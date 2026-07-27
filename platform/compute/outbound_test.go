@@ -212,7 +212,7 @@ func newOutboundSessionWithOpener(
 	dialer, err := link.Dial(
 		context.Background(),
 		"ws"+server.URL[4:],
-		link.DialConfig{},
+		link.DialConfig{SessionLedger: link.NewRemoteSessionLedger(nil)},
 		nil,
 	)
 	if err != nil {

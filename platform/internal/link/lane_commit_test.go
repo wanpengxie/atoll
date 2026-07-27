@@ -160,7 +160,10 @@ func readAckLine(t *testing.T, r io.Reader) laneAckT {
 func dialWithLogger(t *testing.T, r *storageRig, opener link.LocalFileOpener) (*link.Dialer, *logCapture) {
 	t.Helper()
 	cap := &logCapture{}
-	d, err := link.Dial(context.Background(), r.wsURL(), link.DialConfig{LocalFileOpener: opener}, slog.New(cap))
+	d, err := link.Dial(context.Background(), r.wsURL(), link.DialConfig{
+		LocalFileOpener: opener,
+		SessionLedger:   link.NewRemoteSessionLedger(nil),
+	}, slog.New(cap))
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

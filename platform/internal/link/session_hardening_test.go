@@ -112,18 +112,33 @@ func TestManagementEnumeratesCandidatesAndKicksOneExactGeneration(t *testing.T) 
 		t.Fatal("exact candidate kick was rejected")
 	}
 	select {
-	case evidence := <-first.death:
-		if evidence.reason != SessionRevoked {
-			t.Fatalf("first reason=%s", evidence.reason)
-		}
+	case <-first.sealed:
 	default:
-		t.Fatal("first candidate did not receive revoke")
+		t.Fatal("exact kick did not write the verdict")
+	}
+	if reason := sealedReason(t, registry, first.generation); reason != SessionRevoked {
+		t.Fatalf("first reason=%s", reason)
 	}
 	select {
-	case <-second.death:
+	case <-second.sealed:
 		t.Fatal("exact kick disturbed the other generation")
 	default:
 	}
+}
+
+func sealedReason(
+	t *testing.T,
+	registry *sessionRegistry,
+	generation SessionGeneration,
+) SessionEndReason {
+	t.Helper()
+	for _, snapshot := range registry.snapshots() {
+		if snapshot.Generation == generation {
+			return snapshot.Reason
+		}
+	}
+	t.Fatalf("generation %s not found in snapshots", generation)
+	return ""
 }
 
 func TestCandidateAutomaticallyReportsHandshakeTimeout(t *testing.T) {
@@ -134,9 +149,9 @@ func TestCandidateAutomaticallyReportsHandshakeTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case evidence := <-record.death:
-		if evidence.reason != SessionHandshakeTimeout {
-			t.Fatalf("reason=%s", evidence.reason)
+	case <-record.sealed:
+		if reason := sealedReason(t, registry, record.generation); reason != SessionHandshakeTimeout {
+			t.Fatalf("reason=%s", reason)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("candidate did not leave automatically")

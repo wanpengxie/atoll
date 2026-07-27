@@ -73,7 +73,9 @@ func newSessionTestServer(t *testing.T) (*link.Acceptor, *httptest.Server) {
 
 func TestDaemonOutboundAcceptsOnlyLiveHomeMintedSessionAuthority(t *testing.T) {
 	acceptor, server := newSessionTestServer(t)
-	dialer, err := link.Dial(context.Background(), "ws"+server.URL[4:], link.DialConfig{}, nil)
+	dialer, err := link.Dial(context.Background(), "ws"+server.URL[4:], link.DialConfig{
+		SessionLedger: link.NewRemoteSessionLedger(nil),
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

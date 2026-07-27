@@ -391,16 +391,17 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 			_ = conn.Close()
 			return
 		}
-		// Non-control substreams carry the same per-write budget, but a write
-		// failure only closes this one stream: substream failure is local and
-		// never session evidence.
+		// Actor substreams carry the per-write transport budget so a peer that
+		// stops reading kills only its own stream; the failure is local and
+		// never session evidence. Lane substreams are byte pumps and get NO
+		// budget: their timing belongs to the initiating context alone.
 		ls.onActor(ls.wrap(conn, nil))
 	case streamLane:
 		if ls.onLane == nil {
 			_ = conn.Close()
 			return
 		}
-		ls.onLane(ls.wrap(conn, nil))
+		ls.onLane(conn)
 	default:
 		if ls.logger != nil {
 			ls.logger.Warn("link.unknown_stream_kind", "kind", string(header.Kind))
@@ -578,11 +579,14 @@ func (ls *linkSession) openTagged(ctx context.Context, kind streamKind) (net.Con
 				_ = conn.Close()
 				conn = nil
 			} else {
-				if kind == streamControl {
+				switch kind {
+				case streamControl:
 					conn = ls.wrap(conn, ls.controlWriteFailed)
-				} else {
+				case streamActor:
 					conn = ls.wrap(conn, nil)
 				}
+				// streamLane stays unwrapped: byte-pump timing belongs to
+				// the initiating context alone.
 			}
 		}
 		if err != nil && isConnectionWriteTimeout(err) {

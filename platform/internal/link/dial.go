@@ -121,13 +121,17 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	// The ledger is the one process-level session truth shared across
+	// reconnect attempts. Manufacturing a private registry per connection
+	// would let overlapping dials each believe they are Current — a second
+	// session ledger, which must never exist.
+	if cfg.SessionLedger == nil || cfg.SessionLedger.registry == nil {
+		return nil, errors.New("link: DialConfig.SessionLedger is required")
+	}
+	sessions := cfg.SessionLedger.registry
 	ws, _, err := websocket.DefaultDialer.DialContext(ctx, serverURL, nil)
 	if err != nil {
 		return nil, err
-	}
-	sessions := newSessionRegistry(logger)
-	if cfg.SessionLedger != nil && cfg.SessionLedger.registry != nil {
-		sessions = cfg.SessionLedger.registry
 	}
 	d := &Dialer{
 		channelID:           "",
@@ -146,7 +150,8 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	}
 
 	onControl := func(payload []byte) {
-		switch peekControlKind(payload) {
+		kind := peekControlKind(payload)
+		switch kind {
 		case ctrlPlanPoke:
 			if !validPlanPoke(payload) {
 				d.onSessionEvidence(SessionProtocolViolation, "malformed_plan_poke", nil)
@@ -220,8 +225,15 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 			return
 		case ctrlAttachReply:
 		default:
-			// Unknown kinds stay ignored for forward compatibility; only a
-			// known kind with a malformed payload is a protocol violation.
+			// A frame with no kind at all is malformed, not future vocabulary.
+			if kind == "" {
+				d.onSessionEvidence(SessionProtocolViolation, "control_frame_missing_kind", nil)
+				return
+			}
+			// A non-empty unknown kind is tolerated (logged, never answered):
+			// the rolling-upgrade window between home and daemon restarts is
+			// the same version-skew lifeline §5.4 grants unknown substreams.
+			logger.Warn("link.unknown_control_kind", "kind", string(kind))
 			return
 		}
 		cf, derr := decodeControl(payload)

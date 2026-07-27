@@ -80,7 +80,10 @@ type sessionRecord struct {
 	generation SessionGeneration
 	key        string
 
-	death          chan sessionEvidence
+	// sealed closes when beginSeal commits this record's verdict. Evidence is
+	// never queued in a channel: report writes the verdict into the ledger
+	// under its lock, and sealed is only the collection wake-up level.
+	sealed         chan struct{}
 	doneOnce       sync.Once
 	done           chan struct{}
 	candidateTimer *time.Timer
@@ -96,17 +99,16 @@ type sessionEvidence struct {
 	err    error
 }
 
-// report offers evidence to the supervising loop. The one-slot buffer holds
-// the first undelivered evidence; a consumer that refuses stale evidence can
-// keep supervising and still receive later reports.
+// report IS the verdict: it performs the locked decision write immediately, so
+// evidence is never parked where later evidence could displace or lose it.
+// Stale candidate-only evidence is refused inside beginSeal; a later real
+// reason still lands because nothing was consumed. The supervising loop only
+// observes the sealed level and collects.
 func (r *sessionRecord) report(reason SessionEndReason, detail string, err error) {
-	if r == nil {
+	if r == nil || r.registry == nil {
 		return
 	}
-	select {
-	case r.death <- sessionEvidence{reason: reason, detail: detail, err: err}:
-	default:
-	}
+	_ = r.registry.beginSeal(r, sessionEvidence{reason: reason, detail: detail, err: err})
 }
 
 func (r *sessionRecord) setHandle(handle *linkHandle) {
@@ -188,10 +190,18 @@ func (r *sessionRegistry) mint(key string) (*sessionRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	record.candidateTimer = time.AfterFunc(r.candidateTTL, func() {
-		r.reportIfCandidate(record, SessionHandshakeTimeout, "attach_not_received_before_ttl")
-	})
+	r.armCandidateTimer(record, "attach_not_received_before_ttl")
 	return record, nil
+}
+
+// armCandidateTimer installs the TTL under the ledger lock — the same lock
+// every reader (activate, beginSeal) holds when stopping it.
+func (r *sessionRegistry) armCandidateTimer(record *sessionRecord, detail string) {
+	r.mu.Lock()
+	record.candidateTimer = time.AfterFunc(r.candidateTTL, func() {
+		r.reportIfCandidate(record, SessionHandshakeTimeout, detail)
+	})
+	r.mu.Unlock()
 }
 
 // reportIfCandidate offers candidate-only evidence. The state check narrows
@@ -226,9 +236,7 @@ func (r *sessionRegistry) adopt(generation SessionGeneration, key string) (*sess
 	if err != nil {
 		return nil, err
 	}
-	record.candidateTimer = time.AfterFunc(r.candidateTTL, func() {
-		r.reportIfCandidate(record, SessionHandshakeTimeout, "adopted_session_not_activated_before_ttl")
-	})
+	r.armCandidateTimer(record, "adopted_session_not_activated_before_ttl")
 	if _, err := r.activate(record); err != nil {
 		return nil, err
 	}
@@ -243,7 +251,7 @@ func (r *sessionRegistry) insert(
 	now := time.Now()
 	record := &sessionRecord{
 		registry: r, generation: generation, key: key,
-		death: make(chan sessionEvidence, 1), done: make(chan struct{}),
+		sealed: make(chan struct{}), done: make(chan struct{}),
 	}
 	r.mu.Lock()
 	if r.live[generation] != nil || r.closed[generation] != nil {
@@ -321,14 +329,14 @@ func (r *sessionRegistry) beginSeal(record *sessionRecord, evidence sessionEvide
 		return sealAlreadyDecided
 	}
 	now := time.Now()
-	if record.candidateTimer != nil {
-		record.candidateTimer.Stop()
-	}
 	if !validSessionEndReason(evidence.reason) {
 		evidence.detail = "invalid_session_end_reason: " + string(evidence.reason)
 		evidence.reason = SessionLocalFault
 	}
 	r.mu.Lock()
+	if record.candidateTimer != nil {
+		record.candidateTimer.Stop()
+	}
 	value := r.live[record.generation]
 	if value == nil || value.state == SessionClosing || value.state == SessionClosed {
 		r.mu.Unlock()
@@ -354,6 +362,7 @@ func (r *sessionRegistry) beginSeal(record *sessionRecord, evidence sessionEvide
 	}
 	state := value.state
 	r.mu.Unlock()
+	close(record.sealed)
 	r.logger.Warn("link.session_state",
 		"generation", record.generation, "key", record.key,
 		"state", state, "reason", evidence.reason,

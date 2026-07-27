@@ -483,15 +483,41 @@ func TestStaleCandidateEvidenceDoesNotSealActiveSession(t *testing.T) {
 }
 
 // The candidate TTL callback itself is conditional: an activated session's
-// expired timer must not enqueue candidate-only evidence.
+// expired timer must not write any verdict.
 func TestCandidateTimerCallbackIsConditionalOnCandidateState(t *testing.T) {
 	registry := newSessionRegistry(nil)
 	record := activeRecord(t, registry, "daemon-a")
 	registry.reportIfCandidate(record, SessionHandshakeTimeout, "fired_after_activate")
 	select {
-	case evidence := <-record.death:
-		t.Fatalf("active session received candidate evidence: %+v", evidence)
+	case <-record.sealed:
+		t.Fatal("active session was sealed by a stale candidate timer")
 	default:
+	}
+	if !registry.admit(record).allows() {
+		t.Fatal("stale candidate timer cut admission")
+	}
+}
+
+// Evidence is never parked where later evidence can be lost behind it: a
+// stale candidate-only report on an active session writes nothing, and the
+// next real reason still lands with its own attribution.
+func TestRealEvidenceStillLandsAfterStaleCandidateReport(t *testing.T) {
+	registry := newSessionRegistry(nil)
+	record := activeRecord(t, registry, "daemon-a")
+	record.report(SessionHandshakeTimeout, "stale_timer", nil)
+	select {
+	case <-record.sealed:
+		t.Fatal("stale candidate evidence sealed an active session")
+	default:
+	}
+	record.report(SessionRevoked, "real_reason", nil)
+	select {
+	case <-record.sealed:
+	default:
+		t.Fatal("real evidence was lost behind the stale report")
+	}
+	if reason := sealedReason(t, registry, record.generation); reason != SessionRevoked {
+		t.Fatalf("reason=%s want revoked", reason)
 	}
 }
 
@@ -532,6 +558,34 @@ func TestPhysicalCloseGatesLateChildRegistration(t *testing.T) {
 	case <-session.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("session did not collect after close")
+	}
+}
+
+// Kind boundary: a non-empty unknown kind is version-skew lifeline and is
+// ignored; a frame with no kind at all is malformed and seals the session.
+func TestUnknownKindIgnoredButMissingKindIsViolation(t *testing.T) {
+	rig := newReviewRig(t, reviewRigConfig{})
+	daemon := dialRawDaemon(t, rig.wsURL(), true)
+	daemon.send([]byte(`{"kind":"future_vocabulary"}`))
+	time.Sleep(100 * time.Millisecond)
+	rig.waitSession(t, time.Second, func(s SessionSnapshot) bool {
+		return s.Key == "daemon-1" && s.State == SessionActive
+	})
+	daemon.send([]byte(`{"payload_without_kind":true}`))
+	snapshot := rig.waitSession(t, 5*time.Second, func(s SessionSnapshot) bool {
+		return s.Key == "daemon-1" && s.State == SessionClosed
+	})
+	if snapshot.Reason != SessionProtocolViolation {
+		t.Fatalf("reason=%s want protocol_violation", snapshot.Reason)
+	}
+}
+
+// The process-level shared ledger is the one remote session truth: Dial
+// refuses to manufacture a private registry per connection.
+func TestDialRequiresSharedSessionLedger(t *testing.T) {
+	if _, err := Dial(context.Background(), "ws://127.0.0.1:1", DialConfig{}, nil); err == nil ||
+		err.Error() != "link: DialConfig.SessionLedger is required" {
+		t.Fatalf("err=%v want ledger required", err)
 	}
 }
 

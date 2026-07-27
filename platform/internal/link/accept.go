@@ -276,7 +276,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	}
 
 	onControl := func(payload []byte) {
-		switch peekControlKind(payload) {
+		kind := peekControlKind(payload)
+		switch kind {
 		case ctrlAttach:
 			frame, err := decodeControl(payload)
 			if err != nil || frame.Attach == nil {
@@ -410,6 +411,17 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				Kind: ctrlResolveCoordReply, ResolveCoordReply: &reply,
 			})
 			_ = lc.sendControl(raw)
+		default:
+			// A frame with no kind at all is malformed, not future vocabulary.
+			if kind == "" {
+				record.report(SessionProtocolViolation, "control_frame_missing_kind", nil)
+				return
+			}
+			// A non-empty unknown kind is tolerated (logged, never answered):
+			// the rolling-upgrade window between home and daemon restarts is
+			// the same version-skew lifeline §5.4 grants unknown substreams.
+			a.logger.Warn("link.unknown_control_kind",
+				"generation", record.generation, "key", record.key, "kind", string(kind))
 		}
 	}
 
@@ -446,37 +458,20 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	record.setHandle(handle)
 	lc.start()
 
-	for {
-		var evidence sessionEvidence
-		select {
-		case <-a.ctx.Done():
-			evidence = preferReported(record, sessionEvidence{
-				reason: SessionRevoked, detail: "acceptor_shutdown",
-			})
-		case evidence = <-record.death:
-		case <-lc.closed():
-			evidence = preferReported(record, sessionEvidence{
-				reason: SessionCarrierLost, detail: "carrier_closed",
-			})
-		}
-		if a.sealSession(record, physical, lc, evidence) {
-			return
-		}
-		// Stale candidate-only evidence was refused by the locked decision
-		// write; the session is still healthy, keep supervising.
-	}
-}
-
-// preferReported drains a pending reported evidence ahead of the generic
-// fallback: when a precise reason and its physical consequence (carrier
-// close) race into the select, the precise reason must win.
-func preferReported(record *sessionRecord, fallback sessionEvidence) sessionEvidence {
+	// report performs the locked decision write itself, so a verdict written by
+	// any evidence source (probe watchdog, control reader, kick, task pool) is
+	// already in the ledger when sealed closes; this loop only supplies the
+	// physical observations and then collects. When a precise reason and its
+	// physical consequence race, whichever verdict committed first is kept —
+	// beginSeal refuses the loser as already decided.
 	select {
-	case evidence := <-record.death:
-		return evidence
-	default:
-		return fallback
+	case <-a.ctx.Done():
+		record.report(SessionRevoked, "acceptor_shutdown", nil)
+	case <-lc.closed():
+		record.report(SessionCarrierLost, "carrier_closed", nil)
+	case <-record.sealed:
 	}
+	a.collectSession(record, physical, lc)
 }
 
 func (a *Acceptor) logLateReject(record *sessionRecord, gate string) {
@@ -486,20 +481,13 @@ func (a *Acceptor) logLateReject(record *sessionRecord, gate string) {
 		"gate", gate, "rejected", count)
 }
 
-// sealSession returns false only when the decision write refused the evidence
-// as stale, meaning the session stays alive and supervision must continue.
-func (a *Acceptor) sealSession(
+// collectSession runs after the verdict is already in the ledger: it performs
+// the bounded physical teardown and the closing→closed completion write.
+func (a *Acceptor) collectSession(
 	record *sessionRecord,
 	physical *AuthenticatedLinkSession,
 	lc *linkSession,
-	evidence sessionEvidence,
-) bool {
-	switch a.sessions.beginSeal(record, evidence) {
-	case sealStaleEvidence:
-		return false
-	case sealAlreadyDecided:
-		return true
-	}
+) {
 	start := time.Now()
 	joinedTasks, abandoned := lc.drainControlTasks(defaultSettlementWindow)
 	a.logger.Info("link.session_seal_step",
@@ -522,7 +510,6 @@ func (a *Acceptor) sealSession(
 			"generation", record.generation, "key", record.key)
 	}
 	a.sessions.completeSeal(record, abandoned)
-	return true
 }
 
 func (a *Acceptor) probeSession(record *sessionRecord, lc *linkSession) {
