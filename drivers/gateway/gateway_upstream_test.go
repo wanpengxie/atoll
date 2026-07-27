@@ -127,7 +127,7 @@ func TestRevocationInFlightThenRefused(t *testing.T) {
 	// openHomeWired (六轮终审 P1-5, barrier authenticity): a REAL membership-change poke
 	// wire, so this test's revocation drives the actual Remove→poke edge — not a
 	// hand-called s.reconcile() standing in for it.
-	h, id := openDormantDeclaredHomeWired(t, channel.ID("c"), principal, g)
+	h, id := openDeclaredAgentHomeWired(t, channel.ID("c"), principal, g)
 	// Keep the delivery barrier independent from the real human cell that Home may
 	// embody asynchronously. The eligibility route is still backed by the admitted
 	// member, while this dedicated slot gives the test sole ownership of its frame

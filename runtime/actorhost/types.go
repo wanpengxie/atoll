@@ -424,7 +424,9 @@ const (
 	ActualRoute
 )
 
-// Snapshot is an immutable diagnostic view used by status and tests.
+// Snapshot is an immutable diagnostic view used by status and tests. It
+// carries only converged coordinates; in-flight build/retire occupancy is
+// internal state no production consumer reads.
 type Snapshot struct {
 	Desired   Desired
 	Actual    ActualKind
@@ -432,7 +434,4 @@ type Snapshot struct {
 	Unit      *actorrt.Unit
 	Binding   Binding
 	StartedAt time.Time
-	Building  bool
-	Retiring  int
-	Retrying  bool
 }

@@ -363,7 +363,7 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 	return openTestChannel(t, chID, principal, principal, actor.KindHuman, g)
 }
 
-func openDormantDeclaredHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*testChannel, actor.ActorID) {
+func openDeclaredAgentHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*testChannel, actor.ActorID) {
 	return openTestChannel(t, chID, "gateway-owner:"+principal, principal, actor.KindAgent, g)
 }
 

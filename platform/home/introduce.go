@@ -78,7 +78,7 @@ func (h *Home) resolveIntroduction(
 		}
 	}
 
-	placement, err := h.resolveDaemonPlacement(ctx, "")
+	placement, err := h.resolveDaemonPlacement(ctx)
 	if err != nil {
 		return actorctl.IntroduceRequest{}, err
 	}
@@ -92,23 +92,8 @@ func (h *Home) resolveIntroduction(
 }
 
 // resolveDaemonPlacement picks the placement host for a declaration-backed
-// actor. An empty desired host takes the first bound daemon.
-func (h *Home) resolveDaemonPlacement(
-	ctx context.Context,
-	desiredHost string,
-) (storespec.Placement, error) {
-	if desiredHost != "" {
-		bound, err := h.bindings.IsBound(ctx, storespec.DaemonID(desiredHost))
-		if err != nil {
-			return storespec.Placement{}, err
-		}
-		if !bound {
-			return storespec.Placement{}, &channel.OperationError{
-				Code: channel.ErrCodeInvalidDesiredHost, Detail: "daemon is not bound to this channel",
-			}
-		}
-		return storespec.NewDaemonPlacement(desiredHost)
-	}
+// actor: the first bound daemon.
+func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement, error) {
 	bound, err := h.bindings.ListBoundDaemons(ctx)
 	if err != nil {
 		return storespec.Placement{}, err

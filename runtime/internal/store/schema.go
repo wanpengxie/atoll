@@ -275,22 +275,24 @@ CREATE TABLE IF NOT EXISTS timer_dead (
 );
 `
 
-// ChannelLocalTables enumerates the channel-local table names in
-// initialization order. Tests assert that every name exists in
-// `sqlite_master` after OpenChannel.
+// ChannelLocalTables returns the channel-local table names in initialization
+// order — a fresh copy per call, so no caller can mutate the canonical list.
+// Tests assert that every name exists in `sqlite_master` after OpenChannel.
 //
-// ChannelLocalTables contains only channel-local truth tables. The former
+// The list contains only channel-local truth tables. The former
 // bootstrap_registry table was not channel-local truth and has been removed.
-var ChannelLocalTables = []string{
-	"messages",
-	"actor_registry",
-	"channel_genesis",
-	"channel_daemon_bindings",
-	"resources",
-	"resource_grants",
-	"resource_reservations",
-	"resource_tombstones",
-	"actor_state",
-	"timers",
-	"timer_dead",
+func ChannelLocalTables() []string {
+	return []string{
+		"messages",
+		"actor_registry",
+		"channel_genesis",
+		"channel_daemon_bindings",
+		"resources",
+		"resource_grants",
+		"resource_reservations",
+		"resource_tombstones",
+		"actor_state",
+		"timers",
+		"timer_dead",
+	}
 }

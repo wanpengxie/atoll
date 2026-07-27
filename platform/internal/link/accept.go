@@ -80,7 +80,6 @@ type Acceptor struct {
 	wg           sync.WaitGroup
 	closeOnce    sync.Once
 	closeDone    chan struct{}
-	leaked       atomic.Int64
 	compensated  atomic.Int64
 	lateRejected atomic.Int64
 
@@ -726,12 +725,8 @@ func (a *Acceptor) Close() error {
 				a.KickSession(snapshot.Generation)
 			}
 		}
-		if !waitGroupWithin(&a.wg, 30*time.Second) {
-			a.leaked.Add(1)
-		}
+		waitGroupWithin(&a.wg, 30*time.Second)
 	})
 	<-a.closeDone
 	return nil
 }
-
-func (a *Acceptor) Leaked() int64 { return a.leaked.Load() }

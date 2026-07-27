@@ -70,14 +70,6 @@ func TestDerivedRefsAreDomainSeparatedAndChannelScoped(t *testing.T) {
 	}
 }
 
-func TestOperationCorrelationDomainsCannotCollide(t *testing.T) {
-	ref := RefCorrelation("same-client-value")
-	msg := MessageCorrelation("same-client-value")
-	if ref == msg || !strings.HasPrefix(ref, "op:ref:v1:") || !strings.HasPrefix(msg, "op:msg:v1:") {
-		t.Fatalf("correlations are not domain separated: ref=%q msg=%q", ref, msg)
-	}
-}
-
 func TestOperationErrorClosedSet(t *testing.T) {
 	want := map[OperationErrorCode]bool{
 		ErrCodeBadPayload: true, ErrCodeChannelUnavailable: true, ErrCodeInvalidDesiredHost: true,

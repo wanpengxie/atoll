@@ -103,10 +103,9 @@ type Home struct {
 	nowMs              func() int64
 	onMembershipChange func(string)
 
-	reconcileStop   func()
-	reconcileDone   chan struct{}
-	reconcileLeaked atomic.Int64
-	pokeCh          chan struct{}
+	reconcileStop func()
+	reconcileDone chan struct{}
+	pokeCh        chan struct{}
 
 	closed    atomic.Bool
 	closeOnce sync.Once

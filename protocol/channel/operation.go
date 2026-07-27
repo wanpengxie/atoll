@@ -269,16 +269,6 @@ func DerivedRealmToolRef(channelID ID, requestID string) string {
 	return "adm:rt:v1:" + hex.EncodeToString(sum[:])
 }
 
-func RefCorrelation(ref string) string {
-	sum := sha256.Sum256([]byte(ref))
-	return "op:ref:v1:" + hex.EncodeToString(sum[:])
-}
-
-func MessageCorrelation(id string) string {
-	sum := sha256.Sum256([]byte(id))
-	return "op:msg:v1:" + hex.EncodeToString(sum[:])
-}
-
 type OperationErrorCode string
 
 const (

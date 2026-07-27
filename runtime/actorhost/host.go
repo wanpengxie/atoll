@@ -810,11 +810,7 @@ func (h *HostSupervisor) Inspect(id actor.ActorID) (Snapshot, bool) {
 		unlock()
 		return Snapshot{}, false
 	}
-	out := Snapshot{
-		Building: state.build != nil,
-		Retiring: len(state.retiring),
-		Retrying: !state.retryAt.IsZero(),
-	}
+	out := Snapshot{}
 	if state.desired != nil {
 		out.Desired = state.desired.clonePublic()
 	}

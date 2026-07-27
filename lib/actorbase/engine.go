@@ -303,8 +303,8 @@ func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 			return nil
 		}
 		if existed {
-			// Anchor/boot redelivery of an already-admitted request is an
-			// account no-op, not a second handler invocation.
+			// Redelivery of an already-admitted request is an account
+			// no-op, not a second handler invocation.
 			return nil
 		}
 		// Admitted: seat the delivery. The work deque never evicts a seated

@@ -149,11 +149,3 @@ func (l *serveLedger) stopTimers() {
 		}
 	}
 }
-
-// len reports the number of Admitted (not yet Closed) entries — the DoD's
-// "账 ≤ 未闭合请求数" invariant, directly testable, and "deadline 后必空".
-func (l *serveLedger) len() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.entries)
-}

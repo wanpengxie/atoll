@@ -52,15 +52,6 @@ func (e homeActorEffects) ActorsEnded(ids []actor.ActorID) {
 	h.pokeReconcile()
 }
 
-func (e homeActorEffects) Fatal(err error) {
-	h := e.home
-	if h == nil {
-		return
-	}
-	h.logger.Error("platform.home.system_kernel_failed", "err", err)
-	go func() { _ = h.closeInternal("system_kernel_failed") }()
-}
-
 // notifyMembership is the membership-change tail. The command layer carries its
 // own principals; nothing is echoed back from the store.
 func (h *Home) notifyMembership(principals ...string) {

@@ -13,6 +13,21 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
+// inspectTransitional reports the in-flight build/retire occupancy for one
+// actor — a test-only probe (same locking discipline as Inspect). Production
+// Snapshot deliberately carries only converged coordinates.
+func (h *HostSupervisor) inspectTransitional(id actor.ActorID) (building bool, retiring int) {
+	unlock := h.spans.lock(id)
+	defer unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	state := h.states[id]
+	if state == nil {
+		return false, 0
+	}
+	return state.build != nil, len(state.retiring)
+}
+
 type hostTestActor struct {
 	dying chan error
 	recv  chan message.ID
@@ -275,8 +290,9 @@ func TestBodyBuildReceivesExactSelfAndCurrentWindow(t *testing.T) {
 		t.Fatal("candidate reported current before publication/Start")
 	}
 	snapshot, ok := host.Inspect(id)
-	if !ok || !snapshot.Building || snapshot.Actual != ActualNone {
-		t.Fatalf("building snapshot = %#v", snapshot)
+	building, _ := host.inspectTransitional(id)
+	if !ok || !building || snapshot.Actual != ActualNone {
+		t.Fatalf("building snapshot = %#v (building=%v)", snapshot, building)
 	}
 	close(release)
 	eventually(t, func() bool {
@@ -413,8 +429,9 @@ func TestDirectReplacementKeepsPredecessorUntilCandidatePublishes(t *testing.T) 
 	in2 := <-inputs
 	gate2 := <-releases
 	during, _ := host.Inspect(id)
-	if during.Actual != ActualBody || during.Attempt != g1 || during.Unit != first.Unit || !during.Building {
-		t.Fatalf("predecessor was not kept during build: %#v", during)
+	duringBuilding, _ := host.inspectTransitional(id)
+	if during.Actual != ActualBody || during.Attempt != g1 || during.Unit != first.Unit || !duringBuilding {
+		t.Fatalf("predecessor was not kept during build: %#v (building=%v)", during, duringBuilding)
 	}
 	if in2.Current.IsCurrent() {
 		t.Fatal("G2 current before publication")
@@ -432,8 +449,8 @@ func TestDirectReplacementKeepsPredecessorUntilCandidatePublishes(t *testing.T) 
 		t.Fatal("G2 did not become current")
 	}
 	eventually(t, func() bool {
-		s, _ := host.Inspect(id)
-		return s.Retiring == 0
+		_, retiring := host.inspectTransitional(id)
+		return retiring == 0
 	})
 }
 
@@ -477,7 +494,8 @@ func TestNaturalExitRebuildsSameAttemptAndReapsRetiring(t *testing.T) {
 	<-actors
 	eventually(t, func() bool {
 		s, _ := host.Inspect(id)
-		return s.Actual == ActualBody && s.Attempt == key && s.Unit != first.Unit && s.Retiring == 0
+		_, retiring := host.inspectTransitional(id)
+		return s.Actual == ActualBody && s.Attempt == key && s.Unit != first.Unit && retiring == 0
 	})
 	if in1.Current.IsCurrent() || !in2.Current.IsCurrent() {
 		t.Fatal("same-attempt exact current did not move to rebuilt Unit")
@@ -741,11 +759,12 @@ func TestDesiredChangeDuringPrepareMakesExactBuildLoser(t *testing.T) {
 	close(release)
 	eventually(t, func() bool {
 		snapshot, ok := host.Inspect(id)
+		building, retiring := host.inspectTransitional(id)
 		return ok &&
 			snapshot.Desired.(CarrierDesired).AttemptKey == g2 &&
 			snapshot.Actual == ActualNone &&
-			!snapshot.Building &&
-			snapshot.Retiring == 0
+			!building &&
+			retiring == 0
 	})
 	if in1.Current.IsCurrent() {
 		t.Fatal("invalidated candidate became current")
@@ -782,8 +801,9 @@ func TestHighChurnRetiringSetReturnsToZero(t *testing.T) {
 		previous = snapshot.Unit
 	}
 	eventually(t, func() bool {
-		snapshot, ok := host.Inspect(id)
-		return ok && snapshot.Retiring == 0
+		_, ok := host.Inspect(id)
+		_, retiring := host.inspectTransitional(id)
+		return ok && retiring == 0
 	})
 }
 

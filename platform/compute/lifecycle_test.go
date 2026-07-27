@@ -3,7 +3,7 @@ package compute
 import (
 	"context"
 	"errors"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,51 +23,50 @@ func (emptyComputePlan) LookupExact(
 	return platform.ActorFactory{}, false
 }
 
-func TestRunComputeReturnsAfterBothForwardersExit(t *testing.T) {
+// Run's ordered close DAG must terminate on an already-canceled context: every
+// forwarder joins and the run returns without a leak incident.
+func TestRunReturnsOnCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	storage := make(chan struct{})
-	err := runCompute(ctx, Config{ServerWS: "ws://invalid", PlanSource: emptyComputePlan{}}, &computeLifecycleHooks{
-		forwarderTimeout: time.Second,
-		storageExited:    func() { close(storage) },
-	})
-	if err != nil {
+	if err := Run(ctx, Config{ServerWS: "ws://invalid", PlanSource: emptyComputePlan{}}); err != nil {
 		t.Fatal(err)
-	}
-	select {
-	case <-storage:
-	default:
-		t.Fatal("compute.Run returned before storage forwarder exited")
 	}
 }
 
-func TestRunComputeForwarderTimeoutTransfersRootOwnership(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	entered, release, exited := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var leaked atomic.Int64
-	err := runCompute(ctx, Config{ServerWS: "ws://invalid", PlanSource: emptyComputePlan{}}, &computeLifecycleHooks{
-		forwarderTimeout: 25 * time.Millisecond,
-		forwarderLeaked:  &leaked,
-		storagePump:      func(context.Context, *storageHostForwarder) { close(entered); <-release },
-		storageExited:    func() { close(exited) },
-	})
-	<-entered
-	if !errors.Is(err, ErrForwardersLeaked) {
-		t.Fatalf("err = %v", err)
+func TestAwaitForwardersJoins(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go wg.Done()
+	if err := awaitForwarders(&wg, time.Second); err != nil {
+		t.Fatalf("awaitForwarders = %v, want nil", err)
 	}
-	if got := leaked.Load(); got != 1 {
-		t.Fatalf("forwarder leak account = %d, want exactly one incident", got)
+}
+
+// A forwarder that outlives the join timeout must surface ErrForwardersLeaked
+// while root ownership still transfers (the call returns; the blocked
+// goroutine keeps running until released).
+func TestAwaitForwardersTimeoutTransfersRootOwnership(t *testing.T) {
+	release, exited := make(chan struct{}), make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(exited)
+		<-release
+	}()
+	err := awaitForwarders(&wg, 25*time.Millisecond)
+	if !errors.Is(err, ErrForwardersLeaked) {
+		t.Fatalf("err = %v, want ErrForwardersLeaked", err)
 	}
 	select {
 	case <-exited:
-		t.Fatal("blocked storage forwarder unexpectedly exited")
+		t.Fatal("blocked forwarder unexpectedly exited")
 	default:
 	}
 	close(release)
 	select {
 	case <-exited:
 	case <-time.After(time.Second):
-		t.Fatal("released storage forwarder did not exit")
+		t.Fatal("released forwarder did not exit")
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -41,17 +40,6 @@ type Config struct {
 type PlanSource interface {
 	ApplyPlan([]platform.PlanActor) error
 	ActorFactorySource
-}
-
-func Run(ctx context.Context, cfg Config) error { return runCompute(ctx, cfg, nil) }
-
-// computeLifecycleHooks contains only test observation seams. It owns no
-// runtime state and cannot alter actor/link convergence.
-type computeLifecycleHooks struct {
-	forwarderTimeout time.Duration
-	forwarderLeaked  *atomic.Int64
-	storageExited    func()
-	storagePump      func(context.Context, *storageHostForwarder)
 }
 
 type daemonHostEvents struct{ outbound *DaemonOutbound }
@@ -107,7 +95,7 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 	}
 }
 
-func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (retErr error) {
+func Run(ctx context.Context, cfg Config) (retErr error) {
 	if cfg.PlanSource == nil {
 		return errors.New("compute: PlanSource required")
 	}
@@ -133,15 +121,6 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 	storageWG.Add(1)
 	go func() {
 		defer storageWG.Done()
-		defer func() {
-			if hooks != nil && hooks.storageExited != nil {
-				hooks.storageExited()
-			}
-		}()
-		if hooks != nil && hooks.storagePump != nil {
-			hooks.storagePump(ctx, storage)
-			return
-		}
 		storage.pump(ctx)
 	}()
 
@@ -178,23 +157,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 			sessionCancel()
 			currentSession = nil
 		}
-		timeout := 5 * time.Second
-		if hooks != nil && hooks.forwarderTimeout > 0 {
-			timeout = hooks.forwarderTimeout
-		}
-		joined := make(chan struct{})
-		go func() {
-			storageWG.Wait()
-			close(joined)
-		}()
-		select {
-		case <-joined:
-		case <-time.After(timeout):
-			if hooks != nil && hooks.forwarderLeaked != nil {
-				hooks.forwarderLeaked.Add(1)
-			}
-			retErr = errors.Join(retErr, ErrForwardersLeaked)
-		}
+		retErr = errors.Join(retErr, awaitForwarders(&storageWG, 5*time.Second))
 	}
 	defer closeRuntime()
 
@@ -370,5 +333,23 @@ func waitBackoff(ctx context.Context, value time.Duration) bool {
 }
 
 var ErrForwardersLeaked = errors.New("compute: forwarders leaked")
+
+// awaitForwarders joins the forwarder waitgroup within timeout. A timeout
+// means a forwarder goroutine outlived the ordered close DAG: root ownership
+// still transfers (the caller returns), and the incident surfaces as
+// ErrForwardersLeaked instead of a silent hang.
+func awaitForwarders(wg *sync.WaitGroup, timeout time.Duration) error {
+	joined := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+		return nil
+	case <-time.After(timeout):
+		return ErrForwardersLeaked
+	}
+}
 
 var _ actorhost.HostEventSink = (*daemonHostEvents)(nil)

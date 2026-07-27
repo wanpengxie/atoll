@@ -54,8 +54,8 @@ type Deps struct {
 	ChannelID channel.ID
 
 	// (There is NO ActorRegistry dep: the sender door trusts the pen weld —
-	// identity + kind are welded at Mint, liveness is gated one layer up by
-	// livePen.IsLive() — so no step reads the membership registry at write
+	// identity + kind are welded at Mint, liveness is gated one layer up by the
+	// pen-held authority's Admit() — so no step reads the membership registry at write
 	// time (the receiver/audience half was evicted earlier). The substrate is
 	// likewise type-agnostic — no TypeRegistry dep either: business-type
 	// vocabulary is a domain concern, not a substrate write-time check.)

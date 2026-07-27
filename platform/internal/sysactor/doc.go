@@ -33,8 +33,9 @@
 // on itself) rather than welded through buildCaps. All four arms are real
 // (期10 S6): Access/State are wired EAGER (the access door is assembled by
 // storeopen, before channelkit); Schedule/Spawn are LATE-BOUND (their engines
-// assemble after this cell is born — see platform/sysanchorcaps.go),
-// captured through the same closure Hooks.Canceller uses. It still enters
+// assemble after this cell is born — see the systemcaps mint in Home.Open,
+// platform/home/open.go), captured through the same closure Hooks.Canceller
+// uses. It still enters
 // through the SAME actorbase.New seam every other actor does. Its privilege
 // is entirely in WHERE its Caps come from (platform itself is the authority,
 // not a minted membrane) and in wearing no incarnation gate, never in a

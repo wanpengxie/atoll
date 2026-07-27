@@ -37,9 +37,8 @@ type ActiveStaging struct{ Coord string }
 
 // ReclaimAckFunc is Pass's network callback — compute.Run's bridge supplies a
 // closure bound to whichever *link.Dialer is CURRENTLY connected (this
-// package never holds a live connection reference itself: unlike
-// cellObsForwarder/cellCancelForwarder's Rebind pattern, there is nothing
-// here that needs to survive a reconnect mid-call — each Pass is a single,
+// package never holds a live connection reference itself: nothing here
+// needs to survive a reconnect mid-call — each Pass is a single,
 // short-lived reconcile cycle the platform-side ticker re-issues wholesale
 // next tick if this one's connection died).
 type ReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, err error)
