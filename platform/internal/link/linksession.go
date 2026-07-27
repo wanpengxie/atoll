@@ -49,10 +49,16 @@ type boundedConn struct {
 	net.Conn
 	logger      *slog.Logger
 	onWriteFail func(error)
+	// budget overrides streamWriteBudget when non-zero (test injection).
+	budget time.Duration
 }
 
 func (c *boundedConn) Write(payload []byte) (int, error) {
-	_ = c.Conn.SetWriteDeadline(time.Now().Add(streamWriteBudget))
+	budget := c.budget
+	if budget == 0 {
+		budget = streamWriteBudget
+	}
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(budget))
 	n, err := c.Conn.Write(payload)
 	if err != nil {
 		if c.logger != nil {
@@ -95,6 +101,8 @@ type controlTaskPool struct {
 	wg       sync.WaitGroup
 	logger   *slog.Logger
 	evidence func(SessionEndReason, string, error)
+	// abandonAfter overrides controlTaskAbandonAfter when non-zero (tests).
+	abandonAfter time.Duration
 
 	active    atomic.Int64
 	abandoned atomic.Int64
@@ -142,8 +150,12 @@ func (p *controlTaskPool) submit(task func(), busy func()) bool {
 		return false
 	}
 	go func() {
+		abandonAfter := p.abandonAfter
+		if abandonAfter == 0 {
+			abandonAfter = controlTaskAbandonAfter
+		}
 		done := make(chan struct{})
-		timer := time.AfterFunc(controlTaskAbandonAfter, func() {
+		timer := time.AfterFunc(abandonAfter, func() {
 			p.abandoned.Add(1)
 			p.zombies.Add(1)
 			if p.logger != nil {
@@ -189,7 +201,15 @@ func (p *controlTaskPool) drain(timeout time.Duration) (joined bool, abandoned i
 	case <-done:
 		return true, p.abandoned.Load()
 	case <-time.After(timeout):
-		return false, p.abandoned.Load() + p.active.Load()
+		// A zombie already counted itself into abandoned when its 45s timer
+		// fired but still holds an active seat — count each task once:
+		// abandoned + the stuck tasks not yet accounted (active minus
+		// zombies).
+		stuck := p.active.Load() - p.zombies.Load()
+		if stuck < 0 {
+			stuck = 0
+		}
+		return false, p.abandoned.Load() + stuck
 	}
 }
 
@@ -359,12 +379,34 @@ func (ls *linkSession) wrap(conn net.Conn, onWriteFail func(error)) net.Conn {
 	return &boundedConn{Conn: conn, logger: ls.logger, onWriteFail: onWriteFail}
 }
 
+// Lock-ordering invariant: controlWriteFailed can run inside sendControl's
+// ctrlMu hold (boundedConn.Write calls it synchronously), and reportEvidence
+// resolves into beginSeal which takes the registry lock — so the only legal
+// order is ctrlMu → registry.mu. Nothing under the registry lock may ever
+// call sendControl or take ctrlMu.
 func (ls *linkSession) controlWriteFailed(err error) {
 	if isConnectionWriteTimeout(err) {
 		ls.reportEvidence(SessionCarrierLost, "control_connection_write_timeout", err)
 		return
 	}
+	if ls.carrierClosed() {
+		ls.reportEvidence(SessionCarrierLost, "carrier_closed_control_write", err)
+		return
+	}
 	ls.reportEvidence(SessionSpineLost, "control_spine_write_failed", err)
+}
+
+// carrierClosed observes the multiplexer's own close level without blocking.
+func (ls *linkSession) carrierClosed() bool {
+	if ls == nil || ls.ys == nil {
+		return true
+	}
+	select {
+	case <-ls.ys.CloseChan():
+		return true
+	default:
+		return false
+	}
 }
 
 func (ls *linkSession) dispatch(conn net.Conn) {
@@ -418,10 +460,15 @@ func (ls *linkSession) readControl(conn net.Conn) {
 			if ls.closing.Load() {
 				return
 			}
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-				errors.Is(err, net.ErrClosed) || errors.Is(err, yamux.ErrSessionShutdown) {
+			switch {
+			case errors.Is(err, yamux.ErrSessionShutdown) || ls.carrierClosed():
+				// The whole carrier is gone; the control stream's EOF is a
+				// symptom, not a separate spine death — attribute precisely.
+				ls.reportEvidence(SessionCarrierLost, "carrier_closed_control_read", err)
+			case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+				errors.Is(err, net.ErrClosed):
 				ls.reportEvidence(SessionSpineLost, "control_spine_read_failed", err)
-			} else {
+			default:
 				ls.reportEvidence(SessionProtocolViolation, "control_spine_decode_failed", err)
 			}
 			return

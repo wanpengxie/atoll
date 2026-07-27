@@ -147,10 +147,12 @@ type sessionRegistry struct {
 	current map[string]SessionGeneration
 	logger  *slog.Logger
 
-	candidateTTL  time.Duration
-	diagnosticTTL time.Duration
-	probeInterval time.Duration
-	livenessTTL   time.Duration
+	candidateTTL      time.Duration
+	diagnosticTTL     time.Duration
+	probeInterval     time.Duration
+	livenessTTL       time.Duration
+	settlementWindow  time.Duration
+	sessionJoinWindow time.Duration
 }
 
 func newSessionRegistry(logger *slog.Logger) *sessionRegistry {
@@ -163,10 +165,12 @@ func newSessionRegistry(logger *slog.Logger) *sessionRegistry {
 		records:       make(map[SessionGeneration]*sessionRecord),
 		current:       make(map[string]SessionGeneration),
 		logger:        logger,
-		candidateTTL:  defaultCandidateTTL,
-		diagnosticTTL: defaultDiagnosticTTL,
-		probeInterval: defaultProbeInterval,
-		livenessTTL:   defaultLivenessTTL,
+		candidateTTL:      defaultCandidateTTL,
+		diagnosticTTL:     defaultDiagnosticTTL,
+		probeInterval:     defaultProbeInterval,
+		livenessTTL:       defaultLivenessTTL,
+		settlementWindow:  defaultSettlementWindow,
+		sessionJoinWindow: defaultSessionJoinWindow,
 	}
 }
 
@@ -236,8 +240,17 @@ func (r *sessionRegistry) adopt(generation SessionGeneration, key string) (*sess
 	if err != nil {
 		return nil, err
 	}
-	r.armCandidateTimer(record, "adopted_session_not_activated_before_ttl")
+	// No candidate timer here: adopt is an atomic insert→activate sequence
+	// with no handshake wait to bound — a TTL guard would only ever fire on
+	// the defensive failure path below (零预留).
 	if _, err := r.activate(record); err != nil {
+		// Defensive-only (activate cannot fail on a just-inserted candidate
+		// today): pair the verdict with its completion so the record can
+		// never sit unsealable in the live map.
+		r.beginSeal(record, sessionEvidence{
+			reason: SessionLocalFault, detail: "adopt_activate_failed", err: err,
+		})
+		r.completeSeal(record, 0)
 		return nil, err
 	}
 	return record, nil

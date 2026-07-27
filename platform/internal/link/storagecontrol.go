@@ -246,6 +246,16 @@ func (p *pendingReplies[T]) deliver(id string, v T) {
 	}
 }
 
+// pending reports whether id currently has a live waiter. Verdict points
+// that must confirm a reply's correlation BEFORE any ledger write (ticket
+// continuity, §4) ask this; deliver itself stays a pure best-effort courier.
+func (p *pendingReplies[T]) pending(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.waiters[id]
+	return ok
+}
+
 // cancel drops id's waiter without delivering — used by the caller's own
 // ctx/timeout path so a late reply after the caller gave up cannot leak the
 // map entry.

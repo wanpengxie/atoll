@@ -223,14 +223,20 @@ func (s *AuthenticatedLinkSession) OpenActorStream(
 		}
 		return nil, ErrInvalidPhysicalChild
 	}
+	// The admission verdict was passed exactly once, at the gate above. The
+	// open has crossed that gate: it is in-flight work and is never revoked
+	// by a second reading (§3 在途恒不回撤). If a seal landed meanwhile, the
+	// closed-gate registration below and the shutdown snapshot own its
+	// collection — verdict and handoff are separate mechanisms.
 	stream := newActorStream(s, resource)
-	if !s.authority.admits() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
 		stream.start()
 		_ = stream.Close()
 		<-stream.Done()
 		return nil, ErrPhysicalSessionClosed
 	}
-	s.mu.Lock()
 	s.streams[stream] = struct{}{}
 	s.mu.Unlock()
 	stream.start()
@@ -256,11 +262,9 @@ func (s *AuthenticatedLinkSession) NewBinding(cfg BindingConfig) (*Binding, erro
 	if s == nil || nilInterface(cfg.Endpoint) || cfg.Close == nil {
 		return nil, ErrInvalidPhysicalChild
 	}
+	// Admission was already decided once by the caller at the stream's gate
+	// (onActor). No second reading here — only the closed-gate handoff below.
 	binding := newBinding(s, cfg)
-	if !s.authority.admits() {
-		_ = binding.Close()
-		return nil, ErrPhysicalSessionClosed
-	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()

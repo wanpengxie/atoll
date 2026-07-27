@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -103,10 +105,12 @@ type reviewRig struct {
 }
 
 type reviewRigConfig struct {
-	probeInterval time.Duration
-	livenessTTL   time.Duration
-	attachBinding func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
-	storage       StorageHostControl
+	probeInterval    time.Duration
+	livenessTTL      time.Duration
+	settlementWindow time.Duration
+	joinWindow       time.Duration
+	attachBinding    func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
+	storage          StorageHostControl
 }
 
 func newReviewRig(t *testing.T, cfg reviewRigConfig) *reviewRig {
@@ -141,6 +145,12 @@ func newReviewRig(t *testing.T, cfg reviewRigConfig) *reviewRig {
 	}
 	if cfg.livenessTTL > 0 {
 		acc.sessions.livenessTTL = cfg.livenessTTL
+	}
+	if cfg.settlementWindow > 0 {
+		acc.sessions.settlementWindow = cfg.settlementWindow
+	}
+	if cfg.joinWindow > 0 {
+		acc.sessions.sessionJoinWindow = cfg.joinWindow
 	}
 	rig := &reviewRig{acc: acc}
 	rig.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -177,15 +187,18 @@ func (r *reviewRig) waitSession(
 // rawDaemon is a hand-driven daemon endpoint: it speaks the wire protocol
 // directly so a test can choose exactly which frames it answers.
 type rawDaemon struct {
-	t    *testing.T
-	ws   *websocket.Conn
-	ys   *yamux.Session
-	ctrl net.Conn
+	t             *testing.T
+	ws            *websocket.Conn
+	ys            *yamux.Session
+	ctrl          net.Conn
+	attachReplies chan AttachReply
 
 	writeMu sync.Mutex
 }
 
-func dialRawDaemon(t *testing.T, wsURL string, answerProbes bool) *rawDaemon {
+// dialRawCarrier establishes the carrier and control spine WITHOUT attaching,
+// so a test can hand-craft its own attach frame (or none at all).
+func dialRawCarrier(t *testing.T, wsURL string, answerProbes bool) *rawDaemon {
 	t.Helper()
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -202,21 +215,14 @@ func dialRawDaemon(t *testing.T, wsURL string, answerProbes bool) *rawDaemon {
 	if err := writeStreamHeader(ctrl, streamControl); err != nil {
 		t.Fatalf("control header: %v", err)
 	}
-	daemon := &rawDaemon{t: t, ws: ws, ys: ys, ctrl: ctrl}
+	daemon := &rawDaemon{
+		t: t, ws: ws, ys: ys, ctrl: ctrl,
+		attachReplies: make(chan AttachReply, 4),
+	}
 	t.Cleanup(func() {
 		_ = ys.Close()
 		_ = ws.Close()
 	})
-
-	attachRaw, err := encodeControl(controlFrame{
-		RequestID: "review-attach", Kind: ctrlAttach, Attach: &AttachRequest{Proto: 2},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	daemon.send(attachRaw)
-
-	attached := make(chan AttachReply, 1)
 	go func() {
 		decoder := json.NewDecoder(ctrl)
 		for {
@@ -240,23 +246,42 @@ func dialRawDaemon(t *testing.T, wsURL string, answerProbes bool) *rawDaemon {
 			case ctrlAttachReply:
 				if frame.AttachReply != nil {
 					select {
-					case attached <- *frame.AttachReply:
+					case daemon.attachReplies <- *frame.AttachReply:
 					default:
 					}
 				}
 			}
 		}
 	}()
+	return daemon
+}
 
-	select {
-	case reply := <-attached:
-		if !reply.Accepted {
-			t.Fatalf("attach rejected: %s", reply.Reason)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("attach reply did not arrive")
+func dialRawDaemon(t *testing.T, wsURL string, answerProbes bool) *rawDaemon {
+	t.Helper()
+	daemon := dialRawCarrier(t, wsURL, answerProbes)
+	attachRaw, err := encodeControl(controlFrame{
+		RequestID: "review-attach", Kind: ctrlAttach, Attach: &AttachRequest{Proto: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon.send(attachRaw)
+	reply := daemon.waitAttachReply()
+	if !reply.Accepted {
+		t.Fatalf("attach rejected: %s", reply.Reason)
 	}
 	return daemon
+}
+
+func (d *rawDaemon) waitAttachReply() AttachReply {
+	d.t.Helper()
+	select {
+	case reply := <-d.attachReplies:
+		return reply
+	case <-time.After(3 * time.Second):
+		d.t.Fatal("attach reply did not arrive")
+		return AttachReply{}
+	}
 }
 
 func (d *rawDaemon) send(raw []byte) {
@@ -600,5 +625,311 @@ func TestMalformedKnownControlFrameIsProtocolViolation(t *testing.T) {
 	})
 	if snapshot.Reason != SessionProtocolViolation {
 		t.Fatalf("reason=%s want protocol_violation", snapshot.Reason)
+	}
+}
+
+// Verdict-once: an open that passed the admission gate is in-flight work and
+// is never revoked by a second reading when a seal lands mid-open; the
+// closed-gate handoff and shutdown own its collection instead.
+func TestInFlightOpenSurvivesSealVerdict(t *testing.T) {
+	registry := newSessionRegistry(nil)
+	record := activeRecord(t, registry, "daemon-a")
+	key := physicalKey(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	session, err := NewAuthenticatedLinkSession(AuthenticatedLinkSessionConfig{
+		Peer:      "daemon-a",
+		Authority: authorityPair(registry, record),
+		OpenActorStream: func(context.Context, actor.ActorID, actorhost.AttemptKey) (ActorStreamResource, error) {
+			close(entered)
+			<-gate
+			done := make(chan struct{})
+			var once sync.Once
+			return ActorStreamResource{
+				Arms: physicalArms(),
+				Close: func() error {
+					once.Do(func() { close(done) })
+					return nil
+				},
+				Done: done,
+			}, nil
+		},
+		CloseTransport: func() error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type opened struct {
+		stream *ActorStream
+		err    error
+	}
+	result := make(chan opened, 1)
+	go func() {
+		stream, openErr := session.OpenActorStream(context.Background(), "agent:a", key)
+		result <- opened{stream: stream, err: openErr}
+	}()
+	<-entered
+	if registry.beginSeal(record, sessionEvidence{reason: SessionRevoked}) != sealCommitted {
+		t.Fatal("seal did not commit")
+	}
+	close(gate)
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("in-flight open was revoked by a second verdict: %v", got.err)
+	}
+	_ = session.Close()
+	select {
+	case <-got.stream.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not collect the in-flight stream")
+	}
+}
+
+// Home side of the attach verdict point: an attach with no RequestID can
+// never be correlated by the dialer, so it is malformed — not merely quiet.
+func TestAttachMissingRequestIDIsProtocolViolation(t *testing.T) {
+	rig := newReviewRig(t, reviewRigConfig{})
+	carrier := dialRawCarrier(t, rig.wsURL(), true)
+	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{Proto: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrier.send(raw)
+	snapshot := rig.waitSession(t, 5*time.Second, func(s SessionSnapshot) bool {
+		return s.Key == "daemon-1" && s.State == SessionClosed
+	})
+	if snapshot.Reason != SessionProtocolViolation {
+		t.Fatalf("reason=%s want protocol_violation", snapshot.Reason)
+	}
+}
+
+// Proto is the negotiated version field: an unknown value gets an honest
+// rejection with attribution, never a silent compatibility path.
+func TestAttachProtoMismatchIsRejectedWithAttribution(t *testing.T) {
+	rig := newReviewRig(t, reviewRigConfig{})
+	carrier := dialRawCarrier(t, rig.wsURL(), true)
+	raw, err := encodeControl(controlFrame{
+		RequestID: "review-proto", Kind: ctrlAttach, Attach: &AttachRequest{Proto: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrier.send(raw)
+	reply := carrier.waitAttachReply()
+	if reply.Accepted || !strings.Contains(reply.Reason, "unsupported attach proto") {
+		t.Fatalf("reply=%+v want proto rejection", reply)
+	}
+	snapshot := rig.waitSession(t, 5*time.Second, func(s SessionSnapshot) bool {
+		return s.Key == "daemon-1" && s.State == SessionClosed
+	})
+	if snapshot.Reason != SessionAdmissionRejected {
+		t.Fatalf("reason=%s want admission_rejected", snapshot.Reason)
+	}
+}
+
+// The transport-contract write budget: a stream whose peer stops reading is
+// judged dead water within the budget and only that stream is closed.
+func TestWriteBudgetJudgesDeadWaterStreamLocally(t *testing.T) {
+	left, right := net.Pipe()
+	defer right.Close()
+	bounded := &boundedConn{Conn: left, budget: 50 * time.Millisecond}
+	if _, err := bounded.Write(make([]byte, 1024)); err == nil {
+		t.Fatal("write into a dead-water pipe did not hit the budget")
+	}
+	if _, err := left.Write([]byte("x")); err == nil {
+		t.Fatal("dead-water stream was not closed after the budget verdict")
+	}
+}
+
+// Phase B acceptance: with a control task stuck far beyond every window, the
+// seal collection still completes bounded and leaves one explicit abandoned
+// account on the snapshot.
+func TestCollectSessionBoundedWithStuckControlTask(t *testing.T) {
+	rig := newReviewRig(t, reviewRigConfig{
+		settlementWindow: 100 * time.Millisecond,
+		joinWindow:       200 * time.Millisecond,
+		storage:          &reviewStorageControl{committedDelay: 5 * time.Second},
+	})
+	daemon := dialRawDaemon(t, rig.wsURL(), true)
+	committed, err := encodeStorageControl(storageControlFrame{
+		Kind:      ctrlCommitted,
+		Committed: &Committed{RequestID: "review-stuck", ReservationID: "resv-stuck"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon.send(committed)
+	time.Sleep(150 * time.Millisecond)
+
+	var generation SessionGeneration
+	for _, snapshot := range rig.acc.Sessions() {
+		if snapshot.Key == "daemon-1" && snapshot.State == SessionActive {
+			generation = snapshot.Generation
+		}
+	}
+	if generation == "" {
+		t.Fatal("no active session to kick")
+	}
+	start := time.Now()
+	if !rig.acc.KickSession(generation) {
+		t.Fatal("kick was rejected")
+	}
+	snapshot := rig.waitSession(t, 3*time.Second, func(s SessionSnapshot) bool {
+		return s.Generation == generation && s.State == SessionClosed
+	})
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("collection took %v; windows are 100ms/200ms", elapsed)
+	}
+	if snapshot.Abandoned < 1 {
+		t.Fatalf("abandoned=%d want >=1 for the stuck task", snapshot.Abandoned)
+	}
+}
+
+// A panicking control handler is a local fault, never an unrecovered crash.
+func TestControlHandlerPanicIsLocalFault(t *testing.T) {
+	carrierA, carrierB := net.Pipe()
+	client, err := yamux.Client(carrierA, linkYamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := yamux.Server(carrierB, linkYamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer server.Close()
+	evidence := make(chan SessionEndReason, 1)
+	ls := newLinkSession(client,
+		func([]byte) { panic("review-boom") }, nil, nil, nil,
+		func(reason SessionEndReason, _ string, _ error) { evidence <- reason }, nil)
+	reader, writer := net.Pipe()
+	defer reader.Close()
+	go ls.readControl(reader)
+	if _, err := writer.Write(append(encodePlanPoke(), '\n')); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case reason := <-evidence:
+		if reason != SessionLocalFault {
+			t.Fatalf("reason=%s want local_fault", reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("panic was not reported as local fault")
+	}
+}
+
+// A second control spine on one carrier breaks organ integrity.
+func TestDuplicateControlSpineIsProtocolViolation(t *testing.T) {
+	rig := newReviewRig(t, reviewRigConfig{})
+	daemon := dialRawDaemon(t, rig.wsURL(), true)
+	second, err := daemon.ys.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStreamHeader(second, streamControl); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := rig.waitSession(t, 5*time.Second, func(s SessionSnapshot) bool {
+		return s.Key == "daemon-1" && s.State == SessionClosed
+	})
+	if snapshot.Reason != SessionProtocolViolation {
+		t.Fatalf("reason=%s want protocol_violation", snapshot.Reason)
+	}
+}
+
+// Stage-3 settlement of an abandoned open: the worker that completes after
+// its caller left closes the stream itself and accounts a late close.
+func TestLateOpenIsReapedAndAccounted(t *testing.T) {
+	carrierA, carrierB := net.Pipe()
+	clientCfg := linkYamuxConfig()
+	clientCfg.AcceptBacklog = 1
+	client, err := yamux.Client(carrierA, clientCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := yamux.Server(carrierB, linkYamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer server.Close()
+	ls := newLinkSession(client, nil, nil, nil, nil,
+		func(SessionEndReason, string, error) {}, nil)
+
+	first, err := ls.openTagged(context.Background(), streamActor)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	defer first.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := ls.openTagged(ctx, streamActor); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second open err=%v want deadline", err)
+	}
+	// Now let the backlog drain: accepting the first stream ACKs it and
+	// unblocks the abandoned worker, which must reap its own late stream.
+	go func() {
+		for {
+			if _, acceptErr := server.AcceptStream(); acceptErr != nil {
+				return
+			}
+		}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, late := ls.openCounts(); late == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	inFlight, late := ls.openCounts()
+	t.Fatalf("late close not accounted: in_flight=%d late=%d", inFlight, late)
+}
+
+// A zombie control task is accounted exactly once across its abandon timer
+// and a later drain timeout.
+func TestZombieControlTaskIsCountedOnce(t *testing.T) {
+	pool := newControlTaskPool(nil, nil)
+	pool.abandonAfter = 50 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	pool.submit(func() { <-release }, nil)
+	time.Sleep(150 * time.Millisecond)
+	if _, abandoned := pool.drain(50 * time.Millisecond); abandoned != 1 {
+		t.Fatalf("one zombie accounted %d times", abandoned)
+	}
+}
+
+// A lane transfer ticket is single-use: consumed at its first valid
+// redemption, so a replay within the TTL finds nothing.
+func TestLaneTransferTokenIsSingleUse(t *testing.T) {
+	acc := &Acceptor{lane: newLaneState(), sessions: newSessionRegistry(nil)}
+	token, err := acc.OpenLaneTransfer(
+		context.Background(), "target-daemon", "req-daemon", "coord-1", access.OpRead, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeem := func() laneAck {
+		home, daemon := net.Pipe()
+		defer daemon.Close()
+		go acc.handleLaneRedeem("req-daemon", home)
+		if err := writeLaneJSON(daemon, laneRedeemHeader{Token: token}); err != nil {
+			t.Fatal(err)
+		}
+		var ack laneAck
+		if err := readLaneJSON(daemon, &ack); err != nil {
+			t.Fatal(err)
+		}
+		return ack
+	}
+	first := redeem()
+	if first.OK || !strings.Contains(first.Reason, "no live link") {
+		t.Fatalf("first redemption ack=%+v want target-unreachable", first)
+	}
+	second := redeem()
+	if second.OK || !strings.Contains(second.Reason, "unknown or mismatched") {
+		t.Fatalf("replayed ticket was honored: ack=%+v", second)
 	}
 }

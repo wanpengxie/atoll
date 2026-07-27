@@ -70,6 +70,10 @@ type PlanReply struct {
 // encodePlanPoke emits the deliberately empty, sole-key level-wake frame.
 func encodePlanPoke() []byte { return []byte(`{"kind":"plan_poke"}`) }
 
+// validPlanPoke accepts EXACTLY the one-field shape encodePlanPoke emits
+// (len==1 check). The two functions must change together: adding a field to
+// the encoder without relaxing this check makes every poke a protocol
+// violation that kills the session.
 func validPlanPoke(raw []byte) bool {
 	var value map[string]json.RawMessage
 	if json.Unmarshal(raw, &value) != nil || len(value) != 1 {

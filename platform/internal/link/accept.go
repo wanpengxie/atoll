@@ -284,11 +284,29 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				record.report(SessionProtocolViolation, "malformed_attach", err)
 				return
 			}
+			// An attach without a RequestID can never be correlated by the
+			// dialer's verdict point — it is malformed, not merely quiet.
+			if frame.RequestID == "" {
+				record.report(SessionProtocolViolation, "attach_missing_request_id", nil)
+				return
+			}
 			requestID := frame.RequestID
 			lc.submitControlTask(func() {
 				reply := AttachReply{
 					ChannelID: a.channelID, DaemonID: daemonID,
 					Generation: record.generation,
+				}
+				// Proto is the one negotiated version field; an unknown value
+				// gets an honest rejection with attribution, never a silent
+				// compatibility path.
+				if frame.Attach.Proto != 2 {
+					reply.Reason = fmt.Sprintf("link: unsupported attach proto %d", frame.Attach.Proto)
+					raw, _ := encodeControl(controlFrame{
+						RequestID: requestID, Kind: ctrlAttachReply, AttachReply: &reply,
+					})
+					_ = lc.sendControl(raw)
+					record.report(SessionAdmissionRejected, "attach_proto_unsupported", nil)
+					return
 				}
 				if attachErr := a.canAttach(reqCtx, daemonID); attachErr != nil {
 					reply.Reason = attachErr.Error()
@@ -450,6 +468,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	if err != nil {
 		record.report(SessionLocalFault, "physical_owner_setup_failed", err)
 		_ = lc.closeCarrier()
+		a.sessions.completeSeal(record, 0)
 		return
 	}
 	handle := &linkHandle{
@@ -489,7 +508,7 @@ func (a *Acceptor) collectSession(
 	lc *linkSession,
 ) {
 	start := time.Now()
-	joinedTasks, abandoned := lc.drainControlTasks(defaultSettlementWindow)
+	joinedTasks, abandoned := lc.drainControlTasks(a.sessions.settlementWindow)
 	a.logger.Info("link.session_seal_step",
 		"generation", record.generation, "key", record.key,
 		"step", "settlement", "joined", joinedTasks, "elapsed", time.Since(start))
@@ -497,14 +516,14 @@ func (a *Acceptor) collectSession(
 	a.logger.Info("link.session_seal_step",
 		"generation", record.generation, "key", record.key,
 		"step", "carrier_closed", "elapsed", time.Since(start))
-	if !lc.waitWorkers(defaultSessionJoinWindow) {
+	if !lc.waitWorkers(a.sessions.sessionJoinWindow) {
 		abandoned++
 		a.logger.Warn("link.session_mechanism_abandoned",
 			"generation", record.generation, "key", record.key)
 	}
 	select {
 	case <-physical.Done():
-	case <-time.After(defaultSessionJoinWindow):
+	case <-time.After(a.sessions.sessionJoinWindow):
 		abandoned++
 		a.logger.Warn("link.session_children_abandoned",
 			"generation", record.generation, "key", record.key)

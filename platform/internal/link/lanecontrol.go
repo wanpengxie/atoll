@@ -143,8 +143,17 @@ func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
 		delete(a.lane.transfers, hdr.Token)
 		ok = false
 	}
+	if ok && tr.requesterDaemonID == daemonID {
+		// Single-use is enforced AT REDEMPTION: the full evidence (exists,
+		// unexpired, right requester) passed under this one lock hold, so the
+		// ticket is consumed here — a replay within the TTL finds nothing.
+		// A mismatched requester does NOT burn someone else's ticket.
+		delete(a.lane.transfers, hdr.Token)
+	} else {
+		ok = false
+	}
 	a.lane.mu.Unlock()
-	if !ok || tr.requesterDaemonID != daemonID {
+	if !ok {
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "unknown or mismatched transfer token"})
 		return
 	}

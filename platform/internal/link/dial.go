@@ -241,6 +241,19 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 			d.onSessionEvidence(SessionProtocolViolation, "malformed_attach_reply", derr)
 			return
 		}
+		// Verdict point: ALL evidence is collected BEFORE any ledger write
+		// (§3/§4 ticket continuity). Correlation is part of the ticket — a
+		// reply that does not answer our one pending attach must never
+		// install session truth; the pending table is only consulted here,
+		// deliver below stays a pure courier.
+		if cf.RequestID == "" || !d.pendingAttach.pending(cf.RequestID) {
+			d.onSessionEvidence(SessionProtocolViolation, "uncorrelated_attach_reply", nil)
+			return
+		}
+		if cf.AttachReply.Accepted && cf.AttachReply.ChannelID == "" {
+			d.onSessionEvidence(SessionProtocolViolation, "accepted_attach_missing_channel_id", nil)
+			return
+		}
 		d.mu.Lock()
 		if d.closed {
 			// The local evidence decision already ran; adopting now would
@@ -275,13 +288,6 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 			d.session = record
 		}
 		d.mu.Unlock()
-		if cf.RequestID == "" {
-			// Attach carries a RequestID, so a reply without one cannot be
-			// correlated to the waiter — a protocol/
-			// ordering anomaly, never silently dropped (F11).
-			d.logger.Warn("link.attach_reply_no_request_id")
-			return
-		}
 		d.pendingAttach.deliver(cf.RequestID, *cf.AttachReply)
 	}
 	// onLane handles a HOME-opened lane substream: the home is relaying a
@@ -1022,9 +1028,9 @@ func (d *Dialer) onSessionEvidence(reason SessionEndReason, detail string, err e
 		go func() {
 			var abandoned int64
 			if d.lc != nil {
-				_, abandoned = d.lc.drainControlTasks(defaultSettlementWindow)
+				_, abandoned = d.lc.drainControlTasks(d.sessions.settlementWindow)
 				_ = d.lc.closeCarrier()
-				if !d.lc.waitWorkers(defaultSessionJoinWindow) {
+				if !d.lc.waitWorkers(d.sessions.sessionJoinWindow) {
 					abandoned++
 				}
 			}
@@ -1032,7 +1038,7 @@ func (d *Dialer) onSessionEvidence(reason SessionEndReason, detail string, err e
 				if physicalDone := record.physicalJoin(); physicalDone != nil {
 					select {
 					case <-physicalDone:
-					case <-time.After(defaultSessionJoinWindow):
+					case <-time.After(d.sessions.sessionJoinWindow):
 						abandoned++
 					}
 				}
