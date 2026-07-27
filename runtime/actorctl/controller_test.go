@@ -142,6 +142,46 @@ func currentAttempt(t *testing.T, c *Controller, id actor.ActorID) string {
 
 // --- fork replay table -------------------------------------------------------
 
+// The verdict is the door's first step: a stale term is refused before the
+// replay table is consulted, while the current term retrying the same
+// RequestID still lands on the replay row.
+func TestForkReplayRequiresACurrentCaller(t *testing.T) {
+	ctx := context.Background()
+	controller, _, parent := seedParent(t)
+	g1 := attemptKeyOf(currentAttempt(t, controller, parent))
+
+	request := ForkRequest{
+		CallerActorID: parent,
+		CallerAttempt: g1,
+		RequestID:     "req-stale",
+		Spec:          actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
+	}
+	first, err := controller.Fork(ctx, request)
+	if err != nil {
+		t.Fatalf("first fork: %v", err)
+	}
+
+	if _, err := controller.Restart(ctx, RestartRequest{ActorID: parent}); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+
+	// The old term replays: refused at the gate, not answered from the table.
+	if _, err := controller.Fork(ctx, request); !errors.Is(err, ErrStaleAttempt) {
+		t.Fatalf("stale replay err=%v, want ErrStaleAttempt", err)
+	}
+
+	// The current term replays the same RequestID: same child, no second one.
+	request.CallerAttempt = attemptKeyOf(currentAttempt(t, controller, parent))
+	replay, err := controller.Fork(ctx, request)
+	if err != nil {
+		t.Fatalf("current replay: %v", err)
+	}
+	if replay.Result.ChildActorID != first.Result.ChildActorID {
+		t.Fatalf("replay child=%q want %q",
+			replay.Result.ChildActorID, first.Result.ChildActorID)
+	}
+}
+
 func TestForkReplayReturnsTheFirstChildForever(t *testing.T) {
 	ctx := context.Background()
 	controller, store, parent := seedParent(t)

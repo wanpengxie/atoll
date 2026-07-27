@@ -67,15 +67,19 @@ func (c *Controller) Fork(
 		return Transition[ForkResult]{}, err
 	}
 
+	// The verdict is the door's first step — before the replay lookup, so a
+	// stale or ended caller is refused instead of being answered from the
+	// table. A current caller retrying the same RequestID still lands on the
+	// replay row right after passing the gate.
+	if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
+		return Transition[ForkResult]{}, err
+	}
 	key := forkKey{caller: request.CallerActorID, request: request.RequestID}
 	if entry, found := c.forks[key]; found {
 		if entry.digest != digest {
 			return Transition[ForkResult]{}, ErrForkConflict
 		}
 		return Transition[ForkResult]{Result: ForkResult{ChildActorID: entry.child}}, nil
-	}
-	if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
-		return Transition[ForkResult]{}, err
 	}
 	parent := c.actors[request.CallerActorID]
 	spec, placement, err := normalizeFork(request.Spec, parent.Record)
