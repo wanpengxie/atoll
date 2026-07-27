@@ -106,6 +106,7 @@ type acceptorRigConfig struct {
 	joinWindow       time.Duration
 	attachBinding    func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
 	storage          StorageHostControl
+	daemonID         func(*http.Request) string
 }
 
 func newAcceptorRig(t *testing.T, cfg acceptorRigConfig) *acceptorRig {
@@ -149,7 +150,11 @@ func newAcceptorRig(t *testing.T, cfg acceptorRigConfig) *acceptorRig {
 	}
 	rig := &acceptorRig{acc: acc}
 	rig.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		rig.acc.Serve(w, req, "daemon-1")
+		daemonID := "daemon-1"
+		if cfg.daemonID != nil {
+			daemonID = cfg.daemonID(req)
+		}
+		rig.acc.Serve(w, req, daemonID)
 	}))
 	t.Cleanup(func() {
 		_ = rig.acc.Close()
@@ -182,11 +187,12 @@ func (r *acceptorRig) waitSession(
 // rawDaemon is a hand-driven daemon endpoint: it speaks the wire protocol
 // directly so a test can choose exactly which frames it answers.
 type rawDaemon struct {
-	t             *testing.T
-	ws            *websocket.Conn
-	ys            *yamux.Session
-	ctrl          net.Conn
-	attachReplies chan AttachReply
+	t              *testing.T
+	ws             *websocket.Conn
+	ys             *yamux.Session
+	ctrl           net.Conn
+	attachReplies  chan AttachReply
+	resolveReplies chan ResolveCoordReply
 
 	writeMu sync.Mutex
 }
@@ -212,7 +218,8 @@ func dialRawCarrier(t *testing.T, wsURL string, answerProbes bool) *rawDaemon {
 	}
 	daemon := &rawDaemon{
 		t: t, ws: ws, ys: ys, ctrl: ctrl,
-		attachReplies: make(chan AttachReply, 4),
+		attachReplies:  make(chan AttachReply, 4),
+		resolveReplies: make(chan ResolveCoordReply, 4),
 	}
 	t.Cleanup(func() {
 		_ = ys.Close()
@@ -242,6 +249,14 @@ func dialRawCarrier(t *testing.T, wsURL string, answerProbes bool) *rawDaemon {
 				if frame.AttachReply != nil {
 					select {
 					case daemon.attachReplies <- *frame.AttachReply:
+					default:
+					}
+				}
+			case ctrlResolveCoordReply:
+				laneFrame, laneErr := decodeLaneControl(raw)
+				if laneErr == nil && laneFrame.ResolveCoordReply != nil {
+					select {
+					case daemon.resolveReplies <- *laneFrame.ResolveCoordReply:
 					default:
 					}
 				}
@@ -276,6 +291,17 @@ func (d *rawDaemon) waitAttachReply() AttachReply {
 	case <-time.After(3 * time.Second):
 		d.t.Fatal("attach reply did not arrive")
 		return AttachReply{}
+	}
+}
+
+func (d *rawDaemon) waitResolveReply() ResolveCoordReply {
+	d.t.Helper()
+	select {
+	case reply := <-d.resolveReplies:
+		return reply
+	case <-time.After(3 * time.Second):
+		d.t.Fatal("resolve coord reply did not arrive")
+		return ResolveCoordReply{}
 	}
 }
 

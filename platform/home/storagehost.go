@@ -118,10 +118,10 @@ func (c lateStorageControl) ReclaimRequest(ctx context.Context, daemonID string,
 // session/transfer tables, which do not exist until step 11).
 type lateLaneControl struct{ acc *lateAcceptor }
 
-func (c lateLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
+func (c lateLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (accessdoor.LaneTickets, error) {
 	a := c.acc.get()
 	if a == nil {
-		return "", errors.New("platform: lane control not wired yet (Acceptor not built)")
+		return accessdoor.LaneTickets{}, errors.New("platform: lane control not wired yet (Acceptor not built)")
 	}
 	return a.OpenLaneTransfer(ctx, targetDaemonID, requesterDaemonID, coord, mode, reservationID)
 }

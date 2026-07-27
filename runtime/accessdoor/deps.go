@@ -114,7 +114,7 @@ type Deps struct {
 	StorageMounts StorageMounts
 	// StorageControl issues the chosen placement's AllocRequest.
 	StorageControl StorageControl
-	// LaneControl mints the file byte-route Token for OpRead/OpWrite(file)
+	// LaneControl mints the file byte-route redeem/resolve ticket pair for OpRead/OpWrite(file)
 	// and Create(file, with_content=true) — §5's own Dep, nil-safe absent
 	// (a kv-only test rig or an assembly that never wires the lane simply
 	// cannot route file bytes, honestly, never a silent kv-shaped route).

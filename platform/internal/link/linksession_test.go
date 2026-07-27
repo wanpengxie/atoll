@@ -1,7 +1,7 @@
 package link
 
 // linkSession mechanism unit tests: the control task pool (local busy, zombie
-// accounting, panic recovery), probe fast-path, the three-stage open model
+// accounting, panic recovery), inline probe table row, the three-stage open model
 // (non-blocking capacity, seal unblocking, late-close settlement), per-write
 // budgets, and carrier-error classification.
 
@@ -68,13 +68,24 @@ func TestZombieControlTaskIsCountedOnce(t *testing.T) {
 	}
 }
 
-func TestProbeReplyBypassesSaturatedControlTaskPool(t *testing.T) {
+func TestProbeTableRowIsInlineDespiteSaturatedControlTaskPool(t *testing.T) {
 	left, right := net.Pipe()
 	defer left.Close()
 	defer right.Close()
 	ls := &linkSession{ctrl: left}
 	ls.controlTasks = newControlTaskPool(nil, nil)
 	ls.openSeats = make(chan struct{}, openAttemptCapacity)
+	router, err := newControlRouter(
+		[]controlKind{ctrlProbe},
+		map[controlKind]controlRoute{ctrlProbe: probeRoute(parseProbe, false)},
+		nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls.onControl = func(raw []byte) {
+		router.dispatch(controlDispatchInput{link: ls}, raw)
+	}
 	release := make(chan struct{})
 	for i := 0; i < controlTaskCapacity; i++ {
 		ls.controlTasks.submit(func() { <-release }, nil)

@@ -6,8 +6,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
 // AttachRequest is the stream-0 control message a daemon sends to join a
@@ -67,6 +71,66 @@ type PlanReply struct {
 	Error  string               `json:"error,omitempty"`
 }
 
+func requiredControlField(name, value string) error {
+	if value == "" {
+		return fmt.Errorf("link: control field %s is required", name)
+	}
+	return nil
+}
+
+func (m AttachRequest) validate() error {
+	if m.Proto <= 0 {
+		return fmt.Errorf("link: attach proto must be positive")
+	}
+	return nil
+}
+
+func (m AttachReply) validate() error {
+	if !m.Accepted {
+		return requiredControlField("attach_reply.reason", m.Reason)
+	}
+	if err := requiredControlField("attach_reply.channel_id", string(m.ChannelID)); err != nil {
+		return err
+	}
+	if err := requiredControlField("attach_reply.generation", string(m.Generation)); err != nil {
+		return err
+	}
+	generation, err := uuid.Parse(string(m.Generation))
+	if err != nil || generation.Version() != 7 || generation.Variant() != uuid.RFC4122 ||
+		generation.String() != string(m.Generation) {
+		return fmt.Errorf("link: attach_reply.generation must be canonical UUIDv7")
+	}
+	return requiredControlField("attach_reply.daemon_id", m.DaemonID)
+}
+
+func (PlanPull) validate() error { return nil }
+
+func (m Probe) validate() error {
+	return requiredControlField("probe.nonce", m.Nonce)
+}
+
+func (m ProbeReply) validate() error {
+	return requiredControlField("probe_reply.nonce", m.Nonce)
+}
+
+func (m PlanReply) validate() error {
+	for i, planActor := range m.Actors {
+		if planActor.ActorID == "" {
+			return fmt.Errorf("link: plan_reply.actors[%d].actor_id is required", i)
+		}
+		if _, err := actorhost.ParseAttemptKey(string(planActor.AttemptKey)); err != nil {
+			return fmt.Errorf("link: plan_reply.actors[%d].attempt_key: %w", i, err)
+		}
+		if _, ok := actor.ParseKind(string(planActor.Kind)); !ok {
+			return fmt.Errorf("link: plan_reply.actors[%d].kind is invalid", i)
+		}
+		if planActor.Class == "" {
+			return fmt.Errorf("link: plan_reply.actors[%d].class is required", i)
+		}
+	}
+	return nil
+}
+
 // encodePlanPoke emits the deliberately empty, sole-key level-wake frame.
 func encodePlanPoke() []byte { return []byte(`{"kind":"plan_poke"}`) }
 
@@ -105,6 +169,36 @@ func decodeControl(b []byte) (controlFrame, error) {
 	var f controlFrame
 	if err := json.Unmarshal(b, &f); err != nil {
 		return controlFrame{}, fmt.Errorf("link: decode control: %w", err)
+	}
+	if f.Attach != nil {
+		if err := f.Attach.validate(); err != nil {
+			return controlFrame{}, err
+		}
+	}
+	if f.AttachReply != nil {
+		if err := f.AttachReply.validate(); err != nil {
+			return controlFrame{}, err
+		}
+	}
+	if f.PlanPull != nil {
+		if err := f.PlanPull.validate(); err != nil {
+			return controlFrame{}, err
+		}
+	}
+	if f.PlanReply != nil {
+		if err := f.PlanReply.validate(); err != nil {
+			return controlFrame{}, err
+		}
+	}
+	if f.Probe != nil {
+		if err := f.Probe.validate(); err != nil {
+			return controlFrame{}, err
+		}
+	}
+	if f.ProbeReply != nil {
+		if err := f.ProbeReply.validate(); err != nil {
+			return controlFrame{}, err
+		}
 	}
 	return f, nil
 }

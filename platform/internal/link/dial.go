@@ -149,146 +149,13 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		localFileOpener:     cfg.LocalFileOpener,
 	}
 
+	router, err := buildDaemonControlRouter(d)
+	if err != nil {
+		_ = ws.Close()
+		return nil, err
+	}
 	onControl := func(payload []byte) {
-		kind := peekControlKind(payload)
-		switch kind {
-		case ctrlPlanPoke:
-			if !validPlanPoke(payload) {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_plan_poke", nil)
-				return
-			}
-			d.signalPlanChanged()
-			return
-		case ctrlAllocRequest:
-			sf, err := decodeStorageControl(payload)
-			if err != nil || sf.AllocRequest == nil {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_alloc_request", err)
-				return
-			}
-			req := *sf.AllocRequest
-			d.lc.submitControlTask(
-				func() { d.handleAllocRequest(req) },
-				func() { d.sendAllocBusy(req.RequestID) },
-			)
-			return
-		case ctrlReclaimRequest:
-			sf, err := decodeStorageControl(payload)
-			if err != nil || sf.ReclaimRequest == nil {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_reclaim_request", err)
-				return
-			}
-			req := *sf.ReclaimRequest
-			d.lc.submitControlTask(
-				func() { d.handleReclaimRequest(req) },
-				func() { d.sendReclaimBusy(req.RequestID) },
-			)
-			return
-		case ctrlCommittedReply:
-			sf, err := decodeStorageControl(payload)
-			if err != nil || sf.CommittedReply == nil {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_committed_reply", err)
-				return
-			}
-			d.pendingCommitted.deliver(sf.CommittedReply.RequestID, *sf.CommittedReply)
-			return
-		case ctrlReclaimAckReply:
-			sf, err := decodeStorageControl(payload)
-			if err != nil || sf.ReclaimAckReply == nil {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_reclaim_ack_reply", err)
-				return
-			}
-			d.pendingReclaim.deliver(sf.ReclaimAckReply.RequestID, *sf.ReclaimAckReply)
-			return
-		case ctrlReconcilePullReply:
-			sf, err := decodeStorageControl(payload)
-			if err != nil || sf.ReconcilePullReply == nil {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_reconcile_pull_reply", err)
-				return
-			}
-			d.pendingReconcile.deliver(sf.ReconcilePullReply.RequestID, *sf.ReconcilePullReply)
-			return
-		case ctrlResolveCoordReply:
-			lf, err := decodeLaneControl(payload)
-			if err != nil || lf.ResolveCoordReply == nil {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_resolve_coord_reply", err)
-				return
-			}
-			d.pendingResolveCoord.deliver(lf.ResolveCoordReply.RequestID, *lf.ResolveCoordReply)
-			return
-		case ctrlPlanReply:
-			cf, err := decodeControl(payload)
-			if err != nil || cf.PlanReply == nil {
-				d.onSessionEvidence(SessionProtocolViolation, "malformed_plan_reply", err)
-				return
-			}
-			d.pendingPlan.deliver(cf.RequestID, *cf.PlanReply)
-			return
-		case ctrlAttachReply:
-		default:
-			// A frame with no kind at all is malformed, not future vocabulary.
-			if kind == "" {
-				d.onSessionEvidence(SessionProtocolViolation, "control_frame_missing_kind", nil)
-				return
-			}
-			// A non-empty unknown kind is tolerated (logged, never answered):
-			// the rolling-upgrade window between home and daemon restarts is
-			// the same version-skew lifeline §5.4 grants unknown substreams.
-			logger.Warn("link.unknown_control_kind", "kind", string(kind))
-			return
-		}
-		cf, derr := decodeControl(payload)
-		if derr != nil || cf.AttachReply == nil {
-			d.onSessionEvidence(SessionProtocolViolation, "malformed_attach_reply", derr)
-			return
-		}
-		// Verdict point: ALL evidence is collected BEFORE any ledger write
-		// (§3/§4 ticket continuity). Correlation is part of the ticket — a
-		// reply that does not answer our one pending attach must never
-		// install session truth; the pending table is only consulted here,
-		// deliver below stays a pure courier.
-		if cf.RequestID == "" || !d.pendingAttach.pending(cf.RequestID) {
-			d.onSessionEvidence(SessionProtocolViolation, "uncorrelated_attach_reply", nil)
-			return
-		}
-		if cf.AttachReply.Accepted && cf.AttachReply.ChannelID == "" {
-			d.onSessionEvidence(SessionProtocolViolation, "accepted_attach_missing_channel_id", nil)
-			return
-		}
-		d.mu.Lock()
-		if d.closed {
-			// The local evidence decision already ran; adopting now would
-			// install a record no one can ever seal. Drop the late reply.
-			d.mu.Unlock()
-			return
-		}
-		// The attach reply publishes the home-confirmed daemon id — the
-		// authoritative value AttachReply.
-		// DaemonID's doc names (§4.7). An accepted reply always carries a
-		// non-empty DaemonID (Acceptor.handleAttach stamps the authenticated id
-		// unconditionally); a rejected one may not, so only update on Accepted
-		// to avoid clobbering a previously-confirmed id with an empty string.
-		if cf.AttachReply.Accepted {
-			if cf.AttachReply.DaemonID == "" {
-				d.mu.Unlock()
-				d.onSessionEvidence(SessionProtocolViolation, "accepted_attach_missing_daemon_id", nil)
-				return
-			}
-			if d.session != nil {
-				d.mu.Unlock()
-				d.onSessionEvidence(SessionProtocolViolation, "duplicate_accepted_attach_reply", nil)
-				return
-			}
-			d.daemonID = cf.AttachReply.DaemonID
-			record, err := d.sessions.adopt(cf.AttachReply.Generation, cf.AttachReply.DaemonID)
-			if err != nil {
-				d.mu.Unlock()
-				d.onSessionEvidence(SessionProtocolViolation, "invalid_attach_generation", err)
-				return
-			}
-			d.session = record
-		}
-		d.mu.Unlock()
-		d.pendingAttach.deliver(cf.RequestID, *cf.AttachReply)
+		router.dispatch(controlDispatchInput{peerID: "home", link: d.lc}, payload)
 	}
 	// onLane handles a HOME-opened lane substream: the home is relaying a
 	// redeemed transfer whose TARGET is this daemon (§5). It runs on the per-
@@ -360,10 +227,42 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		}
 		return nil, errors.New(reason)
 	}
+	// The read loop only correlates and delivers. Adoption belongs to this
+	// waiting side, after successful pairing, so an uncorrelated reply has no
+	// code path that can publish session truth.
+	if adoptErr := d.adoptAttachReply(reply); adoptErr != nil {
+		_ = d.Close()
+		return nil, adoptErr
+	}
+	return d, nil
+}
+
+// adoptAttachReply is the waiting side's attach commit point. Pairing has
+// already consumed the pending request before this method runs; the local
+// closed/session checks stay under d.mu with the ledger adoption so a Close
+// between delivery and adoption cannot publish an uncollectable session.
+func (d *Dialer) adoptAttachReply(reply AttachReply) error {
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return errors.New("link: dial closed before attach adoption")
+	}
+	if d.session != nil {
+		d.mu.Unlock()
+		d.onSessionEvidence(SessionProtocolViolation, "duplicate_accepted_attach_reply", nil)
+		return errors.New("link: duplicate accepted attach reply")
+	}
+	record, adoptErr := d.sessions.adopt(reply.Generation, reply.DaemonID)
+	if adoptErr != nil {
+		d.mu.Unlock()
+		d.onSessionEvidence(SessionProtocolViolation, "invalid_attach_generation", adoptErr)
+		return adoptErr
+	}
+	d.daemonID = reply.DaemonID
+	d.session = record
 	d.channelID = string(reply.ChannelID)
 	d.mu.Unlock()
-	return d, nil
+	return nil
 }
 
 // PullPlan fetches one authenticated, bound daemon snapshot over the control
@@ -606,14 +505,9 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 	}
 }
 
-// handleAllocRequest answers one inbound AllocRequest on the control plane's
-// read-loop goroutine (onControl runs synchronously per stream-0 frame, the
-// same posture handleAttach already has home-side) — a real Allocator mkdir/
-// touch is expected to be fast (a local filesystem op), so this is not
-// bounced to a separate goroutine; a slow/wedged Allocator would delay
-// further control-frame processing on this link, an accepted trade-off
-// matching the existing synchronous-onControl discipline throughout this
-// package.
+// handleAllocRequest answers one inbound AllocRequest from the control table's
+// bounded worker pool. The filesystem operation never blocks the control read
+// loop; pool saturation is answered by sendAllocBusy.
 func (d *Dialer) handleAllocRequest(req AllocRequest) {
 	d.mu.Lock()
 	handler := d.allocHandler
@@ -645,9 +539,8 @@ func (d *Dialer) sendAllocBusy(requestID string) {
 }
 
 // handleReclaimRequest answers one inbound ReclaimRequest (期11 review §2.5
-// #B, the content-less create loser's synchronous coord reclaim) on the same
-// synchronous onControl goroutine handleAllocRequest uses — a local
-// RemoveAll, expected fast. Reclaims coord's live bytes via the wired
+// #B, the content-less create loser's synchronous coord reclaim) from the same
+// bounded worker pool as AllocRequest. It reclaims coord's live bytes via the wired
 // LocalFileOpener (idempotent: an already-empty coord is a clean OK). A nil
 // opener (no storage host on this compute) answers OK:false with an honest
 // Reason, never a silent drop, exactly like handleAllocRequest.

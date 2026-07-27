@@ -36,12 +36,10 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, place
 	// Same-daemon (Local) resolves coord itself via the daemon-side
 	// control-RPC ResolveCoord step (platform/internal/link) — never a lane
 	// byte-hop (§5 item 0's "同daemon→daemon本地os.Root句柄...zerocopy").
-	// Cross-host (!Local) redeems the Token by opening a lane stream on its
-	// own connection. Both branches mint the SAME Token through ONE
-	// LaneControl.OpenTransfer call — ResolveCoord's sender-auth check
-	// (target daemon only) needs somewhere to look coord up by regardless
-	// of which redemption path the caller takes (see platform/internal/
-	// link's doc for the full walk).
+	// One mint returns two purpose-specific tickets. A local route carries only
+	// the retryable resolve ticket. A cross-host route carries only the
+	// consume-on-valid-use redeem ticket; the home stores and forwards its
+	// paired resolve ticket to the target.
 	local := facts.Active && host != "" && host == placementDaemonID
 	if dir && !local {
 		// A directory lease is a whole-tree os.Root capability confined to one
@@ -54,9 +52,16 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, place
 	if d.deps.LaneControl == nil {
 		return nil, errors.New("accessdoor: file byte route not wired (Deps.LaneControl is nil)")
 	}
-	token, terr := d.deps.LaneControl.OpenTransfer(ctx, placementDaemonID, host, coord, mode, reservationID)
+	tickets, terr := d.deps.LaneControl.OpenTransfer(ctx, placementDaemonID, host, coord, mode, reservationID)
 	if terr != nil {
 		return nil, terr
+	}
+	if err := tickets.validate(); err != nil {
+		return nil, err
+	}
+	token := tickets.Redeem
+	if local {
+		token = tickets.Resolve
 	}
 	return &FileRoute{Local: local, Token: token, Mode: mode, ReservationID: reservationID, Dir: dir}, nil
 }

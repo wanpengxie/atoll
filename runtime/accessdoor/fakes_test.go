@@ -326,9 +326,9 @@ func (f *fakeStorageControl) ReclaimRequest(ctx context.Context, daemonID string
 // assert the exact (targetDaemonID, requesterDaemonID, coord, mode,
 // reservationID) the door routed.
 type fakeLaneControl struct {
-	token string
-	err   error
-	calls []openTransferCall
+	tickets LaneTickets
+	err     error
+	calls   []openTransferCall
 }
 
 type openTransferCall struct {
@@ -339,16 +339,12 @@ type openTransferCall struct {
 	reservationID     string
 }
 
-func (f *fakeLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
+func (f *fakeLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (LaneTickets, error) {
 	f.calls = append(f.calls, openTransferCall{targetDaemonID: targetDaemonID, requesterDaemonID: requesterDaemonID, coord: coord, mode: mode, reservationID: reservationID})
 	if f.err != nil {
-		return "", f.err
+		return LaneTickets{}, f.err
 	}
-	tok := f.token
-	if tok == "" {
-		tok = "fake-lane-token"
-	}
-	return tok, nil
+	return f.tickets, nil
 }
 
 // fakeStateStore is a configurable resourcespec.StateStore stub. Every method
@@ -423,7 +419,9 @@ func newFileDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership, mounts
 	d.deps.StorageMounts = mounts
 	d.deps.StorageControl = ctl
 	d.deps.ChannelID = chID
-	d.deps.LaneControl = &fakeLaneControl{}
+	d.deps.LaneControl = &fakeLaneControl{tickets: LaneTickets{
+		Redeem: "fake-redeem-ticket", Resolve: "fake-resolve-ticket",
+	}}
 	return d
 }
 

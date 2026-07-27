@@ -15,12 +15,12 @@ import (
 // accepted Outcome for OpRead/OpWrite(file) and Create(file,
 // with_content=true) — NEVER bytes, NEVER a coord (§8.1/§8.9 red lines: the
 // door hands out an authorization, not a storage handle). Local: the caller
-// is same-daemon as the file's placement — it must resolve Token into its
-// own local handle via the daemon-side control-RPC (ResolveCoord, never the
-// lane). !Local: the caller redeems Token by opening a stream on ITS OWN
+// is same-daemon as the file's placement — Token is the resolve ticket used to
+// obtain its local handle via the daemon-side control-RPC (ResolveCoord, never the
+// lane). !Local: Token is the redeem ticket opened on the caller's OWN
 // lane session (§5 item 0's "consumer 拿到的是字节流,不是可离线兑现的票据"
-// — Token is scoped to the requesting connection: a DIFFERENT daemon
-// presenting the same Token is rejected, see platform/internal/link's
+// — the redeem ticket is scoped to the requesting connection: a DIFFERENT daemon
+// presenting it is rejected, see platform/internal/link's
 // sender-auth check). Mode echoes the requested direction so a generic
 // caller need not re-derive it. ReservationID is set ONLY for
 // Create(with_content=true)'s write route — the daemon side must fire
@@ -161,14 +161,33 @@ type FileOpener interface {
 // but no byte-plane implementation is installed there.
 var ErrFileCapabilityUnavailable = errors.New("accessdoor: capability_unavailable")
 
+// LaneTickets are the two deliberately different capabilities minted for one
+// file route. Redeem is carried only by a cross-host requester and is consumed
+// by the first valid lane redemption. Resolve is carried by a local route or
+// forwarded by the home to the cross-host target; it is read-only until expiry
+// so a target can retry a lost ResolveCoord reply.
+type LaneTickets struct {
+	Redeem  string
+	Resolve string
+}
+
+func (t LaneTickets) validate() error {
+	if t.Redeem == "" || t.Resolve == "" {
+		return errors.New("accessdoor: lane control must mint both redeem and resolve tickets")
+	}
+	if t.Redeem == t.Resolve {
+		return errors.New("accessdoor: redeem and resolve tickets must be distinct")
+	}
+	return nil
+}
+
 // LaneControl is the door's file-byte-route minting Dep (期11 spec §5 item
 // 0's "门单方裁决产物"): having decided a file OpRead/OpWrite or
 // with_content create's byte access is either same-daemon (Local) or
-// cross-host (lane), the door mints an opaque, single-use, per-connection
-// Token — never a coord, never bound into any wire-visible struct beyond
-// FileRoute's own opaque field — and hands the REDEMPTION mechanics to
-// whichever party owns the live connections (platform assembly, mirroring
-// StorageControl's own "this package has no notion of a link/wire" doc).
+// cross-host (lane), the door mints the two opaque capabilities above — never
+// a coord — and hands the transport mechanics to whichever party owns the live
+// connections (platform assembly, mirroring StorageControl's own "this package
+// has no notion of a link/wire" doc).
 // requesterDaemonID is the caller's OWN daemon host ("" for a home-hosted
 // caller — day-1 unreachable, see FileOpener's doc) — the redeeming
 // connection's identity the platform-side lane-redeem handler checks the
@@ -176,5 +195,5 @@ var ErrFileCapabilityUnavailable = errors.New("accessdoor: capability_unavailabl
 // senderDaemonID == targetDaemonID instead, the same single mechanical
 // assertion covering both branches, see platform/internal/link's doc).
 type LaneControl interface {
-	OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (token string, err error)
+	OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (LaneTickets, error)
 }

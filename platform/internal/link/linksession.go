@@ -473,43 +473,6 @@ func (ls *linkSession) readControl(conn net.Conn) {
 			}
 			return
 		}
-		switch peekControlKind(raw) {
-		case ctrlProbe:
-			frame, err := decodeControl(raw)
-			if err != nil || frame.Probe == nil {
-				ls.reportEvidence(SessionProtocolViolation, "malformed_liveness_probe", err)
-				return
-			}
-			reply, _ := encodeControl(controlFrame{
-				Kind:       ctrlProbeReply,
-				ProbeReply: &ProbeReply{Nonce: frame.Probe.Nonce},
-			})
-			if err := ls.sendControl(reply); err != nil {
-				return
-			}
-			continue
-		case ctrlProbeReply:
-			frame, err := decodeControl(raw)
-			if err != nil || frame.ProbeReply == nil {
-				ls.reportEvidence(SessionProtocolViolation, "malformed_liveness_reply", err)
-				return
-			}
-			ls.probeMu.Lock()
-			matched := frame.ProbeReply.Nonce != "" && frame.ProbeReply.Nonce == ls.probe
-			sentAt := ls.probeAt
-			if matched {
-				ls.probe = ""
-				ls.probeAt = time.Time{}
-			}
-			ls.probeMu.Unlock()
-			if matched && ls.onProbe != nil {
-				if ls.logger != nil {
-					ls.logger.Debug("link.session_probe_reply", "round_trip", time.Since(sentAt))
-				}
-				ls.onProbe()
-			}
-			continue
-		}
 		if ls.onControl == nil {
 			continue
 		}
@@ -521,6 +484,30 @@ func (ls *linkSession) readControl(conn net.Conn) {
 			}()
 			ls.onControl(append([]byte(nil), raw...))
 		}()
+	}
+}
+
+func (ls *linkSession) handleProbe(probe *Probe) {
+	reply, _ := encodeControl(controlFrame{
+		Kind: ctrlProbeReply, ProbeReply: &ProbeReply{Nonce: probe.Nonce},
+	})
+	_ = ls.sendControl(reply)
+}
+
+func (ls *linkSession) handleProbeReply(reply *ProbeReply) {
+	ls.probeMu.Lock()
+	matched := reply.Nonce == ls.probe
+	sentAt := ls.probeAt
+	if matched {
+		ls.probe = ""
+		ls.probeAt = time.Time{}
+	}
+	ls.probeMu.Unlock()
+	if matched && ls.onProbe != nil {
+		if ls.logger != nil {
+			ls.logger.Debug("link.session_probe_reply", "round_trip", time.Since(sentAt))
+		}
+		ls.onProbe()
 	}
 }
 
