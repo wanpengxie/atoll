@@ -45,7 +45,7 @@ type View interface {
 	HumanRoster(context.Context) ([]channel.HumanRosterEntry, error)
 	DeclaredInstances(context.Context, string) ([]actor.ActorID, error)
 	HasDeclaredInstance(context.Context, string) (bool, error)
-	ResolvePrincipal(context.Context, actor.Kind, string) (actor.ActorID, bool, error)
+	ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
 	ActorFacts(context.Context, actor.ActorID) (channel.ActorFacts, bool, error)
@@ -99,8 +99,8 @@ func (a viewAdapter) DeclaredInstances(ctx context.Context, d string) ([]actor.A
 func (a viewAdapter) HasDeclaredInstance(ctx context.Context, d string) (bool, error) {
 	return a.home.View().HasDeclaredInstance(ctx, d)
 }
-func (a viewAdapter) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
-	return a.home.View().ResolvePrincipal(ctx, kind, principal)
+func (a viewAdapter) ResolvePrincipal(ctx context.Context, principal string) (actor.ActorID, bool, error) {
+	return a.home.View().ResolvePrincipal(ctx, principal)
 }
 func (a viewAdapter) OwnerPrincipal(ctx context.Context) (string, bool, error) {
 	return a.home.View().OwnerPrincipal(ctx)

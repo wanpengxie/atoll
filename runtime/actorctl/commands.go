@@ -225,13 +225,27 @@ func (c *Controller) Terminal(
 	switch command.Kind {
 	case TerminalEnd:
 		request := command.End
-		if request.CallerAttempt != "" {
+		// End has exactly two legal initiators, and v4.7 names them in three
+		// places (§2.3, §5.7, §12.1 DoD): the target itself, and the system face.
+		//
+		// They prove themselves differently and the branches must stay apart. The
+		// target presents its own current term, the same A/G verdict every other
+		// self-acting arm presents. The system face presents none — the kernel is
+		// a constant and holds no actor record, so it has no term to name — and is
+		// admitted by naming itself.
+		//
+		// What is NOT an initiator is a field nobody filled in. This gate used to
+		// be sentinel-driven: an empty CallerAttempt skipped the term check and an
+		// empty CallerActorID skipped the authorization, so a zero-value request
+		// ended its target. An empty caller now falls to the refusal below, and an
+		// empty attempt fails the target's own term check.
+		switch request.CallerActorID {
+		case actor.SystemActorID:
+		case request.Target:
 			if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
 				return Transition[TerminalResult]{}, err
 			}
-		}
-		caller := request.CallerActorID
-		if caller != "" && caller != actor.SystemActorID && caller != request.Target {
+		default:
 			return Transition[TerminalResult]{}, ErrEndForbidden
 		}
 		if _, active := c.actors[request.Target]; active {

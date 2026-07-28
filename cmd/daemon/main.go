@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"log/slog"
 	"net/url"
@@ -27,7 +26,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
@@ -36,7 +34,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorhost"
 
 	// Availability (NOT auto-run): blank-import every in-tree actor + engine so the
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
@@ -55,123 +52,46 @@ func channelFromServerURL(raw string) string {
 	return u.Query().Get("channel")
 }
 
-// planSource is the daemon's single applied compute-plan snapshot. The reconcile
-// ring pulls the authenticated plan through its link, calls ApplyPlan, then reads
-// Members and LookupExact from this same atomically replaced desired/factory pair.
-// A pull or build failure leaves the last-known-good snapshot intact, so the
-// daemon stays connected and retries without introducing a second plan source.
-type planSource struct {
+// classFactories resolves one body's factory at BUILD time from the class and
+// config that body's own desired carries — the daemon-side mirror of the server
+// host's registry lookup. There is no plan snapshot here and no state at all:
+// the desired the Host serves is the one plan ledger, and the registry is
+// compiled-in code. A class this daemon cannot build fails that body alone
+// (logged by the caller, retried on the Host's backoff) instead of holding the
+// whole plan hostage.
+type classFactories struct {
 	chID, wsRoot, deviceName string
 	logger                   *slog.Logger
-
-	mu          sync.Mutex
-	lastDesired []actorhost.BodyDesired
-	builders    map[actor.ActorID]plannedBody
-	lastBuilt   int // -1 until the first successful fetch (to Info-log only on change)
 }
 
-type plannedBody struct {
-	desired actorhost.BodyDesired
-	factory platform.ActorFactory
-}
-
-func newPlanSource(chID, wsRoot, deviceName string, logger *slog.Logger) *planSource {
-	return &planSource{
-		chID: chID, wsRoot: wsRoot, deviceName: deviceName,
-		logger:    logger,
-		builders:  map[actor.ActorID]plannedBody{},
-		lastBuilt: -1,
-	}
-}
-
-func (p *planSource) Members(context.Context) ([]actorhost.BodyDesired, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := append([]actorhost.BodyDesired(nil), p.lastDesired...)
-	for i := range out {
-		out[i].ExecutionSpec.Config = append(
-			json.RawMessage(nil),
-			out[i].ExecutionSpec.Config...,
-		)
-	}
-	return out, nil
-}
-
-// ApplyPlan builds both desired and factory halves off-lock, then publishes one
-// atomic snapshot. Any invalid row rejects the whole candidate so the previous
-// last-known-good snapshot remains authoritative.
-func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
-	var desired []actorhost.BodyDesired
-	builders := map[actor.ActorID]plannedBody{}
-	for _, asg := range plan {
-		id := asg.ActorID
-		if _, duplicate := builders[id]; duplicate {
-			return fmt.Errorf("daemon: duplicate plan instance %s", id)
-		}
-		// Desired is generated from the plan row alone, but publication is atomic:
-		// unknown classes, build failures, and identity drift reject the full plan.
-		kind, ok := registry.ClassKind(asg.Class)
-		if !ok {
-			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.ActorID, asg.Class)
-		}
-		bodyDesired := actorhost.BodyDesired{
-			ActorID: id, AttemptKey: asg.AttemptKey,
-			ExecutionSpec: actorhost.ExecutionSpec{
-				Kind: kind, Class: asg.Class, Config: append(json.RawMessage(nil), asg.Config...),
-			},
-		}
-		desired = append(desired, bodyDesired)
-		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
-			ID:     id,
-			Config: asg.Config,
-		}, registry.Deps{
-			ChannelID:    channel.ID(p.chID),
-			WorkspaceDir: p.wsRoot,
-			DeviceName:   p.deviceName,
-			Logger:       p.logger,
-		})
-		if berr != nil {
-			return fmt.Errorf("daemon: build plan instance %s class %q: %w", asg.ActorID, asg.Class, berr)
-		}
-		// The builder table is keyed on the PLAN's InstanceID (what desired carries
-		// and what the ring Lookups), NOT decl.ID. A constructor that rewrites the id
-		// (device derives its own id from the device identity, "ignores ID and derives
-		// it") would otherwise file the factory under the derived id — permanently
-		// unreachable by the ring's Lookup(InstanceID) → no_builder forever, yet Build
-		// reported success. Treat an id drift as a full candidate failure so the
-		// prior LKG remains intact rather than publishing an unreachable builder.
-		if decl.ID != id {
-			return fmt.Errorf("daemon: plan instance %s class %q built mismatched id %s", asg.ActorID, asg.Class, decl.ID)
-		}
-		builders[id] = plannedBody{desired: bodyDesired, factory: decl.Factory}
-	}
-	p.mu.Lock()
-	p.lastDesired = desired
-	p.builders = builders
-	changed := p.lastBuilt != len(desired)
-	p.lastBuilt = len(desired)
-	p.mu.Unlock()
-	if changed {
-		p.logger.Info("daemon: composition", "channel", p.chID,
-			"assigned", len(plan), "desired", len(desired), "built", len(builders))
-	}
-	return nil
-}
-
-func (p *planSource) LookupExact(
+func (f classFactories) BuildClass(
 	id actor.ActorID,
-	attempt actorhost.AttemptKey,
-	spec actorhost.ExecutionSpec,
+	class string,
+	config json.RawMessage,
 ) (platform.ActorFactory, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	body, ok := p.builders[id]
-	if !ok ||
-		body.desired.AttemptKey != attempt ||
-		!body.desired.ExecutionSpec.Equal(spec) {
+	decl, err := registry.Build(class, registry.InstanceSpec{
+		ID:     id,
+		Config: config,
+	}, registry.Deps{
+		ChannelID:    channel.ID(f.chID),
+		WorkspaceDir: f.wsRoot,
+		DeviceName:   f.deviceName,
+		Logger:       f.logger,
+	})
+	if err != nil {
+		f.logger.Warn("daemon: build class failed", "actor", id, "class", class, "err", err)
 		return platform.ActorFactory{}, false
 	}
-	return body.factory, true
+	// A constructor that rewrites the id (device derives its own id from the
+	// device identity) would produce a body claiming an identity the plan never
+	// named. Refuse the build outright — there is no table to file it under, so
+	// the only way it could leak is by being built, and it is not.
+	if decl.ID != id {
+		f.logger.Warn("daemon: class derived a different id",
+			"actor", id, "class", class, "derived", decl.ID)
+		return platform.ActorFactory{}, false
+	}
+	return decl.Factory, true
 }
 
 func main() {
@@ -217,10 +137,10 @@ func main() {
 	}
 
 	// The daemon's compute plan is pulled over its authenticated link on every
-	// reconcile pass and applied as one desired-set/factory snapshot. Startup
-	// connects first; pull failures retain the previous snapshot (initially empty)
-	// and the next pass retries without a second plan source.
-	source := newPlanSource(chID, wsRoot, deviceName, logger)
+	// reconcile pass and handed to the Host as one desired snapshot — the one
+	// plan ledger. Factories resolve per body at build time from that desired's
+	// own spec, exactly as the server host resolves against its registry.
+	factories := classFactories{chID: chID, wsRoot: wsRoot, deviceName: deviceName, logger: logger}
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's query
 	// string (?key=), which the app layer resolves on WS upgrade. There is no
@@ -257,7 +177,7 @@ func main() {
 	if err := compute.Run(ctx, compute.Config{
 		ServerWS:        serverWS,
 		Logger:          logger,
-		PlanSource:      source,
+		Factories:       factories,
 		StorageHost:     storageHostAdapter{host: sh},
 		LocalFileOpener: storageHostAdapter{host: sh},
 	}); err != nil {

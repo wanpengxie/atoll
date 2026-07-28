@@ -10,7 +10,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerfire"
@@ -47,7 +46,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 	}
 	author := declared[0]
 
-	sink, err := timerfire.New(h.controller, h.minter)
+	sink, err := timerfire.New(h.controller, h.admittedWriter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,11 +64,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 		t.Fatalf("live author fire: %v", err)
 	}
 	// End the author; the identical fire is now refused by the gate and the
-	if _, err := h.actors.End(ctx, actorctl.EndRequest{
-		Target: author, CallerActorID: actor.SystemActorID, Reason: "test",
-	}); err != nil {
-		t.Fatalf("end author: %v", err)
-	}
+	endIdentityForFixture(t, h, author)
 	beforeDead, err := h.query.MaxSeq(ctx)
 	if err != nil {
 		t.Fatal(err)

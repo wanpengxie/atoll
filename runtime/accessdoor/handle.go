@@ -41,8 +41,7 @@ const KindFile = resourcespec.KindFile
 // has any use for. It is welded to ONE caller/owner at construction and NEVER
 // self-reports identity. It is an INTERFACE: the cell implementation
 // (boundStateHandle) and the port implementation (remoteAccessHandle) are
-// twins of one contract, so a liveness wrapper can wrap it the way livePen
-// wraps Pen, zero friction.
+// twins of one contract, both minted behind the same authority-welding seam.
 type AccessHandle interface {
 	Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error)
 }

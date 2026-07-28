@@ -63,8 +63,8 @@ func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner,
 
 // gatewayResolver bridges the app's own entitlement DTO into the gateway's
 // EntitlementResolver seam (连接模型勘误期 §3.2: app → drivers is fenced, so the
-// assembly root maps DTO→DTO). The app resolves 户籍 ∪ 读资格 per principal; the bridge
-// only translates the flat access class into gateway.AccessClass.
+// assembly root maps DTO→DTO). The app resolves each principal's memberships;
+// the bridge is a pure field-for-field carry.
 func gatewayResolver(a *app.App) gateway.EntitlementResolver {
 	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
 		routes, failed, err := a.EntitlementSnapshot(ctx, principal)
@@ -73,14 +73,9 @@ func gatewayResolver(a *app.App) gateway.EntitlementResolver {
 		}
 		gr := make([]gateway.Route, 0, len(routes))
 		for _, r := range routes {
-			access := gateway.AccessObserver
-			if r.Access == "member" {
-				access = gateway.AccessMember
-			}
 			gr = append(gr, gateway.Route{
 				Channel:   r.Channel,
 				Bundle:    r.Bundle,
-				Access:    access,
 				SubjectID: r.SubjectID,
 			})
 		}

@@ -102,10 +102,13 @@ func (r ActorRecord) Clone() ActorRecord {
 	return r
 }
 
-// ActorDraft is the insert payload for one declaration-class birth. An empty
-// ID asks the registry transaction to mint one.
+// ActorDraft is the insert payload for one declaration-class birth. It carries
+// no id: a birth id is minted inside the registry transaction that inserts the
+// row, and the authoritative record comes back out. There is deliberately no
+// way to ask for a particular one — an id chosen outside the transaction is an
+// id that was decided before anyone checked, and it would also sit outside the
+// naming the mint derives, free to occupy a value some later mint would produce.
 type ActorDraft struct {
-	ID           actor.ActorID
 	Kind         actor.Kind
 	Principal    string
 	SourceDeclID string
@@ -156,6 +159,19 @@ type ActorFactsAuthority interface {
 // IdentityRoster answers "who is here right now" as identities only.
 type IdentityRoster interface {
 	ActiveIdentities() ([]ActiveIdentity, error)
+}
+
+// PrincipalIdentity answers the inverse of ActorFacts' principal: given a login
+// principal, which member is it. Question-shaped by construction — it returns an
+// id, never a record — and it is the ONLY principal-axis read outside the store,
+// so a login can be turned into a member without anyone holding the registry.
+//
+// A principal is a human-only fact (the registry refuses a non-human one), so
+// the answer needs no kind to disambiguate. An empty principal is not a query
+// and never resolves: every non-human carries "" and must not be reachable by
+// asking for nothing.
+type PrincipalIdentity interface {
+	ResolvePrincipal(principal string) (actor.ActorID, bool, error)
 }
 
 // DeclaredInstanceReader answers "which actors did this declaration produce".

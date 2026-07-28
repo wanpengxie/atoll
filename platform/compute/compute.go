@@ -6,11 +6,9 @@ import (
 	"log/slog"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -25,33 +23,18 @@ const (
 	redialMaxBackoff     = 30 * time.Second
 )
 
-// Config configures one daemon execution domain. PlanSource is the sole
-// authenticated plan/factory snapshot; actor bodies and the physical link are
-// deliberately owned by different organs.
+// Config configures one daemon execution domain. Factories resolves a class
+// into this daemon's factory at body-build time — the desired snapshot pulled
+// over the link is the ONE plan ledger, exactly as on the server host; actor
+// bodies and the physical link are deliberately owned by different organs.
 type Config struct {
 	ServerWS         string
 	Logger           *slog.Logger
-	PlanSource       PlanSource
+	Factories        ActorFactorySource
 	Poll             time.Duration
 	StorageHost      StorageHost
 	ScrubberInterval time.Duration
 	LocalFileOpener  LocalFileOpener
-}
-
-type PlanSource interface {
-	ApplyPlan([]platform.PlanActor) error
-	ActorFactorySource
-}
-
-func Run(ctx context.Context, cfg Config) error { return runCompute(ctx, cfg, nil) }
-
-// computeLifecycleHooks contains only test observation seams. It owns no
-// runtime state and cannot alter actor/link convergence.
-type computeLifecycleHooks struct {
-	forwarderTimeout time.Duration
-	forwarderLeaked  *atomic.Int64
-	storageExited    func()
-	storagePump      func(context.Context, *storageHostForwarder)
 }
 
 type daemonHostEvents struct{ outbound *DaemonOutbound }
@@ -59,21 +42,32 @@ type daemonHostEvents struct{ outbound *DaemonOutbound }
 func (*daemonHostEvents) OnBodyExited(actor.ActorID, actorhost.AttemptKey, actorrt.Incarnation, error) {
 }
 
+// OnBodyObs forwards one observation the Host already ruled current. The
+// Incarnation is what selects the slot — the coordinate cannot, since an
+// abandoned build shares it with the body that replaced it.
 func (e *daemonHostEvents) OnBodyObs(
-	id actor.ActorID,
-	key actorhost.AttemptKey,
-	_ actorrt.Incarnation,
+	_ actor.ActorID,
+	_ actorhost.AttemptKey,
+	self actorrt.Incarnation,
 	kind actorrt.ObsKind,
 	value actorrt.ObsValue,
 ) {
-	e.outbound.publishObs(id, key, kind, value)
+	e.outbound.publishObs(self, kind, value)
 }
 
-func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.BodyBuilder {
+func daemonBodyBuilder(
+	outbound *DaemonOutbound,
+	factories ActorFactorySource,
+	logger *slog.Logger,
+) actorhost.BodyBuilder {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return func(input actorhost.BodyBuildInput) actorrt.Actor {
 		prepared, prepareErr := outbound.Prepare(
 			input.ActorID,
 			input.AttemptKey,
+			input.Self,
 			input.Identity,
 			input.Attempt,
 			input.Current,
@@ -87,12 +81,18 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 				_ = prepared.Slot.Close()
 			}
 		}()
-		factory, ok := source.LookupExact(
+		// The factory is derived here, from the spec this build claim carries —
+		// the exact generation by construction. A class this daemon cannot build
+		// fails this body alone, loudly; the Host retries it on its own backoff
+		// while every other row converges.
+		factory, ok := factories.BuildClass(
 			input.ActorID,
-			input.AttemptKey,
-			input.ExecutionSpec,
+			input.ExecutionSpec.Class,
+			input.ExecutionSpec.Config,
 		)
 		if !ok {
+			logger.Warn("platform.compute.actor_factory_missing",
+				"actor", input.ActorID, "class", input.ExecutionSpec.Class)
 			return nil
 		}
 		hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {
@@ -107,9 +107,9 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 	}
 }
 
-func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (retErr error) {
-	if cfg.PlanSource == nil {
-		return errors.New("compute: PlanSource required")
+func Run(ctx context.Context, cfg Config) (retErr error) {
+	if cfg.Factories == nil {
+		return errors.New("compute: Factories required")
 	}
 	if cfg.ServerWS == "" {
 		return errors.New("compute: ServerWS required")
@@ -133,15 +133,6 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 	storageWG.Add(1)
 	go func() {
 		defer storageWG.Done()
-		defer func() {
-			if hooks != nil && hooks.storageExited != nil {
-				hooks.storageExited()
-			}
-		}()
-		if hooks != nil && hooks.storagePump != nil {
-			hooks.storagePump(ctx, storage)
-			return
-		}
 		storage.pump(ctx)
 	}()
 
@@ -178,23 +169,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 			sessionCancel()
 			currentSession = nil
 		}
-		timeout := 5 * time.Second
-		if hooks != nil && hooks.forwarderTimeout > 0 {
-			timeout = hooks.forwarderTimeout
-		}
-		joined := make(chan struct{})
-		go func() {
-			storageWG.Wait()
-			close(joined)
-		}()
-		select {
-		case <-joined:
-		case <-time.After(timeout):
-			if hooks != nil && hooks.forwarderLeaked != nil {
-				hooks.forwarderLeaked.Add(1)
-			}
-			retErr = errors.Join(retErr, ErrForwardersLeaked)
-		}
+		retErr = errors.Join(retErr, awaitForwarders(&storageWG, 5*time.Second))
 	}
 	defer closeRuntime()
 
@@ -235,7 +210,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 				Domain:      domain,
 				Logger:      logger,
 				Events:      &daemonHostEvents{outbound: outbound},
-				BodyBuilder: daemonBodyBuilder(outbound, cfg.PlanSource),
+				BodyBuilder: daemonBodyBuilder(outbound, cfg.Factories, logger),
 			})
 			if err != nil {
 				_ = dialer.Close()
@@ -262,7 +237,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		}
 		storage.Rebind(dialer)
 
-		if err := acceptDaemonPlan(ctx, dialer, cfg.PlanSource, host); err != nil {
+		if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
 			logger.Warn("platform.compute.plan_rejected", "err", err)
 			_ = session.Close()
 			<-session.Done()
@@ -295,11 +270,11 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 			case <-session.Done():
 				connected = false
 			case <-planWake:
-				if err := acceptDaemonPlan(ctx, dialer, cfg.PlanSource, host); err != nil {
+				if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
 					logger.Warn("platform.compute.plan_refresh_failed", "err", err)
 				}
 			case <-ticker.C:
-				if err := acceptDaemonPlan(ctx, dialer, cfg.PlanSource, host); err != nil {
+				if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
 					logger.Warn("platform.compute.plan_refresh_failed", "err", err)
 				}
 			}
@@ -316,17 +291,21 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 	}
 }
 
+// acceptDaemonPlan pulls the authenticated plan and hands it to the Host as
+// one desired snapshot. That is the whole of it: there is no second ledger to
+// publish into, so nothing can sit on a different generation than the desired
+// the Host serves. A row this daemon cannot build is discovered at that row's
+// own body build, logged there, and retried on the Host's backoff — it does
+// not hold the rest of the plan hostage the way whole-plan eager rejection
+// did (which kept truth-dead bodies running and healthy rows waiting for as
+// long as one bad row stayed bad).
 func acceptDaemonPlan(
 	ctx context.Context,
 	dialer *link.Dialer,
-	source PlanSource,
 	host *actorhost.HostSupervisor,
 ) error {
 	plan, err := dialer.PullPlan(ctx)
 	if err != nil {
-		return err
-	}
-	if err := source.ApplyPlan(plan); err != nil {
 		return err
 	}
 	desired := make([]actorhost.Desired, 0, len(plan))
@@ -370,5 +349,23 @@ func waitBackoff(ctx context.Context, value time.Duration) bool {
 }
 
 var ErrForwardersLeaked = errors.New("compute: forwarders leaked")
+
+// awaitForwarders joins the forwarder waitgroup within timeout. A timeout
+// means a forwarder goroutine outlived the ordered close DAG: root ownership
+// still transfers (the caller returns), and the incident surfaces as
+// ErrForwardersLeaked instead of a silent hang.
+func awaitForwarders(wg *sync.WaitGroup, timeout time.Duration) error {
+	joined := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+		return nil
+	case <-time.After(timeout):
+		return ErrForwardersLeaked
+	}
+}
 
 var _ actorhost.HostEventSink = (*daemonHostEvents)(nil)

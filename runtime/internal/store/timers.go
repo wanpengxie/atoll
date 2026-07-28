@@ -120,7 +120,12 @@ func (s *timerStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, 
 }
 
 func (s *timerStore) MoveToDead(ctx context.Context, id timerspec.TimerID, class timerspec.DeathClass, reason, detail string, diedAt int64) (bool, int, error) {
-	if class != timerspec.DeathFireRejected {
+	// Explicit closed-set check: adding a DeathClass value means adding a case
+	// here, so a new class is admitted deliberately instead of being silently
+	// rejected by an equality against the (currently single) legal value.
+	switch class {
+	case timerspec.DeathFireRejected:
+	default:
 		return false, 0, fmt.Errorf("store: invalid timer death class %q", class)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

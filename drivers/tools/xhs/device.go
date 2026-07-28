@@ -116,14 +116,6 @@ func (d *device) addr() string {
 	return d.listener.Addr().String()
 }
 
-// bound reports whether the endpoint has already bound its listener — the retry
-// loop's idempotency guard (a listener is a bound-once resource).
-func (d *device) bound() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.listener != nil
-}
-
 // start binds the WS endpoint and boots the serve goroutine. A bind failure is
 // returned so the actor-local maintenance loop can retry — the exclusive
 // loopback port may still be held by a predecessor incarnation (Q8=B).

@@ -88,9 +88,13 @@ type Pen interface {
 // each admission point (Spawn / attach / system closure). Minting any identity
 // is the highest capability in the system, so archtest confines harness.Minter
 // type references to the platform tree.
+//
+// A minter mints, and that is all it does. The admitted write is not on it and
+// is not reachable from it: they are two capabilities that happen to drive the
+// same chain, and no type in this package holds both. Minter used to embed the
+// admitted seam, which handed all three minting consumers a write none of them
+// calls.
 type Minter interface {
-	AdmittedMinter
-
 	// MintAuthority welds a live authority onto the chain. The returned Pen
 	// re-runs that authority's one complete verdict on every Write, so the
 	// same shell serves a local body for its whole term and a remote ingress
@@ -98,9 +102,17 @@ type Minter interface {
 	MintAuthority(capauth.Authority, actor.Kind) Pen
 }
 
-// AdmittedMinter consumes one already-completed ActorID collaboration
-// admission. Its one remaining source boundary is timer fire, where the author
-// verdict is the fire gate itself; the returned Pen consumes that snapshot.
-type AdmittedMinter interface {
-	MintAdmitted(storespec.IdentityAdmission) Pen
+
+// AdmittedWriter writes as an identity whose collaboration admission the caller
+// has ALREADY completed. Its one source boundary is timer fire, where the author
+// verdict is the fire gate itself — the caller needs that verdict's result in
+// hand (a dead author's row is annihilated, not retried), so the pen must not
+// re-reach it.
+//
+// It deliberately mints nothing. A pen would be a capability that outlives the
+// verdict behind it, indistinguishable by type from one that re-judges on every
+// write, and holding it across the moment would write as an identity that has
+// since ended. What exists here is one write, not a writer.
+type AdmittedWriter interface {
+	WriteAdmitted(context.Context, storespec.IdentityAdmission, *message.Envelope) (WriteResult, error)
 }

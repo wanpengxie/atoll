@@ -41,7 +41,6 @@ func (h *Home) closeInternalWithin(reason string, timeout time.Duration) error {
 				select {
 				case <-h.reconcileDone:
 				case <-ctx.Done():
-					h.reconcileLeaked.Add(1)
 					faults = append(faults, ctx.Err())
 				}
 			}

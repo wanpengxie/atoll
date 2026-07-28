@@ -291,7 +291,7 @@ func TestKernelCannotBeInserted(t *testing.T) {
 	store, _ := openStore(t)
 
 	if _, err := store.Insert(ctx, storespec.ActorDraft{
-		ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: 1,
+		Kind: actor.KindSystem, CreatedAt: 1,
 		Definition: storespec.ActorDefinition{Class: "system"},
 		Placement:  storespec.NewServerPlacement(),
 	}); err == nil {

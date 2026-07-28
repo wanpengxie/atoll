@@ -100,7 +100,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.requests = cs.Requests
 	h.bindings = cs.Bindings
 	h.resourceRead = cs.ResourceRead
-	h.principals = cs.Principals
 	h.defaultAgent = openDefaultAgentFold(ctx, h, cs.Query, logger)
 
 	if cfg.Bootstrap && cfg.Genesis != nil {
@@ -160,7 +159,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		ResourceOutbox: cs.Assembly.Resources,
 		completion:     completion,
 	}
-	h.minter, err = harness.New(harness.Deps{
+	h.minter, h.admittedWriter, err = harness.New(harness.Deps{
 		ChannelID: cfg.ChannelID, Log: cs.Log, Presence: h.actors,
 		Logger: logger,
 	})
@@ -182,7 +181,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// The fire sink is substrate glue (schedule exit → ledger admission →
 	// harness write) defined in runtime; assembly here only constructs it.
 	// The authority rides the Controller directly — no facade forwarding.
-	fire, err := timerfire.New(h.controller, h.minter)
+	fire, err := timerfire.New(h.controller, h.admittedWriter)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct fire sink: %w", err)
 	}

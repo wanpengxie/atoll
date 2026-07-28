@@ -38,7 +38,12 @@ patterns=(
 	'\bComputeID\b|\bBoundID\b|json:"(compute_id|bound_id)"'
 	'cfg\.Desired|cfg\.Builder'
 	'CompositionResolver[[:space:]]*!=[[:space:]]*nil'
-	'a\.(declarations|composition|registry|daemonAuthority|actorLock|portIndex)[[:space:]]*(!=|==)[[:space:]]*nil'
+	# registry is deliberately absent from this alternation: the attach
+	# authority values in link/session_registry.go legitimately hold a
+	# *sessionRegistry and nil-check it (a.registry == nil). The retired shape
+	# this rule fences is the old Acceptor's OPTIONAL deps, still covered by
+	# the five remaining field names.
+	'a\.(declarations|composition|daemonAuthority|actorLock|portIndex)[[:space:]]*(!=|==)[[:space:]]*nil'
 	'ports[[:space:]]*=[[:space:]]*map\[actor\.ActorID\]actorrt\.Incarnation|link-local quiet-stop fallback'
 	'\bPlanSink\b|\bplanSink\b'
 	'\bfullCaps\b|func[[:space:]]+CapsFactory[[:space:]]*\('

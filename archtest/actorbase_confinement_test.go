@@ -27,12 +27,13 @@ const actorcapsPkg = platformModulePrefix + "lib/actorcaps"
 // bundle. Importing actorcaps vocabulary such as ForkSpec or LifecycleHandle
 // is intentionally broader; only Caps itself is the private assembly seam.
 //
-// runtime/actorctl joined the allowlist when the Server managed Caps final
-// construction moved into it (harden03B value-ledger gate收口): actorctl is now
-// the SOLE constructor of the Server managed body's five-arm Caps — it welds the
-// value-ledger gate onto each arm and hands the finished bundle to a narrow
-// business builder. Naming actorcaps.Caps there is that construction locus, not
-// a downstream leak; the platform assembly root now only injects minters.
+// runtime/managedcaps and runtime/systemcaps joined the allowlist when the
+// Server managed/system Caps final construction moved into them (harden03B
+// value-ledger gate收口): managedcaps is now the SOLE constructor of the Server
+// managed body's five-arm Caps — it mints each arm with the run authority
+// welded inside and hands the finished bundle out; systemcaps is its once-only
+// system twin. Naming actorcaps.Caps there is that construction locus, not a
+// downstream leak; the platform assembly root now only injects minters.
 var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../lib/actorcaps/", "../archtest/", "../runtime/managedcaps/", "../runtime/systemcaps/"}
 
 // TestActorcapsConfinedToPlatformAndActorbase checks the actual Caps selector,

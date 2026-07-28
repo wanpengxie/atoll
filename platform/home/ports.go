@@ -1,7 +1,6 @@
 package home
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -12,10 +11,6 @@ import (
 // by ChannelHost. They deliberately do not turn Home back into a public organ
 // bag: callers receive only the exact operation result, while Bundle exposes
 // the stable Gateway/Daemon/View capabilities above this bridge.
-
-func BootstrapOwner(ctx context.Context, h *Home, principal string) (actor.ActorID, error) {
-	return h.admitChannelOwner(ctx, principal)
-}
 
 func Shutdown(h *Home) error { return h.closeInternal("normal") }
 

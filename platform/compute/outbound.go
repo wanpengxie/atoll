@@ -81,9 +81,14 @@ var disconnectedOutboundBundle = &OutboundArmsBundle{}
 // OutboundSlot is an exact body-lifetime membrane. G1 and G2 slots for the
 // same ActorID can coexist without overwriting one another.
 type OutboundSlot struct {
-	owner    *DaemonOutbound
-	id       actor.ActorID
-	key      actorhost.AttemptKey
+	owner *DaemonOutbound
+	id    actor.ActorID
+	key   actorhost.AttemptKey
+	// self is the exact body this slot was minted for. It is the routing
+	// identity for observations: (id, key) does not separate an abandoned
+	// build's slot from the published body's slot when a plan flap rebuilds the
+	// same attempt, and the Incarnation does.
+	self     actorrt.Incarnation
 	identity actorhost.IdentityCurrent
 	attempt  actorhost.AttemptCurrent
 	current  actorhost.ActualCurrent
@@ -171,9 +176,17 @@ func (d *DaemonOutbound) Wake() {
 	}
 }
 
+// publishObs routes one observation to the slot of the exact body that
+// published it. The routing coordinate is the publisher's Incarnation, not
+// (ActorID, AttemptKey): one attempt can own more than one Unit — an abandoned
+// build's slot outlives the drop and stays registered until its retirement
+// closes it — so the pair is a many-to-one projection of the slot it must
+// select, while the Incarnation is exactly 1:1 with it. This is the same
+// provenance rule presence.Fold applies to a same-process body (Fold.OnObs
+// records the Incarnation; only testimony that crossed a wire, where a
+// process-local Incarnation cannot travel, falls back to attempt + route).
 func (d *DaemonOutbound) publishObs(
-	id actor.ActorID,
-	key actorhost.AttemptKey,
+	self actorrt.Incarnation,
 	kind actorrt.ObsKind,
 	value actorrt.ObsValue,
 ) {
@@ -183,7 +196,7 @@ func (d *DaemonOutbound) publishObs(
 	d.mu.Lock()
 	var target *OutboundSlot
 	for slot := range d.slots {
-		if slot.id == id && slot.key == key && !slot.closed.Load() {
+		if slot.self == self && !slot.closed.Load() {
 			target = slot
 			break
 		}
@@ -202,6 +215,7 @@ func (d *DaemonOutbound) publishObs(
 func (d *DaemonOutbound) Prepare(
 	id actor.ActorID,
 	key actorhost.AttemptKey,
+	self actorrt.Incarnation,
 	identity actorhost.IdentityCurrent,
 	attempt actorhost.AttemptCurrent,
 	current actorhost.ActualCurrent,
@@ -215,7 +229,7 @@ func (d *DaemonOutbound) Prepare(
 		return PreparedOutbound{}, err
 	}
 	slot := &OutboundSlot{
-		owner: d, id: id, key: key,
+		owner: d, id: id, key: key, self: self,
 		identity: identity, attempt: attempt, current: current,
 	}
 	slot.arms.Store(disconnectedOutboundBundle)
@@ -843,17 +857,29 @@ func (s outboundSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
 	return bundle.Schedule.Ack(ctx, id)
 }
 
+// outboundLifecycle acts AS THE CURRENT TERM, alongside the pen and the
+// resource arm. The wire says so already: link's handler table states that
+// carrying the attempt key IS the permission matrix, and fork and end-self both
+// carry it while schedule — the one arm that acts as an identity across terms —
+// does not. This gate was the local half of that classification, missing.
+//
+// It is not a permission verdict. The Controller rules on permission and
+// refuses a stale caller either way; what is being read here is the daemon's
+// own applied plan, and that plan is already what this daemon used to decide
+// the superseded body must go — the reconcile pass starts retiring it the
+// moment the plan lands. Carrying a body's outbound work while tearing it down
+// on the authority of the same plan is the daemon disagreeing with itself.
 type outboundLifecycle struct{ slot *OutboundSlot }
 
 func (l outboundLifecycle) Fork(ctx context.Context, requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
-	bundle, err := l.slot.loadConnected()
+	bundle, err := l.slot.loadAttempt()
 	if err != nil {
 		return "", err
 	}
 	return bundle.Lifecycle.Fork(ctx, requestID, spec)
 }
 func (l outboundLifecycle) EndSelf(ctx context.Context, request actorcaps.EndSelfRequest) error {
-	bundle, err := l.slot.loadConnected()
+	bundle, err := l.slot.loadAttempt()
 	if err != nil {
 		return err
 	}

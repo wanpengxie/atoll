@@ -119,8 +119,8 @@ func TestT6RealRemoveCascadeIsolated(t *testing.T) {
 	res := newResolver()
 	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "wren"
-	h1, id1 := openDormantDeclaredHomeWired(t, channel.ID("c1"), principal, g)
-	h2, id2 := openDormantDeclaredHomeWired(t, channel.ID("c2"), principal, g)
+	h1, id1 := openDeclaredAgentHomeWired(t, channel.ID("c1"), principal, g)
+	h2, id2 := openDeclaredAgentHomeWired(t, channel.ID("c2"), principal, g)
 	res.set(principal, []Route{
 		memberRoute("c1", h1, id1, clk.now()),
 		memberRoute("c2", h2, id2, clk.now()),

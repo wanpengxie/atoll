@@ -15,6 +15,16 @@ import (
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
+// len reports the number of Admitted (not yet Closed) serve-ledger entries —
+// the test-only occupancy probe behind the "账 ≤ 未闭合请求数" invariant and
+// "deadline 后必空". Production never reads occupancy; it lives here so the
+// call graph carries no production-dead door.
+func (l *serveLedger) len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.entries)
+}
+
 // replyCall / failCall record one recorded write for assertions below.
 type replyCall struct {
 	msg Msg

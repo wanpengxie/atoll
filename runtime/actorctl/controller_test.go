@@ -58,10 +58,9 @@ func (s *fakeRecordStore) Insert(
 		}
 	}
 	s.nextID++
-	id := draft.ID
-	if id == "" {
-		id = actor.ActorID(string(draft.Kind) + ":minted:" + string(rune('a'+s.nextID)))
-	}
+	// The real registry mints inside the insert transaction and no draft can ask
+	// for a name; this stand-in does the same.
+	id := actor.ActorID(string(draft.Kind) + ":minted:" + string(rune('a'+s.nextID)))
 	record := storespec.ActorRecord{
 		ID: id, Kind: draft.Kind, Principal: draft.Principal,
 		SourceDeclID: draft.SourceDeclID, CreatedAt: draft.CreatedAt,
@@ -232,7 +231,10 @@ func TestForkReplayReturnsTheFirstChildForever(t *testing.T) {
 
 	// Even after the child is terminated, the same RequestID still answers with
 	// the original id: one request can never produce two live children.
-	if _, err := controller.End(ctx, EndRequest{Target: child, CallerActorID: child}); err != nil {
+	if _, err := controller.End(ctx, EndRequest{
+		Target: child, CallerActorID: child,
+		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, child)),
+	}); err != nil {
 		t.Fatalf("end child: %v", err)
 	}
 	third, err := controller.Fork(ctx, request)
@@ -412,6 +414,22 @@ func TestNarrowProjectionsAnswerOneQuestionEach(t *testing.T) {
 		t.Fatalf("kernel answered identity facts: found=%v err=%v", found, err)
 	}
 
+	// ResolvePrincipal is ActorFacts' principal read backwards, and it answers
+	// off the same ledger — the Platform door no longer holds a registry face to
+	// ask instead.
+	if id, found, err := controller.ResolvePrincipal("carol"); err != nil || !found || id != "human:c" {
+		t.Fatalf("resolve principal carol=(%s,%v,%v)", id, found, err)
+	}
+	if id, found, err := controller.ResolvePrincipal("nobody"); err != nil || found {
+		t.Fatalf("an unknown principal resolved: (%s,%v,%v)", id, found, err)
+	}
+	// Both agents above carry no principal. Asking for nothing must not hand one
+	// of them back — the same empty-matches-empty hole the introduction verdict
+	// had to close.
+	if id, found, err := controller.ResolvePrincipal(""); err != nil || found {
+		t.Fatalf("the empty principal resolved to %q (found=%v err=%v)", id, found, err)
+	}
+
 	// The declaration reconcile list is the pull loop's own comparison input:
 	// it carries the definition, the roster deliberately does not.
 	declared, err := controller.DeclaredReconcileList()
@@ -446,7 +464,9 @@ func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 	}
 
 	// Ending the parent must NOT spread to its fork: there is no lineage.
-	transition, err := controller.End(ctx, EndRequest{Target: parent, CallerActorID: parent})
+	transition, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: parent, CallerAttempt: attempt,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,18 +478,78 @@ func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 	}
 }
 
-func TestEndOnlyAcceptsTheTargetOrTheSystemFace(t *testing.T) {
+// End admits exactly two initiators, and they prove themselves differently:
+// the target names itself AND presents its own current term; the system face
+// names itself and presents no term, because it holds no record to have one.
+// Everyone else is refused, and so is a request that named nobody.
+func TestEndAcceptsTheTargetOrTheSystemFaceAndNoOneElse(t *testing.T) {
 	ctx := context.Background()
 	controller, _, parent := seedParent(t)
+	parentAttempt := attemptKeyOf(currentAttempt(t, controller, parent))
+
+	// A member in good standing, acting as its current term, aimed at someone
+	// else. This is the case ErrEndForbidden exists for: identity is proven, the
+	// permission is what is missing.
+	sibling, err := controller.Fork(ctx, ForkRequest{
+		CallerActorID: parent, CallerAttempt: parentAttempt, RequestID: "req-sibling",
+		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	siblingID := sibling.Result.ChildActorID
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: siblingID,
+		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, siblingID)),
+	}); !errors.Is(err, ErrEndForbidden) {
+		t.Fatalf("a member ending someone else err=%v want ErrEndForbidden", err)
+	}
+
+	// A caller who is nobody is refused on the same ground as a member aiming at
+	// someone else: it is not one of the two initiators. Answering "you are not
+	// a member" would be a different claim than the one being made.
 	if _, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerActorID: "agent:stranger",
+		CallerAttempt: parentAttempt,
 	}); !errors.Is(err, ErrEndForbidden) {
 		t.Fatalf("stranger End err=%v want ErrEndForbidden", err)
 	}
+
+	// The zero-value request. Both gates used to be sentinel-skipped by exactly
+	// this shape, and it ended the target.
+	if _, err := controller.End(ctx, EndRequest{Target: parent}); err == nil {
+		t.Fatal("a zero-value EndRequest ended the target")
+	}
+	// The same, one field at a time: neither omission may read as authority.
 	if _, err := controller.End(ctx, EndRequest{
-		Target: parent, CallerActorID: actor.SystemActorID,
+		Target: parent, CallerActorID: parent,
+	}); !errors.Is(err, ErrStaleAttempt) {
+		t.Fatalf("End with no attempt err=%v want ErrStaleAttempt", err)
+	}
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerAttempt: parentAttempt,
+	}); !errors.Is(err, ErrEndForbidden) {
+		t.Fatalf("End with no caller err=%v want ErrEndForbidden", err)
+	}
+
+	// The target itself, presenting its own term, succeeds.
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: parent, CallerAttempt: parentAttempt,
 	}); err != nil {
-		t.Fatalf("system face End: %v", err)
+		t.Fatalf("the target ending itself: %v", err)
+	}
+
+	// The system face is the other legal initiator (v4.7 §2.3/§5.7/§12.1), and
+	// it carries no attempt at all — the kernel holds no actor record, so there
+	// is no term for it to name. Demanding one of every caller would delete this
+	// initiator by making its branch unreachable, which is what happened once.
+	if _, err := controller.End(ctx, EndRequest{
+		Target: siblingID, CallerActorID: actor.SystemActorID,
+	}); err != nil {
+		t.Fatalf("the system face ending a third party: %v", err)
+	}
+	if active, err := controller.IsActive(ctx, siblingID); err != nil || active {
+		t.Fatalf("the system face's End did not land: active=%v err=%v", active, err)
 	}
 }
 

@@ -67,7 +67,7 @@ func TestAuthorityPenAdmitsOnceAndLetsAcceptedWriteFinish(t *testing.T) {
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	mint, err := New(Deps{
+	mint, _, err := New(Deps{
 		ChannelID: testChannelID,
 		Log:       barrier,
 		Presence:  testAuthority{},

@@ -7,18 +7,16 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-func (r *actorRegistry) insertFixedID(ctx context.Context, rec storespec.Record) error {
-	source := ""
-	if rec.Kind == actor.KindAgent || rec.Kind == actor.KindTool {
-		source = "test:" + string(rec.ID)
-	}
-	_, err := r.Insert(ctx, storespec.ActorDraft{
-		ID: rec.ID, Kind: rec.Kind, Principal: rec.Principal,
-		SourceDeclID: source, CreatedAt: rec.CreatedAt,
-		Definition: storespec.ActorDefinition{Class: string(rec.Kind)},
+// insertTool admits one tool actor and returns the id the registry minted for
+// it. Tests name the declaration, never the actor: a birth id is minted inside
+// the insert transaction and there is no way to ask for a particular one.
+func (r *actorRegistry) insertTool(ctx context.Context, decl string) (actor.ActorID, error) {
+	record, err := r.Insert(ctx, storespec.ActorDraft{
+		Kind: actor.KindTool, SourceDeclID: "test:" + decl, CreatedAt: 1,
+		Definition: storespec.ActorDefinition{Class: string(actor.KindTool)},
 		Placement:  storespec.NewServerPlacement(),
 	})
-	return err
+	return record.ID, err
 }
 
 func endActorForTest(ctx context.Context, r *actorRegistry, id actor.ActorID, at int64) error {

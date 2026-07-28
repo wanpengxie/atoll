@@ -123,12 +123,9 @@ func TestAdmit_CellLessMember(t *testing.T) {
 // (a home restart) succeeds and restores the durable membership image.
 func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h1, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true})
+	h1, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true, BootstrapOwnerPrincipal: "restart-owner"})
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
-	}
-	if _, err := home.BootstrapOwner(context.Background(), h1, "restart-owner"); err != nil {
-		t.Fatalf("seed owner: %v", err)
 	}
 	if err := home.Shutdown(h1); err != nil {
 		t.Fatalf("Close: %v", err)

@@ -534,9 +534,14 @@ func TestHarden03BBodyConstructionUsesOnlyExactSnapshot(t *testing.T) {
 			forbidden: []string{"factories.Lookup(input.ActorID)"},
 		},
 		{
+			// The daemon builds exactly like the server: the factory is derived
+			// at build time from the spec the build input itself carries — the
+			// exact generation by construction. A pre-built factory table keyed
+			// by plan generation (the old LookupExact) is the shape that could
+			// split from desired and is forbidden.
 			path:      "../platform/compute/compute.go",
-			required:  []string{"source.LookupExact(", "input.AttemptKey", "input.ExecutionSpec"},
-			forbidden: []string{"source.Lookup(input.ActorID)"},
+			required:  []string{"factories.BuildClass(", "input.ExecutionSpec.Class", "input.ExecutionSpec.Config"},
+			forbidden: []string{"LookupExact", "ApplyPlan"},
 		},
 		{
 			path:      "../runtime/actorctl/authority.go",

@@ -131,9 +131,6 @@ func validateDraft(in storespec.ActorDraft) error {
 	if err := in.Placement.Validate(); err != nil {
 		return err
 	}
-	if in.ID == actor.SystemActorID {
-		return errors.New("store: the reserved system id cannot name a record")
-	}
 	if in.Kind == actor.KindHuman && in.Principal == "" {
 		return errors.New("store: human admission principal required")
 	}
@@ -199,25 +196,11 @@ func (r *actorRegistry) Insert(
 		}
 	}
 
-	if in.ID == "" {
-		seed := in.Principal
-		if seed == "" {
-			seed = in.SourceDeclID
-		}
-		in.ID, err = mintActorIDTx(ctx, tx, in.Kind, seed, in.CreatedAt)
-		if err != nil {
-			return storespec.ActorRecord{}, err
-		}
-	} else {
-		var used bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM actor_registry WHERE actor_id=?)`,
-			string(in.ID)).Scan(&used); err != nil {
-			return storespec.ActorRecord{}, err
-		}
-		if used {
-			return storespec.ActorRecord{}, fmt.Errorf("store: actor id %q already used", in.ID)
-		}
+	// The id is minted here and only here, inside the transaction that inserts
+	// the row. The draft has no id field to honour, so there is no second way in.
+	id, err := mintActorIDTx(ctx, tx, in.Kind, seedFor(in), in.CreatedAt)
+	if err != nil {
+		return storespec.ActorRecord{}, err
 	}
 
 	var config any
@@ -227,10 +210,10 @@ func (r *actorRegistry) Insert(
 	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_registry
 		(actor_id,actor_kind,principal,source_decl_id,class,config_json,placement,desired_host,created_at,deregistered_at)
 		VALUES (?,?,?,?,?,?,?,?,?,NULL)`,
-		string(in.ID), string(in.Kind), in.Principal, in.SourceDeclID,
+		string(id), string(in.Kind), in.Principal, in.SourceDeclID,
 		in.Definition.Class, config, string(in.Placement.Kind), in.Placement.Host,
 		in.CreatedAt); err != nil {
-		return storespec.ActorRecord{}, fmt.Errorf("store: actor insert %q: %w", in.ID, err)
+		return storespec.ActorRecord{}, fmt.Errorf("store: actor insert %q: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return storespec.ActorRecord{}, fmt.Errorf("store: actor insert commit: %w", err)
@@ -239,7 +222,7 @@ func (r *actorRegistry) Insert(
 		r.onCommit()
 	}
 	return storespec.ActorRecord{
-		ID: in.ID, Kind: in.Kind, Principal: in.Principal,
+		ID: id, Kind: in.Kind, Principal: in.Principal,
 		SourceDeclID: in.SourceDeclID, CreatedAt: in.CreatedAt,
 		Definition: in.Definition.Clone(), Placement: in.Placement,
 	}, nil
@@ -342,6 +325,17 @@ func (r *actorRegistry) Deregister(
 		r.onCommit()
 	}
 	return nil
+}
+
+// seedFor is the naming input a birth id is derived from: the login principal
+// for a human admission, the declaration for everything else. Exactly one of
+// them is set — validateDraft has already refused a draft that carries the
+// wrong one for its kind.
+func seedFor(in storespec.ActorDraft) string {
+	if in.Principal != "" {
+		return in.Principal
+	}
+	return in.SourceDeclID
 }
 
 func mintActorIDTx(ctx context.Context, tx *sql.Tx, kind actor.Kind, seed string, at int64) (actor.ActorID, error) {

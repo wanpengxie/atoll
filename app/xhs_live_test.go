@@ -112,7 +112,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan, Poll: 20 * time.Millisecond},
+			compute.Config{ServerWS: serverWS, Logger: logger, Factories: plan, Poll: 20 * time.Millisecond},
 		)
 	}()
 	t.Cleanup(func() {
@@ -311,7 +311,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	}})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan, Poll: 20 * time.Millisecond},
+			compute.Config{ServerWS: serverWS, Logger: logger, Factories: plan, Poll: 20 * time.Millisecond},
 		)
 	}()
 	t.Cleanup(func() {

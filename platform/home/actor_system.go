@@ -319,6 +319,10 @@ func (a *actorSystem) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	return a.home.controller.ActiveIdentities()
 }
 
+func (a *actorSystem) ResolvePrincipal(principal string) (actor.ActorID, bool, error) {
+	return a.home.controller.ResolvePrincipal(principal)
+}
+
 func (a *actorSystem) DeclaredInstances(declID string) ([]actor.ActorID, error) {
 	return a.home.controller.DeclaredInstances(declID)
 }

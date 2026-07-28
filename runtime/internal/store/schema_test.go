@@ -46,7 +46,7 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 	}
 	_ = rows.Close()
 
-	for _, name := range store.ChannelLocalTables {
+	for _, name := range store.ChannelLocalTables() {
 		if !present[name] {
 			t.Errorf("expected channel-local table %q missing after OpenChannel", name)
 		}
@@ -75,10 +75,10 @@ func TestChannelLocalTables_Set(t *testing.T) {
 		"timers":                  true,
 		"timer_dead":              true,
 	}
-	if len(store.ChannelLocalTables) != len(want) {
-		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables, want)
+	if len(store.ChannelLocalTables()) != len(want) {
+		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables(), want)
 	}
-	for _, n := range store.ChannelLocalTables {
+	for _, n := range store.ChannelLocalTables() {
 		if !want[n] {
 			t.Errorf("unexpected table %q in ChannelLocalTables", n)
 		}

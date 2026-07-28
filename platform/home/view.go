@@ -32,6 +32,7 @@ type viewAuthority interface {
 	storespec.ActorFactsAuthority
 	storespec.IdentityRoster
 	storespec.DeclaredInstanceReader
+	storespec.PrincipalIdentity
 }
 
 type View struct {
@@ -43,7 +44,6 @@ type View struct {
 	nowMs        func() int64
 	resources    storespec.ResourceReadStore
 	defaultAgent *defaultAgentFold
-	principals   storespec.PrincipalRegistry
 	bindings     storespec.DaemonBindingReader
 
 	ownerPrincipal string
@@ -63,7 +63,6 @@ func (h *Home) View() View {
 		nowMs:          h.nowMs,
 		resources:      h.resourceRead,
 		defaultAgent:   h.defaultAgent,
-		principals:     h.principals,
 		bindings:       h.bindings,
 		ownerPrincipal: h.ownerPrincipal,
 	}
@@ -206,9 +205,15 @@ func (v View) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	}
 }
 
-func (v View) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
-	record, found, err := v.principals.LookupActivePrincipal(ctx, kind, principal)
-	return record.ID, found, err
+// ResolvePrincipal turns a login principal into the member behind it in THIS
+// channel. It asks the Controller, which is the authority on who is a member
+// right now — reading the registry directly would answer from a second ledger,
+// one that can hold a member the Controller has not published yet and can still
+// hold one it has already ended.
+//
+// There is no kind to pass: a principal is a human-only fact.
+func (v View) ResolvePrincipal(_ context.Context, principal string) (actor.ActorID, bool, error) {
+	return v.authority.ResolvePrincipal(principal)
 }
 
 // HumanRoster is the entitlement projection: which login principals hold human

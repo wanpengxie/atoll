@@ -17,7 +17,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // stateTestChannelID is the channel every state fixture is bound to (this
@@ -54,12 +53,12 @@ func openStateFixture(t *testing.T) stateFixture {
 func TestState_CRUDLifecycle(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
-	mustInsertActor(t, f.reg, "actor:a")
+	a := mustInsertActor(t, f.reg, "a")
 
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
+	if err := f.state.Create(ctx, a, "cursor", []byte("v1")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	val, exists, err := f.state.Read(ctx, "actor:a", "cursor")
+	val, exists, err := f.state.Read(ctx, a, "cursor")
 	if err != nil || !exists {
 		t.Fatalf("Read after create: exists=%v err=%v", exists, err)
 	}
@@ -68,20 +67,20 @@ func TestState_CRUDLifecycle(t *testing.T) {
 	}
 
 	// Write overwrites an existing row (exists=true).
-	exists, err = f.state.Write(ctx, "actor:a", "cursor", []byte("v2"))
+	exists, err = f.state.Write(ctx, a, "cursor", []byte("v2"))
 	if err != nil || !exists {
 		t.Fatalf("Write existing: exists=%v err=%v", exists, err)
 	}
-	if val, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(val) != "v2" {
+	if val, _, _ := f.state.Read(ctx, a, "cursor"); string(val) != "v2" {
 		t.Errorf("value after write=%q want v2", val)
 	}
 
 	// Delete removes the row (exists=true), then it is gone.
-	exists, err = f.state.Delete(ctx, "actor:a", "cursor")
+	exists, err = f.state.Delete(ctx, a, "cursor")
 	if err != nil || !exists {
 		t.Fatalf("Delete existing: exists=%v err=%v", exists, err)
 	}
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
+	if _, exists, _ := f.state.Read(ctx, a, "cursor"); exists {
 		t.Error("row must be gone after delete")
 	}
 }
@@ -91,18 +90,18 @@ func TestState_CRUDLifecycle(t *testing.T) {
 func TestState_CreateCollisionSentinel(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
-	mustInsertActor(t, f.reg, "actor:a")
+	a := mustInsertActor(t, f.reg, "a")
 
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
+	if err := f.state.Create(ctx, a, "cursor", []byte("v1")); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
-	err := f.state.Create(ctx, "actor:a", "cursor", []byte("v2"))
+	err := f.state.Create(ctx, a, "cursor", []byte("v2"))
 	if !errors.Is(err, resourcespec.ErrAlreadyExists) {
 		t.Fatalf("second Create err=%v want ErrAlreadyExists", err)
 	}
 	// The colliding create left the original bytes untouched (test-and-set, no
 	// clobber).
-	if val, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(val) != "v1" {
+	if val, _, _ := f.state.Read(ctx, a, "cursor"); string(val) != "v1" {
 		t.Errorf("value after collision=%q want v1 (unchanged)", val)
 	}
 }
@@ -139,14 +138,14 @@ func TestState_PresentFalseOnAbsent(t *testing.T) {
 func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
-	mustInsertActor(t, f.reg, "actor:a")
+	a := mustInsertActor(t, f.reg, "a")
 
 	// create(nil initial) → an existing row whose bytes are NULL = resolved-but-
 	// empty: exists=true, value=nil (door maps to Found=false).
-	if err := f.state.Create(ctx, "actor:a", "empty", nil); err != nil {
+	if err := f.state.Create(ctx, a, "empty", nil); err != nil {
 		t.Fatalf("Create nil: %v", err)
 	}
-	val, exists, err := f.state.Read(ctx, "actor:a", "empty")
+	val, exists, err := f.state.Read(ctx, a, "empty")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -159,10 +158,10 @@ func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 
 	// An empty non-nil blob is a VALUE, not resolved-but-empty: exists=true,
 	// value=[]byte{} (non-nil, len 0) — must not collapse into the NULL case.
-	if err := f.state.Create(ctx, "actor:a", "blank", []byte{}); err != nil {
+	if err := f.state.Create(ctx, a, "blank", []byte{}); err != nil {
 		t.Fatalf("Create blank: %v", err)
 	}
-	val, exists, err = f.state.Read(ctx, "actor:a", "blank")
+	val, exists, err = f.state.Read(ctx, a, "blank")
 	if err != nil {
 		t.Fatalf("Read blank: %v", err)
 	}
@@ -176,20 +175,20 @@ func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 func TestState_OwnerScopedIsolation(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
-	mustInsertActor(t, f.reg, "actor:a")
-	mustInsertActor(t, f.reg, "actor:b")
+	a := mustInsertActor(t, f.reg, "a")
+	b := mustInsertActor(t, f.reg, "b")
 
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("A")); err != nil {
+	if err := f.state.Create(ctx, a, "cursor", []byte("A")); err != nil {
 		t.Fatalf("Create a: %v", err)
 	}
 	// Same resource_id under a different owner is a distinct row (no collision).
-	if err := f.state.Create(ctx, "actor:b", "cursor", []byte("B")); err != nil {
+	if err := f.state.Create(ctx, b, "cursor", []byte("B")); err != nil {
 		t.Fatalf("Create b (same id, other owner) must not collide: %v", err)
 	}
-	if val, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(val) != "A" {
+	if val, _, _ := f.state.Read(ctx, a, "cursor"); string(val) != "A" {
 		t.Errorf("owner a value=%q want A", val)
 	}
-	if val, _, _ := f.state.Read(ctx, "actor:b", "cursor"); string(val) != "B" {
+	if val, _, _ := f.state.Read(ctx, b, "cursor"); string(val) != "B" {
 		t.Errorf("owner b value=%q want B", val)
 	}
 }
@@ -228,26 +227,26 @@ func TestState_DeregisterLeavesOwnerStateInert(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
 
-	mustInsertActor(t, f.reg, "actor:a")
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
+	a := mustInsertActor(t, f.reg, "a")
+	if err := f.state.Create(ctx, a, "cursor", []byte("v1")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	mustInsertActor(t, f.reg, "actor:b")
-	if err := f.state.Create(ctx, "actor:b", "cursor", []byte("keep")); err != nil {
+	b := mustInsertActor(t, f.reg, "b")
+	if err := f.state.Create(ctx, b, "cursor", []byte("keep")); err != nil {
 		t.Fatalf("Create b: %v", err)
 	}
 
-	if err := endActorForTest(ctx, f.reg, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, a, 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); !exists {
+	if _, exists, _ := f.state.Read(ctx, a, "cursor"); !exists {
 		t.Error("deregister must not clear the dead owner's state (inert data)")
 	}
-	if _, exists, _ := f.state.Read(ctx, "actor:b", "cursor"); !exists {
+	if _, exists, _ := f.state.Read(ctx, b, "cursor"); !exists {
 		t.Error("owner:b state must be untouched")
 	}
 	// Repeating the latch is a no-op, never an error.
-	if err := endActorForTest(ctx, f.reg, "actor:a", 1001); err != nil {
+	if err := endActorForTest(ctx, f.reg, a, 1001); err != nil {
 		t.Fatalf("repeat deregister must be a no-op, got: %v", err)
 	}
 	// Deregistering an id with no row is a no-op too.
@@ -262,11 +261,11 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
 
-	mustInsertActor(t, f.reg, "actor:a")
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource"), resourcespec.ResourceBirthPlan{}); err != nil {
+	a := mustInsertActor(t, f.reg, "a")
+	if err := f.res.Create(ctx, "kv:doc", "kv", a, "", "", []byte("resource"), resourcespec.ResourceBirthPlan{}); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
-	if err := endActorForTest(ctx, f.reg, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, a, 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 	if _, ok, _ := f.res.Resolve(ctx, "kv:doc"); !ok {
@@ -276,9 +275,14 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 
 // --- test helpers ------------------------------------------------------------
 
-func mustInsertActor(t *testing.T, reg *actorRegistry, id actor.ActorID) {
+// mustInsertActor admits one tool actor for the given declaration and returns
+// the id the registry minted. Tests name declarations, not actors: a birth id
+// comes out of the insert transaction and cannot be asked for.
+func mustInsertActor(t *testing.T, reg *actorRegistry, decl string) actor.ActorID {
 	t.Helper()
-	if err := reg.insertFixedID(context.Background(), storespec.Record{ID: id, Kind: actor.KindTool, CreatedAt: 1}); err != nil {
-		t.Fatalf("Insert %q: %v", id, err)
+	id, err := reg.insertTool(context.Background(), decl)
+	if err != nil {
+		t.Fatalf("Insert %q: %v", decl, err)
 	}
+	return id
 }

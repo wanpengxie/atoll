@@ -80,7 +80,6 @@ type Acceptor struct {
 	wg           sync.WaitGroup
 	closeOnce    sync.Once
 	closeDone    chan struct{}
-	leaked       atomic.Int64
 	compensated  atomic.Int64
 	lateRejected atomic.Int64
 
@@ -254,6 +253,14 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			return
 		}
 		if err := a.attachBinding(id, key, peer, binding.HostBinding()); err != nil {
+			// The one refusal on this path that the daemon cannot see the reason
+			// for. It redials either way, so an unlogged refusal shows up only as
+			// a daemon that reconnects forever. Say which kind it was: a host that
+			// has not converged yet resolves itself, a superseded attempt never
+			// will.
+			a.logger.Info("link.actor_attach_refused",
+				"generation", record.generation, "key", record.key,
+				"actor", id, "attempt", key, "reason", err)
 			_ = binding.Close()
 			return
 		}
@@ -726,12 +733,8 @@ func (a *Acceptor) Close() error {
 				a.KickSession(snapshot.Generation)
 			}
 		}
-		if !waitGroupWithin(&a.wg, 30*time.Second) {
-			a.leaked.Add(1)
-		}
+		waitGroupWithin(&a.wg, 30*time.Second)
 	})
 	<-a.closeDone
 	return nil
 }
-
-func (a *Acceptor) Leaked() int64 { return a.leaked.Load() }

@@ -337,12 +337,12 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 			id = ids[0]
 		}
 	} else {
-		id, found, err = bundle.View().ResolvePrincipal(context.Background(), memberKind, member)
+		id, found, err = bundle.View().ResolvePrincipal(context.Background(), member)
 	}
 	if err != nil || !found {
 		t.Fatalf("ResolvePrincipal(%s)=(%s,%v,%v)", member, id, found, err)
 	}
-	ownerID, ownerFound, ownerErr := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, owner)
+	ownerID, ownerFound, ownerErr := bundle.View().ResolvePrincipal(context.Background(), owner)
 	if ownerErr != nil || !ownerFound {
 		t.Fatalf("ResolvePrincipal(owner %s)=(%s,%v,%v)", owner, ownerID, ownerFound, ownerErr)
 	}
@@ -363,7 +363,7 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 	return openTestChannel(t, chID, principal, principal, actor.KindHuman, g)
 }
 
-func openDormantDeclaredHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*testChannel, actor.ActorID) {
+func openDeclaredAgentHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*testChannel, actor.ActorID) {
 	return openTestChannel(t, chID, "gateway-owner:"+principal, principal, actor.KindAgent, g)
 }
 
@@ -378,7 +378,7 @@ func newTestGateway(t testing.TB, cfg Config, set settings) *Gateway {
 
 // memberRoute builds a member Route to a channel bundle's admitted subject.
 func memberRoute(chID channel.ID, h *testChannel, subj actor.ActorID, now time.Time) Route {
-	return Route{Channel: chID, Bundle: h, Access: AccessMember, SubjectID: subj}
+	return Route{Channel: chID, Bundle: h, SubjectID: subj}
 }
 
 // mkBusiness builds a business frame of type typ carrying channel_id=cid (empty cid →

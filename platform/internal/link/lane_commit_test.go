@@ -23,8 +23,8 @@ import (
 // reclaims the orphaned coord and every commit failure is a Warn (the lane
 // protocol has no completion-reply frame — the "发送方知情" half stays A4). The
 // full committingWriteHandle.Commit verdict matrix is locked at the wrapper
-// level in storagecontrol_test.go (期11 review #D); these tests prove the LANE
-// path actually routes through it.
+// level in committing_write_handle_test.go (期11 review #D); these tests prove
+// the LANE path actually routes through it.
 
 // --- test doubles ------------------------------------------------------------
 

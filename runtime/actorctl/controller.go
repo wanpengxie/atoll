@@ -246,6 +246,31 @@ func (c *Controller) ActorFacts(
 	}, true, nil
 }
 
+// ResolvePrincipal turns a login principal into the member behind it. It is the
+// inverse of ActorFacts' principal field, answered off the same in-memory value
+// ledger and under the same lock, so it can never disagree with what the rest of
+// the Controller is serving.
+//
+// An empty principal resolves to nothing. Every non-human member carries "" (the
+// registry forbids them a login principal), so matching one would hand an
+// arbitrary agent back as the answer to "who is logged in as nobody".
+func (c *Controller) ResolvePrincipal(principal string) (actor.ActorID, bool, error) {
+	if principal == "" {
+		return "", false, nil
+	}
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return "", false, err
+	}
+	for id, value := range c.actors {
+		if value.Record.Principal == principal {
+			return id, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // ActiveIdentities answers "who is here right now" for the presence and
 // connection-slot sweeps. It carries no definition.
 func (c *Controller) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
@@ -427,6 +452,7 @@ func sortByActorID[T any](values []T, key func(T) actor.ActorID) {
 func cloneRaw(raw []byte) []byte { return append([]byte(nil), raw...) }
 
 var _ storespec.ActorFactsAuthority = (*Controller)(nil)
+var _ storespec.PrincipalIdentity = (*Controller)(nil)
 var _ storespec.IdentityRoster = (*Controller)(nil)
 var _ storespec.DeclaredInstanceReader = (*Controller)(nil)
 var _ storespec.IdentityPresence = (*Controller)(nil)

@@ -28,7 +28,7 @@
 // Layout (§4.2, first-version-is-final — "改布局=迁移"):
 //
 //	<workspaceRoot>/resources/<channelID>/live/<coord>     landed bytes
-//	<workspaceRoot>/resources/<channelID>/staging/<coord>.<suffix>  in-flight writes
+//	<workspaceRoot>/resources/<channelID>/staging/<coord>-<suffix>  in-flight writes
 //
 // This is a SIBLING of the device workspace tree (<workspaceRoot>/<channelID>/...),
 // not nested under it — separate os.Root trees, so an agent's `rm -rf` of its

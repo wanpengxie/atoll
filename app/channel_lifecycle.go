@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -272,7 +271,7 @@ func (a *App) runProvisionJob(ctx context.Context, id int64) error {
 	// TODO(fanout-lite): a declaration may be soft-deleted while a persisted
 	// provision job is retrying; the frozen instance is still allowed to be
 	// born and thereafter behaves like any other retained snapshot.
-	actorID, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, job.Owner)
+	actorID, found, err := bundle.View().ResolvePrincipal(ctx, job.Owner)
 	if err != nil || !found {
 		return a.retryProvision(ctx, id, "open_failed", errors.New("owner projection unavailable"))
 	}

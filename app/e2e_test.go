@@ -19,7 +19,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -27,55 +26,33 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-func authenticatedTestPlan(decls []platform.ActorDecl) *testPlanSource {
+// authenticatedTestPlan is the daemon-side factory source for e2e runs: it
+// resolves per actor at body-build time, exactly the production shape. A body
+// can only be built for a spec the daemon Host's desired serves, and that
+// desired is the pulled plan — so "only what the server published gets built"
+// holds by construction, with no plan snapshot to maintain here.
+func authenticatedTestPlan(decls []platform.ActorDecl) *testFactorySource {
 	factories := make(map[actor.ActorID]platform.ActorFactory, len(decls))
 	for _, d := range decls {
 		factories[d.ID] = d.Factory
 	}
-	return &testPlanSource{factories: factories, builds: map[actor.ActorID]platform.ActorFactory{}}
+	return &testFactorySource{factories: factories}
 }
 
-type testPlanSource struct {
+type testFactorySource struct {
 	mu        sync.Mutex
 	factories map[actor.ActorID]platform.ActorFactory
-	builds    map[actor.ActorID]platform.ActorFactory
-	plans     map[actor.ActorID]platform.PlanActor
 }
 
-func (p *testPlanSource) ApplyPlan(rows []platform.PlanActor) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	builds := make(map[actor.ActorID]platform.ActorFactory, len(rows))
-	plans := make(map[actor.ActorID]platform.PlanActor, len(rows))
-	for _, row := range rows {
-		f, ok := p.factories[row.ActorID]
-		if !ok {
-			continue
-		}
-		builds[row.ActorID] = f
-		plans[row.ActorID] = row
-	}
-	p.builds = builds
-	p.plans = plans
-	return nil
-}
-
-func (p *testPlanSource) LookupExact(
+func (p *testFactorySource) BuildClass(
 	id actor.ActorID,
-	attempt actorhost.AttemptKey,
-	spec actorhost.ExecutionSpec,
+	_ string,
+	_ json.RawMessage,
 ) (platform.ActorFactory, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	f, ok := p.builds[id]
-	row, planned := p.plans[id]
-	if !ok || !planned || row.AttemptKey != attempt {
-		return platform.ActorFactory{}, false
-	}
-	rowSpec := actorhost.ExecutionSpec{
-		Kind: row.Kind, Class: row.Class, Config: row.Config,
-	}
-	return f, rowSpec.Equal(spec)
+	f, ok := p.factories[id]
+	return f, ok
 }
 
 func truthRowsForTest(t *testing.T, env *testEnv, chID string) []any {
@@ -121,13 +98,8 @@ func testGatewayResolver(a *app.App) gateway.EntitlementResolver {
 		}
 		gr := make([]gateway.Route, 0, len(routes))
 		for _, r := range routes {
-			access := gateway.AccessObserver
-			if r.Access == "member" {
-				access = gateway.AccessMember
-			}
 			gr = append(gr, gateway.Route{
-				Channel: r.Channel, Bundle: r.Bundle, Access: access,
-				SubjectID: r.SubjectID,
+				Channel: r.Channel, Bundle: r.Bundle, SubjectID: r.SubjectID,
 			})
 		}
 		return gr, failed, nil
@@ -349,7 +321,7 @@ func fullSetup(t *testing.T, env *testEnv) setupResult {
 
 	chBody, cookies := createChannel(t, env, cookies, "general")
 	chID := chBody["id"].(string)
-	actorID, _ := env.app.ResolvePrincipalForTest(chID, actor.KindHuman, userID)
+	actorID, _ := env.app.ResolvePrincipalForTest(chID, userID)
 	boostID, _ := env.app.ResolveSourceForTest(chID, "sys:boost")
 
 	return setupResult{

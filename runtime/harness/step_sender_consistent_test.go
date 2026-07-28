@@ -9,11 +9,11 @@ import (
 )
 
 // StepSenderConsistent contract: the pen weld is the single identity
-// truth; there is no registry lookup in this step. Registry-backed rejection
-// (e.g. deregistered sender) is enforced one layer up, in livePen.IsLive()
-// (platform/internal/link/livepen.go, ErrWriterNotLive), which runs before
-// the chain and cannot be exercised from this package's step-isolation
-// harness. See livepen_test.go for its coverage.
+// truth; there is no registry lookup in this step. Liveness rejection (e.g. a
+// dead incarnation) is enforced one layer up — the pen holds the run authority
+// and calls Admit() on every Write — which runs before the chain and cannot be
+// exercised from this package's step-isolation harness. See
+// authority_pen_test.go for its coverage.
 func TestStepSenderConsistent(t *testing.T) {
 	deps := Deps{}
 

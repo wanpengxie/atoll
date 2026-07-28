@@ -9,8 +9,8 @@
 //
 // Serving-time structural changes converge through the private opEntry. Both
 // member operate frames and channelhost SysOp calls are adapters to that one
-// component. It commits idempotency anchor, system audit event pair, and durable
-// structure in one SQLite transaction; runtime effects are post-commit hints and
+// component. It commits the system audit event pair and durable structure in
+// one SQLite transaction; runtime effects are post-commit hints and
 // reconciliation remains the correctness backstop.
 //
 // The package also resolves empty audiences after a write crosses the membrane,

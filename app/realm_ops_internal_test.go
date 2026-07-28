@@ -42,7 +42,7 @@ func init() {
 func TestRealmOpsEditDeclarationRejectsCrossKind(t *testing.T) {
 	a := newBareAppForTest(t)
 	bundle := openTestChannelForTest(t, a, "realm-edit-kind", nil)
-	owner, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, "owner")
+	owner, found, err := bundle.View().ResolvePrincipal(context.Background(), "owner")
 	if err != nil || !found {
 		t.Fatalf("owner=(%s,%v,%v)", owner, found, err)
 	}
@@ -146,7 +146,7 @@ func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testin
 	if err != nil || view.Status != "done" {
 		t.Fatalf("agent operation status=(%+v,%v)", view, err)
 	}
-	ownerActor, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, "owner")
+	ownerActor, found, err := bundle.View().ResolvePrincipal(context.Background(), "owner")
 	if err != nil || !found {
 		t.Fatalf("owner actor=(%q,%v,%v)", ownerActor, found, err)
 	}
@@ -198,7 +198,7 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 	if err != nil || !found {
 		t.Fatalf("resolve realm tool target=(%+v,%v,%v)", target, found, err)
 	}
-	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, "owner")
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), "owner")
 	if err != nil || !found {
 		t.Fatalf("resolve owner=(%s,%v,%v)", initiator, found, err)
 	}
@@ -236,7 +236,7 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sourceOwner, found, err := source.View().ResolvePrincipal(context.Background(), actor.KindHuman, "owner")
+	sourceOwner, found, err := source.View().ResolvePrincipal(context.Background(), "owner")
 	if err != nil || !found {
 		t.Fatalf("source owner=(%s,%v,%v)", sourceOwner, found, err)
 	}

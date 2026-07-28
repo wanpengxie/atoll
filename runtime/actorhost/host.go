@@ -524,20 +524,42 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 	if h.sealed {
 		h.mu.Unlock()
 		unlock()
-		return ErrAttachRejected
+		// A closing host is not refusing this attach on its merits; it is closed,
+		// and says so in the same words every other entry point here uses.
+		return ErrHostClosed
 	}
 	state := h.states[id]
 	if state != nil && (state.body != nil || state.build != nil) {
 		h.mu.Unlock()
 		unlock()
+		// A local body or an in-flight build still owns the id. Retiring it is
+		// this host's own convergence work, which Wake hurries along, so the
+		// attach arrived early rather than wrongly.
 		h.Wake()
-		return ErrAttachRejected
+		return ErrAttachNotReady
 	}
-	if state == nil || state.desired == nil || state.desired.carrier == nil ||
-		state.desired.carrier.AttemptKey != key {
+	if state == nil || state.desired == nil || state.desired.carrier == nil {
 		h.mu.Unlock()
 		unlock()
-		return ErrAttachRejected
+		// The Controller already authorized this actor as daemon-placed, so a
+		// desired that names no carrier is this host's projection lagging, not a
+		// disagreement about where the actor belongs.
+		return ErrAttachNotReady
+	}
+	if state.desired.carrier.AttemptKey != key {
+		desiredKey := state.desired.carrier.AttemptKey
+		h.mu.Unlock()
+		unlock()
+		order, err := compareAttemptKeys(key, desiredKey)
+		if err != nil {
+			return err
+		}
+		if order < 0 {
+			return ErrAttachStale
+		}
+		// The incoming attempt is NEWER than the one this host has accepted:
+		// the plan that promoted it has not arrived here yet.
+		return ErrAttachNotReady
 	}
 	if state.route == nil {
 		state.route = &routeActual{key: key, binding: binding, started: time.Now()}
@@ -559,7 +581,9 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 	if order < 0 {
 		h.mu.Unlock()
 		unlock()
-		return ErrAttachRejected
+		// A newer attempt already holds the route. Retrying can never make this
+		// older one current.
+		return ErrAttachStale
 	}
 	predecessor = state.route.binding
 	started := time.Now()
@@ -810,11 +834,7 @@ func (h *HostSupervisor) Inspect(id actor.ActorID) (Snapshot, bool) {
 		unlock()
 		return Snapshot{}, false
 	}
-	out := Snapshot{
-		Building: state.build != nil,
-		Retiring: len(state.retiring),
-		Retrying: !state.retryAt.IsZero(),
-	}
+	out := Snapshot{}
 	if state.desired != nil {
 		out.Desired = state.desired.clonePublic()
 	}

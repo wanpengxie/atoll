@@ -80,13 +80,16 @@ type Home struct {
 	bindings     storespec.DaemonBindingStore
 	defaultAgent *defaultAgentFold
 	resourceRead storespec.ResourceReadStore
-	principals   storespec.PrincipalRegistry
 	closeStore   func() error
 
-	minter       harness.Minter
-	outbox       resourcespec.ResourceOutbox
-	stateHandles accessdoor.StateHandleResolver
-	engine       *schedule.Engine
+	// The two harness capabilities are held apart, exactly as they are handed
+	// out: minter goes to the three components that mint pens, admittedWriter
+	// goes to timer fire and nowhere else. Home writes through neither.
+	minter         harness.Minter
+	admittedWriter harness.AdmittedWriter
+	outbox         resourcespec.ResourceOutbox
+	stateHandles   accessdoor.StateHandleResolver
+	engine         *schedule.Engine
 
 	signal       *tap.Signal
 	delivery     *tap.Pump
@@ -103,10 +106,9 @@ type Home struct {
 	nowMs              func() int64
 	onMembershipChange func(string)
 
-	reconcileStop   func()
-	reconcileDone   chan struct{}
-	reconcileLeaked atomic.Int64
-	pokeCh          chan struct{}
+	reconcileStop func()
+	reconcileDone chan struct{}
+	pokeCh        chan struct{}
 
 	closed    atomic.Bool
 	closeOnce sync.Once

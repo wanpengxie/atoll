@@ -17,7 +17,7 @@ import (
 // separately (platform emit-identity tests).
 func newTestChain(t *testing.T, cs *store.ChannelStores) *chain {
 	t.Helper()
-	m, err := New(testDeps(t, cs))
+	m, _, err := New(testDeps(t, cs))
 	if err != nil {
 		t.Fatalf("New chain: %v", err)
 	}
@@ -26,7 +26,7 @@ func newTestChain(t *testing.T, cs *store.ChannelStores) *chain {
 
 // New rejects incomplete Deps (substrate refuses to assemble half-wired).
 func TestChain_NewValidatesDeps(t *testing.T) {
-	if _, err := New(Deps{}); err == nil {
+	if _, _, err := New(Deps{}); err == nil {
 		t.Fatalf("New with empty Deps should error")
 	}
 }

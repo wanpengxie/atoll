@@ -18,11 +18,10 @@ import (
 //     (forced overwrite).
 //
 // There is deliberately NO actor_registry lookup here: identity is pen-welded
-// (sender.id above) and liveness is gated one layer up by livePen.IsLive()
-// (platform/internal/link/livepen.go) on every write, before this chain even
-// runs. A registry
-// name-list check here would be a second, redundant authority over the same
-// "is this a real, live writer" question — this step trusts the pen.
+// (sender.id above) and liveness is gated one layer up — the pen holds the run
+// authority and calls Admit() on every Write, before this chain even runs. A
+// registry name-list check here would be a second, redundant authority over the
+// same "is this a real, live writer" question — this step trusts the pen.
 type stepSenderConsistent struct {
 	deps Deps
 }

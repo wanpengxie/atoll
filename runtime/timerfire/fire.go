@@ -24,7 +24,7 @@ var ErrInvalidInput = errors.New("timerfire: invalid construction input")
 // is refused (author_not_member) and the row annihilated by the engine — the
 // reason the schedule arm needs no entry-side classification gate.
 type sink struct {
-	minter    harness.AdmittedMinter
+	writer    harness.AdmittedWriter
 	authority storespec.CollaborationAuthority
 }
 
@@ -32,12 +32,12 @@ type sink struct {
 // the value ledger's own membership face — no Platform forwarding layer.
 func New(
 	authority storespec.CollaborationAuthority,
-	minter harness.AdmittedMinter,
+	writer harness.AdmittedWriter,
 ) (schedule.FireSink, error) {
-	if authority == nil || minter == nil {
+	if authority == nil || writer == nil {
 		return nil, ErrInvalidInput
 	}
-	return sink{minter: minter, authority: authority}, nil
+	return sink{writer: writer, authority: authority}, nil
 }
 
 func (s sink) Append(ctx context.Context, author actor.ActorID, env *message.Envelope) error {
@@ -48,7 +48,9 @@ func (s sink) Append(ctx context.Context, author actor.ActorID, env *message.Env
 	if !ok || !admission.Valid() {
 		return schedule.FireRejected{Reason: "author_not_member", Detail: string(author)}
 	}
-	result, err := s.minter.MintAdmitted(admission).Write(ctx, env)
+	// The verdict above is what this write consumes, and it is consumed here or
+	// not at all: no pen comes back that could carry it past this moment.
+	result, err := s.writer.WriteAdmitted(ctx, admission, env)
 	if err != nil {
 		return err
 	}

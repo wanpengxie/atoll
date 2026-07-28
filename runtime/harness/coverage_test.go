@@ -62,7 +62,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
 	// NowMs / Logger nil → defaults filled.
-	m, err := New(Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}})
+	m, _, err := New(Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestStepName_DefaultUnknownID(t *testing.T) {
 // chainWith builds the internal chain with stub deps.
 func chainWith(t *testing.T, lg storespec.MessageLog) *chain {
 	t.Helper()
-	m, err := New(Deps{
+	m, _, err := New(Deps{
 		ChannelID: testChannelID,
 		Log:       lg,
 		Presence:  testAuthority{},
@@ -119,8 +119,8 @@ func chainWith(t *testing.T, lg storespec.MessageLog) *chain {
 // observeError (chain.go step-error path) and returns the wrapped error. We
 // trigger this at StepResponsePairing by making Log.FindByID fail for the
 // parent lookup — StepSenderConsistent no longer has an error-producing seam
-// of its own (no registry lookup left: identity is pen-welded + livePen-gated,
-// not registry-checked).
+// of its own (no registry lookup left: identity is pen-welded + Admit()-gated
+// by the pen-held authority, not registry-checked).
 func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 	findErr := errors.New("boom-find")
 	lg := stubLog{
@@ -254,9 +254,10 @@ func TestStepNormalize_NilEnvelope(t *testing.T) {
 // ---------------------------------------------------------------------
 // step_sender_consistent.go — ctx canceled (final guard). The Lookup-error
 // seam this section used to cover is gone: the step no longer calls
-// ActorRegistry.Lookup at all — identity is pen-welded + livePen-gated one
-// layer up, not registry-checked here. That correctness now lives in
-// platform/internal/link/livepen_test.go (ErrWriterNotLive).
+// ActorRegistry.Lookup at all — identity is pen-welded, and liveness is gated
+// one layer up (the pen holds the run authority and calls Admit() on every
+// Write), not registry-checked here. That gate's coverage lives in
+// authority_pen_test.go.
 // ---------------------------------------------------------------------
 
 func TestStepSenderConsistent_CtxCanceled(t *testing.T) {

@@ -50,19 +50,20 @@ func TestStepEnvelopeShape_FieldMissing(t *testing.T) {
 // channel at all, and what lands on the row is deps.ChannelID.
 func TestChannelStampComesFromTheHarnessBindingAlone(t *testing.T) {
 	cs := newTestStore(t)
-	mint, err := New(testDeps(t, cs))
+	_, mint, err := New(testDeps(t, cs))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pen := mint.MintAdmitted(storespec.IdentityAdmission{
-		ID: "agent:a", Kind: actor.KindAgent,
-	})
+	// One admission, one write. There is no pen to hold between the two writes
+	// below — each states the verdict it is writing under, which is the whole
+	// point of the seam.
+	admission := storespec.IdentityAdmission{ID: "agent:a", Kind: actor.KindAgent}
 
 	stamped := &message.Envelope{
 		ID: "stamped", TS: fixedNowMs - 1000, Kind: message.KindEvent,
 		Type: "agent.text", Audience: message.Audience{"agent:b"},
 	}
-	result, err := pen.Write(context.Background(), stamped)
+	result, err := mint.WriteAdmitted(context.Background(), admission, stamped)
 	if err != nil || !result.Accepted() {
 		t.Fatalf("write: result=%+v err=%v", result, err)
 	}
@@ -76,7 +77,7 @@ func TestChannelStampComesFromTheHarnessBindingAlone(t *testing.T) {
 		ID: "forged", TS: fixedNowMs - 1000, ChannelID: channel.ID("foreign-channel"),
 		Kind: message.KindEvent, Type: "agent.text", Audience: message.Audience{"agent:b"},
 	}
-	result, err = pen.Write(context.Background(), forged)
+	result, err = mint.WriteAdmitted(context.Background(), admission, forged)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}

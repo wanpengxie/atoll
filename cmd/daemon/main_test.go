@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
 func TestStorageRootCloseDecisionTransfersOnForwarderLeak(t *testing.T) {
@@ -24,9 +22,9 @@ func TestStorageRootCloseDecisionTransfersOnForwarderLeak(t *testing.T) {
 	}
 }
 
-// Test-only classes: one that builds, one whose constructor always errors. They
-// let TestPlanSource_BuildFailureDoesNotCullDesired drive a per-row Build failure
-// deterministically (real classes need creds/config to fail).
+// Test-only classes: one that builds, one whose constructor always errors, one
+// that derives a different id — the three answers a class constructor can give
+// a body build (real classes need creds/config to fail deterministically).
 func init() {
 	registry.Register("test-ok-daemon", registry.ClassDecl{
 		Kind: actor.KindAgent,
@@ -52,86 +50,41 @@ func init() {
 	})
 }
 
-func TestPlanSource_InvalidCandidatePreservesLastKnownGood(t *testing.T) {
-	cases := []struct {
-		name string
-		bad  platform.PlanActor
-	}{
-		{name: "unknown class", bad: platform.PlanActor{ActorID: "agent:bad", Class: "not-registered"}},
-		{name: "build failure", bad: platform.PlanActor{ActorID: "agent:bad", Class: "test-fail-daemon"}},
-		{name: "id rewrite", bad: platform.PlanActor{ActorID: "agent:bad", Class: "test-rewrite-id-daemon"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := newPlanSource("c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err := p.ApplyPlan([]platform.PlanActor{{ActorID: "agent:stable", Class: "test-ok-daemon"}}); err != nil {
-				t.Fatalf("seed LKG: %v", err)
-			}
-			if err := p.ApplyPlan([]platform.PlanActor{
-				{ActorID: "agent:new", Class: "test-ok-daemon"}, tc.bad,
-			}); err == nil {
-				t.Fatal("invalid candidate plan unexpectedly published")
-			}
-
-			desired, err := p.Members(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(desired) != 1 || desired[0].ActorID != "agent:stable" {
-				t.Fatalf("LKG desired changed after rejected plan: %+v", desired)
-			}
-			stable := desired[0]
-			if _, ok := p.LookupExact(stable.ActorID, stable.AttemptKey, stable.ExecutionSpec); !ok {
-				t.Fatal("LKG builder disappeared after rejected plan")
-			}
-			if _, ok := p.LookupExact(
-				"agent:new",
-				actorhost.AttemptKey("00000000-0000-7000-8000-000000000003"),
-				actorhost.ExecutionSpec{Kind: actor.KindAgent, Class: "test-ok-daemon"},
-			); ok {
-				t.Fatal("partial candidate builder leaked into LKG")
-			}
-		})
+func testFactories() classFactories {
+	return classFactories{
+		chID: "c", deviceName: "dev",
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
-func TestPlanSourceLookupExactRejectsSuccessorFactoryForStaleBuild(t *testing.T) {
-	p := newPlanSource("c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	g1 := actorhost.AttemptKey("00000000-0000-7000-8000-000000000001")
-	g2 := actorhost.AttemptKey("00000000-0000-7000-8000-000000000002")
-	if err := p.ApplyPlan([]platform.PlanActor{{
-		ActorID: "agent:a", AttemptKey: g1, Class: "test-ok-daemon",
-		Config: []byte(`{"generation":1}`),
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	first, err := p.Members(context.Background())
-	if err != nil || len(first) != 1 {
-		t.Fatalf("first desired = %#v, %v", first, err)
-	}
-	g1Spec := first[0].ExecutionSpec
+// The factory is a pure function of (id, class, config) — the spec the Host's
+// own desired carries into each build. There is no plan snapshot behind it, so
+// there is no generation to disagree with: the two-ledger split (a builder
+// table on one plan, desired on another, meeting at a silent no_builder loop)
+// has nothing to happen to. What remains to pin is the resolution itself and
+// its two refusals.
+func TestClassFactoriesResolvesFromTheBuildInputAlone(t *testing.T) {
+	f := testFactories()
 
-	if err := p.ApplyPlan([]platform.PlanActor{{
-		ActorID: "agent:a", AttemptKey: g2, Class: "test-ok-daemon",
-		Config: []byte(`{"generation":2}`),
-	}}); err != nil {
-		t.Fatal(err)
+	if _, ok := f.BuildClass("agent:a", "test-ok-daemon", nil); !ok {
+		t.Fatal("a registered class did not resolve")
 	}
-	if _, ok := p.LookupExact("agent:a", g1, g1Spec); ok {
-		t.Fatal("stale G1 build acquired the current G2 factory")
+	// A class this daemon binary does not carry (version skew) fails this one
+	// body, not a plan: there is no plan here to fail.
+	if _, ok := f.BuildClass("agent:a", "not-registered", nil); ok {
+		t.Fatal("an unregistered class resolved a factory")
 	}
-	current, err := p.Members(context.Background())
-	if err != nil || len(current) != 1 {
-		t.Fatalf("current desired = %#v, %v", current, err)
+	if _, ok := f.BuildClass("agent:a", "test-fail-daemon", nil); ok {
+		t.Fatal("a failing constructor resolved a factory")
 	}
-	if _, ok := p.LookupExact(
-		current[0].ActorID,
-		current[0].AttemptKey,
-		current[0].ExecutionSpec,
-	); !ok {
-		t.Fatal("current G2 build could not acquire its exact factory")
-	}
-	if _, ok := p.LookupExact("agent:a", g2, g1Spec); ok {
-		t.Fatal("current G2 attempt acquired a factory for mismatched G1 execution spec")
+}
+
+// A constructor that rewrites the id (device deriving its own from the device
+// identity) would produce a body claiming an identity the plan never named.
+// With no table to file it under, the only leak path is being built — refuse.
+func TestClassFactoriesRefusesAConstructorThatDerivesAnotherID(t *testing.T) {
+	f := testFactories()
+	if _, ok := f.BuildClass("agent:a", "test-rewrite-id-daemon", nil); ok {
+		t.Fatal("a factory was handed out for an identity the plan never named")
 	}
 }
