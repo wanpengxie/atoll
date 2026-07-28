@@ -70,7 +70,6 @@ func (k *Kernel) Start(unit *actorrt.Unit) error {
 		k.release(unit)
 		return ErrInvalidUnit
 	}
-	go k.watch(unit)
 	return nil
 }
 
@@ -83,17 +82,10 @@ func (k *Kernel) release(unit *actorrt.Unit) {
 	k.mu.Unlock()
 }
 
-func (k *Kernel) watch(unit *actorrt.Unit) {
-	<-unit.Done()
-	k.mu.Lock()
-	closing := k.closing
-	current := k.unit == unit
-	k.mu.Unlock()
-	if !closing && current {
-		k.fail(ErrExited)
-	}
-}
-
+// OnExited is the exit report. It is the only one: the Unit emits it from
+// inside finish, before Done closes, so a second watcher blocking on Done could
+// never reach fail first — and it would report a bare ErrExited, dropping the
+// cause the event carries.
 func (k *Kernel) OnExited(event actorrt.ExitedEvent) {
 	k.mu.Lock()
 	closing := k.closing
