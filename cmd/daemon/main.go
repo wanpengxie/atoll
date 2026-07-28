@@ -56,18 +56,20 @@ func channelFromServerURL(raw string) string {
 }
 
 // planSource is the daemon's single applied compute-plan snapshot. The reconcile
-// ring pulls the authenticated plan through its link, calls ApplyPlan, then reads
-// Members and LookupExact from this same atomically replaced desired/factory pair.
-// A pull or build failure leaves the last-known-good snapshot intact, so the
-// daemon stays connected and retries without introducing a second plan source.
+// ring pulls the authenticated plan through its link, calls ApplyPlan, and then
+// resolves each Host build claim through LookupExact against that same atomically
+// replaced builder table. The desired half of the snapshot is NOT read back from
+// here — the ring hands the plan rows to the Host directly, and the Host's own
+// desired is the one anybody asks. A pull or build failure leaves the
+// last-known-good snapshot intact, so the daemon stays connected and retries
+// without introducing a second plan source.
 type planSource struct {
 	chID, wsRoot, deviceName string
 	logger                   *slog.Logger
 
-	mu          sync.Mutex
-	lastDesired []actorhost.BodyDesired
-	builders    map[actor.ActorID]plannedBody
-	lastBuilt   int // -1 until the first successful fetch (to Info-log only on change)
+	mu        sync.Mutex
+	builders  map[actor.ActorID]plannedBody
+	lastBuilt int // -1 until the first successful fetch (to Info-log only on change)
 }
 
 type plannedBody struct {
@@ -84,24 +86,10 @@ func newPlanSource(chID, wsRoot, deviceName string, logger *slog.Logger) *planSo
 	}
 }
 
-func (p *planSource) Members(context.Context) ([]actorhost.BodyDesired, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := append([]actorhost.BodyDesired(nil), p.lastDesired...)
-	for i := range out {
-		out[i].ExecutionSpec.Config = append(
-			json.RawMessage(nil),
-			out[i].ExecutionSpec.Config...,
-		)
-	}
-	return out, nil
-}
-
-// ApplyPlan builds both desired and factory halves off-lock, then publishes one
-// atomic snapshot. Any invalid row rejects the whole candidate so the previous
+// ApplyPlan builds the factory table off-lock, then publishes it as one atomic
+// snapshot. Any invalid row rejects the whole candidate so the previous
 // last-known-good snapshot remains authoritative.
 func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
-	var desired []actorhost.BodyDesired
 	builders := map[actor.ActorID]plannedBody{}
 	for _, asg := range plan {
 		id := asg.ActorID
@@ -110,17 +98,30 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 		}
 		// Desired is generated from the plan row alone, but publication is atomic:
 		// unknown classes, build failures, and identity drift reject the full plan.
-		kind, ok := registry.ClassKind(asg.Class)
-		if !ok {
+		//
+		// The registry answers ONE question here — can this daemon build the class —
+		// and its Kind is deliberately discarded. What the body IS belongs to the
+		// Controller's desired projection, which is what the row carries; a daemon
+		// holds no truth and must not derive that fact a second time. Two
+		// derivations would meet at LookupExact's Equal with nothing to reconcile
+		// them, and a disagreement there is a builder that never matches: a silent
+		// build-fail loop with no log naming the reason.
+		if _, ok := registry.ClassKind(asg.Class); !ok {
 			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.ActorID, asg.Class)
+		}
+		// The row's Kind is adopted, not trusted blindly: an unparseable one would
+		// fail ExecutionSpec's canonicalization inside Equal, and Equal reports that
+		// as "not a match" — the same silent no_builder loop by another door. Reject
+		// the candidate loudly instead.
+		if _, ok := actor.ParseKind(string(asg.Kind)); !ok {
+			return fmt.Errorf("daemon: plan instance %s has invalid kind %q", asg.ActorID, asg.Kind)
 		}
 		bodyDesired := actorhost.BodyDesired{
 			ActorID: id, AttemptKey: asg.AttemptKey,
 			ExecutionSpec: actorhost.ExecutionSpec{
-				Kind: kind, Class: asg.Class, Config: append(json.RawMessage(nil), asg.Config...),
+				Kind: asg.Kind, Class: asg.Class, Config: append(json.RawMessage(nil), asg.Config...),
 			},
 		}
-		desired = append(desired, bodyDesired)
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
 			ID:     id,
 			Config: asg.Config,
@@ -146,14 +147,13 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 		builders[id] = plannedBody{desired: bodyDesired, factory: decl.Factory}
 	}
 	p.mu.Lock()
-	p.lastDesired = desired
 	p.builders = builders
-	changed := p.lastBuilt != len(desired)
-	p.lastBuilt = len(desired)
+	changed := p.lastBuilt != len(builders)
+	p.lastBuilt = len(builders)
 	p.mu.Unlock()
 	if changed {
 		p.logger.Info("daemon: composition", "channel", p.chID,
-			"assigned", len(plan), "desired", len(desired), "built", len(builders))
+			"assigned", len(plan), "built", len(builders))
 	}
 	return nil
 }

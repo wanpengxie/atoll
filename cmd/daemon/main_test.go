@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -52,36 +51,58 @@ func init() {
 	})
 }
 
+// okRow is a plan row the way home actually sends one: the Kind travels on the
+// wire, carried out of the Controller's desired projection (platform/home/plan.go).
+// The daemon adopts it rather than deriving its own from the class registry —
+// a second derivation would meet the first at LookupExact's Equal with nothing
+// to reconcile them.
+func okRow(id actor.ActorID, key actorhost.AttemptKey, config []byte) platform.PlanActor {
+	return platform.PlanActor{
+		ActorID: id, AttemptKey: key,
+		Kind: actor.KindAgent, Class: "test-ok-daemon", Config: config,
+	}
+}
+
+// specOf rebuilds the ExecutionSpec a plan row produces. The daemon publishes no
+// desired read face — the Host holds the only one — so a test that wants to ask
+// LookupExact about a row states the row's own spec, exactly as the Host does.
+func specOf(row platform.PlanActor) actorhost.ExecutionSpec {
+	return actorhost.ExecutionSpec{Kind: row.Kind, Class: row.Class, Config: row.Config}
+}
+
 func TestPlanSource_InvalidCandidatePreservesLastKnownGood(t *testing.T) {
 	cases := []struct {
 		name string
 		bad  platform.PlanActor
 	}{
-		{name: "unknown class", bad: platform.PlanActor{ActorID: "agent:bad", Class: "not-registered"}},
-		{name: "build failure", bad: platform.PlanActor{ActorID: "agent:bad", Class: "test-fail-daemon"}},
-		{name: "id rewrite", bad: platform.PlanActor{ActorID: "agent:bad", Class: "test-rewrite-id-daemon"}},
+		{name: "unknown class", bad: platform.PlanActor{
+			ActorID: "agent:bad", Kind: actor.KindAgent, Class: "not-registered"}},
+		{name: "build failure", bad: platform.PlanActor{
+			ActorID: "agent:bad", Kind: actor.KindAgent, Class: "test-fail-daemon"}},
+		{name: "id rewrite", bad: platform.PlanActor{
+			ActorID: "agent:bad", Kind: actor.KindAgent, Class: "test-rewrite-id-daemon"}},
+		// A row whose Kind the wire never filled in. Adopting the row's Kind means
+		// an unparseable one has to be refused HERE: ExecutionSpec canonicalization
+		// happens inside Equal, which reports failure as "not a match", so letting
+		// it through would publish a builder that can never be looked up — the
+		// silent no_builder loop, reached by a different door.
+		{name: "invalid kind", bad: platform.PlanActor{
+			ActorID: "agent:bad", Kind: actor.Kind("not-a-kind"), Class: "test-ok-daemon"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newPlanSource("c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err := p.ApplyPlan([]platform.PlanActor{{ActorID: "agent:stable", Class: "test-ok-daemon"}}); err != nil {
+			stable := okRow("agent:stable", "", nil)
+			if err := p.ApplyPlan([]platform.PlanActor{stable}); err != nil {
 				t.Fatalf("seed LKG: %v", err)
 			}
 			if err := p.ApplyPlan([]platform.PlanActor{
-				{ActorID: "agent:new", Class: "test-ok-daemon"}, tc.bad,
+				okRow("agent:new", "", nil), tc.bad,
 			}); err == nil {
 				t.Fatal("invalid candidate plan unexpectedly published")
 			}
 
-			desired, err := p.Members(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(desired) != 1 || desired[0].ActorID != "agent:stable" {
-				t.Fatalf("LKG desired changed after rejected plan: %+v", desired)
-			}
-			stable := desired[0]
-			if _, ok := p.LookupExact(stable.ActorID, stable.AttemptKey, stable.ExecutionSpec); !ok {
+			if _, ok := p.LookupExact(stable.ActorID, stable.AttemptKey, specOf(stable)); !ok {
 				t.Fatal("LKG builder disappeared after rejected plan")
 			}
 			if _, ok := p.LookupExact(
@@ -95,40 +116,52 @@ func TestPlanSource_InvalidCandidatePreservesLastKnownGood(t *testing.T) {
 	}
 }
 
+// The Kind the daemon files a builder under is the row's, not one it looked up
+// for itself. Pinning this is the whole point of A14: the Host resolves a build
+// claim by handing LookupExact the spec IT holds, which came off the same wire
+// row, and the two only agree unconditionally while there is one derivation.
+func TestPlanSourceFilesTheBuilderUnderTheRowsKind(t *testing.T) {
+	p := newPlanSource("c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	key := actorhost.AttemptKey("00000000-0000-7000-8000-000000000001")
+	// test-ok-daemon is registered as KindAgent. A row that says KindTool is what
+	// a version skew looks like — the class was reclassified on one side. The
+	// builder must be reachable by what the row said, since that is also what the
+	// Host will carry into its claim.
+	row := platform.PlanActor{
+		ActorID: "agent:a", AttemptKey: key,
+		Kind: actor.KindTool, Class: "test-ok-daemon",
+	}
+	if err := p.ApplyPlan([]platform.PlanActor{row}); err != nil {
+		t.Fatalf("ApplyPlan: %v", err)
+	}
+	if _, ok := p.LookupExact(row.ActorID, key, specOf(row)); !ok {
+		t.Fatal("the builder is not reachable by the Kind the plan row carried")
+	}
+	if _, ok := p.LookupExact(row.ActorID, key, actorhost.ExecutionSpec{
+		Kind: actor.KindAgent, Class: "test-ok-daemon",
+	}); ok {
+		t.Fatal("the registry's own Kind still resolves a builder — a second derivation survives")
+	}
+}
+
 func TestPlanSourceLookupExactRejectsSuccessorFactoryForStaleBuild(t *testing.T) {
 	p := newPlanSource("c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	g1 := actorhost.AttemptKey("00000000-0000-7000-8000-000000000001")
 	g2 := actorhost.AttemptKey("00000000-0000-7000-8000-000000000002")
-	if err := p.ApplyPlan([]platform.PlanActor{{
-		ActorID: "agent:a", AttemptKey: g1, Class: "test-ok-daemon",
-		Config: []byte(`{"generation":1}`),
-	}}); err != nil {
+	g1Row := okRow("agent:a", g1, []byte(`{"generation":1}`))
+	if err := p.ApplyPlan([]platform.PlanActor{g1Row}); err != nil {
 		t.Fatal(err)
 	}
-	first, err := p.Members(context.Background())
-	if err != nil || len(first) != 1 {
-		t.Fatalf("first desired = %#v, %v", first, err)
-	}
-	g1Spec := first[0].ExecutionSpec
+	g1Spec := specOf(g1Row)
 
-	if err := p.ApplyPlan([]platform.PlanActor{{
-		ActorID: "agent:a", AttemptKey: g2, Class: "test-ok-daemon",
-		Config: []byte(`{"generation":2}`),
-	}}); err != nil {
+	g2Row := okRow("agent:a", g2, []byte(`{"generation":2}`))
+	if err := p.ApplyPlan([]platform.PlanActor{g2Row}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := p.LookupExact("agent:a", g1, g1Spec); ok {
 		t.Fatal("stale G1 build acquired the current G2 factory")
 	}
-	current, err := p.Members(context.Background())
-	if err != nil || len(current) != 1 {
-		t.Fatalf("current desired = %#v, %v", current, err)
-	}
-	if _, ok := p.LookupExact(
-		current[0].ActorID,
-		current[0].AttemptKey,
-		current[0].ExecutionSpec,
-	); !ok {
+	if _, ok := p.LookupExact(g2Row.ActorID, g2, specOf(g2Row)); !ok {
 		t.Fatal("current G2 build could not acquire its exact factory")
 	}
 	if _, ok := p.LookupExact("agent:a", g2, g1Spec); ok {
