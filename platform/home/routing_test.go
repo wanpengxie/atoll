@@ -245,9 +245,9 @@ func TestDefaultAgentFold_InvalidLatestFailsClosedAndForgedSenderIsIgnored(t *te
 			Visibility: message.VisibilitySystem,
 			Audience:   message.Audience{actor.SystemActorID},
 		}
-		result, err := h.minter.MintAdmitted(storespec.IdentityAdmission{
+		result, err := h.minter.WriteAdmitted(context.Background(), storespec.IdentityAdmission{
 			ID: one, Kind: actor.KindAgent,
-		}).Write(context.Background(), env)
+		}, env)
 		if err != nil || !result.Accepted() {
 			t.Fatalf("forged append result=%+v err=%v", result, err)
 		}
@@ -300,9 +300,9 @@ func TestHarnessNoLongerResolvesEmptyAudience(t *testing.T) {
 		ID: "empty-audience", TS: time.Now().UnixMilli(), Kind: message.KindEvent,
 		Type: "routing.probe", Payload: json.RawMessage(`{}`),
 	}
-	result, err := h.minter.MintAdmitted(storespec.IdentityAdmission{
+	result, err := h.minter.WriteAdmitted(context.Background(), storespec.IdentityAdmission{
 		ID: one, Kind: actor.KindAgent,
-	}).Write(context.Background(), env)
+	}, env)
 	if err != nil || result.RejectReason != harness.HarnessAudienceEmpty ||
 		len(env.Audience) != 0 || env.Kind != message.KindEvent {
 		t.Fatalf("result=%+v env=%+v err=%v", result, env, err)

@@ -472,7 +472,7 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"admitIdentity", "AdmitIdentity", "MintAdmitted", "MintAuthority",
+		"admitIdentity", "AdmitIdentity", "WriteAdmitted", "MintAuthority",
 		"ResolvePhysical", "StateHandles", "actorctl.",
 	} {
 		if strings.Contains(link, forbidden) {
@@ -486,7 +486,7 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 	for _, path := range phaseAProductionFiles(t, "../platform/internal/link") {
 		body := readAuthorityContractFile(t, path)
 		for _, forbidden := range []string{
-			"harness.Minter", "harness.AdmittedMinter",
+			"harness.Minter", "harness.AdmittedWriter",
 			"accessdoor.AccessMinter", "accessdoor.AdmittedMinter",
 			"accessdoor.StateHandleResolver",
 			"schedule.Minter", "schedule.AdmittedMinter",
@@ -531,7 +531,7 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 		body := readAuthorityContractFile(t, path)
 		for _, forbidden := range []string{
 			"PenBasis", "RunAuthorityFor", "IdentityAuthorityFor",
-			".MintAuthority(", ".MintAdmitted(",
+			".MintAuthority(", ".WriteAdmitted(",
 		} {
 			if strings.Contains(body, forbidden) {
 				t.Errorf("%s touches capability-coordinate face %q — only managedcaps, remoteingress and timerfire may", path, forbidden)
@@ -539,15 +539,61 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 		}
 	})
 
+	// Timer fire reaches its own author verdict and then writes under it. The
+	// verdict's RESULT is what the caller needs — a dead author's row is
+	// annihilated, never retried — so the write must not re-reach it, and the
+	// admitted seam hands back no pen that could carry the verdict past this
+	// moment. This used to require the literal "MintAdmitted(admission)", which
+	// a line that parked the pen in a variable satisfied just as well.
 	scheduler := readAuthorityContractFile(t, "../runtime/timerfire/fire.go")
 	for _, required := range []string{
 		"AdmitIdentity(ctx, author)",
-		"MintAdmitted(admission)",
+		"WriteAdmitted(ctx, admission, env)",
 		`FireRejected{Reason: "author_not_member"`,
 	} {
 		if !strings.Contains(scheduler, required) {
 			t.Errorf("timer fire lacks admitted collaboration seam %q", required)
 		}
+	}
+}
+
+// The admitted seam is a write, not a writer. A pen minted from a completed
+// admission would be a capability that outlives the verdict behind it, and it
+// would be indistinguishable by type from one that re-judges on every write —
+// so the shape that could be held is the one that must not exist.
+//
+// How to break it: give AdmittedWriter a method that returns a Pen, or have
+// WriteAdmitted hand one back instead of a result.
+func TestAdmittedSeamHandsBackNoPen(t *testing.T) {
+	step := readAuthorityContractFile(t, "../runtime/harness/step.go")
+	const required = "WriteAdmitted(context.Context, storespec.IdentityAdmission, *message.Envelope) (WriteResult, error)"
+	if !strings.Contains(step, required) {
+		t.Errorf("AdmittedWriter no longer writes in one call: %q is gone", required)
+	}
+
+	for path, file := range parseProductionPackage(t, "../runtime/harness") {
+		ast.Inspect(file, func(node ast.Node) bool {
+			spec, ok := node.(*ast.TypeSpec)
+			if !ok || spec.Name.Name != "AdmittedWriter" {
+				return true
+			}
+			iface, ok := spec.Type.(*ast.InterfaceType)
+			if !ok {
+				return true
+			}
+			for _, method := range iface.Methods.List {
+				fn, ok := method.Type.(*ast.FuncType)
+				if !ok || fn.Results == nil {
+					continue
+				}
+				for _, result := range fn.Results.List {
+					if ident, ok := result.Type.(*ast.Ident); ok && ident.Name == "Pen" {
+						t.Errorf("%s: AdmittedWriter hands back a Pen — an admission is one write, never a writer", path)
+					}
+				}
+			}
+			return true
+		})
 	}
 }
 
@@ -583,7 +629,7 @@ func TestChannelIdentityIsOnlyTheHarnessOwnBinding(t *testing.T) {
 
 	pen := readAuthorityContractFile(t, "../runtime/harness/pen.go")
 	for _, required := range []string{
-		"func (m *minter) MintAdmitted(admission storespec.IdentityAdmission) Pen {",
+		"func (m *minter) WriteAdmitted(",
 		"func (m *minter) MintAuthority(authority capauth.Authority, kind actor.Kind) Pen {",
 		"env.ChannelID = p.chain.deps.ChannelID",
 	} {

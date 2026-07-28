@@ -17,17 +17,31 @@ type minter struct {
 	chain *chain
 }
 
-func (m *minter) MintAdmitted(admission storespec.IdentityAdmission) Pen {
+// WriteAdmitted writes one envelope as the identity an already-completed
+// admission names. It hands back no pen, because there is no pen to hand: the
+// caller reached its own liveness verdict a moment ago and this write consumes
+// exactly that instant. A pen would outlive the verdict it was minted from,
+// and nothing in the type would say so — an identity that has since ended
+// would keep writing, silently.
+//
+// One admission, one write. The obligation is not enforced here; it is
+// unstatable.
+func (m *minter) WriteAdmitted(
+	ctx context.Context,
+	admission storespec.IdentityAdmission,
+	env *message.Envelope,
+) (WriteResult, error) {
 	if !admission.Valid() {
-		return rejectedPen{}
+		return WriteResult{}, errors.New("harness: invalid admission")
 	}
-	return &boundPen{
+	pen := &boundPen{
 		chain: m.chain,
 		principal: caller{
 			actorID: admission.ID,
 			kind:    admission.Kind,
 		},
 	}
+	return pen.Write(ctx, env)
 }
 
 func (m *minter) MintAuthority(authority capauth.Authority, kind actor.Kind) Pen {
