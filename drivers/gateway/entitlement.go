@@ -28,8 +28,9 @@ type Route struct {
 
 // EntitlementResolver is the app-domain seam (injected by the assembly root, spec
 // §3.2 EntitlementResolver 注入缝): given a principal it returns the full set of
-// channels that principal is currently entitled to (member ∪ observer), the
-// per-channel failures, and an err for a whole-snapshot failure. The interface is
+// channels that principal holds MEMBERSHIP in — observer traffic rides the
+// per-channel SSE/HTTP read plane and never enters this route set (see Route) —
+// plus the per-channel failures, and an err for a whole-snapshot failure. The interface is
 // defined HERE (drivers/gateway) and implemented app-side, bridged through
 // cmd/server — so drivers never imports app (archtest 围栏), mirroring the WSGateway/
 // Routing seam shape.
