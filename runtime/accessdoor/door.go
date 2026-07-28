@@ -114,24 +114,16 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 	if err != nil {
 		return Outcome{}, err
 	}
-	callerActive := facts.Active
-	isOwner := facts.Active && facts.Owner
-
 	// ---- owner root ∪ A8: actor entry ∪ (members entry ∧ current member) ----
-	allowed := isOwner
+	// The owner root short-circuits before any registry round trip. The rest is
+	// opAllowed — the SAME predicate effectiveOps ranges over, asked here for
+	// exactly the one op this call carries (never all four: invoke is the hot
+	// path, and the other three ops are not being judged).
+	allowed := facts.Active && facts.Owner
 	if !allowed {
-		allowed, err = d.deps.Registry.ActorAllows(ctx, caller, id, op)
-	}
-	if err != nil {
-		return Outcome{}, err
-	}
-	if !allowed {
-		mAllow, err := d.deps.Registry.MembersAllow(ctx, id, op)
+		allowed, err = d.opAllowed(ctx, caller, id, op, facts.Active)
 		if err != nil {
 			return Outcome{}, err
-		}
-		if mAllow {
-			allowed = callerActive
 		}
 	}
 	if !allowed {

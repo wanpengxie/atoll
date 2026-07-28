@@ -387,7 +387,7 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 
 	entries := make([]ListEntry, 0, len(rows))
 	for _, row := range rows {
-		eff := effectiveOpsFromGrants(caller, row.Grants, isMember, facts.Owner)
+		eff := effectiveOpsFromGrants(caller, row.Grants, isMember, facts.Active && facts.Owner)
 		ops := opSetFromEffective(eff)
 		if len(ops) == 0 {
 			continue // non-owner any-grant projection: zero rights on this row = invisible
