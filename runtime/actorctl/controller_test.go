@@ -478,10 +478,11 @@ func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 	}
 }
 
-// End is self-termination and nothing else. The caller proves its own current
-// term first and may only name itself as the target — in that order, the same
-// one every other self-acting arm uses.
-func TestEndOnlyAcceptsTheTargetItself(t *testing.T) {
+// End admits exactly two initiators, and they prove themselves differently:
+// the target names itself AND presents its own current term; the system face
+// names itself and presents no term, because it holds no record to have one.
+// Everyone else is refused, and so is a request that named nobody.
+func TestEndAcceptsTheTargetOrTheSystemFaceAndNoOneElse(t *testing.T) {
 	ctx := context.Background()
 	controller, _, parent := seedParent(t)
 	parentAttempt := attemptKeyOf(currentAttempt(t, controller, parent))
@@ -504,13 +505,14 @@ func TestEndOnlyAcceptsTheTargetItself(t *testing.T) {
 		t.Fatalf("a member ending someone else err=%v want ErrEndForbidden", err)
 	}
 
-	// A caller who is nobody is refused before the permission question is even
-	// reached: it can present no current term.
+	// A caller who is nobody is refused on the same ground as a member aiming at
+	// someone else: it is not one of the two initiators. Answering "you are not
+	// a member" would be a different claim than the one being made.
 	if _, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerActorID: "agent:stranger",
 		CallerAttempt: parentAttempt,
-	}); !errors.Is(err, ErrInactive) {
-		t.Fatalf("stranger End err=%v want ErrInactive", err)
+	}); !errors.Is(err, ErrEndForbidden) {
+		t.Fatalf("stranger End err=%v want ErrEndForbidden", err)
 	}
 
 	// The zero-value request. Both gates used to be sentinel-skipped by exactly
@@ -526,24 +528,28 @@ func TestEndOnlyAcceptsTheTargetItself(t *testing.T) {
 	}
 	if _, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerAttempt: parentAttempt,
-	}); !errors.Is(err, ErrInactive) {
-		t.Fatalf("End with no caller err=%v want ErrInactive", err)
+	}); !errors.Is(err, ErrEndForbidden) {
+		t.Fatalf("End with no caller err=%v want ErrEndForbidden", err)
 	}
 
-	// The system face holds no actor record, so it can present no current term.
-	// Removal by anyone other than the target is TerminalRemove's business.
-	if _, err := controller.End(ctx, EndRequest{
-		Target: parent, CallerActorID: actor.SystemActorID,
-		CallerAttempt: parentAttempt,
-	}); err == nil {
-		t.Fatal("the system face ended an actor through End")
-	}
-
-	// And the target itself, presenting its own term, still succeeds.
+	// The target itself, presenting its own term, succeeds.
 	if _, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerActorID: parent, CallerAttempt: parentAttempt,
 	}); err != nil {
 		t.Fatalf("the target ending itself: %v", err)
+	}
+
+	// The system face is the other legal initiator (v4.7 §2.3/§5.7/§12.1), and
+	// it carries no attempt at all — the kernel holds no actor record, so there
+	// is no term for it to name. Demanding one of every caller would delete this
+	// initiator by making its branch unreachable, which is what happened once.
+	if _, err := controller.End(ctx, EndRequest{
+		Target: siblingID, CallerActorID: actor.SystemActorID,
+	}); err != nil {
+		t.Fatalf("the system face ending a third party: %v", err)
+	}
+	if active, err := controller.IsActive(ctx, siblingID); err != nil || active {
+		t.Fatalf("the system face's End did not land: active=%v err=%v", active, err)
 	}
 }
 

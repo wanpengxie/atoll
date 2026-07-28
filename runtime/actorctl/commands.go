@@ -10,7 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-var ErrEndForbidden = errors.New("actorctl: only the target itself may end an actor")
+var ErrEndForbidden = errors.New("actorctl: only the target itself or the system face may end an actor")
 
 // Admit is the human birth command. Its whole ledger change happens inside the
 // ledger lock: durable insert first (fallible), publication after (infallible).
@@ -225,23 +225,27 @@ func (c *Controller) Terminal(
 	switch command.Kind {
 	case TerminalEnd:
 		request := command.End
-		// End is an actor ending ITSELF, and the proof is the A/G verdict every
-		// other self-acting arm presents: the caller names its own current term.
+		// End has exactly two legal initiators, and v4.7 names them in three
+		// places (§2.3, §5.7, §12.1 DoD): the target itself, and the system face.
 		//
-		// Both halves used to be sentinel-gated — an empty CallerAttempt skipped
-		// the term check, an empty CallerActorID skipped the authorization — so a
-		// zero-value request cleared both gates. A field nobody filled in is not a
-		// grant of authority, and it must never read as one; the checks are
-		// unconditional now.
+		// They prove themselves differently and the branches must stay apart. The
+		// target presents its own current term, the same A/G verdict every other
+		// self-acting arm presents. The system face presents none — the kernel is
+		// a constant and holds no actor record, so it has no term to name — and is
+		// admitted by naming itself.
 		//
-		// The system face is not a caller here either. It holds no actor record
-		// (the kernel is a constant, never a member), so it can present no current
-		// term, and the check above can never pass for it. Removal BY someone else
-		// is TerminalRemove, which has its own initiator gate.
-		if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
-			return Transition[TerminalResult]{}, err
-		}
-		if request.CallerActorID != request.Target {
+		// What is NOT an initiator is a field nobody filled in. This gate used to
+		// be sentinel-driven: an empty CallerAttempt skipped the term check and an
+		// empty CallerActorID skipped the authorization, so a zero-value request
+		// ended its target. An empty caller now falls to the refusal below, and an
+		// empty attempt fails the target's own term check.
+		switch request.CallerActorID {
+		case actor.SystemActorID:
+		case request.Target:
+			if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
+				return Transition[TerminalResult]{}, err
+			}
+		default:
 			return Transition[TerminalResult]{}, ErrEndForbidden
 		}
 		if _, active := c.actors[request.Target]; active {
