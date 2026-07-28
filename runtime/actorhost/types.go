@@ -22,7 +22,25 @@ var (
 	ErrInvalidDesired    = errors.New("actorhost: invalid desired")
 	ErrSameAttemptDrift  = errors.New("actorhost: same attempt changed immutable desired")
 	ErrHostClosed        = errors.New("actorhost: host closed")
-	ErrAttachRejected    = errors.New("actorhost: attach rejected")
+
+	// ErrAttachStale and ErrAttachNotReady are the two ways an attach is
+	// refused, and like ErrNotHosted/ErrNoEndpointYet below they mean opposite
+	// things to whoever retries and whoever reads the log.
+	//
+	// Neither is a permission verdict. Permission was already settled before
+	// Attach is called — the Controller authorized this actor, attempt and peer.
+	// What is read here is this host's own desired, a projection of Controller
+	// truth that converges on its own clock, so these say only how far along
+	// this host is.
+	//
+	// ErrAttachStale is "never": a newer attempt already holds the route, and no
+	// amount of retrying makes an older one current again. ErrAttachNotReady is
+	// "not yet": this host has not converged to a state where the route can be
+	// filed — a local body still owns the id, or its desired has not caught up
+	// with the placement the Controller already authorized. The same attach,
+	// unchanged, succeeds once convergence lands.
+	ErrAttachStale    = errors.New("actorhost: attach superseded by a newer attempt")
+	ErrAttachNotReady = errors.New("actorhost: host has not converged to accept this attach")
 
 	// ErrNotHosted and ErrNoEndpointYet are the two ways a delivery finds no
 	// endpoint, and they mean opposite things to whoever reads the log.

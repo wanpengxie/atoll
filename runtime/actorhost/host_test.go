@@ -557,7 +557,9 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 	}
 	stale := newTestBinding()
 	staleHandle := exactTestBinding(t, stale)
-	if err := host.Attach(id, low, staleHandle); !errors.Is(err, ErrAttachRejected) {
+	// A newer attempt holds the route, so this one is refused as superseded —
+	// never as "not yet", which would tell the caller to keep trying.
+	if err := host.Attach(id, low, staleHandle); !errors.Is(err, ErrAttachStale) {
 		t.Fatalf("stale attach error = %v", err)
 	}
 	select {
@@ -579,6 +581,90 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 	b1.finish()
 	b2.finish()
 	b3.finish()
+}
+
+// A refused attach says one of two opposite things, and the caller redials on
+// one and gives up on the other. Permission is not among them: by the time
+// Attach runs the Controller has already authorized this actor, attempt and
+// peer, so everything read here is this host's own desired — a projection that
+// converges on its own clock. Both refusals are statements about how far along
+// this host is.
+//
+// The distinction is the point, so this pins the two against each other rather
+// than each on its own: a single error value for both is what made a projection
+// that had not caught up indistinguishable from an attempt that lost.
+func TestAttachSeparatesNotConvergedFromSuperseded(t *testing.T) {
+	t.Parallel()
+	host, err := New(Config{
+		Domain:      "server",
+		BodyBuilder: func(BodyBuildInput) actorrt.Actor { return newHostTestActor() },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeHost(t, host)
+	id := actor.ActorID("agent:attach-verdicts")
+
+	a, b := testAttempt(t), testAttempt(t)
+	low, high := a, b
+	if string(low) > string(high) {
+		low, high = high, low
+	}
+
+	// Nothing desired here at all yet: the Controller authorized a placement
+	// this host has not been told about. Retrying is exactly right.
+	early := newTestBinding()
+	defer early.finish()
+	if err := host.Attach(id, high, exactTestBinding(t, early)); !errors.Is(err, ErrAttachNotReady) {
+		t.Fatalf("attach before any desired = %v, want not-ready", err)
+	}
+
+	// Desired names the OLDER attempt. The incoming newer one is still ahead of
+	// this host, not behind it — also retryable.
+	if err := host.AcceptFullDesired([]Desired{CarrierDesired{
+		ActorID: id, AttemptKey: low, PeerDomain: "daemon",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ahead := newTestBinding()
+	defer ahead.finish()
+	if err := host.Attach(id, high, exactTestBinding(t, ahead)); !errors.Is(err, ErrAttachNotReady) {
+		t.Fatalf("attach ahead of desired = %v, want not-ready", err)
+	}
+
+	// Now the newer attempt is desired AND holds the route. The older one has
+	// lost for good, and must not be told to keep trying.
+	if err := host.AcceptFullDesired([]Desired{CarrierDesired{
+		ActorID: id, AttemptKey: high, PeerDomain: "daemon",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	winner := newTestBinding()
+	defer winner.finish()
+	if err := host.Attach(id, high, exactTestBinding(t, winner)); err != nil {
+		t.Fatalf("the desired attempt was refused its route: %v", err)
+	}
+	loser := newTestBinding()
+	defer loser.finish()
+	lost := host.Attach(id, low, exactTestBinding(t, loser))
+	if !errors.Is(lost, ErrAttachStale) {
+		t.Fatalf("superseded attach = %v, want stale", lost)
+	}
+	// The whole point: one value cannot satisfy both readings.
+	if errors.Is(lost, ErrAttachNotReady) {
+		t.Fatal("the two refusals are the same value again")
+	}
+
+	// A closed host is not judging the attach at all, and says so in the words
+	// every other entry point on this type uses.
+	if err := host.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sealed := newTestBinding()
+	defer sealed.finish()
+	if err := host.Attach(id, high, exactTestBinding(t, sealed)); !errors.Is(err, ErrHostClosed) {
+		t.Fatalf("attach on a closed host = %v, want host-closed", err)
+	}
 }
 
 func TestOpaqueBindingIdentityAcceptsNonComparableResource(t *testing.T) {
@@ -637,7 +723,10 @@ func TestAttachDuringBodyBuildIsRetryableAndDoesNotOwnIncoming(t *testing.T) {
 	<-started
 	binding := newTestBinding()
 	handle := exactTestBinding(t, binding)
-	if err := host.Attach(id, key, handle); !errors.Is(err, ErrAttachRejected) {
+	// A build is in flight for this id. Retiring it is this host's own
+	// convergence work, so the refusal is "not yet" — the caller that redials
+	// gets in once the build settles.
+	if err := host.Attach(id, key, handle); !errors.Is(err, ErrAttachNotReady) {
 		t.Fatalf("Attach error = %v", err)
 	}
 	select {
