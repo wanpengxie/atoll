@@ -58,10 +58,9 @@ func (s *fakeRecordStore) Insert(
 		}
 	}
 	s.nextID++
-	id := draft.ID
-	if id == "" {
-		id = actor.ActorID(string(draft.Kind) + ":minted:" + string(rune('a'+s.nextID)))
-	}
+	// The real registry mints inside the insert transaction and no draft can ask
+	// for a name; this stand-in does the same.
+	id := actor.ActorID(string(draft.Kind) + ":minted:" + string(rune('a'+s.nextID)))
 	record := storespec.ActorRecord{
 		ID: id, Kind: draft.Kind, Principal: draft.Principal,
 		SourceDeclID: draft.SourceDeclID, CreatedAt: draft.CreatedAt,

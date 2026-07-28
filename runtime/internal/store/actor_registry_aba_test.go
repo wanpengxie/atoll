@@ -164,10 +164,18 @@ func TestActorRegistryABA_PrincipalReuseAfterEndMintsFreshIdentity(t *testing.T)
 	}
 }
 
-// An explicitly-named id that a tombstone already holds is refused outright:
-// the id-in-use check deliberately does NOT filter on deregistered_at, because a
-// dead identity keeps its name forever.
-func TestActorRegistryABA_ExplicitIDCannotReuseATombstone(t *testing.T) {
+// A dead identity keeps its name forever, and the mint is what enforces it: the
+// id-in-use check inside the insert transaction deliberately does NOT filter on
+// deregistered_at, so a tombstoned name is still taken and the mint steps past
+// it.
+//
+// This used to be tested through the caller-supplied id path, which asked for a
+// tombstoned name outright and was refused. That path is gone — a draft carries
+// no id, so nothing outside the transaction can name a birth — and the property
+// it guarded is pinned here where it actually lives. A successor born from the
+// same declaration at the same instant is the case that would collide, because
+// the mint derives the candidate from exactly those two.
+func TestActorRegistryABA_MintStepsPastATombstonedName(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
 
@@ -176,16 +184,18 @@ func TestActorRegistryABA_ExplicitIDCannotReuseATombstone(t *testing.T) {
 		t.Fatalf("Deregister: %v", err)
 	}
 
-	revival := agentDraft("decl:other", "v2", 3000)
-	revival.ID = old.ID
-	if _, err := rig.reg.Insert(ctx, revival); err == nil {
-		t.Fatalf("insert reusing the tombstoned id %q must be refused", old.ID)
+	fresh := rig.mustInsert(agentDraft("decl:aba", "v2", 1000))
+	if fresh.ID == old.ID {
+		t.Fatalf("the successor was minted onto the tombstoned name %q", old.ID)
 	}
-	if n := rig.rawRowCount(); n != 1 {
-		t.Fatalf("actor_registry rows = %d, want 1 (the refused insert wrote nothing)", n)
+	if n := rig.rawRowCount(); n != 2 {
+		t.Fatalf("actor_registry rows = %d, want 2 (tombstone + successor)", n)
 	}
 	if class, dereg, ok := rig.rawRow(old.ID); !ok || class != "v1" || !dereg.Valid {
 		t.Fatalf("tombstone was overwritten: class=%q dereg=%+v ok=%v", class, dereg, ok)
+	}
+	if class, dereg, ok := rig.rawRow(fresh.ID); !ok || class != "v2" || dereg.Valid {
+		t.Fatalf("successor row=%q dereg=%+v ok=%v", class, dereg, ok)
 	}
 }
 

@@ -223,8 +223,14 @@ func TestActorAuthorityDaemonFacadesUseAAndAGButNotC(t *testing.T) {
 		"a.slot.loadIdentity()",
 		"func (s outboundSchedule) Schedule(",
 		"s.slot.loadIdentity()",
+		// Lifecycle is a run arm, not an identity one. link's handler table makes
+		// carrying the attempt key the classification itself, and fork and
+		// end-self both carry one while schedule does not. This wall used to
+		// require loadConnected here, which pinned the local half as the only arm
+		// exempt from its own tier.
 		"func (l outboundLifecycle) Fork(",
-		"l.slot.loadConnected()",
+		"func (l outboundLifecycle) EndSelf(",
+		"l.slot.loadAttempt()",
 	} {
 		if !strings.Contains(outbound, required) {
 			t.Errorf("daemon capability lifetime mapping missing %q", required)
