@@ -76,18 +76,15 @@ type ChannelStores struct {
 // The raw *sql.DB is owned by the returned ChannelStores and never exposed.
 //
 // channelID is the channel scope, bound at construction. The store is bound to
-// ONE channel — its scope is fixed here, not re-asserted per call. The
-// membership control plane stamps this bound id into its mirror events (a
-// per-call channelID would be a pseudo-parameter the caller could lie about,
-// writing a foreign-channel row into this channel's sqlite — the same truth
-// corruption the harness shape-step dies to prevent; cf. FindByID, whose channel
-// scope is likewise the binding, not a per-call arg).
+// ONE channel — its scope is fixed here, not re-asserted per call. A per-call
+// channelID would be a pseudo-parameter the caller could lie about, writing a
+// foreign-channel row into this channel's sqlite — the same truth corruption
+// the harness shape-step dies to prevent; cf. FindByID, whose channel scope is
+// likewise the binding, not a per-call arg.
 //
-// onCommit is the post-commit signal source wired into BOTH write paths (the
-// request-path Append and the control-plane mirror append): the append
-// chokepoint produces "the log advanced" so a downstream tap is woken
-// identically regardless of which path committed. nil = no subscriber. May be
-// nil for read-only / test opens.
+// onCommit is the post-commit signal source wired into the append chokepoint:
+// committing a row produces "the log advanced" so a downstream tap is woken.
+// nil = no subscriber. May be nil for read-only / test opens.
 func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenOptions, onCommit func()) (*ChannelStores, error) {
 	db, err := openChannelDB(ctx, dbPath, opts)
 	if err != nil {

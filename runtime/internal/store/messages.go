@@ -104,9 +104,10 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 
 // appendTx is the raw INSERT of one envelope row within an existing tx. It
 // is an UNEXPORTED package func, NOT a method on an exported type: there is
-// deliberately no public "append into this tx" primitive. The only callers
-// are Append (which wraps it in its own tx) and the membership control-plane
-// op in actors.go (which needs the row + its mirror event in one atomic tx).
+// deliberately no public "append into this tx" primitive. Its one caller is
+// Append, which wraps it in its own tx. The shape is kept for the next caller
+// that genuinely needs a row and something else committed together — the point
+// is that such a caller must live in this package, not that one exists.
 // No receiver is taken — it touches only tx, so it can never be a capability
 // someone obtains by constructing a *messages.
 func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
