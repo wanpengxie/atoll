@@ -50,7 +50,7 @@ func TestStepEnvelopeShape_FieldMissing(t *testing.T) {
 // channel at all, and what lands on the row is deps.ChannelID.
 func TestChannelStampComesFromTheHarnessBindingAlone(t *testing.T) {
 	cs := newTestStore(t)
-	mint, err := New(testDeps(t, cs))
+	_, mint, err := New(testDeps(t, cs))
 	if err != nil {
 		t.Fatal(err)
 	}

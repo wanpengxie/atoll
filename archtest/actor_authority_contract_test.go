@@ -629,7 +629,7 @@ func TestChannelIdentityIsOnlyTheHarnessOwnBinding(t *testing.T) {
 
 	pen := readAuthorityContractFile(t, "../runtime/harness/pen.go")
 	for _, required := range []string{
-		"func (m *minter) WriteAdmitted(",
+		"func (w *admittedWriter) WriteAdmitted(",
 		"func (m *minter) MintAuthority(authority capauth.Authority, kind actor.Kind) Pen {",
 		"env.ChannelID = p.chain.deps.ChannelID",
 	} {

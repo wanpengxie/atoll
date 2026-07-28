@@ -88,15 +88,20 @@ type Pen interface {
 // each admission point (Spawn / attach / system closure). Minting any identity
 // is the highest capability in the system, so archtest confines harness.Minter
 // type references to the platform tree.
+//
+// A minter mints, and that is all it does. The admitted write is not on it and
+// is not reachable from it: they are two capabilities that happen to drive the
+// same chain, and no type in this package holds both. Minter used to embed the
+// admitted seam, which handed all three minting consumers a write none of them
+// calls.
 type Minter interface {
-	AdmittedWriter
-
 	// MintAuthority welds a live authority onto the chain. The returned Pen
 	// re-runs that authority's one complete verdict on every Write, so the
 	// same shell serves a local body for its whole term and a remote ingress
 	// for one operation.
 	MintAuthority(capauth.Authority, actor.Kind) Pen
 }
+
 
 // AdmittedWriter writes as an identity whose collaboration admission the caller
 // has ALREADY completed. Its one source boundary is timer fire, where the author

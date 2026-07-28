@@ -17,33 +17,6 @@ type minter struct {
 	chain *chain
 }
 
-// WriteAdmitted writes one envelope as the identity an already-completed
-// admission names. It hands back no pen, because there is no pen to hand: the
-// caller reached its own liveness verdict a moment ago and this write consumes
-// exactly that instant. A pen would outlive the verdict it was minted from,
-// and nothing in the type would say so — an identity that has since ended
-// would keep writing, silently.
-//
-// One admission, one write. The obligation is not enforced here; it is
-// unstatable.
-func (m *minter) WriteAdmitted(
-	ctx context.Context,
-	admission storespec.IdentityAdmission,
-	env *message.Envelope,
-) (WriteResult, error) {
-	if !admission.Valid() {
-		return WriteResult{}, errors.New("harness: invalid admission")
-	}
-	pen := &boundPen{
-		chain: m.chain,
-		principal: caller{
-			actorID: admission.ID,
-			kind:    admission.Kind,
-		},
-	}
-	return pen.Write(ctx, env)
-}
-
 func (m *minter) MintAuthority(authority capauth.Authority, kind actor.Kind) Pen {
 	if authority == nil || authority.ActorID() == "" {
 		return rejectedPen{}
@@ -115,4 +88,38 @@ type rejectedPen struct{}
 
 func (rejectedPen) Write(context.Context, *message.Envelope) (WriteResult, error) {
 	return WriteResult{}, errors.New("harness: invalid authority")
+}
+
+// admittedWriter is the one-write seam, a separate object from the minter. It
+// mints nothing and cannot: the two drive the same chain and share nothing else,
+// so a consumer handed one of them cannot reach the other.
+type admittedWriter struct {
+	chain *chain
+}
+
+// WriteAdmitted writes one envelope as the identity an already-completed
+// admission names. It hands back no pen, because there is no pen to hand: the
+// caller reached its own liveness verdict a moment ago and this write consumes
+// exactly that instant. A pen would outlive the verdict it was minted from,
+// and nothing in the type would say so — an identity that has since ended
+// would keep writing, silently.
+//
+// One admission, one write. The obligation is not enforced here; it is
+// unstatable.
+func (w *admittedWriter) WriteAdmitted(
+	ctx context.Context,
+	admission storespec.IdentityAdmission,
+	env *message.Envelope,
+) (WriteResult, error) {
+	if !admission.Valid() {
+		return WriteResult{}, errors.New("harness: invalid admission")
+	}
+	pen := &boundPen{
+		chain: w.chain,
+		principal: caller{
+			actorID: admission.ID,
+			kind:    admission.Kind,
+		},
+	}
+	return pen.Write(ctx, env)
 }

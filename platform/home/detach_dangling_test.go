@@ -85,7 +85,7 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 	}
 
 	// Collaboration is untouched: a message to a dangling member is accepted.
-	result, err := h.minter.WriteAdmitted(
+	result, err := h.admittedWriter.WriteAdmitted(
 		ctx,
 		storespec.IdentityAdmission{ID: sender, Kind: actor.KindHuman},
 		&message.Envelope{

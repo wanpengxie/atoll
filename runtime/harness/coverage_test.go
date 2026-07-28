@@ -62,7 +62,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
 	// NowMs / Logger nil → defaults filled.
-	m, err := New(Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}})
+	m, _, err := New(Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestStepName_DefaultUnknownID(t *testing.T) {
 // chainWith builds the internal chain with stub deps.
 func chainWith(t *testing.T, lg storespec.MessageLog) *chain {
 	t.Helper()
-	m, err := New(Deps{
+	m, _, err := New(Deps{
 		ChannelID: testChannelID,
 		Log:       lg,
 		Presence:  testAuthority{},

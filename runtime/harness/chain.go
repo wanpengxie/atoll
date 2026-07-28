@@ -44,9 +44,14 @@ type chain struct {
 // be referenced by the platform tree (enforced by
 // archtest.TestHarnessConstructionConfinedToPlatform); downstream speaks the
 // harness.Pen / WriteResult seam, never builds the engine itself.
-func New(deps Deps) (Minter, error) {
+// New returns the two capabilities separately because they ARE separate: the
+// minter mints self-judging pens, the writer performs one write under a verdict
+// its caller already reached. They drive the same chain and share nothing else.
+// Handing back one object would put both in whatever field the caller stores it
+// in, which is how three consumers that only mint ended up holding a write.
+func New(deps Deps) (Minter, AdmittedWriter, error) {
 	if err := deps.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if deps.NowMs == nil {
 		deps.NowMs = func() int64 { return time.Now().UnixMilli() }
@@ -70,7 +75,8 @@ func New(deps Deps) (Minter, error) {
 	}
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].ID() < steps[j].ID() })
 
-	return &minter{chain: &chain{deps: deps, steps: steps}}, nil
+	engine := &chain{deps: deps, steps: steps}
+	return &minter{chain: engine}, &admittedWriter{chain: engine}, nil
 }
 
 // write runs the chain against env. The envelope

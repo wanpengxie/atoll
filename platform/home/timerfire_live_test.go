@@ -46,7 +46,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 	}
 	author := declared[0]
 
-	sink, err := timerfire.New(h.controller, h.minter)
+	sink, err := timerfire.New(h.controller, h.admittedWriter)
 	if err != nil {
 		t.Fatal(err)
 	}

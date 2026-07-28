@@ -80,7 +80,7 @@ func newFireMapFixture(t *testing.T, authority storespec.CollaborationAuthority)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 
-	minter, err := harness.New(harness.Deps{
+	_, minter, err := harness.New(harness.Deps{
 		ChannelID: fireMapChannelID,
 		Log:       cs.Log,
 		Presence:  fireMapPresence{},
@@ -285,7 +285,7 @@ func TestFireSinkPropagatesAuthorityFaultAsTransient(t *testing.T) {
 // first fire (hours later, in the run loop) instead of at construction.
 func TestNewFailsFastOnMissingOrgan(t *testing.T) {
 	authority := fireMapAuthority{}
-	minter, err := harness.New(harness.Deps{
+	_, minter, err := harness.New(harness.Deps{
 		ChannelID: fireMapChannelID,
 		Log:       nopMessageLog{},
 		Presence:  fireMapPresence{},

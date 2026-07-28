@@ -82,7 +82,11 @@ type Home struct {
 	resourceRead storespec.ResourceReadStore
 	closeStore   func() error
 
-	minter       harness.Minter
+	// The two harness capabilities are held apart, exactly as they are handed
+	// out: minter goes to the three components that mint pens, admittedWriter
+	// goes to timer fire and nowhere else. Home writes through neither.
+	minter         harness.Minter
+	admittedWriter harness.AdmittedWriter
 	outbox       resourcespec.ResourceOutbox
 	stateHandles accessdoor.StateHandleResolver
 	engine       *schedule.Engine
