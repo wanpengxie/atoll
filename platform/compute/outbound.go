@@ -857,17 +857,29 @@ func (s outboundSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
 	return bundle.Schedule.Ack(ctx, id)
 }
 
+// outboundLifecycle acts AS THE CURRENT TERM, alongside the pen and the
+// resource arm. The wire says so already: link's handler table states that
+// carrying the attempt key IS the permission matrix, and fork and end-self both
+// carry it while schedule — the one arm that acts as an identity across terms —
+// does not. This gate was the local half of that classification, missing.
+//
+// It is not a permission verdict. The Controller rules on permission and
+// refuses a stale caller either way; what is being read here is the daemon's
+// own applied plan, and that plan is already what this daemon used to decide
+// the superseded body must go — the reconcile pass starts retiring it the
+// moment the plan lands. Carrying a body's outbound work while tearing it down
+// on the authority of the same plan is the daemon disagreeing with itself.
 type outboundLifecycle struct{ slot *OutboundSlot }
 
 func (l outboundLifecycle) Fork(ctx context.Context, requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
-	bundle, err := l.slot.loadConnected()
+	bundle, err := l.slot.loadAttempt()
 	if err != nil {
 		return "", err
 	}
 	return bundle.Lifecycle.Fork(ctx, requestID, spec)
 }
 func (l outboundLifecycle) EndSelf(ctx context.Context, request actorcaps.EndSelfRequest) error {
-	bundle, err := l.slot.loadConnected()
+	bundle, err := l.slot.loadAttempt()
 	if err != nil {
 		return err
 	}

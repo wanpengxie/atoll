@@ -721,15 +721,29 @@ func TestAcceptedPlanReplacementFencesRunArmsButKeepsIdentityArms(t *testing.T) 
 	if _, err := b1.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:stale-run", nil, nil); !errors.Is(err, ErrOutboundNotCurrent) {
 		t.Fatalf("G1 Access after accepted G2 err=%v", err)
 	}
+	// Lifecycle is a run arm too — link's handler table makes carrying the
+	// attempt key the classification itself, and fork and end-self both carry
+	// one. A body this daemon has already begun retiring, on the authority of
+	// the very plan being read here, may not fork a child or end its identity.
+	if _, err := b1.prepared.Caps.Lifecycle.Fork(
+		t.Context(), message.ID("stale-fork"), actorcaps.ForkSpec{},
+	); !errors.Is(err, ErrOutboundNotCurrent) {
+		t.Fatalf("G1 Fork after accepted G2 err=%v", err)
+	}
+	if err := b1.prepared.Caps.Lifecycle.EndSelf(
+		t.Context(), actorcaps.EndSelfRequest{},
+	); !errors.Is(err, ErrOutboundNotCurrent) {
+		t.Fatalf("G1 EndSelf after accepted G2 err=%v", err)
+	}
 	if _, err := b1.prepared.Caps.State.Invoke(t.Context(), access.OpRead, "resource:identity", nil, nil); err != nil {
 		t.Fatalf("G1 State lost A-level authority across replacement: %v", err)
 	}
 	if _, err := b1.prepared.Caps.Schedule.Schedule(t.Context(), schedule.ScheduleReq{}); err != nil {
 		t.Fatalf("G1 Schedule lost A-level authority across replacement: %v", err)
 	}
-	if probe.penCalls.Load() != 0 || probe.accessCalls.Load() != 0 {
-		t.Fatalf("stale run arms reached transport: pen=%d access=%d",
-			probe.penCalls.Load(), probe.accessCalls.Load())
+	if probe.penCalls.Load() != 0 || probe.accessCalls.Load() != 0 || probe.lifecycleCalls.Load() != 0 {
+		t.Fatalf("stale run arms reached transport: pen=%d access=%d lifecycle=%d",
+			probe.penCalls.Load(), probe.accessCalls.Load(), probe.lifecycleCalls.Load())
 	}
 	if probe.stateCalls.Load() != 1 || probe.scheduleCalls.Load() != 1 {
 		t.Fatalf("identity arms did not reach transport: state=%d schedule=%d",
