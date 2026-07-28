@@ -344,7 +344,7 @@ func fullSetup(t *testing.T, env *testEnv) setupResult {
 
 	chBody, cookies := createChannel(t, env, cookies, "general")
 	chID := chBody["id"].(string)
-	actorID, _ := env.app.ResolvePrincipalForTest(chID, actor.KindHuman, userID)
+	actorID, _ := env.app.ResolvePrincipalForTest(chID, userID)
 	boostID, _ := env.app.ResolveSourceForTest(chID, "sys:boost")
 
 	return setupResult{

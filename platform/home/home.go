@@ -80,7 +80,6 @@ type Home struct {
 	bindings     storespec.DaemonBindingStore
 	defaultAgent *defaultAgentFold
 	resourceRead storespec.ResourceReadStore
-	principals   storespec.PrincipalRegistry
 	closeStore   func() error
 
 	minter       harness.Minter

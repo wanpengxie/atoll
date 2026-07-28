@@ -415,6 +415,22 @@ func TestNarrowProjectionsAnswerOneQuestionEach(t *testing.T) {
 		t.Fatalf("kernel answered identity facts: found=%v err=%v", found, err)
 	}
 
+	// ResolvePrincipal is ActorFacts' principal read backwards, and it answers
+	// off the same ledger — the Platform door no longer holds a registry face to
+	// ask instead.
+	if id, found, err := controller.ResolvePrincipal("carol"); err != nil || !found || id != "human:c" {
+		t.Fatalf("resolve principal carol=(%s,%v,%v)", id, found, err)
+	}
+	if id, found, err := controller.ResolvePrincipal("nobody"); err != nil || found {
+		t.Fatalf("an unknown principal resolved: (%s,%v,%v)", id, found, err)
+	}
+	// Both agents above carry no principal. Asking for nothing must not hand one
+	// of them back — the same empty-matches-empty hole the introduction verdict
+	// had to close.
+	if id, found, err := controller.ResolvePrincipal(""); err != nil || found {
+		t.Fatalf("the empty principal resolved to %q (found=%v err=%v)", id, found, err)
+	}
+
 	// The declaration reconcile list is the pull loop's own comparison input:
 	// it carries the definition, the roster deliberately does not.
 	declared, err := controller.DeclaredReconcileList()

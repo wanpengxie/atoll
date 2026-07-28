@@ -14,7 +14,6 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform/channelhost"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
@@ -70,7 +69,7 @@ func (a *App) readerForPrincipal(ctx context.Context, bundle channelhost.Bundle,
 	if principal == "" {
 		return channel.Reader{}, observeUnavailable, nil
 	}
-	memberID, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, principal)
+	memberID, found, err := bundle.View().ResolvePrincipal(ctx, principal)
 	if err != nil {
 		return channel.Reader{}, observeUnavailable, err
 	}

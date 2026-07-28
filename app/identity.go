@@ -66,7 +66,7 @@ func (a *App) requireChannelMemberActor(c *gin.Context) (string, actor.ActorID, 
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return "", "", false
 	}
-	id, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), actor.KindHuman, middleware.UserID(c))
+	id, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), middleware.UserID(c))
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return "", "", false

@@ -1,12 +1,38 @@
 package home
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
+
+// endIdentityForFixture makes one identity dead so a test can ask what the
+// channel does afterwards. It is fixture setup, never the thing under test.
+//
+// Remove is the door: ending someone OTHER than yourself is TerminalRemove,
+// which production drives from the admission and realm-ops handlers and which
+// requires an active member as its initiator. End is self-termination and
+// presents the caller's own current term, so it is not the command a test
+// reaches for when it simply wants an identity gone. (These tests used to pass
+// actor.SystemActorID to End; the kernel holds no actor record, so it could
+// never present a term, and that escape is gone.)
+func endIdentityForFixture(t *testing.T, h *Home, id actor.ActorID) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := h.actors.Remove(ctx, actorctl.RemoveRequest{
+		Target: id, InitiatorActorID: id,
+	}); err != nil {
+		t.Fatalf("remove identity %s: %v", id, err)
+	}
+	if active, err := h.controller.IsActive(ctx, id); err != nil || active {
+		t.Fatalf("identity %s survived removal: active=%v err=%v", id, active, err)
+	}
+}
 
 // Shared scaffolding for the restart-dimension acceptance surface: a schedule
 // clock whose observed "now" the test can jump forward AFTER a durable row is

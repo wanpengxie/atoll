@@ -100,7 +100,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.requests = cs.Requests
 	h.bindings = cs.Bindings
 	h.resourceRead = cs.ResourceRead
-	h.principals = cs.Principals
 	h.defaultAgent = openDefaultAgentFold(ctx, h, cs.Query, logger)
 
 	if cfg.Bootstrap && cfg.Genesis != nil {

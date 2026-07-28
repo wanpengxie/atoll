@@ -534,11 +534,7 @@ func TestEndedIdentityLosesItsStateHandleTheMomentEndCommits(t *testing.T) {
 			t.Fatalf("%s identity %s state create: %+v err=%v", name, id, out, err)
 		}
 
-		if _, err := h.actors.End(ctx, actorctl.EndRequest{
-			Target: id, CallerActorID: actor.SystemActorID, Reason: "test",
-		}); err != nil {
-			t.Fatalf("End %s identity %s: %v", name, id, err)
-		}
+		endIdentityForFixture(t, h, id)
 
 		// The handle already in hand carries the authority, never a snapshot:
 		// the door re-runs the verdict on every call, so it is refused now.

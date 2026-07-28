@@ -337,12 +337,12 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 			id = ids[0]
 		}
 	} else {
-		id, found, err = bundle.View().ResolvePrincipal(context.Background(), memberKind, member)
+		id, found, err = bundle.View().ResolvePrincipal(context.Background(), member)
 	}
 	if err != nil || !found {
 		t.Fatalf("ResolvePrincipal(%s)=(%s,%v,%v)", member, id, found, err)
 	}
-	ownerID, ownerFound, ownerErr := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, owner)
+	ownerID, ownerFound, ownerErr := bundle.View().ResolvePrincipal(context.Background(), owner)
 	if ownerErr != nil || !ownerFound {
 		t.Fatalf("ResolvePrincipal(owner %s)=(%s,%v,%v)", owner, ownerID, ownerFound, ownerErr)
 	}

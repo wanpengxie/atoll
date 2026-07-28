@@ -158,6 +158,19 @@ type IdentityRoster interface {
 	ActiveIdentities() ([]ActiveIdentity, error)
 }
 
+// PrincipalIdentity answers the inverse of ActorFacts' principal: given a login
+// principal, which member is it. Question-shaped by construction — it returns an
+// id, never a record — and it is the ONLY principal-axis read outside the store,
+// so a login can be turned into a member without anyone holding the registry.
+//
+// A principal is a human-only fact (the registry refuses a non-human one), so
+// the answer needs no kind to disambiguate. An empty principal is not a query
+// and never resolves: every non-human carries "" and must not be reachable by
+// asking for nothing.
+type PrincipalIdentity interface {
+	ResolvePrincipal(principal string) (actor.ActorID, bool, error)
+}
+
 // DeclaredInstanceReader answers "which actors did this declaration produce".
 // It returns ids alone: the definition axis belongs to the declaration pull
 // loop's own projection and never leaks into the business membrane.

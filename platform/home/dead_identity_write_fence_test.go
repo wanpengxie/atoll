@@ -88,11 +88,7 @@ func TestEndedIdentityPenIsRefusedOnTheMessageWritePath(t *testing.T) {
 		t.Fatalf("the live write landed %d rows, want 1", rows)
 	}
 
-	if _, err := h.actors.End(ctx, actorctl.EndRequest{
-		Target: author, CallerActorID: actor.SystemActorID, Reason: "test",
-	}); err != nil {
-		t.Fatalf("end the author: %v", err)
-	}
+	endIdentityForFixture(t, h, author)
 
 	// The very same pen, one call later.
 	dead, err := pen.Write(ctx, fenceEnv("write-fence:dead"))
@@ -246,15 +242,11 @@ func TestEndingAnActorMintsNoGrantOnTheResourcesItCreated(t *testing.T) {
 		}
 	}
 
-	// The real command — the one an operator, a declaration removal and the
-	// system kernel all land on.
-	if _, err := h.actors.End(ctx, actorctl.EndRequest{
-		Target: creator, CallerActorID: actor.SystemActorID, Reason: "test",
-	}); err != nil {
-		t.Fatalf("end the creator: %v", err)
-	}
-	// The death really landed, so what follows is being asked of a channel
-	// whose creator is gone — not of one where End quietly did nothing.
+	// The real command — the one an operator and a declaration removal both
+	// land on. The helper also proves the death landed, so what follows is
+	// being asked of a channel whose creator is gone, not of one where the
+	// command quietly did nothing.
+	endIdentityForFixture(t, h, creator)
 	if active, err := h.controller.IsActive(ctx, creator); err != nil || active {
 		t.Fatalf("the creator survived its own End: active=%v err=%v", active, err)
 	}

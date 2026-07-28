@@ -33,7 +33,7 @@ func (a *App) reconcilePrincipalChannel(ctx context.Context, chID channel.ID, pr
 	if !ok {
 		return
 	}
-	id, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, principal)
+	id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
 	if err != nil {
 		a.logger.Warn("membership projection reconcile failed", "channel", chID, "principal", principal, "err", err)
 		return
@@ -165,7 +165,7 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 			failed = append(failed, membership.channel)
 			continue
 		}
-		id, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, principal)
+		id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
 		if err != nil {
 			failed = append(failed, membership.channel)
 			continue

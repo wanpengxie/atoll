@@ -135,7 +135,7 @@ func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind
 	if err != nil {
 		return "", err
 	}
-	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, owner)
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), owner)
 	if err != nil || !found {
 		return "", fmt.Errorf("resolve owner actor: found=%v err=%v", found, err)
 	}
@@ -151,12 +151,12 @@ func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind
 	return result.ActorID, err
 }
 
-func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal string) (actor.ActorID, error) {
+func (a *App) ResolvePrincipalForTest(chID string, principal string) (actor.ActorID, error) {
 	bundle, ok := a.host.Acquire(channel.ID(chID))
 	if !ok {
 		return "", errTestChannelNotLoaded
 	}
-	id, ok, err := bundle.View().ResolvePrincipal(context.Background(), kind, principal)
+	id, ok, err := bundle.View().ResolvePrincipal(context.Background(), principal)
 	if err != nil {
 		return "", err
 	}
@@ -203,7 +203,7 @@ func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
 	if err != nil || !found {
 		return err
 	}
-	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, owner)
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), owner)
 	if err != nil || !found {
 		return err
 	}

@@ -172,7 +172,7 @@ func (a *App) respondCreatedChannel(c *gin.Context, id string) {
 		if value, found, err := bundle.View().DefaultAgent(c.Request.Context()); err == nil && found {
 			row["default_agent"] = string(value)
 		}
-		if owner, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), actor.KindHuman, middleware.UserID(c)); err == nil && found {
+		if owner, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), middleware.UserID(c)); err == nil && found {
 			row["creator_actor_id"] = string(owner)
 		}
 	}
