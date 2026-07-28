@@ -232,7 +232,10 @@ func TestForkReplayReturnsTheFirstChildForever(t *testing.T) {
 
 	// Even after the child is terminated, the same RequestID still answers with
 	// the original id: one request can never produce two live children.
-	if _, err := controller.End(ctx, EndRequest{Target: child, CallerActorID: child}); err != nil {
+	if _, err := controller.End(ctx, EndRequest{
+		Target: child, CallerActorID: child,
+		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, child)),
+	}); err != nil {
 		t.Fatalf("end child: %v", err)
 	}
 	third, err := controller.Fork(ctx, request)
@@ -446,7 +449,9 @@ func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 	}
 
 	// Ending the parent must NOT spread to its fork: there is no lineage.
-	transition, err := controller.End(ctx, EndRequest{Target: parent, CallerActorID: parent})
+	transition, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: parent, CallerAttempt: attempt,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,18 +463,72 @@ func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 	}
 }
 
-func TestEndOnlyAcceptsTheTargetOrTheSystemFace(t *testing.T) {
+// End is self-termination and nothing else. The caller proves its own current
+// term first and may only name itself as the target — in that order, the same
+// one every other self-acting arm uses.
+func TestEndOnlyAcceptsTheTargetItself(t *testing.T) {
 	ctx := context.Background()
 	controller, _, parent := seedParent(t)
+	parentAttempt := attemptKeyOf(currentAttempt(t, controller, parent))
+
+	// A member in good standing, acting as its current term, aimed at someone
+	// else. This is the case ErrEndForbidden exists for: identity is proven, the
+	// permission is what is missing.
+	sibling, err := controller.Fork(ctx, ForkRequest{
+		CallerActorID: parent, CallerAttempt: parentAttempt, RequestID: "req-sibling",
+		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	siblingID := sibling.Result.ChildActorID
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: siblingID,
+		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, siblingID)),
+	}); !errors.Is(err, ErrEndForbidden) {
+		t.Fatalf("a member ending someone else err=%v want ErrEndForbidden", err)
+	}
+
+	// A caller who is nobody is refused before the permission question is even
+	// reached: it can present no current term.
 	if _, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerActorID: "agent:stranger",
-	}); !errors.Is(err, ErrEndForbidden) {
-		t.Fatalf("stranger End err=%v want ErrEndForbidden", err)
+		CallerAttempt: parentAttempt,
+	}); !errors.Is(err, ErrInactive) {
+		t.Fatalf("stranger End err=%v want ErrInactive", err)
+	}
+
+	// The zero-value request. Both gates used to be sentinel-skipped by exactly
+	// this shape, and it ended the target.
+	if _, err := controller.End(ctx, EndRequest{Target: parent}); err == nil {
+		t.Fatal("a zero-value EndRequest ended the target")
+	}
+	// The same, one field at a time: neither omission may read as authority.
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: parent,
+	}); !errors.Is(err, ErrStaleAttempt) {
+		t.Fatalf("End with no attempt err=%v want ErrStaleAttempt", err)
 	}
 	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerAttempt: parentAttempt,
+	}); !errors.Is(err, ErrInactive) {
+		t.Fatalf("End with no caller err=%v want ErrInactive", err)
+	}
+
+	// The system face holds no actor record, so it can present no current term.
+	// Removal by anyone other than the target is TerminalRemove's business.
+	if _, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerActorID: actor.SystemActorID,
+		CallerAttempt: parentAttempt,
+	}); err == nil {
+		t.Fatal("the system face ended an actor through End")
+	}
+
+	// And the target itself, presenting its own term, still succeeds.
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: parent, CallerAttempt: parentAttempt,
 	}); err != nil {
-		t.Fatalf("system face End: %v", err)
+		t.Fatalf("the target ending itself: %v", err)
 	}
 }
 

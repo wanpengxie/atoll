@@ -10,7 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-var ErrEndForbidden = errors.New("actorctl: only the target itself or the system face may end an actor")
+var ErrEndForbidden = errors.New("actorctl: only the target itself may end an actor")
 
 // Admit is the human birth command. Its whole ledger change happens inside the
 // ledger lock: durable insert first (fallible), publication after (infallible).
@@ -225,13 +225,23 @@ func (c *Controller) Terminal(
 	switch command.Kind {
 	case TerminalEnd:
 		request := command.End
-		if request.CallerAttempt != "" {
-			if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
-				return Transition[TerminalResult]{}, err
-			}
+		// End is an actor ending ITSELF, and the proof is the A/G verdict every
+		// other self-acting arm presents: the caller names its own current term.
+		//
+		// Both halves used to be sentinel-gated — an empty CallerAttempt skipped
+		// the term check, an empty CallerActorID skipped the authorization — so a
+		// zero-value request cleared both gates. A field nobody filled in is not a
+		// grant of authority, and it must never read as one; the checks are
+		// unconditional now.
+		//
+		// The system face is not a caller here either. It holds no actor record
+		// (the kernel is a constant, never a member), so it can present no current
+		// term, and the check above can never pass for it. Removal BY someone else
+		// is TerminalRemove, which has its own initiator gate.
+		if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
+			return Transition[TerminalResult]{}, err
 		}
-		caller := request.CallerActorID
-		if caller != "" && caller != actor.SystemActorID && caller != request.Target {
+		if request.CallerActorID != request.Target {
 			return Transition[TerminalResult]{}, ErrEndForbidden
 		}
 		if _, active := c.actors[request.Target]; active {
