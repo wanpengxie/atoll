@@ -95,8 +95,11 @@ check_live ci "gateway binding semantics" \
   'binding slot|binding registry|binding_gen|bindingGen|绑定世代|stale.binding|FrameDetach' \
   drivers/gateway/ platform/subjectgate/ platform/internal/humancell/ platform/home/
 
+# onRevoked/onRevoke are word-bounded: the retired symbols were standalone
+# callback identifiers, and the bare substring also lives inside the legitimate
+# link session-end reason SessionRevoked ("Sessi|onRevoked").
 check_live cs "revocation-source migration" \
-  'RevocationSource|SubscribeRevoked|onRevoked|SetRevokeSink|onRevoke' \
+  'RevocationSource|SubscribeRevoked|\bonRevoked\b|SetRevokeSink|\bonRevoke\b' \
   drivers/gateway/ platform/ app/ e2e/ lib/
 
 check_live cs "channel-bound websocket URL" \
