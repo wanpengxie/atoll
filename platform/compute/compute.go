@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -24,22 +23,18 @@ const (
 	redialMaxBackoff     = 30 * time.Second
 )
 
-// Config configures one daemon execution domain. PlanSource is the sole
-// authenticated plan/factory snapshot; actor bodies and the physical link are
-// deliberately owned by different organs.
+// Config configures one daemon execution domain. Factories resolves a class
+// into this daemon's factory at body-build time — the desired snapshot pulled
+// over the link is the ONE plan ledger, exactly as on the server host; actor
+// bodies and the physical link are deliberately owned by different organs.
 type Config struct {
 	ServerWS         string
 	Logger           *slog.Logger
-	PlanSource       PlanSource
+	Factories        ActorFactorySource
 	Poll             time.Duration
 	StorageHost      StorageHost
 	ScrubberInterval time.Duration
 	LocalFileOpener  LocalFileOpener
-}
-
-type PlanSource interface {
-	ApplyPlan([]platform.PlanActor) error
-	ActorFactorySource
 }
 
 type daemonHostEvents struct{ outbound *DaemonOutbound }
@@ -60,7 +55,14 @@ func (e *daemonHostEvents) OnBodyObs(
 	e.outbound.publishObs(self, kind, value)
 }
 
-func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.BodyBuilder {
+func daemonBodyBuilder(
+	outbound *DaemonOutbound,
+	factories ActorFactorySource,
+	logger *slog.Logger,
+) actorhost.BodyBuilder {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return func(input actorhost.BodyBuildInput) actorrt.Actor {
 		prepared, prepareErr := outbound.Prepare(
 			input.ActorID,
@@ -79,12 +81,18 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 				_ = prepared.Slot.Close()
 			}
 		}()
-		factory, ok := source.LookupExact(
+		// The factory is derived here, from the spec this build claim carries —
+		// the exact generation by construction. A class this daemon cannot build
+		// fails this body alone, loudly; the Host retries it on its own backoff
+		// while every other row converges.
+		factory, ok := factories.BuildClass(
 			input.ActorID,
-			input.AttemptKey,
-			input.ExecutionSpec,
+			input.ExecutionSpec.Class,
+			input.ExecutionSpec.Config,
 		)
 		if !ok {
+			logger.Warn("platform.compute.actor_factory_missing",
+				"actor", input.ActorID, "class", input.ExecutionSpec.Class)
 			return nil
 		}
 		hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {
@@ -100,8 +108,8 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 }
 
 func Run(ctx context.Context, cfg Config) (retErr error) {
-	if cfg.PlanSource == nil {
-		return errors.New("compute: PlanSource required")
+	if cfg.Factories == nil {
+		return errors.New("compute: Factories required")
 	}
 	if cfg.ServerWS == "" {
 		return errors.New("compute: ServerWS required")
@@ -202,7 +210,7 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 				Domain:      domain,
 				Logger:      logger,
 				Events:      &daemonHostEvents{outbound: outbound},
-				BodyBuilder: daemonBodyBuilder(outbound, cfg.PlanSource),
+				BodyBuilder: daemonBodyBuilder(outbound, cfg.Factories, logger),
 			})
 			if err != nil {
 				_ = dialer.Close()
@@ -229,7 +237,7 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 		}
 		storage.Rebind(dialer)
 
-		if err := acceptDaemonPlan(ctx, dialer, cfg.PlanSource, host); err != nil {
+		if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
 			logger.Warn("platform.compute.plan_rejected", "err", err)
 			_ = session.Close()
 			<-session.Done()
@@ -262,11 +270,11 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 			case <-session.Done():
 				connected = false
 			case <-planWake:
-				if err := acceptDaemonPlan(ctx, dialer, cfg.PlanSource, host); err != nil {
+				if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
 					logger.Warn("platform.compute.plan_refresh_failed", "err", err)
 				}
 			case <-ticker.C:
-				if err := acceptDaemonPlan(ctx, dialer, cfg.PlanSource, host); err != nil {
+				if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
 					logger.Warn("platform.compute.plan_refresh_failed", "err", err)
 				}
 			}
@@ -283,17 +291,21 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 	}
 }
 
+// acceptDaemonPlan pulls the authenticated plan and hands it to the Host as
+// one desired snapshot. That is the whole of it: there is no second ledger to
+// publish into, so nothing can sit on a different generation than the desired
+// the Host serves. A row this daemon cannot build is discovered at that row's
+// own body build, logged there, and retried on the Host's backoff — it does
+// not hold the rest of the plan hostage the way whole-plan eager rejection
+// did (which kept truth-dead bodies running and healthy rows waiting for as
+// long as one bad row stayed bad).
 func acceptDaemonPlan(
 	ctx context.Context,
 	dialer *link.Dialer,
-	source PlanSource,
 	host *actorhost.HostSupervisor,
 ) error {
 	plan, err := dialer.PullPlan(ctx)
 	if err != nil {
-		return err
-	}
-	if err := source.ApplyPlan(plan); err != nil {
 		return err
 	}
 	desired := make([]actorhost.Desired, 0, len(plan))

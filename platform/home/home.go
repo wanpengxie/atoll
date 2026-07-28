@@ -87,9 +87,9 @@ type Home struct {
 	// goes to timer fire and nowhere else. Home writes through neither.
 	minter         harness.Minter
 	admittedWriter harness.AdmittedWriter
-	outbox       resourcespec.ResourceOutbox
-	stateHandles accessdoor.StateHandleResolver
-	engine       *schedule.Engine
+	outbox         resourcespec.ResourceOutbox
+	stateHandles   accessdoor.StateHandleResolver
+	engine         *schedule.Engine
 
 	signal       *tap.Signal
 	delivery     *tap.Pump

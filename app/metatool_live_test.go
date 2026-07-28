@@ -228,7 +228,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 	})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan, Poll: 20 * time.Millisecond},
+			compute.Config{ServerWS: serverWS, Logger: logger, Factories: plan, Poll: 20 * time.Millisecond},
 		)
 	}()
 	t.Cleanup(func() {

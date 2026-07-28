@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -9,16 +10,14 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
-type emptyComputePlan struct{}
+type emptyComputeFactories struct{}
 
-func (emptyComputePlan) ApplyPlan([]platform.PlanActor) error { return nil }
-func (emptyComputePlan) LookupExact(
+func (emptyComputeFactories) BuildClass(
 	actor.ActorID,
-	actorhost.AttemptKey,
-	actorhost.ExecutionSpec,
+	string,
+	json.RawMessage,
 ) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
 }
@@ -28,7 +27,7 @@ func (emptyComputePlan) LookupExact(
 func TestRunReturnsOnCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := Run(ctx, Config{ServerWS: "ws://invalid", PlanSource: emptyComputePlan{}}); err != nil {
+	if err := Run(ctx, Config{ServerWS: "ws://invalid", Factories: emptyComputeFactories{}}); err != nil {
 		t.Fatal(err)
 	}
 }

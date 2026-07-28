@@ -49,13 +49,11 @@ type daemonForkBirth struct {
 	err    string
 }
 
-// daemonForkPlan is the daemon's PlanSource: it accepts the authenticated plan
-// and answers exact factory lookups out of it. LookupExact deliberately
-// re-derives the answer from the accepted rows, so a body can only be built for
-// a coordinate the server actually published.
+// daemonForkPlan is the daemon's factory source: it resolves a class into a
+// test proc at body-build time, from the spec the Host's own desired carries —
+// exactly the production shape, so a body can only be built for a coordinate
+// the server actually published (the spec came off that published desired).
 type daemonForkPlan struct {
-	mu     sync.Mutex
-	rows   []platform.PlanActor
 	births chan daemonForkBirth
 	starts chan actor.ActorID
 }
@@ -67,41 +65,12 @@ func newDaemonForkPlan() *daemonForkPlan {
 	}
 }
 
-func (p *daemonForkPlan) ApplyPlan(rows []platform.PlanActor) error {
-	p.mu.Lock()
-	p.rows = append([]platform.PlanActor(nil), rows...)
-	p.mu.Unlock()
-	return nil
-}
-
-func (p *daemonForkPlan) snapshot() []platform.PlanActor {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]platform.PlanActor(nil), p.rows...)
-}
-
-func (p *daemonForkPlan) LookupExact(
-	id actor.ActorID,
-	attempt actorhost.AttemptKey,
-	spec actorhost.ExecutionSpec,
+func (p *daemonForkPlan) BuildClass(
+	_ actor.ActorID,
+	class string,
+	_ json.RawMessage,
 ) (platform.ActorFactory, bool) {
-	p.mu.Lock()
-	var row platform.PlanActor
-	found := false
-	for _, candidate := range p.rows {
-		rowSpec := actorhost.ExecutionSpec{
-			Kind: candidate.Kind, Class: candidate.Class, Config: candidate.Config,
-		}
-		if candidate.ActorID == id && candidate.AttemptKey == attempt && rowSpec.Equal(spec) {
-			row, found = candidate, true
-			break
-		}
-	}
-	p.mu.Unlock()
-	if !found {
-		return platform.ActorFactory{}, false
-	}
-	switch row.Class {
+	switch class {
 	case daemonForkParentClass:
 		return platform.ActorFactory{Proc: actorbase.Def{New: func() (actorbase.Proc, error) {
 			return p.parentProc(), nil
@@ -236,9 +205,9 @@ func runDaemonFor(t *testing.T, h *Home, plan *daemonForkPlan) {
 	done := make(chan error, 1)
 	go func() {
 		done <- compute.Run(ctx, compute.Config{
-			ServerWS:   "ws" + srv.URL[len("http"):] + "/compute",
-			PlanSource: plan,
-			Poll:       50 * time.Millisecond,
+			ServerWS:  "ws" + srv.URL[len("http"):] + "/compute",
+			Factories: plan,
+			Poll:      50 * time.Millisecond,
 		})
 	}()
 	t.Cleanup(func() {
@@ -365,19 +334,11 @@ func TestDaemonForkChildIsBuiltOnTheDaemonAndRoutedFromTheServer(t *testing.T) {
 
 	// T25, downstream half: the poke that the accepted Fork produced carries the
 	// new row to the daemon, which builds the child body itself.
+	// The build itself is the proof the pulled plan carried the child's row:
+	// the factory source is stateless, so the only spec a build can consume is
+	// the one the daemon Host's desired serves — which is the pulled plan.
 	restartEventually(t, "the daemon to build the forked child body", func() bool {
 		return started.count(plan, child) == 1
-	})
-	restartEventually(t, "the daemon plan to carry both bodies", func() bool {
-		rows := plan.snapshot()
-		if len(rows) != 2 {
-			return false
-		}
-		classes := map[string]int{}
-		for _, row := range rows {
-			classes[row.Class]++
-		}
-		return classes[daemonForkParentClass] == 1 && classes[daemonForkChildClass] == 1
 	})
 
 	// T25, upstream half: the server holds a ROUTE for both — never a body. A

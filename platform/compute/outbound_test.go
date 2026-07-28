@@ -2,12 +2,14 @@ package compute
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -817,30 +819,105 @@ func TestOutboundOpenFailureUsesBoundedRetryBackoff(t *testing.T) {
 	eventuallyOutbound(t, func() bool { return opens.Load() >= 2 })
 }
 
-type panickingPlanSource struct {
+type panickingFactorySource struct {
 	called chan struct{}
 	once   sync.Once
 }
 
-func (*panickingPlanSource) ApplyPlan([]platform.PlanActor) error { return nil }
-func (s *panickingPlanSource) LookupExact(
+func (s *panickingFactorySource) BuildClass(
 	actor.ActorID,
-	actorhost.AttemptKey,
-	actorhost.ExecutionSpec,
+	string,
+	json.RawMessage,
 ) (platform.ActorFactory, bool) {
 	s.once.Do(func() { close(s.called) })
-	panic("factory lookup panic")
+	panic("factory build panic")
+}
+
+// selectiveFactorySource resolves some classes and refuses the rest, counting
+// every ask — the shape of a daemon whose binary cannot build one row of the
+// plan (version skew).
+type selectiveFactorySource struct {
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (s *selectiveFactorySource) BuildClass(
+	_ actor.ActorID,
+	class string,
+	_ json.RawMessage,
+) (platform.ActorFactory, bool) {
+	s.mu.Lock()
+	s.calls[class]++
+	s.mu.Unlock()
+	if class != "buildable" {
+		return platform.ActorFactory{}, false
+	}
+	return platform.ActorFactory{Proc: actorbase.Def{New: func() (actorbase.Proc, error) {
+		return func(sys actorbase.Sys) error {
+			<-sys.Life().Done()
+			return nil
+		}, nil
+	}}}, true
+}
+
+func (s *selectiveFactorySource) count(class string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls[class]
+}
+
+// One row this daemon cannot build fails alone: the buildable row converges to
+// a live body while the unbuildable one retries on the Host's own backoff.
+// This is the semantics the lazy factory shape was chosen FOR — the eager
+// whole-plan rejection it replaced held every healthy row hostage to one bad
+// one, in defence of old bodies that were already truth-dead.
+func TestOneUnbuildableRowDoesNotBlockTheOthers(t *testing.T) {
+	t.Parallel()
+	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: time.Millisecond})
+	source := &selectiveFactorySource{calls: map[string]int{}}
+	host, err := actorhost.New(actorhost.Config{
+		Domain:       "daemon",
+		PollInterval: time.Millisecond,
+		RetryDelay:   time.Millisecond,
+		BodyBuilder:  daemonBodyBuilder(outbound, source, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOutboundFixture(t, host, outbound)
+
+	good := actor.ActorID("agent:good")
+	bad := actor.ActorID("agent:bad")
+	goodDesired := outboundDesired(t, good, outboundAttempt(t))
+	goodDesired.ExecutionSpec.Class = "buildable"
+	badDesired := outboundDesired(t, bad, outboundAttempt(t))
+	badDesired.ExecutionSpec.Class = "not-in-this-binary"
+	if err := host.AcceptFullDesired([]actorhost.Desired{goodDesired, badDesired}); err != nil {
+		t.Fatal(err)
+	}
+
+	eventuallyOutbound(t, func() bool {
+		snapshot, ok := host.Inspect(good)
+		return ok && snapshot.Actual == actorhost.ActualBody &&
+			snapshot.Unit != nil && snapshot.Unit.IsAlive()
+	})
+	// The bad row keeps being retried — asked more than once — and never holds
+	// a body; the good one was never rebuilt on its account.
+	eventuallyOutbound(t, func() bool { return source.count("not-in-this-binary") >= 2 })
+	if snapshot, ok := host.Inspect(bad); ok && snapshot.Actual == actorhost.ActualBody {
+		t.Fatal("the unbuildable row acquired a body")
+	}
 }
 
 func TestDaemonBodyBuildPanicClosesPreparedOutboundSlot(t *testing.T) {
 	t.Parallel()
 	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: time.Millisecond})
-	source := &panickingPlanSource{called: make(chan struct{})}
+	source := &panickingFactorySource{called: make(chan struct{})}
 	host, err := actorhost.New(actorhost.Config{
 		Domain:       "daemon",
 		PollInterval: time.Millisecond,
 		RetryDelay:   time.Hour,
-		BodyBuilder:  daemonBodyBuilder(outbound, source),
+		BodyBuilder:  daemonBodyBuilder(outbound, source, nil),
 	})
 	if err != nil {
 		t.Fatal(err)

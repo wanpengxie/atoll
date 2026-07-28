@@ -12,7 +12,6 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -277,11 +276,11 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 	t.Cleanup(func() { testAgentBuilder = baseBuilder })
 	computeCtx, cancelCompute := context.WithCancel(context.Background())
 	computeErr := make(chan error, 1)
-	plan := &e2eLinkPlan{chID: channel.ID(setup.chID), builders: map[actor.ActorID]platform.ActorFactory{}}
+	plan := &e2eLinkPlan{chID: channel.ID(setup.chID)}
 	go func() {
 		computeErr <- compute.Run(computeCtx, compute.Config{
 			ServerWS:   fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), setup.chID, daemon["api_key"].(string)),
-			PlanSource: plan, Poll: 20 * time.Millisecond,
+			Factories:  plan, Poll: 20 * time.Millisecond,
 		})
 	}()
 	t.Cleanup(func() {
@@ -330,8 +329,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 			t.Fatalf("operation owner=(%q,%q), want fork %q", ownerPrincipal, ownerActor, got.child)
 		}
 	case <-time.After(8 * time.Second):
-		rows, applies := plan.snapshot()
-		t.Fatalf("fork requester did not finish realm operation/resource combination: builds=%d plan=%v applies=%d", builds.Load(), rows, applies)
+		t.Fatalf("fork requester did not finish realm operation/resource combination: builds=%d", builds.Load())
 	}
 }
 

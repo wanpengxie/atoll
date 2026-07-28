@@ -2,22 +2,32 @@ package compute
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
-	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
-// ActorFactorySource resolves only the exact immutable plan generation that
-// created a Host build claim. ActorID-only lookup is intentionally absent: a
-// newer plan must never supply its factory to an older in-flight build.
+// ActorFactorySource resolves one body's factory at BUILD time, from the class
+// and config the Host's own desired carries — the same shape the server host
+// uses. There is no plan-generation snapshot to consult: the spec in the build
+// input IS the generation (it came off this Host's desired), so a newer plan
+// cannot feed an older in-flight build by construction, and a row this daemon
+// cannot build fails alone, at its own build, with its own log — it holds no
+// other actor's update hostage.
+//
+// The eager two-ledger shape this replaces (pre-built factory table, exact
+// generation lookup, whole-plan last-known-good) protected nothing real: a
+// plan-superseded body is already truth-dead — home refuses its stale-attempt
+// writes and tears down its route — so rejecting a whole plan to "keep the old
+// one running" kept zombies running and held healthy rows back with them.
 type ActorFactorySource interface {
-	LookupExact(
+	BuildClass(
 		id actor.ActorID,
-		attempt actorhost.AttemptKey,
-		spec actorhost.ExecutionSpec,
+		class string,
+		config json.RawMessage,
 	) (def platform.ActorFactory, ok bool)
 }
 
