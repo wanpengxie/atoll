@@ -139,7 +139,7 @@ func TestCloseSealsAllSessionsBeforePresenceJoin(t *testing.T) {
 			t.Fatalf("Attach(%s): %v", principal, err)
 		}
 		s.elig.Store(&eligState{
-			routes: map[channel.ID]Route{"c": {Channel: "c", Access: AccessMember}},
+			routes: map[channel.ID]Route{"c": {Channel: "c"}},
 			paused: map[channel.ID]struct{}{},
 		})
 		sessions = append(sessions, s)

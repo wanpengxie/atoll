@@ -121,13 +121,8 @@ func testGatewayResolver(a *app.App) gateway.EntitlementResolver {
 		}
 		gr := make([]gateway.Route, 0, len(routes))
 		for _, r := range routes {
-			access := gateway.AccessObserver
-			if r.Access == "member" {
-				access = gateway.AccessMember
-			}
 			gr = append(gr, gateway.Route{
-				Channel: r.Channel, Bundle: r.Bundle, Access: access,
-				SubjectID: r.SubjectID,
+				Channel: r.Channel, Bundle: r.Bundle, SubjectID: r.SubjectID,
 			})
 		}
 		return gr, failed, nil

@@ -561,9 +561,6 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 			}
 			return errFrame(subjectgate.CodeForbidden, "no eligibility for channel")
 		}
-		if r.Access != AccessMember {
-			return errFrame(subjectgate.CodeForbidden, "observer may not drive business frames")
-		}
 		// Delivery permit (统一会话闸): a已获准 delivery blocks Close's排水 counter.
 		if !s.beginDeliver() {
 			return errFrame(subjectgate.CodeClosed, "session closed")

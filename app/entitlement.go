@@ -14,7 +14,6 @@ import (
 type EntitlementRoute struct {
 	Channel   channel.ID
 	Bundle    channelhost.Bundle
-	Access    string
 	SubjectID actor.ActorID
 }
 
@@ -176,7 +175,7 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 			a.reconcilePrincipalChannel(ctx, membership.channel, principal)
 			continue
 		}
-		routes = append(routes, EntitlementRoute{Channel: membership.channel, Bundle: bundle, Access: "member", SubjectID: id})
+		routes = append(routes, EntitlementRoute{Channel: membership.channel, Bundle: bundle, SubjectID: id})
 	}
 	return routes, failed, nil
 }

@@ -8,25 +8,22 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// AccessClass is a principal's access to one channel (连接模型勘误期 §3.2 解析面):
-// a member writes + reads + emits presence; an observer has a revocable, per-channel
-// realm read capability and never inherits write or presence rights.
-type AccessClass string
-
-const (
-	AccessMember   AccessClass = "member"
-	AccessObserver AccessClass = "observer"
-)
-
 // Route is one channel a principal is currently entitled to (spec §3.2 解析面
-// 输出定形): the channel id, the Home handle that serves its log/signal, the
-// access class and the member's per-channel subject id (member only — empty for an
-// observer). The gateway anchors leases when resolution completes on its own clock.
+// 输出定形): the channel id, the Home handle that serves its log/signal, and the
+// member's per-channel subject id. The gateway anchors leases when resolution
+// completes on its own clock.
+//
+// A route is a MEMBERSHIP route, and that is the whole of it — there is no access
+// class to read. Observer traffic rides the per-channel SSE/HTTP read plane and
+// never enters this route set, which is what the resolver's own contract says
+// (app.EntitlementRoute). A gateway-level observer would be a different thing
+// than a member with a narrower field: it has no subject id, so it can hold no
+// presence slot and drive no business frame, and every consumer here would have
+// to be told about it. Give it its own shape when something actually needs one.
 type Route struct {
 	Channel   channel.ID
 	Bundle    channelhost.Bundle
-	Access    AccessClass
-	SubjectID actor.ActorID // member only; zero value for observer
+	SubjectID actor.ActorID
 }
 
 // EntitlementResolver is the app-domain seam (injected by the assembly root, spec

@@ -481,9 +481,6 @@ func (g *Gateway) presenceReconcile() {
 			continue
 		}
 		for _, r := range routes {
-			if r.Access != AccessMember {
-				continue // observers get no presence testimony (no槽)
-			}
 			slot, ok := r.Bundle.Gateway().SubjectSlotFor(r.SubjectID)
 			if !ok {
 				continue // actor-body lag — no slot yet, next圈
