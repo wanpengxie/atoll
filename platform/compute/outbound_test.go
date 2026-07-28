@@ -297,6 +297,7 @@ func newOutboundHost(
 			prepared, err := outbound.Prepare(
 				input.ActorID,
 				input.AttemptKey,
+				input.Self,
 				input.Identity,
 				input.Attempt,
 				input.Current,
@@ -449,7 +450,7 @@ func TestOutboundLevelObsPublishedBeforeConnectReachesTheChannel(t *testing.T) {
 	eventuallyOutbound(t, build.input.Current.IsCurrent)
 
 	// The device connects here — body up, stream not yet open. This is the gap.
-	outbound.publishObs(id, key, actorrt.ObsKind("device_presence"), actorrt.ObsValue(`{"online":true}`))
+	outbound.publishObs(build.input.Self, actorrt.ObsKind("device_presence"), actorrt.ObsValue(`{"online":true}`))
 
 	if err := outbound.SetSession(session); err != nil {
 		t.Fatal(err)

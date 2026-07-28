@@ -47,14 +47,17 @@ type daemonHostEvents struct{ outbound *DaemonOutbound }
 func (*daemonHostEvents) OnBodyExited(actor.ActorID, actorhost.AttemptKey, actorrt.Incarnation, error) {
 }
 
+// OnBodyObs forwards one observation the Host already ruled current. The
+// Incarnation is what selects the slot — the coordinate cannot, since an
+// abandoned build shares it with the body that replaced it.
 func (e *daemonHostEvents) OnBodyObs(
-	id actor.ActorID,
-	key actorhost.AttemptKey,
-	_ actorrt.Incarnation,
+	_ actor.ActorID,
+	_ actorhost.AttemptKey,
+	self actorrt.Incarnation,
 	kind actorrt.ObsKind,
 	value actorrt.ObsValue,
 ) {
-	e.outbound.publishObs(id, key, kind, value)
+	e.outbound.publishObs(self, kind, value)
 }
 
 func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.BodyBuilder {
@@ -62,6 +65,7 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 		prepared, prepareErr := outbound.Prepare(
 			input.ActorID,
 			input.AttemptKey,
+			input.Self,
 			input.Identity,
 			input.Attempt,
 			input.Current,

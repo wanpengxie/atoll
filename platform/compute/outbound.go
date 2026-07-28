@@ -81,9 +81,14 @@ var disconnectedOutboundBundle = &OutboundArmsBundle{}
 // OutboundSlot is an exact body-lifetime membrane. G1 and G2 slots for the
 // same ActorID can coexist without overwriting one another.
 type OutboundSlot struct {
-	owner    *DaemonOutbound
-	id       actor.ActorID
-	key      actorhost.AttemptKey
+	owner *DaemonOutbound
+	id    actor.ActorID
+	key   actorhost.AttemptKey
+	// self is the exact body this slot was minted for. It is the routing
+	// identity for observations: (id, key) does not separate an abandoned
+	// build's slot from the published body's slot when a plan flap rebuilds the
+	// same attempt, and the Incarnation does.
+	self     actorrt.Incarnation
 	identity actorhost.IdentityCurrent
 	attempt  actorhost.AttemptCurrent
 	current  actorhost.ActualCurrent
@@ -171,9 +176,17 @@ func (d *DaemonOutbound) Wake() {
 	}
 }
 
+// publishObs routes one observation to the slot of the exact body that
+// published it. The routing coordinate is the publisher's Incarnation, not
+// (ActorID, AttemptKey): one attempt can own more than one Unit — an abandoned
+// build's slot outlives the drop and stays registered until its retirement
+// closes it — so the pair is a many-to-one projection of the slot it must
+// select, while the Incarnation is exactly 1:1 with it. This is the same
+// provenance rule presence.Fold applies to a same-process body (Fold.OnObs
+// records the Incarnation; only testimony that crossed a wire, where a
+// process-local Incarnation cannot travel, falls back to attempt + route).
 func (d *DaemonOutbound) publishObs(
-	id actor.ActorID,
-	key actorhost.AttemptKey,
+	self actorrt.Incarnation,
 	kind actorrt.ObsKind,
 	value actorrt.ObsValue,
 ) {
@@ -183,7 +196,7 @@ func (d *DaemonOutbound) publishObs(
 	d.mu.Lock()
 	var target *OutboundSlot
 	for slot := range d.slots {
-		if slot.id == id && slot.key == key && !slot.closed.Load() {
+		if slot.self == self && !slot.closed.Load() {
 			target = slot
 			break
 		}
@@ -202,6 +215,7 @@ func (d *DaemonOutbound) publishObs(
 func (d *DaemonOutbound) Prepare(
 	id actor.ActorID,
 	key actorhost.AttemptKey,
+	self actorrt.Incarnation,
 	identity actorhost.IdentityCurrent,
 	attempt actorhost.AttemptCurrent,
 	current actorhost.ActualCurrent,
@@ -215,7 +229,7 @@ func (d *DaemonOutbound) Prepare(
 		return PreparedOutbound{}, err
 	}
 	slot := &OutboundSlot{
-		owner: d, id: id, key: key,
+		owner: d, id: id, key: key, self: self,
 		identity: identity, attempt: attempt, current: current,
 	}
 	slot.arms.Store(disconnectedOutboundBundle)

@@ -11,12 +11,17 @@ import (
 )
 
 // DaemonOutbound.publishObs is the daemon's routing step for every observation
-// an actor body pushes: daemonHostEvents.OnBodyObs hands it (ActorID,
-// AttemptKey, kind, value) and it must find THE slot that belongs to the body
-// that published — the slot being the body's one stable arm onto the wire.
+// an actor body pushes: daemonHostEvents.OnBodyObs hands it the publisher's
+// Incarnation and it must find THE slot minted for that exact body — the slot
+// being the body's one stable arm onto the wire.
 //
-// Routing is the whole job, and it is done by scanning the slot registry for a
-// coordinate match. These tests pin what that scan must produce.
+// Routing is the whole job, and the identity it routes by is the Incarnation,
+// not the (ActorID, AttemptKey) coordinate. One attempt can own more than one
+// Unit: an abandoned build's slot is registered before its build is dropped and
+// stays registered until retirement closes it, so for that window two unclosed
+// slots carry the same coordinate. The coordinate is therefore a many-to-one
+// projection of the slot it must select; the Incarnation is exactly 1:1 with
+// it. These tests pin what that scan must produce.
 
 // heldObsKinds reports the observations a slot is holding for its next stream.
 // With no session wired, a published observation cannot go out, so the slot
@@ -38,12 +43,11 @@ func heldObsCount(slot *OutboundSlot) int {
 	return len(slot.pendingObs)
 }
 
-// TestPublishObsRoutesByTheFullActorAndAttemptCoordinate is the positive
-// contract: with several live slots present, each observation reaches the one
-// whose (ActorID, AttemptKey) it carries — neither the actor id alone nor the
-// attempt key alone is enough to pick a slot, and a slot that has been closed
-// is never chosen even while a matching coordinate is still being published.
-func TestPublishObsRoutesByTheFullActorAndAttemptCoordinate(t *testing.T) {
+// TestPublishObsRoutesByPublisherIncarnation is the positive contract: with
+// several live slots present, each observation reaches the slot of the exact
+// body that published it, an identity no live slot answers to is carried by
+// nobody, and a closed slot is never chosen.
+func TestPublishObsRoutesByPublisherIncarnation(t *testing.T) {
 	t.Parallel()
 	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: 5 * time.Millisecond})
 	builds := make(chan outboundBuild)
@@ -52,65 +56,67 @@ func TestPublishObsRoutesByTheFullActorAndAttemptCoordinate(t *testing.T) {
 
 	alpha := actor.ActorID("agent:obs-alpha")
 	beta := actor.ActorID("agent:obs-beta")
-	alphaKey := outboundAttempt(t)
-	betaKey := outboundAttempt(t)
 	if err := host.AcceptFullDesired([]actorhost.Desired{
-		outboundDesired(t, alpha, alphaKey),
-		outboundDesired(t, beta, betaKey),
+		outboundDesired(t, alpha, outboundAttempt(t)),
+		outboundDesired(t, beta, outboundAttempt(t)),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	slots := map[actor.ActorID]*OutboundSlot{}
+	selves := map[actor.ActorID]actorrt.Incarnation{}
 	for range 2 {
 		build := <-builds
 		close(build.release)
 		slots[build.input.ActorID] = build.prepared.Slot
+		selves[build.input.ActorID] = build.input.Self
 	}
 	eventuallyOutbound(t, func() bool {
-		return len(slots) == 2 && slots[alpha] != nil && slots[beta] != nil
+		return slots[alpha] != nil && slots[beta] != nil
 	})
 
-	// Right actor, right attempt.
-	outbound.publishObs(alpha, alphaKey, "presence", actorrt.ObsValue(`{"online":true}`))
+	// The publisher's own identity selects the publisher's own slot.
+	outbound.publishObs(selves[alpha], "presence", actorrt.ObsValue(`{"online":true}`))
 	if got := heldObsKinds(slots[alpha]); len(got) != 1 || got[0] != "presence" {
-		t.Fatalf("alpha slot holds %v, want the observation addressed to it", got)
+		t.Fatalf("alpha slot holds %v, want the observation its own body published", got)
 	}
 	if n := heldObsCount(slots[beta]); n != 0 {
 		t.Fatalf("beta slot received alpha's observation (%d held)", n)
 	}
 
-	// Right actor, WRONG attempt: no slot answers to that coordinate, so the
-	// observation has no arm to carry it and must not be handed to the other
-	// generation of the same actor.
-	outbound.publishObs(alpha, betaKey, "misrouted-attempt", actorrt.ObsValue(`{}`))
+	// An identity no live slot answers to has no arm to carry it. Nothing may
+	// absorb it — in particular the scan must not fall back to a coordinate and
+	// hand it to some other body.
+	outbound.publishObs(actorrt.Incarnation{}, "stranger", actorrt.ObsValue(`{}`))
 	if n := heldObsCount(slots[alpha]); n != 1 {
-		t.Fatalf("alpha slot took an observation carrying another attempt key (%d held)", n)
+		t.Fatalf("alpha slot took an observation from an identity it does not own (%d held)", n)
 	}
 	if n := heldObsCount(slots[beta]); n != 0 {
-		t.Fatalf("beta slot took an observation carrying another actor id (%d held)", n)
+		t.Fatalf("beta slot took an observation from an identity it does not own (%d held)", n)
 	}
 
-	// Right attempt, WRONG actor: same argument, other axis.
-	outbound.publishObs(beta, alphaKey, "misrouted-actor", actorrt.ObsValue(`{}`))
-	if heldObsCount(slots[alpha]) != 1 || heldObsCount(slots[beta]) != 0 {
-		t.Fatalf("cross-actor observation landed somewhere: alpha=%d beta=%d",
-			heldObsCount(slots[alpha]), heldObsCount(slots[beta]))
+	// The other body's identity reaches the other body's slot, and only it.
+	outbound.publishObs(selves[beta], "beta-presence", actorrt.ObsValue(`{}`))
+	if n := heldObsCount(slots[beta]); n != 1 {
+		t.Fatalf("beta slot holds %d, want the observation its own body published", n)
+	}
+	if n := heldObsCount(slots[alpha]); n != 1 {
+		t.Fatalf("alpha slot absorbed beta's observation (%d held)", n)
 	}
 
-	// A closed slot is not a routing target: its held observations were
-	// dropped at Close (the body is gone; a successor mints its own), so
-	// handing it more would be writing into a grave.
+	// A closed slot is not a routing target: its held observations were dropped
+	// at Close (the body is gone; a successor mints its own), so handing it more
+	// would be writing into a grave.
 	if err := slots[beta].Close(); err != nil {
 		t.Fatal(err)
 	}
-	outbound.publishObs(beta, betaKey, "after-close", actorrt.ObsValue(`{}`))
+	outbound.publishObs(selves[beta], "after-close", actorrt.ObsValue(`{}`))
 	if n := heldObsCount(slots[beta]); n != 0 {
 		t.Fatalf("closed slot accepted an observation (%d held)", n)
 	}
 }
 
 // TestPublishObsRoutesToTheLiveIncarnationWhenAnAbandonedBuildSharesItsAttemptKey
-// is defect A2's reproduction.
+// is defect A2's regression guard.
 //
 // The scenario is an ordinary plan flap, entirely within one AcceptFullDesired
 // stream: the row for an actor disappears from one plan snapshot and comes back
@@ -122,17 +128,14 @@ func TestPublishObsRoutesByTheFullActorAndAttemptCoordinate(t *testing.T) {
 // AttemptKey) coordinates are identical — one belonging to the incarnation that
 // actually got published, one to the build that lost.
 //
-// publishObs picks between them by scanning d.slots and taking the first match.
-// Go randomizes map iteration, so roughly half of everything the live body
-// publishes is handed to the abandoned slot instead — and that slot's Close()
-// drops its held observations on the floor, so those pushes vanish with no
-// error anywhere. The upstream half of the same defect is
-// daemonHostEvents.OnBodyObs (compute.go:50) discarding the actorrt.Incarnation
-// the Host took the trouble to forward: with it, the two slots would be
-// distinguishable; without it, the coordinate genuinely is ambiguous and no
-// scan order can fix it.
+// Selecting between them by coordinate is undefined: the scan takes the first
+// match and Go randomizes map iteration, so a large share of everything the
+// live body publishes used to be handed to the abandoned slot instead — and
+// that slot's Close() drops its held observations on the floor, so those pushes
+// vanished with no error anywhere (measured 171/200 before the fix). The
+// Incarnation the Host forwards separates the two slots exactly, which is why
+// it, and not the coordinate, is the routing identity.
 func TestPublishObsRoutesToTheLiveIncarnationWhenAnAbandonedBuildSharesItsAttemptKey(t *testing.T) {
-	t.Skip("known defect A2: publishObs picks a slot by (ActorID, AttemptKey) alone, so an abandoned build's slot sharing that coordinate steals the live body's observations (measured 171/200) and drops them at Close")
 	t.Parallel()
 	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: 5 * time.Millisecond})
 	builds := make(chan outboundBuild)
@@ -169,10 +172,17 @@ func TestPublishObsRoutesToTheLiveIncarnationWhenAnAbandonedBuildSharesItsAttemp
 	if registered != 2 {
 		t.Fatalf("registered slots = %d, want the two same-coordinate slots this defect needs", registered)
 	}
+	if abandoned.input.AttemptKey != live.input.AttemptKey {
+		t.Fatalf("attempt keys differ (%q vs %q), so the two slots are not ambiguous by coordinate and this test proves nothing",
+			abandoned.input.AttemptKey, live.input.AttemptKey)
+	}
+	if abandoned.input.Self == live.input.Self {
+		t.Fatal("the two builds share one Incarnation, so identity cannot separate them")
+	}
 
 	const pushes = 200
 	for i := range pushes {
-		outbound.publishObs(id, key, actorrt.ObsKind(fmt.Sprintf("obs-%03d", i)), actorrt.ObsValue(`{}`))
+		outbound.publishObs(live.input.Self, actorrt.ObsKind(fmt.Sprintf("obs-%03d", i)), actorrt.ObsValue(`{}`))
 	}
 
 	onLive := heldObsCount(live.prepared.Slot)
