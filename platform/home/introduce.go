@@ -19,7 +19,6 @@ func (h *Home) resolveIntroduction(
 	ctx context.Context,
 	declID string,
 	initiator actor.ActorID,
-	memberSourced bool,
 ) (actorctl.IntroduceRequest, error) {
 	if declID == "" || initiator == "" {
 		return actorctl.IntroduceRequest{}, &channel.OperationError{
@@ -53,12 +52,15 @@ func (h *Home) resolveIntroduction(
 			Code: code, Detail: err.Error(), Retryable: retryable,
 		}
 	}
-	if memberSourced && facts.Visibility != "public" {
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
-			Code: channel.ErrCodeForbidden, Detail: "member introduction is limited to public declarations",
-		}
-	}
-	if facts.Visibility != "public" && initiatorFacts.Principal != facts.OwnerPrincipal {
+	// A non-public declaration is its owner's to place, and ownership is a
+	// principal fact. The initiator's principal is read here, from the roster —
+	// the door does not get to assert it. An initiator that carries no principal
+	// (every non-human admission: the store forbids them one) can therefore own
+	// nothing, and the empty-vs-empty comparison that would otherwise admit it
+	// is refused explicitly rather than left to depend on realm-side invariants
+	// keeping every declaration owner non-empty.
+	if facts.Visibility != "public" &&
+		(initiatorFacts.Principal == "" || initiatorFacts.Principal != facts.OwnerPrincipal) {
 		return actorctl.IntroduceRequest{}, &channel.OperationError{
 			Code: channel.ErrCodeForbidden, Detail: "declaration is private",
 		}

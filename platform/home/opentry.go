@@ -60,16 +60,19 @@ func (e *opEntry) Introduce(
 	if err := e.available(); err != nil {
 		return channel.IntroduceResult{}, err
 	}
-	return e.introduce(ctx, req.DeclID, req.InitiatorActorID, false)
+	return e.introduce(ctx, req.DeclID, req.InitiatorActorID)
 }
 
+// introduce is the one introduction path. Both doors — the out-of-band
+// admission call above and the in-gate operate frame below — reach the same
+// verdict, because the verdict reads the initiator's own facts instead of
+// taking the door's word for what kind of initiator it is.
 func (e *opEntry) introduce(
 	ctx context.Context,
 	declID string,
 	initiator actor.ActorID,
-	memberSourced bool,
 ) (channel.IntroduceResult, error) {
-	command, err := e.home.resolveIntroduction(ctx, declID, initiator, memberSourced)
+	command, err := e.home.resolveIntroduction(ctx, declID, initiator)
 	if err != nil {
 		return channel.IntroduceResult{}, err
 	}
@@ -177,7 +180,7 @@ func (e *opEntry) Execute(
 				Code: string(channel.ErrCodeBadPayload), Detail: "decl_id required",
 			}
 		}
-		result, err := e.introduce(ctx, payload.DeclID, req.Sender, true)
+		result, err := e.introduce(ctx, payload.DeclID, req.Sender)
 		if err != nil {
 			return nil, asOperateError(err)
 		}
