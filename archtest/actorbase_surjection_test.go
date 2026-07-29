@@ -41,6 +41,13 @@ func TestActorbaseSysIsSurjectiveOverCapabilityFace(t *testing.T) {
 		"response/provisional (non-terminal)": "Progress",
 		"event (no closure obligation)":       "Emit",
 		"request + caller closure":            "Call",
+		// A request write with NO caller closure is its own atom, not a mode of
+		// Call: nothing registers an out-station entry, nothing arms the
+		// caller-side timer, and an absent deadline is left absent for the
+		// substrate to stamp rather than resolved against the short default a
+		// blocking caller needs. Merging this line into Call's would hide
+		// exactly the differences that make the two separate verbs.
+		"request, no caller closure": "Post",
 	}
 	for atom, verb := range penAtoms {
 		if !hasMethod(verb) {

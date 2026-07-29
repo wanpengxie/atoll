@@ -94,7 +94,7 @@ func (s *stubExecutor) SetDefaultAgent(context.Context, OperateRequest) (any, er
 }
 
 func operateMsg(typ string, sender actor.ActorID) actorbase.Msg {
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "op1", ChannelID: "ch", Kind: message.KindRequest, Type: typ,
 		Sender:   message.Sender{Kind: actor.KindAgent, ID: sender},
 		Audience: message.Audience{actor.SystemActorID},

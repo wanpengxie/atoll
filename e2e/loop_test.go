@@ -507,10 +507,13 @@ func submitAndAwaitTerminal(t *testing.T, ws *wsClient, msgType string, payload 
 		if id == "" {
 			t.Fatalf("%s: receipt carries no message_id: %v", msgType, rec)
 		}
-		// The submit receipt is {message_id, seq} — the commit seq is part of the
-		// L2 acceptance shape, so its absence/zero is a contract break.
-		if seq, ok := rp["seq"].(float64); !ok || seq <= 0 {
-			t.Fatalf("%s: receipt carries no positive seq: %v", msgType, rec)
+		// The submit receipt is {message_id} and nothing else. A receipt says
+		// "accepted, and this is its identity"; seq is the store's row position,
+		// which the wire contract already forbade a client from using as a feed
+		// cursor — leaving it the one field nobody could legally read. Its
+		// PRESENCE is now the contract break.
+		if _, leaked := rp["seq"]; leaked {
+			t.Fatalf("%s: receipt still carries seq: %v", msgType, rec)
 		}
 		// Await THIS request's terminal (a failed terminal carries
 		// payload.status=failed + reason).

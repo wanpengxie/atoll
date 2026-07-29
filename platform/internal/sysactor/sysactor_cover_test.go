@@ -111,7 +111,7 @@ func TestReceive_NonRequestIgnored(t *testing.T) {
 	for _, c := range cases {
 		sys := &fakeSys{}
 		s := New(Deps{Authority: fakeRegistry{}})
-		msg := actorbase.NewMsg(context.Background(), message.Envelope{ID: "e1", Kind: c.kind, Type: c.typ})
+		msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "e1", Kind: c.kind, Type: c.typ})
 		s.handle(sys, msg)
 		if len(sys.replies) != 0 {
 			t.Fatalf("Receive(%s/%s) wrote %d replies, want 0 (not synthesized)", c.kind, c.typ, len(sys.replies))

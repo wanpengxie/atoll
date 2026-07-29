@@ -151,7 +151,7 @@ func (f *fakeSys) Resource() actorbase.ResourceHandle { return f.resource }
 var _ actorbase.Sys = (*fakeSys)(nil)
 
 func requestMsg(id, typ string, payload string) actorbase.Msg {
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:      message.ID(id),
 		Kind:    message.KindRequest,
 		Type:    typ,
@@ -164,7 +164,7 @@ func requestMsg(id, typ string, payload string) actorbase.Msg {
 func completedTerminal(payload map[string]any) actorbase.Msg {
 	payload["status"] = message.StatusCompleted
 	raw, _ := json.Marshal(payload)
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		Kind: message.KindResponse, Payload: raw,
 	})
 }
@@ -234,7 +234,7 @@ func TestChat_ToolFailureFailsToolCallFailed(t *testing.T) {
 	failedRaw, _ := json.Marshal(map[string]any{
 		"status": message.StatusFailed, "error_code": "type_unsupported", "detail": "nope",
 	})
-	term := actorbase.NewMsg(context.Background(), message.Envelope{Kind: message.KindResponse, Payload: failedRaw})
+	term := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: failedRaw})
 	sys := &fakeSys{
 		queue:    []actorbase.Msg{requestMsg("m-3", TypeChat, `{"a":1}`)},
 		pending:  &fakePending{term: term},

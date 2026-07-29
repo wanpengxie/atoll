@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
@@ -18,38 +20,87 @@ import (
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
-// fakeSys implements only the identity-dimension verbs (plus Self/PublishObs)
-// the frame interpreter drives; the rest of actorbase.Sys is embedded nil (a
-// call the interpreter never makes would nil-panic, which is the honest test
-// contract — assert the interpreter touches ONLY the identity face).
+// fakeSys implements only the verbs the frame interpreter drives; the rest of
+// actorbase.Sys is embedded nil (a call the interpreter never makes would
+// nil-panic, which is the honest test contract — assert the interpreter touches
+// ONLY the write/schedule/resource face it is supposed to).
+//
+// NOTE for whoever edits the verb table next: because Sys is embedded nil here,
+// ADDING or RENAMING a Sys method does NOT break this file's compilation — it
+// breaks at run time. This package must be run explicitly after any verb-table
+// change; a green `go build` proves nothing about it.
 type fakeSys struct {
 	actorbase.Sys
 	self actor.ActorID
+	life context.Context
 
-	submitSpec  behavior.SubjectWriteSpec
-	submitID    message.ID
-	submitSeq   int64
-	submitErr   error
-	respondReq  *message.Envelope
-	respondSpec behavior.ResponseSpec
-	respondID   message.ID
-	respondErr  error
-	cancelTID   schedule.TimerID
-	rh          actorbase.ResourceHandle
-	obs         [][]byte
+	// unregistered writes (submit frame)
+	emitSpec behavior.EventSpec
+	postSpec behavior.RequestSpec
+	emitted  bool
+	posted   bool
+	writeID  message.ID
+	writeErr error
+
+	// terminal writes (resolve / cancel frames)
+	replyMsg   actorbase.Msg
+	replyVal   any
+	replied    bool
+	failMsg    actorbase.Msg
+	failCode   string
+	failDetail string
+	failed     bool
+	terminalID message.ID
+	writeTermE error
+
+	// schedule arm
+	afterD       time.Duration
+	afterType    string
+	afterPayload any
+	afterHome    schedule.TimerHome
+	afterID      schedule.TimerID
+	cancelTID    schedule.TimerID
+
+	rh  actorbase.ResourceHandle
+	obs [][]byte
 }
 
 func (f *fakeSys) Self() actor.ActorID { return f.self }
-func (f *fakeSys) SubmitEnvelope(spec behavior.SubjectWriteSpec) (message.ID, int64, error) {
-	f.submitSpec = spec
-	return f.submitID, f.submitSeq, f.submitErr
+
+func (f *fakeSys) Life() context.Context {
+	if f.life == nil {
+		f.life = context.Background()
+	}
+	return f.life
 }
-func (f *fakeSys) RespondEnvelope(req *message.Envelope, spec behavior.ResponseSpec) (message.ID, error) {
-	f.respondReq, f.respondSpec = req, spec
-	return f.respondID, f.respondErr
+
+func (f *fakeSys) Emit(spec behavior.EventSpec) (message.ID, error) {
+	f.emitSpec, f.emitted = spec, true
+	return f.writeID, f.writeErr
 }
-func (f *fakeSys) CancelTimerIdentity(id schedule.TimerID) error { f.cancelTID = id; return nil }
-func (f *fakeSys) ResourceIdentity() actorbase.ResourceHandle    { return f.rh }
+
+func (f *fakeSys) Post(spec behavior.RequestSpec) (message.ID, error) {
+	f.postSpec, f.posted = spec, true
+	return f.writeID, f.writeErr
+}
+
+func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
+	f.replyMsg, f.replyVal, f.replied = msg, v, true
+	return f.terminalID, f.writeTermE
+}
+
+func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, error) {
+	f.failMsg, f.failCode, f.failDetail, f.failed = msg, code, detail, true
+	return f.terminalID, f.writeTermE
+}
+
+func (f *fakeSys) After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error) {
+	f.afterD, f.afterType, f.afterPayload, f.afterHome = d, msgType, payload, home
+	return f.afterID, nil
+}
+
+func (f *fakeSys) CancelTimer(id schedule.TimerID) error { f.cancelTID = id; return nil }
+func (f *fakeSys) Resource() actorbase.ResourceHandle    { return f.rh }
 func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
 	f.obs = append(f.obs, []byte(val))
 	return nil
@@ -80,7 +131,7 @@ func decodeErr(t *testing.T, f subjectgate.Frame) subjectgate.ErrorPayload {
 }
 
 func TestInterpretSubmit(t *testing.T) {
-	fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 42}
+	fs := &fakeSys{self: "human:alice", writeID: "m1"}
 	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref-1", subjectgate.SubmitPayload{
 		ChannelID: "c1", MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{"x":1}`),
 	})
@@ -90,20 +141,48 @@ func TestInterpretSubmit(t *testing.T) {
 	}
 	var rc subjectgate.SubmitReceipt
 	_ = got.DecodePayload(&rc)
-	if rc.MessageID != "m1" || rc.Seq != 42 {
+	if rc.MessageID != "m1" {
 		t.Fatalf("receipt mismatch: %+v", rc)
 	}
-	// default kind = request; audience carried through.
-	if fs.submitSpec.Kind != message.KindRequest || len(fs.submitSpec.Audience) != 1 {
-		t.Fatalf("submit spec not built correctly: %+v", fs.submitSpec)
+	// default kind = request → Post (never Emit); audience carried through.
+	if !fs.posted || fs.emitted {
+		t.Fatalf("default kind must Post, not Emit (posted=%v emitted=%v)", fs.posted, fs.emitted)
+	}
+	if len(fs.postSpec.Audience) != 1 || fs.postSpec.Audience[0] != "tool:kimi" {
+		t.Fatalf("request spec not built correctly: %+v", fs.postSpec)
+	}
+	if fs.postSpec.Type != "human.message" || string(fs.postSpec.Payload) != `{"x":1}` {
+		t.Fatalf("request spec not built correctly: %+v", fs.postSpec)
+	}
+}
+
+// The submit frame's kind is a CLIENT-supplied string. Post/Emit make a
+// kind=response unconstructible at the verb, so the whitelist that used to live
+// on the deleted SubmitEnvelope now lives here — and answers bad_payload,
+// because a refused kind is permanently malformed, not a transient outage.
+func TestInterpretSubmitRefusesKindsOtherThanRequestOrEvent(t *testing.T) {
+	for _, kind := range []string{"response", "wat"} {
+		fs := &fakeSys{self: "human:alice", writeID: "m1"}
+		f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
+			ChannelID: "c1", MsgType: "x", Kind: kind, Audience: []string{"tool:kimi"},
+		})
+		e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, false), f))
+		if e.Code != subjectgate.CodeBadPayload {
+			t.Fatalf("kind=%q must be bad_payload, got %q", kind, e.Code)
+		}
+		if fs.posted || fs.emitted {
+			t.Fatalf("kind=%q must not reach any write verb", kind)
+		}
 	}
 }
 
 // TestInterpretSubmitExpiresAt (P1-6): the submit frame's optional expires_at_ms
-// rides through to SubjectWriteSpec.ExpiresAt verbatim (additive透传); absent → nil.
+// rides through to RequestSpec.ExpiresAt verbatim (additive透传); absent → nil,
+// so the substrate stamps its own long default TTL rather than a short
+// caller-side one (Post resolves no timeout — that is why it is Post).
 func TestInterpretSubmitExpiresAt(t *testing.T) {
 	exp := int64(1_777_000_000_123)
-	fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 1}
+	fs := &fakeSys{self: "human:alice", writeID: "m1"}
 	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
 		ChannelID: "c1", MsgType: "human.approve", Kind: "request", Audience: []string{"tool:kimi"},
 		Payload: json.RawMessage(`{}`), ExpiresAt: &exp,
@@ -111,18 +190,86 @@ func TestInterpretSubmitExpiresAt(t *testing.T) {
 	if got := interpretFrame(fs, newDeps("human:alice", nil, false), f); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("submit with expires_at should succeed, got %+v", got)
 	}
-	if fs.submitSpec.ExpiresAt == nil || *fs.submitSpec.ExpiresAt != exp {
-		t.Fatalf("ExpiresAt must透传 verbatim: got %v want %d", fs.submitSpec.ExpiresAt, exp)
+	if fs.postSpec.ExpiresAt == nil || *fs.postSpec.ExpiresAt != exp {
+		t.Fatalf("ExpiresAt must透传 verbatim: got %v want %d", fs.postSpec.ExpiresAt, exp)
 	}
 
 	// Absent expires_at → nil (harness default TTL).
-	fs2 := &fakeSys{self: "human:alice", submitID: "m2", submitSeq: 2}
+	fs2 := &fakeSys{self: "human:alice", writeID: "m2"}
 	f2, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref2", subjectgate.SubmitPayload{
 		ChannelID: "c1", MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{}`),
 	})
 	_ = interpretFrame(fs2, newDeps("human:alice", nil, false), f2)
-	if fs2.submitSpec.ExpiresAt != nil {
-		t.Fatalf("absent expires_at must be nil, got %v", *fs2.submitSpec.ExpiresAt)
+	if fs2.postSpec.ExpiresAt != nil {
+		t.Fatalf("absent expires_at must be nil, got %v", *fs2.postSpec.ExpiresAt)
+	}
+}
+
+// The full submit surface (own id, parent, visibility) reaches the verb spec
+// unchanged on BOTH arms — the event arm carries no ExpiresAt because an event
+// has no closure to deadline.
+func TestInterpretSubmitCarriesTheFullSurfaceOnBothArms(t *testing.T) {
+	fs := &fakeSys{self: "human:alice", writeID: "m1"}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
+		ChannelID: "c1", MsgType: "chat.text", Kind: "event", Audience: []string{"agent:a"},
+		ID: "own-id", ParentID: "parent-1", Visibility: "private", Payload: json.RawMessage(`{"t":"hi"}`),
+	})
+	if got := interpretFrame(fs, newDeps("human:alice", nil, false), f); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("event submit should receipt: %s", decodeErr(t, got).Code)
+	}
+	if !fs.emitted || fs.posted {
+		t.Fatalf("kind=event must Emit, not Post")
+	}
+	got := fs.emitSpec
+	if got.ID != "own-id" || got.ParentID != "parent-1" || got.Visibility != message.VisibilityPrivate ||
+		got.Type != "chat.text" || string(got.Payload) != `{"t":"hi"}` {
+		t.Fatalf("event spec lost a field: %+v", got)
+	}
+
+	fs2 := &fakeSys{self: "human:alice", writeID: "m2"}
+	f2, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
+		ChannelID: "c1", MsgType: "human.approve", Kind: "request", Audience: []string{"agent:a"},
+		ID: "own-id", ParentID: "parent-1", Visibility: "private",
+	})
+	if got := interpretFrame(fs2, newDeps("human:alice", nil, false), f2); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("request submit should receipt: %s", decodeErr(t, got).Code)
+	}
+	if fs2.postSpec.ID != "own-id" || fs2.postSpec.ParentID != "parent-1" ||
+		fs2.postSpec.Visibility != message.VisibilityPrivate {
+		t.Fatalf("request spec lost a field: %+v", fs2.postSpec)
+	}
+}
+
+// A harness rejection must reach the wire as its OWN reason word, not as a
+// shrugging "unavailable" — on BOTH write arms (§4.2a). WriteRejected is the
+// typed carrier that makes that possible.
+func TestSubmitSurfacesHarnessRejectVerbatimOnBothArms(t *testing.T) {
+	for _, kind := range []string{"request", "event"} {
+		fs := &fakeSys{
+			self:     "human:alice",
+			writeErr: &actorbase.WriteRejected{Reason: "harness_id_duplicate_conflict", Detail: "already exists"},
+		}
+		f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
+			ChannelID: "c1", MsgType: "x", Kind: kind, Audience: []string{"tool:kimi"},
+		})
+		e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, false), f))
+		if e.Code != "harness_id_duplicate_conflict" || e.Detail != "already exists" {
+			t.Fatalf("kind=%s: harness verdict must ride through verbatim, got %+v", kind, e)
+		}
+	}
+}
+
+// The interpreter runs its verbs on the cell's life ctx, so every write during
+// teardown answers a bare context.Canceled. That must not reach a person's
+// client as a Go runtime string — same retryable verdict, honest detail.
+func TestTeardownWritesAnswerAStableUnavailable(t *testing.T) {
+	fs := &fakeSys{self: "human:alice", writeErr: fmt.Errorf("pen write: %w", context.Canceled)}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
+		ChannelID: "c1", MsgType: "human.approve", Audience: []string{"tool:kimi"},
+	})
+	e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, false), f))
+	if e.Code != subjectgate.CodeUnavailable || e.Detail != "cell is stopping" {
+		t.Fatalf("teardown write should be a stable unavailable, got %+v", e)
 	}
 }
 
@@ -135,7 +282,7 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 		return f
 	}
 	base := func(snapshot RoutingSnapshot) (*fakeSys, Deps) {
-		fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 1}
+		fs := &fakeSys{self: "human:alice", writeID: "m1"}
 		deps := newDeps("human:alice", nil, false)
 		deps.Routing = func() RoutingSnapshot { return snapshot }
 		deps.IsActive = func(context.Context, actor.ActorID) (bool, error) { return true, nil }
@@ -149,9 +296,11 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 		if got.Type != subjectgate.FrameReceipt {
 			t.Fatalf("got error: %+v", decodeErr(t, got))
 		}
-		if fs.submitSpec.Kind != message.KindEvent ||
-			len(fs.submitSpec.Audience) != 1 || fs.submitSpec.Audience[0] != "agent:default" {
-			t.Fatalf("submit=%+v", fs.submitSpec)
+		if !fs.emitted || fs.posted {
+			t.Fatalf("kind=event must go to Emit")
+		}
+		if len(fs.emitSpec.Audience) != 1 || fs.emitSpec.Audience[0] != "agent:default" {
+			t.Fatalf("emit=%+v", fs.emitSpec)
 		}
 	})
 
@@ -200,7 +349,8 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 
 func TestInterpretResolveFiveStep(t *testing.T) {
 	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "tool:kimi"}, Audience: message.Audience{"human:alice"}}
-	fs := &fakeSys{self: "human:alice", respondID: "resp1"}
+	life := context.Background()
+	fs := &fakeSys{self: "human:alice", life: life, terminalID: "resp1"}
 
 	// happy path.
 	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{ChannelID: "c1", ReqID: "r1", Decision: "approved"})
@@ -208,8 +358,13 @@ func TestInterpretResolveFiveStep(t *testing.T) {
 	if got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("resolve happy path should receipt: %+v (%s)", got, decodeErr(t, got).Code)
 	}
-	if fs.respondSpec.Status != message.StatusCompleted {
-		t.Fatalf("resolve must map to completed, got %q", fs.respondSpec.Status)
+	if !fs.replied {
+		t.Fatalf("resolve must close the request through Reply (the completed terminal)")
+	}
+	// The handle is built from the LOG-recovered envelope, on sys.Life() — the
+	// person holds no mailbox delivery and the cell outlives them going offline.
+	if fs.replyMsg.ID != "r1" || fs.replyMsg.Ctx() != life {
+		t.Fatalf("reply handle must be the log-recovered request on sys.Life(): id=%q", fs.replyMsg.ID)
 	}
 
 	// invalid decision.
@@ -232,19 +387,100 @@ func TestInterpretResolveFiveStep(t *testing.T) {
 	}
 }
 
+// §7.1, the migration trap: Reply marshals its argument ONCE (behavior.
+// RespondJSON), so the interpreter must hand it the merged VALUE — never the
+// bytes of an already-marshalled copy. json.Marshal([]byte) emits a base64 JSON
+// STRING, which would silently destroy the payload and lose `decision`
+// altogether. This test marshals exactly as Reply does and asserts the result is
+// still a decodable object carrying both the person's fields and the decision.
+func TestResolvePayloadIsMarshalledExactlyOnce(t *testing.T) {
+	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "tool:kimi"}, Audience: message.Audience{"human:alice"}}
+	fs := &fakeSys{self: "human:alice", terminalID: "resp1"}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{
+		ChannelID: "c1", ReqID: "r1", Decision: "approved",
+		Payload: json.RawMessage(`{"note":"看过了","n":7}`),
+	})
+	if got := interpretFrame(fs, newDeps("human:alice", req, true), f); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("resolve should receipt: %s", decodeErr(t, got).Code)
+	}
+	if _, isBytes := fs.replyVal.([]byte); isBytes {
+		t.Fatalf("Reply must never be handed a []byte — it would be re-marshalled to base64")
+	}
+	// Reply's own single marshal, reproduced.
+	raw, err := json.Marshal(fs.replyVal)
+	if err != nil {
+		t.Fatalf("marshal reply value: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("resolve payload is not a JSON object (base64 corruption?): %s", raw)
+	}
+	if out["decision"] != "approved" || out["note"] != "看过了" || out["n"] != float64(7) {
+		t.Fatalf("resolve payload lost fields: %v", out)
+	}
+}
+
 func TestInterpretCancelSenderGate(t *testing.T) {
 	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "human:alice"}, Audience: message.Audience{"tool:kimi"}}
-	fs := &fakeSys{self: "human:alice", respondID: "resp1"}
+	life := context.Background()
+	fs := &fakeSys{self: "human:alice", life: life, terminalID: "resp1"}
 	f, _ := subjectgate.NewFrame(subjectgate.FrameCancel, "r", subjectgate.CancelPayload{ChannelID: "c1", ReqID: "r1"})
 	if got := interpretFrame(fs, newDeps("human:alice", req, true), f); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("cancel by sender should receipt: %s", decodeErr(t, got).Code)
 	}
-	if fs.respondSpec.Status != message.StatusFailed {
-		t.Fatalf("cancel must map to failed terminal, got %q", fs.respondSpec.Status)
+	// Cancel writes the failed terminal through Fail, on the same log-origin
+	// handle resolve uses. The interpreter supplies only code+detail: the
+	// reason derivation (this identity SENT the request → the caller's own
+	// unanswered_timeout) and the cancelled:true stamp are the engine's, in one
+	// place — the three-field literal this function used to hand-write is gone.
+	if !fs.failed || fs.replied {
+		t.Fatalf("cancel must go through Fail, not Reply")
+	}
+	if fs.failMsg.ID != "r1" || fs.failMsg.Ctx() != life {
+		t.Fatalf("fail handle must be the log-recovered request on sys.Life(): id=%q", fs.failMsg.ID)
+	}
+	if fs.failCode != string(message.TerminalUnansweredTimeout) || fs.failDetail != "cancelled by caller" {
+		t.Fatalf("cancel words changed: code=%q detail=%q", fs.failCode, fs.failDetail)
 	}
 	// non-sender refused.
 	if e := decodeErr(t, interpretFrame(fs, newDeps("human:bob", req, true), f)); e.Code != subjectgate.CodeUnauthorizedSender {
 		t.Fatalf("want unauthorized_sender, got %q", e.Code)
+	}
+}
+
+// §9-14: the打断 hint is best-effort and fires EXACTLY once per successful
+// cancel — and never when the write itself errored. Fail does not run
+// Hooks.Canceller (that hook belongs to callLedger.cancel, the in-process
+// twin), so deps.CancelHint is the ONLY thing that can interrupt the receiver.
+func TestCancelHintFiresExactlyOnce(t *testing.T) {
+	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "human:alice"}, Audience: message.Audience{"tool:kimi"}}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameCancel, "r", subjectgate.CancelPayload{ChannelID: "c1", ReqID: "r1"})
+
+	var hints []actor.ActorID
+	deps := newDeps("human:alice", req, true)
+	deps.CancelHint = func(target actor.ActorID, id message.ID) {
+		if id != "r1" {
+			t.Fatalf("hint carried the wrong request id: %q", id)
+		}
+		hints = append(hints, target)
+	}
+
+	fs := &fakeSys{self: "human:alice", terminalID: "resp1"}
+	if got := interpretFrame(fs, deps, f); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("cancel should receipt: %s", decodeErr(t, got).Code)
+	}
+	if len(hints) != 1 || hints[0] != "tool:kimi" {
+		t.Fatalf("want exactly one hint to the receiver, got %v", hints)
+	}
+
+	// A verb-errored self-close closes nothing, so it hints nothing.
+	hints = nil
+	errored := &fakeSys{self: "human:alice", writeTermE: errors.New("membrane down")}
+	if got := interpretFrame(errored, deps, f); got.Type != subjectgate.FrameError {
+		t.Fatalf("failed cancel must answer an error frame, got %+v", got)
+	}
+	if len(hints) != 0 {
+		t.Fatalf("a failed cancel must send no hint, got %v", hints)
 	}
 }
 
@@ -253,10 +489,10 @@ func TestInterpretCancelSenderGate(t *testing.T) {
 // The request being cancelled was authored in a PRIOR life — this fresh
 // incarnation (a bare fakeSys with zero call-ledger memory of it) never Recv'd or
 // sent it in-process. It is recovered purely from the durable log (FindByID), and
-// the sender-identity gate (req.Sender.ID == self) grants the cancel. The terminal
-// failed response lands, closing the request — no per-life ledger was consulted.
-// (Paired sibling of TestRespondEnvelopeAcrossIncarnation, which covers the
-// respond-authority half at the engine level.)
+// the sender-identity gate (req.Sender.ID == self) grants the cancel. The
+// log-origin Msg carries that recovery into the verb, and the terminal failed
+// response lands — no per-life ledger was consulted.
+// (Engine-side sibling: lib/actorbase's log-origin terminal-write coverage.)
 func TestCancelOwnRequestAcrossIncarnation(t *testing.T) {
 	// Request authored by human:alice in a life this incarnation has no memory of.
 	priorLifeReq := &message.Envelope{
@@ -265,19 +501,79 @@ func TestCancelOwnRequestAcrossIncarnation(t *testing.T) {
 		Audience: message.Audience{"tool:kimi"},
 	}
 	// Fresh incarnation: no call ledger, no serve ledger — authority is log-derived only.
-	fs := &fakeSys{self: "human:alice", respondID: "resp-x"}
+	fs := &fakeSys{self: "human:alice", terminalID: "resp-x"}
 	f, _ := subjectgate.NewFrame(subjectgate.FrameCancel, "ref-c", subjectgate.CancelPayload{ChannelID: "c1", ReqID: "r-priorlife"})
 
 	got := interpretFrame(fs, newDeps("human:alice", priorLifeReq, true), f)
 	if got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("cross-incarnation cancel of own request should receipt: %s", decodeErr(t, got).Code)
 	}
-	// The terminal response addressed the recovered request — truth closed from the log.
-	if fs.respondReq == nil || fs.respondReq.ID != "r-priorlife" {
-		t.Fatalf("cancel must respond to the log-recovered request, got %+v", fs.respondReq)
+	// The terminal addressed the recovered request — truth closed from the log.
+	if !fs.failed || fs.failMsg.ID != "r-priorlife" {
+		t.Fatalf("cancel must fail the log-recovered request, got %+v", fs.failMsg.Envelope)
 	}
-	if fs.respondSpec.Status != message.StatusFailed {
-		t.Fatalf("cancel must map to failed terminal, got %q", fs.respondSpec.Status)
+	if fs.failMsg.Sender.ID != "human:alice" {
+		t.Fatalf("the recovered envelope must ride into the verb verbatim — the sender is what picks the self-close arm")
+	}
+}
+
+func TestInterpretAfterUsesTheDurableHome(t *testing.T) {
+	fs := &fakeSys{self: "human:alice", afterID: "t-1"}
+	payload := json.RawMessage(`{"note":"remind me"}`)
+	f, _ := subjectgate.NewFrame(subjectgate.FrameAfter, "r", subjectgate.AfterPayload{
+		ChannelID: "c1", DurationMs: 1500, MsgType: "human.remind", Payload: payload,
+	})
+	got := interpretFrame(fs, newDeps("human:alice", nil, false), f)
+	if got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("after should receipt: %s", decodeErr(t, got).Code)
+	}
+	var rc subjectgate.AfterReceipt
+	_ = got.DecodePayload(&rc)
+	if rc.TimerID != "t-1" {
+		t.Fatalf("timer id mismatch: %+v", rc)
+	}
+	// Durable: a person's reminder must outlive a Scheduler restart. home is
+	// DURABILITY, not lifetime — there is no default, so this is a declaration.
+	if fs.afterHome != schedule.TimerHomeDurable {
+		t.Fatalf("human timers must be durable, got %q", fs.afterHome)
+	}
+	if fs.afterD != 1500*time.Millisecond || fs.afterType != "human.remind" {
+		t.Fatalf("after args wrong: d=%v type=%q", fs.afterD, fs.afterType)
+	}
+	// The payload stays json.RawMessage all the way to the verb: After marshals
+	// once, and RawMessage's MarshalJSON emits the bytes as-is. Handing over a
+	// plain []byte here would base64 them (the §7.1 trap, on this line too).
+	raw, ok := fs.afterPayload.(json.RawMessage)
+	if !ok {
+		t.Fatalf("After payload must stay json.RawMessage, got %T", fs.afterPayload)
+	}
+	out, err := json.Marshal(raw)
+	if err != nil || string(out) != `{"note":"remind me"}` {
+		t.Fatalf("timer payload would not survive After's marshal: %s (%v)", out, err)
+	}
+
+	// bounds still refused before the verb.
+	for _, bad := range []int64{0, -1} {
+		bf, _ := subjectgate.NewFrame(subjectgate.FrameAfter, "r", subjectgate.AfterPayload{
+			ChannelID: "c1", DurationMs: bad, MsgType: "x",
+		})
+		if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, false), bf)); e.Code != subjectgate.CodeBadPayload {
+			t.Fatalf("duration %d must be bad_payload, got %q", bad, e.Code)
+		}
+	}
+}
+
+func TestInterpretCancelTimer(t *testing.T) {
+	fs := &fakeSys{self: "human:alice"}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameCancelTimer, "r", subjectgate.CancelTimerPayload{
+		ChannelID: "c1", TimerID: "t-9",
+	})
+	got := interpretFrame(fs, newDeps("human:alice", nil, false), f)
+	if got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("cancel_timer should receipt: %s", decodeErr(t, got).Code)
+	}
+	if fs.cancelTID != "t-9" {
+		t.Fatalf("timer id not carried: %q", fs.cancelTID)
 	}
 }
 

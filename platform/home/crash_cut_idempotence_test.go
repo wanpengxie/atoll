@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -80,8 +81,12 @@ func (f *crashCutFixture) proc() actorbase.Proc {
 		}
 		if run.err == "" && !run.fenced {
 			// The business effect: one committed row in the channel log.
-			if _, err := sys.Emit(crashCutEventType,
-				map[string]string{"unit": "the-one-job"}, sys.Self()); err != nil {
+			spec, err := behavior.EventSpecJSON(crashCutEventType,
+				map[string]string{"unit": "the-one-job"}, sys.Self())
+			if err == nil {
+				_, err = sys.Emit(spec)
+			}
+			if err != nil {
 				run.err = "business effect: " + err.Error()
 			} else {
 				run.ran = true

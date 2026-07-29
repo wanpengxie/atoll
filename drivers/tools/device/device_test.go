@@ -157,7 +157,7 @@ func startActor(t *testing.T) (*fakeSys, string) {
 
 func request(typ string, payload any) actorbase.Msg {
 	raw, _ := json.Marshal(payload)
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:        message.ID("req-" + typ),
 		ChannelID: testChannel,
 		Kind:      message.KindRequest,
@@ -311,7 +311,7 @@ func TestDescribeAndUnknownType(t *testing.T) {
 
 	pushRaw := func(id string, typ string, payload any) (string, string, map[string]json.RawMessage) {
 		raw, _ := json.Marshal(payload)
-		msg := actorbase.NewMsg(context.Background(), message.Envelope{
+		msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 			ID:        message.ID(id),
 			ChannelID: testChannel,
 			Kind:      message.KindRequest,

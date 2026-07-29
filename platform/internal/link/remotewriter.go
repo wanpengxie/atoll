@@ -41,7 +41,7 @@ import (
 // host pen welds the bound identity. So this proxy must stay a pure relay — see
 // the platform emit-identity test.
 //
-// A remote cell has no local truth: its Respond/EmitEvent drive this pen,
+// A remote cell has no local truth: its Respond/Emit writes drive this pen,
 // which sends a KindEmit and BLOCKS until the matching KindEmitAck returns. The
 // returned harness.WriteResult is reconstructed from that ack, so a remote
 // cell's Respond observes the EXACT outcome a local cell's Respond would — the
@@ -73,7 +73,7 @@ func NewRemoteWriter(codec *ipc.Codec) *RemoteWriter {
 // Write sends env upward as a KindEmit and blocks until the host returns the
 // matching KindEmitAck (FIFO) or ctx is cancelled. It satisfies harness.Pen
 // (relay-only): a remote cell's pen seam is this method, so its behavior.Respond
-// / behavior.EmitEvent flow to the host harness (truth owner) and observe the
+// and its event writes flow to the host harness (truth owner) and observe the
 // authoritative verdict. It does NOT inject identity here — the host emitSink's
 // Mint welds the bound id (see the type doc invariant).
 //

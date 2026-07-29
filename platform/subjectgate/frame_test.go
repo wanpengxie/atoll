@@ -71,7 +71,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		{"cancel_timer", FrameCancelTimer, CancelTimerPayload{ChannelID: "c1", TimerID: "t1"}},
 		{"resource", FrameResource, ResourcePayload{ChannelID: "c1", Op: ResRead, ResourceID: "res:1"}},
 		{"feed", FrameFeed, FeedPayload{ChannelID: "c1", Seq: 5, Envelope: json.RawMessage(`{}`)}},
-		{"receipt", FrameReceipt, SubmitReceipt{MessageID: "m1", Seq: 5}},
+		{"receipt", FrameReceipt, SubmitReceipt{MessageID: "m1"}},
 		{"error", FrameError, ErrorPayload{Frame: "submit", Code: CodeBadPayload, Detail: "bad"}},
 	}
 	if len(cases) != len(knownFrameTypes) {

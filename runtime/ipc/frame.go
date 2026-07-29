@@ -33,7 +33,7 @@ const (
 	KindEmit Kind = "emit"
 	// KindEmitAck (host→remote): the host's authoritative verdict for one
 	// KindEmit. The harness Writer's WriteResult (MessageID + RejectReason) is
-	// part of a cell's PEN: a remote cell's Respond/EmitEvent MUST see the same
+	// part of a cell's PEN: a remote cell's Respond/Emit MUST see the same
 	// authoritative write verdict a local cell sees, so the writer contract may
 	// not be downgraded across the wire — that requires an upward ack, not a
 	// fire-and-forget emit.
