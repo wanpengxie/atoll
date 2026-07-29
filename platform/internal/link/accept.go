@@ -90,8 +90,7 @@ type Acceptor struct {
 }
 
 type linkHandle struct {
-	send     func([]byte) error
-	openLane func(context.Context) (net.Conn, error)
+	send func([]byte) error
 }
 
 func (h *linkHandle) sendControl(raw []byte) error {
@@ -273,15 +272,6 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		}
 	}
 
-	onLane := func(conn net.Conn) {
-		if !authority.admits() {
-			_ = conn.Close()
-			a.logLateReject(record, "lane_admission")
-			return
-		}
-		a.handleLaneRedeem(daemonID, conn)
-	}
-
 	router, err := buildHomeControlRouter(a, reqCtx, record, authority.admits)
 	if err != nil {
 		record.report(SessionLocalFault, "control_table_invalid", err)
@@ -299,7 +289,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		"key", record.key,
 	)
 	lc, err = acceptLinkSession(
-		ws, onControl, onActor, onLane,
+		ws, onControl, onActor,
 		func() { a.sessions.touch(record, time.Now()) },
 		func(reason SessionEndReason, detail string, evidenceErr error) {
 			record.report(reason, detail, evidenceErr)
@@ -322,9 +312,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		a.sessions.completeSeal(record, 0)
 		return
 	}
-	handle := &linkHandle{
-		send: lc.sendControl, openLane: lc.openLane,
-	}
+	handle := &linkHandle{send: lc.sendControl}
 	record.setHandle(handle)
 	lc.start()
 

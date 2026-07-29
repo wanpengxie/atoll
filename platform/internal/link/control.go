@@ -43,7 +43,7 @@ type AttachReply struct {
 
 // controlKind tags one stream-0 control payload (the link control plane is
 // JSON; actor streams are native ipc). The full vocabulary — attach, plan,
-// probe, storage and lane RPCs — is enumerated by the per-endpoint known-kind
+// probe, storage and file-route RPCs — is enumerated by the per-endpoint known-kind
 // lists in control_dispatch.go, which the control tables must cover exactly.
 type controlKind string
 

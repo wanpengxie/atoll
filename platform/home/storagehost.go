@@ -112,18 +112,18 @@ func (c lateStorageControl) ReclaimRequest(ctx context.Context, daemonID string,
 	return a.SendReclaimRequest(ctx, daemonID, coord)
 }
 
-// lateLaneControl implements accessdoor.LaneControl over a lateAcceptor —
-// §5's Token-mint injection point, same late-bound discipline as
-// lateStorageMounts/lateStorageControl above (the Acceptor owns the lane
-// session/transfer tables, which do not exist until step 11).
-type lateLaneControl struct{ acc *lateAcceptor }
+// lateTransferControl implements accessdoor.TransferControl over a
+// lateAcceptor — §5's ticket-mint injection point, same late-bound discipline
+// as lateStorageMounts/lateStorageControl above (the Acceptor owns the
+// transfer table, which does not exist until step 11).
+type lateTransferControl struct{ acc *lateAcceptor }
 
-func (c lateLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (accessdoor.LaneTickets, error) {
+func (c lateTransferControl) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
 	a := c.acc.get()
 	if a == nil {
-		return accessdoor.LaneTickets{}, errors.New("platform: lane control not wired yet (Acceptor not built)")
+		return "", errors.New("platform: transfer control not wired yet (Acceptor not built)")
 	}
-	return a.OpenLaneTransfer(ctx, targetDaemonID, requesterDaemonID, coord, mode, reservationID)
+	return a.OpenTransfer(ctx, targetDaemonID, coord, mode, reservationID)
 }
 
 // homeStorageHostControl implements link.StorageHostControl over
@@ -304,8 +304,8 @@ func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonI
 }
 
 var (
-	_ accessdoor.StorageMounts  = lateStorageMounts{}
-	_ accessdoor.StorageControl = lateStorageControl{}
-	_ accessdoor.LaneControl    = lateLaneControl{}
-	_ link.StorageHostControl   = homeStorageHostControl{}
+	_ accessdoor.StorageMounts   = lateStorageMounts{}
+	_ accessdoor.StorageControl  = lateStorageControl{}
+	_ accessdoor.TransferControl = lateTransferControl{}
+	_ link.StorageHostControl    = homeStorageHostControl{}
 )

@@ -11,18 +11,72 @@ package link_test
 // direction — collecting bytes on anything short of a DEFINITIVE Lost verdict
 // is data loss.
 //
-// lane_commit_test.go proves the lane's OpWrite arm actually routes through
-// this wrapper; the matrix itself lives here, driven directly through
+// file_write_route_test.go proves the write route actually routes through this
+// wrapper; the matrix itself lives here, driven directly through
 // link.NewCommittingWriteHandleForTest so each verdict is reached without
-// staging a whole lane transfer for it.
+// staging a whole transfer for it.
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
+
+// recordingFileOpener is a LocalFileOpener whose OpenWrite lands bytes in memory
+// and whose ReclaimCoord records the reclaimed coord — so a test can assert
+// whether the Lost branch actually reclaimed.
+type recordingFileOpener struct {
+	mu        sync.Mutex
+	written   map[string][]byte
+	reclaimed []string
+}
+
+func (o *recordingFileOpener) OpenRead(string) (io.ReadSeekCloser, error) {
+	return nil, errors.New("recordingFileOpener: OpenRead unexercised")
+}
+func (o *recordingFileOpener) OpenWrite(coord string) (accessdoor.LocalWriteHandle, error) {
+	return &recordingWH{o: o, coord: coord}, nil
+}
+func (o *recordingFileOpener) OpenDir(string) (accessdoor.LocalDirHandle, error) {
+	return nil, errors.New("recordingFileOpener: OpenDir unexercised")
+}
+func (o *recordingFileOpener) ReclaimCoord(coord string) error {
+	o.mu.Lock()
+	o.reclaimed = append(o.reclaimed, coord)
+	o.mu.Unlock()
+	return nil
+}
+func (o *recordingFileOpener) reclaimedCoords() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.reclaimed...)
+}
+
+var _ link.LocalFileOpener = (*recordingFileOpener)(nil)
+
+type recordingWH struct {
+	o     *recordingFileOpener
+	coord string
+	buf   bytes.Buffer
+}
+
+func (h *recordingWH) Write(p []byte) (int, error) { return h.buf.Write(p) }
+func (h *recordingWH) Commit() error {
+	h.o.mu.Lock()
+	if h.o.written == nil {
+		h.o.written = map[string][]byte{}
+	}
+	h.o.written[h.coord] = append([]byte(nil), h.buf.Bytes()...)
+	h.o.mu.Unlock()
+	return nil
+}
+func (h *recordingWH) Abort() error { return nil }
 
 // failingCommitWH is a LocalWriteHandle whose own Commit fails — the bytes
 // never landed, so nothing downstream of the local commit may run.
@@ -37,10 +91,10 @@ func (h *failingCommitWH) Abort() error                { h.aborted = true; retur
 
 // commitWrapperRig wires one live daemon↔home pair plus the recording opener
 // the Lost branch reclaims through.
-func commitWrapperRig(t *testing.T) (*storageRig, *link.Dialer, *recordingLaneOpener) {
+func commitWrapperRig(t *testing.T) (*storageRig, *link.Dialer, *recordingFileOpener) {
 	t.Helper()
 	r := newStorageRig(t)
-	opener := &recordingLaneOpener{}
+	opener := &recordingFileOpener{}
 	d := dialStorageDaemon(t, r, link.DialConfig{LocalFileOpener: opener})
 	return r, d, opener
 }

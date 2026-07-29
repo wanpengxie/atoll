@@ -45,7 +45,7 @@ func TestWireAccessArmRoundTripsVerdictsWithCellParity(t *testing.T) {
 			Value: []byte("bytes-back"),
 			Found: true,
 			Route: &accessdoor.FileRoute{
-				Local: true, Token: "tok-7", Mode: access.OpWrite,
+				Token: "tok-7", Mode: access.OpWrite,
 				ReservationID: "res-9", Dir: false,
 			},
 		}
@@ -105,7 +105,7 @@ func TestWireAccessArmRoundTripsVerdictsWithCellParity(t *testing.T) {
 			SourceChannelID: "chan:src", SourceResourceID: "res:src",
 		}
 		want := accessdoor.Outcome{
-			Route: &accessdoor.FileRoute{Local: false, Token: "create-tok", Mode: access.OpWrite},
+			Route: &accessdoor.FileRoute{Token: "create-tok", Mode: access.OpWrite},
 		}
 		ing.setAccess(func(remoteingress.AccessRequest) (remoteingress.AccessResponse, error) {
 			return remoteingress.AccessResponse{Outcome: want}, nil

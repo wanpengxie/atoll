@@ -3,6 +3,7 @@ package accessdoor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -22,48 +23,46 @@ type door struct {
 
 // resolveFileRoute computes OpRead/OpWrite(file)'s (and, via query.go's
 // create, a with_content create's write) byte-access authorization product
-// (期11 spec §3.4/§5 item 0): same-daemon (caller's authoritative Placement.Host
-// equals placementDaemonID) → Local; else → mint a lane Token via
-// Deps.LaneControl. reservationID is "" for a plain OpRead/OpWrite (§3.5:
-// no outbox involvement — OpWrite never fires Committed) and the
-// just-reserved id for a with-content create's write route (§1.7).
+// (期11 spec §3.4/§5 item 0). Byte access is SAME-DAEMON ONLY: the caller's
+// authoritative storage host must equal placementDaemonID, and the route it
+// gets back is a ticket the daemon resolves into a local handle over the
+// control-RPC ResolveCoord step (platform/internal/link) — zero byte-hop,
+// true zerocopy for the file bytes themselves.
+//
+// A caller on a DIFFERENT daemon than the file is refused outright with
+// ErrFileCapabilityUnavailable. There is no daemon-to-daemon byte transport in
+// this deployment: the evaluation baseline is one daemon in one trust domain
+// (transfer-lifecycle-spec's own "单 daemon = 所有字节本地"), so the relay that
+// used to serve this branch existed only for a deployment shape that does not
+// exist, with failure semantics (EOF-as-commit, dropped Lost verdicts) that
+// were never finished. An honest refusal beats a path whose only reachable
+// form is the unfinished one; re-introducing it when a multi-daemon
+// deployment is real is additive.
+//
+// reservationID is "" for a plain OpRead/OpWrite (§3.5: no outbox involvement
+// — OpWrite never fires Committed) and the just-reserved id for a with-content
+// create's write route (§1.7).
 func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, placementDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (*FileRoute, error) {
 	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
 	host := facts.PreferredStorageHost
-	// Same-daemon (Local) resolves coord itself via the daemon-side
-	// control-RPC ResolveCoord step (platform/internal/link) — never a lane
-	// byte-hop (§5 item 0's "同daemon→daemon本地os.Root句柄...zerocopy").
-	// One mint returns two purpose-specific tickets. A local route carries only
-	// the retryable resolve ticket. A cross-host route carries only the
-	// consume-on-valid-use redeem ticket; the home stores and forwards its
-	// paired resolve ticket to the target.
-	local := facts.Active && host != "" && host == placementDaemonID
-	if dir && !local {
-		// A directory lease is a whole-tree os.Root capability confined to one
-		// machine — it does NOT serialize onto the lane's single byte-pipe. A
-		// cross-host dir workspace Open is deferred whole (债② federation, 丁12
-		// scope: same-daemon only); reject honestly rather than mint a lane
-		// route the redeem side could only mis-handle as a byte stream.
-		return nil, errors.New("accessdoor: cross-host directory lease deferred (债② federation) — a dir workspace Open requires a same-daemon caller")
+	if !facts.Active || host == "" || host != placementDaemonID {
+		return nil, fmt.Errorf("%w: file bytes are same-daemon only — caller host %q, file placed on %q",
+			ErrFileCapabilityUnavailable, host, placementDaemonID)
 	}
-	if d.deps.LaneControl == nil {
-		return nil, errors.New("accessdoor: file byte route not wired (Deps.LaneControl is nil)")
+	if d.deps.TransferControl == nil {
+		return nil, errors.New("accessdoor: file byte route not wired (Deps.TransferControl is nil)")
 	}
-	tickets, terr := d.deps.LaneControl.OpenTransfer(ctx, placementDaemonID, host, coord, mode, reservationID)
+	token, terr := d.deps.TransferControl.OpenTransfer(ctx, placementDaemonID, coord, mode, reservationID)
 	if terr != nil {
 		return nil, terr
 	}
-	if err := tickets.validate(); err != nil {
-		return nil, err
+	if token == "" {
+		return nil, errors.New("accessdoor: transfer control minted an empty ticket")
 	}
-	token := tickets.Redeem
-	if local {
-		token = tickets.Resolve
-	}
-	return &FileRoute{Local: local, Token: token, Mode: mode, ReservationID: reservationID, Dir: dir}, nil
+	return &FileRoute{Token: token, Mode: mode, ReservationID: reservationID, Dir: dir}, nil
 }
 
 // driver resolves a kind to its Driver, returning a Go error when none is
@@ -135,7 +134,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		if meta.Kind == resourcespec.KindFile {
 			// file bytes never ride Outcome.Value (§8.1 red line) — the execute
 			// arm's kind branch (期11 spec §3.4) redirects file read/write to
-			// the daemon-hosted / lane-forwarded byte path, NOT this door's
+			// the daemon-hosted byte path, NOT this door's
 			// Driver dispatch (file has no Driver — Allocator/Streamer, a
 			// structurally different shape, realize its bytes, §4). The
 			// accepted outcome carries a FileRoute (§5), never bytes.

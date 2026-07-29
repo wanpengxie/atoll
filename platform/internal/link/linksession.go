@@ -22,7 +22,6 @@ type streamKind string
 const (
 	streamControl streamKind = "control"
 	streamActor   streamKind = "actor"
-	streamLane    streamKind = "lane"
 )
 
 const (
@@ -42,7 +41,76 @@ type streamHeader struct {
 }
 
 func writeStreamHeader(w io.Writer, kind streamKind) error {
-	return writeLaneJSON(w, streamHeader{Kind: kind})
+	return writeStreamJSON(w, streamHeader{Kind: kind})
+}
+
+// streamHeaderReadTimeout bounds the ONE header read at the head of every
+// substream (期11 review #F). Without it, a peer that opens a substream and
+// then never writes its header (a half-open connection, a peer bug) wedges the
+// dispatch goroutine reading it forever. Session probes prove only the control
+// spine, so a stuck child still needs its own admission bound. A header is tens
+// of bytes, so any healthy peer sends it near-instantly; this only ever fires on
+// a genuinely stuck/half-open stream. The deadline is CLEARED the moment the
+// header is read (readStreamJSON's defer), so it never bounds what follows on
+// the same stream.
+//
+// A var (not a const) SOLELY so a test can shorten it to prove the bounded
+// close without waiting out a real 30s; production never reassigns it.
+var streamHeaderReadTimeout = 30 * time.Second
+
+// writeStreamJSON / readStreamJSON are the substream header's own tiny framing:
+// a single newline-terminated JSON value, exactly once per stream, before any
+// other traffic. Newline-terminated (not length-prefixed) is sufficient because
+// this message is sent by exactly one side at a fixed protocol step — no
+// interleaving, no need for a byte-exact framer.
+func writeStreamJSON(w io.Writer, v any) error {
+	if dl, ok := w.(interface{ SetWriteDeadline(t time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(streamWriteBudget))
+		defer func() { _ = dl.SetWriteDeadline(time.Time{}) }()
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	_, err = w.Write(b)
+	return err
+}
+
+// readStreamJSON reads EXACTLY through the terminating '\n' and no further —
+// deliberately NOT a bufio.Reader/json.Decoder wrapping r directly: both read
+// AHEAD into their own internal buffer past the delimiter (a decoder has no
+// length prefix to bound its read to), silently swallowing whatever follows on
+// the SAME stream. A byte-at-a-time scan is the simplest way to guarantee zero
+// over-read; headers here are tens of bytes, so the per-byte Read call cost is
+// noise.
+func readStreamJSON(r io.Reader, v any) error {
+	// Bound the header read against a half-open / never-writing peer (#F). Set
+	// on entry, CLEARED on return (defer) so anything following on the SAME
+	// stream inherits no deadline. Only streams that carry a deadline API
+	// (net.Conn / yamux stream) are bounded; a plain io.Reader (test buffer)
+	// simply skips it.
+	if dl, ok := r.(interface{ SetReadDeadline(t time.Time) error }); ok {
+		_ = dl.SetReadDeadline(time.Now().Add(streamHeaderReadTimeout))
+		defer func() { _ = dl.SetReadDeadline(time.Time{}) }()
+	}
+	var buf []byte
+	one := make([]byte, 1)
+	for {
+		n, err := r.Read(one)
+		if n == 1 {
+			if one[0] == '\n' {
+				return json.Unmarshal(buf, v)
+			}
+			buf = append(buf, one[0])
+		}
+		if err != nil {
+			if err == io.EOF && len(buf) > 0 {
+				return json.Unmarshal(buf, v)
+			}
+			return fmt.Errorf("link: read stream header: %w", err)
+		}
+	}
 }
 
 type boundedConn struct {
@@ -229,7 +297,6 @@ type linkSession struct {
 
 	onControl func([]byte)
 	onActor   func(net.Conn)
-	onLane    func(net.Conn)
 	onProbe   func()
 	evidence  func(SessionEndReason, string, error)
 	logger    *slog.Logger
@@ -253,7 +320,6 @@ func newLinkSession(
 	ys *yamux.Session,
 	onControl func([]byte),
 	onActor func(net.Conn),
-	onLane func(net.Conn),
 	onProbe func(),
 	evidence func(SessionEndReason, string, error),
 	logger *slog.Logger,
@@ -262,7 +328,7 @@ func newLinkSession(
 		logger = slog.New(slog.DiscardHandler)
 	}
 	ls := &linkSession{
-		ys: ys, onControl: onControl, onActor: onActor, onLane: onLane,
+		ys: ys, onControl: onControl, onActor: onActor,
 		onProbe: onProbe, evidence: evidence, logger: logger,
 		openSeats: make(chan struct{}, openAttemptCapacity),
 	}
@@ -274,7 +340,6 @@ func dialLinkSession(
 	ctx context.Context,
 	ws *websocket.Conn,
 	onControl func([]byte),
-	onLane func(net.Conn),
 	onProbe func(),
 	evidence func(SessionEndReason, string, error),
 	logger *slog.Logger,
@@ -283,7 +348,7 @@ func dialLinkSession(
 	if err != nil {
 		return nil, err
 	}
-	ls := newLinkSession(ys, onControl, nil, onLane, onProbe, evidence, logger)
+	ls := newLinkSession(ys, onControl, nil, onProbe, evidence, logger)
 	ctrl, err := ls.openTagged(ctx, streamControl)
 	if err != nil {
 		_ = ys.Close()
@@ -299,7 +364,6 @@ func acceptLinkSession(
 	ws *websocket.Conn,
 	onControl func([]byte),
 	onActor func(net.Conn),
-	onLane func(net.Conn),
 	onProbe func(),
 	evidence func(SessionEndReason, string, error),
 	logger *slog.Logger,
@@ -308,7 +372,7 @@ func acceptLinkSession(
 	if err != nil {
 		return nil, err
 	}
-	return newLinkSession(ys, onControl, onActor, onLane, onProbe, evidence, logger), nil
+	return newLinkSession(ys, onControl, onActor, onProbe, evidence, logger), nil
 }
 
 func (ls *linkSession) reportEvidence(reason SessionEndReason, detail string, err error) {
@@ -411,7 +475,7 @@ func (ls *linkSession) carrierClosed() bool {
 
 func (ls *linkSession) dispatch(conn net.Conn) {
 	var header streamHeader
-	if err := readLaneJSON(conn, &header); err != nil {
+	if err := readStreamJSON(conn, &header); err != nil {
 		_ = conn.Close()
 		return
 	}
@@ -435,15 +499,8 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 		}
 		// Actor substreams carry the per-write transport budget so a peer that
 		// stops reading kills only its own stream; the failure is local and
-		// never session evidence. Lane substreams are byte pumps and get NO
-		// budget: their timing belongs to the initiating context alone.
+		// never session evidence.
 		ls.onActor(ls.wrap(conn, nil))
-	case streamLane:
-		if ls.onLane == nil {
-			_ = conn.Close()
-			return
-		}
-		ls.onLane(conn)
 	default:
 		if ls.logger != nil {
 			ls.logger.Warn("link.unknown_stream_kind", "kind", string(header.Kind))
@@ -567,10 +624,6 @@ func (ls *linkSession) sendProbe(nonce string) error {
 
 func (ls *linkSession) openStream(ctx context.Context) (net.Conn, error) {
 	return ls.openTagged(ctx, streamActor)
-}
-
-func (ls *linkSession) openLane(ctx context.Context) (net.Conn, error) {
-	return ls.openTagged(ctx, streamLane)
 }
 
 // openTagged gives the whole non-cancellable yamux open attempt to one
@@ -703,4 +756,3 @@ func (ls *linkSession) closed() <-chan struct{} {
 	}
 	return ls.ys.CloseChan()
 }
-

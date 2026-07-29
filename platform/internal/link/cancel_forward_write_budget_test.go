@@ -52,12 +52,11 @@ const cancelForwardTimeout = 20 * time.Second
 // pins the production value it stands for.
 const cancelForwardBudget = 300 * time.Millisecond
 
-// TestActorStreamCarriesSharedWriteBudgetAndLaneDoesNot pins the wrap decision
-// the whole cancel-forward bound rests on. The cancel forward writes onto an
-// actor substream, so that substream must arrive bounded by the shared budget
-// (budget==0 → streamWriteBudget); a lane substream is a byte pump whose timing
-// belongs to its initiating context and must arrive unwrapped.
-func TestActorStreamCarriesSharedWriteBudgetAndLaneDoesNot(t *testing.T) {
+// TestActorStreamCarriesSharedWriteBudget pins the wrap decision the whole
+// cancel-forward bound rests on. The cancel forward writes onto an actor
+// substream, so that substream must arrive bounded by the shared budget
+// (budget==0 → streamWriteBudget).
+func TestActorStreamCarriesSharedWriteBudget(t *testing.T) {
 	rig := newCancelForwardRig(t)
 
 	actorConn, err := rig.session.openTagged(context.Background(), streamActor)
@@ -73,14 +72,6 @@ func TestActorStreamCarriesSharedWriteBudgetAndLaneDoesNot(t *testing.T) {
 	}
 	if streamWriteBudget <= 0 || streamWriteBudget > 10*time.Second {
 		t.Fatalf("streamWriteBudget=%v: the shared per-write budget must stay bounded by the declared 10s", streamWriteBudget)
-	}
-
-	laneConn, err := rig.session.openTagged(context.Background(), streamLane)
-	if err != nil {
-		t.Fatalf("open lane stream: %v", err)
-	}
-	if _, wrapped := laneConn.(*boundedConn); wrapped {
-		t.Fatal("lane substream carries a per-write budget; its timing belongs to the initiating context alone")
 	}
 }
 
@@ -205,7 +196,7 @@ func newCancelForwardRig(t *testing.T) *cancelForwardRig {
 		t.Fatal(err)
 	}
 	rig := &cancelForwardRig{peer: peer, evidence: make(chan SessionEndReason, 8)}
-	rig.session = newLinkSession(client, nil, nil, nil, nil,
+	rig.session = newLinkSession(client, nil, nil, nil,
 		func(reason SessionEndReason, _ string, _ error) {
 			select {
 			case rig.evidence <- reason:
@@ -272,7 +263,7 @@ func (r *cancelForwardRig) readStreamHeader(t *testing.T, conn net.Conn) {
 	done := make(chan error, 1)
 	go func() {
 		var header streamHeader
-		err := readLaneJSON(conn, &header)
+		err := readStreamJSON(conn, &header)
 		if err == nil && header.Kind != streamActor {
 			t.Errorf("substream header kind=%q want %q", header.Kind, streamActor)
 		}

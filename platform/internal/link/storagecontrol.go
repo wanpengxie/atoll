@@ -29,8 +29,8 @@ import (
 // this frame is ever sent — coord is the SERVER-generated opaque storage
 // handle (§1.6), never daemon-chosen. Dir marks a directory-shaped create
 // (mkdir vs touch); a content-bearing create's actual bytes never ride this
-// frame (§8.1) — they arrive later via the lane (§5), staged under this
-// SAME coord.
+// frame (§8.1) — they arrive later through the daemon-local write route (§5),
+// staged under this SAME coord.
 type AllocRequest struct {
 	RequestID string `json:"request_id"`
 	ChannelID string `json:"channel_id"`

@@ -12,24 +12,24 @@ import (
 // leaseNoForgeryScanDirs are the resource-access packages 期11 spec §8.9's
 // red line binds: "本期绝不为 file 访问建密码学票据（签名/nonce/过期/一次性/
 // 绑定）" — the door (runtime/accessdoor, where handles/reservations are
-// minted and verified) and the lane/storage half of the link transport
+// minted and verified) and the transfer/storage half of the link transport
 // (where a Token crosses the wire, platform/internal/link's storagecontrol.go
-// + lanecontrol.go + lane.go). A local handle is domain-internal capability
+// + lanecontrol.go). A local handle is domain-internal capability
 // consumed in place (§8.9: "consumer 拿它当场用，不跨信任域旅行"), never a
 // self-verifying, offline-redeemable credential — v0.4's own P0 was exactly
 // this line crossed once already ("v0.4 正栽于此").
 var leaseNoForgeryScanDirs = []string{"../runtime/accessdoor"}
 
 // leaseNoForgeryScanFiles are the specific platform/internal/link files that
-// carry the lane/storage control-RPC wire shapes (§4.7/§5) — NOT the whole
+// carry the transfer/storage control-RPC wire shapes (§4.7/§5) — NOT the whole
 // link package (most of link is the general actor-message mux, out of this
-// axis). These are exactly the three files 期11 S5/S6 built the resource
-// lane in; the rest of link (attach, cancel-forward, the actor stream mux)
-// is a different concern with its own existing purity tests
+// axis). These are the files 期11 S5/S6 built the file byte route in, plus the
+// daemon-side opener contract; the rest of link (attach, cancel-forward, the
+// actor stream mux) is a different concern with its own existing purity tests
 // (lane_purity_test.go covers the yamux-confinement half of this same
 // slice).
 var leaseNoForgeryScanFiles = []string{
-	"../platform/internal/link/lane.go",
+	"../platform/internal/link/filebytes.go",
 	"../platform/internal/link/lanecontrol.go",
 	"../platform/internal/link/storagecontrol.go",
 }

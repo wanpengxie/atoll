@@ -14,7 +14,7 @@
 // linksession.go owns the mux: one top-level yamux.Session rides a wsByteStream
 // (the raw WS connection adapted to a byte stream), and every substream opens
 // with a self-describing streamHeader{Kind} so the accept loop can dispatch it
-// to its plane (control / actor / lane) without relying on stream ordering. It
+// to its plane (control / actor) without relying on stream ordering. It
 // is pure mechanism: every control frame (probes included) goes through the
-// one control dispatch table; actor and lane bytes remain opaque.
+// one control dispatch table; actor bytes remain opaque.
 package link

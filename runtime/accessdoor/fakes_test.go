@@ -321,30 +321,29 @@ func (f *fakeStorageControl) ReclaimRequest(ctx context.Context, daemonID string
 	return f.reclaimErr
 }
 
-// fakeLaneControl is a configurable LaneControl stub (§5 item 0's file
-// byte-route Token mint) — records every OpenTransfer call so a test can
-// assert the exact (targetDaemonID, requesterDaemonID, coord, mode,
-// reservationID) the door routed.
-type fakeLaneControl struct {
-	tickets LaneTickets
-	err     error
-	calls   []openTransferCall
+// fakeTransferControl is a configurable TransferControl stub (§5 item 0's file
+// byte-route ticket mint) — records every OpenTransfer call so a test can
+// assert the exact (targetDaemonID, coord, mode, reservationID) the door
+// routed.
+type fakeTransferControl struct {
+	ticket string
+	err    error
+	calls  []openTransferCall
 }
 
 type openTransferCall struct {
-	targetDaemonID    string
-	requesterDaemonID string
-	coord             string
-	mode              access.Operation
-	reservationID     string
+	targetDaemonID string
+	coord          string
+	mode           access.Operation
+	reservationID  string
 }
 
-func (f *fakeLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (LaneTickets, error) {
-	f.calls = append(f.calls, openTransferCall{targetDaemonID: targetDaemonID, requesterDaemonID: requesterDaemonID, coord: coord, mode: mode, reservationID: reservationID})
+func (f *fakeTransferControl) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
+	f.calls = append(f.calls, openTransferCall{targetDaemonID: targetDaemonID, coord: coord, mode: mode, reservationID: reservationID})
 	if f.err != nil {
-		return LaneTickets{}, f.err
+		return "", f.err
 	}
-	return f.tickets, nil
+	return f.ticket, nil
 }
 
 // fakeStateStore is a configurable resourcespec.StateStore stub. Every method
@@ -419,9 +418,7 @@ func newFileDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership, mounts
 	d.deps.StorageMounts = mounts
 	d.deps.StorageControl = ctl
 	d.deps.ChannelID = chID
-	d.deps.LaneControl = &fakeLaneControl{tickets: LaneTickets{
-		Redeem: "fake-redeem-ticket", Resolve: "fake-resolve-ticket",
-	}}
+	d.deps.TransferControl = &fakeTransferControl{ticket: "fake-transfer-ticket"}
 	return d
 }
 

@@ -127,7 +127,7 @@ func TestMalformedControlReportsEvidenceWithoutMechanismKill(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 	evidence := make(chan SessionEndReason, 1)
-	ls := newLinkSession(client, nil, nil, nil, nil,
+	ls := newLinkSession(client, nil, nil, nil,
 		func(reason SessionEndReason, _ string, _ error) { evidence <- reason }, nil)
 	reader, writer := net.Pipe()
 	defer reader.Close()
@@ -166,7 +166,7 @@ func TestControlHandlerPanicIsLocalFault(t *testing.T) {
 	defer server.Close()
 	evidence := make(chan SessionEndReason, 1)
 	ls := newLinkSession(client,
-		func([]byte) { panic("test-boom") }, nil, nil, nil,
+		func([]byte) { panic("test-boom") }, nil, nil,
 		func(reason SessionEndReason, _ string, _ error) { evidence <- reason }, nil)
 	reader, writer := net.Pipe()
 	defer reader.Close()
@@ -194,7 +194,7 @@ func TestOpenCapacityBusyDoesNotReportSessionDeath(t *testing.T) {
 	for i := 0; i < openAttemptCapacity; i++ {
 		ls.openSeats <- struct{}{}
 	}
-	if _, err := ls.openTagged(context.Background(), streamLane); !errors.Is(err, ErrOpenBusy) {
+	if _, err := ls.openTagged(context.Background(), streamActor); !errors.Is(err, ErrOpenBusy) {
 		t.Fatalf("open error=%v want busy", err)
 	}
 }
@@ -214,7 +214,7 @@ func TestSealUnblocksStuckOpenWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close() // never Accepts: unacked SYNs hold the client backlog
-	ls := newLinkSession(client, nil, nil, nil, nil,
+	ls := newLinkSession(client, nil, nil, nil,
 		func(SessionEndReason, string, error) {}, nil)
 
 	first, err := ls.openTagged(context.Background(), streamActor)
@@ -264,7 +264,7 @@ func TestLateOpenIsReapedAndAccounted(t *testing.T) {
 	}
 	defer client.Close()
 	defer server.Close()
-	ls := newLinkSession(client, nil, nil, nil, nil,
+	ls := newLinkSession(client, nil, nil, nil,
 		func(SessionEndReason, string, error) {}, nil)
 
 	first, err := ls.openTagged(context.Background(), streamActor)

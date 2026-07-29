@@ -311,8 +311,8 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		if !out.Accepted() {
 			t.Fatalf("want accepted, got reject %q", out.RejectReason)
 		}
-		if out.Route == nil || !out.Route.Local || out.Route.Mode != access.OpWrite {
-			t.Fatalf("want a Local write Route (creator is daemon-1, same as placement), got %+v", out.Route)
+		if out.Route == nil || out.Route.Mode != access.OpWrite {
+			t.Fatalf("want a write Route (creator is daemon-1, same as placement), got %+v", out.Route)
 		}
 		if len(reg.reserveCreateCalls) != 1 {
 			t.Fatalf("ReserveCreate calls = %d, want 1 (placement+reservation ARE resolved for with_content)", len(reg.reserveCreateCalls))
@@ -540,18 +540,18 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 // kind branch: file read/write through Invoke never touches a Driver (file
 // structurally has none — its bytes are realized by the daemon-side
 // Allocator/Streamer, §4) and never carries bytes on Outcome.Value (§8.1) —
-// an accepted outcome carries a FileRoute instead, Local when the caller's
-// ActorAuthority Placement.Host matches the resource's placement daemon, a minted
-// lane Token otherwise.
+// an accepted outcome carries a FileRoute instead. A route exists ONLY for a
+// caller on the file's own daemon; every other caller is refused, since this
+// deployment has no daemon-to-daemon byte transport.
 func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	meta := resourcespec.ResourceMeta{Kind: resourcespec.KindFile, PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"}
 
-	t.Run("same-daemon caller gets a Local route, no bytes on Value", func(t *testing.T) {
+	t.Run("same-daemon caller gets a route, no bytes on Value", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
-		lane := &fakeLaneControl{tickets: LaneTickets{Redeem: "redeem-local-unused", Resolve: "resolve-local"}}
+		transfers := &fakeTransferControl{ticket: "ticket-local"}
 		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.LaneControl = lane
+		d.deps.TransferControl = transfers
 		for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
 			out, err := d.invoke(context.Background(), "a", op, "r1", nil, nil)
 			if err != nil {
@@ -563,89 +563,78 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 			if out.Value != nil {
 				t.Fatalf("op %q: file bytes must never ride Outcome.Value, got %v", op, out.Value)
 			}
-			if out.Route == nil || !out.Route.Local {
-				t.Fatalf("op %q: want Local route, got %+v", op, out.Route)
+			if out.Route == nil {
+				t.Fatalf("op %q: want a route, got none", op)
 			}
 			if out.Route.Mode != op {
 				t.Fatalf("op %q: route Mode = %q, want %q", op, out.Route.Mode, op)
 			}
-			if out.Route.Token != "resolve-local" {
-				t.Fatalf("op %q: local route ticket = %q, want resolve ticket", op, out.Route.Token)
+			if out.Route.Token != "ticket-local" {
+				t.Fatalf("op %q: route ticket = %q, want the minted ticket", op, out.Route.Token)
 			}
 		}
-		if len(lane.calls) != 2 {
-			t.Fatalf("OpenTransfer calls = %d, want 2 (one per op — a Token still mints for the Local branch's ResolveCoord step)", len(lane.calls))
+		if len(transfers.calls) != 2 {
+			t.Fatalf("OpenTransfer calls = %d, want 2 (one per op)", len(transfers.calls))
+		}
+		if transfers.calls[0].targetDaemonID != "daemon-1" || transfers.calls[0].coord != "coord-1" {
+			t.Fatalf("OpenTransfer call = %+v, want target=daemon-1 coord=coord-1", transfers.calls[0])
 		}
 	})
 
-	t.Run("cross-host caller gets a Stream route (minted Token)", func(t *testing.T) {
+	// Byte access is same-daemon only. A caller elsewhere is refused with
+	// capability_unavailable and NO route — never a route whose only possible
+	// redemption is a transport this deployment does not have.
+	t.Run("caller on another daemon is refused, no route minted", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{lookupHost: "daemon-2", lookupFound: true}
-		lane := &fakeLaneControl{tickets: LaneTickets{Redeem: "redeem-xyz", Resolve: "resolve-not-carried"}}
+		transfers := &fakeTransferControl{ticket: "never-minted"}
 		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.LaneControl = lane
+		d.deps.TransferControl = transfers
 
 		out, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil)
-		if err != nil {
-			t.Fatalf("unexpected error %v", err)
+		if !errors.Is(err, ErrFileCapabilityUnavailable) {
+			t.Fatalf("err = %v, want ErrFileCapabilityUnavailable", err)
 		}
-		if out.Route == nil || out.Route.Local {
-			t.Fatalf("want a non-Local route, got %+v", out.Route)
+		if out.Route != nil {
+			t.Fatalf("a refused caller must get no route, got %+v", out.Route)
 		}
-		if out.Route.Token != "redeem-xyz" {
-			t.Fatalf("Token = %q, want redeem ticket", out.Route.Token)
-		}
-		if len(lane.calls) != 1 || lane.calls[0].targetDaemonID != "daemon-1" || lane.calls[0].requesterDaemonID != "daemon-2" || lane.calls[0].coord != "coord-1" {
-			t.Fatalf("OpenTransfer call = %+v, want target=daemon-1 requester=daemon-2 coord=coord-1", lane.calls)
+		if len(transfers.calls) != 0 {
+			t.Fatalf("a refused caller must mint nothing, got %+v", transfers.calls)
 		}
 	})
 
-	t.Run("server placement (home-hosted caller) is honestly non-Local", func(t *testing.T) {
+	t.Run("home-hosted caller (no storage host) is refused the same way", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{} // lookupFound: false
-		lane := &fakeLaneControl{tickets: LaneTickets{
-			Redeem: "redeem-server", Resolve: "resolve-server",
-		}}
+		transfers := &fakeTransferControl{ticket: "never-minted"}
 		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.LaneControl = lane
+		d.deps.TransferControl = transfers
 
-		out, err := d.invoke(context.Background(), "a", access.OpWrite, "r1", nil, nil)
-		if err != nil {
-			t.Fatalf("unexpected error %v", err)
+		_, err := d.invoke(context.Background(), "a", access.OpWrite, "r1", nil, nil)
+		if !errors.Is(err, ErrFileCapabilityUnavailable) {
+			t.Fatalf("err = %v, want ErrFileCapabilityUnavailable", err)
 		}
-		if out.Route == nil || out.Route.Local {
-			t.Fatalf("want a non-Local route for an unfound/home-hosted caller, got %+v", out.Route)
+		if len(transfers.calls) != 0 {
+			t.Fatalf("a refused caller must mint nothing, got %+v", transfers.calls)
 		}
 	})
 
-	t.Run("malformed ticket pairs fail closed", func(t *testing.T) {
-		tests := []struct {
-			name    string
-			tickets LaneTickets
-		}{
-			{name: "missing redeem", tickets: LaneTickets{Resolve: "resolve-only"}},
-			{name: "missing resolve", tickets: LaneTickets{Redeem: "redeem-only"}},
-			{name: "same ticket", tickets: LaneTickets{Redeem: "one", Resolve: "one"}},
-		}
-		for _, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
-				mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
-				d := newDoor(reg, &fakeDriver{}, mem)
-				d.deps.LaneControl = &fakeLaneControl{tickets: test.tickets}
-				if _, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil); err == nil {
-					t.Fatal("malformed ticket pair was accepted")
-				}
-			})
+	t.Run("an empty ticket fails closed", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
+		d := newDoor(reg, &fakeDriver{}, mem)
+		d.deps.TransferControl = &fakeTransferControl{}
+		if _, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil); err == nil {
+			t.Fatal("an empty ticket was accepted")
 		}
 	})
 
-	t.Run("nil Deps.LaneControl is an honest Go error, never a fabricated route", func(t *testing.T) {
+	t.Run("nil Deps.TransferControl is an honest Go error, never a fabricated route", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{lookupHost: "daemon-1", lookupFound: true})
 		_, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil)
 		if err == nil {
-			t.Fatal("expected a Go error when Deps.LaneControl is nil")
+			t.Fatal("expected a Go error when Deps.TransferControl is nil")
 		}
 	})
 }

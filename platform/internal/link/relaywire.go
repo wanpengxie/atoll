@@ -419,11 +419,11 @@ func invokeRoundTrip(ctx context.Context, relay *relayClient, scope accessScope,
 // accessScopeChannel.
 type remoteResourceHandle struct {
 	relay *relayClient
-	// dialer backs FileOpener (§5, lane.go/dial.go): a daemon-hosted actor's
-	// resource face needs its OWN Dialer (not just the relay arm) to redeem
-	// a FileRoute — SendResolveCoord/lane-session access are Dialer methods,
-	// not relay round-trips (file bytes never ride the ipc access arm at
-	// all, §8.1). nil on any avatar this section does not wire as a
+	// dialer backs FileOpener (§5, filebytes.go/dial.go): a daemon-hosted
+	// actor's resource face needs its OWN Dialer (not just the relay arm) to
+	// redeem a FileRoute — SendResolveCoord and the injected local opener are
+	// Dialer state, not relay round-trips (file bytes never ride the ipc
+	// access arm at all, §8.1). nil on any avatar this section does not wire as a
 	// FileOpener (day-1: none — every remoteResourceHandle is daemon-hosted
 	// and gets one, see OpenStream).
 	dialer *Dialer
@@ -592,10 +592,10 @@ func (h *remoteResourceHandle) Open(ctx context.Context, id resource.ResourceID,
 // Redeem satisfies accessdoor.FileOpener: turns an ALREADY-obtained
 // accepted FileRoute (e.g. from Create(with_content=true)'s own Outcome —
 // Open cannot re-derive it via Invoke since the row does not exist yet)
-// into a live FileAccess. The actual mechanics (ResolveCoord + local open,
-// or lane redeem) live on *Dialer — see dial.go's redeemFileRoute — since
-// they need Dialer state (the control-RPC arm, the lane session, the
-// injected LocalFileOpener) this thin wrapper does not itself hold.
+// into a live FileAccess. The actual mechanics (ResolveCoord + local open)
+// live on *Dialer — see dial.go's redeemFileRoute — since they need Dialer
+// state (the control-RPC arm, the injected LocalFileOpener) this thin wrapper
+// does not itself hold.
 func (h *remoteResourceHandle) Redeem(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
 	if h.dialer == nil {
 		return accessdoor.FileAccess{}, errors.New("link: this resource handle has no dialer wired for file byte redemption")

@@ -4,37 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/protocol/access"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
-// laneTransferTTL bounds how long a minted ticket pair lingers. A successful
-// redeem consumes ONLY the redeem ticket; the resolve ticket stays readable
-// for retries until this TTL — the TTL (never the redeem) is what finally
-// retires it. Opportunistic mint-time sweeping is backed by enforcement at use.
+// laneTransferTTL bounds how long a minted ticket lingers. The ticket is
+// read-only until it expires, so a target whose ResolveCoord reply was lost can
+// retry; the TTL is what finally retires it. Opportunistic mint-time sweeping
+// is backed by enforcement at use.
 const laneTransferTTL = 10 * time.Minute
 
-// lanecontrol.go is the HOME half of §5's resource lane: target selection reads
-// the session ledger's current index, while the ticket-keyed transfer registry
-// (accessdoor.LaneControl's platform-side implementor reaches this via
-// Acceptor.OpenLaneTransfer), the
-// ResolveCoord control-RPC frame pair (daemon-initiated, riding the SAME control
-// substream storagecontrol.go already extends — §4.7's own "fallback 触发时才落
-// control" wording, chosen here for the SAME reason: a genuinely daemon-local
-// rid→coord cache would contradict "daemon 无 truth"，so even the Local/zerocopy
-// route resolves its coord through one small metadata round trip on this
-// existing, tested channel — never through the lane itself, which stays
-// byte-only), and handleLaneRedeem, which relays a requester's redeem substream
-// to the transfer's target daemon (§5). 片③ flattened the lane: a redeem is a
-// plain top-level tag=lane substream dispatched by the link's own accept loop
-// (onLane), not a stream on a nested per-daemon yamux session.
+// lanecontrol.go is the HOME half of §5's file byte route: the ticket-keyed
+// transfer registry (accessdoor.TransferControl's platform-side implementor
+// reaches this via Acceptor.OpenTransfer) and the ResolveCoord control-RPC
+// frame pair, daemon-initiated, riding the SAME control substream
+// storagecontrol.go already extends — §4.7's own "fallback 触发时才落 control"
+// wording, chosen here for the SAME reason: a genuinely daemon-local rid→coord
+// cache would contradict "daemon 无 truth", so the caller resolves its coord
+// through one small metadata round trip on this existing, tested channel.
+//
+// There is no byte relay here. Byte access is same-daemon only (the door
+// refuses any other caller outright, accessdoor.door.resolveFileRoute), so the
+// home never stands between two daemons' bytes: it authorizes, and the daemon
+// that owns the file opens the handle locally.
 
 // --- ResolveCoord: daemon-initiated control-RPC (mirrors Committed/
 //     ReclaimAck/ReconcilePull's own request/response shape) ----------------
@@ -117,143 +113,47 @@ func decodeLaneControl(b []byte) (laneControlFrame, error) {
 
 // --- transfer registry -----------------------------------------------------
 
-// laneTransfer is one pending byte-access authorization. Its two tickets have
-// deliberately different lifecycles: redeemTicket is consumed by the first
-// valid requester redemption, while resolveTicket remains read-only and
-// retryable by the target until the shared TTL expires.
+// laneTransfer is one pending byte-access authorization. Its ticket is
+// read-only and retryable by the target until the TTL expires — nothing
+// consumes it, because only the target daemon can resolve it and resolving is
+// idempotent.
 type laneTransfer struct {
-	redeemTicket      string
-	resolveTicket     string
-	targetDaemonID    string
-	requesterDaemonID string
-	coord             string
-	mode              access.Operation
-	reservationID     string
-	// mintedAt stamps OpenLaneTransfer time, read only by
+	ticket         string
+	targetDaemonID string
+	coord          string
+	mode           access.Operation
+	reservationID  string
+	// mintedAt stamps OpenTransfer time, read only by
 	// sweepExpiredTransfersLocked for the laneTransferTTL GC (期11 review #G).
 	mintedAt time.Time
 }
 
-// laneState contains transfer capabilities only. Target-session routing reads
-// the session ledger's current index directly; there is deliberately no lane
-// link table.
+// laneState contains transfer capabilities only.
 type laneState struct {
 	mu          sync.Mutex
-	redeems     map[string]laneTransfer
 	resolutions map[string]laneTransfer
 }
 
 func newLaneState() *laneState {
-	return &laneState{
-		redeems:     map[string]laneTransfer{},
-		resolutions: map[string]laneTransfer{},
-	}
+	return &laneState{resolutions: map[string]laneTransfer{}}
 }
 
-// handleLaneRedeem answers one redeem stream — dispatched by the accept loop
-// (onLane) for every tag=lane substream a daemon opens toward the home, each one
-// a redeem attempt. daemonID is the requester's confirmed identity. A valid
-// requester consumes the redeem ticket under the lookup lock; the paired,
-// retryable resolve ticket is what the home forwards to the target before
-// relaying bytes.
-func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
-	defer conn.Close()
-	var hdr laneRedeemHeader
-	if err := readLaneJSON(conn, &hdr); err != nil {
-		return
-	}
-	a.lane.mu.Lock()
-	tr, ok := a.lane.redeems[hdr.Token]
-	if ok && laneTransferExpired(tr, time.Now()) {
-		// 期11 review残余#3: TTL is enforced AT USE, not only opportunistically
-		// at the NEXT mint (sweepExpiredTransfersLocked) — a token minted long
-		// ago but never redeemed until now must not still work just because no
-		// OTHER OpenLaneTransfer happened to run its GC in between.
-		a.lane.deleteTransferLocked(tr)
-		ok = false
-	}
-	if ok && tr.requesterDaemonID == daemonID {
-		// Single-use is enforced AT REDEMPTION: the full evidence (exists,
-		// unexpired, right requester) passed under this one lock hold, so the
-		// ticket is consumed here — a replay within the TTL finds nothing.
-		// A mismatched requester does NOT burn someone else's ticket.
-		delete(a.lane.redeems, hdr.Token)
-	} else {
-		ok = false
-	}
-	a.lane.mu.Unlock()
-	if !ok {
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "unknown or mismatched transfer token"})
-		return
-	}
-	targetRecord := a.sessions.currentRecord(tr.targetDaemonID)
-	if targetRecord == nil {
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: fmt.Sprintf("target daemon %q has no live link", tr.targetDaemonID)})
-		return
-	}
-	handle := targetRecord.linkHandle()
-	if handle == nil || handle.openLane == nil {
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: fmt.Sprintf("target daemon %q has no live link", tr.targetDaemonID)})
-		return
-	}
-	// openLane writes the streamHeader{lane} on the target's link; the
-	// laneRedeemHeader below rides right after it, exactly as the requester's own
-	// redeem substream carried its header after its streamHeader.
-	openCtx, cancel := context.WithTimeout(a.ctx, streamWriteBudget)
-	targetConn, err := handle.openLane(openCtx)
-	cancel()
-	if err != nil {
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "open target lane stream: " + err.Error()})
-		return
-	}
-	if err := writeLaneJSON(targetConn, laneRedeemHeader{Token: tr.resolveTicket}); err != nil {
-		_ = targetConn.Close()
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "forward token to target: " + err.Error()})
-		return
-	}
-	// Read the TARGET's own ack FIRST, before relaying anything to the
-	// requester — this ack is a protocol handshake byte, not payload, and
-	// must never be forwarded into the raw byte pump below (pumpBidirectional
-	// is a dumb byte relay with no framing awareness once it starts; the
-	// three-step handshake — requester→home→target→home→requester — has to
-	// fully resolve before ANY io.Copy begins, or the target's own ack line
-	// would be indistinguishable from the first bytes of real data).
-	var targetAck laneAck
-	if err := readLaneJSON(targetConn, &targetAck); err != nil {
-		_ = targetConn.Close()
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "target ack: " + err.Error()})
-		return
-	}
-	if !targetAck.OK {
-		_ = targetConn.Close()
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: targetAck.Reason})
-		return
-	}
-	if err := writeLaneJSON(conn, laneAck{OK: true}); err != nil {
-		_ = targetConn.Close()
-		return
-	}
-	pumpBidirectional(io.ReadWriteCloser(conn), io.ReadWriteCloser(targetConn))
-}
-
-// OpenLaneTransfer implements accessdoor.LaneControl (via a thin platform-
+// OpenTransfer implements accessdoor.TransferControl (via a thin platform-
 // layer wrapper, mirroring lateStorageControl's own indirection — see
-// platform/home/storagehost.go): mints one consume-on-valid-use redeem ticket
-// and one read-only-until-expiry resolve ticket.
-func (a *Acceptor) OpenLaneTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (accessdoor.LaneTickets, error) {
-	tickets := accessdoor.LaneTickets{Redeem: uuid.NewString(), Resolve: uuid.NewString()}
+// platform/home/storagehost.go): mints one read-only-until-expiry ticket that
+// only targetDaemonID can resolve.
+func (a *Acceptor) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
 	now := time.Now()
 	tr := laneTransfer{
-		redeemTicket: tickets.Redeem, resolveTicket: tickets.Resolve,
-		targetDaemonID: targetDaemonID, requesterDaemonID: requesterDaemonID,
-		coord: coord, mode: mode, reservationID: reservationID, mintedAt: now,
+		ticket:         uuid.NewString(),
+		targetDaemonID: targetDaemonID,
+		coord:          coord, mode: mode, reservationID: reservationID, mintedAt: now,
 	}
 	a.lane.mu.Lock()
 	a.sweepExpiredTransfersLocked(now)
-	a.lane.redeems[tickets.Redeem] = tr
-	a.lane.resolutions[tickets.Resolve] = tr
+	a.lane.resolutions[tr.ticket] = tr
 	a.lane.mu.Unlock()
-	return tickets, nil
+	return tr.ticket, nil
 }
 
 // sweepExpiredTransfersLocked drops every transfer older than laneTransferTTL
@@ -270,16 +170,15 @@ func (a *Acceptor) sweepExpiredTransfersLocked(now time.Time) {
 }
 
 func (s *laneState) deleteTransferLocked(tr laneTransfer) {
-	delete(s.redeems, tr.redeemTicket)
-	delete(s.resolutions, tr.resolveTicket)
+	delete(s.resolutions, tr.ticket)
 }
 
 // laneTransferExpired reports whether tr has aged past laneTransferTTL as of
 // now — the single predicate both the opportunistic mint-time GC
 // (sweepExpiredTransfersLocked) above AND the at-USE enforcement
-// (handleResolveCoord / handleLaneRedeem, 期11 review残余#3) share, so the
-// two can never disagree about what "expired" means. Before this fix, TTL
-// was ONLY checked opportunistically at the next OpenLaneTransfer call — a
+// (handleResolveCoord, 期11 review残余#3) share, so the two can never disagree
+// about what "expired" means. Before this fix, TTL
+// was ONLY checked opportunistically at the next OpenTransfer call — a
 // transfer nobody happened to mint again after was resolvable/redeemable
 // indefinitely, silently outliving the "10 minutes to abandon" contract
 // laneTransferTTL's own doc promises.
@@ -288,10 +187,9 @@ func laneTransferExpired(tr laneTransfer, now time.Time) bool {
 }
 
 // handleResolveCoord answers ResolveCoord (§5 item 0's single mechanical
-// check): only the daemon the transfer's target IS may resolve it — this ONE
-// assertion covers both the Local route (the caller IS the target, resolving
-// directly) and the Stream route's target-side inbound handler (redeemed-to by
-// home, then resolving for itself) uniformly.
+// check): only the daemon the transfer's target IS may resolve it. Since byte
+// access is same-daemon only, that daemon is also the caller — one assertion,
+// one branch.
 //
 // 期11 review #H reshapes two things the pre-review "delete-then-check" form
 // got wrong:
@@ -299,10 +197,8 @@ func laneTransferExpired(tr laneTransfer, now time.Time) bool {
 //     deletion, so a frame from the WRONG sender can never burn a legitimate
 //     target's token (the old form deleted first, then rejected, destroying a
 //     valid transfer on an unauthorized probe).
-//  2. IDEMPOTENT / REPLAY-SAFE — the resolve ticket is read-only until expiry.
-//     Local routes carry it directly; cross-host routes receive it from the
-//     home after the separate redeem ticket is consumed. A dropped reply can
-//     therefore be retried without making redemption replayable.
+//  2. IDEMPOTENT / REPLAY-SAFE — the ticket is read-only until expiry, so a
+//     dropped reply can be retried.
 func (a *Acceptor) handleResolveCoord(senderDaemonID string, msg *ResolveCoordRequest) ResolveCoordReply {
 	reply := ResolveCoordReply{RequestID: msg.RequestID}
 	if senderDaemonID == "" {

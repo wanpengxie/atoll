@@ -114,11 +114,11 @@ type Deps struct {
 	StorageMounts StorageMounts
 	// StorageControl issues the chosen placement's AllocRequest.
 	StorageControl StorageControl
-	// LaneControl mints the file byte-route redeem/resolve ticket pair for OpRead/OpWrite(file)
+	// TransferControl mints the file byte-route ticket for OpRead/OpWrite(file)
 	// and Create(file, with_content=true) — §5's own Dep, nil-safe absent
-	// (a kv-only test rig or an assembly that never wires the lane simply
-	// cannot route file bytes, honestly, never a silent kv-shaped route).
-	LaneControl LaneControl
+	// (a kv-only test rig or an assembly that never wires the byte plane
+	// simply cannot route file bytes, honestly, never a silent kv-shaped route).
+	TransferControl TransferControl
 
 	// Logger is the door's oplog seam (telemetry-completion spec A5/C4):
 	// purely a self-report channel, never a decision input — nil-safe

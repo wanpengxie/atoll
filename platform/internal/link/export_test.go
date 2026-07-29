@@ -1,17 +1,8 @@
 package link
 
 import (
-	"io"
-
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
-
-// HandleLaneInboundForTest drives the daemon's inbound lane handler (#19's
-// unified write-completion arm) over a caller-supplied conn, so an external test
-// can prove the OpWrite arm routes through committingWriteHandle: Lost reclaims,
-// NAK/transport-error does not, and a reservation-less transfer takes the plain
-// Commit path.
-func (d *Dialer) HandleLaneInboundForTest(conn io.ReadWriteCloser) { d.handleLaneInbound(conn) }
 
 // NewCommittingWriteHandleForTest exposes committingWriteHandle to the external
 // link_test package for 期11 review #D's守测: the wrapper that fires

@@ -150,7 +150,8 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		ChannelID:      cfg.ChannelID,
 		StorageMounts:  lateStorageMounts{acc: lateAcc},
 		StorageControl: lateStorageControl{acc: lateAcc},
-		LaneControl:    lateLaneControl{acc: lateAcc},
+
+		TransferControl: lateTransferControl{acc: lateAcc},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build access door: %w", err)

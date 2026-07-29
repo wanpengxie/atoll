@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"sync"
 	"time"
 
@@ -68,12 +67,13 @@ type Dialer struct {
 	pendingReconcile *pendingReplies[ReconcilePullReply]
 
 	// pendingResolveCoord correlates this Dialer's own ResolveCoord sends
-	// (§5's lane-control frame, lanecontrol.go) with home's replies.
+	// (§5 ResolveCoord, lanecontrol.go) with home's replies.
 	pendingResolveCoord *pendingReplies[ResolveCoordReply]
 
 	// localFileOpener is the daemon-side same-machine byte-access capability
-	// (lane.go's LocalFileOpener) — supplied in DialConfig. nil → every file byte redemption on this compute answers an
-	// honest "no storage host wired" error (never a silent no-op).
+	// (filebytes.go's LocalFileOpener) — supplied in DialConfig. nil → every
+	// file byte redemption on this compute answers an honest "no storage host
+	// wired" error (never a silent no-op).
 	localFileOpener LocalFileOpener
 
 	done      chan struct{}
@@ -157,19 +157,13 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	onControl := func(payload []byte) {
 		router.dispatch(controlDispatchInput{peerID: "home", link: d.lc}, payload)
 	}
-	// onLane handles a HOME-opened lane substream: the home is relaying a
-	// redeemed transfer whose TARGET is this daemon (§5). It runs on the per-
-	// substream dispatch goroutine (its own goroutine), so blocking on the byte
-	// copy never stalls the accept loop.
-	onLane := func(conn net.Conn) { d.handleLaneInbound(conn) }
-
 	// Build the top-level yamux session over the raw WS byte stream and open the
 	// control substream (dialLinkSession tags it and starts its read loop). The
 	// session's own accept + control read loops run for the link's whole life;
 	// the per-actor ipc READ loops (which invoke dispatch) start at Start(),
 	// after every cell is installed, so a buffered deliver just waits for Start.
 	ls, err := dialLinkSession(
-		ctx, ws, onControl, onLane, nil,
+		ctx, ws, onControl, nil,
 		d.onSessionEvidence, logger,
 	)
 	if err != nil {
@@ -638,83 +632,6 @@ func (d *Dialer) SendReconcilePull(ctx context.Context, activeCoords []string) (
 	return d.pendingReconcile.wait(ctx, msg.RequestID, ch, d.done)
 }
 
-// handleLaneInbound answers one inbound lane data stream: read the Token,
-// resolve it via ResolveCoord (this daemon must BE the transfer's target —
-// home's handler enforces the sender==target assertion, §5 item 0), open
-// the local handle, then copy bytes — read: local→stream; write: stream→
-// local, Commit (firing Committed(ReservationID) when set) or Abort on a
-// short read.
-func (d *Dialer) handleLaneInbound(conn io.ReadWriteCloser) {
-	defer conn.Close()
-	var hdr laneRedeemHeader
-	if err := readLaneJSON(conn, &hdr); err != nil {
-		return
-	}
-	reply, err := d.SendResolveCoord(context.Background(), hdr.Token)
-	if err != nil || !reply.OK {
-		reason := "resolve failed"
-		if err != nil {
-			reason = err.Error()
-		} else {
-			reason = reply.Reason
-		}
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: reason})
-		return
-	}
-	d.mu.Lock()
-	opener := d.localFileOpener
-	d.mu.Unlock()
-	if opener == nil {
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "link: no storage host wired on this compute"})
-		return
-	}
-	switch reply.Mode {
-	case access.OpRead:
-		rh, oerr := opener.OpenRead(reply.Coord)
-		if oerr != nil {
-			_ = writeLaneJSON(conn, laneAck{OK: false, Reason: oerr.Error()})
-			return
-		}
-		defer rh.Close()
-		if err := writeLaneJSON(conn, laneAck{OK: true}); err != nil {
-			return
-		}
-		_, _ = io.Copy(conn, rh)
-	case access.OpWrite:
-		wh, oerr := opener.OpenWrite(reply.Coord)
-		if oerr != nil {
-			_ = writeLaneJSON(conn, laneAck{OK: false, Reason: oerr.Error()})
-			return
-		}
-		// Reuse the local write route's completion wrapper (redeemFileRoute's SAME
-		// ReservationID!="" construction condition): committingWriteHandle.Commit
-		// fires Committed(reservationID) and — on a home Lost verdict — reclaims
-		// this write's orphaned coord. #19 合并形: one commit-completion
-		// implementation, not the lane's own hand-written SendCommitted copy.
-		if reply.ReservationID != "" {
-			wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID, coord: reply.Coord}
-		}
-		if err := writeLaneJSON(conn, laneAck{OK: true}); err != nil {
-			_ = wh.Abort()
-			return
-		}
-		if _, cerr := io.Copy(wh, conn); cerr != nil {
-			_ = wh.Abort()
-			return
-		}
-		if cerr := wh.Commit(); cerr != nil {
-			// The lane protocol has NO completion-reply frame slot: the sender is
-			// not waiting on one (恢复协议的"发送方知情"半格仍留 A4). A failed
-			// commit — transport error, an explicit home NAK, or a Lost race whose
-			// orphan bytes committingWriteHandle.Commit already reclaimed — is
-			// surfaced as a Warn here, never a silent drop.
-			d.logger.Warn("link.lane_commit_failed", "reservation_id", reply.ReservationID, "coord", reply.Coord, "err", cerr)
-		}
-	default:
-		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "link: unknown lane mode " + string(reply.Mode)})
-	}
-}
-
 // SendResolveCoord is the daemon's send-half of §5's ResolveCoord frame:
 // resolves a Token into its coord/mode/reservation, blocking for the
 // correlated reply (or ctx/timeout/link-close). Only the transfer's OWN
@@ -736,83 +653,54 @@ func (d *Dialer) SendResolveCoord(ctx context.Context, token string) (ResolveCoo
 }
 
 // redeemFileRoute is the shared implementation behind
-// remoteResourceHandle.Redeem — Local resolves coord directly (one small
-// control RPC, zero lane byte-hop, true zerocopy for the actual file
-// bytes) and opens the local handle; !Local opens a fresh stream on THIS
-// daemon's OWN lane session, sends the redeem header, and hands the caller
-// the raw stream as FileAccess.Stream.
+// remoteResourceHandle.Redeem: resolve the ticket into a coord (one small
+// control RPC, zero byte-hop, true zerocopy for the actual file bytes) and
+// open the local handle. Every route reaching here is same-daemon — the door
+// refuses any other caller before a route is ever minted.
 func (d *Dialer) redeemFileRoute(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
-	if route.Local {
-		reply, err := d.SendResolveCoord(ctx, route.Token)
-		if err != nil {
-			return accessdoor.FileAccess{}, err
-		}
-		if !reply.OK {
-			return accessdoor.FileAccess{}, laneErr("resolve coord: %s", reply.Reason)
-		}
-		d.mu.Lock()
-		opener := d.localFileOpener
-		d.mu.Unlock()
-		if opener == nil {
-			return accessdoor.FileAccess{}, errors.New("link: no local file opener wired on this compute")
-		}
-		if route.Dir {
-			// Directory-shaped resource (workspace): hand out the os.Root subtree
-			// lease (期11 丁12) regardless of read/write mode — a dir lease is
-			// inherently both, with no Commit boundary (each os.* call lands
-			// immediately in the real subtree). Cross-host dir leases are rejected
-			// at the door (resolveFileRoute), so route.Dir implies route.Local.
-			root, oerr := opener.OpenDir(reply.Coord)
-			if oerr != nil {
-				return accessdoor.FileAccess{}, oerr
-			}
-			return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Dir: root}}, nil
-		}
-		switch route.Mode {
-		case access.OpRead:
-			rh, oerr := opener.OpenRead(reply.Coord)
-			if oerr != nil {
-				return accessdoor.FileAccess{}, oerr
-			}
-			return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Read: rh}}, nil
-		case access.OpWrite:
-			wh, oerr := opener.OpenWrite(reply.Coord)
-			if oerr != nil {
-				return accessdoor.FileAccess{}, oerr
-			}
-			if reply.ReservationID != "" {
-				wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID, coord: reply.Coord}
-			}
-			return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Write: wh}}, nil
-		default:
-			return accessdoor.FileAccess{}, laneErr("unknown mode %q", route.Mode)
-		}
-	}
-
-	// Flattened lane: a redeem is a fresh TOP-LEVEL substream tagged lane on
-	// this link's own session (openLane writes the streamHeader{lane}); the
-	// home's accept loop dispatches it to handleLaneRedeem. No nested yamux
-	// session to guard — d.lc is live for any live Dialer.
-	openCtx, cancelOpen := context.WithTimeout(context.Background(), streamWriteBudget)
-	conn, err := d.lc.openLane(openCtx)
-	cancelOpen()
+	reply, err := d.SendResolveCoord(ctx, route.Token)
 	if err != nil {
-		return accessdoor.FileAccess{}, fmt.Errorf("link: open lane redeem stream: %w", err)
-	}
-	if err := writeLaneJSON(conn, laneRedeemHeader{Token: route.Token}); err != nil {
-		_ = conn.Close()
 		return accessdoor.FileAccess{}, err
 	}
-	var ack laneAck
-	if err := readLaneJSON(conn, &ack); err != nil {
-		_ = conn.Close()
-		return accessdoor.FileAccess{}, err
+	if !reply.OK {
+		return accessdoor.FileAccess{}, fileRouteErr("resolve coord: %s", reply.Reason)
 	}
-	if !ack.OK {
-		_ = conn.Close()
-		return accessdoor.FileAccess{}, laneErr("redeem rejected: %s", ack.Reason)
+	d.mu.Lock()
+	opener := d.localFileOpener
+	d.mu.Unlock()
+	if opener == nil {
+		return accessdoor.FileAccess{}, errors.New("link: no local file opener wired on this compute")
 	}
-	return accessdoor.FileAccess{Stream: conn}, nil
+	if route.Dir {
+		// Directory-shaped resource (workspace): hand out the os.Root subtree
+		// lease (期11 丁12) regardless of read/write mode — a dir lease is
+		// inherently both, with no Commit boundary (each os.* call lands
+		// immediately in the real subtree).
+		root, oerr := opener.OpenDir(reply.Coord)
+		if oerr != nil {
+			return accessdoor.FileAccess{}, oerr
+		}
+		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Dir: root}}, nil
+	}
+	switch route.Mode {
+	case access.OpRead:
+		rh, oerr := opener.OpenRead(reply.Coord)
+		if oerr != nil {
+			return accessdoor.FileAccess{}, oerr
+		}
+		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Read: rh}}, nil
+	case access.OpWrite:
+		wh, oerr := opener.OpenWrite(reply.Coord)
+		if oerr != nil {
+			return accessdoor.FileAccess{}, oerr
+		}
+		if reply.ReservationID != "" {
+			wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID, coord: reply.Coord}
+		}
+		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Write: wh}}, nil
+	default:
+		return accessdoor.FileAccess{}, fileRouteErr("unknown mode %q", route.Mode)
+	}
 }
 
 // committingWriteHandle wraps a LocalWriteHandle so Commit ALSO fires
