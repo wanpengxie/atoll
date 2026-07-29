@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"golang.org/x/crypto/bcrypt"
@@ -55,6 +56,14 @@ func (a *App) requireChannelMember(c *gin.Context) (string, bool) {
 	return chID, ok
 }
 
+// resolveMember is the single carrier of the "active channel member" ruling:
+// membership is exactly the principal resolving in the membrane's roster.
+// Every transport shell (the gin guards here, sysop_forward's memberGate)
+// answers through this one function so the ruling can never fork.
+func resolveMember(ctx context.Context, bundle channelhost.Bundle, principal string) (actor.ActorID, bool, error) {
+	return bundle.View().ResolvePrincipal(ctx, principal)
+}
+
 func (a *App) requireChannelMemberActor(c *gin.Context) (string, actor.ActorID, bool) {
 	chID := c.Param("chID")
 	bundle, err := a.acquireBundle(c.Request.Context(), channel.ID(chID))
@@ -66,7 +75,7 @@ func (a *App) requireChannelMemberActor(c *gin.Context) (string, actor.ActorID, 
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return "", "", false
 	}
-	id, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), middleware.UserID(c))
+	id, found, err := resolveMember(c.Request.Context(), bundle, middleware.UserID(c))
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return "", "", false

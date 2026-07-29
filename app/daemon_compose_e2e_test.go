@@ -175,7 +175,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 }
 
 // Binding truth and live attachment are deliberately independent axes. The
-// focused detach convergence cases live with the admission tests.
+// focused detach convergence cases live with the sysop forward e2e tests.
 func waitDaemonComposition(t *testing.T, condition func() bool, failure string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

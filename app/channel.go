@@ -65,6 +65,9 @@ func channelJSON(id, name, typ, status, owner string, created int64, parent sql.
 	return row
 }
 
+// handleCreateChannel is the create acceptance gate. 201 means "desired
+// accepted, physical convergence bounded" — not "genesis aligned"; the
+// stateless arm brings the physical side up after the answer.
 func (a *App) handleCreateChannel(c *gin.Context) {
 	caller := middleware.UserID(c)
 	var req struct {
@@ -138,9 +141,12 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	status := http.StatusOK
 	if changed {
 		status = http.StatusCreated
-		a.lifecycle.notify(accepted.ID)
 		a.convergeChannel(c.Request.Context(), accepted.ID)
 	}
+	// Poke on replays too: an idempotent re-submit is the caller's strongest
+	// "hurry up" signal for a channel whose physical side may still be
+	// converging, and a poke only buys timeliness.
+	a.lifecycle.notify(accepted.ID)
 	c.JSON(status, row)
 }
 
@@ -291,16 +297,27 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 	case deleteAlreadyRetired:
 		c.JSON(http.StatusOK, gin.H{"status": "retiring", "changed": false})
 		return
+	case deleteRowAbsent:
+		// The predicate "must not exist" already holds; claiming a status for
+		// a row that never existed would be a false statement.
+		c.JSON(http.StatusOK, gin.H{"changed": false})
+		return
 	case deleteForbidden:
 		c.JSON(http.StatusForbidden, gin.H{"error": "channel owner required"})
 		return
+	}
+	// Read the affected roster through the relation module (the module owns
+	// every read and write of its tables) before the Gone event deletes it.
+	affected, aerr := a.relations.PrincipalsOf(c.Request.Context(), channel.ID(chID))
+	if aerr != nil {
+		a.logger.Warn("affected principal read failed; gateway kick degraded", "channel", chID, "err", aerr)
 	}
 	if err := a.relations.Apply(c.Request.Context(), channel.ID(chID), []channelspec.RelationDelta{{
 		Kind: channelspec.RelationGone, ChannelID: channel.ID(chID),
 	}}); err != nil {
 		a.logger.Warn("channel relation retirement event failed", "channel", chID, "err", err)
 	}
-	for _, principal := range accepted.affected {
+	for _, principal := range affected {
 		if a.membershipPoke != nil {
 			a.membershipPoke(principal)
 		}
@@ -315,12 +332,12 @@ type deleteOutcome uint8
 const (
 	deleteAccepted deleteOutcome = iota + 1
 	deleteAlreadyRetired
+	deleteRowAbsent
 	deleteForbidden
 )
 
 type deleteAcceptance struct {
-	outcome  deleteOutcome
-	affected []string
+	outcome deleteOutcome
 }
 
 func (a *App) acceptDeleteChannel(ctx context.Context, id channel.ID, caller string) (deleteAcceptance, error) {
@@ -356,7 +373,10 @@ func (a *App) acceptDeleteChannelOnce(ctx context.Context, id channel.ID, caller
 		var status, owner string
 		err := tx.QueryRowContext(ctx,
 			`SELECT status,owner_principal FROM channels WHERE id=?`, string(id)).Scan(&status, &owner)
-		if errors.Is(err, sql.ErrNoRows) || (err == nil && status == "retiring") {
+		if errors.Is(err, sql.ErrNoRows) {
+			return deleteAcceptance{outcome: deleteRowAbsent}, nil
+		}
+		if err == nil && status == "retiring" {
 			return deleteAcceptance{outcome: deleteAlreadyRetired}, nil
 		}
 		if err != nil {
@@ -364,27 +384,10 @@ func (a *App) acceptDeleteChannelOnce(ctx context.Context, id channel.ID, caller
 		}
 		return deleteAcceptance{outcome: deleteForbidden}, nil
 	}
-	rows, err := tx.QueryContext(ctx,
-		`SELECT principal FROM principal_channels WHERE channel_id=?`, string(id))
-	if err != nil {
-		return deleteAcceptance{}, err
-	}
-	var affected []string
-	for rows.Next() {
-		var principal string
-		if err := rows.Scan(&principal); err != nil {
-			_ = rows.Close()
-			return deleteAcceptance{}, err
-		}
-		affected = append(affected, principal)
-	}
-	if err := rows.Close(); err != nil {
-		return deleteAcceptance{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return deleteAcceptance{}, err
 	}
-	return deleteAcceptance{outcome: deleteAccepted, affected: affected}, nil
+	return deleteAcceptance{outcome: deleteAccepted}, nil
 }
 
 func (a *App) handleListCandidates(c *gin.Context) {

@@ -197,4 +197,19 @@ func TestRelationEventsComeFromCommitRootsAndOpenSnapshot(t *testing.T) {
 		got[channelspec.RelationIntroduced][0].ActorID != introduced.ActorID {
 		t.Fatalf("introduced payload=%+v", got[channelspec.RelationIntroduced])
 	}
+	// Death deltas must carry the same identity axes as their birth twins:
+	// the receiver deletes by actor_id, so a mistranslated EndedFact would
+	// turn the delete into a silent no-op while a count-only check stays green.
+	if got[channelspec.RelationLeft][0].Principal != "alice" ||
+		got[channelspec.RelationLeft][0].ActorID != admitted.ActorID {
+		t.Fatalf("left payload=%+v", got[channelspec.RelationLeft])
+	}
+	if got[channelspec.RelationInstanceRemoved][0].DeclID != "decl-a" ||
+		got[channelspec.RelationInstanceRemoved][0].ActorID != introduced.ActorID {
+		t.Fatalf("instance-removed payload=%+v", got[channelspec.RelationInstanceRemoved])
+	}
+	if got[channelspec.RelationBound][0].DaemonID != "daemon-a" ||
+		got[channelspec.RelationUnbound][0].DaemonID != "daemon-a" {
+		t.Fatalf("binding payloads=%+v / %+v", got[channelspec.RelationBound], got[channelspec.RelationUnbound])
+	}
 }

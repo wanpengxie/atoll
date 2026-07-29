@@ -246,7 +246,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			return
 		}
 		// Route publication is convergent: Current precheck, runtime commit,
-		// Current postcheck, exact rollback.
+		// Current postcheck, exact compensation.
 		if !authority.isCurrent() {
 			a.logLateReject(record, "route_publish_precheck")
 			_ = binding.Close()

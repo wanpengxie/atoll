@@ -468,7 +468,7 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 		"CREATE TABLE decl_fanout_jobs", "CREATE TABLE daemon_revoke_jobs", "CREATE TABLE decl_fanout_deliveries",
 		"CREATE TABLE channel_finalize_deliveries", "CREATE TABLE decl_render_state", "pending_config_json", "pending_ref",
 		"channel_provision_jobs", "channel_destroy_jobs", "channel_admission_operations",
-		"compensation_job_id", "next_attempt_at", "api_key_hash"} {
+		"compensation_job_id", "attempt INTEGER", "next_attempt_at", "api_key_hash"} {
 		if strings.Contains(appText, forbidden) {
 			t.Errorf("app schema retains %q", forbidden)
 		}

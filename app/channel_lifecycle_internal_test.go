@@ -348,3 +348,55 @@ func TestLifecycleFullScanDestroysOrphanImage(t *testing.T) {
 		}
 	}
 }
+
+// Open-first is the arm's data-safety order: a serving channel is never
+// re-provisioned (Provision clears unpublished images behind its guards), so
+// a revisit must observe via Open only.
+func TestLifecycleServingChannelIsNeverReprovisioned(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	desired := desiredFixture(t, "open-first", "owner", nil)
+	insertDesired(t, a, desired)
+	a.convergeChannel(context.Background(), desired.ID)
+	host.mu.Lock()
+	afterFirst := host.provisions
+	host.mu.Unlock()
+	if afterFirst != 1 {
+		t.Fatalf("first convergence provisions=%d want 1", afterFirst)
+	}
+	a.convergeChannel(context.Background(), desired.ID)
+	host.mu.Lock()
+	afterSecond := host.provisions
+	host.mu.Unlock()
+	if afterSecond != afterFirst {
+		t.Fatalf("serving channel was re-provisioned: %d -> %d", afterFirst, afterSecond)
+	}
+}
+
+// Permanent open failures arrive Join-wrapped from the host, so the
+// classification must hold through errors.Is: no provision attempt, no
+// further retries, desired row kept for a human.
+func TestLifecyclePermanentOpenFailureStopsRetryAndKeepsRow(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	desired := desiredFixture(t, "permanent-open", "owner", nil)
+	insertDesired(t, a, desired)
+	host.openErr = errors.Join(channelhost.ErrSchemaIncompatible, errors.New("genesis type drift"))
+	a.lifecycle = newLifecycleWorker(a)
+	a.convergeChannel(context.Background(), desired.ID)
+	a.convergeChannel(context.Background(), desired.ID)
+	host.mu.Lock()
+	opens, provisions := host.opens, host.provisions
+	host.mu.Unlock()
+	if provisions != 0 {
+		t.Fatalf("permanent open failure still provisioned %d times (destructive-rebuild face)", provisions)
+	}
+	if opens != 1 {
+		t.Fatalf("permanent open failure was retried: opens=%d want 1", opens)
+	}
+	var exists bool
+	if err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, desired.ID).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("permanent open failure removed desired row")
+	}
+}

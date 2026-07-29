@@ -14,7 +14,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform/channelhost"
-	"github.com/wanpengxie/atoll/platform/realmtool"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
@@ -256,16 +256,16 @@ func (a *App) resourceSubject(c *gin.Context) (channelhost.Bundle, channel.Reade
 }
 
 func writeRealmFailure(c *gin.Context, err error) {
-	var realmErr *realmtool.RealmError
+	var realmErr *channelspec.RealmError
 	if errors.As(err, &realmErr) {
 		switch realmErr.Code {
-		case realmtool.RealmResourceNotFound:
+		case channelspec.RealmResourceNotFound:
 			c.JSON(http.StatusNotFound, gin.H{"error": string(realmErr.Code)})
-		case realmtool.RealmForbidden:
+		case channelspec.RealmForbidden:
 			c.JSON(http.StatusForbidden, gin.H{"error": string(realmErr.Code)})
-		case realmtool.RealmInvalidRequest:
+		case channelspec.RealmInvalidRequest:
 			c.JSON(http.StatusBadRequest, gin.H{"error": string(realmErr.Code)})
-		case realmtool.RealmCapabilityUnavailable:
+		case channelspec.RealmCapabilityUnavailable:
 			c.JSON(http.StatusConflict, gin.H{"code": string(realmErr.Code)})
 		default:
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": string(realmErr.Code)})

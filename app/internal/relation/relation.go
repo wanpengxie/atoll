@@ -5,8 +5,11 @@ package relation
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
+
+	"modernc.org/sqlite"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -14,12 +17,50 @@ import (
 )
 
 type Store struct {
-	db  *sql.DB
-	now func() int64
+	db     *sql.DB
+	now    func() int64
+	isBusy func(error) bool
 }
 
 func New(db *sql.DB) *Store {
-	return &Store{db: db, now: func() int64 { return time.Now().UnixMilli() }}
+	return &Store{
+		db:     db,
+		now:    func() int64 { return time.Now().UnixMilli() },
+		isBusy: isSQLiteBusy,
+	}
+}
+
+// busyBackoff bounds the retries a write gets when SQLite reports lock
+// contention. The connection already waits busy_timeout before surfacing
+// BUSY, so these retries only cover a writer that holds the lock past one
+// full window (e.g. an acceptance transaction mid-commit). A dropped event
+// batch has no later repair point on a long-serving channel, so the write
+// path absorbs contention here instead of pushing it onto every emitter.
+var busyBackoff = []time.Duration{25 * time.Millisecond, 100 * time.Millisecond}
+
+func isSQLiteBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	// Extended result codes keep the primary code in the low byte, so this
+	// covers BUSY, BUSY_RECOVERY, BUSY_SNAPSHOT and BUSY_TIMEOUT.
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == 5
+}
+
+// withBusyRetry runs one write attempt and retries on lock contention. The
+// store owns every write to the relation tables, so contention hardening
+// lives here once instead of at each caller.
+func (s *Store) withBusyRetry(ctx context.Context, fn func() error) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = fn()
+		if err == nil || !s.isBusy(err) || attempt >= len(busyBackoff) {
+			return err
+		}
+		select {
+		case <-time.After(busyBackoff[attempt]):
+		case <-ctx.Done():
+			return err
+		}
+	}
 }
 
 type Instance struct {
@@ -28,6 +69,10 @@ type Instance struct {
 }
 
 func (s *Store) Apply(ctx context.Context, chID channel.ID, deltas []channelspec.RelationDelta) error {
+	return s.withBusyRetry(ctx, func() error { return s.applyOnce(ctx, chID, deltas) })
+}
+
+func (s *Store) applyOnce(ctx context.Context, chID channel.ID, deltas []channelspec.RelationDelta) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -69,7 +114,10 @@ func (s *Store) Apply(ctx context.Context, chID channel.ID, deltas []channelspec
 				SET decl_id=excluded.decl_id,updated_at=excluded.updated_at`,
 				string(chID), delta.DeclID, string(delta.ActorID), now)
 		case channelspec.RelationInstanceRemoved:
-			if delta.ActorID == "" {
+			// DeclID is unused by the PK delete but is contract cargo: a death
+			// delta arrives as fully loaded as its birth twin, so a missing
+			// axis means the emitter is broken and must surface here.
+			if delta.DeclID == "" || delta.ActorID == "" {
 				return fmt.Errorf("relation: incomplete instance-removed delta")
 			}
 			_, err = tx.ExecContext(ctx, `DELETE FROM channel_decl_instances
@@ -126,6 +174,24 @@ func (s *Store) InstancesOf(ctx context.Context, declID string) ([]Instance, err
 	return out, rows.Err()
 }
 
+func (s *Store) PrincipalsOf(ctx context.Context, chID channel.ID) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT principal FROM principal_channels
+		WHERE channel_id=? ORDER BY principal`, string(chID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var principal string
+		if err := rows.Scan(&principal); err != nil {
+			return nil, err
+		}
+		out = append(out, principal)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) BindingsOf(ctx context.Context, daemonID string) ([]channel.ID, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT channel_id FROM daemon_channels
 		WHERE daemon_id=? ORDER BY channel_id`, daemonID)
@@ -151,10 +217,12 @@ func (s *Store) ReconcilePrincipal(ctx context.Context, chID channel.ID, princip
 			Principal: principal, ActorID: actorID,
 		}})
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM principal_channels
-		WHERE principal=? AND channel_id=? AND actor_id=?`,
-		principal, string(chID), string(actorID))
-	return err
+	return s.withBusyRetry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM principal_channels
+			WHERE principal=? AND channel_id=? AND actor_id=?`,
+			principal, string(chID), string(actorID))
+		return err
+	})
 }
 
 func (s *Store) ReconcileBinding(ctx context.Context, chID channel.ID, daemonID string, bound bool) error {

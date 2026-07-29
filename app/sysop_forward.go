@@ -10,7 +10,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
-	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -121,6 +120,8 @@ func classifySysopError(code string) sysopErrorClass {
 	}
 }
 
+// sysopErrorHTTP maps a membrane operate code to its HTTP status (renamed
+// from admissionErrorHTTP when the admission ledger died).
 func sysopErrorHTTP(code string) int {
 	switch classifySysopError(code) {
 	case sysopBadRequest:
@@ -155,27 +156,27 @@ func writeSysopError(c *gin.Context, err error) {
 	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "result unknown", "retry": "safe"})
 }
 
-func sysopRealmErrorCode(code string) realmtool.RealmErrorCode {
+func sysopRealmErrorCode(code string) channelspec.RealmErrorCode {
 	switch classifySysopError(code) {
 	case sysopBadRequest:
-		return realmtool.RealmInvalidRequest
+		return channelspec.RealmInvalidRequest
 	case sysopForbidden:
-		return realmtool.RealmForbidden
+		return channelspec.RealmForbidden
 	case sysopNotFound:
 		if channelspec.OperationErrorCode(code) == channelspec.ErrCodeDeclNotFound {
-			return realmtool.RealmDeclNotFound
+			return channelspec.RealmDeclNotFound
 		}
-		return realmtool.RealmUnavailable
+		return channelspec.RealmUnavailable
 	default:
 		if channelspec.OperationErrorCode(code) == channelspec.ErrCodeChannelUnavailable {
-			return realmtool.RealmChannelUnavailable
+			return channelspec.RealmChannelUnavailable
 		}
-		return realmtool.RealmConflict
+		return channelspec.RealmConflict
 	}
 }
 
 func memberGate(ctx context.Context, bundle channelhost.Bundle, principal string) error {
-	_, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+	_, found, err := resolveMember(ctx, bundle, principal)
 	if err != nil {
 		return &sysopUnknownError{cause: err}
 	}

@@ -41,7 +41,7 @@ func (a *App) handleListDaemons(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 			return
 		}
-		online, err := a.daemonOnline(c.Request.Context(), "", id)
+		online, err := a.daemonOnline(c.Request.Context(), id)
 		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "daemon status unavailable"})
 			return
@@ -62,9 +62,9 @@ func (a *App) handleListDaemons(c *gin.Context) {
 }
 
 // daemonOnline reports whether daemon id has a live link attach right now. It is
-// online iff attached on any of its bound channels (or `only`, when non-empty).
+// online iff attached on any of its bound channels.
 // Read-time from each channel-home's View — derived, never a stored column.
-func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string) (bool, error) {
+func (a *App) daemonOnline(ctx context.Context, daemonID string) (bool, error) {
 	check := func(chID channel.ID) (bool, error) {
 		release := a.channelLocks.lock(string(chID))
 		defer release()
@@ -83,9 +83,6 @@ func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string
 			return false, nil
 		}
 		return bundle.View().IsAttached(daemonID), nil
-	}
-	if only != "" {
-		return check(only)
 	}
 	ids, err := a.relations.BindingsOf(ctx, daemonID)
 	if err != nil {
@@ -299,6 +296,12 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 			return channelspec.BindingResult{Bound: true}, err == nil && !deleted.Valid, nil
 		},
 		Qualify: func(bundle channelhost.Bundle) error {
+			// Same in-gate order as detach: membership first, then the daemon
+			// checks — the two verbs are one family and order differences read
+			// as intent.
+			if err := memberGate(c.Request.Context(), bundle, userID); err != nil {
+				return err
+			}
 			var owner string
 			var deleted sql.NullInt64
 			err := a.db.QueryRowContext(c.Request.Context(),
@@ -313,7 +316,7 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 			if deleted.Valid {
 				return &sysopGateError{Status: http.StatusNotFound, Code: string(sysopCodeDaemonNotFound)}
 			}
-			return memberGate(c.Request.Context(), bundle, userID)
+			return nil
 		},
 		Invoke: func(sys channelhost.SysOp, ref string) (channelspec.BindingResult, error) {
 			return sys.AttachDaemon(c.Request.Context(), channelspec.DaemonRequest{Ref: ref, DaemonID: req.DaemonID})

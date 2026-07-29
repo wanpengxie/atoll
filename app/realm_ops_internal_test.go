@@ -55,8 +55,8 @@ func TestRealmOpsEditDeclarationRejectsCrossKind(t *testing.T) {
 	_, err = (realmOps{app: a}).EditDeclaration(context.Background(), realmtool.Requester{
 		ActorID: owner, ChannelID: "realm-edit-kind", RequestID: "cross-kind-edit",
 	}, "kind-pinned", realmtool.DeclSpec{Name: "kind-pinned", Class: realmCrossKindToolClass, Visibility: "private", Config: json.RawMessage(`{}`)})
-	var realmErr *realmtool.RealmError
-	if !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmInvalidRequest {
+	var realmErr *channelspec.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != channelspec.RealmInvalidRequest {
 		t.Fatalf("cross-kind edit err=%v", err)
 	}
 	var class string
@@ -83,8 +83,8 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	_, err = (realmOps{app: a}).CreateDeclaration(context.Background(), realmtool.Requester{
 		ActorID: agent, ChannelID: "agent-realm-ops", RequestID: "agent-create-request",
 	}, realmtool.DeclSpec{Name: "must not persist", Class: "go-kimi", Visibility: "public", Config: json.RawMessage(`{}`)})
-	var realmErr *realmtool.RealmError
-	if !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmForbidden {
+	var realmErr *channelspec.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != channelspec.RealmForbidden {
 		t.Fatalf("agent create err=%v", err)
 	}
 	var count int
@@ -192,8 +192,8 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 		t.Fatal(err)
 	}
 	n, err = body.Read(buffer)
-	var realmErr *realmtool.RealmError
-	if n != 0 || !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmCapabilityUnavailable {
+	var realmErr *channelspec.RealmError
+	if n != 0 || !errors.As(err, &realmErr) || realmErr.Code != channelspec.RealmCapabilityUnavailable {
 		t.Fatalf("post-revoke chunk n=%d err=%v", n, err)
 	}
 }
@@ -260,8 +260,8 @@ func TestRealmCopyLimitIsEnforcedByRealmStream(t *testing.T) {
 	body := newRealmCopyPolicyBody(io.NopCloser(bytes.NewReader([]byte("12345"))), 4)
 	defer body.Close()
 	_, err := io.ReadAll(body)
-	var realmErr *realmtool.RealmError
-	if !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmInvalidRequest {
+	var realmErr *channelspec.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != channelspec.RealmInvalidRequest {
 		t.Fatalf("oversized realm stream err=%v, want invalid_request", err)
 	}
 

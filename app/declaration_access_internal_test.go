@@ -6,7 +6,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
-	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 )
@@ -64,7 +63,7 @@ func TestSysopErrorClassificationAdapters(t *testing.T) {
 	// RealmOps has no daemon attach operation, and daemon identities are not the
 	// resource family addressed by RealmResourceNotFound. If malformed persisted
 	// input ever crosses this adapter, fail honestly as a realm-level outage.
-	if got := sysopRealmErrorCode(string(sysopCodeDaemonNotFound)); got != realmtool.RealmUnavailable {
+	if got := sysopRealmErrorCode(string(sysopCodeDaemonNotFound)); got != channelspec.RealmUnavailable {
 		t.Fatalf("daemon_not_found Realm=%q", got)
 	}
 	if got := classifySysopError(string(channelspec.ErrCodeChannelUnavailable)); got != sysopConflict {
@@ -73,7 +72,7 @@ func TestSysopErrorClassificationAdapters(t *testing.T) {
 	if got := sysopErrorHTTP(string(channelspec.ErrCodeChannelUnavailable)); got != 409 {
 		t.Fatalf("channel_unavailable HTTP=%d", got)
 	}
-	if got := sysopRealmErrorCode(string(channelspec.ErrCodeChannelUnavailable)); got != realmtool.RealmChannelUnavailable {
+	if got := sysopRealmErrorCode(string(channelspec.ErrCodeChannelUnavailable)); got != channelspec.RealmChannelUnavailable {
 		t.Fatalf("channel_unavailable Realm=%q", got)
 	}
 }

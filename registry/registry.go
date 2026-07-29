@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -66,6 +67,11 @@ type ClassDecl struct {
 }
 
 // ValidateConfig performs every check a class voluntarily makes available at
+// ErrUnknownClass distinguishes "no such class" from "config invalid": the
+// two ailments need opposite user action (fix the class name vs fix the
+// config), so callers must be able to tell them apart.
+var ErrUnknownClass = errors.New("registry: unknown class")
+
 // acceptance time. The registry always owns the JSON-object shape check;
 // constructors remain fail-closed for host/environment-dependent conditions.
 func ValidateConfig(class string, config json.RawMessage) error {
@@ -73,7 +79,7 @@ func ValidateConfig(class string, config json.RawMessage) error {
 	d, found := reg[class]
 	mu.RUnlock()
 	if !found {
-		return fmt.Errorf("registry: unknown class %q", class)
+		return fmt.Errorf("%w: %q", ErrUnknownClass, class)
 	}
 	if len(config) != 0 {
 		var object map[string]json.RawMessage

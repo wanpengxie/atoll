@@ -3,6 +3,7 @@ package relation
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -155,5 +156,46 @@ func assertCount(t *testing.T, db *sql.DB, table string, want int) {
 	}
 	if got != want {
 		t.Fatalf("%s rows=%d want %d", table, got, want)
+	}
+}
+
+// The write path absorbs SQLite lock contention itself: a busy error is
+// retried until the backoff budget runs out, any other error surfaces at
+// once. Losing an event batch has no later repair point on a long-serving
+// channel, so this behavior is contract, not tuning.
+func TestWithBusyRetryAbsorbsContention(t *testing.T) {
+	store, _ := testStore(t)
+	sentinel := errors.New("fake busy")
+	store.isBusy = func(err error) bool { return errors.Is(err, sentinel) }
+
+	calls := 0
+	err := store.withBusyRetry(context.Background(), func() error {
+		calls++
+		if calls <= 2 {
+			return sentinel
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("recovery: err=%v calls=%d", err, calls)
+	}
+
+	calls = 0
+	err = store.withBusyRetry(context.Background(), func() error {
+		calls++
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) || calls != len(busyBackoff)+1 {
+		t.Fatalf("exhaustion: err=%v calls=%d", err, calls)
+	}
+
+	calls = 0
+	plain := errors.New("not busy")
+	err = store.withBusyRetry(context.Background(), func() error {
+		calls++
+		return plain
+	})
+	if !errors.Is(err, plain) || calls != 1 {
+		t.Fatalf("non-busy must not retry: err=%v calls=%d", err, calls)
 	}
 }

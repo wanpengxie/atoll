@@ -11,7 +11,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/humancell"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
-	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -83,7 +82,7 @@ func (v View) Resources() ResourceView {
 // reader gate needs existence, never a record.
 func validateReader(ctx context.Context, authority storespec.IdentityPresence, as channel.Reader) error {
 	if !as.Valid() {
-		return &realmtool.RealmError{Code: realmtool.RealmForbidden}
+		return &channelspec.RealmError{Code: channelspec.RealmForbidden}
 	}
 	if as.Mode != channel.ReaderMember {
 		return nil
@@ -93,7 +92,7 @@ func validateReader(ctx context.Context, authority storespec.IdentityPresence, a
 		return err
 	}
 	if !active {
-		return &realmtool.RealmError{Code: realmtool.RealmForbidden}
+		return &channelspec.RealmError{Code: channelspec.RealmForbidden}
 	}
 	return nil
 }
@@ -114,7 +113,7 @@ func (v ResourceView) Stat(ctx context.Context, as channel.Reader, id resource.R
 		return channel.ResourceMeta{}, err
 	}
 	if !found {
-		return channel.ResourceMeta{}, &realmtool.RealmError{Code: realmtool.RealmResourceNotFound}
+		return channel.ResourceMeta{}, &channelspec.RealmError{Code: channelspec.RealmResourceNotFound}
 	}
 	return meta, nil
 }
@@ -125,13 +124,13 @@ func (v ResourceView) Fetch(ctx context.Context, as channel.Reader, id resource.
 	}
 	meta, value, found, err := v.store.FetchReadable(ctx, id)
 	if errors.Is(err, storespec.ErrResourceCapabilityUnavailable) {
-		return channel.ResourceFetch{}, &realmtool.RealmError{Code: realmtool.RealmCapabilityUnavailable}
+		return channel.ResourceFetch{}, &channelspec.RealmError{Code: channelspec.RealmCapabilityUnavailable}
 	}
 	if err != nil {
 		return channel.ResourceFetch{}, err
 	}
 	if !found {
-		return channel.ResourceFetch{}, &realmtool.RealmError{Code: realmtool.RealmResourceNotFound}
+		return channel.ResourceFetch{}, &channelspec.RealmError{Code: channelspec.RealmResourceNotFound}
 	}
 	return channel.ResourceFetch{Meta: meta, Body: io.NopCloser(bytes.NewReader(value))}, nil
 }

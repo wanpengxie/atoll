@@ -311,7 +311,7 @@ func TestActorHandshakeOpenedBeforeSealIsRefusedByAdmissionBarrier(t *testing.T)
 		t.Fatalf("attachBinding calls=%d; a sealed session published an exact route", got)
 	}
 	if got := rig.acc.compensated.Load(); got != 0 {
-		t.Fatalf("rolled back=%d; the refusal came from route-publish rollback, "+
+		t.Fatalf("compensated=%d; the refusal came from route-publish compensation, "+
 			"not from the admission barrier", got)
 	}
 }

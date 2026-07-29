@@ -29,18 +29,18 @@ const realmResourceCopyLimitBytes int64 = 32 << 20
 
 func (o realmOps) requesterFacts(ctx context.Context, req realmtool.Requester) (channelspec.ActorFacts, error) {
 	if req.ActorID == "" || req.ChannelID == "" || req.RequestID == "" {
-		return channelspec.ActorFacts{}, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "incomplete requester"}
+		return channelspec.ActorFacts{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "incomplete requester"}
 	}
 	bundle, ok := o.app.host.Acquire(req.ChannelID)
 	if !ok {
-		return channelspec.ActorFacts{}, &realmtool.RealmError{Code: realmtool.RealmChannelUnavailable}
+		return channelspec.ActorFacts{}, &channelspec.RealmError{Code: channelspec.RealmChannelUnavailable}
 	}
 	facts, found, err := bundle.View().ActorFacts(ctx, req.ActorID)
 	if err != nil {
 		return channelspec.ActorFacts{}, err
 	}
 	if !found || !facts.Active {
-		return channelspec.ActorFacts{}, &realmtool.RealmError{Code: realmtool.RealmForbidden, Detail: "requester is not active"}
+		return channelspec.ActorFacts{}, &channelspec.RealmError{Code: channelspec.RealmForbidden, Detail: "requester is not active"}
 	}
 	return facts, nil
 }
@@ -86,13 +86,13 @@ func (o realmOps) InspectDeclaration(ctx context.Context, req realmtool.Requeste
 	}
 	d, err := scanDecl(o.app.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,visibility FROM actor_decls WHERE id=? AND deleted_at IS NULL`, declID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmDeclNotFound}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmDeclNotFound}
 	}
 	if err != nil {
 		return realmtool.DeclDetail{}, err
 	}
 	if !declarationVisibleTo(d.Visibility, d.Owner, facts.Principal) {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmForbidden}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmForbidden}
 	}
 	return d, nil
 }
@@ -101,16 +101,16 @@ func normalizeDeclSpec(spec realmtool.DeclSpec) (realmtool.DeclSpec, error) {
 	spec.Name = strings.TrimSpace(spec.Name)
 	spec.Class = strings.TrimSpace(spec.Class)
 	if spec.Name == "" || spec.Class == "" {
-		return spec, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "name and class required"}
+		return spec, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "name and class required"}
 	}
 	if spec.Visibility == "" {
 		spec.Visibility = "private"
 	}
 	if spec.Visibility != "public" && spec.Visibility != "private" {
-		return spec, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "invalid visibility"}
+		return spec, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "invalid visibility"}
 	}
 	if len(spec.Config) > 0 && !isJSONObject(spec.Config) {
-		return spec, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "config must be an object"}
+		return spec, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "config must be an object"}
 	}
 	return spec, nil
 }
@@ -121,17 +121,17 @@ func (o realmOps) CreateDeclaration(ctx context.Context, req realmtool.Requester
 		return realmtool.DeclDetail{}, err
 	}
 	if facts.Kind != actor.KindHuman {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmForbidden, Detail: "only humans may write the realm declaration registry"}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmForbidden, Detail: "only humans may write the realm declaration registry"}
 	}
 	spec, err = normalizeDeclSpec(spec)
 	if err != nil {
 		return realmtool.DeclDetail{}, err
 	}
 	if _, ok, err := o.app.declarationClassKind(ctx, spec.Class); err != nil || !ok {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "unknown or reserved class"}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "unknown or reserved class"}
 	}
 	if err := registry.ValidateConfig(spec.Class, spec.Config); err != nil {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "config_invalid"}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "config_invalid"}
 	}
 	id := uuid.NewString()
 	now := time.Now().UnixMilli()
@@ -152,17 +152,17 @@ func (o realmOps) EditDeclaration(ctx context.Context, req realmtool.Requester, 
 		return realmtool.DeclDetail{}, err
 	}
 	if facts.Kind != actor.KindHuman {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmForbidden}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmForbidden}
 	}
 	spec, err = normalizeDeclSpec(spec)
 	if err != nil {
 		return realmtool.DeclDetail{}, err
 	}
 	if _, ok, err := o.app.declarationClassKind(ctx, spec.Class); err != nil || !ok {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "unknown or reserved class"}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "unknown or reserved class"}
 	}
 	if err := registry.ValidateConfig(spec.Class, spec.Config); err != nil {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "config_invalid"}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "config_invalid"}
 	}
 	tx, err := o.app.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -172,7 +172,7 @@ func (o realmOps) EditDeclaration(ctx context.Context, req realmtool.Requester, 
 	var currentClass string
 	if err := tx.QueryRowContext(ctx, `SELECT default_class FROM actor_decls WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, declID, facts.Principal).Scan(&currentClass); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmDeclNotFound}
+			return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmDeclNotFound}
 		}
 		return realmtool.DeclDetail{}, err
 	}
@@ -181,7 +181,7 @@ func (o realmOps) EditDeclaration(ctx context.Context, req realmtool.Requester, 
 		return realmtool.DeclDetail{}, err
 	}
 	if !sameKind {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "class must remain within the declaration kind"}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "class must remain within the declaration kind"}
 	}
 	now := time.Now().UnixMilli()
 	res, err := tx.ExecContext(ctx, `UPDATE actor_decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, spec.Name, spec.Class, string(spec.Config), spec.Visibility, now, declID, facts.Principal)
@@ -189,7 +189,7 @@ func (o realmOps) EditDeclaration(ctx context.Context, req realmtool.Requester, 
 		return realmtool.DeclDetail{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return realmtool.DeclDetail{}, &realmtool.RealmError{Code: realmtool.RealmDeclNotFound}
+		return realmtool.DeclDetail{}, &channelspec.RealmError{Code: channelspec.RealmDeclNotFound}
 	}
 	if err := tx.Commit(); err != nil {
 		return realmtool.DeclDetail{}, err
@@ -204,7 +204,7 @@ func (o realmOps) RevokeDeclaration(ctx context.Context, req realmtool.Requester
 		return err
 	}
 	if facts.Kind != actor.KindHuman {
-		return &realmtool.RealmError{Code: realmtool.RealmForbidden}
+		return &channelspec.RealmError{Code: channelspec.RealmForbidden}
 	}
 	tx, err := o.app.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -217,7 +217,7 @@ func (o realmOps) RevokeDeclaration(ctx context.Context, req realmtool.Requester
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return &realmtool.RealmError{Code: realmtool.RealmDeclNotFound}
+		return &channelspec.RealmError{Code: channelspec.RealmDeclNotFound}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -272,7 +272,7 @@ func (o realmOps) Introduce(ctx context.Context, req realmtool.Requester, declID
 
 func (o realmOps) Remove(ctx context.Context, req realmtool.Requester, target actor.ActorID) (channel.RemoveResult, error) {
 	if target == "" {
-		return channel.RemoveResult{}, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "target required"}
+		return channel.RemoveResult{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "target required"}
 	}
 	ref := realmtool.DerivedRealmToolRef(req.ChannelID, req.RequestID)
 	outcome, err := forwardSysop(ctx, o.app, req.ChannelID, sysopForward[channel.RemoveResult]{
@@ -309,15 +309,15 @@ func realmForwardError(err error, ref string) error {
 	}
 	var gate *sysopGateError
 	if errors.As(err, &gate) {
-		code := realmtool.RealmForbidden
+		code := channelspec.RealmForbidden
 		if gate.Status == 404 {
-			code = realmtool.RealmChannelUnavailable
+			code = channelspec.RealmChannelUnavailable
 		}
-		return &realmtool.RealmError{Code: code, Detail: gate.Code}
+		return &channelspec.RealmError{Code: code, Detail: gate.Code}
 	}
 	var operationErr *channelspec.OperationError
 	if errors.As(err, &operationErr) {
-		return &realmtool.RealmError{
+		return &channelspec.RealmError{
 			Code: sysopRealmErrorCode(string(operationErr.Code)), Detail: string(operationErr.Code),
 		}
 	}
@@ -331,14 +331,14 @@ func (o realmOps) crossReader(ctx context.Context, req realmtool.Requester, sour
 	}
 	bundle, err := o.app.acquireBundle(ctx, source)
 	if err != nil {
-		return nil, channel.Reader{}, &realmtool.RealmError{Code: realmtool.RealmChannelUnavailable}
+		return nil, channel.Reader{}, &channelspec.RealmError{Code: channelspec.RealmChannelUnavailable}
 	}
 	hasTool, err := bundle.View().HasDeclaredInstance(ctx, realmToolDeclID)
 	if err != nil {
 		return nil, channel.Reader{}, err
 	}
 	if !hasTool {
-		return nil, channel.Reader{}, &realmtool.RealmError{Code: realmtool.RealmCapabilityUnavailable, Detail: "source realm tool absent"}
+		return nil, channel.Reader{}, &channelspec.RealmError{Code: channelspec.RealmCapabilityUnavailable, Detail: "source realm tool absent"}
 	}
 	if source == req.ChannelID {
 		return bundle, channel.Reader{ActorID: req.ActorID, Mode: channel.ReaderMember}, nil
@@ -348,7 +348,7 @@ func (o realmOps) crossReader(ctx context.Context, req realmtool.Requester, sour
 		return nil, channel.Reader{}, err
 	}
 	if reason != observeAllowed {
-		return nil, channel.Reader{}, &realmtool.RealmError{Code: realmtool.RealmCapabilityUnavailable, Detail: string(reason)}
+		return nil, channel.Reader{}, &channelspec.RealmError{Code: channelspec.RealmCapabilityUnavailable, Detail: string(reason)}
 	}
 	return bundle, reader, nil
 }
@@ -393,13 +393,13 @@ func (r *realmCopyPolicyBody) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	if r.remaining < 0 {
-		return 0, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
+		return 0, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
 	}
 	if r.remaining == 0 {
 		var probe [1]byte
 		n, err := r.body.Read(probe[:])
 		if n > 0 {
-			return 0, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
+			return 0, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
 		}
 		return 0, err
 	}
@@ -409,7 +409,7 @@ func (r *realmCopyPolicyBody) Read(p []byte) (int, error) {
 	n, err := r.body.Read(p)
 	r.remaining -= int64(n)
 	if r.remaining < 0 {
-		return n, &realmtool.RealmError{Code: realmtool.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
+		return n, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
 	}
 	return n, err
 }
@@ -436,11 +436,11 @@ func (r *observerResourceBody) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	if reason != observeAllowed {
-		code := realmtool.RealmCapabilityUnavailable
+		code := channelspec.RealmCapabilityUnavailable
 		if reason == observeChannelAbsent {
-			code = realmtool.RealmChannelUnavailable
+			code = channelspec.RealmChannelUnavailable
 		}
-		return 0, &realmtool.RealmError{Code: code, Detail: string(reason)}
+		return 0, &channelspec.RealmError{Code: code, Detail: string(reason)}
 	}
 	const chunk = 32 * 1024
 	if len(p) > chunk {

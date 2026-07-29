@@ -3,6 +3,7 @@ package app
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -200,6 +201,10 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 		finalConfig = req.Config
 	}
 	if err := registry.ValidateConfig(finalClass, finalConfig); err != nil {
+		if errors.Is(err, registry.ErrUnknownClass) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "config_invalid"})
 		return
 	}

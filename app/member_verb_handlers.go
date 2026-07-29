@@ -21,7 +21,11 @@ func (a *App) handleJoinChannel(c *gin.Context) {
 		Predicate: func(bundle channelhost.Bundle) (channel.AdmitResult, bool, error) {
 			id, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), principal)
 			if err == nil && found {
-				err = a.relations.ReconcilePrincipal(c.Request.Context(), chID, principal, id, true)
+				// Repair is a side effect over a non-authoritative index; its
+				// failure never changes an answer the membrane already confirmed.
+				if rerr := a.relations.ReconcilePrincipal(c.Request.Context(), chID, principal, id, true); rerr != nil {
+					a.logger.Warn("membership relation repair failed", "channel", chID, "principal", principal, "err", rerr)
+				}
 			}
 			return channel.AdmitResult{ActorID: id, Created: false}, found, err
 		},

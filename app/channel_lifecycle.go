@@ -101,7 +101,12 @@ func (w *lifecycleWorker) lightScan() {
 	w.pokeMu.Unlock()
 	for id := range ids {
 		if !w.ready(id) {
-			w.retainRetry(id)
+			// Backoff not yet elapsed → keep for the next tick. Permanently
+			// failed ids are dropped instead: retrying them is pointless and
+			// re-queueing would spin the light scan forever.
+			if !w.stopped(id) {
+				w.retainRetry(id)
+			}
 			continue
 		}
 		w.app.convergeChannel(w.ctx, id)
@@ -109,6 +114,13 @@ func (w *lifecycleWorker) lightScan() {
 			w.retainRetry(id)
 		}
 	}
+}
+
+func (w *lifecycleWorker) stopped(id channel.ID) bool {
+	w.retryMu.Lock()
+	defer w.retryMu.Unlock()
+	_, stopped := w.permanent[id]
+	return stopped
 }
 
 func (w *lifecycleWorker) retainRetry(id channel.ID) {
@@ -197,6 +209,7 @@ func (a *App) convergeChannel(ctx context.Context, id channel.ID) {
 	defer release()
 	desired, err := a.loadDesiredChannel(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
+		a.clearLifecycleRetry(id)
 		return
 	}
 	if err != nil {
@@ -223,7 +236,7 @@ func (a *App) convergePresent(ctx context.Context, desired desiredChannel) error
 		return nil
 	}
 	if !errors.Is(err, channelhost.ErrChannelNotFound) {
-		return a.classifyLifecycleError(desired.ID, "open", err, true)
+		return a.classifyLifecycleError(desired.ID, "open", err)
 	}
 	var spec channelhost.ProvisionSpec
 	if err := json.Unmarshal([]byte(desired.SpecJSON), &spec); err != nil || spec.ChannelID != desired.ID {
@@ -236,10 +249,10 @@ func (a *App) convergePresent(ctx context.Context, desired desiredChannel) error
 	// ErrServing/ErrChannelRetired guards run before its unpublished-image
 	// cleanup and are the authoritative protection against destructive rebuild.
 	if _, err := a.host.Provision(ctx, spec); err != nil {
-		return a.classifyLifecycleError(desired.ID, "provision", err, true)
+		return a.classifyLifecycleError(desired.ID, "provision", err)
 	}
 	if err := a.host.Open(ctx, open); err != nil {
-		return a.classifyLifecycleError(desired.ID, "open", err, true)
+		return a.classifyLifecycleError(desired.ID, "open", err)
 	}
 	return nil
 }
@@ -271,12 +284,12 @@ func (a *App) convergeRetiring(ctx context.Context, desired desiredChannel) erro
 	return nil
 }
 
-func (a *App) classifyLifecycleError(id channel.ID, phase string, err error, present bool) error {
+func (a *App) classifyLifecycleError(id channel.ID, phase string, err error) error {
 	permanent := errors.Is(err, channelhost.ErrChannelRetired) ||
 		errors.Is(err, channelhost.ErrInvalidChannelID) ||
 		errors.Is(err, channelhost.ErrSchemaIncompatible) ||
 		errors.Is(err, channelhost.ErrOwnerInvariant)
-	if permanent && present {
+	if permanent {
 		return a.permanentLifecycle(id, phase, err)
 	}
 	return a.deferLifecycle(id, err)

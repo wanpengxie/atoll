@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -67,13 +68,13 @@ func decode(msg actorbase.Msg, out any) error {
 		return nil
 	}
 	if err := json.Unmarshal(msg.Payload, out); err != nil {
-		return &RealmError{Code: RealmInvalidRequest, Detail: "invalid JSON payload"}
+		return &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "invalid JSON payload"}
 	}
 	return nil
 }
 
 func fail(sys actorbase.Sys, msg actorbase.Msg, err error) {
-	var realmErr *RealmError
+	var realmErr *channelspec.RealmError
 	if errors.As(err, &realmErr) {
 		_, _ = sys.Fail(msg, string(realmErr.Code), realmErr.Detail)
 		return
@@ -83,12 +84,12 @@ func fail(sys actorbase.Sys, msg actorbase.Msg, err error) {
 		_, _ = sys.Reply(msg, map[string]any{"status": "result_unknown", "ref": unknown.Ref})
 		return
 	}
-	_, _ = sys.Fail(msg, string(RealmUnavailable), err.Error())
+	_, _ = sys.Fail(msg, string(channelspec.RealmUnavailable), err.Error())
 }
 
 func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 	if ops == nil {
-		fail(sys, msg, &RealmError{Code: RealmUnavailable})
+		fail(sys, msg, &channelspec.RealmError{Code: channelspec.RealmUnavailable})
 		return
 	}
 	req := requester(msg)
@@ -108,7 +109,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			declaration, err = ops.InspectDeclaration(msg.Ctx(), req, p.DeclID)
 			result = map[string]any{"declaration": declaration}
 		} else if err == nil {
-			err = &RealmError{Code: RealmInvalidRequest, Detail: "decl_id required"}
+			err = &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "decl_id required"}
 		}
 	case TypeCreateDeclaration:
 		var p DeclSpec
@@ -173,7 +174,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 						if createErr != nil {
 							err = createErr
 						} else {
-							err = &RealmError{Code: RealmConflict, Detail: string(out.RejectReason)}
+							err = &channelspec.RealmError{Code: channelspec.RealmConflict, Detail: string(out.RejectReason)}
 						}
 					} else {
 						result = map[string]any{"resource_id": newID, "source": p}
@@ -182,7 +183,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			}
 		}
 	default:
-		err = &RealmError{Code: RealmInvalidRequest, Detail: "unsupported realm operation"}
+		err = &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "unsupported realm operation"}
 	}
 	if err != nil {
 		fail(sys, msg, err)

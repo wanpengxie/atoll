@@ -38,36 +38,10 @@ type Requester struct {
 	RequestID string        `json:"request_id"`
 }
 
-type RealmErrorCode string
-
-const (
-	RealmForbidden             RealmErrorCode = "forbidden"
-	RealmDeclNotFound          RealmErrorCode = "decl_not_found"
-	RealmResourceNotFound      RealmErrorCode = "resource_not_found"
-	RealmCapabilityUnavailable RealmErrorCode = "capability_unavailable"
-	RealmChannelUnavailable    RealmErrorCode = "channel_unavailable"
-	RealmUnavailable           RealmErrorCode = "realm_unavailable"
-	RealmInvalidRequest        RealmErrorCode = "invalid_request"
-	RealmConflict              RealmErrorCode = "conflict"
-)
-
-var realmErrorCodes = [...]RealmErrorCode{
-	RealmForbidden, RealmDeclNotFound, RealmResourceNotFound,
-	RealmCapabilityUnavailable, RealmChannelUnavailable, RealmUnavailable,
-	RealmInvalidRequest, RealmConflict,
-}
-
-type RealmError struct {
-	Code   RealmErrorCode
-	Detail string
-}
-
-func (e *RealmError) Error() string {
-	if e.Detail == "" {
-		return string(e.Code)
-	}
-	return string(e.Code) + ": " + e.Detail
-}
+// The realm error vocabulary (RealmErrorCode / RealmError) lives in
+// platform/channelspec: the contract crosses the membrane, so its codes are
+// boundary vocabulary shared by the membrane's read faces, the app gates and
+// this codec — not any single party's property.
 
 type ErrResultUnknown struct{ Ref string }
 
