@@ -66,12 +66,12 @@ type ClassDecl struct {
 	ValidateConfig func(json.RawMessage) error
 }
 
-// ValidateConfig performs every check a class voluntarily makes available at
 // ErrUnknownClass distinguishes "no such class" from "config invalid": the
 // two ailments need opposite user action (fix the class name vs fix the
 // config), so callers must be able to tell them apart.
 var ErrUnknownClass = errors.New("registry: unknown class")
 
+// ValidateConfig performs every check a class voluntarily makes available at
 // acceptance time. The registry always owns the JSON-object shape check;
 // constructors remain fail-closed for host/environment-dependent conditions.
 func ValidateConfig(class string, config json.RawMessage) error {
@@ -147,7 +147,7 @@ func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error
 	d, found := reg[class]
 	mu.RUnlock()
 	if !found {
-		return platform.ActorDecl{}, fmt.Errorf("registry: unknown class %q (registered: %v)", class, classes())
+		return platform.ActorDecl{}, fmt.Errorf("%w: %q (registered: %v)", ErrUnknownClass, class, classes())
 	}
 	decl, err := d.New(spec, ctx)
 	if err != nil {

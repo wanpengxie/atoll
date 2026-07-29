@@ -70,7 +70,7 @@ func (a *App) readerForPrincipal(ctx context.Context, bundle channelhost.Bundle,
 	if principal == "" {
 		return channel.Reader{}, observeUnavailable, nil
 	}
-	memberID, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+	memberID, found, err := resolveMember(ctx, bundle, principal)
 	if err != nil {
 		return channel.Reader{}, observeUnavailable, err
 	}

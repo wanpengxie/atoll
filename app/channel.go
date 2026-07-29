@@ -141,12 +141,16 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	status := http.StatusOK
 	if changed {
 		status = http.StatusCreated
+		// A freshly accepted row must not inherit lifecycle state from any
+		// earlier life of this ID (stale permanent marks would silently block
+		// convergence forever).
+		a.resetLifecycleForStatusChange(accepted.ID)
 		a.convergeChannel(c.Request.Context(), accepted.ID)
 	}
 	// Poke on replays too: an idempotent re-submit is the caller's strongest
 	// "hurry up" signal for a channel whose physical side may still be
 	// converging, and a poke only buys timeliness.
-	a.lifecycle.notify(accepted.ID)
+	a.pokeLifecycle(accepted.ID)
 	c.JSON(status, row)
 }
 
@@ -293,7 +297,7 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "delete unavailable", "retry": "safe"})
 		return
 	}
-	switch accepted.outcome {
+	switch accepted {
 	case deleteAlreadyRetired:
 		c.JSON(http.StatusOK, gin.H{"status": "retiring", "changed": false})
 		return
@@ -305,9 +309,16 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 	case deleteForbidden:
 		c.JSON(http.StatusForbidden, gin.H{"error": "channel owner required"})
 		return
+	case deleteAccepted:
+		// Fall through to the destructive tail below.
+	default:
+		// Fail closed: an outcome this switch does not know must never fall
+		// into the destructive accepted tail.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unknown delete outcome"})
+		return
 	}
-	// Read the affected roster through the relation module (the module owns
-	// every read and write of its tables) before the Gone event deletes it.
+	// Read the affected roster through the relation module (it owns every
+	// write and provides the read API) before the Gone event deletes it.
 	affected, aerr := a.relations.PrincipalsOf(c.Request.Context(), channel.ID(chID))
 	if aerr != nil {
 		a.logger.Warn("affected principal read failed; gateway kick degraded", "channel", chID, "err", aerr)
@@ -323,7 +334,7 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 		}
 	}
 	a.resetLifecycleForStatusChange(channel.ID(chID))
-	a.lifecycle.notify(channel.ID(chID))
+	a.pokeLifecycle(channel.ID(chID))
 	c.JSON(http.StatusOK, gin.H{"status": "retiring", "changed": true})
 }
 
@@ -336,13 +347,9 @@ const (
 	deleteForbidden
 )
 
-type deleteAcceptance struct {
-	outcome deleteOutcome
-}
-
-func (a *App) acceptDeleteChannel(ctx context.Context, id channel.ID, caller string) (deleteAcceptance, error) {
+func (a *App) acceptDeleteChannel(ctx context.Context, id channel.ID, caller string) (deleteOutcome, error) {
 	var (
-		accepted deleteAcceptance
+		accepted deleteOutcome
 		err      error
 	)
 	for attempt := 0; attempt < 2; attempt++ {
@@ -354,40 +361,40 @@ func (a *App) acceptDeleteChannel(ctx context.Context, id channel.ID, caller str
 	return accepted, err
 }
 
-func (a *App) acceptDeleteChannelOnce(ctx context.Context, id channel.ID, caller string) (deleteAcceptance, error) {
+func (a *App) acceptDeleteChannelOnce(ctx context.Context, id channel.ID, caller string) (deleteOutcome, error) {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
-		return deleteAcceptance{}, err
+		return 0, err
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `UPDATE channels SET status='retiring'
 		WHERE id=? AND status='present' AND owner_principal=?`, string(id), caller)
 	if err != nil {
-		return deleteAcceptance{}, err
+		return 0, err
 	}
 	changed, err := res.RowsAffected()
 	if err != nil {
-		return deleteAcceptance{}, err
+		return 0, err
 	}
 	if changed == 0 {
 		var status, owner string
 		err := tx.QueryRowContext(ctx,
 			`SELECT status,owner_principal FROM channels WHERE id=?`, string(id)).Scan(&status, &owner)
 		if errors.Is(err, sql.ErrNoRows) {
-			return deleteAcceptance{outcome: deleteRowAbsent}, nil
+			return deleteRowAbsent, nil
 		}
 		if err == nil && status == "retiring" {
-			return deleteAcceptance{outcome: deleteAlreadyRetired}, nil
+			return deleteAlreadyRetired, nil
 		}
 		if err != nil {
-			return deleteAcceptance{}, err
+			return 0, err
 		}
-		return deleteAcceptance{outcome: deleteForbidden}, nil
+		return deleteForbidden, nil
 	}
 	if err := tx.Commit(); err != nil {
-		return deleteAcceptance{}, err
+		return 0, err
 	}
-	return deleteAcceptance{outcome: deleteAccepted}, nil
+	return deleteAccepted, nil
 }
 
 func (a *App) handleListCandidates(c *gin.Context) {

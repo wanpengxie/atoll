@@ -33,7 +33,13 @@ func TestValidateConfig(t *testing.T) {
 	if err := ValidateConfig(class, json.RawMessage(`{"ok":false}`)); err == nil {
 		t.Fatal("validator rejection ignored")
 	}
-	if err := ValidateConfig("registry-validate-missing", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("unknown class accepted")
+	if err := ValidateConfig("registry-validate-missing", json.RawMessage(`{}`)); !errors.Is(err, ErrUnknownClass) {
+		t.Fatalf("unknown class must surface ErrUnknownClass (callers branch on it), got %v", err)
+	}
+	if err := ValidateConfig(class, json.RawMessage(`{"ok":false}`)); errors.Is(err, ErrUnknownClass) {
+		t.Fatal("config rejection must not claim unknown class")
+	}
+	if _, err := Build("registry-validate-missing", InstanceSpec{}, Deps{}); !errors.Is(err, ErrUnknownClass) {
+		t.Fatalf("Build unknown class must surface ErrUnknownClass, got %v", err)
 	}
 }

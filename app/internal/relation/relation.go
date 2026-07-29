@@ -47,7 +47,9 @@ func isSQLiteBusy(err error) bool {
 
 // withBusyRetry runs one write attempt and retries on lock contention. The
 // store owns every write to the relation tables, so contention hardening
-// lives here once instead of at each caller.
+// lives here once instead of at each caller. Callers sit on the per-channel
+// lock while this backs off; the pause is bounded (sum of busyBackoff) and
+// scoped to one channel — no transaction or DB lock is held between attempts.
 func (s *Store) withBusyRetry(ctx context.Context, fn func() error) error {
 	var err error
 	for attempt := 0; ; attempt++ {

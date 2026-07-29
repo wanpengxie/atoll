@@ -19,7 +19,7 @@ func (a *App) handleJoinChannel(c *gin.Context) {
 	principal := middleware.UserID(c)
 	outcome, err := forwardSysop(c.Request.Context(), a, chID, sysopForward[channel.AdmitResult]{
 		Predicate: func(bundle channelhost.Bundle) (channel.AdmitResult, bool, error) {
-			id, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), principal)
+			id, found, err := resolveMember(c.Request.Context(), bundle, principal)
 			if err == nil && found {
 				// Repair is a side effect over a non-authoritative index; its
 				// failure never changes an answer the membrane already confirmed.
@@ -67,7 +67,7 @@ func introduceCall(
 			return value, len(instances) != 0, err
 		},
 		Qualify: func(bundle channelhost.Bundle) error {
-			id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+			id, found, err := resolveMember(ctx, bundle, principal)
 			if err != nil {
 				return &sysopUnknownError{cause: err}
 			}
@@ -125,7 +125,7 @@ func removeCall(ctx context.Context, principal string, target actor.ActorID) sys
 			return channel.RemoveResult{}, !found || !facts.Active, err
 		},
 		Qualify: func(bundle channelhost.Bundle) error {
-			id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+			id, found, err := resolveMember(ctx, bundle, principal)
 			if err != nil {
 				return &sysopUnknownError{cause: err}
 			}

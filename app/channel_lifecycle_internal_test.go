@@ -392,6 +392,12 @@ func TestLifecyclePermanentOpenFailureStopsRetryAndKeepsRow(t *testing.T) {
 	if opens != 1 {
 		t.Fatalf("permanent open failure was retried: opens=%d want 1", opens)
 	}
+	// The discriminating assertion: a deferred (backoff) classification also
+	// blocks the second converge within the tick window, so only the stopped
+	// mark separates "permanent" from "will retry later".
+	if !a.lifecycle.stopped(desired.ID) {
+		t.Fatal("Join-wrapped ErrSchemaIncompatible was not classified permanent")
+	}
 	var exists bool
 	if err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, desired.ID).Scan(&exists); err != nil {
 		t.Fatal(err)

@@ -73,7 +73,9 @@ type Config struct {
 	UIDist string
 }
 
-// New assembles the App: gin engine, routes, and loads existing channels.
+// New assembles the App: gin engine, routes, wiring — and nothing running.
+// Existing channels are loaded by the convergence arm, which starts in Start
+// (called by Run) after the assembly root finishes every setter injection.
 func New(cfg Config) (*App, error) {
 	logger := cfg.Logger
 	if logger == nil {
@@ -119,9 +121,21 @@ func New(cfg Config) (*App, error) {
 	a.registerRoutes()
 
 	a.lifecycle = newLifecycleWorker(a)
-	a.lifecycle.start()
 
 	return a, nil
+}
+
+// Start begins background work (the convergence arm, including its boot full
+// scan). Construction and assembly must be complete before this point: New
+// only wires, Start runs. The assembly root calls every setter
+// (SetGateway/SetMembershipPoke) between New and Start, so no reader of those
+// fields exists until all writes are done — construction stays side-effect
+// free and a failed assembly exits cleanly with nothing running. Run calls
+// Start; call it directly only in harnesses that never Run. Idempotent.
+func (a *App) Start() {
+	if a.lifecycle != nil {
+		a.lifecycle.start()
+	}
 }
 
 // SetGateway injects the human-ingress connector (gateway 期 S3). The assembly
@@ -140,6 +154,7 @@ func (a *App) SetMembershipPoke(fn func(principal string)) { a.membershipPoke = 
 // holds an explicit http.Server so cmd can drain in-flight requests on signal;
 // a clean Shutdown returns nil (ErrServerClosed is not an error).
 func (a *App) Run(addr string) error {
+	a.Start()
 	a.mu.Lock()
 	a.srv = &http.Server{Addr: addr, Handler: a.engine}
 	srv := a.srv

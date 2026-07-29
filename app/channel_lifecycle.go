@@ -29,6 +29,9 @@ type lifecycleWorker struct {
 	once   sync.Once
 	runMu  sync.Mutex
 
+	startMu sync.Mutex
+	started bool
+
 	pokeMu sync.Mutex
 	poked  map[channel.ID]struct{}
 
@@ -49,7 +52,25 @@ func newLifecycleWorker(app *App) *lifecycleWorker {
 	}
 }
 
+// start launches the arm. It runs AFTER assembly completes (App.Start, called
+// from Run): construction must stay side-effect free — the boot full scan
+// opens membranes and provisions physical stores, and it must never observe a
+// half-assembled App (that ordering is what makes the post-New setter
+// injections race-free by structure, not by per-field synchronization).
 func (w *lifecycleWorker) start() {
+	// One critical section carries idempotence and the close handshake at
+	// once: the cancellation check and the started flip are atomic under
+	// startMu, and close() reads started under the same lock after
+	// cancelling — so either close observes started=true and joins done, or
+	// this start observes the cancel and never spawns. A non-atomic pair
+	// would let Start slip a worker past a Close that already returned.
+	w.startMu.Lock()
+	if w.started || w.ctx.Err() != nil {
+		w.startMu.Unlock()
+		return
+	}
+	w.started = true
+	w.startMu.Unlock()
 	go func() {
 		defer close(w.done)
 		ticker := time.NewTicker(lifecycleTick)
@@ -88,7 +109,12 @@ func (w *lifecycleWorker) notify(id channel.ID) {
 func (w *lifecycleWorker) close() {
 	w.once.Do(func() {
 		w.cancel()
-		<-w.done
+		w.startMu.Lock()
+		started := w.started
+		w.startMu.Unlock()
+		if started {
+			<-w.done
+		}
 	})
 }
 
@@ -209,7 +235,9 @@ func (a *App) convergeChannel(ctx context.Context, id channel.ID) {
 	defer release()
 	desired, err := a.loadDesiredChannel(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		a.clearLifecycleRetry(id)
+		// The row is gone entirely: drop every trace, including a permanent
+		// mark, so an externally removed channel leaks nothing in memory.
+		a.resetLifecycleForStatusChange(id)
 		return
 	}
 	if err != nil {
@@ -316,6 +344,14 @@ func (a *App) deferLifecycle(id channel.ID, err error) error {
 		a.lifecycle.notify(id)
 	}
 	return err
+}
+
+// pokeLifecycle nil-guards the arm like every other App-side accessor: test
+// fixtures build App without a worker.
+func (a *App) pokeLifecycle(id channel.ID) {
+	if a.lifecycle != nil {
+		a.lifecycle.notify(id)
+	}
 }
 
 func (a *App) clearLifecycleRetry(id channel.ID) {

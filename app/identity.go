@@ -58,8 +58,9 @@ func (a *App) requireChannelMember(c *gin.Context) (string, bool) {
 
 // resolveMember is the single carrier of the "active channel member" ruling:
 // membership is exactly the principal resolving in the membrane's roster.
-// Every transport shell (the gin guards here, sysop_forward's memberGate)
-// answers through this one function so the ruling can never fork.
+// Every consumer of that ruling — the gin guards, sysop_forward's memberGate,
+// the verb predicates/qualifiers, the observer classifier and the routing
+// grant — answers through this one function so the ruling can never fork.
 func resolveMember(ctx context.Context, bundle channelhost.Bundle, principal string) (actor.ActorID, bool, error) {
 	return bundle.View().ResolvePrincipal(ctx, principal)
 }

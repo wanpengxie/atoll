@@ -9,7 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 )
 
-func TestNew_ConvergesMissingChannelImageFromDesiredValue(t *testing.T) {
+func TestStart_ConvergesMissingChannelImageFromDesiredValue(t *testing.T) {
 	dir := t.TempDir()
 	db, err := openTestAppDB(t, filepath.Join(dir, "app.sqlite"))
 	if err != nil {
@@ -34,6 +34,9 @@ func TestNew_ConvergesMissingChannelImageFromDesiredValue(t *testing.T) {
 		t.Fatalf("one missing image blocked realm startup: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Close() })
+	// Construction wires but never runs; the boot full scan belongs to Start
+	// (assembly-complete boundary).
+	a.Start()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if _, ok := a.host.Acquire("c"); ok {

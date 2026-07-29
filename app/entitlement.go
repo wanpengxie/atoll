@@ -47,7 +47,7 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 			failed = append(failed, membership.channel)
 			continue
 		}
-		id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+		id, found, err := resolveMember(ctx, bundle, principal)
 		if err != nil {
 			failed = append(failed, membership.channel)
 			continue

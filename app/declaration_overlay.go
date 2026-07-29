@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -79,6 +80,12 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 		validated = json.RawMessage(global.String)
 	}
 	if err := registry.ValidateConfig(class, validated); err != nil {
+		if errors.Is(err, registry.ErrUnknownClass) {
+			// The decl's persisted class no longer exists in this binary —
+			// a different ailment from an invalid config value.
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
+			return
+		}
 		status := http.StatusBadRequest
 		code := "config_invalid"
 		if clear {
