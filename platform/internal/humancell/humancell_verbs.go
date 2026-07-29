@@ -1,6 +1,7 @@
 package humancell
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"time"
@@ -15,14 +16,24 @@ import (
 // error → error frame (裁决8), duration/timer/list-query conversions, and the
 // resource Outcome → wire ResourceOutcome projection.
 
-// mapVerbErr folds a Sys identity-verb error into an error frame. A typed
+// mapVerbErr folds a Sys write-verb error into an error frame. A typed
 // WriteRejected surfaces its harness reason VERBATIM as the flat code (裁决8 平面
 // 词律); every other error (membrane transient during teardown, infra) is the
 // retryable unavailable code — never a raw internal string on the wire.
+//
+// The teardown arm is named explicitly. The interpreter is a goroutine beside
+// the serve loop and runs its verbs on the cell's life ctx, so once the cell
+// begins stopping every write answers a bare context.Canceled — a Go runtime
+// word with no meaning to a person's client. The verdict is the same retryable
+// unavailable either way; only the detail is replaced, with the fact that
+// actually happened.
 func mapVerbErr(err error, errFrame frameErr) subjectgate.Frame {
 	var wr *actorbase.WriteRejected
 	if errors.As(err, &wr) {
 		return errFrame(wr.Reason, wr.Detail)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errFrame(subjectgate.CodeUnavailable, "cell is stopping")
 	}
 	return errFrame(subjectgate.CodeUnavailable, err.Error())
 }

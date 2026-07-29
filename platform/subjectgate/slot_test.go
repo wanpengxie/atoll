@@ -177,7 +177,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 		for {
 			select {
 			case job := <-ch:
-				r, _ := NewFrame(FrameReceipt, job.Frame.Ref, SubmitReceipt{MessageID: "m1", Seq: 1})
+				r, _ := NewFrame(FrameReceipt, job.Frame.Ref, SubmitReceipt{MessageID: "m1"})
 				job.Reply(FrameResult{Frame: r})
 			case <-stop:
 				return
@@ -244,7 +244,7 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 	// B answers one job.
 	go func() {
 		job := <-framesB
-		r, _ := NewFrame(FrameReceipt, job.Frame.Ref, SubmitReceipt{MessageID: "mb", Seq: 1})
+		r, _ := NewFrame(FrameReceipt, job.Frame.Ref, SubmitReceipt{MessageID: "mb"})
 		job.Reply(FrameResult{Frame: r})
 	}()
 

@@ -2,7 +2,6 @@ package actorbase
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -80,7 +79,11 @@ func (f *fakeSys) Progress(msg Msg, v any) (message.ID, error) {
 	panic("not implemented")
 }
 
-func (f *fakeSys) Emit(msgType string, payload any, audience ...actor.ActorID) (message.ID, error) {
+func (f *fakeSys) Emit(spec behavior.EventSpec) (message.ID, error) {
+	panic("not implemented")
+}
+
+func (f *fakeSys) Post(spec behavior.RequestSpec) (message.ID, error) {
 	panic("not implemented")
 }
 
@@ -92,7 +95,7 @@ func (f *fakeSys) State() StateHandle { panic("not implemented") }
 
 func (f *fakeSys) Resource() ResourceHandle { panic("not implemented") }
 
-func (f *fakeSys) After(d time.Duration, msgType string, payload any) (schedule.TimerID, error) {
+func (f *fakeSys) After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error) {
 	panic("not implemented")
 }
 
@@ -121,23 +124,10 @@ func (f *fakeSys) Recv() (Msg, error) {
 
 func (f *fakeSys) Life() context.Context { return context.Background() }
 
-// Identity-dimension variants (gateway 期 S1): dispatch/Serve never reach them.
-func (f *fakeSys) SubmitEnvelope(behavior.SubjectWriteSpec) (message.ID, int64, error) {
-	return "", 0, ErrUnsupported
-}
-func (f *fakeSys) RespondEnvelope(*message.Envelope, behavior.ResponseSpec) (message.ID, error) {
-	return "", ErrUnsupported
-}
-func (f *fakeSys) AfterIdentity(time.Duration, string, json.RawMessage) (schedule.TimerID, error) {
-	return "", ErrUnsupported
-}
-func (f *fakeSys) CancelTimerIdentity(schedule.TimerID) error { return ErrUnsupported }
-func (f *fakeSys) ResourceIdentity() ResourceHandle           { return nil }
-
 var _ Sys = (*fakeSys)(nil)
 
 func newTestMsg(msgType string) Msg {
-	return NewMsg(context.Background(), message.Envelope{
+	return NewMsg(OriginMailbox, context.Background(), message.Envelope{
 		ID:   "req-1",
 		Kind: message.KindRequest,
 		Type: msgType,
@@ -212,7 +202,7 @@ func TestDispatch_HandlerCtx_IsMsgCtx(t *testing.T) {
 	sys := &fakeSys{}
 	type ctxKey struct{}
 	want := context.WithValue(context.Background(), ctxKey{}, "value")
-	msg := NewMsg(want, message.Envelope{ID: "req-1", Kind: message.KindRequest, Type: "greet"})
+	msg := NewMsg(OriginMailbox, want, message.Envelope{ID: "req-1", Kind: message.KindRequest, Type: "greet"})
 
 	var gotCtx context.Context
 	routes := map[string]Handler{

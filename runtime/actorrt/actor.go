@@ -90,8 +90,10 @@ func buildActor(build func(Incarnation) Actor, inc Incarnation) (impl Actor, err
 // This is one of the three occupant seams (siblings: DownReporter / Stopper).
 // The former off-process-subject drive seam (OccupantDriver, 缝家族第四条) is
 // GONE with the gateway 期: an off-process subject now drives its OWN Unit's
-// identity-dimension Sys verbs through the subjectgate frame protocol, not a
-// door-side synchronous call face.
+// Sys verbs through the subjectgate frame protocol, not a door-side
+// synchronous call face. (Those verbs carry no Identity suffix any more: the
+// distinction they used to name — which ledger authorises the write — moved
+// onto the Msg as its origin.)
 type RequestCanceller interface {
 	CancelRequest(id message.ID)
 }

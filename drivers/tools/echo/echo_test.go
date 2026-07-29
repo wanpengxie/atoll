@@ -60,7 +60,7 @@ var _ actorbase.Sys = (*fakeSys)(nil)
 
 func requestMsg(id, typ string, payload any) actorbase.Msg {
 	raw, _ := json.Marshal(payload)
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:      message.ID(id),
 		Kind:    message.KindRequest,
 		Type:    typ,

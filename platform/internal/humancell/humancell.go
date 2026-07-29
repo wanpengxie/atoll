@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 // Day-1 two of the three honest closure options (三层律 §3) a human cell
@@ -231,6 +232,17 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	if kind == "" {
 		kind = message.KindRequest
 	}
+	// The kind whitelist is the INTERPRETER's now, not a verb's. Post writes
+	// only requests and Emit only events, so no Sys verb can be handed a
+	// kind=response any more — but `kind` here is still a client-supplied
+	// string, and a subject hand-writing a response would forge closure around
+	// the from-log five-step authorization the resolve frame exists for. An
+	// unknown/refused kind is a permanently malformed frame, so it answers
+	// bad_payload rather than the retryable unavailable the deleted verb-level
+	// check used to fold into.
+	if kind != message.KindRequest && kind != message.KindEvent {
+		return errFrame(f, subjectgate.CodeBadPayload, "kind must be request or event; got "+string(kind))
+	}
 	id := message.ID(p.ID)
 	if id == "" {
 		id = message.ID(uuid.NewString())
@@ -239,7 +251,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	for _, a := range p.Audience {
 		aud = append(aud, actor.ActorID(a))
 	}
-	if len(aud) == 0 && (kind == message.KindRequest || kind == message.KindEvent) {
+	if len(aud) == 0 {
 		if deps.Routing == nil {
 			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
 		}
@@ -260,21 +272,39 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 		}
 		aud = append(aud, snapshot.Target)
 	}
-	spec := behavior.SubjectWriteSpec{
-		ID:         id,
-		Type:       p.MsgType,
-		Kind:       kind,
-		Payload:    p.Payload,
-		Audience:   aud,
-		Visibility: message.Visibility(p.Visibility),
-		ParentID:   message.ID(p.ParentID),
-		ExpiresAt:  p.ExpiresAt, // additive透传 (v0.4.1); nil → harness default TTL
+	// Two kinds, two verbs — the dispatch the deleted SubjectWriteSpec used to
+	// hide behind one call. An event carries no deadline (nothing waits on it),
+	// which is why ExpiresAt rides only the request arm.
+	var msgID message.ID
+	var err error
+	if kind == message.KindEvent {
+		msgID, err = sys.Emit(behavior.EventSpec{
+			ID:         id,
+			Type:       p.MsgType,
+			Payload:    p.Payload,
+			Audience:   aud,
+			Visibility: message.Visibility(p.Visibility),
+			ParentID:   message.ID(p.ParentID),
+		})
+	} else {
+		// Post, not Call/Submit: the person is not waiting on this goroutine,
+		// so there is no caller obligation to register — and an absent
+		// ExpiresAt must stay absent so the substrate stamps its own long TTL
+		// (additive透传 v0.4.1), never a short caller-side default.
+		msgID, err = sys.Post(behavior.RequestSpec{
+			ID:         id,
+			Type:       p.MsgType,
+			Payload:    p.Payload,
+			Audience:   aud,
+			Visibility: message.Visibility(p.Visibility),
+			ParentID:   message.ID(p.ParentID),
+			ExpiresAt:  p.ExpiresAt,
+		})
 	}
-	msgID, seq, err := sys.SubmitEnvelope(spec)
 	if err != nil {
 		return mapVerbErrFrame(err, f)
 	}
-	return receipt(f, subjectgate.SubmitReceipt{MessageID: string(msgID), Seq: seq})
+	return receipt(f, subjectgate.SubmitReceipt{MessageID: string(msgID)})
 }
 
 func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {
@@ -319,8 +349,17 @@ func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subject
 		}
 	}
 	merged["decision"] = p.Decision
-	raw, _ := json.Marshal(merged)
-	if _, err := sys.RespondEnvelope(req, behavior.ResponseSpec{Status: message.StatusCompleted, Payload: raw}); err != nil {
+	// The person holds no mailbox handle — the frame carried a bare req_id and
+	// the envelope came back from the LOG, so the write's authority is the log
+	// (actorbase.OriginLog). ctx is sys.Life(): the cell outlives the person
+	// going offline, and a log-origin Msg promises no request scope anyway.
+	//
+	// Reply takes a Go VALUE and marshals it exactly once. Handing it the
+	// already-marshalled []byte would make that second marshal encode the bytes
+	// as a base64 JSON string — the decision would silently vanish from truth.
+	// Pinned by TestResolvePayloadIsMarshalledExactlyOnce.
+	msg := actorbase.NewMsg(actorbase.OriginLog, sys.Life(), *req)
+	if _, err := sys.Reply(msg, merged); err != nil {
 		return mapVerbErrFrame(err, f)
 	}
 	return receipt(f, subjectgate.ResolveReceipt{ReqID: p.ReqID})
@@ -355,17 +394,14 @@ func interpretCancel(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	if !open {
 		return prepErr(subjectgate.CodeAlreadyClosed, "request already closed")
 	}
-	cancelPayload, _ := json.Marshal(map[string]any{
-		"error_code": string(message.TerminalUnansweredTimeout),
-		"detail":     "cancelled by sender",
-		"cancelled":  true,
-	})
+	// Same log-origin handle as resolve (see interpretResolve). Fail derives the
+	// terminal reason from WHO is writing: this identity sent the request, so
+	// the engine picks the caller's own word (unanswered_timeout) and stamps
+	// cancelled:true into the payload itself. The three-field literal this
+	// function used to hand-write is gone — one act, one producer.
+	msg := actorbase.NewMsg(actorbase.OriginLog, sys.Life(), *req)
 	out := func() subjectgate.Frame {
-		if _, err := sys.RespondEnvelope(req, behavior.ResponseSpec{
-			Status:  message.StatusFailed,
-			Reason:  string(message.TerminalUnansweredTimeout),
-			Payload: cancelPayload,
-		}); err != nil {
+		if _, err := sys.Fail(msg, string(message.TerminalUnansweredTimeout), "cancelled by caller"); err != nil {
 			return mapVerbErrFrame(err, f)
 		}
 		return receipt(f, subjectgate.CancelReceipt{ReqID: p.ReqID})
@@ -395,7 +431,11 @@ func interpretAfter(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
 	if p.MsgType == "" {
 		return prepErr(subjectgate.CodeBadPayload, "msg_type required")
 	}
-	id, err := sys.AfterIdentity(durationMs(p.DurationMs), p.MsgType, p.Payload)
+	// Durable home: a person's reminder must survive a Scheduler restart, which
+	// is what the home parameter names (durability, not lifetime). p.Payload is
+	// json.RawMessage, so After's single marshal emits it verbatim rather than
+	// base64-ing a []byte — the same trap §7.1 names for resolve.
+	id, err := sys.After(durationMs(p.DurationMs), p.MsgType, p.Payload, schedule.TimerHomeDurable)
 	if err != nil {
 		return mapVerbErrFrame(err, f)
 	}
@@ -407,7 +447,7 @@ func interpretCancelTimer(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Fr
 	if err := f.DecodePayload(&p); err != nil {
 		return errFrame(f, subjectgate.CodeBadPayload, err.Error())
 	}
-	if err := sys.CancelTimerIdentity(scheduleTimerID(p.TimerID)); err != nil {
+	if err := sys.CancelTimer(scheduleTimerID(p.TimerID)); err != nil {
 		return mapVerbErrFrame(err, f)
 	}
 	return receipt(f, subjectgate.CancelTimerReceipt{TimerID: p.TimerID})
@@ -418,7 +458,7 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 	if err := f.DecodePayload(&p); err != nil {
 		return errFrame(f, subjectgate.CodeBadPayload, err.Error())
 	}
-	rh := sys.ResourceIdentity()
+	rh := sys.Resource()
 	rid := resource.ResourceID(p.ResourceID)
 	switch p.Op {
 	// --- write ops ---

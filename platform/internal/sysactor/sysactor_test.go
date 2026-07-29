@@ -139,7 +139,7 @@ func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
 var _ actorbase.Sys = (*fakeSys)(nil)
 
 func requestMsg(id message.ID, typ string, payload []byte) actorbase.Msg {
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: id, ChannelID: "ch", Kind: message.KindRequest, Type: typ,
 		Sender:   message.Sender{Kind: actor.KindAgent, ID: "caller"},
 		Audience: message.Audience{actor.SystemActorID},

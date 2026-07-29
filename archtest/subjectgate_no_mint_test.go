@@ -14,7 +14,7 @@ import (
 // door, quarantined to platform/internal/humancell by platform 拓扑批 T2) and
 // the expiry reaper (platform/home/expiry.go) may NEVER mint a
 // capability or construct an actor body — the interpreter only drives the cell's
-// OWN welded caps through the identity-dimension Sys verbs (P2 能力取用), and the
+// OWN welded caps through the ordinary Sys verbs (P2 能力取用), and the
 // reaper writes through the home's existing systemPen (D3 — never mint-as-caller).
 // The forbidden call names are checked as selector suffixes so a re-plumb through
 // any holder; old body-construction helpers are assembled below to keep the

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -73,8 +74,9 @@ func (f *restartTimerFixture) BuildClass(
 func (f *restartTimerFixture) proc() actorbase.Proc {
 	return func(sys actorbase.Sys) error {
 		if f.arm {
-			id, err := sys.AfterIdentity(
-				time.Hour, restartTimerType, json.RawMessage(restartTimerPayload))
+			id, err := sys.After(
+				time.Hour, restartTimerType,
+				json.RawMessage(restartTimerPayload), schedule.TimerHomeDurable)
 			armed := restartTimerArmed{actorID: sys.Self(), timerID: id}
 			if err != nil {
 				armed.err = err.Error()
@@ -93,8 +95,12 @@ func (f *restartTimerFixture) proc() actorbase.Proc {
 			fire := restartTimerFire{actorID: sys.Self(), env: msg.Envelope}
 			// A fire that only lands in the log proves nothing about the actor
 			// being driven by it. Doing real work back into the channel does.
-			followup, err := sys.Emit(restartTimerFollowupType,
+			spec, err := behavior.EventSpecJSON(restartTimerFollowupType,
 				map[string]string{"timer": string(msg.ID)}, sys.Self())
+			var followup message.ID
+			if err == nil {
+				followup, err = sys.Emit(spec)
+			}
 			if err != nil {
 				fire.err = err.Error()
 			}
@@ -164,11 +170,12 @@ func restartTimerFireAssertions(
 	}
 }
 
-// T3. AfterIdentity is the durable-home arm of the schedule verb. Payload
-// pass-through is not the interesting half — this drives one all the way to a
-// REAL fire: the engine's due sweep, the fire sink's author admission, the
-// harness write, the delivery pump, and the arming actor's own mailbox.
-func TestAfterIdentityTimerReallyFiresBackIntoItsAuthor(t *testing.T) {
+// T3. After(..., TimerHomeDurable) is the durable-home arm of the schedule
+// verb. Payload pass-through is not the interesting half — this drives one all
+// the way to a REAL fire: the engine's due sweep, the fire sink's author
+// admission, the harness write, the delivery pump, and the arming actor's own
+// mailbox.
+func TestDurableHomeTimerReallyFiresBackIntoItsAuthor(t *testing.T) {
 	clock := newRestartShiftClock()
 	fixture := newRestartTimerFixture(true)
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
@@ -190,7 +197,7 @@ func TestAfterIdentityTimerReallyFiresBackIntoItsAuthor(t *testing.T) {
 
 	armed := restartRecv(t, "the durable timer to be armed", fixture.armed)
 	if armed.err != "" || armed.timerID == "" {
-		t.Fatalf("AfterIdentity = %q err=%s", armed.timerID, armed.err)
+		t.Fatalf("After(TimerHomeDurable) = %q err=%s", armed.timerID, armed.err)
 	}
 	restartRecv(t, "the arming body to reach its mailbox", fixture.started)
 
@@ -248,7 +255,7 @@ func TestDurableTimerArmedBeforeARestartFiresInTheNextHome(t *testing.T) {
 	}
 	armed := restartRecv(t, "the durable timer to be armed", first.armed)
 	if armed.err != "" || armed.timerID == "" {
-		t.Fatalf("AfterIdentity = %q err=%s", armed.timerID, armed.err)
+		t.Fatalf("After(TimerHomeDurable) = %q err=%s", armed.timerID, armed.err)
 	}
 	restartRecv(t, "the arming body to reach its mailbox", first.started)
 	if _, found, err := h1.query.LatestBySenderAndType(

@@ -295,11 +295,16 @@ type FeedPayload struct {
 // no longer a binding grant — it just hands over the游标表 and acks receipt.
 type AttachReceipt struct{}
 
-// SubmitReceipt's seq is the harness write seq — NOT a feed cursor (write位≠读位,
-// 契约注释钉死, build spec §S2). A client must never advance a feed cursor from it.
+// SubmitReceipt acks a write: it says the write was accepted, and names WHAT was
+// written. That identity is the message.ID — nothing else belongs here. A row
+// position (seq) is assigned by the storage layer, not by the act of writing, so
+// it is not part of what a receipt owes the writer.
+//
+// Reading position is a separate thing with its own carrier: the downstream
+// FeedPayload.Seq is the legitimate read cursor, and it is the only seq a client
+// ever advances a feed with.
 type SubmitReceipt struct {
 	MessageID string `json:"message_id"`
-	Seq       int64  `json:"seq"`
 }
 
 type ResolveReceipt struct {
