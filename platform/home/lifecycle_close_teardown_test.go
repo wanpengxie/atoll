@@ -286,7 +286,7 @@ func TestDueTimerAcrossTheCloseWindowFiresExactlyOnce(t *testing.T) {
 
 	armed := restartRecv(t, "the durable timer to be armed", first.armed)
 	if armed.err != "" || armed.timerID == "" {
-		t.Fatalf("AfterIdentity = %q err=%s", armed.timerID, armed.err)
+		t.Fatalf("After(TimerHomeDurable) = %q err=%s", armed.timerID, armed.err)
 	}
 	restartRecv(t, "the arming body to reach its mailbox", first.started)
 	if _, found, err := h.query.LatestBySenderAndType(

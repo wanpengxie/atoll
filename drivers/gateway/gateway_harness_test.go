@@ -473,7 +473,7 @@ func blockingInterpreter(slot *subjectgate.Slot, got chan<- struct{}, release <-
 				case <-stop:
 					return
 				}
-				r, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, job.Frame.Ref, subjectgate.SubmitReceipt{MessageID: "m", Seq: 1})
+				r, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, job.Frame.Ref, subjectgate.SubmitReceipt{MessageID: "m"})
 				job.Reply(subjectgate.FrameResult{Frame: r})
 			case <-stop:
 				return

@@ -252,7 +252,7 @@ func (f *fakeExtension) reply(t *testing.T, up upFrame) {
 // request builds an xhs request Msg of the given type + payload.
 func request(id, typ string, payload map[string]any) actorbase.Msg {
 	body, _ := json.Marshal(payload)
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:         message.ID(id),
 		ChannelID:  testChannelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
@@ -353,7 +353,7 @@ func TestTimeout(t *testing.T) {
 func TestDescribe(t *testing.T) {
 	_, sys := startActor(t, Config{})
 
-	sys.push(actorbase.NewMsg(context.Background(), message.Envelope{
+	sys.push(actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:         message.ID("req-desc"),
 		ChannelID:  testChannelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
@@ -415,7 +415,7 @@ func TestKindGuardDropsNonRequest(t *testing.T) {
 
 	ev := request("ev-1", TypeSearch, map[string]any{"keyword": "x"})
 	evEnv := message.Envelope{ID: ev.ID, Kind: message.KindEvent, Type: ev.Type, Payload: ev.Payload}
-	sys.push(actorbase.NewMsg(context.Background(), evEnv))
+	sys.push(actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), evEnv))
 
 	time.Sleep(30 * time.Millisecond)
 	if got := sys.repliesSnapshot(); len(got) != 0 {

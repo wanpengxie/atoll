@@ -39,7 +39,11 @@ func (p *fakePen) Write(_ context.Context, env *message.Envelope) (harness.Write
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.reject != "" {
-		return harness.WriteResult{RejectReason: p.reject}, nil
+		// A rejected write still names the message it judged — the harness does
+		// (a terminal duplicate reports the id of the terminal already in truth),
+		// and behavior.Respond's idempotent absorption hands that id back to its
+		// caller as the write's receipt.
+		return harness.WriteResult{MessageID: env.ID, RejectReason: p.reject}, nil
 	}
 	env.Sender.ID = p.self
 	p.written = append(p.written, env)
@@ -321,7 +325,7 @@ func TestEngine_LateReplyAfterDeadlineIsErrRequestClosed(t *testing.T) {
 		t.Fatal("expected admit to succeed")
 	}
 	ctx, _ := e.serve.ctxFor(env.ID)
-	msg := NewMsg(ctx, *env)
+	msg := NewMsg(OriginMailbox, ctx, *env)
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for e.serve.len() != 0 && time.Now().Before(deadline) {
@@ -344,7 +348,7 @@ func TestEngine_ReplyClosesEntry(t *testing.T) {
 	env := newRequestEnv("req-3", -1)
 	e.serve.admit(env)
 	ctx, _ := e.serve.ctxFor(env.ID)
-	msg := NewMsg(ctx, *env)
+	msg := NewMsg(OriginMailbox, ctx, *env)
 
 	if _, err := e.Reply(msg, map[string]string{"greeting": "hello"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -380,7 +384,7 @@ func TestEngine_CancelRequestClosesEntryAndCancelsMsgCtx(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ctxFor to resolve the admitted entry")
 	}
-	msg := NewMsg(ctx, *env)
+	msg := NewMsg(OriginMailbox, ctx, *env)
 
 	select {
 	case <-msg.Ctx().Done():
@@ -840,4 +844,34 @@ func TestEngine_StopAbandonsStuckWorkerOnBudget(t *testing.T) {
 		t.Fatal("Stop still blocked past its ctx budget — the unbounded join is back")
 	}
 	close(release) // unblock the worker: the background waiter finishes teardown order
+}
+
+// TestNormaliseTimerPayloadFoldsAbsentPayloadToZeroLength pins the fold that
+// keeps an absent timer payload legal at FIRE time.
+//
+// The Scheduler's buildFireEnvelope substitutes the proto baseline `{}` only
+// when len(payload)==0. json.Marshal(nil) yields the four bytes `null`, which
+// is non-empty, so it sails through to the harness — which rejects null
+// payloads. The failure surfaces at fire time (Memory timer silently dropped,
+// Durable timer parked in a dead row), never at Schedule time, which is why it
+// went unnoticed: a test that only asserts "Schedule returned no error" cannot
+// see it.
+func TestNormaliseTimerPayloadFoldsAbsentPayloadToZeroLength(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   []byte
+		want int // wanted len; 0 means "fire path will substitute {}"
+	}{
+		{"marshalled nil", []byte("null"), 0},
+		{"nil slice", nil, 0},
+		{"empty slice", []byte{}, 0},
+		{"real payload survives", []byte(`{"a":1}`), 7},
+		{"json null STRING is not the null literal", []byte(`"null"`), 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := len(normaliseTimerPayload(tc.in)); got != tc.want {
+				t.Fatalf("normaliseTimerPayload(%s) len = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
 }

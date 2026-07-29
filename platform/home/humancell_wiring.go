@@ -41,9 +41,13 @@ import (
 //     deferred human.approve / describe self-answer);
 //   - the FRAME interpreter (gateway 期 S2): the person's OWN actions arrive as
 //     wire frames through the per-identity slot's帧递交端 and are driven onto this
-//     cell's own caps via the identity-dimension Sys verbs (SubmitEnvelope/
-//     RespondEnvelope/AfterIdentity/…). No slot (no gateway attach yet) → this
-//     face is dormant and the cell is mailbox-only.
+//     cell's own caps via the ORDINARY Sys verbs (Post/Emit/Reply/Fail/After/…).
+//     The frame carries a bare request id and the person holds no mailbox, so a
+//     terminal is written through a LOG-origin Msg (actorbase.MsgOrigin): the
+//     authority is the log, not this incarnation's serve ledger. That used to be
+//     a parallel set of Identity-suffixed verbs; it is now a property of the Msg,
+//     which is where "which ledger authorises this write" belongs. No slot (no
+//     gateway attach yet) → this face is dormant and the cell is mailbox-only.
 //
 // The cell holds ZERO caller obligations (期12): a subject's own requests are
 // closed by the substrate expiry reaper (义务归位 D3) — no per-user Caller, no

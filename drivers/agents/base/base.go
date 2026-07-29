@@ -203,7 +203,11 @@ func (s *procSink) Emit(o Output) error {
 	for k, v := range o.Extra {
 		payload[k] = v
 	}
-	_, err := s.sys.Emit(eventType, payload, s.audience())
+	spec, err := behavior.EventSpecJSON(eventType, payload, s.audience())
+	if err != nil {
+		return err
+	}
+	_, err = s.sys.Emit(spec)
 	return err
 }
 

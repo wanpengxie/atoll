@@ -9,8 +9,10 @@ import "github.com/wanpengxie/atoll/protocol/channel"
 // each with an independent cursor component. The vector is device-carried,
 // lane-memory-held, and evaporates on disconnect (server 零持久化).
 //
-// receipt.seq is NEVER folded in here (write位≠读位, 裁决 §S2 契约): a submit
-// receipt's harness write-seq must never advance a feed cursor.
+// A submit receipt carries NO seq to fold in (write位≠读位): the receipt says
+// "accepted, and this is its identity", and the store row position it used to
+// carry was removed once it was clear no client could legally read it. Only a
+// feed frame's seq — a read position — ever advances this cursor.
 type cursor struct {
 	pos map[channel.ID]int64
 }

@@ -51,10 +51,15 @@ func (s *fakeState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{}, nil
 }
 
+// emitRecord captures one Emit. Emit now takes the FULL event surface
+// (behavior.EventSpec), whose Payload is already JSON — so the double decodes
+// it back into the map these assertions are written against. JSON numbers
+// therefore land as float64, which is what the payload genuinely is once it
+// has crossed the verb.
 type emitRecord struct {
 	typ      string
 	payload  map[string]any
-	audience []actor.ActorID
+	audience message.Audience
 }
 
 type failRecord struct{ code, detail string }
@@ -92,15 +97,17 @@ func (s *fakeSys) Fail(_ actorbase.Msg, code, detail string) (message.ID, error)
 	return "fail", nil
 }
 func (s *fakeSys) Progress(_ actorbase.Msg, _ any) (message.ID, error) { return "", nil }
-func (s *fakeSys) Emit(msgType string, payload any, audience ...actor.ActorID) (message.ID, error) {
-	m, _ := payload.(map[string]any)
-	s.emits = append(s.emits, emitRecord{typ: msgType, payload: m, audience: audience})
+func (s *fakeSys) Emit(spec behavior.EventSpec) (message.ID, error) {
+	var m map[string]any
+	_ = json.Unmarshal(spec.Payload, &m)
+	s.emits = append(s.emits, emitRecord{typ: spec.Type, payload: m, audience: spec.Audience})
 	return "emit", nil
 }
+func (s *fakeSys) Post(behavior.RequestSpec) (message.ID, error)              { return "", nil }
 func (s *fakeSys) Call(actor.ActorID, string, any) (actorbase.Pending, error) { return nil, nil }
 func (s *fakeSys) State() actorbase.StateHandle                               { return s.state }
 func (s *fakeSys) Resource() actorbase.ResourceHandle                         { return nil }
-func (s *fakeSys) After(time.Duration, string, any) (schedule.TimerID, error) {
+func (s *fakeSys) After(time.Duration, string, any, schedule.TimerHome) (schedule.TimerID, error) {
 	return "", nil
 }
 func (s *fakeSys) CancelTimer(schedule.TimerID) error { return nil }
@@ -121,19 +128,6 @@ func (s *fakeSys) Recv() (actorbase.Msg, error) {
 	}
 	return msg, nil
 }
-
-// Identity-dimension variants (gateway 期 S1): the base Proc never drives them.
-func (s *fakeSys) SubmitEnvelope(behavior.SubjectWriteSpec) (message.ID, int64, error) {
-	return "", 0, actorbase.ErrUnsupported
-}
-func (s *fakeSys) RespondEnvelope(*message.Envelope, behavior.ResponseSpec) (message.ID, error) {
-	return "", actorbase.ErrUnsupported
-}
-func (s *fakeSys) AfterIdentity(time.Duration, string, json.RawMessage) (schedule.TimerID, error) {
-	return "", actorbase.ErrUnsupported
-}
-func (s *fakeSys) CancelTimerIdentity(schedule.TimerID) error { return actorbase.ErrUnsupported }
-func (s *fakeSys) ResourceIdentity() actorbase.ResourceHandle { return nil }
 
 var _ actorbase.Sys = (*fakeSys)(nil)
 
@@ -173,7 +167,7 @@ func eventMsg(sender actor.ActorID, text string) actorbase.Msg {
 	env.Type = "user.text"
 	env.Sender = message.Sender{ID: sender}
 	env.Payload = payload
-	return actorbase.NewMsg(context.Background(), env)
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)
 }
 
 func describeMsg(typeSel string) actorbase.Msg {
@@ -184,7 +178,7 @@ func describeMsg(typeSel string) actorbase.Msg {
 	env.Type = introspect.QueryDescribe
 	env.Sender = message.Sender{ID: "asker"}
 	env.Payload = payload
-	return actorbase.NewMsg(context.Background(), env)
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)
 }
 
 func runProc(t *testing.T, self actor.ActorID, eng *stubEngine, seedState map[resource.ResourceID][]byte, msgs ...actorbase.Msg) (*fakeSys, error) {
@@ -233,7 +227,7 @@ func TestTurnEmitsTerminalOutput(t *testing.T) {
 	if e.payload["text"] != "hi back" || e.payload["next_action"] != "done" {
 		t.Fatalf("emit payload = %v", e.payload)
 	}
-	if e.payload["turn_index"] != 1 {
+	if e.payload["turn_index"] != float64(1) {
 		t.Fatalf("turn_index = %v, want 1", e.payload["turn_index"])
 	}
 	if len(e.audience) != 1 || e.audience[0] != actor.ActorID("user:alice") {
@@ -256,7 +250,7 @@ func TestIntermediateThenTerminal(t *testing.T) {
 	if len(sys.emits) != 2 {
 		t.Fatalf("want 2 emits (intermediate + terminal), got %d", len(sys.emits))
 	}
-	if sys.emits[0].payload["step_index"] != 1 {
+	if sys.emits[0].payload["step_index"] != float64(1) {
 		t.Fatalf("intermediate extra not merged: %v", sys.emits[0].payload)
 	}
 	if sys.emits[1].payload["text"] != "done text" {

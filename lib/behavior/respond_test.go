@@ -151,19 +151,27 @@ func TestRespond_RejectReasonErrors(t *testing.T) {
 	}
 }
 
-// EmitEvent emits a kind=event message; the authoring identity is welded onto
-// the pen (the relay stub leaves Sender/ChannelID zero on the built envelope).
-func TestEmitEvent_Success(t *testing.T) {
-	w := &recordingWriter{}
-	id, err := EmitEvent(context.Background(), w, fixedClock(99),
-		"agent.text", json.RawMessage(`{"hi":1}`), message.Visibility("channel"), message.Audience{actor.ActorID("a")})
+// BuildEvent fills the kind=event envelope's own fields and leaves the
+// pen-injected ones (Sender / ChannelID) zero — the sealed-pen contract.
+//
+// This used to be asserted through EmitEvent, the pen-writing wrapper that
+// lived alongside it. That wrapper is gone: it flattened a harness rejection
+// into a formatted error, so a caller that has to map verdicts onto protocol
+// codes could not recover the reason. The write moved to the Emit verb, which
+// carries the rejection typed; what stays here is the construction contract.
+func TestBuildEvent_FillsOwnFieldsAndLeavesPenInjectedZero(t *testing.T) {
+	ev, err := BuildEvent(fixedClock(99), EventSpec{
+		Type:       "agent.text",
+		Payload:    json.RawMessage(`{"hi":1}`),
+		Visibility: message.Visibility("channel"),
+		Audience:   message.Audience{actor.ActorID("a")},
+	})
 	if err != nil {
-		t.Fatalf("EmitEvent err: %v", err)
+		t.Fatalf("BuildEvent err: %v", err)
 	}
-	if id == "" {
-		t.Fatal("want a message id")
+	if ev.ID == "" {
+		t.Fatal("want a generated id")
 	}
-	ev := w.last()
 	if ev.Kind != message.KindEvent {
 		t.Fatalf("kind = %q, want event", ev.Kind)
 	}
@@ -182,31 +190,90 @@ func TestEmitEvent_Success(t *testing.T) {
 	}
 }
 
-// EmitEvent rejects an empty event type.
-func TestEmitEvent_EmptyType(t *testing.T) {
-	_, err := EmitEvent(context.Background(), &recordingWriter{}, fixedClock(1),
-		"", nil, message.Visibility("channel"), nil)
-	if err == nil {
+// BuildEvent rejects an empty event type.
+func TestBuildEvent_EmptyType(t *testing.T) {
+	if _, err := BuildEvent(fixedClock(1), EventSpec{}); err == nil {
 		t.Fatal("empty type must error")
 	}
 }
 
-// EmitEvent surfaces a writer error.
-func TestEmitEvent_WriteError(t *testing.T) {
-	w := &recordingWriter{err: errors.New("boom")}
-	_, err := EmitEvent(context.Background(), w, fixedClock(1),
-		"agent.text", nil, message.Visibility("channel"), nil)
-	if err == nil {
-		t.Fatal("writer error must propagate")
+// EventSpecJSON is the narrow three-argument sugar: it marshals a Go value
+// into the spec's RawMessage payload and folds the variadic audience. A
+// payload that cannot be marshalled is an error, never a silently empty spec.
+func TestEventSpecJSON(t *testing.T) {
+	spec, err := EventSpecJSON("agent.text", map[string]string{"text": "hi"}, actor.ActorID("a"))
+	if err != nil {
+		t.Fatalf("EventSpecJSON err: %v", err)
+	}
+	if spec.Type != "agent.text" {
+		t.Fatalf("type = %q", spec.Type)
+	}
+	if string(spec.Payload) != `{"text":"hi"}` {
+		t.Fatalf("payload = %s, want the marshalled map", spec.Payload)
+	}
+	if len(spec.Audience) != 1 || spec.Audience[0] != actor.ActorID("a") {
+		t.Fatalf("audience = %v, want [a]", spec.Audience)
+	}
+
+	// No audience at all stays nil rather than becoming an empty slice: an
+	// event addressed to nobody in particular is a real shape.
+	spec, err = EventSpecJSON("agent.text", nil)
+	if err != nil {
+		t.Fatalf("EventSpecJSON(no audience) err: %v", err)
+	}
+	if spec.Audience != nil {
+		t.Fatalf("audience = %v, want nil", spec.Audience)
+	}
+
+	if _, err := EventSpecJSON("agent.text", make(chan int)); err == nil {
+		t.Fatal("an unmarshallable payload must error")
 	}
 }
 
-// EmitEvent surfaces a reject reason as an error.
-func TestEmitEvent_RejectReason(t *testing.T) {
-	w := &rejectWriter{reason: "harness_bad_visibility"}
-	_, err := EmitEvent(context.Background(), w, fixedClock(1),
-		"agent.text", nil, message.Visibility("channel"), nil)
-	if err == nil {
-		t.Fatal("reject reason must surface as an error")
+// TestProgressAbsorbsBothTerminalAlreadyLandedVerdicts pins that a provisional
+// losing the race to the final settles benignly regardless of WHICH word the
+// harness uses to say so.
+//
+// stepResponsePairing hands a provisional-after-final its OWN verdict
+// (harness_provisional_after_final) rather than the generic
+// harness_terminal_duplicate. Progress used to absorb only the latter, so the
+// former surfaced as an error — contradicting Progress's own doc promise that
+// a lost race is "benign, not an error". Both words mean the same thing from
+// this caller's seat: the terminal landed first.
+func TestProgressAbsorbsBothTerminalAlreadyLandedVerdicts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reject harness.HarnessRejectReason
+	}{
+		{"terminal duplicate", harness.HarnessTerminalDuplicate},
+		{"provisional after final", harness.HarnessProvisionalAfterFinal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newRequest("req-progress", nil)
+			w := &recordingWriter{reject: tc.reject}
+
+			id, err := Progress(context.Background(), w, fixedClock(0), req, map[string]any{"pct": 50})
+			if err != nil {
+				t.Fatalf("Progress under %s: want benign settle, got error: %v", tc.reject, err)
+			}
+			if id == "" {
+				t.Fatalf("Progress under %s: want the message id back, got empty", tc.reject)
+			}
+			if w.count() != 1 {
+				t.Fatalf("Progress under %s: want exactly one write attempt, got %d", tc.reject, w.count())
+			}
+		})
+	}
+}
+
+// TestProgressStillSurfacesUnrelatedRejects guards the absorption above from
+// widening into "swallow every reject": a verdict that is NOT about the
+// terminal already having landed must still reach the caller.
+func TestProgressStillSurfacesUnrelatedRejects(t *testing.T) {
+	req := newRequest("req-progress-2", nil)
+	w := &recordingWriter{reject: harness.HarnessResponseParentNotFound}
+
+	if _, err := Progress(context.Background(), w, fixedClock(0), req, map[string]any{}); err == nil {
+		t.Fatal("Progress: an unrelated harness reject must surface as an error, got nil")
 	}
 }

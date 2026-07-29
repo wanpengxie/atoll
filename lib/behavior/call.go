@@ -53,18 +53,10 @@ func BuildRequest(
 	clock func() time.Time,
 	spec RequestSpec,
 ) (*message.Envelope, error) {
-	return buildRequest(clock, spec, true)
-}
-
-// buildRequest is shared with BuildSubjectWrite. A subject-drive request may
-// intentionally cross the channel boundary without an audience so the
-// membrane's routing step can resolve it; in-process Call still requires an
-// explicit target.
-func buildRequest(clock func() time.Time, spec RequestSpec, requireAudience bool) (*message.Envelope, error) {
 	if strings.TrimSpace(spec.Type) == "" {
 		return nil, fmt.Errorf("behavior: BuildRequest type required")
 	}
-	if requireAudience && len(spec.Audience) == 0 {
+	if len(spec.Audience) == 0 {
 		return nil, fmt.Errorf("behavior: BuildRequest audience required")
 	}
 	id := spec.ID

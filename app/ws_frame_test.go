@@ -385,6 +385,54 @@ func TestWS_NonMemberWriteRejected(t *testing.T) {
 	}
 }
 
+// TestWS_PostedRequestGetsTheSubstrateWideDeadline: a person's submitted
+// request names no deadline, and the one it ends up with must be the
+// SUBSTRATE's day-long fallback — the request is a human approval that may sit
+// unanswered overnight.
+//
+// The two halves of this are each unit-tested against a double (the verb
+// leaves an absent expires_at absent; the harness stamps its global TTL on an
+// absent one), and both would stay green if the write ever went back through
+// the caller-closure path, which resolves an absent deadline against the
+// in-process default measured in SECONDS. Only the joined path can tell 24
+// hours from 30 seconds, so it is asserted here, once, end to end.
+func TestWS_PostedRequestGetsTheSubstrateWideDeadline(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+	_, bActor := addSecondMember(t, env, s, "ttl-approver@test.com")
+
+	ca := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer ca.close()
+
+	before := time.Now().UnixMilli()
+	ack := ca.sendMessage(map[string]any{
+		"msg_type": "human.approve",
+		"kind":     "request",
+		"audience": []string{string(bActor)},
+		"payload":  map[string]any{"q": "approve?"},
+		// no expires_at on purpose — that is the whole point.
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("request frame: want ack, got %v", ack)
+	}
+	after := time.Now().UnixMilli()
+	reqID, _ := ack["message_id"].(string)
+
+	entry := ca.waitTail(func(e map[string]any) bool { return e["id"] == reqID }, 3*time.Second)
+	raw, ok := entry["expires_at"].(float64)
+	if !ok {
+		t.Fatalf("posted request carries no expires_at at all (%v) — an open request with no deadline is never reaped", entry["expires_at"])
+	}
+	const dayMs = 24 * 60 * 60 * 1000
+	got := int64(raw)
+	if got < before+dayMs || got > after+dayMs {
+		t.Fatalf("posted request expires_at = %d, want the substrate's 24h fallback (between %d and %d) — a caller-side default would land seconds from now",
+			got, before+dayMs, after+dayMs)
+	}
+}
+
 // TestWS_ResolveFrameEndToEnd: A requests B (human.approve → left open); B resolves
 // via a resolve frame; A's feed sees the completed terminal with the decision.
 func TestWS_ResolveFrameEndToEnd(t *testing.T) {
@@ -540,7 +588,7 @@ func TestWS_PresenceMultiTab(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestWS_AfterFrameEndToEnd: a member arms a self-reminder over the ws; the
-// identity-bound timer fires and the reminder message lands on the same feed.
+// durable-home timer fires and the reminder message lands on the same feed.
 func TestWS_AfterFrameEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())

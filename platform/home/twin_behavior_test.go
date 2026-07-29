@@ -9,12 +9,14 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -99,13 +101,17 @@ func (r twinResolver) BuildClass(
 			out, err := sys.State().Get("k")
 			fail(err)
 			report.state = string(out.Value)
-			if _, err := sys.After(time.Hour, "twin.tick", nil); err != nil {
+			if _, err := sys.After(
+				time.Hour, "twin.tick", nil, schedule.TimerHomeMemory); err != nil {
 				fail(err)
 			} else {
 				report.timerOK = true
 			}
 			if peer != "" {
-				msgID, err := sys.Emit("twin.hello", map[string]string{"from": string(id)}, peer)
+				spec, err := behavior.EventSpecJSON(
+					"twin.hello", map[string]string{"from": string(id)}, peer)
+				fail(err)
+				msgID, err := sys.Emit(spec)
 				fail(err)
 				report.emitted = msgID
 			}
