@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -185,7 +186,7 @@ func openDaemonForkChannel(t *testing.T, channelID channel.ID, dbPath string) *H
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.closeInternal("test") })
-	if _, err := h.opEntry.AttachDaemon(context.Background(), channel.DaemonRequest{
+	if _, err := h.opEntry.AttachDaemon(context.Background(), channelspec.DaemonRequest{
 		Ref: "test:attach:" + uuid.NewString(), DaemonID: daemonForkDomain,
 	}); err != nil {
 		t.Fatalf("bind the daemon: %v", err)

@@ -123,8 +123,8 @@ func main() {
 
 	// Human-ingress gateway (gateway 期 S3, 连接模型勘误期): constructed AFTER the app so
 	// it can hold the app's routing + entitlement面, then injected back (the construction
-	// cycle is broken by the setters). ChannelHost wires membrane membership-change
-	// emit points through HomeDeps.OnMembershipChange to Gateway.Poke
+	// cycle is broken by the setters). ChannelHost wires membrane relation-change
+	// emit points through HomeDeps.OnRelationChange to Gateway.Poke
 	// directly; the entitlement resolver bridges the app's own DTO into gateway.Route
 	// (app → drivers is fenced, so the assembly root does the DTO→DTO map here).
 	gw, err := gateway.New(gateway.Config{

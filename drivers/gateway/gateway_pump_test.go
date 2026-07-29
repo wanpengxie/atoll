@@ -193,7 +193,7 @@ func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 
 // TestAdmitWithoutPokeConvergesOnSweep (DoD-6/7③ timer backstop): the connection is
 // already running with no channels. A real Home.Admit then appears in resolver truth,
-// but there is deliberately NO OnMembershipChange wire and no hand Poke. Advancing the
+// but there is deliberately NO OnRelationChange wire and no hand Poke. Advancing the
 // injected clock fires runFeed's real sweep timer and the new channel enters the stream.
 func TestAdmitWithoutPokeConvergesOnSweep(t *testing.T) {
 	clk := newClock()

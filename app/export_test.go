@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -37,16 +39,16 @@ func (a *App) DeclaredInstancesForTest(chID channel.ID, declID string) ([]actor.
 }
 
 // ActorFactsForTest asks the membrane's identity-fact question.
-func (a *App) ActorFactsForTest(chID channel.ID, id actor.ActorID) (channel.ActorFacts, bool, error) {
+func (a *App) ActorFactsForTest(chID channel.ID, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
-		return channel.ActorFacts{}, false, errTestChannelNotLoaded
+		return channelspec.ActorFacts{}, false, errTestChannelNotLoaded
 	}
 	return bundle.View().ActorFacts(context.Background(), id)
 }
 
 // HumanRosterForTest asks the membrane's entitlement projection.
-func (a *App) HumanRosterForTest(chID channel.ID) ([]channel.HumanRosterEntry, error) {
+func (a *App) HumanRosterForTest(chID channel.ID) ([]channelspec.HumanRosterEntry, error) {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
 		return nil, errTestChannelNotLoaded
@@ -62,7 +64,7 @@ func (a *App) ResolvedDeclarationForTest(
 	ctx context.Context,
 	chID channel.ID,
 	declID string,
-) (channel.DeclarationFacts, error) {
+) (channelspec.DeclarationFacts, error) {
 	return compositionResolver{app: a}.ResolveDeclaration(ctx, chID, declID)
 }
 
@@ -117,7 +119,7 @@ func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) (acto
 	if kind != actor.KindHuman {
 		return "", fmt.Errorf("test admission supports human identities only")
 	}
-	result, err := bundle.SysOp().Admit(context.Background(), channel.AdmitRequest{Ref: "test-admit:" + uuid.NewString(), Principal: principal})
+	result, err := bundle.SysOp().Admit(context.Background(), channelspec.AdmitRequest{Ref: "test-admit:" + uuid.NewString(), Principal: principal})
 	return result.ActorID, err
 }
 
@@ -139,7 +141,7 @@ func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind
 	if err != nil || !found {
 		return "", fmt.Errorf("resolve owner actor: found=%v err=%v", found, err)
 	}
-	result, err := bundle.SysOp().Introduce(context.Background(), channel.IntroduceRequest{
+	result, err := bundle.SysOp().Introduce(context.Background(), channelspec.IntroduceRequest{
 		Ref: "test-introduce:" + uuid.NewString(), DeclID: principal, InitiatorActorID: initiator,
 	})
 	if err == nil {
@@ -207,25 +209,28 @@ func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
 	if err != nil || !found {
 		return err
 	}
-	_, err = bundle.SysOp().Remove(context.Background(), channel.RemoveRequest{
+	_, err = bundle.SysOp().Remove(context.Background(), channelspec.RemoveRequest{
 		Ref: "test-remove-realm-tool:" + uuid.NewString(), Target: target, InitiatorActorID: initiator,
 	})
 	return err
 }
 
-// CreateHalfBuiltChannelForTest creates a published directory row plus its
-// provision intent but no local image, modelling a crash window.
+// CreateHalfBuiltChannelForTest accepts a desired row without converging its
+// local image, modelling the ordinary post-acceptance build window.
 func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string, error) {
 	chID := uuid.NewString()
 	now := time.Now().UnixMilli()
-	if _, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channels (id,name,type,created_at,parent_id) VALUES (?,?,?,?,NULL)`,
-		chID, name, "group", now); err != nil {
+	spec, err := json.Marshal(channelhost.ProvisionSpec{
+		ChannelID: channel.ID(chID), Type: "group",
+		OwnerPrincipal: ownerPrincipal, CreatedAt: now,
+	})
+	if err != nil {
 		return "", err
 	}
-	if _, err := a.db.ExecContext(context.Background(), `INSERT INTO channel_provision_jobs
-		(operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,published_at,created_at)
-		VALUES (?,?,?,?,?,?,?,?,?)`, "lc:test:"+chID, chID, ownerPrincipal, name, "group", ownerPrincipal, `{}`, now, now); err != nil {
+	if _, err := a.db.ExecContext(context.Background(),
+		`INSERT INTO channels (id,name,type,status,owner_principal,spec_json,created_at,parent_id)
+		VALUES (?,?,?,'present',?,?,?,NULL)`,
+		chID, name, "group", ownerPrincipal, string(spec), now); err != nil {
 		return "", err
 	}
 	return chID, nil

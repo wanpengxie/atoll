@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -48,20 +49,20 @@ func (g *lifecycleReconcileGate) unpark() { g.openOnce.Do(func() { close(g.relea
 
 func (g *lifecycleReconcileGate) ResolveDeclaration(
 	context.Context, channel.ID, string,
-) (channel.DeclarationFacts, error) {
+) (channelspec.DeclarationFacts, error) {
 	if g.armed.Load() {
 		g.enterOnce.Do(func() { close(g.entered) })
 		<-g.release
 	}
-	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+	return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 }
 
 func (g *lifecycleReconcileGate) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
 
-func (g *lifecycleReconcileGate) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{}, nil
+func (g *lifecycleReconcileGate) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{}, nil
 }
 
 // lifecycleCloseConfig is a bootstrap channel carrying ONE declared agent —

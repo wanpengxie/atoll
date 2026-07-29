@@ -259,7 +259,7 @@ func TestPresenceConvergesFromAnyDirty(t *testing.T) {
 
 // TestPresenceTickConvergesWithoutPoke is the periodic half of DoD-6/7④: after the
 // real presence loop has drained the attach poke and is waiting, a membership route is
-// added without an OnMembershipChange wire. Only the injected PresenceTick alarm can
+// added without an OnRelationChange wire. Only the injected PresenceTick alarm can
 // wake the loop; advancing the clock proves that timer path publishes online.
 func TestPresenceTickConvergesWithoutPoke(t *testing.T) {
 	clk := newClock()

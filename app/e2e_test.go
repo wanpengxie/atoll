@@ -477,6 +477,18 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 	if apiKey == "" {
 		t.Fatal("daemon api_key empty")
 	}
+	owned := env.do(t, "GET", "/api/daemons", nil, s.cookies)
+	assertStatus(t, owned, http.StatusOK)
+	var recovered bool
+	for _, item := range respJSON(t, owned)["daemons"].([]any) {
+		daemon := item.(map[string]any)
+		if daemon["id"] == daemonID {
+			recovered = daemon["api_key"] == apiKey
+		}
+	}
+	if !recovered {
+		t.Fatal("owner daemon list did not recover the plaintext api_key")
+	}
 
 	// List channel daemons -- should contain the one we just created.
 	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/daemons", s.chID), nil, s.cookies)
@@ -520,7 +532,10 @@ func TestDetachDaemonUnavailableChannelIsExplicit(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s", s.chID, daemonID), nil, s.cookies)
-	assertStatus(t, w, http.StatusAccepted)
+	assertStatus(t, w, http.StatusServiceUnavailable)
+	if body := respJSON(t, w); body["retry"] != "safe" {
+		t.Fatalf("detach unknown=%v", body)
+	}
 }
 
 // ---------------------------------------------------------------------------

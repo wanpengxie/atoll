@@ -5,26 +5,21 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 const (
-	lifecycleTick            = 250 * time.Millisecond
-	lifecycleDrain           = 16
-	servingReconcileInterval = 30 * time.Second
-	// membershipSweepInterval paces the projection's third maintenance layer;
-	// App.New runs the boot pass before the first tick fires.
-	membershipSweepInterval = 5 * time.Minute
+	lifecycleTick     = 250 * time.Millisecond
+	lifecycleFullScan = 30 * time.Second
 )
 
+// lifecycleWorker is a stateless convergence arm. Durable intent exists only
+// in channels rows; all retry scheduling below is disposable process memory.
 type lifecycleWorker struct {
 	app    *App
 	ctx    context.Context
@@ -33,19 +28,24 @@ type lifecycleWorker struct {
 	done   chan struct{}
 	once   sync.Once
 	runMu  sync.Mutex
-	// The two cursors are process-local scheduling hints, not claims. Job truth
-	// remains entirely in SQLite, so a restart safely begins each ring at zero.
-	nextKind      string
-	provisionLast int64
-	destroyLast   int64
-	servingEvery  time.Duration
+
+	pokeMu sync.Mutex
+	poked  map[channel.ID]struct{}
+
+	retryMu   sync.Mutex
+	attempts  map[channel.ID]int
+	retryAt   map[channel.ID]time.Time
+	permanent map[channel.ID]struct{}
 }
 
 func newLifecycleWorker(app *App) *lifecycleWorker {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &lifecycleWorker{
-		app: app, ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), done: make(chan struct{}),
-		nextKind: "provision", servingEvery: servingReconcileInterval,
+		app: app, ctx: ctx, cancel: cancel,
+		wake: make(chan struct{}, 1), done: make(chan struct{}),
+		poked:    make(map[channel.ID]struct{}),
+		attempts: make(map[channel.ID]int), retryAt: make(map[channel.ID]time.Time),
+		permanent: make(map[channel.ID]struct{}),
 	}
 }
 
@@ -54,355 +54,295 @@ func (w *lifecycleWorker) start() {
 		defer close(w.done)
 		ticker := time.NewTicker(lifecycleTick)
 		defer ticker.Stop()
-		servingEvery := w.servingEvery
-		if servingEvery <= 0 {
-			servingEvery = servingReconcileInterval
-		}
-		servingTicker := time.NewTicker(servingEvery)
-		defer servingTicker.Stop()
-		lastSweep := time.Now()
+		full := time.NewTicker(lifecycleFullScan)
+		defer full.Stop()
+		w.fullScan()
 		for {
 			select {
 			case <-w.ctx.Done():
 				return
-			case <-ticker.C:
-				w.drain()
-				if time.Since(lastSweep) >= membershipSweepInterval {
-					lastSweep = time.Now()
-					w.app.sweepMembershipProjection(w.ctx)
-				}
 			case <-w.wake:
-				w.drain()
-			case <-servingTicker.C:
-				if err := w.app.reconcileServingChannels(w.ctx); err != nil {
-					w.app.logger.Warn("channel serving reconcile failed", "err", err)
-				}
+				w.lightScan()
+			case <-ticker.C:
+				w.lightScan()
+			case <-full.C:
+				w.fullScan()
 			}
 		}
 	}()
 }
 
-func (w *lifecycleWorker) notify() {
+func (w *lifecycleWorker) notify(id channel.ID) {
+	if id == "" {
+		return
+	}
+	w.pokeMu.Lock()
+	w.poked[id] = struct{}{}
+	w.pokeMu.Unlock()
 	select {
 	case w.wake <- struct{}{}:
 	default:
 	}
 }
-func (w *lifecycleWorker) close() { w.once.Do(func() { w.cancel(); <-w.done }) }
 
-func (w *lifecycleWorker) drain() {
+func (w *lifecycleWorker) close() {
+	w.once.Do(func() {
+		w.cancel()
+		<-w.done
+	})
+}
+
+func (w *lifecycleWorker) lightScan() {
 	w.runMu.Lock()
 	defer w.runMu.Unlock()
-	for i := 0; i < lifecycleDrain; i++ {
-		kind, id, ok := w.next()
-		if !ok {
+	w.pokeMu.Lock()
+	ids := w.poked
+	w.poked = make(map[channel.ID]struct{})
+	w.pokeMu.Unlock()
+	for id := range ids {
+		if !w.ready(id) {
+			w.retainRetry(id)
+			continue
+		}
+		w.app.convergeChannel(w.ctx, id)
+		if w.retryPending(id) {
+			w.retainRetry(id)
+		}
+	}
+}
+
+func (w *lifecycleWorker) retainRetry(id channel.ID) {
+	w.pokeMu.Lock()
+	w.poked[id] = struct{}{}
+	w.pokeMu.Unlock()
+}
+
+func (w *lifecycleWorker) fullScan() {
+	w.runMu.Lock()
+	defer w.runMu.Unlock()
+	rows, err := w.app.db.QueryContext(w.ctx, `SELECT id FROM channels ORDER BY id`)
+	if err != nil {
+		w.app.logger.Warn("channel desired scan failed", "err", err)
+		return
+	}
+	var ids []channel.ID
+	for rows.Next() {
+		var id channel.ID
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			w.app.logger.Warn("channel desired scan failed", "err", err)
 			return
 		}
-		if kind == "provision" {
-			_ = w.app.runProvisionJob(w.ctx, id)
-		} else {
-			_ = w.app.runDestroyJob(w.ctx, id)
-		}
+		ids = append(ids, id)
 	}
-}
-
-func (w *lifecycleWorker) next() (string, int64, bool) {
-	first, second := w.nextKind, "destroy"
-	if first == "destroy" {
-		second = "provision"
+	if err := rows.Close(); err != nil {
+		w.app.logger.Warn("channel desired scan failed", "err", err)
+		return
 	}
-	for _, kind := range []string{first, second} {
-		id, ok := w.nextOfKind(kind)
-		if !ok {
-			continue
-		}
-		if kind == "provision" {
-			w.provisionLast = id
-			w.nextKind = "destroy"
-		} else {
-			w.destroyLast = id
-			w.nextKind = "provision"
-		}
-		return kind, id, true
+	for _, id := range ids {
+		w.app.convergeChannel(w.ctx, id)
 	}
-	return "", 0, false
-}
-
-func (w *lifecycleWorker) nextOfKind(kind string) (int64, bool) {
-	now := time.Now().UnixMilli()
-	last := w.destroyLast
-	table := "channel_destroy_jobs"
-	extra := ""
-	if kind == "provision" {
-		last = w.provisionLast
-		table = "channel_provision_jobs"
-		extra = " AND compensation_job_id IS NULL"
-	}
-	query := `SELECT job_id FROM ` + table + ` WHERE done_at IS NULL AND dead_at IS NULL` + extra +
-		` AND next_attempt_at<=? AND job_id>? ORDER BY next_attempt_at,job_id LIMIT 1`
-	var id int64
-	if err := w.app.db.QueryRowContext(w.ctx, query, now, last).Scan(&id); err == nil {
-		return id, true
-	}
-	// Wrap the ring. The compound pending index gives the same deterministic
-	// order as the claim query on both the forward and wrapped legs.
-	query = `SELECT job_id FROM ` + table + ` WHERE done_at IS NULL AND dead_at IS NULL` + extra +
-		` AND next_attempt_at<=? ORDER BY next_attempt_at,job_id LIMIT 1`
-	if err := w.app.db.QueryRowContext(w.ctx, query, now).Scan(&id); err != nil {
-		return 0, false
-	}
-	return id, true
-}
-
-type provisionJob struct {
-	ID                                                               int64
-	OperationID, ChannelID, RequestedBy, Name, Type, Owner, SpecJSON string
-	Receipt                                                          sql.NullString
-	Published                                                        sql.NullInt64
-	Compensation                                                     sql.NullInt64
-	Attempt                                                          int
-	Done, Dead                                                       sql.NullInt64
-}
-
-func (a *App) loadProvisionJob(ctx context.Context, id int64) (provisionJob, error) {
-	var job provisionJob
-	err := a.db.QueryRowContext(ctx, `SELECT job_id,operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,
-		receipt_json,published_at,compensation_job_id,attempt,done_at,dead_at FROM channel_provision_jobs WHERE job_id=?`, id).
-		Scan(&job.ID, &job.OperationID, &job.ChannelID, &job.RequestedBy, &job.Name, &job.Type, &job.Owner, &job.SpecJSON,
-			&job.Receipt, &job.Published, &job.Compensation, &job.Attempt, &job.Done, &job.Dead)
-	return job, err
-}
-
-func (a *App) runProvisionJob(ctx context.Context, id int64) error {
-	job, err := a.loadProvisionJob(ctx, id)
-	if err != nil || job.Done.Valid || job.Dead.Valid {
-		return err
-	}
-	release := a.channelLocks.lock(job.ChannelID)
-	defer release()
-	job, err = a.loadProvisionJob(ctx, id)
-	if err != nil || job.Done.Valid || job.Dead.Valid {
-		return err
-	}
-	if job.Compensation.Valid {
-		if err := a.runDestroyJobLocked(ctx, job.Compensation.Int64); err != nil {
-			return err
-		}
-		var done sql.NullInt64
-		if err := a.db.QueryRowContext(ctx, `SELECT done_at FROM channel_destroy_jobs WHERE job_id=?`, job.Compensation.Int64).Scan(&done); err != nil || !done.Valid {
-			return err
-		}
-		_, err := a.db.ExecContext(ctx, `UPDATE channel_provision_jobs SET attempt=attempt+1,error_code='name_conflict',last_error='publish name conflict compensated',dead_at=? WHERE job_id=?`, time.Now().UnixMilli(), id)
-		return err
-	}
-	var spec channelhost.ProvisionSpec
-	if err := json.Unmarshal([]byte(job.SpecJSON), &spec); err != nil || spec.ChannelID == "" {
-		return a.deadProvision(ctx, id, "invalid_job", fmt.Errorf("decode provision spec: %w", err))
-	}
-	if !job.Published.Valid {
-		receipt, err := a.host.Provision(ctx, spec)
-		if err != nil {
-			if errors.Is(err, channelhost.ErrInvalidChannelID) || errors.Is(err, channelhost.ErrChannelRetired) {
-				code := "invalid_channel_id"
-				if errors.Is(err, channelhost.ErrChannelRetired) {
-					code = "channel_retired"
-				}
-				return a.deadProvision(ctx, id, code, err)
-			}
-			return a.retryProvision(ctx, id, "storage_unavailable", err)
-		}
-		raw, err := json.Marshal(receipt)
-		if err != nil {
-			return a.deadProvision(ctx, id, "invalid_job", fmt.Errorf("encode provision receipt: %w", err))
-		}
-		tx, err := a.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		var parent any
-		if spec.Origin != nil && spec.Origin.ParentChannelID != "" {
-			parent = string(spec.Origin.ParentChannelID)
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO channels(id,name,type,created_at,parent_id) VALUES (?,?,?,?,?)`, job.ChannelID, job.Name, job.Type, spec.CreatedAt, parent)
-		if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique") {
-			op := "lc:comp:" + uuid.NewString()
-			res, insertErr := tx.ExecContext(ctx, `INSERT INTO channel_destroy_jobs(operation_id,channel_id,requested_by,created_at) VALUES (?,?,?,?)`, op, job.ChannelID, job.RequestedBy, time.Now().UnixMilli())
-			if insertErr != nil {
-				return insertErr
-			}
-			compID, _ := res.LastInsertId()
-			if _, err := tx.ExecContext(ctx, `UPDATE channel_provision_jobs SET compensation_job_id=?,last_error='publish name conflict' WHERE job_id=?`, compID, id); err != nil {
-				return err
-			}
-			if err := tx.Commit(); err != nil {
-				return err
-			}
-			return a.runDestroyJobLocked(ctx, compID)
-		}
-		if err != nil {
-			_ = tx.Rollback()
-			return a.retryProvision(ctx, id, "storage_unavailable", err)
-		}
-		now := time.Now().UnixMilli()
-		if _, err := tx.ExecContext(ctx, `UPDATE channel_provision_jobs SET receipt_json=?,published_at=?,attempt=attempt+1,last_error=NULL,error_code=NULL WHERE job_id=?`, string(raw), now, id); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		job.Receipt = sql.NullString{String: string(raw), Valid: true}
-		job.Published = sql.NullInt64{Int64: now, Valid: true}
-	}
-	if err := a.host.Open(ctx, channelhost.OpenSpec{ChannelID: channel.ID(job.ChannelID), ExpectedType: job.Type}); err != nil {
-		if errors.Is(err, channelhost.ErrSchemaIncompatible) {
-			return a.deadProvision(ctx, id, "schema_incompatible", err)
-		}
-		if errors.Is(err, channelhost.ErrOwnerInvariant) {
-			return a.deadProvision(ctx, id, "owner_invariant", err)
-		}
-		return a.retryProvision(ctx, id, "open_failed", err)
-	}
-	bundle, ok := a.host.Acquire(channel.ID(job.ChannelID))
-	if !ok {
-		return a.retryProvision(ctx, id, "open_failed", errors.New("opened channel unavailable"))
-	}
-	// A provision attempt is intentionally frozen at its genesis snapshot.
-	// TODO(fanout-lite): a declaration may be soft-deleted while a persisted
-	// provision job is retrying; the frozen instance is still allowed to be
-	// born and thereafter behaves like any other retained snapshot.
-	actorID, found, err := bundle.View().ResolvePrincipal(ctx, job.Owner)
-	if err != nil || !found {
-		return a.retryProvision(ctx, id, "open_failed", errors.New("owner projection unavailable"))
-	}
-	now := time.Now().UnixMilli()
-	tx, err := a.db.BeginTx(ctx, nil)
+	entries, err := w.app.host.Census(w.ctx)
 	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO principal_channels(principal,channel_id,actor_id,updated_at) VALUES (?,?,?,?) ON CONFLICT(principal,channel_id) DO UPDATE SET actor_id=excluded.actor_id,updated_at=excluded.updated_at`, job.Owner, job.ChannelID, string(actorID), now); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_provision_jobs SET done_at=?,last_error=NULL,error_code=NULL WHERE job_id=?`, now, id); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	if a.membershipPoke != nil {
-		a.membershipPoke(job.Owner)
-	}
-	return nil
-}
-
-func (a *App) retryProvision(ctx context.Context, id int64, code string, cause error) error {
-	var attempt int
-	_ = a.db.QueryRowContext(ctx, `SELECT attempt FROM channel_provision_jobs WHERE job_id=?`, id).Scan(&attempt)
-	next := time.Now().Add(backoff(attempt + 1)).UnixMilli()
-	_, err := a.db.ExecContext(ctx, `UPDATE channel_provision_jobs SET attempt=attempt+1,error_code=?,last_error=?,next_attempt_at=? WHERE job_id=?`, code, cause.Error(), next, id)
-	return errors.Join(cause, err)
-}
-
-func (a *App) deadProvision(ctx context.Context, id int64, code string, cause error) error {
-	_, err := a.db.ExecContext(ctx, `UPDATE channel_provision_jobs SET attempt=attempt+1,error_code=?,last_error=?,dead_at=? WHERE job_id=?`, code, cause.Error(), time.Now().UnixMilli(), id)
-	return errors.Join(cause, err)
-}
-
-func (a *App) runDestroyJob(ctx context.Context, id int64) error {
-	var channelID string
-	if err := a.db.QueryRowContext(ctx, `SELECT channel_id FROM channel_destroy_jobs WHERE job_id=?`, id).Scan(&channelID); err != nil {
-		return err
-	}
-	release := a.channelLocks.lock(channelID)
-	defer release()
-	return a.runDestroyJobLocked(ctx, id)
-}
-
-func (a *App) runDestroyJobLocked(ctx context.Context, id int64) error {
-	var channelID string
-	var attempt int
-	var done, dead sql.NullInt64
-	if err := a.db.QueryRowContext(ctx, `SELECT channel_id,attempt,done_at,dead_at FROM channel_destroy_jobs WHERE job_id=?`, id).Scan(&channelID, &attempt, &done, &dead); err != nil {
-		return err
-	}
-	if done.Valid || dead.Valid {
-		return nil
-	}
-	if err := a.host.Destroy(ctx, channel.ID(channelID)); err != nil {
-		if errors.Is(err, channelhost.ErrInvalidChannelID) {
-			return a.deadDestroy(ctx, id, "invalid_channel_id", err)
-		}
-		next := time.Now().Add(backoff(attempt + 1)).UnixMilli()
-		_, writeErr := a.db.ExecContext(ctx, `UPDATE channel_destroy_jobs SET attempt=attempt+1,error_code='destroy_failed',last_error=?,next_attempt_at=? WHERE job_id=?`, err.Error(), next, id)
-		return errors.Join(err, writeErr)
-	}
-	now := time.Now().UnixMilli()
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_destroy_jobs SET attempt=attempt+1,error_code=NULL,last_error=NULL,done_at=? WHERE job_id=?`, now, id); err != nil {
-		return err
-	}
-	// A publish-name loser is terminal only after the physical image has left
-	// Census. Keeping this transition with the destroy receipt closes the crash
-	// window without ever making the provision worker reclaim compensation.
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_provision_jobs
-		SET attempt=attempt+1,error_code='name_conflict',last_error='publish name conflict compensated',dead_at=?
-		WHERE compensation_job_id=? AND done_at IS NULL AND dead_at IS NULL`, now, id); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (a *App) deadDestroy(ctx context.Context, id int64, code string, cause error) error {
-	_, err := a.db.ExecContext(ctx, `UPDATE channel_destroy_jobs SET attempt=attempt+1,error_code=?,last_error=?,dead_at=? WHERE job_id=?`, code, cause.Error(), time.Now().UnixMilli(), id)
-	a.logger.Error("channel destroy job permanently failed", "job_id", id, "code", code, "err", cause)
-	return errors.Join(cause, err)
-}
-
-// reconcileServingChannels is the lifecycle level-reconciliation arm. One corrupt or
-// unavailable channel is isolated and remains honestly unavailable; it never
-// prevents the realm from starting or the next pass from retrying it. Keeping
-// Open beside Provision/Destroy makes channelhost's production lifecycle
-// calling surface mechanically closed to this file.
-func (a *App) reconcileServingChannels(ctx context.Context) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT id,type FROM channels ORDER BY id`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var raw, typ string
-		if err := rows.Scan(&raw, &typ); err != nil {
-			return err
-		}
-		id := channel.ID(raw)
-		if err := a.host.Open(ctx, channelhost.OpenSpec{ChannelID: id, ExpectedType: typ}); err != nil {
-			a.logger.Warn("channel open reconcile failed", "channel", raw, "err", err)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	entries, err := a.host.Census(ctx)
-	if err != nil {
-		a.logger.Warn("channel census failed", "err", err)
-		return nil
+		w.app.logger.Warn("channel census failed", "err", err)
+		return
 	}
 	for _, entry := range entries {
-		exists, err := a.channelExists(ctx, string(entry.ChannelID))
-		if err != nil {
-			a.logger.Warn("channel directory check failed", "channel", entry.ChannelID, "err", err)
+		var exists bool
+		if err := w.app.db.QueryRowContext(w.ctx,
+			`SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, string(entry.ChannelID),
+		).Scan(&exists); err != nil {
+			w.app.logger.Warn("orphan desired check failed", "channel", entry.ChannelID, "err", err)
 			continue
 		}
-		if !exists {
-			a.logger.Warn("orphan channel image", "channel", entry.ChannelID, "state", entry.State)
+		if exists {
+			continue
+		}
+		release := w.app.channelLocks.lock(string(entry.ChannelID))
+		err := w.app.host.Destroy(w.ctx, entry.ChannelID)
+		release()
+		if err != nil {
+			w.app.logger.Warn("orphan channel cleanup failed", "channel", entry.ChannelID, "err", err)
+		}
+	}
+}
+
+type desiredChannel struct {
+	ID       channel.ID
+	Name     string
+	Type     string
+	Status   string
+	Owner    string
+	SpecJSON string
+	Created  int64
+	Parent   sql.NullString
+}
+
+func (a *App) loadDesiredChannel(ctx context.Context, id channel.ID) (desiredChannel, error) {
+	var desired desiredChannel
+	err := a.db.QueryRowContext(ctx, `SELECT id,name,type,status,owner_principal,spec_json,created_at,parent_id
+		FROM channels WHERE id=?`, string(id)).
+		Scan(&desired.ID, &desired.Name, &desired.Type, &desired.Status, &desired.Owner,
+			&desired.SpecJSON, &desired.Created, &desired.Parent)
+	return desired, err
+}
+
+// convergeChannel is also the create handler's bounded best-effort fast path.
+// It changes only physical actual state and terminally removes a retired row.
+func (a *App) convergeChannel(ctx context.Context, id channel.ID) {
+	if a.lifecycle != nil && !a.lifecycle.ready(id) {
+		return
+	}
+	release := a.channelLocks.lock(string(id))
+	defer release()
+	desired, err := a.loadDesiredChannel(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		a.deferLifecycle(id, err)
+		return
+	}
+	switch desired.Status {
+	case "present":
+		err = a.convergePresent(ctx, desired)
+	case "retiring":
+		err = a.convergeRetiring(ctx, desired)
+	default:
+		err = errors.New("invalid desired channel status")
+	}
+	if err == nil {
+		a.clearLifecycleRetry(id)
+	}
+}
+
+func (a *App) convergePresent(ctx context.Context, desired desiredChannel) error {
+	open := channelhost.OpenSpec{ChannelID: desired.ID, ExpectedType: desired.Type}
+	err := a.host.Open(ctx, open)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, channelhost.ErrChannelNotFound) {
+		return a.classifyLifecycleError(desired.ID, "open", err, true)
+	}
+	var spec channelhost.ProvisionSpec
+	if err := json.Unmarshal([]byte(desired.SpecJSON), &spec); err != nil || spec.ChannelID != desired.ID {
+		if err == nil {
+			err = errors.New("provision spec channel mismatch")
+		}
+		return a.permanentLifecycle(desired.ID, "decode", err)
+	}
+	// ErrChannelNotFound is not itself proof of physical absence. Provision's
+	// ErrServing/ErrChannelRetired guards run before its unpublished-image
+	// cleanup and are the authoritative protection against destructive rebuild.
+	if _, err := a.host.Provision(ctx, spec); err != nil {
+		return a.classifyLifecycleError(desired.ID, "provision", err, true)
+	}
+	if err := a.host.Open(ctx, open); err != nil {
+		return a.classifyLifecycleError(desired.ID, "open", err, true)
+	}
+	return nil
+}
+
+func (a *App) convergeRetiring(ctx context.Context, desired desiredChannel) error {
+	if err := a.host.Destroy(ctx, desired.ID); err != nil {
+		if errors.Is(err, channelhost.ErrInvalidChannelID) ||
+			errors.Is(err, channelhost.ErrTombstoneExists) {
+			return a.permanentLifecycle(desired.ID, "destroy", err)
+		}
+		return a.deferLifecycle(desired.ID, err)
+	}
+	res, err := a.db.ExecContext(ctx,
+		`DELETE FROM channels WHERE id=? AND status='retiring'`, string(desired.ID))
+	if err != nil {
+		return a.deferLifecycle(desired.ID, err)
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return a.deferLifecycle(desired.ID, err)
+	}
+	if changed != 0 {
+		if err := a.relations.Apply(ctx, desired.ID, []channelspec.RelationDelta{{
+			Kind: channelspec.RelationGone, ChannelID: desired.ID,
+		}}); err != nil {
+			a.logger.Warn("retired channel relation cleanup failed", "channel", desired.ID, "err", err)
 		}
 	}
 	return nil
+}
+
+func (a *App) classifyLifecycleError(id channel.ID, phase string, err error, present bool) error {
+	permanent := errors.Is(err, channelhost.ErrChannelRetired) ||
+		errors.Is(err, channelhost.ErrInvalidChannelID) ||
+		errors.Is(err, channelhost.ErrSchemaIncompatible) ||
+		errors.Is(err, channelhost.ErrOwnerInvariant)
+	if permanent && present {
+		return a.permanentLifecycle(id, phase, err)
+	}
+	return a.deferLifecycle(id, err)
+}
+
+func (a *App) permanentLifecycle(id channel.ID, phase string, err error) error {
+	a.logger.Error("channel convergence permanently failed", "channel", id, "phase", phase, "err", err)
+	if a.lifecycle != nil {
+		a.lifecycle.retryMu.Lock()
+		a.lifecycle.permanent[id] = struct{}{}
+		a.lifecycle.retryMu.Unlock()
+	}
+	return err
+}
+
+func (a *App) deferLifecycle(id channel.ID, err error) error {
+	a.logger.Warn("channel convergence deferred", "channel", id, "err", err)
+	if a.lifecycle != nil {
+		a.lifecycle.retryMu.Lock()
+		attempt := a.lifecycle.attempts[id] + 1
+		a.lifecycle.attempts[id] = attempt
+		a.lifecycle.retryAt[id] = time.Now().Add(backoff(attempt))
+		a.lifecycle.retryMu.Unlock()
+		a.lifecycle.notify(id)
+	}
+	return err
+}
+
+func (a *App) clearLifecycleRetry(id channel.ID) {
+	if a.lifecycle == nil {
+		return
+	}
+	a.lifecycle.retryMu.Lock()
+	delete(a.lifecycle.attempts, id)
+	delete(a.lifecycle.retryAt, id)
+	a.lifecycle.retryMu.Unlock()
+}
+
+func (a *App) resetLifecycleForStatusChange(id channel.ID) {
+	if a.lifecycle == nil {
+		return
+	}
+	a.lifecycle.retryMu.Lock()
+	delete(a.lifecycle.attempts, id)
+	delete(a.lifecycle.retryAt, id)
+	delete(a.lifecycle.permanent, id)
+	a.lifecycle.retryMu.Unlock()
+}
+
+func (w *lifecycleWorker) ready(id channel.ID) bool {
+	w.retryMu.Lock()
+	defer w.retryMu.Unlock()
+	if _, stopped := w.permanent[id]; stopped {
+		return false
+	}
+	return !time.Now().Before(w.retryAt[id])
+}
+
+func (w *lifecycleWorker) retryPending(id channel.ID) bool {
+	w.retryMu.Lock()
+	defer w.retryMu.Unlock()
+	if _, stopped := w.permanent[id]; stopped {
+		return false
+	}
+	_, pending := w.attempts[id]
+	return pending
 }
 
 func backoff(attempt int) time.Duration {
@@ -412,5 +352,5 @@ func backoff(attempt int) time.Duration {
 	if attempt > 8 {
 		attempt = 8
 	}
-	return time.Duration(1<<(attempt-1)) * 250 * time.Millisecond
+	return time.Duration(1<<(attempt-1)) * lifecycleTick
 }

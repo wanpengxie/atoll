@@ -8,9 +8,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -68,7 +68,7 @@ func (h *Home) reconcileDeclarations(ctx context.Context) {
 		)
 		cancel()
 		if resolveErr != nil {
-			if !errors.Is(resolveErr, channel.ErrDeclarationNotFound) {
+			if !errors.Is(resolveErr, channelspec.ErrDeclarationNotFound) {
 				h.logger.Warn("platform.declaration_pull.resolve_failed",
 					"actor", instance.ID, "declaration", instance.SourceDeclID, "error", resolveErr)
 			}
@@ -119,7 +119,7 @@ func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
 		if resolveErr != nil || !facts.Deleted {
 			continue
 		}
-		if _, err := h.opEntry.DetachDaemon(ctx, channel.DaemonRequest{
+		if _, err := h.opEntry.DetachDaemon(ctx, channelspec.DaemonRequest{
 			Ref: "daemon-pull:v1:" + uuid.NewString(), DaemonID: string(id),
 		}); err != nil {
 			h.logger.Warn("platform.daemon_pull.detach_failed", "daemon", id, "error", err)

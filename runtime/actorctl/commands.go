@@ -183,9 +183,10 @@ func (c *Controller) End(
 ) (Transition[EndResult], error) {
 	transition, err := c.Terminal(ctx, TerminalCommand{Kind: TerminalEnd, End: request})
 	return Transition[EndResult]{
-		Result:    EndResult{Ended: transition.Result.Ended},
-		Ended:     transition.Ended,
-		Reconcile: transition.Reconcile,
+		Result:     EndResult{Ended: transition.Result.Ended},
+		Ended:      transition.Ended,
+		EndedFacts: transition.EndedFacts,
+		Reconcile:  transition.Reconcile,
 	}, err
 }
 
@@ -195,13 +196,16 @@ func (c *Controller) Remove(
 ) (Transition[channel.RemoveResult], error) {
 	transition, err := c.Terminal(ctx, TerminalCommand{Kind: TerminalRemove, Remove: request})
 	return Transition[channel.RemoveResult]{
-		Result:    transition.Result.Remove,
-		Ended:     transition.Ended,
-		Reconcile: transition.Reconcile,
+		Result:     transition.Result.Remove,
+		Ended:      transition.Ended,
+		EndedFacts: transition.EndedFacts,
+		Reconcile:  transition.Reconcile,
 	}, err
 }
 
-// Terminal is the whole termination command. The terminal set is exactly the
+// Terminal is the whole termination command. It is called only by End and
+// Remove in actorSystem; that boundary keeps finishTransition the sole emitted
+// relation tail. The terminal set is exactly the
 // explicit target — there is no lineage cascade, no plan, no pre-classification
 // and no third beat.
 func (c *Controller) Terminal(
@@ -277,7 +281,12 @@ func (c *Controller) Terminal(
 	}
 	transition := Transition[TerminalResult]{}
 	for _, id := range targets {
-		transition.Reconcile.add(c.actors[id].Record.Placement)
+		record := c.actors[id].Record
+		transition.Reconcile.add(record.Placement)
+		transition.EndedFacts = append(transition.EndedFacts, EndedFact{
+			ID: id, Kind: record.Kind, Principal: record.Principal,
+			SourceDeclID: record.SourceDeclID,
+		})
 		delete(c.actors, id)
 	}
 	switch command.Kind {

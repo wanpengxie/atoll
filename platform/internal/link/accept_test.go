@@ -419,7 +419,7 @@ func TestLivenessBusyTrafficDoesNotRefreshDeadSpine(t *testing.T) {
 
 // Route-publish sandwich: a displacement landing between the runtime commit
 // and the Current postcheck is compensated — the exact binding is withdrawn
-// and the compensation counter records it.
+// and the rollback counter records it.
 func TestRoutePublishDisplacedMidCommitIsCompensated(t *testing.T) {
 	displaceReq := make(chan struct{})
 	displaceDone := make(chan struct{})

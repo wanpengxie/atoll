@@ -2,9 +2,8 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,6 +13,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -24,7 +25,7 @@ import (
 func (a *App) handleListDaemons(c *gin.Context) {
 	userID := middleware.UserID(c)
 	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT id, name, created_at FROM daemons WHERE owner_id = ? AND deleted_at IS NULL`, userID,
+		`SELECT id, name, api_key, created_at FROM daemons WHERE owner_id = ? AND deleted_at IS NULL`, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -34,9 +35,9 @@ func (a *App) handleListDaemons(c *gin.Context) {
 
 	var result []gin.H
 	for rows.Next() {
-		var id, name string
+		var id, name, apiKey string
 		var createdAt int64
-		if err := rows.Scan(&id, &name, &createdAt); err != nil {
+		if err := rows.Scan(&id, &name, &apiKey, &createdAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 			return
 		}
@@ -46,7 +47,7 @@ func (a *App) handleListDaemons(c *gin.Context) {
 			return
 		}
 		result = append(result, gin.H{
-			"id": id, "name": name, "created_at": createdAt,
+			"id": id, "name": name, "api_key": apiKey, "created_at": createdAt,
 			"online": online,
 		})
 	}
@@ -65,23 +66,35 @@ func (a *App) handleListDaemons(c *gin.Context) {
 // Read-time from each channel-home's View — derived, never a stored column.
 func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string) (bool, error) {
 	check := func(chID channel.ID) (bool, error) {
+		release := a.channelLocks.lock(string(chID))
+		defer release()
 		bundle, ok := a.host.Acquire(chID)
 		if !ok {
-			return false, fmt.Errorf("%w: %s", errChannelUnavailable, chID)
+			return false, nil
+		}
+		bound, err := bundle.View().IsBound(ctx, daemonID)
+		if err != nil {
+			return false, nil
+		}
+		if err := a.relations.ReconcileBinding(ctx, chID, daemonID, bound); err != nil {
+			a.logger.Warn("daemon binding relation repair failed", "channel", chID, "daemon", daemonID, "err", err)
+		}
+		if !bound {
+			return false, nil
 		}
 		return bundle.View().IsAttached(daemonID), nil
 	}
 	if only != "" {
 		return check(only)
 	}
-	ids, err := a.directoryChannelIDs(ctx)
+	ids, err := a.relations.BindingsOf(ctx, daemonID)
 	if err != nil {
 		return false, err
 	}
 	for _, ch := range ids {
 		online, err := check(ch)
 		if err != nil {
-			return false, err
+			continue
 		}
 		if online {
 			return true, nil
@@ -91,7 +104,7 @@ func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string
 }
 
 func (a *App) directoryChannelIDs(ctx context.Context) ([]channel.ID, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels ORDER BY id`)
+	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels WHERE status='present' ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -120,13 +133,12 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	daemonID := uuid.NewString()
 	release := a.daemonLocks.lock(daemonID)
 	defer release()
-	apiKey := uuid.NewString() // plaintext, returned once
-	keyHash := hashAPIKey(apiKey)
+	apiKey := uuid.NewString()
 	now := time.Now().UnixMilli()
 
 	_, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO daemons (id, owner_id, name, api_key_hash, created_at) VALUES (?,?,?,?,?)`,
-		daemonID, userID, req.Name, keyHash, now,
+		`INSERT INTO daemons (id, owner_id, name, api_key, created_at) VALUES (?,?,?,?,?)`,
+		daemonID, userID, req.Name, apiKey, now,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "create daemon failed"})
@@ -136,7 +148,7 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"id":      daemonID,
 		"name":    req.Name,
-		"api_key": apiKey, // returned only once
+		"api_key": apiKey,
 	})
 }
 
@@ -262,10 +274,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 }
 
 func (a *App) handleAttachDaemon(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
-		return
-	}
+	chID := channel.ID(c.Param("chID"))
 	var req struct {
 		DaemonID string `json:"daemon_id"`
 	}
@@ -275,49 +284,87 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 	}
 	req.DaemonID = strings.TrimSpace(req.DaemonID)
 	userID := middleware.UserID(c)
-	var ownerID string
-	err := a.db.QueryRowContext(c.Request.Context(), `SELECT owner_id FROM daemons WHERE id = ? AND deleted_at IS NULL`, req.DaemonID).Scan(&ownerID)
-	if err != nil || ownerID != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
+	outcome, err := forwardSysop(c.Request.Context(), a, chID, sysopForward[channelspec.BindingResult]{
+		Predicate: func(bundle channelhost.Bundle) (channelspec.BindingResult, bool, error) {
+			bound, err := bundle.View().IsBound(c.Request.Context(), req.DaemonID)
+			if err != nil || !bound {
+				return channelspec.BindingResult{}, false, err
+			}
+			var deleted sql.NullInt64
+			err = a.db.QueryRowContext(c.Request.Context(),
+				`SELECT deleted_at FROM daemons WHERE id=?`, req.DaemonID).Scan(&deleted)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return channelspec.BindingResult{}, false, err
+			}
+			return channelspec.BindingResult{Bound: true}, err == nil && !deleted.Valid, nil
+		},
+		Qualify: func(bundle channelhost.Bundle) error {
+			var owner string
+			var deleted sql.NullInt64
+			err := a.db.QueryRowContext(c.Request.Context(),
+				`SELECT owner_id,deleted_at FROM daemons WHERE id=?`, req.DaemonID).
+				Scan(&owner, &deleted)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != userID) {
+				return &sysopGateError{Status: http.StatusForbidden, Code: "forbidden"}
+			}
+			if err != nil {
+				return &sysopUnknownError{cause: err}
+			}
+			if deleted.Valid {
+				return &sysopGateError{Status: http.StatusNotFound, Code: string(sysopCodeDaemonNotFound)}
+			}
+			return memberGate(c.Request.Context(), bundle, userID)
+		},
+		Invoke: func(sys channelhost.SysOp, ref string) (channelspec.BindingResult, error) {
+			return sys.AttachDaemon(c.Request.Context(), channelspec.DaemonRequest{Ref: ref, DaemonID: req.DaemonID})
+		},
+	})
+	if err != nil {
+		writeSysopError(c, err)
 		return
 	}
-	intent := struct {
-		DaemonID string `json:"daemon_id"`
-	}{req.DaemonID}
-	record, _, err := a.admission.submit(c.Request.Context(), admissionCommand{
-		ChannelID: channel.ID(chID), Op: "attach", Owner: principalAdmissionOwner(userID), IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
-		BuildRequest: func(ref string) any { return channel.DaemonRequest{Ref: ref, DaemonID: req.DaemonID} },
-	})
-	respondAdmissionRecord(c, record, err, http.StatusOK)
+	c.JSON(http.StatusOK, gin.H{"bound": outcome.Value.Bound, "changed": outcome.Changed})
 }
 
 // handleDetachDaemon records one exact channel operation. The membrane commits
 // binding removal and instance cleanup together, then kicks any live link as a
 // post-commit convergence hint.
 func (a *App) handleDetachDaemon(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
-		return
-	}
+	chID := channel.ID(c.Param("chID"))
 	daemonID := c.Param("id")
 	ctx := c.Request.Context()
-	var owner string
-	// Deliberately include tombstoned daemons. Detach removes a reference, so
-	// ownership remains provable from historical realm truth and cleanup stays
-	// legal after the referent has retired; attach is the path that requires
-	// deleted_at IS NULL.
-	if err := a.db.QueryRowContext(ctx, `SELECT owner_id FROM daemons WHERE id=?`, daemonID).Scan(&owner); err != nil || owner != middleware.UserID(c) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
+	principal := middleware.UserID(c)
+	outcome, err := forwardSysop(ctx, a, chID, sysopForward[channelspec.BindingResult]{
+		Predicate: func(bundle channelhost.Bundle) (channelspec.BindingResult, bool, error) {
+			bound, err := bundle.View().IsBound(ctx, daemonID)
+			return channelspec.BindingResult{Bound: false}, !bound, err
+		},
+		Qualify: func(bundle channelhost.Bundle) error {
+			if err := memberGate(ctx, bundle, principal); err != nil {
+				return err
+			}
+			var owner string
+			if err := a.db.QueryRowContext(ctx,
+				`SELECT owner_id FROM daemons WHERE id=?`, daemonID).Scan(&owner); err != nil || owner != principal {
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return &sysopUnknownError{cause: err}
+				}
+				return &sysopGateError{Status: http.StatusForbidden, Code: "forbidden"}
+			}
+			return nil
+		},
+		Invoke: func(sys channelhost.SysOp, ref string) (channelspec.BindingResult, error) {
+			return sys.DetachDaemon(ctx, channelspec.DaemonRequest{Ref: ref, DaemonID: daemonID})
+		},
+	})
+	if err != nil {
+		writeSysopError(c, err)
 		return
 	}
-	intent := struct {
-		DaemonID string `json:"daemon_id"`
-	}{daemonID}
-	record, _, err := a.admission.submit(ctx, admissionCommand{
-		ChannelID: channel.ID(chID), Op: "detach", Owner: principalAdmissionOwner(owner), IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
-		BuildRequest: func(ref string) any { return channel.DaemonRequest{Ref: ref, DaemonID: daemonID} },
+	c.JSON(http.StatusOK, gin.H{
+		"bound": outcome.Value.Bound, "changed": outcome.Changed,
+		"cleared_instances": outcome.Value.ClearedInstances,
 	})
-	respondAdmissionRecord(c, record, err, http.StatusOK)
 }
 
 // ---------------------------------------------------------------------------
@@ -328,10 +375,9 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 // the daemon is bound to the requested channel. This is the single auth path
 // for compute connections -- fleet never does auth itself.
 func (a *App) authAndResolve(apiKey string, chID channel.ID) (string, error) {
-	keyHash := hashAPIKey(apiKey)
 	var daemonID string
 	err := a.db.QueryRow(
-		`SELECT id FROM daemons WHERE api_key_hash = ? AND deleted_at IS NULL`, keyHash,
+		`SELECT id FROM daemons WHERE api_key = ? AND deleted_at IS NULL`, apiKey,
 	).Scan(&daemonID)
 	if err != nil {
 		return "", fmt.Errorf("invalid api key")
@@ -347,9 +393,4 @@ func (a *App) authAndResolve(apiKey string, chID channel.ID) (string, error) {
 	}
 
 	return daemonID, nil
-}
-
-func hashAPIKey(key string) string {
-	h := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(h[:])
 }

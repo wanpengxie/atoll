@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
@@ -44,7 +45,7 @@ type Config struct {
 	IntroductionResolver IntroductionResolver
 	Clock                schedule.Clock
 	ReservationTimeout   time.Duration
-	OnMembershipChange   func(principal string)
+	OnRelationChange     func(channelpkg.ID, []channelspec.RelationDelta)
 }
 
 // Home is the channel composition root. Runtime organs are held as peers;
@@ -102,9 +103,9 @@ type Home struct {
 	systemPen    harness.Pen
 	expiryCursor storespec.ExpiryCursor
 
-	logger             *slog.Logger
-	nowMs              func() int64
-	onMembershipChange func(string)
+	logger           *slog.Logger
+	nowMs            func() int64
+	onRelationChange func(channelpkg.ID, []channelspec.RelationDelta)
 
 	reconcileStop func()
 	reconcileDone chan struct{}

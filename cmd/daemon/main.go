@@ -79,7 +79,8 @@ func (f classFactories) BuildClass(
 		Logger:       f.logger,
 	})
 	if err != nil {
-		f.logger.Warn("daemon: build class failed", "actor", id, "class", class, "err", err)
+		f.logger.Error("daemon: build class failed",
+			"channel", f.chID, "actor", id, "class", class, "err", err)
 		return platform.ActorFactory{}, false
 	}
 	// A constructor that rewrites the id (device derives its own id from the
@@ -176,7 +177,7 @@ func main() {
 
 	if err := compute.Run(ctx, compute.Config{
 		ServerWS:        serverWS,
-		Logger:          logger,
+		Logger:          logger.With("channel", chID),
 		Factories:       factories,
 		StorageHost:     storageHostAdapter{host: sh},
 		LocalFileOpener: storageHostAdapter{host: sh},

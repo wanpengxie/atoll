@@ -3,8 +3,8 @@ package home
 import (
 	"context"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -31,8 +31,8 @@ func (h *Home) guardOwnerTerminal(ctx context.Context, target actor.ActorID) err
 		return err
 	}
 	if h.isOwner(facts) {
-		return &channel.OperationError{
-			Code: channel.ErrCodeProtectedActor, Detail: "channel owner is protected",
+		return &channelspec.OperationError{
+			Code: channelspec.ErrCodeProtectedActor, Detail: "channel owner is protected",
 		}
 	}
 	return nil

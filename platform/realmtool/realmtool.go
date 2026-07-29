@@ -23,22 +23,20 @@ const (
 	TypeRevokeDeclaration  = "realm.declarations.revoke"
 	TypeIntroduce          = "realm.introduce"
 	TypeRemove             = "realm.remove"
-	TypeOperationStatus    = "realm.operation_status"
 	TypeListResources      = "realm.resources.list"
 	TypeFetchResource      = "realm.resources.fetch"
 )
 
 type RealmOps interface {
-	ListDeclarations(context.Context, channel.Requester) ([]channel.DeclSummary, error)
-	InspectDeclaration(context.Context, channel.Requester, string) (channel.DeclDetail, error)
-	CreateDeclaration(context.Context, channel.Requester, channel.DeclSpec) (channel.DeclDetail, error)
-	EditDeclaration(context.Context, channel.Requester, string, channel.DeclSpec) (channel.DeclDetail, error)
-	RevokeDeclaration(context.Context, channel.Requester, string) error
-	Introduce(context.Context, channel.Requester, string, channel.IntroduceOpts) (channel.IntroduceResult, error)
-	Remove(context.Context, channel.Requester, actor.ActorID) (channel.RemoveResult, error)
-	OperationStatus(context.Context, channel.Requester, string) (channel.OperationView, error)
-	ListResources(context.Context, channel.Requester, channel.ID, channel.ResourceListQuery) (channel.ResourcePage, error)
-	FetchResource(context.Context, channel.Requester, channel.ID, resource.ResourceID) (channel.ResourceFetch, error)
+	ListDeclarations(context.Context, Requester) ([]DeclSummary, error)
+	InspectDeclaration(context.Context, Requester, string) (DeclDetail, error)
+	CreateDeclaration(context.Context, Requester, DeclSpec) (DeclDetail, error)
+	EditDeclaration(context.Context, Requester, string, DeclSpec) (DeclDetail, error)
+	RevokeDeclaration(context.Context, Requester, string) error
+	Introduce(context.Context, Requester, string, IntroduceOpts) (channel.IntroduceResult, error)
+	Remove(context.Context, Requester, actor.ActorID) (channel.RemoveResult, error)
+	ListResources(context.Context, Requester, channel.ID, channel.ResourceListQuery) (channel.ResourcePage, error)
+	FetchResource(context.Context, Requester, channel.ID, resource.ResourceID) (channel.ResourceFetch, error)
 }
 
 func Def(ops RealmOps) actorbase.Def {
@@ -60,8 +58,8 @@ func serve(sys actorbase.Sys, ops RealmOps) error {
 	}
 }
 
-func requester(msg actorbase.Msg) channel.Requester {
-	return channel.Requester{ActorID: msg.Sender.ID, ChannelID: msg.ChannelID, RequestID: string(msg.ID)}
+func requester(msg actorbase.Msg) Requester {
+	return Requester{ActorID: msg.Sender.ID, ChannelID: msg.ChannelID, RequestID: string(msg.ID)}
 }
 
 func decode(msg actorbase.Msg, out any) error {
@@ -69,28 +67,28 @@ func decode(msg actorbase.Msg, out any) error {
 		return nil
 	}
 	if err := json.Unmarshal(msg.Payload, out); err != nil {
-		return &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "invalid JSON payload"}
+		return &RealmError{Code: RealmInvalidRequest, Detail: "invalid JSON payload"}
 	}
 	return nil
 }
 
 func fail(sys actorbase.Sys, msg actorbase.Msg, err error) {
-	var realmErr *channel.RealmError
+	var realmErr *RealmError
 	if errors.As(err, &realmErr) {
 		_, _ = sys.Fail(msg, string(realmErr.Code), realmErr.Detail)
 		return
 	}
-	var unknown *channel.ErrResultUnknown
+	var unknown *ErrResultUnknown
 	if errors.As(err, &unknown) {
 		_, _ = sys.Reply(msg, map[string]any{"status": "result_unknown", "ref": unknown.Ref})
 		return
 	}
-	_, _ = sys.Fail(msg, string(channel.RealmUnavailable), err.Error())
+	_, _ = sys.Fail(msg, string(RealmUnavailable), err.Error())
 }
 
 func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 	if ops == nil {
-		fail(sys, msg, &channel.RealmError{Code: channel.RealmUnavailable})
+		fail(sys, msg, &RealmError{Code: RealmUnavailable})
 		return
 	}
 	req := requester(msg)
@@ -98,7 +96,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 	var err error
 	switch msg.Type {
 	case TypeListDeclarations:
-		var declarations []channel.DeclSummary
+		var declarations []DeclSummary
 		declarations, err = ops.ListDeclarations(msg.Ctx(), req)
 		result = map[string]any{"declarations": declarations}
 	case TypeInspectDeclaration:
@@ -106,26 +104,26 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			DeclID string `json:"decl_id"`
 		}
 		if err = decode(msg, &p); err == nil && p.DeclID != "" {
-			var declaration channel.DeclDetail
+			var declaration DeclDetail
 			declaration, err = ops.InspectDeclaration(msg.Ctx(), req, p.DeclID)
 			result = map[string]any{"declaration": declaration}
 		} else if err == nil {
-			err = &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "decl_id required"}
+			err = &RealmError{Code: RealmInvalidRequest, Detail: "decl_id required"}
 		}
 	case TypeCreateDeclaration:
-		var p channel.DeclSpec
+		var p DeclSpec
 		if err = decode(msg, &p); err == nil {
-			var declaration channel.DeclDetail
+			var declaration DeclDetail
 			declaration, err = ops.CreateDeclaration(msg.Ctx(), req, p)
 			result = map[string]any{"declaration": declaration}
 		}
 	case TypeEditDeclaration:
 		var p struct {
-			DeclID string           `json:"decl_id"`
-			Spec   channel.DeclSpec `json:"spec"`
+			DeclID string   `json:"decl_id"`
+			Spec   DeclSpec `json:"spec"`
 		}
 		if err = decode(msg, &p); err == nil {
-			var declaration channel.DeclDetail
+			var declaration DeclDetail
 			declaration, err = ops.EditDeclaration(msg.Ctx(), req, p.DeclID, p.Spec)
 			result = map[string]any{"declaration": declaration}
 		}
@@ -142,7 +140,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			DeclID string `json:"decl_id"`
 		}
 		if err = decode(msg, &p); err == nil {
-			result, err = ops.Introduce(msg.Ctx(), req, p.DeclID, channel.IntroduceOpts{})
+			result, err = ops.Introduce(msg.Ctx(), req, p.DeclID, IntroduceOpts{})
 		}
 	case TypeRemove:
 		var p struct {
@@ -150,13 +148,6 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 		}
 		if err = decode(msg, &p); err == nil {
 			result, err = ops.Remove(msg.Ctx(), req, p.Target)
-		}
-	case TypeOperationStatus:
-		var p struct {
-			Ref string `json:"ref"`
-		}
-		if err = decode(msg, &p); err == nil {
-			result, err = ops.OperationStatus(msg.Ctx(), req, p.Ref)
 		}
 	case TypeListResources:
 		var p struct {
@@ -182,7 +173,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 						if createErr != nil {
 							err = createErr
 						} else {
-							err = &channel.RealmError{Code: channel.RealmConflict, Detail: string(out.RejectReason)}
+							err = &RealmError{Code: RealmConflict, Detail: string(out.RejectReason)}
 						}
 					} else {
 						result = map[string]any{"resource_id": newID, "source": p}
@@ -191,7 +182,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			}
 		}
 	default:
-		err = &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "unsupported realm operation"}
+		err = &RealmError{Code: RealmInvalidRequest, Detail: "unsupported realm operation"}
 	}
 	if err != nil {
 		fail(sys, msg, err)

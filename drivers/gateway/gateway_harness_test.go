@@ -19,6 +19,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -30,14 +31,14 @@ func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, stri
 	return platform.ActorFactory{}, false
 }
 
-func (gatewayTestCompositionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
-	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+func (gatewayTestCompositionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error) {
+	return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 }
 func (gatewayTestCompositionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (gatewayTestCompositionResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{}, nil
+func (gatewayTestCompositionResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{}, nil
 }
 
 // logCapture is a slog.Handler that records every emitted message (for telemetry
@@ -276,7 +277,7 @@ func (h *testChannel) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool)
 func (h *testChannel) View() channelhost.View { return h.Bundle.View() }
 
 func (h *testChannel) Admit(ctx context.Context, _ actor.Kind, principal string) (actor.ActorID, error) {
-	result, err := h.SysOp().Admit(ctx, channel.AdmitRequest{Ref: "gateway-test:admit:" + principal, Principal: principal})
+	result, err := h.SysOp().Admit(ctx, channelspec.AdmitRequest{Ref: "gateway-test:admit:" + principal, Principal: principal})
 	return result.ActorID, err
 }
 
@@ -284,7 +285,7 @@ func (h *testChannel) Remove(ctx context.Context, id actor.ActorID) error {
 	if h.ownerID == "" {
 		return context.Canceled
 	}
-	_, err := h.SysOp().Remove(ctx, channel.RemoveRequest{Ref: "gateway-test:remove:" + string(id), Target: id, InitiatorActorID: h.ownerID})
+	_, err := h.SysOp().Remove(ctx, channelspec.RemoveRequest{Ref: "gateway-test:remove:" + string(id), Target: id, InitiatorActorID: h.ownerID})
 	if err == nil {
 		h.extras.Remove(id)
 	}
@@ -295,9 +296,11 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	t.Helper()
 	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}, IntroductionResolver: gatewayTestCompositionResolver{}}
 	if wired != nil {
-		deps.OnMembershipChange = func(_ channel.ID, principals []string) {
-			for _, principal := range principals {
-				wired.Poke(principal)
+		deps.OnRelationChange = func(_ channel.ID, deltas []channelspec.RelationDelta) {
+			for _, delta := range deltas {
+				if delta.Principal != "" {
+					wired.Poke(delta.Principal)
+				}
 			}
 		}
 	}
@@ -309,7 +312,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	source := ""
 	if memberKind == actor.KindAgent {
 		source = "gateway-test:" + member
-		rendered, sealErr := (channel.RenderedSnapshot{
+		rendered, sealErr := (channelspec.RenderedSnapshot{
 			Class: "gateway-test-unresolved", Placement: channel.Placement{Kind: channel.PlacementServer},
 		}).Seal()
 		if sealErr != nil {

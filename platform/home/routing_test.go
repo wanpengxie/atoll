@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/humancell"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -221,7 +222,7 @@ func TestDefaultAgentFold_InvalidLatestFailsClosedAndForgedSenderIsIgnored(t *te
 		}
 		h = openRoutingHomeAt(t, "routing-invalid", dbPath, false)
 		if id, found, err := h.View().DefaultAgent(context.Background()); id != "" || found ||
-			!errors.Is(err, channel.ErrDefaultAgentUnavailable) {
+			!errors.Is(err, channelspec.ErrDefaultAgentUnavailable) {
 			t.Fatalf("invalid latest folded to (%q,%v,%v)", id, found, err)
 		}
 		if got := h.defaultAgent.snapshot(); got.State != humancell.RoutingUnavailable {

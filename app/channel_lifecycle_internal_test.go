@@ -2,31 +2,31 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"path/filepath"
-	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	relationstore "github.com/wanpengxie/atoll/app/internal/relation"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 type countedHost struct {
 	channelhost.LocalHost
-	mu           sync.Mutex
-	provisions   int
-	destroys     int
-	failDestroys int
-	opens        int
-	failOpens    int
+	mu                  sync.Mutex
+	provisions          int
+	destroys            int
+	opens               int
+	failDestroys        int
+	destroyErr          error
+	openErr             error
+	beforeDestroyReturn func()
 }
 
 func (h *countedHost) Provision(ctx context.Context, spec channelhost.ProvisionSpec) (channelhost.ProvisionReceipt, error) {
@@ -35,260 +35,316 @@ func (h *countedHost) Provision(ctx context.Context, spec channelhost.ProvisionS
 	h.mu.Unlock()
 	return h.LocalHost.Provision(ctx, spec)
 }
+
 func (h *countedHost) Destroy(ctx context.Context, id channel.ID) error {
 	h.mu.Lock()
 	h.destroys++
+	if h.destroyErr != nil {
+		err := h.destroyErr
+		h.mu.Unlock()
+		return err
+	}
 	if h.failDestroys > 0 {
 		h.failDestroys--
 		h.mu.Unlock()
 		return errors.New("injected destroy failure")
 	}
+	beforeReturn := h.beforeDestroyReturn
 	h.mu.Unlock()
-	return h.LocalHost.Destroy(ctx, id)
+	err := h.LocalHost.Destroy(ctx, id)
+	if err == nil && beforeReturn != nil {
+		beforeReturn()
+	}
+	return err
 }
+
 func (h *countedHost) Open(ctx context.Context, spec channelhost.OpenSpec) error {
 	h.mu.Lock()
 	h.opens++
-	if h.failOpens > 0 {
-		h.failOpens--
+	if h.openErr != nil {
+		err := h.openErr
 		h.mu.Unlock()
-		return errors.New("injected open failure")
+		return err
 	}
 	h.mu.Unlock()
 	return h.LocalHost.Open(ctx, spec)
 }
 
-func newLifecycleTestApp(t *testing.T, failDestroys int) (*App, *countedHost) {
+func newLifecycleTestApp(t *testing.T) (*App, *countedHost) {
 	t.Helper()
 	root := t.TempDir()
 	db, err := openTestAppDB(t, filepath.Join(root, "app.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &App{db: db, logger: testLogger(), daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet()}
-	real, err := channelhost.New(filepath.Join(root, "channels"), channelhost.HomeDeps{CompositionResolver: compositionResolver{app: a}, IntroductionResolver: compositionResolver{app: a}, Logger: a.logger})
+	a := &App{
+		db: db, logger: slog.New(slog.DiscardHandler),
+		daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
+	}
+	a.relations = relationstore.New(db)
+	real, err := channelhost.New(filepath.Join(root, "channels"), channelhost.HomeDeps{
+		CompositionResolver:  compositionResolver{app: a},
+		IntroductionResolver: compositionResolver{app: a},
+		Logger:               a.logger,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapped := &countedHost{LocalHost: real, failDestroys: failDestroys}
-	a.host = wrapped
+	host := &countedHost{LocalHost: real}
+	a.host = host
 	t.Cleanup(func() { _ = real.Close() })
-	return a, wrapped
+	return a, host
 }
 
-func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
-
-func TestPublishNameConflictCompensatesBeforeDead(t *testing.T) {
-	a, host := newLifecycleTestApp(t, 3)
-	ctx := context.Background()
-	now := time.Now().UnixMilli()
+func desiredFixture(t *testing.T, name, owner string, parent *string) desiredChannel {
+	t.Helper()
 	id := channel.ID(uuid.NewString())
-	if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('winner','same','group',?,NULL)`, now); err != nil {
-		t.Fatal(err)
+	now := time.Now().UnixMilli()
+	spec := channelhost.ProvisionSpec{
+		ChannelID: id, Type: "group", OwnerPrincipal: owner, CreatedAt: now,
 	}
-	spec := channelhost.ProvisionSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now}
-	raw, _ := json.Marshal(spec)
-	res, err := a.db.Exec(`INSERT INTO channel_provision_jobs(operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,created_at) VALUES (?,?,?,?,?,?,?,?)`, "lc:test", id, "owner", "same", "group", "owner", string(raw), now)
+	if parent != nil {
+		spec.Origin = &channelhost.Origin{
+			ParentChannelID: channel.ID(*parent), InitiatorPrincipal: owner,
+		}
+	}
+	raw, err := json.Marshal(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobID, _ := res.LastInsertId()
-	for i := 0; i < 3; i++ {
-		_ = a.runProvisionJob(ctx, jobID)
-		var dead any
-		if err := a.db.QueryRow(`SELECT dead_at FROM channel_provision_jobs WHERE job_id=?`, jobID).Scan(&dead); err != nil {
-			t.Fatal(err)
-		}
-		if dead != nil {
-			t.Fatalf("provision died before compensation closed on round %d", i)
+	return desiredChannel{
+		ID: id, Name: name, Type: "group", Status: "present",
+		Owner: owner, SpecJSON: string(raw), Created: now,
+		Parent: nullableParent(parent),
+	}
+}
+
+func insertDesired(t *testing.T, a *App, desired desiredChannel) {
+	t.Helper()
+	if _, err := a.db.Exec(`INSERT INTO channels(
+		id,name,type,status,owner_principal,spec_json,created_at,parent_id)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		desired.ID, desired.Name, desired.Type, desired.Status, desired.Owner,
+		desired.SpecJSON, desired.Created, nullStringValue(desired.Parent)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateAcceptancePredicateAndNameRelease(t *testing.T) {
+	a, _ := newLifecycleTestApp(t)
+	ctx := context.Background()
+	first := desiredFixture(t, "same", "owner", nil)
+	got, changed, conflict, parentMissing, err := a.acceptCreateChannel(ctx, first)
+	if err != nil || !changed || conflict || parentMissing || got.ID != first.ID {
+		t.Fatalf("first acceptance=(%+v,%v,%v,%v,%v)", got, changed, conflict, parentMissing, err)
+	}
+	replay := desiredFixture(t, "same", "owner", nil)
+	got, changed, conflict, _, err = a.acceptCreateChannel(ctx, replay)
+	if err != nil || changed || conflict || got.ID != first.ID {
+		t.Fatalf("replay=(%+v,%v,%v,%v)", got, changed, conflict, err)
+	}
+	other := desiredFixture(t, "same", "other", nil)
+	_, _, conflict, _, err = a.acceptCreateChannel(ctx, other)
+	if err != nil || !conflict {
+		t.Fatalf("different intent conflict=%v err=%v", conflict, err)
+	}
+	if _, err := a.db.Exec(`UPDATE channels SET status='retiring' WHERE id=?`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	replacement := desiredFixture(t, "same", "owner", nil)
+	got, changed, conflict, _, err = a.acceptCreateChannel(ctx, replacement)
+	if err != nil || !changed || conflict || got.ID != replacement.ID {
+		t.Fatalf("retiring name replacement=(%+v,%v,%v,%v)", got, changed, conflict, err)
+	}
+}
+
+func TestCreateAcceptanceRejectsRetiringParent(t *testing.T) {
+	a, _ := newLifecycleTestApp(t)
+	parent := desiredFixture(t, "parent", "owner", nil)
+	parent.Status = "retiring"
+	insertDesired(t, a, parent)
+	raw := string(parent.ID)
+	child := desiredFixture(t, "child", "owner", &raw)
+	_, changed, conflict, parentMissing, err := a.acceptCreateChannel(context.Background(), child)
+	if err != nil || changed || conflict || !parentMissing {
+		t.Fatalf("child acceptance=(%v,%v,%v,%v)", changed, conflict, parentMissing, err)
+	}
+}
+
+func TestConcurrentCreateClassifiesWinner(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		otherOwner string
+		wantReplay bool
+	}{
+		{name: "same intent", otherOwner: "owner", wantReplay: true},
+		{name: "different intent", otherOwner: "other", wantReplay: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a, _ := newLifecycleTestApp(t)
+			first := desiredFixture(t, "race", "owner", nil)
+			second := desiredFixture(t, "race", test.otherOwner, nil)
+			type result struct {
+				changed, conflict bool
+				err               error
+			}
+			start := make(chan struct{})
+			results := make(chan result, 2)
+			for _, desired := range []desiredChannel{first, second} {
+				go func(d desiredChannel) {
+					<-start
+					a.createMu.Lock()
+					_, changed, conflict, _, err := a.acceptCreateChannel(context.Background(), d)
+					a.createMu.Unlock()
+					results <- result{changed: changed, conflict: conflict, err: err}
+				}(desired)
+			}
+			close(start)
+			one, two := <-results, <-results
+			if one.err != nil || two.err != nil {
+				t.Fatalf("concurrent create errors: %v %v", one.err, two.err)
+			}
+			created := 0
+			conflicts := 0
+			replays := 0
+			for _, got := range []result{one, two} {
+				if got.changed {
+					created++
+				} else if got.conflict {
+					conflicts++
+				} else {
+					replays++
+				}
+			}
+			if created != 1 || (test.wantReplay && replays != 1) || (!test.wantReplay && conflicts != 1) {
+				t.Fatalf("created=%d replay=%d conflicts=%d", created, replays, conflicts)
+			}
+		})
+	}
+}
+
+func TestLifecycleConvergesPresentAndRetiring(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	desired := desiredFixture(t, "lifecycle", "owner", nil)
+	insertDesired(t, a, desired)
+	a.convergeChannel(context.Background(), desired.ID)
+	if _, ok := host.Acquire(desired.ID); !ok {
+		t.Fatal("present desired row did not become serving")
+	}
+	if _, err := a.db.Exec(`UPDATE channels SET status='retiring' WHERE id=?`, desired.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.convergeChannel(context.Background(), desired.ID)
+	var exists bool
+	if err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, desired.ID).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("retiring row survived confirmed physical destruction")
+	}
+}
+
+func TestLifecycleRetiringDeleteIsConditional(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	desired := desiredFixture(t, "conditional-retire", "owner", nil)
+	desired.Status = "retiring"
+	insertDesired(t, a, desired)
+	host.beforeDestroyReturn = func() {
+		if _, err := a.db.Exec(`UPDATE channels SET status='present' WHERE id=?`, desired.ID); err != nil {
+			t.Errorf("restore desired status: %v", err)
 		}
 	}
+	a.convergeChannel(context.Background(), desired.ID)
+	var status string
+	if err := a.db.QueryRow(`SELECT status FROM channels WHERE id=?`, desired.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "present" {
+		t.Fatalf("conditional cleanup removed or rewrote a renewed desired row: status=%q", status)
+	}
+}
+
+func TestLifecycleUnknownDestroyKeepsDesiredRow(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	desired := desiredFixture(t, "unknown-destroy", "owner", nil)
+	desired.Status = "retiring"
+	insertDesired(t, a, desired)
+	host.failDestroys = 1
+	a.convergeChannel(context.Background(), desired.ID)
+	var status string
+	if err := a.db.QueryRow(`SELECT status FROM channels WHERE id=?`, desired.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "retiring" {
+		t.Fatalf("status=%q", status)
+	}
+}
+
+func TestLifecycleUnknownFailureRetriesOnLightScan(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	desired := desiredFixture(t, "light-retry", "owner", nil)
+	desired.Status = "retiring"
+	insertDesired(t, a, desired)
+	host.failDestroys = 1
+	worker := newLifecycleWorker(a)
+	a.lifecycle = worker
+	worker.notify(desired.ID)
+	worker.lightScan()
+	time.Sleep(lifecycleTick + 25*time.Millisecond)
+	worker.lightScan()
+	var exists bool
+	if err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, desired.ID).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("unknown failure was not retried by the targeted light scan")
+	}
+}
+
+func TestLifecyclePermanentDestroyStopsRetryAndKeepsRow(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	desired := desiredFixture(t, "permanent-destroy", "owner", nil)
+	desired.Status = "retiring"
+	insertDesired(t, a, desired)
+	host.destroyErr = channelhost.ErrInvalidChannelID
+	a.lifecycle = newLifecycleWorker(a)
+	a.convergeChannel(context.Background(), desired.ID)
+	a.convergeChannel(context.Background(), desired.ID)
 	host.mu.Lock()
-	provisions := host.provisions
+	calls := host.destroys
 	host.mu.Unlock()
-	if provisions != 1 {
-		t.Fatalf("Provision calls=%d want 1 during compensation retries", provisions)
+	if calls != 1 {
+		t.Fatalf("permanent destroy calls=%d want 1", calls)
 	}
-	if err := a.runProvisionJob(ctx, jobID); err != nil {
+	var exists bool
+	if err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, desired.ID).Scan(&exists); err != nil {
 		t.Fatal(err)
 	}
-	var code string
-	var dead int64
-	if err := a.db.QueryRow(`SELECT error_code,dead_at FROM channel_provision_jobs WHERE job_id=?`, jobID).Scan(&code, &dead); err != nil {
+	if !exists {
+		t.Fatal("permanent destroy failure deleted desired row")
+	}
+}
+
+func TestLifecycleFullScanDestroysOrphanImage(t *testing.T) {
+	a, host := newLifecycleTestApp(t)
+	spec := desiredFixture(t, "orphan", "owner", nil)
+	var provision channelhost.ProvisionSpec
+	if err := json.Unmarshal([]byte(spec.SpecJSON), &provision); err != nil {
 		t.Fatal(err)
 	}
-	if code != "name_conflict" || dead == 0 {
-		t.Fatalf("terminal=(%q,%d)", code, dead)
+	if _, err := host.Provision(context.Background(), provision); err != nil {
+		t.Fatal(err)
 	}
-	entries, err := a.host.Census(ctx)
+	worker := newLifecycleWorker(a)
+	a.lifecycle = worker
+	worker.fullScan()
+	entries, err := host.Census(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if entry.ChannelID == id {
-			t.Fatalf("compensated channel remains in census: %v", entries)
+		if entry.ChannelID == spec.ID {
+			t.Fatalf("orphan remains in census: %+v", entries)
 		}
-	}
-}
-
-func TestLifecycleClaimAlternatesKindsAndWrapsEachCursor(t *testing.T) {
-	a, _ := newLifecycleTestApp(t, 0)
-	now := time.Now().UnixMilli()
-	for _, values := range []struct {
-		table, operation, channel string
-	}{
-		{"channel_provision_jobs", "lc:p1", "p1"},
-		{"channel_provision_jobs", "lc:p2", "p2"},
-		{"channel_destroy_jobs", "lc:d1", "d1"},
-		{"channel_destroy_jobs", "lc:d2", "d2"},
-	} {
-		if values.table == "channel_provision_jobs" {
-			spec, _ := json.Marshal(channelhost.ProvisionSpec{ChannelID: channel.ID(values.channel), Type: "group", OwnerPrincipal: "owner", CreatedAt: now})
-			if _, err := a.db.Exec(`INSERT INTO channel_provision_jobs(operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,created_at) VALUES (?,?,?,?,?,?,?,?)`, values.operation, values.channel, "owner", values.channel, "group", "owner", string(spec), now); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		if _, err := a.db.Exec(`INSERT INTO channel_destroy_jobs(operation_id,channel_id,requested_by,created_at) VALUES (?,?,?,?)`, values.operation, values.channel, "owner", now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	w := newLifecycleWorker(a)
-	got := make([]string, 0, 6)
-	for range 6 {
-		kind, id, ok := w.next()
-		if !ok {
-			t.Fatal("claim ring unexpectedly empty")
-		}
-		got = append(got, fmt.Sprintf("%s:%d", kind, id))
-	}
-	want := []string{"provision:1", "destroy:1", "provision:2", "destroy:2", "provision:1", "destroy:1"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("claim order=%v want %v", got, want)
-	}
-}
-
-func TestLifecycleClaimExcludesCompensatingProvision(t *testing.T) {
-	a, _ := newLifecycleTestApp(t, 0)
-	now := time.Now().UnixMilli()
-	if _, err := a.db.Exec(`INSERT INTO channel_destroy_jobs(operation_id,channel_id,requested_by,created_at) VALUES ('lc:d','c','owner',?)`, now); err != nil {
-		t.Fatal(err)
-	}
-	spec, _ := json.Marshal(channelhost.ProvisionSpec{ChannelID: "c", Type: "group", OwnerPrincipal: "owner", CreatedAt: now})
-	if _, err := a.db.Exec(`INSERT INTO channel_provision_jobs(operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,compensation_job_id,created_at) VALUES ('lc:p','c','owner','c','group','owner',?,1,?)`, string(spec), now); err != nil {
-		t.Fatal(err)
-	}
-	w := newLifecycleWorker(a)
-	kind, id, ok := w.next()
-	if !ok || kind != "destroy" || id != 1 {
-		t.Fatalf("claim=(%q,%d,%v), want destroy compensation", kind, id, ok)
-	}
-}
-
-func TestProvisionReceiptPublishesAtomicallyAndRetryRebuilds(t *testing.T) {
-	a, host := newLifecycleTestApp(t, 0)
-	ctx := context.Background()
-	now := time.Now().UnixMilli()
-	id := channel.ID(uuid.NewString())
-	spec := channelhost.ProvisionSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now}
-	raw, _ := json.Marshal(spec)
-	res, err := a.db.Exec(`INSERT INTO channel_provision_jobs(operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,created_at) VALUES (?,?,?,?,?,?,?,?)`, "lc:atomic", id, "owner", "atomic", "group", "owner", string(raw), now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobID, _ := res.LastInsertId()
-	if _, err := a.db.Exec(`CREATE TRIGGER fail_channel_publish BEFORE INSERT ON channels BEGIN SELECT RAISE(FAIL, 'injected publish failure'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.runProvisionJob(ctx, jobID); err == nil {
-		t.Fatal("injected publish failure unexpectedly succeeded")
-	}
-	var receipt sql.NullString
-	var published sql.NullInt64
-	if err := a.db.QueryRow(`SELECT receipt_json,published_at FROM channel_provision_jobs WHERE job_id=?`, jobID).Scan(&receipt, &published); err != nil {
-		t.Fatal(err)
-	}
-	if receipt.Valid || published.Valid {
-		t.Fatalf("partial publish escaped transaction: receipt=%v published=%v", receipt, published)
-	}
-	if _, err := a.db.Exec(`DROP TRIGGER fail_channel_publish`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.db.Exec(`UPDATE channel_provision_jobs SET next_attempt_at=0 WHERE job_id=?`, jobID); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.runProvisionJob(ctx, jobID); err != nil {
-		t.Fatal(err)
-	}
-	host.mu.Lock()
-	provisions := host.provisions
-	host.mu.Unlock()
-	if provisions != 2 {
-		t.Fatalf("Provision calls=%d want 2 (retry must rebuild)", provisions)
-	}
-	if err := a.db.QueryRow(`SELECT receipt_json,published_at FROM channel_provision_jobs WHERE job_id=?`, jobID).Scan(&receipt, &published); err != nil {
-		t.Fatal(err)
-	}
-	if !receipt.Valid || !published.Valid {
-		t.Fatalf("publish pair not committed together: receipt=%v published=%v", receipt, published)
-	}
-}
-
-func TestServingTickerRetriesDirectoryChannelAfterOpenFailure(t *testing.T) {
-	a, host := newLifecycleTestApp(t, 0)
-	ctx := context.Background()
-	now := time.Now().UnixMilli()
-	id := channel.ID(uuid.NewString())
-	spec := channelhost.ProvisionSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now}
-	if _, err := host.Provision(ctx, spec); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES (?,?,?,?,NULL)`, id, "open-retry", "group", now); err != nil {
-		t.Fatal(err)
-	}
-	host.mu.Lock()
-	host.failOpens = 1
-	host.mu.Unlock()
-	w := newLifecycleWorker(a)
-	w.servingEvery = 10 * time.Millisecond
-	w.start()
-	defer w.close()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, ok := host.Acquire(id); ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("serving ticker did not recover channel after injected Open failure")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	host.mu.Lock()
-	opens := host.opens
-	host.mu.Unlock()
-	if opens < 2 {
-		t.Fatalf("Open calls=%d want at least 2 periodic attempts", opens)
-	}
-}
-
-func TestDestroyInvalidChannelIDIsPermanent(t *testing.T) {
-	a, _ := newLifecycleTestApp(t, 0)
-	now := time.Now().UnixMilli()
-	res, err := a.db.Exec(`INSERT INTO channel_destroy_jobs(operation_id,channel_id,requested_by,created_at) VALUES (?,?,?,?)`, "lc:bad-destroy", "", "owner", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobID, _ := res.LastInsertId()
-	if err := a.runDestroyJobLocked(context.Background(), jobID); !errors.Is(err, channelhost.ErrInvalidChannelID) {
-		t.Fatalf("destroy error=%v want invalid channel id", err)
-	}
-	var code string
-	var dead int64
-	if err := a.db.QueryRow(`SELECT error_code,dead_at FROM channel_destroy_jobs WHERE job_id=?`, jobID).Scan(&code, &dead); err != nil {
-		t.Fatal(err)
-	}
-	if code != "invalid_channel_id" || dead == 0 {
-		t.Fatalf("destroy terminal=(%q,%d)", code, dead)
 	}
 }

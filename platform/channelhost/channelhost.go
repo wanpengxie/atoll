@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -60,9 +61,9 @@ type Origin struct {
 }
 
 type GenesisDeclaration struct {
-	DeclID   string                   `json:"decl_id"`
-	Kind     actor.Kind               `json:"kind"`
-	Rendered channel.RenderedSnapshot `json:"rendered_snapshot"`
+	DeclID   string                       `json:"decl_id"`
+	Kind     actor.Kind                   `json:"kind"`
+	Rendered channelspec.RenderedSnapshot `json:"rendered_snapshot"`
 }
 
 type ProvisionSpec struct {
@@ -96,7 +97,7 @@ type CensusEntry struct {
 type HomeDeps struct {
 	CompositionResolver  home.CompositionResolver
 	IntroductionResolver home.IntroductionResolver
-	OnMembershipChange   func(channel.ID, []string)
+	OnRelationChange     func(channel.ID, []channelspec.RelationDelta)
 	Logger               *slog.Logger
 }
 
@@ -379,9 +380,7 @@ func (h *ChannelHost) openHome(
 	} else {
 		config.ExpectedGenesis = genesis
 	}
-	if h.deps.OnMembershipChange != nil {
-		config.OnMembershipChange = func(principal string) { h.deps.OnMembershipChange(id, []string{principal}) }
-	}
+	config.OnRelationChange = h.deps.OnRelationChange
 	return home.Open(config)
 }
 

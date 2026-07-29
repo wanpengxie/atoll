@@ -11,6 +11,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
 )
 
 type declarationOverlayRequest struct {
@@ -52,11 +53,12 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 	}
 	defer tx.Rollback()
 
-	var owner, visibility string
+	var owner, visibility, class string
+	var global sql.NullString
 	var deletedAt sql.NullInt64
 	if err := tx.QueryRowContext(c.Request.Context(),
-		`SELECT owner,visibility,deleted_at FROM actor_decls WHERE id=?`, declID).
-		Scan(&owner, &visibility, &deletedAt); err != nil {
+		`SELECT owner,visibility,default_class,config_json,deleted_at FROM actor_decls WHERE id=?`, declID).
+		Scan(&owner, &visibility, &class, &global, &deletedAt); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "declaration not found"})
 		} else {
@@ -70,6 +72,20 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 	}
 	if !declarationVisibleTo(visibility, owner, principal) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "declaration owner required"})
+		return
+	}
+	validated := config
+	if clear && global.Valid {
+		validated = json.RawMessage(global.String)
+	}
+	if err := registry.ValidateConfig(class, validated); err != nil {
+		status := http.StatusBadRequest
+		code := "config_invalid"
+		if clear {
+			status = http.StatusConflict
+			code = "config_invalid_on_clear"
+		}
+		c.JSON(status, gin.H{"error": code})
 		return
 	}
 	if clear {

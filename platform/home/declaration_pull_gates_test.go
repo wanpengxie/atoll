@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
@@ -58,7 +59,7 @@ func newDeclPullRealm() *declPullRealm {
 
 func (r *declPullRealm) ResolveDeclaration(
 	context.Context, channel.ID, string,
-) (channel.DeclarationFacts, error) {
+) (channelspec.DeclarationFacts, error) {
 	r.mu.Lock()
 	r.resolves++
 	park := r.armed
@@ -70,9 +71,9 @@ func (r *declPullRealm) ResolveDeclaration(
 		<-r.release
 	}
 	if resolveErr != nil {
-		return channel.DeclarationFacts{}, resolveErr
+		return channelspec.DeclarationFacts{}, resolveErr
 	}
-	return channel.DeclarationFacts{
+	return channelspec.DeclarationFacts{
 		Visibility: "public", Class: class, Config: json.RawMessage(config),
 	}, nil
 }
@@ -84,8 +85,8 @@ func (r *declPullRealm) ClassKind(context.Context, string) (actor.Kind, bool, er
 	return r.kind, r.kindFound, r.kindErr
 }
 
-func (r *declPullRealm) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{}, nil
+func (r *declPullRealm) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{}, nil
 }
 
 func (r *declPullRealm) setFacts(class, config string) {
@@ -191,7 +192,7 @@ func TestDeclarationPullSkipsEveryUnusableRealmAnswer(t *testing.T) {
 			realm.setResolveErr(errors.New("realm rpc failed"))
 		}, false},
 		{"declaration gone", func() {
-			realm.setResolveErr(channel.ErrDeclarationNotFound)
+			realm.setResolveErr(channelspec.ErrDeclarationNotFound)
 		}, false},
 		{"class registry fault", func() {
 			realm.setResolveErr(nil)
@@ -251,7 +252,7 @@ func TestDeclarationPullSkipsEveryUnusableRealmAnswer(t *testing.T) {
 func TestDeclarationPullCannotCrossFromARemovedInstanceToItsRebornTwin(t *testing.T) {
 	probe := newLifecycleLogProbe("", nil)
 	realm := newDeclPullRealm()
-	realm.setResolveErr(channel.ErrDeclarationNotFound)
+	realm.setResolveErr(channelspec.ErrDeclarationNotFound)
 	realm.setClassKind(actor.KindAgent, true, nil)
 
 	h := openDeclPullHome(t, "decl-pull-aba", realm, slog.New(probe))
@@ -268,10 +269,10 @@ func TestDeclarationPullCannotCrossFromARemovedInstanceToItsRebornTwin(t *testin
 
 	// From here on every other round of the loop is a no-op, so the only
 	// declaration answer still in flight is the one held for the stale id.
-	realm.setResolveErr(channel.ErrDeclarationNotFound)
+	realm.setResolveErr(channelspec.ErrDeclarationNotFound)
 
 	// Truth moves underneath the parked resolve.
-	if _, err := h.opEntry.Remove(ctx, channel.RemoveRequest{
+	if _, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
 		Ref: "aba:remove", Target: stale, InitiatorActorID: stale,
 	}); err != nil {
 		t.Fatalf("remove the in-flight instance: %v", err)

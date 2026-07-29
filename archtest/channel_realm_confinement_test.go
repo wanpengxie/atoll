@@ -366,61 +366,41 @@ func TestChannelRealmW5LifecycleCallsites(t *testing.T) {
 	}
 }
 
-// W6: each lifecycle runner has exactly one implementation shared by inline and worker paths.
-func TestChannelRealmW6SingleJobRunners(t *testing.T) {
-	want := map[string]int{"runProvisionJob": 0, "runDestroyJob": 0}
+// W6: desired acceptance and terminal reclamation have one write owner each;
+// inline and worker convergence share the same stateless arm.
+func TestChannelRealmW6DesiredWriteOwnership(t *testing.T) {
+	convergeDefinitions := 0
 	for _, path := range phaseAProductionFiles(t, "../app") {
 		_, f := phaseAParse(t, path)
 		for _, decl := range f.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok {
-				if _, tracked := want[fn.Name.Name]; tracked {
-					want[fn.Name.Name]++
-				}
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "convergeChannel" {
+				convergeDefinitions++
 			}
 		}
-	}
-	for name, count := range want {
-		if count != 1 {
-			t.Errorf("%s definitions=%d, want 1", name, count)
-		}
-	}
-
-	// Tracked governance ledger: every realm runner names both its implementation
-	// owner and durable anchors. Keeping this in archtest makes a clean clone carry
-	// the wall even though the project-management corpus itself is workspace-local.
-	runners := []struct {
-		name    string
-		source  string
-		typ     string
-		anchors []string
-	}{
-		{"channel lifecycle worker", "../app/channel_lifecycle.go", "type lifecycleWorker struct", []string{"channel_provision_jobs", "channel_destroy_jobs"}},
-		{"admission service", "../app/admission.go", "type admissionService struct", []string{"channel_admission_operations"}},
-	}
-	schema, err := os.ReadFile("../app/store.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, runner := range runners {
-		body, err := os.ReadFile(runner.source)
+		body, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(body), runner.typ) {
-			t.Errorf("registered %s implementation %q is absent", runner.name, runner.typ)
-		}
-		for _, anchor := range runner.anchors {
-			if !strings.Contains(string(schema), `"table", "`+anchor+`"`) {
-				t.Errorf("registered %s durable anchor %q is absent from strict schema", runner.name, anchor)
+		text := string(body)
+		for token, owner := range map[string]string{
+			"INSERT INTO channels":                  "../app/channel.go",
+			"UPDATE channels SET status='retiring'": "../app/channel.go",
+			"DELETE FROM channels":                  "../app/channel_lifecycle.go",
+		} {
+			if strings.Contains(text, token) && path != owner {
+				t.Errorf("%s owns %q outside %s", path, token, owner)
 			}
 		}
 	}
+	if convergeDefinitions != 1 {
+		t.Errorf("convergeChannel definitions=%d, want 1", convergeDefinitions)
+	}
 }
 
-// W7: Bundle.SysOp is consumed only by admissionService. Declaration
+// W7: Bundle.SysOp is consumed only by the realm forwarder. Declaration
 // convergence is Home-owned and uses a private store port.
 func TestChannelRealmW7SysOpConsumptionClosed(t *testing.T) {
-	allowed := map[string]bool{"../app/admission.go": true}
+	allowed := map[string]bool{"../app/sysop_forward.go": true}
 	for _, path := range phaseAProductionFiles(t, "../app") {
 		fset, f := phaseAParse(t, path)
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -430,7 +410,7 @@ func TestChannelRealmW7SysOpConsumptionClosed(t *testing.T) {
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
 			if ok && sel.Sel.Name == "SysOp" && !allowed[path] {
-				t.Errorf("%s consumes Bundle.SysOp outside admission", path)
+				t.Errorf("%s consumes Bundle.SysOp outside sysop forwarder", path)
 			}
 			_ = fset
 			return true
@@ -474,10 +454,11 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 	}
 	appText := string(appSchema)
 	for _, required := range []string{
-		"CREATE TABLE channels", "parent_id TEXT", "compensation_job_id INTEGER",
-		"CREATE TABLE channel_admission_operations", "attempt INTEGER", "next_attempt_at INTEGER",
+		"CREATE TABLE channels", "status TEXT", "owner_principal TEXT", "spec_json TEXT",
+		"CREATE UNIQUE INDEX ux_channels_present_name", "WHERE status='present'",
 		"CREATE TABLE channel_decl_overlays", "config_json TEXT",
-		"CREATE TABLE principal_channels", "CREATE TABLE daemons", "deleted_at INTEGER",
+		"CREATE TABLE principal_channels", "CREATE TABLE channel_decl_instances",
+		"CREATE TABLE daemon_channels", "CREATE TABLE daemons", "api_key TEXT", "deleted_at INTEGER",
 	} {
 		if !strings.Contains(appText, required) {
 			t.Errorf("app schema missing %q", required)
@@ -485,7 +466,9 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 	}
 	for _, forbidden := range []string{"CREATE TABLE workspaces", "CREATE TABLE workspace_members", "targets_json",
 		"CREATE TABLE decl_fanout_jobs", "CREATE TABLE daemon_revoke_jobs", "CREATE TABLE decl_fanout_deliveries",
-		"CREATE TABLE channel_finalize_deliveries", "CREATE TABLE decl_render_state", "pending_config_json", "pending_ref"} {
+		"CREATE TABLE channel_finalize_deliveries", "CREATE TABLE decl_render_state", "pending_config_json", "pending_ref",
+		"channel_provision_jobs", "channel_destroy_jobs", "channel_admission_operations",
+		"compensation_job_id", "next_attempt_at", "api_key_hash"} {
 		if strings.Contains(appText, forbidden) {
 			t.Errorf("app schema retains %q", forbidden)
 		}
@@ -506,6 +489,23 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 	for _, forbidden := range []string{"restart_applied", "restart_attempts", "render_seq"} {
 		if strings.Contains(localText, forbidden) {
 			t.Errorf("channel schema retains %q", forbidden)
+		}
+	}
+}
+
+func TestChannelRealmRelationTablesHaveOneWriteOwner(t *testing.T) {
+	for _, path := range phaseAProductionFiles(t, "../app") {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, table := range []string{"principal_channels", "channel_decl_instances", "daemon_channels"} {
+			for _, verb := range []string{"INSERT INTO ", "UPDATE ", "DELETE FROM "} {
+				if strings.Contains(string(body), verb+table) &&
+					!strings.HasPrefix(path, "../app/internal/relation/") {
+					t.Errorf("%s writes relation table %s outside relation module", path, table)
+				}
+			}
 		}
 	}
 }

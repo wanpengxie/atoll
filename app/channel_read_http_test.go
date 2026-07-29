@@ -13,13 +13,12 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-func TestObserverHTTPRequiresRealmToolWhileMemberReadDoesNot(t *testing.T) {
+func TestChannelDetailIsDesiredWhileObserverContentRequiresRealmTool(t *testing.T) {
 	env := setupTestApp(t)
 	owner := fullSetup(t, env)
 	_, outsiderCookies := register(t, env, "observer-http@example.com", "secret123", "Observer")
 
 	for _, path := range []string{
-		"/api/channels/" + owner.chID,
 		"/api/channels/" + owner.chID + "/messages",
 		"/api/channels/" + owner.chID + "/resources",
 	} {
@@ -28,8 +27,9 @@ func TestObserverHTTPRequiresRealmToolWhileMemberReadDoesNot(t *testing.T) {
 	if err := env.app.RemoveRealmToolForTest(channel.ID(owner.chID)); err != nil {
 		t.Fatal(err)
 	}
+	detail := env.do(t, http.MethodGet, "/api/channels/"+owner.chID, nil, outsiderCookies)
+	assertStatus(t, detail, http.StatusOK)
 	for _, path := range []string{
-		"/api/channels/" + owner.chID,
 		"/api/channels/" + owner.chID + "/messages",
 		"/api/channels/" + owner.chID + "/resources",
 	} {

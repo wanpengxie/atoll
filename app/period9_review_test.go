@@ -104,9 +104,12 @@ func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 		t.Fatalf("CreateHalfBuiltChannelForTest: %v", err)
 	}
 
-	// The missing membrane capability is reported honestly (503), no panic.
-	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusServiceUnavailable {
-		t.Fatalf("GET half-built channel: want 503, got %d (%s)", g.Code, g.Body.String())
+	// Desired directory detail is available even while physical state has not
+	// converged; only the derived default_agent field is omitted.
+	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusOK {
+		t.Fatalf("GET half-built channel: want 200, got %d (%s)", g.Code, g.Body.String())
+	} else if _, present := respJSON(t, g)["default_agent"]; present {
+		t.Fatalf("half-built channel fabricated default_agent: %s", g.Body.String())
 	}
 	// The absent local image is reported honestly rather than fabricated.
 	if _, err := env.app.HumanRosterForTest(channel.ID(chID)); err == nil {

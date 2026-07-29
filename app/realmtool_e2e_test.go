@@ -110,16 +110,6 @@ func TestRealmToolActorOwnedIntroduceAndRemove(t *testing.T) {
 	if err := json.Unmarshal(introduced["actor_id"], &target); err != nil || target == "" {
 		t.Fatalf("actor-owned introduce=%v target=%q err=%v", introduced, target, err)
 	}
-	var principal, ownerActor string
-	if err := env.db.QueryRow(`SELECT COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'')
-		FROM channel_admission_operations WHERE channel_id=? AND op='introduce' ORDER BY created_at DESC LIMIT 1`, setup.chID).
-		Scan(&principal, &ownerActor); err != nil {
-		t.Fatal(err)
-	}
-	if principal != "" || ownerActor != string(setup.actorID) {
-		t.Fatalf("operation owner=(principal=%q actor=%q), want sender actor %q", principal, ownerActor, setup.actorID)
-	}
-
 	removed := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeRemove, map[string]any{"target": target})
 	var removedIDs []actor.ActorID
 	if err := json.Unmarshal(removed["removed"], &removedIDs); err != nil || len(removedIDs) != 1 || removedIDs[0] != target {
@@ -158,7 +148,6 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 	type outcome struct {
 		child      actor.ActorID
 		introduced actor.ActorID
-		statusRef  string
 		listed     bool
 		fetched    string
 		err        error
@@ -223,18 +212,6 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 					var body channel.IntroduceResult
 					err = json.Unmarshal(introduced.Payload, &body)
 					result.introduced = body.ActorID
-					result.statusRef = channel.DerivedRealmToolRef(channel.ID(setup.chID), string(introduced.ParentID))
-				}
-				if err == nil {
-					status, statusErr := call(realmtool.TypeOperationStatus, map[string]any{"ref": result.statusRef})
-					err = statusErr
-					if err == nil {
-						var view channel.OperationView
-						err = json.Unmarshal(status.Payload, &view)
-						if err == nil && (view.Ref != result.statusRef || view.Status != "completed") {
-							err = fmt.Errorf("operation status=%+v", view)
-						}
-					}
 				}
 				if err == nil {
 					listed, listErr := call(realmtool.TypeListResources, map[string]any{
@@ -279,8 +256,8 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 	plan := &e2eLinkPlan{chID: channel.ID(setup.chID)}
 	go func() {
 		computeErr <- compute.Run(computeCtx, compute.Config{
-			ServerWS:   fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), setup.chID, daemon["api_key"].(string)),
-			Factories:  plan, Poll: 20 * time.Millisecond,
+			ServerWS:  fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), setup.chID, daemon["api_key"].(string)),
+			Factories: plan, Poll: 20 * time.Millisecond,
 		})
 	}()
 	t.Cleanup(func() {
@@ -308,7 +285,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 
 	select {
 	case got := <-done:
-		if got.err != nil || got.child == "" || got.introduced == "" || got.statusRef == "" || !got.listed || got.fetched == "" {
+		if got.err != nil || got.child == "" || got.introduced == "" || !got.listed || got.fetched == "" {
 			t.Fatalf("fork realm combination=%+v err=%v", got, got.err)
 		}
 		facts, foundFork, err := env.app.ActorFactsForTest(channel.ID(setup.chID), got.child)
@@ -320,13 +297,6 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 		}
 		if facts.Principal != "" {
 			t.Fatalf("fork principal=%q, want empty", facts.Principal)
-		}
-		var ownerPrincipal, ownerActor string
-		if err := env.db.QueryRow(`SELECT COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'') FROM channel_admission_operations WHERE operation_id=?`, got.statusRef).Scan(&ownerPrincipal, &ownerActor); err != nil {
-			t.Fatal(err)
-		}
-		if ownerPrincipal != "" || ownerActor != string(got.child) {
-			t.Fatalf("operation owner=(%q,%q), want fork %q", ownerPrincipal, ownerActor, got.child)
 		}
 	case <-time.After(8 * time.Second):
 		t.Fatalf("fork requester did not finish realm operation/resource combination: builds=%d", builds.Load())

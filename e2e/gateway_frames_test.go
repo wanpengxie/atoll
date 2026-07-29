@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -103,11 +104,12 @@ func TestGatewayFrames(t *testing.T) {
 	ch := api.must("POST", "/api/channels", map[string]any{"name": "home"}, http.StatusCreated)
 	chID, _ := ch["id"].(string)
 
-	// Channel creation returns the creator's admitted subject identity. Channel
-	// internals have no parallel HTTP roster transport.
-	humanID, _ := ch["creator_actor_id"].(string)
+	// Creation returns desired state only. The join reminder is the membrane
+	// identity read-back coordinate and returns the already-admitted owner.
+	joined := api.must("POST", "/api/channels/"+chID+"/join", nil, http.StatusOK)
+	humanID, _ := joined["actor_id"].(string)
 	if humanID == "" || userID == "" {
-		t.Fatalf("channel creation omitted creator subject identity: %v", ch)
+		t.Fatalf("join omitted creator subject identity: %v", joined)
 	}
 
 	cookie := api.cookieHeader()
@@ -202,6 +204,30 @@ func TestGatewayFrames(t *testing.T) {
 	})
 	if receiptField(rec, "timer_id") == "" {
 		t.Fatalf("primary session dead after peer close: %v", rec)
+	}
+
+	deleted := api.must("DELETE", "/api/channels/"+chID, nil, http.StatusOK)
+	if deleted["changed"] != true {
+		t.Fatalf("first channel delete=%v", deleted)
+	}
+	channelDB := filepath.Join(dirs["channels"], base64.RawURLEncoding.EncodeToString([]byte(chID))+".db")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		_, err := os.Stat(channelDB)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("stat retired channel db: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retired channel db was not conditionally removed: %s", channelDB)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	replayedDelete := api.must("DELETE", "/api/channels/"+chID, nil, http.StatusOK)
+	if replayedDelete["changed"] != false {
+		t.Fatalf("delete replay after terminal cleanup=%v", replayedDelete)
 	}
 
 	server.kill9(t)

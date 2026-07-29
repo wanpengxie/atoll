@@ -3,7 +3,6 @@ package channel
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,19 +15,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
-
-var ErrDeclarationNotFound = errors.New("channel: declaration not found")
-
-type DaemonFacts struct {
-	Deleted bool
-}
-
-type DeclarationFacts struct {
-	OwnerPrincipal string
-	Visibility     string
-	Class          string
-	Config         json.RawMessage
-}
 
 // PlacementKind is the wire-level placement discriminator carried by a rendered
 // declaration snapshot. DesiredHost is meaningful only for daemon placement.
@@ -57,53 +43,6 @@ func (p Placement) Validate() error {
 		return ErrInvalidPlacement
 	}
 	return nil
-}
-
-// RenderedSnapshot is the complete, already-resolved declaration value accepted
-// by a channel. Channel storage has no global/local merge semantics.
-type RenderedSnapshot struct {
-	Class     string          `json:"class"`
-	Config    json.RawMessage `json:"config,omitempty"`
-	Placement Placement       `json:"placement"`
-	Digest    string          `json:"digest"`
-}
-
-func (s RenderedSnapshot) Validate() error {
-	if strings.TrimSpace(s.Class) == "" {
-		return ErrInvalidRequest
-	}
-	if err := s.Placement.Validate(); err != nil {
-		return err
-	}
-	want, err := s.ContentDigest()
-	if err != nil {
-		return err
-	}
-	if s.Digest != want {
-		return ErrDigestMismatch
-	}
-	return nil
-}
-
-// ContentDigest covers the rendered value only. Digest is deliberately
-// excluded so equal values can be detected across local declaration versions.
-func (s RenderedSnapshot) ContentDigest() (string, error) {
-	payload := struct {
-		Class     string          `json:"class"`
-		Config    json.RawMessage `json:"config,omitempty"`
-		Placement Placement       `json:"placement"`
-	}{s.Class, s.Config, s.Placement}
-	return Digest(payload)
-}
-
-// Seal computes and installs the content digest.
-func (s RenderedSnapshot) Seal() (RenderedSnapshot, error) {
-	digest, err := s.ContentDigest()
-	if err != nil {
-		return RenderedSnapshot{}, err
-	}
-	s.Digest = digest
-	return s, nil
 }
 
 // Digest returns the v1 RFC-8785/JCS digest used by operation requests.
@@ -255,99 +194,18 @@ func formatJCSNumber(value float64) string {
 	return s
 }
 
-func appendLengthPrefixed(dst []byte, value string) []byte {
-	var size [4]byte
-	binary.BigEndian.PutUint32(size[:], uint32(len([]byte(value))))
-	dst = append(dst, size[:]...)
-	return append(dst, value...)
-}
-
-func DerivedRealmToolRef(channelID ID, requestID string) string {
-	payload := appendLengthPrefixed(nil, string(channelID))
-	payload = appendLengthPrefixed(payload, requestID)
-	sum := sha256.Sum256(payload)
-	return "adm:rt:v1:" + hex.EncodeToString(sum[:])
-}
-
-type OperationErrorCode string
-
-const (
-	ErrCodeBadPayload           OperationErrorCode = "bad_payload"
-	ErrCodeChannelUnavailable   OperationErrorCode = "channel_unavailable"
-	ErrCodeInvalidDesiredHost   OperationErrorCode = "invalid_desired_host"
-	ErrCodeDeclNotFound         OperationErrorCode = "decl_not_found"
-	ErrCodeForbidden            OperationErrorCode = "forbidden"
-	ErrCodeUnknownClass         OperationErrorCode = "unknown_class"
-	ErrCodeProtectedActor       OperationErrorCode = "protected_actor"
-	ErrCodeNotInComposition     OperationErrorCode = "not_in_composition"
-	ErrCodeInternal             OperationErrorCode = "internal_error"
-	ErrCodeNotAcceptedSource    OperationErrorCode = "not_accepted_source"
-	ErrCodeMemberInactive       OperationErrorCode = "member_inactive"
-	ErrCodeAuthorityUnavailable OperationErrorCode = "authority_unavailable"
-	ErrCodeRefConflict          OperationErrorCode = "ref_conflict"
-)
-
-var operationErrorCodes = [...]OperationErrorCode{
-	ErrCodeBadPayload, ErrCodeChannelUnavailable, ErrCodeInvalidDesiredHost,
-	ErrCodeDeclNotFound, ErrCodeForbidden,
-	ErrCodeUnknownClass, ErrCodeProtectedActor, ErrCodeNotInComposition,
-	ErrCodeInternal,
-	ErrCodeNotAcceptedSource, ErrCodeMemberInactive, ErrCodeAuthorityUnavailable,
-}
-
-type OperationError struct {
-	Code      OperationErrorCode
-	Detail    string
-	Retryable bool
-}
-
-func (e *OperationError) Error() string {
-	if e.Detail == "" {
-		return string(e.Code)
-	}
-	return string(e.Code) + ": " + e.Detail
-}
-
 var (
 	ErrInvalidPlacement = errors.New("channel: invalid placement")
 	ErrInvalidRequest   = errors.New("channel: invalid request")
-	ErrDigestMismatch   = errors.New("channel: snapshot digest mismatch")
 )
-
-type AdmitRequest struct {
-	Ref       string `json:"ref"`
-	Principal string `json:"principal"`
-}
 
 type AdmitResult struct {
 	ActorID actor.ActorID `json:"actor_id"`
 	Created bool          `json:"created"`
 }
 
-type IntroduceRequest struct {
-	Ref              string        `json:"ref"`
-	DeclID           string        `json:"decl_id"`
-	InitiatorActorID actor.ActorID `json:"initiator_actor_id"`
-}
-
 type IntroduceResult = AdmitResult
-
-type RemoveRequest struct {
-	Ref              string        `json:"ref"`
-	Target           actor.ActorID `json:"target"`
-	InitiatorActorID actor.ActorID `json:"initiator_actor_id"`
-}
 
 type RemoveResult struct {
 	Removed []actor.ActorID `json:"removed"`
-}
-
-type DaemonRequest struct {
-	Ref      string `json:"ref"`
-	DaemonID string `json:"daemon_id"`
-}
-
-type BindingResult struct {
-	Bound            bool            `json:"bound"`
-	ClearedInstances []actor.ActorID `json:"cleared_instances,omitempty"`
 }

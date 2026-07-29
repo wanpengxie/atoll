@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -24,30 +25,32 @@ func (r compositionResolver) BuildClass(chID channel.ID, childID actor.ActorID, 
 	}
 	decl, err := registry.Build(class, registry.InstanceSpec{ID: childID, Config: config}, registry.Deps{ChannelID: chID, Logger: r.app.logger})
 	if err != nil {
+		r.app.logger.Error("actor class build failed",
+			"channel", chID, "actor", childID, "class", class, "err", err)
 		return platform.ActorFactory{}, false
 	}
 	return decl.Factory, true
 }
 
-func (r compositionResolver) ResolveDeclaration(ctx context.Context, chID channel.ID, declID string) (channel.DeclarationFacts, error) {
+func (r compositionResolver) ResolveDeclaration(ctx context.Context, chID channel.ID, declID string) (channelspec.DeclarationFacts, error) {
 	var owner, visibility, class string
 	var global sql.NullString
 	var deleted sql.NullInt64
 	if err := r.app.db.QueryRowContext(ctx, `SELECT owner,visibility,default_class,config_json,deleted_at FROM actor_decls WHERE id=?`, declID).
 		Scan(&owner, &visibility, &class, &global, &deleted); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+			return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 		}
-		return channel.DeclarationFacts{}, err
+		return channelspec.DeclarationFacts{}, err
 	}
 	if deleted.Valid {
-		return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+		return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 	}
 	config := global.String
 	var overlay sql.NullString
 	err := r.app.db.QueryRowContext(ctx, `SELECT config_json FROM channel_decl_overlays WHERE channel_id=? AND decl_id=?`, string(chID), declID).Scan(&overlay)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return channel.DeclarationFacts{}, err
+		return channelspec.DeclarationFacts{}, err
 	}
 	if err == nil && overlay.Valid {
 		config = overlay.String
@@ -56,7 +59,7 @@ func (r compositionResolver) ResolveDeclaration(ctx context.Context, chID channe
 	if config != "" {
 		raw = json.RawMessage(config)
 	}
-	return channel.DeclarationFacts{OwnerPrincipal: owner, Visibility: visibility, Class: class, Config: raw}, nil
+	return channelspec.DeclarationFacts{OwnerPrincipal: owner, Visibility: visibility, Class: class, Config: raw}, nil
 }
 
 func (r compositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
@@ -70,10 +73,10 @@ func (r compositionResolver) ClassKind(_ context.Context, class string) (actor.K
 	return kind, true, nil
 }
 
-func (r compositionResolver) DaemonFacts(ctx context.Context, daemonID string) (channel.DaemonFacts, error) {
+func (r compositionResolver) DaemonFacts(ctx context.Context, daemonID string) (channelspec.DaemonFacts, error) {
 	var deleted sql.NullInt64
 	if err := r.app.db.QueryRowContext(ctx, `SELECT deleted_at FROM daemons WHERE id=?`, daemonID).Scan(&deleted); err != nil {
-		return channel.DaemonFacts{}, err
+		return channelspec.DaemonFacts{}, err
 	}
-	return channel.DaemonFacts{Deleted: deleted.Valid}, nil
+	return channelspec.DaemonFacts{Deleted: deleted.Valid}, nil
 }

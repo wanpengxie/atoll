@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -34,15 +35,15 @@ import (
 // instead of leaning on it.
 
 type visibilityRealm struct {
-	facts map[string]channel.DeclarationFacts
+	facts map[string]channelspec.DeclarationFacts
 }
 
 func (r visibilityRealm) ResolveDeclaration(
 	_ context.Context, _ channel.ID, declID string,
-) (channel.DeclarationFacts, error) {
+) (channelspec.DeclarationFacts, error) {
 	facts, ok := r.facts[declID]
 	if !ok {
-		return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+		return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 	}
 	return facts, nil
 }
@@ -51,8 +52,8 @@ func (visibilityRealm) ClassKind(context.Context, string) (actor.Kind, bool, err
 	return actor.KindAgent, true, nil
 }
 
-func (visibilityRealm) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{}, nil
+func (visibilityRealm) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{}, nil
 }
 
 func openVisibilityHome(t *testing.T, realm visibilityRealm) *home.Home {
@@ -72,7 +73,7 @@ func openVisibilityHome(t *testing.T, realm visibilityRealm) *home.Home {
 	// clears the permission verdict still needs a host to land on. Bind one:
 	// without it every case below would end in the same placement refusal and
 	// the verdict itself would go untested.
-	if _, err := home.SystemOps(h).AttachDaemon(context.Background(), channel.DaemonRequest{
+	if _, err := home.SystemOps(h).AttachDaemon(context.Background(), channelspec.DaemonRequest{
 		Ref: "attach-host", DaemonID: "daemon-1",
 	}); err != nil {
 		t.Fatalf("AttachDaemon: %v", err)
@@ -82,7 +83,7 @@ func openVisibilityHome(t *testing.T, realm visibilityRealm) *home.Home {
 
 func admitHuman(t *testing.T, h *home.Home, principal string) actor.ActorID {
 	t.Helper()
-	result, err := home.SystemOps(h).Admit(context.Background(), channel.AdmitRequest{
+	result, err := home.SystemOps(h).Admit(context.Background(), channelspec.AdmitRequest{
 		Ref: "admit-" + principal, Principal: principal,
 	})
 	if err != nil {
@@ -117,14 +118,14 @@ func introduceViaOperateFrame(
 	return err
 }
 
-func forbidden(t *testing.T, err error) *channel.OperationError {
+func forbidden(t *testing.T, err error) *channelspec.OperationError {
 	t.Helper()
-	var opErr *channel.OperationError
+	var opErr *channelspec.OperationError
 	if !errors.As(err, &opErr) {
-		t.Fatalf("want a channel.OperationError, got %v", err)
+		t.Fatalf("want a channelspec.OperationError, got %v", err)
 	}
-	if opErr.Code != channel.ErrCodeForbidden {
-		t.Fatalf("want %q, got %q (%s)", channel.ErrCodeForbidden, opErr.Code, opErr.Detail)
+	if opErr.Code != channelspec.ErrCodeForbidden {
+		t.Fatalf("want %q, got %q (%s)", channelspec.ErrCodeForbidden, opErr.Code, opErr.Detail)
 	}
 	return opErr
 }
@@ -132,12 +133,12 @@ func forbidden(t *testing.T, err error) *channel.OperationError {
 // A public declaration is anyone's to place: the owner field is not consulted.
 func TestIntroducePublicDeclarationIgnoresOwnership(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channel.DeclarationFacts{
+	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
 		"pub": {OwnerPrincipal: "alice", Visibility: "public", Class: "go-kimi"},
 	}})
 	bob := admitHuman(t, h, "bob")
 
-	result, err := home.SystemOps(h).Introduce(context.Background(), channel.IntroduceRequest{
+	result, err := home.SystemOps(h).Introduce(context.Background(), channelspec.IntroduceRequest{
 		Ref: "intro-pub", DeclID: "pub", InitiatorActorID: bob,
 	})
 	if err != nil {
@@ -154,12 +155,12 @@ func TestIntroducePublicDeclarationIgnoresOwnership(t *testing.T) {
 // same declaration.
 func TestIntroducePrivateDeclarationByItsOwnerIsAllowed(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channel.DeclarationFacts{
+	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
 		"mine": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
 	}})
 	alice := admitHuman(t, h, "alice")
 
-	result, err := home.SystemOps(h).Introduce(context.Background(), channel.IntroduceRequest{
+	result, err := home.SystemOps(h).Introduce(context.Background(), channelspec.IntroduceRequest{
 		Ref: "intro-mine", DeclID: "mine", InitiatorActorID: alice,
 	})
 	if err != nil {
@@ -177,13 +178,13 @@ func TestIntroducePrivateDeclarationByItsOwnerIsAllowed(t *testing.T) {
 // same answer.
 func TestBothIntroductionDoorsAgreeOnAnOwnersPrivateDeclaration(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channel.DeclarationFacts{
+	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
 		"mine":  {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
 		"mine2": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
 	}})
 	alice := admitHuman(t, h, "alice")
 
-	_, viaAdmission := home.SystemOps(h).Introduce(context.Background(), channel.IntroduceRequest{
+	_, viaAdmission := home.SystemOps(h).Introduce(context.Background(), channelspec.IntroduceRequest{
 		Ref: "intro-mine", DeclID: "mine", InitiatorActorID: alice,
 	})
 	viaFrame := introduceViaOperateFrame(t, h, alice, "mine2")
@@ -201,13 +202,13 @@ func TestBothIntroductionDoorsAgreeOnAnOwnersPrivateDeclaration(t *testing.T) {
 // satisfied by both doors simply saying yes to everything.
 func TestBothIntroductionDoorsAgreeOnAnotherPrincipalsPrivateDeclaration(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channel.DeclarationFacts{
+	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
 		"hers":  {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
 		"hers2": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
 	}})
 	bob := admitHuman(t, h, "bob")
 
-	_, viaAdmission := home.SystemOps(h).Introduce(context.Background(), channel.IntroduceRequest{
+	_, viaAdmission := home.SystemOps(h).Introduce(context.Background(), channelspec.IntroduceRequest{
 		Ref: "intro-hers", DeclID: "hers", InitiatorActorID: bob,
 	})
 	viaFrame := introduceViaOperateFrame(t, h, bob, "hers2")
@@ -221,12 +222,12 @@ func TestBothIntroductionDoorsAgreeOnAnotherPrincipalsPrivateDeclaration(t *test
 // Someone else's private declaration is refused, whichever door asked.
 func TestIntroducePrivateDeclarationByAnotherPrincipalIsForbidden(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channel.DeclarationFacts{
+	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
 		"hers": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
 	}})
 	bob := admitHuman(t, h, "bob")
 
-	_, err := home.SystemOps(h).Introduce(context.Background(), channel.IntroduceRequest{
+	_, err := home.SystemOps(h).Introduce(context.Background(), channelspec.IntroduceRequest{
 		Ref: "intro-hers", DeclID: "hers", InitiatorActorID: bob,
 	})
 	if err == nil {
@@ -241,7 +242,7 @@ func TestIntroducePrivateDeclarationByAnotherPrincipalIsForbidden(t *testing.T) 
 // The refusal must not depend on declaration owners happening to be non-empty.
 func TestIntroducePrivateDeclarationByPrincipalLessInitiatorIsForbidden(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channel.DeclarationFacts{
+	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
 		"pub":     {OwnerPrincipal: "alice", Visibility: "public", Class: "go-kimi"},
 		"private": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
 		// An owner field that never got filled. No realm path writes this today;
@@ -253,7 +254,7 @@ func TestIntroducePrivateDeclarationByPrincipalLessInitiatorIsForbidden(t *testi
 	alice := admitHuman(t, h, "alice")
 
 	// A declared agent is an active member with no principal of its own.
-	agent, err := home.SystemOps(h).Introduce(ctx, channel.IntroduceRequest{
+	agent, err := home.SystemOps(h).Introduce(ctx, channelspec.IntroduceRequest{
 		Ref: "intro-agent", DeclID: "pub", InitiatorActorID: alice,
 	})
 	if err != nil {
@@ -268,7 +269,7 @@ func TestIntroducePrivateDeclarationByPrincipalLessInitiatorIsForbidden(t *testi
 			facts.Kind, facts.Principal)
 	}
 
-	if _, err := home.SystemOps(h).Introduce(ctx, channel.IntroduceRequest{
+	if _, err := home.SystemOps(h).Introduce(ctx, channelspec.IntroduceRequest{
 		Ref: "intro-private-by-agent", DeclID: "private", InitiatorActorID: agent.ActorID,
 	}); err == nil {
 		t.Fatal("a principal-less initiator placed a private declaration")
@@ -276,7 +277,7 @@ func TestIntroducePrivateDeclarationByPrincipalLessInitiatorIsForbidden(t *testi
 		forbidden(t, err)
 	}
 
-	if _, err := home.SystemOps(h).Introduce(ctx, channel.IntroduceRequest{
+	if _, err := home.SystemOps(h).Introduce(ctx, channelspec.IntroduceRequest{
 		Ref: "intro-ownerless-by-agent", DeclID: "ownerless", InitiatorActorID: agent.ActorID,
 	}); err == nil {
 		t.Fatal("empty principal matched an empty owner — the refusal is leaning on realm-side invariants")

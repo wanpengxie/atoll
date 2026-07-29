@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -27,11 +28,11 @@ type mutableDeclarationResolver struct {
 
 func (r *mutableDeclarationResolver) ResolveDeclaration(
 	context.Context, channel.ID, string,
-) (channel.DeclarationFacts, error) {
+) (channelspec.DeclarationFacts, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reads++
-	return channel.DeclarationFacts{
+	return channelspec.DeclarationFacts{
 		Visibility: "public", Class: r.class,
 		Config: append(json.RawMessage(nil), r.config...),
 	}, nil
@@ -44,8 +45,8 @@ func (r *mutableDeclarationResolver) ClassKind(_ context.Context, class string) 
 	return "", false, nil
 }
 
-func (r *mutableDeclarationResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{}, nil
+func (r *mutableDeclarationResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{}, nil
 }
 
 func (r *mutableDeclarationResolver) BuildClass(

@@ -58,10 +58,10 @@ func Open(cfg Config) (_ *Home, retErr error) {
 
 	h := &Home{
 		channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{}),
-		nowMs:              func() int64 { return time.Now().UnixMilli() },
-		onMembershipChange: cfg.OnMembershipChange,
-		subjectgate:        subjectgate.NewRegistry(),
-		pokeCh:             make(chan struct{}, 1),
+		nowMs:            func() int64 { return time.Now().UnixMilli() },
+		onRelationChange: cfg.OnRelationChange,
+		subjectgate:      subjectgate.NewRegistry(),
+		pokeCh:           make(chan struct{}, 1),
 	}
 	defer func() {
 		if p := recover(); p != nil {
@@ -368,6 +368,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}()
 
 	logger.Info("platform.home.ready", "channel", cfg.ChannelID)
+	h.emitRelationSnapshot(ctx)
 	return h, nil
 }
 

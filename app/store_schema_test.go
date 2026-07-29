@@ -50,7 +50,7 @@ func TestOpenDB_InstallsFreshSchemaAndReopens(t *testing.T) {
 	assertColumnAbsent(t, db, "actor_decls", "default_looper")
 }
 
-func TestAdmissionOwnerSchemaEnforcesTaggedIdentityAndScopedIdempotency(t *testing.T) {
+func TestDesiredChannelSchemaReleasesRetiringNames(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.db")
 	process, err := OpenProcessDB(path, true)
 	if err != nil {
@@ -58,48 +58,23 @@ func TestAdmissionOwnerSchemaEnforcesTaggedIdentityAndScopedIdempotency(t *testi
 	}
 	t.Cleanup(func() { _ = process.Close() })
 	db := process.DB
-	insert := func(id, ch, principal, actorID, key string) error {
-		var p, a, k any
-		if principal != "<null>" {
-			p = principal
-		}
-		if actorID != "<null>" {
-			a = actorID
-		}
-		if key != "<null>" {
-			k = key
-		}
-		_, err := db.Exec(`INSERT INTO channel_admission_operations
-			(operation_id,idempotency_key,channel_id,op,requested_by_principal,requested_by_actor_id,request_json,request_digest,created_at)
-			VALUES (?,?,?,?,?,?,?,?,?)`, id, k, ch, "join", p, a, `{}`, "digest:"+id, 1)
+	insert := func(id, status string) error {
+		_, err := db.Exec(`INSERT INTO channels(
+			id,name,type,status,owner_principal,spec_json,created_at)
+			VALUES (?,'same','group',?,'owner','{}',1)`, id, status)
 		return err
 	}
-	if err := insert("principal", "c1", "login", "<null>", "p-key"); err != nil {
-		t.Fatalf("principal-only owner rejected: %v", err)
+	if err := insert("present-a", "present"); err != nil {
+		t.Fatal(err)
 	}
-	if err := insert("actor", "c1", "<null>", "actor:one", "shared"); err != nil {
-		t.Fatalf("actor-only owner rejected: %v", err)
+	if err := insert("present-b", "present"); err == nil {
+		t.Fatal("two present rows accepted the same name")
 	}
-	if err := insert("neither", "c1", "<null>", "<null>", "<null>"); err == nil {
-		t.Fatal("owner XOR accepted two NULL coordinates")
+	if _, err := db.Exec(`UPDATE channels SET status='retiring' WHERE id='present-a'`); err != nil {
+		t.Fatal(err)
 	}
-	if err := insert("empty", "c1", "", "<null>", "<null>"); err == nil {
-		t.Fatal("owner XOR accepted an empty principal")
-	}
-	if err := insert("both", "c1", "login-2", "actor:two", "<null>"); err == nil {
-		t.Fatal("owner XOR accepted both coordinates")
-	}
-	if err := insert("actor-other", "c1", "<null>", "actor:two", "shared"); err != nil {
-		t.Fatalf("different actor collided on idempotency key: %v", err)
-	}
-	if err := insert("actor-other-channel", "c2", "<null>", "actor:one", "shared"); err != nil {
-		t.Fatalf("same actor spelling in another channel collided: %v", err)
-	}
-	if err := insert("actor-duplicate", "c1", "<null>", "actor:one", "shared"); err == nil {
-		t.Fatal("same channel actor reused idempotency key")
-	}
-	if err := insert("principal-cross-channel", "c2", "login", "<null>", "p-key"); err == nil {
-		t.Fatal("principal idempotency key unexpectedly became channel-scoped")
+	if err := insert("present-b", "present"); err != nil {
+		t.Fatalf("retiring row retained name occupancy: %v", err)
 	}
 }
 
@@ -182,8 +157,8 @@ func TestOpenProcessDB_StrictReopenRejectsMalformedSchemaWithoutMutation(t *test
 			build: func(t *testing.T, path string) {
 				db := openRawSQLite(t, path)
 				initializeSchemaVariant(t, db, func(object schemaObject) string {
-					if object.name == "ix_admission_pending" {
-						return `CREATE INDEX ix_admission_pending ON channel_admission_operations(operation_id)`
+					if object.name == "ux_channels_present_name" {
+						return `CREATE UNIQUE INDEX ux_channels_present_name ON channels(name)`
 					}
 					return object.sql
 				})

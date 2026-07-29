@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -52,7 +52,7 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := h.opEntry.AttachDaemon(ctx, channel.DaemonRequest{DaemonID: daemonID}); err != nil {
+	if _, err := h.opEntry.AttachDaemon(ctx, channelspec.DaemonRequest{DaemonID: daemonID}); err != nil {
 		t.Fatal(err)
 	}
 	planBefore, err := h.planForDaemon(ctx, daemonID)
@@ -60,7 +60,7 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 		t.Fatalf("plan before detach = %+v err=%v", planBefore, err)
 	}
 
-	if _, err := h.opEntry.DetachDaemon(ctx, channel.DaemonRequest{DaemonID: daemonID}); err != nil {
+	if _, err := h.opEntry.DetachDaemon(ctx, channelspec.DaemonRequest{DaemonID: daemonID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,7 +99,7 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 	}
 
 	// Re-attaching the same daemon id needs no repair action.
-	if _, err := h.opEntry.AttachDaemon(ctx, channel.DaemonRequest{DaemonID: daemonID}); err != nil {
+	if _, err := h.opEntry.AttachDaemon(ctx, channelspec.DaemonRequest{DaemonID: daemonID}); err != nil {
 		t.Fatal(err)
 	}
 	planBack, err := h.planForDaemon(ctx, daemonID)

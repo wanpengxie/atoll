@@ -23,10 +23,10 @@ func TestRealmChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
 		t.Fatalf("child parent_id=%v want %s", child["parent_id"], parentID)
 	}
 	invalidParent := env.do(t, "POST", "/api/channels", map[string]any{"name": "orphan-attempt", "parent_id": "missing-parent"}, ownerCookies)
-	assertStatus(t, invalidParent, http.StatusBadRequest)
-	var invalidJobs int
-	if err := env.db.QueryRow(`SELECT COUNT(*) FROM channel_provision_jobs WHERE name='orphan-attempt'`).Scan(&invalidJobs); err != nil || invalidJobs != 0 {
-		t.Fatalf("invalid parent jobs=%d err=%v", invalidJobs, err)
+	assertStatus(t, invalidParent, http.StatusConflict)
+	var invalidRows int
+	if err := env.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE name='orphan-attempt'`).Scan(&invalidRows); err != nil || invalidRows != 0 {
+		t.Fatalf("invalid parent rows=%d err=%v", invalidRows, err)
 	}
 
 	duplicate := env.do(t, "POST", "/api/channels", map[string]any{"name": "child"}, ownerCookies)
@@ -51,6 +51,19 @@ func TestRealmChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
 
 	deleted := env.do(t, "DELETE", "/api/channels/"+parentID, nil, ownerCookies)
 	assertStatus(t, deleted, http.StatusOK)
+	if body := respJSON(t, deleted); body["changed"] != true {
+		t.Fatalf("first delete=%v", body)
+	}
+	replayed := env.do(t, "DELETE", "/api/channels/"+parentID, nil, outsiderCookies)
+	assertStatus(t, replayed, http.StatusOK)
+	if body := respJSON(t, replayed); body["changed"] != false {
+		t.Fatalf("retiring/absent delete replay=%v", body)
+	}
+	missing := env.do(t, "DELETE", "/api/channels/never-existed", nil, outsiderCookies)
+	assertStatus(t, missing, http.StatusOK)
+	if body := respJSON(t, missing); body["changed"] != false {
+		t.Fatalf("absent delete=%v", body)
+	}
 	if owner["id"] == "" {
 		t.Fatal("owner identity missing")
 	}
@@ -78,26 +91,14 @@ func TestRetiredContainerRoutesAreAbsent(t *testing.T) {
 	}
 }
 
-func TestLifecycleOperationProjectionOwnerOnly(t *testing.T) {
+func TestLifecycleResponsesExposeNoOperationProjection(t *testing.T) {
 	env := setupTestApp(t)
-	owner, cookies := register(t, env, "operation-owner@example.com", "secret123", "Owner")
+	_, cookies := register(t, env, "operation-owner@example.com", "secret123", "Owner")
 	created := env.do(t, "POST", "/api/channels", map[string]any{"name": "operation-channel"}, cookies)
 	assertStatus(t, created, http.StatusCreated)
-	ch := respJSON(t, created)
-	var ref string
-	if err := env.db.QueryRow(`SELECT operation_id FROM channel_provision_jobs WHERE channel_id=?`, ch["id"]).Scan(&ref); err != nil {
-		t.Fatal(err)
+	body := respJSON(t, created)
+	if _, exists := body["operation_id"]; exists {
+		t.Fatalf("create leaked operation id: %v", body)
 	}
-	view := env.do(t, "GET", "/api/operations/"+ref, nil, cookies)
-	assertStatus(t, view, http.StatusOK)
-	body := respJSON(t, view)
-	if body["family"] != "lifecycle" || body["status"] != "done" {
-		t.Fatalf("operation=%v", body)
-	}
-	_, other := register(t, env, "operation-other@example.com", "secret123", "Other")
-	denied := env.do(t, "GET", "/api/operations/"+ref, nil, other)
-	assertStatus(t, denied, http.StatusNotFound)
-	if owner["id"] == "" {
-		t.Fatal("owner missing")
-	}
+	assertStatus(t, env.do(t, "GET", "/api/operations/anything", nil, cookies), http.StatusNotFound)
 }

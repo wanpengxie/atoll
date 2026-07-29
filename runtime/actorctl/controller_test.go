@@ -568,6 +568,51 @@ func TestKernelIsNeverAMember(t *testing.T) {
 	}
 }
 
+func TestTerminalTransitionCarriesFactsBeforeLedgerDeletion(t *testing.T) {
+	store := newFakeRecordStore(
+		storespec.ActorRecord{
+			ID: "human:alice", Kind: actor.KindHuman, Principal: "alice",
+			Definition: storespec.ActorDefinition{Class: "human"},
+			Placement:  storespec.NewServerPlacement(),
+		},
+		storespec.ActorRecord{
+			ID: "agent:decl", Kind: actor.KindAgent, SourceDeclID: "decl:a",
+			Definition: storespec.ActorDefinition{Class: "agent"},
+			Placement:  storespec.NewServerPlacement(),
+		},
+	)
+	controller := newTestController(t, store)
+	removed, err := controller.Remove(context.Background(), RemoveRequest{
+		Target: "agent:decl", InitiatorActorID: "human:alice",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed.EndedFacts) != 1 {
+		t.Fatalf("remove facts=%+v", removed.EndedFacts)
+	}
+	if fact := removed.EndedFacts[0]; fact.ID != "agent:decl" ||
+		fact.Kind != actor.KindAgent || fact.SourceDeclID != "decl:a" || fact.Principal != "" {
+		t.Fatalf("remove fact=%+v", fact)
+	}
+
+	attempt := currentAttempt(t, controller, "human:alice")
+	ended, err := controller.End(context.Background(), EndRequest{
+		Target: "human:alice", CallerActorID: "human:alice",
+		CallerAttempt: attemptKeyOf(attempt),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ended.EndedFacts) != 1 {
+		t.Fatalf("end facts=%+v", ended.EndedFacts)
+	}
+	if fact := ended.EndedFacts[0]; fact.ID != "human:alice" ||
+		fact.Kind != actor.KindHuman || fact.Principal != "alice" || fact.SourceDeclID != "" {
+		t.Fatalf("end fact=%+v", fact)
+	}
+}
+
 // --- deep copy ---------------------------------------------------------------
 
 func TestRecordHandoffCopiesConfig(t *testing.T) {

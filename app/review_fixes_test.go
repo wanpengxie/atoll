@@ -181,11 +181,11 @@ func TestChannelDaemonListRejectsNonMember(t *testing.T) {
 	assertStatus(t, listed, http.StatusForbidden)
 }
 
-func TestActorDeclListFailsWhenChannelProjectionIsUnavailable(t *testing.T) {
+func TestActorDeclListUsesRelationIndexWhenChannelUnavailable(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)
 	env.app.DropHomeForTest(channel.ID(setup.chID))
 
 	listed := env.do(t, http.MethodGet, "/api/actor-decls", nil, setup.cookies)
-	assertStatus(t, listed, http.StatusServiceUnavailable)
+	assertStatus(t, listed, http.StatusOK)
 }

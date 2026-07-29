@@ -5,8 +5,9 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
@@ -53,26 +54,26 @@ func TestDeclarationClassTransitionAndReservedClass(t *testing.T) {
 	}
 }
 
-func TestAdmissionErrorClassificationAdapters(t *testing.T) {
-	if got := classifyAdmissionError(string(admissionCodeDaemonNotFound)); got != admissionNotFound {
+func TestSysopErrorClassificationAdapters(t *testing.T) {
+	if got := classifySysopError(string(sysopCodeDaemonNotFound)); got != sysopNotFound {
 		t.Fatalf("daemon_not_found class=%v", got)
 	}
-	if got := admissionErrorHTTP(string(admissionCodeDaemonNotFound)); got != 404 {
+	if got := sysopErrorHTTP(string(sysopCodeDaemonNotFound)); got != 404 {
 		t.Fatalf("daemon_not_found HTTP=%d", got)
 	}
 	// RealmOps has no daemon attach operation, and daemon identities are not the
 	// resource family addressed by RealmResourceNotFound. If malformed persisted
 	// input ever crosses this adapter, fail honestly as a realm-level outage.
-	if got := admissionRealmErrorCode(string(admissionCodeDaemonNotFound)); got != channel.RealmUnavailable {
+	if got := sysopRealmErrorCode(string(sysopCodeDaemonNotFound)); got != realmtool.RealmUnavailable {
 		t.Fatalf("daemon_not_found Realm=%q", got)
 	}
-	if got := classifyAdmissionError(string(channel.ErrCodeChannelUnavailable)); got != admissionUnavailable {
+	if got := classifySysopError(string(channelspec.ErrCodeChannelUnavailable)); got != sysopConflict {
 		t.Fatalf("channel_unavailable class=%v", got)
 	}
-	if got := admissionErrorHTTP(string(channel.ErrCodeChannelUnavailable)); got != 503 {
+	if got := sysopErrorHTTP(string(channelspec.ErrCodeChannelUnavailable)); got != 409 {
 		t.Fatalf("channel_unavailable HTTP=%d", got)
 	}
-	if got := admissionRealmErrorCode(string(channel.ErrCodeChannelUnavailable)); got != channel.RealmChannelUnavailable {
+	if got := sysopRealmErrorCode(string(channelspec.ErrCodeChannelUnavailable)); got != realmtool.RealmChannelUnavailable {
 		t.Fatalf("channel_unavailable Realm=%q", got)
 	}
 }

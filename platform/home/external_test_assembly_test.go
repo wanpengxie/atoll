@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -12,14 +13,14 @@ import (
 
 type emptyIntroductionResolver struct{}
 
-func (emptyIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
-	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+func (emptyIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error) {
+	return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 }
 func (emptyIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (emptyIntroductionResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{}, nil
+func (emptyIntroductionResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{}, nil
 }
 
 type emptyCompositionResolver struct{}

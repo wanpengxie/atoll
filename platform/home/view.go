@@ -7,9 +7,11 @@ import (
 	"io"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/humancell"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
+	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -81,7 +83,7 @@ func (v View) Resources() ResourceView {
 // reader gate needs existence, never a record.
 func validateReader(ctx context.Context, authority storespec.IdentityPresence, as channel.Reader) error {
 	if !as.Valid() {
-		return &channel.RealmError{Code: channel.RealmForbidden}
+		return &realmtool.RealmError{Code: realmtool.RealmForbidden}
 	}
 	if as.Mode != channel.ReaderMember {
 		return nil
@@ -91,7 +93,7 @@ func validateReader(ctx context.Context, authority storespec.IdentityPresence, a
 		return err
 	}
 	if !active {
-		return &channel.RealmError{Code: channel.RealmForbidden}
+		return &realmtool.RealmError{Code: realmtool.RealmForbidden}
 	}
 	return nil
 }
@@ -112,7 +114,7 @@ func (v ResourceView) Stat(ctx context.Context, as channel.Reader, id resource.R
 		return channel.ResourceMeta{}, err
 	}
 	if !found {
-		return channel.ResourceMeta{}, &channel.RealmError{Code: channel.RealmResourceNotFound}
+		return channel.ResourceMeta{}, &realmtool.RealmError{Code: realmtool.RealmResourceNotFound}
 	}
 	return meta, nil
 }
@@ -123,13 +125,13 @@ func (v ResourceView) Fetch(ctx context.Context, as channel.Reader, id resource.
 	}
 	meta, value, found, err := v.store.FetchReadable(ctx, id)
 	if errors.Is(err, storespec.ErrResourceCapabilityUnavailable) {
-		return channel.ResourceFetch{}, &channel.RealmError{Code: channel.RealmCapabilityUnavailable}
+		return channel.ResourceFetch{}, &realmtool.RealmError{Code: realmtool.RealmCapabilityUnavailable}
 	}
 	if err != nil {
 		return channel.ResourceFetch{}, err
 	}
 	if !found {
-		return channel.ResourceFetch{}, &channel.RealmError{Code: channel.RealmResourceNotFound}
+		return channel.ResourceFetch{}, &realmtool.RealmError{Code: realmtool.RealmResourceNotFound}
 	}
 	return channel.ResourceFetch{Meta: meta, Body: io.NopCloser(bytes.NewReader(value))}, nil
 }
@@ -183,12 +185,12 @@ func (v View) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, af
 
 // ActorFacts is the requester-authorization projection: who is behind this
 // actor and what kind it is.
-func (v View) ActorFacts(ctx context.Context, id actor.ActorID) (channel.ActorFacts, bool, error) {
+func (v View) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	facts, found, err := v.authority.ActorFacts(ctx, id)
 	if err != nil || !found {
-		return channel.ActorFacts{}, found, err
+		return channelspec.ActorFacts{}, found, err
 	}
-	return channel.ActorFacts{
+	return channelspec.ActorFacts{
 		Principal: facts.Principal, Kind: facts.Kind, Active: true,
 	}, true, nil
 }
@@ -201,7 +203,7 @@ func (v View) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	case humancell.RoutingUnset:
 		return "", false, nil
 	default:
-		return "", false, channel.ErrDefaultAgentUnavailable
+		return "", false, channelspec.ErrDefaultAgentUnavailable
 	}
 }
 
@@ -222,12 +224,12 @@ func (v View) ResolvePrincipal(_ context.Context, principal string) (actor.Actor
 // which is where composition belongs. An actor that ends between the two reads
 // simply drops out of the roster; this is a level-reconciled sweep input, not a
 // linearizable transaction.
-func (v View) HumanRoster(ctx context.Context) ([]channel.HumanRosterEntry, error) {
+func (v View) HumanRoster(ctx context.Context) ([]channelspec.HumanRosterEntry, error) {
 	identities, err := v.authority.ActiveIdentities()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]channel.HumanRosterEntry, 0, len(identities))
+	out := make([]channelspec.HumanRosterEntry, 0, len(identities))
 	for _, identity := range identities {
 		if identity.Kind != actor.KindHuman {
 			continue
@@ -239,7 +241,7 @@ func (v View) HumanRoster(ctx context.Context) ([]channel.HumanRosterEntry, erro
 		if !found || facts.Principal == "" {
 			continue
 		}
-		out = append(out, channel.HumanRosterEntry{
+		out = append(out, channelspec.HumanRosterEntry{
 			ActorID: identity.ID, Principal: facts.Principal,
 		})
 	}

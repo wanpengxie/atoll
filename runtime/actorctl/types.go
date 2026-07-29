@@ -148,9 +148,20 @@ func (h *ReconcileHints) add(placement storespec.Placement) {
 // Transition is the committed change set of one Controller command. Platform
 // owns every cross-organ tail these facts imply.
 type Transition[T any] struct {
-	Result    T
-	Ended     []actor.ActorID
-	Reconcile ReconcileHints
+	Result     T
+	Ended      []actor.ActorID
+	EndedFacts []EndedFact
+	Reconcile  ReconcileHints
+}
+
+// EndedFact preserves the identity facts held at the terminal commit point.
+// Terminal is the only place they are still available without a post-commit
+// lookup: the record is removed from the active ledger immediately afterwards.
+type EndedFact struct {
+	ID           actor.ActorID
+	Kind         actor.Kind
+	Principal    string
+	SourceDeclID string
 }
 
 // DeclaredInstance is the declaration reconcile loop's question shape: "what

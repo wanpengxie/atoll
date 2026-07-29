@@ -1,13 +1,15 @@
 package app
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
 )
 
-func TestNew_IsolatesMissingChannelImage(t *testing.T) {
+func TestNew_ConvergesMissingChannelImageFromDesiredValue(t *testing.T) {
 	dir := t.TempDir()
 	db, err := openTestAppDB(t, filepath.Join(dir, "app.sqlite"))
 	if err != nil {
@@ -16,7 +18,9 @@ func TestNew_IsolatesMissingChannelImage(t *testing.T) {
 	defer db.Close()
 	for _, stmt := range []string{
 		`INSERT INTO users(id,email,password,created_at) VALUES ('u','u@x','x',1)`,
-		`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('c','c','group',1,NULL)`,
+		`INSERT INTO channels(id,name,type,status,owner_principal,spec_json,created_at,parent_id)
+		 VALUES ('c','c','group','present','u',
+		 '{"channel_id":"c","type":"group","owner_principal":"u","created_at":1}',1,NULL)`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("fixture %q: %v", stmt, err)
@@ -30,7 +34,14 @@ func TestNew_IsolatesMissingChannelImage(t *testing.T) {
 		t.Fatalf("one missing image blocked realm startup: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Close() })
-	if _, ok := a.host.Acquire("c"); ok {
-		t.Fatal("missing image was fabricated/opened")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := a.host.Acquire("c"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(fmt.Errorf("desired channel did not converge to serving"))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

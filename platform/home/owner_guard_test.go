@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -61,19 +61,19 @@ func TestOwnerTerminalGuardRefusesAtTheDoor(t *testing.T) {
 	}
 
 	// The owner is protected: refused with the typed door error, still active.
-	_, err = h.opEntry.Remove(ctx, channel.RemoveRequest{
+	_, err = h.opEntry.Remove(ctx, channelspec.RemoveRequest{
 		Ref: "remove-owner", Target: ownerID, InitiatorActorID: agentID,
 	})
-	var opErr *channel.OperationError
-	if !errors.As(err, &opErr) || opErr.Code != channel.ErrCodeProtectedActor {
-		t.Fatalf("removing the owner: err=%v, want %s", err, channel.ErrCodeProtectedActor)
+	var opErr *channelspec.OperationError
+	if !errors.As(err, &opErr) || opErr.Code != channelspec.ErrCodeProtectedActor {
+		t.Fatalf("removing the owner: err=%v, want %s", err, channelspec.ErrCodeProtectedActor)
 	}
 	if active, err := h.controller.IsActive(ctx, ownerID); err != nil || !active {
 		t.Fatalf("owner survived check: active=%v err=%v", active, err)
 	}
 
 	// A non-owner member passes the same door.
-	result, err := h.opEntry.Remove(ctx, channel.RemoveRequest{
+	result, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
 		Ref: "remove-agent", Target: agentID, InitiatorActorID: agentID,
 	})
 	if err != nil {

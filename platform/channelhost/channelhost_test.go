@@ -12,13 +12,14 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 type testResolver struct {
 	daemonDeleted   bool
-	declaration     channel.DeclarationFacts
+	declaration     channelspec.DeclarationFacts
 	declarationLive bool
 }
 
@@ -26,9 +27,9 @@ func (testResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessag
 	return platform.ActorFactory{}, false
 }
 
-func (r testResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
+func (r testResolver) ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error) {
 	if !r.declarationLive {
-		return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+		return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 	}
 	return r.declaration, nil
 }
@@ -36,12 +37,12 @@ func (r testResolver) ResolveDeclaration(context.Context, channel.ID, string) (c
 func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	liveResolver := testResolver{declarationLive: true, declaration: channel.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`)}}
+	liveResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`)}}
 	host, err := New(root, HomeDeps{CompositionResolver: liveResolver, IntroductionResolver: liveResolver})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := (channel.RenderedSnapshot{
+	snapshot, err := (channelspec.RenderedSnapshot{
 		Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`), Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
@@ -67,7 +68,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	latestResolver := testResolver{declarationLive: true, declaration: channel.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"b"}`)}}
+	latestResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"b"}`)}}
 	reopened, err := New(root, HomeDeps{CompositionResolver: latestResolver, IntroductionResolver: latestResolver})
 	if err != nil {
 		t.Fatal(err)
@@ -95,8 +96,8 @@ func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool
 	}
 	return "", false, nil
 }
-func (r testResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{Deleted: r.daemonDeleted}, nil
+func (r testResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{Deleted: r.daemonDeleted}, nil
 }
 
 func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
@@ -107,7 +108,7 @@ func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := (channel.RenderedSnapshot{
+	snapshot, err := (channelspec.RenderedSnapshot{
 		Class: "test-agent", Placement: channel.Placement{Kind: channel.PlacementDaemon, DesiredHost: "daemon-a"},
 	}).Seal()
 	if err != nil {
@@ -125,7 +126,7 @@ func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
 	if !ok {
 		t.Fatal("initial channel not serving")
 	}
-	if _, err := bundle.SysOp().AttachDaemon(ctx, channel.DaemonRequest{Ref: "offline:attach", DaemonID: "daemon-a"}); err != nil {
+	if _, err := bundle.SysOp().AttachDaemon(ctx, channelspec.DaemonRequest{Ref: "offline:attach", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Close(); err != nil {
@@ -286,7 +287,7 @@ func TestDestroyNoReplacePreservesExistingTombstone(t *testing.T) {
 func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	ctx := context.Background()
 	host := newTestHost(t)
-	snapshot, err := (channel.RenderedSnapshot{
+	snapshot, err := (channelspec.RenderedSnapshot{
 		Class: "test-agent", Config: json.RawMessage(`{"v":1}`),
 		Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()

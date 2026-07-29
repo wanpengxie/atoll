@@ -12,6 +12,8 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -50,11 +52,11 @@ func TestRealmOpsEditDeclarationRejectsCrossKind(t *testing.T) {
 	if _, err := a.db.Exec(`INSERT INTO actor_decls(id,name,owner,default_class,config_json,created_at,updated_at,visibility) VALUES ('kind-pinned','kind-pinned','owner',?,'{}',?,?,'private')`, realmFetchSeederClass, now, now); err != nil {
 		t.Fatal(err)
 	}
-	_, err = (realmOps{app: a}).EditDeclaration(context.Background(), channel.Requester{
+	_, err = (realmOps{app: a}).EditDeclaration(context.Background(), realmtool.Requester{
 		ActorID: owner, ChannelID: "realm-edit-kind", RequestID: "cross-kind-edit",
-	}, "kind-pinned", channel.DeclSpec{Name: "kind-pinned", Class: realmCrossKindToolClass, Visibility: "private", Config: json.RawMessage(`{}`)})
-	var realmErr *channel.RealmError
-	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmInvalidRequest {
+	}, "kind-pinned", realmtool.DeclSpec{Name: "kind-pinned", Class: realmCrossKindToolClass, Visibility: "private", Config: json.RawMessage(`{}`)})
+	var realmErr *realmtool.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmInvalidRequest {
 		t.Fatalf("cross-kind edit err=%v", err)
 	}
 	var class string
@@ -65,7 +67,7 @@ func TestRealmOpsEditDeclarationRejectsCrossKind(t *testing.T) {
 
 func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	a := newBareAppForTest(t)
-	snapshot, err := (channel.RenderedSnapshot{
+	snapshot, err := (channelspec.RenderedSnapshot{
 		Class: "dormant-agent", Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
@@ -78,11 +80,11 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("resolve requester=(%s,%v,%v)", agent, found, err)
 	}
-	_, err = (realmOps{app: a}).CreateDeclaration(context.Background(), channel.Requester{
+	_, err = (realmOps{app: a}).CreateDeclaration(context.Background(), realmtool.Requester{
 		ActorID: agent, ChannelID: "agent-realm-ops", RequestID: "agent-create-request",
-	}, channel.DeclSpec{Name: "must not persist", Class: "go-kimi", Visibility: "public", Config: json.RawMessage(`{}`)})
-	var realmErr *channel.RealmError
-	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmForbidden {
+	}, realmtool.DeclSpec{Name: "must not persist", Class: "go-kimi", Visibility: "public", Config: json.RawMessage(`{}`)})
+	var realmErr *realmtool.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmForbidden {
 		t.Fatalf("agent create err=%v", err)
 	}
 	var count int
@@ -96,10 +98,7 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 
 func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testing.T) {
 	a := newBareAppForTest(t)
-	a.admission = newAdmissionService(a)
-	a.admission.start()
-	t.Cleanup(a.admission.close)
-	requesterSnapshot, err := (channel.RenderedSnapshot{
+	requesterSnapshot, err := (channelspec.RenderedSnapshot{
 		Class: "dormant-requester", Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
@@ -116,63 +115,46 @@ func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testin
 		!ok || facts.Principal != "" {
 		t.Fatalf("requester facts=%+v ok=%v err=%v", facts, ok, factsErr)
 	}
-	if _, err := bundle.SysOp().AttachDaemon(context.Background(), channel.DaemonRequest{Ref: "attach-agent-owner", DaemonID: "daemon-a"}); err != nil {
+	if _, err := bundle.SysOp().AttachDaemon(context.Background(), channelspec.DaemonRequest{Ref: "attach-agent-owner", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UnixMilli()
-	if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('agent-owned-operation','agent-owned-operation','group',?,NULL)`, now); err != nil {
+	if _, err := a.db.Exec(`INSERT INTO channels(
+		id,name,type,status,owner_principal,spec_json,created_at,parent_id)
+		VALUES ('agent-owned-operation','agent-owned-operation','group','present','owner','{}',?,NULL)`, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.db.Exec(`INSERT INTO actor_decls(id,name,owner,default_class,created_at,updated_at,visibility) VALUES ('public-target','public-target','owner',?,?,?,'public')`, realmFetchSeederClass, now, now); err != nil {
 		t.Fatal(err)
 	}
-	result, err := (realmOps{app: a}).Introduce(context.Background(), channel.Requester{
+	result, err := (realmOps{app: a}).Introduce(context.Background(), realmtool.Requester{
 		ActorID: requester, ChannelID: "agent-owned-operation", RequestID: "agent-introduce",
-	}, "public-target", channel.IntroduceOpts{})
+	}, "public-target", realmtool.IntroduceOpts{})
 	if err != nil || !result.Created || result.ActorID == "" {
 		t.Fatalf("agent introduce=(%+v,%v)", result, err)
 	}
-	var principal, actorOwner string
-	if err := a.db.QueryRow(`SELECT COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'') FROM channel_admission_operations WHERE operation_id=?`,
-		channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce")).Scan(&principal, &actorOwner); err != nil {
-		t.Fatal(err)
-	}
-	if principal != "" || actorOwner != string(requester) {
-		t.Fatalf("owner=(%q,%q), want actor %q", principal, actorOwner, requester)
-	}
-	view, err := (realmOps{app: a}).OperationStatus(context.Background(), channel.Requester{
-		ActorID: requester, ChannelID: "agent-owned-operation", RequestID: "status",
-	}, channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce"))
-	if err != nil || view.Status != "done" {
-		t.Fatalf("agent operation status=(%+v,%v)", view, err)
-	}
-	ownerActor, found, err := bundle.View().ResolvePrincipal(context.Background(), "owner")
-	if err != nil || !found {
-		t.Fatalf("owner actor=(%q,%v,%v)", ownerActor, found, err)
-	}
-	_, err = (realmOps{app: a}).OperationStatus(context.Background(), channel.Requester{
-		ActorID: ownerActor, ChannelID: "agent-owned-operation", RequestID: "foreign-status",
-	}, channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce"))
-	var realmErr *channel.RealmError
-	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmForbidden {
-		t.Fatalf("foreign actor operation status err=%v", err)
+	replayed, err := (realmOps{app: a}).Introduce(context.Background(), realmtool.Requester{
+		ActorID: requester, ChannelID: "agent-owned-operation", RequestID: "agent-introduce-replay",
+	}, "public-target", realmtool.IntroduceOpts{})
+	if err != nil || replayed.Created || replayed.ActorID != result.ActorID {
+		t.Fatalf("agent introduce replay=(%+v,%v)", replayed, err)
 	}
 }
 
 func TestRealmToolDerivedRefIsChannelScoped(t *testing.T) {
-	one := channel.DerivedRealmToolRef("channel-a", "same-request")
-	two := channel.DerivedRealmToolRef("channel-b", "same-request")
+	one := realmtool.DerivedRealmToolRef("channel-a", "same-request")
+	two := realmtool.DerivedRealmToolRef("channel-b", "same-request")
 	if one == two || one == "" || two == "" {
 		t.Fatalf("derived refs collide: %q %q", one, two)
 	}
-	if one != channel.DerivedRealmToolRef("channel-a", "same-request") {
+	if one != realmtool.DerivedRealmToolRef("channel-a", "same-request") {
 		t.Fatal("derived ref is not deterministic")
 	}
 }
 
 func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *testing.T) {
 	a := newBareAppForTest(t)
-	snapshot, err := (channel.RenderedSnapshot{
+	snapshot, err := (channelspec.RenderedSnapshot{
 		Class: realmToolClass, Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
@@ -181,7 +163,9 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 	bundle := openTestChannelForTest(t, a, "stream-source", []channelhost.GenesisDeclaration{{
 		DeclID: realmToolDeclID, Kind: actor.KindTool, Rendered: snapshot,
 	}})
-	if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('stream-source','stream-source','group',?,NULL)`, time.Now().UnixMilli()); err != nil {
+	if _, err := a.db.Exec(`INSERT INTO channels(
+		id,name,type,status,owner_principal,spec_json,created_at,parent_id)
+		VALUES ('stream-source','stream-source','group','present','owner','{}',?,NULL)`, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	body := &observerResourceBody{
@@ -202,23 +186,23 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 	if err != nil || !found {
 		t.Fatalf("resolve owner=(%s,%v,%v)", initiator, found, err)
 	}
-	if _, err := bundle.SysOp().Remove(context.Background(), channel.RemoveRequest{
+	if _, err := bundle.SysOp().Remove(context.Background(), channelspec.RemoveRequest{
 		Ref: "stream-remove", Target: target, InitiatorActorID: initiator,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	n, err = body.Read(buffer)
-	var realmErr *channel.RealmError
-	if n != 0 || !errors.As(err, &realmErr) || realmErr.Code != channel.RealmCapabilityUnavailable {
+	var realmErr *realmtool.RealmError
+	if n != 0 || !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmCapabilityUnavailable {
 		t.Fatalf("post-revoke chunk n=%d err=%v", n, err)
 	}
 }
 
 func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 	a := newBareAppForTest(t)
-	seal := func(class string) channel.RenderedSnapshot {
+	seal := func(class string) channelspec.RenderedSnapshot {
 		t.Helper()
-		snapshot, err := (channel.RenderedSnapshot{
+		snapshot, err := (channelspec.RenderedSnapshot{
 			Class: class, Placement: channel.Placement{Kind: channel.PlacementServer},
 		}).Seal()
 		if err != nil {
@@ -232,7 +216,9 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 		{DeclID: "fetch-requester", Kind: actor.KindAgent, Rendered: seal("dormant-fetch-requester")},
 	})
 	for _, row := range []struct{ id, name string }{{"agent-fetch-source", "agent-fetch-source"}} {
-		if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES (?,?, 'group',?,NULL)`, row.id, row.name, time.Now().UnixMilli()); err != nil {
+		if _, err := a.db.Exec(`INSERT INTO channels(
+			id,name,type,status,owner_principal,spec_json,created_at,parent_id)
+			VALUES (?,?,'group','present','owner','{}',?,NULL)`, row.id, row.name, time.Now().UnixMilli()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -257,7 +243,7 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("source requester=(%s,%v,%v)", requesterRow, found, err)
 	}
-	fetched, err := (realmOps{app: a}).FetchResource(context.Background(), channel.Requester{
+	fetched, err := (realmOps{app: a}).FetchResource(context.Background(), realmtool.Requester{
 		ActorID: requesterRow, ChannelID: "agent-fetch-source", RequestID: "fetch-as-agent",
 	}, "agent-fetch-source", resource.ResourceID("kv:agent-source"))
 	if err != nil {
@@ -274,8 +260,8 @@ func TestRealmCopyLimitIsEnforcedByRealmStream(t *testing.T) {
 	body := newRealmCopyPolicyBody(io.NopCloser(bytes.NewReader([]byte("12345"))), 4)
 	defer body.Close()
 	_, err := io.ReadAll(body)
-	var realmErr *channel.RealmError
-	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmInvalidRequest {
+	var realmErr *realmtool.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != realmtool.RealmInvalidRequest {
 		t.Fatalf("oversized realm stream err=%v, want invalid_request", err)
 	}
 

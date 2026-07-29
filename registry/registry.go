@@ -60,8 +60,33 @@ type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 // (unreachable pre-Build). Future class-level facts are additive fields here;
 // the Register signature no longer changes when they arrive.
 type ClassDecl struct {
-	Kind actor.Kind
-	New  Constructor
+	Kind           actor.Kind
+	New            Constructor
+	ValidateConfig func(json.RawMessage) error
+}
+
+// ValidateConfig performs every check a class voluntarily makes available at
+// acceptance time. The registry always owns the JSON-object shape check;
+// constructors remain fail-closed for host/environment-dependent conditions.
+func ValidateConfig(class string, config json.RawMessage) error {
+	mu.RLock()
+	d, found := reg[class]
+	mu.RUnlock()
+	if !found {
+		return fmt.Errorf("registry: unknown class %q", class)
+	}
+	if len(config) != 0 {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(config, &object); err != nil || object == nil {
+			return fmt.Errorf("registry: config for %q must be a JSON object", class)
+		}
+	}
+	if d.ValidateConfig != nil {
+		if err := d.ValidateConfig(config); err != nil {
+			return fmt.Errorf("registry: invalid config for %q: %w", class, err)
+		}
+	}
+	return nil
 }
 
 var (

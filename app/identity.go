@@ -31,7 +31,7 @@ var bcryptCost = bcrypt.DefaultCost
 func (a *App) channelExists(ctx context.Context, chID string) (bool, error) {
 	var exists bool
 	err := a.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = ?)`, chID,
+		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = ? AND status='present')`, chID,
 	).Scan(&exists)
 	return exists, err
 }

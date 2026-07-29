@@ -3,9 +3,7 @@ package app
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +12,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
 )
 
 // actor_decls.go is the declaration registry's global-value face: the front-end
@@ -86,6 +85,10 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 		}
 		cfg = string(req.Config)
 	}
+	if err := registry.ValidateConfig(class, req.Config); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "config_invalid"})
+		return
+	}
 	if _, err := a.db.ExecContext(c.Request.Context(),
 		`INSERT INTO actor_decls (id, name, owner, default_class, config_json, created_at, updated_at, visibility) VALUES (?,?,?,?,?,?,?,?)`,
 		id, strings.TrimSpace(req.Name), userID, class, cfg, now, now, visibility); err != nil {
@@ -133,36 +136,19 @@ func (a *App) handleListDecls(c *gin.Context) {
 
 	// Project instance identity only. A channel's declaration version is a local
 	// history/order fence, not realm value identity and not part of this API DTO.
-	bundles, err := a.snapshotBundles(c.Request.Context())
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, errChannelUnavailable) {
-			status = http.StatusServiceUnavailable
-		}
-		c.JSON(status, gin.H{"error": "declaration instances unavailable"})
-		return
-	}
 	for _, decl := range out {
 		declID := decl["id"].(string)
 		instances := make([]gin.H, 0)
-		for chID, bundle := range bundles {
-			declared, err := bundle.View().DeclaredInstances(c.Request.Context(), declID)
-			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "declaration instances unavailable"})
-				return
-			}
-			for _, instanceID := range declared {
-				instances = append(instances, gin.H{
-					"channel_id": string(chID), "instance_id": string(instanceID),
-				})
-			}
+		indexed, err := a.relations.InstancesOf(c.Request.Context(), declID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "declaration instances unavailable"})
+			return
 		}
-		sort.Slice(instances, func(i, j int) bool {
-			if instances[i]["channel_id"].(string) != instances[j]["channel_id"].(string) {
-				return instances[i]["channel_id"].(string) < instances[j]["channel_id"].(string)
-			}
-			return instances[i]["instance_id"].(string) < instances[j]["instance_id"].(string)
-		})
+		for _, instance := range indexed {
+			instances = append(instances, gin.H{
+				"channel_id": string(instance.ChannelID), "instance_id": string(instance.ActorID),
+			})
+		}
 		decl["instances"] = instances
 	}
 	c.JSON(http.StatusOK, gin.H{"decls": out})
@@ -193,7 +179,8 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 	}
 	defer tx.Rollback()
 	var currentClass string
-	if err := tx.QueryRowContext(c.Request.Context(), `SELECT default_class FROM actor_decls WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, declID, userID).Scan(&currentClass); err != nil {
+	var currentConfig sql.NullString
+	if err := tx.QueryRowContext(c.Request.Context(), `SELECT default_class,config_json FROM actor_decls WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, declID, userID).Scan(&currentClass, &currentConfig); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		} else {
@@ -201,9 +188,23 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 		}
 		return
 	}
+	finalClass := currentClass
 	if req.Class != nil {
-		class := strings.TrimSpace(*req.Class)
-		sameKind, classErr := a.declarationClassTransition(c.Request.Context(), currentClass, class)
+		finalClass = strings.TrimSpace(*req.Class)
+	}
+	var finalConfig json.RawMessage
+	if currentConfig.Valid && currentConfig.String != "" {
+		finalConfig = json.RawMessage(currentConfig.String)
+	}
+	if len(req.Config) > 0 {
+		finalConfig = req.Config
+	}
+	if err := registry.ValidateConfig(finalClass, finalConfig); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "config_invalid"})
+		return
+	}
+	if req.Class != nil {
+		sameKind, classErr := a.declarationClassTransition(c.Request.Context(), currentClass, finalClass)
 		if classErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "class registry unavailable"})
 			return
@@ -213,7 +214,8 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 			return
 		}
 		if _, err := tx.ExecContext(c.Request.Context(),
-			`UPDATE actor_decls SET default_class=?,updated_at=? WHERE `+ownedDeclarationWhere, class, now, declID, userID); err != nil {
+			`UPDATE actor_decls SET default_class=?,updated_at=? WHERE `+ownedDeclarationWhere,
+			finalClass, now, declID, userID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
 		}

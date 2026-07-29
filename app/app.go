@@ -17,7 +17,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	relationstore "github.com/wanpengxie/atoll/app/internal/relation"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -38,13 +40,14 @@ type App struct {
 	engine *gin.Engine
 	srv    *http.Server // set by Run; drained by Shutdown
 
-	mu     sync.RWMutex
-	host   channelhost.LocalHost
-	uiDist string
+	mu       sync.RWMutex
+	createMu sync.Mutex
+	host     channelhost.LocalHost
+	uiDist   string
 
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
 	// is the injected direct Gateway.Poke callback that the platform emission
-	// points (home.Config.OnMembershipChange, wired by ChannelHost) feed.
+	// points (home.Config.OnRelationChange, wired by ChannelHost) feed.
 	// Both are set by the assembly root via SetGateway/SetMembershipPoke after New (the
 	// gateway needs the app's routing/entitlement面, breaking the構造 cycle).
 	wsGateway      WSGateway
@@ -53,7 +56,7 @@ type App struct {
 	daemonLocks  *keyedLockSet
 	channelLocks *keyedLockSet
 	lifecycle    *lifecycleWorker
-	admission    *admissionService
+	relations    *relationstore.Store
 }
 
 type HostFactory func(channelhost.HomeDeps) (channelhost.LocalHost, error)
@@ -81,6 +84,7 @@ func New(cfg Config) (*App, error) {
 		db: cfg.DB, logger: logger, uiDist: cfg.UIDist,
 		daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
 	}
+	a.relations = relationstore.New(a.db)
 	if cfg.HostFactory == nil {
 		return nil, errors.New("app: HostFactory required")
 	}
@@ -88,11 +92,15 @@ func New(cfg Config) (*App, error) {
 		CompositionResolver:  compositionResolver{app: a},
 		IntroductionResolver: compositionResolver{app: a},
 		Logger:               logger,
-		OnMembershipChange: func(chID channel.ID, affected []string) {
-			for _, principal := range affected {
-				a.reconcilePrincipalChannel(context.Background(), chID, principal)
-				if a.membershipPoke != nil {
-					a.membershipPoke(principal)
+		OnRelationChange: func(chID channel.ID, deltas []channelspec.RelationDelta) {
+			if err := a.relations.Apply(context.Background(), chID, deltas); err != nil {
+				a.logger.Warn("relation event apply failed", "channel", chID, "err", err)
+				return
+			}
+			for _, delta := range deltas {
+				if (delta.Kind == channelspec.RelationJoined || delta.Kind == channelspec.RelationLeft) &&
+					delta.Principal != "" && a.membershipPoke != nil {
+					a.membershipPoke(delta.Principal)
 				}
 			}
 		},
@@ -110,13 +118,6 @@ func New(cfg Config) (*App, error) {
 	a.engine = engine
 	a.registerRoutes()
 
-	// Reconcile the directory with ChannelHost serving state.
-	if err := a.reconcileServingChannels(context.Background()); err != nil {
-		return nil, fmt.Errorf("app: load channels: %w", err)
-	}
-	a.sweepMembershipProjection(context.Background())
-	a.admission = newAdmissionService(a)
-	a.admission.start()
 	a.lifecycle = newLifecycleWorker(a)
 	a.lifecycle.start()
 
@@ -129,10 +130,10 @@ func New(cfg Config) (*App, error) {
 // it is set.
 func (a *App) SetGateway(g WSGateway) { a.wsGateway = g }
 
-// SetMembershipPoke injects Gateway.Poke directly. ChannelHost forwards membership
-// changes from every channel through the HomeDeps callback.
-// nil → no live poke (reconnect re-auth + the resolver's每批 recheck / sweep remain the
-// correctness正门 — a lost poke only delays convergence).
+// SetMembershipPoke injects Gateway.Poke directly. ChannelHost forwards relation
+// deltas from every channel through the HomeDeps callback.
+// nil means no live poke; reconnect re-auth and relation Snapshot/read-time
+// verification remain the correctness paths, so a lost poke only delays routing.
 func (a *App) SetMembershipPoke(fn func(principal string)) { a.membershipPoke = fn }
 
 // Run starts the HTTP server and blocks until it is Shutdown (or errors). It
@@ -167,9 +168,6 @@ func (a *App) Shutdown(ctx context.Context) error {
 func (a *App) Close() error {
 	if a.lifecycle != nil {
 		a.lifecycle.close()
-	}
-	if a.admission != nil {
-		a.admission.close()
 	}
 	return a.host.Close()
 }
@@ -211,7 +209,6 @@ func (a *App) registerRoutes() {
 		api.PUT("/channels/:chID/decls/:declID/config", a.handlePutDeclarationOverlay)
 		api.DELETE("/channels/:chID/decls/:declID/config", a.handleDeleteDeclarationOverlay)
 		api.GET("/channels/:chID/candidates", a.handleListCandidates)
-		api.GET("/operations/:ref", a.handleGetOperation)
 		// A user's actor-instance declarations (world layer, kind-neutral).
 		api.GET("/actor-decls", a.handleListDecls)
 		api.POST("/actor-decls", a.handleCreateDecl)
@@ -285,22 +282,6 @@ func (a *App) acquireBundle(ctx context.Context, chID channel.ID) (channelhost.B
 		return bundle, nil
 	}
 	return nil, errChannelUnavailable
-}
-
-func (a *App) snapshotBundles(ctx context.Context) (map[channel.ID]channelhost.Bundle, error) {
-	out := make(map[channel.ID]channelhost.Bundle)
-	ids, err := a.directoryChannelIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		if bundle, ok := a.host.Acquire(id); ok {
-			out[id] = bundle
-		} else {
-			return nil, fmt.Errorf("%w: %s", errChannelUnavailable, id)
-		}
-	}
-	return out, nil
 }
 
 const (

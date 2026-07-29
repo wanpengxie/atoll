@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -28,12 +29,12 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 			t.Fatalf("concurrent Close: %v", err)
 		}
 	}
-	if _, err := home.SystemOps(h).Admit(context.Background(), channel.AdmitRequest{
+	if _, err := home.SystemOps(h).Admit(context.Background(), channelspec.AdmitRequest{
 		Ref: "late-admit", Principal: "late",
 	}); !isUnavailable(err) {
 		t.Fatalf("Admit after Close = %v", err)
 	}
-	if _, err := home.SystemOps(h).Remove(context.Background(), channel.RemoveRequest{
+	if _, err := home.SystemOps(h).Remove(context.Background(), channelspec.RemoveRequest{
 		Ref: "late-remove", Target: "late", InitiatorActorID: "late",
 	}); !isUnavailable(err) {
 		t.Fatalf("Remove after Close = %v", err)
@@ -51,8 +52,8 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 }
 
 func isUnavailable(err error) bool {
-	var opErr *channel.OperationError
-	return errors.As(err, &opErr) && opErr.Code == channel.ErrCodeChannelUnavailable
+	var opErr *channelspec.OperationError
+	return errors.As(err, &opErr) && opErr.Code == channelspec.ErrCodeChannelUnavailable
 }
 
 const testChannelID = channel.ID("test-home")
@@ -90,7 +91,7 @@ func TestView_ActorFacts_KernelIsNotAMember(t *testing.T) {
 func TestAdmit_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
-	result, err := home.SystemOps(h).Admit(ctx, channel.AdmitRequest{
+	result, err := home.SystemOps(h).Admit(ctx, channelspec.AdmitRequest{
 		Ref: "admit-alice", Principal: "alice",
 	})
 	if err != nil {

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -21,13 +21,13 @@ func (h *Home) resolveIntroduction(
 	initiator actor.ActorID,
 ) (actorctl.IntroduceRequest, error) {
 	if declID == "" || initiator == "" {
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
-			Code: channel.ErrCodeBadPayload, Detail: "decl_id and initiator_actor_id required",
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeBadPayload, Detail: "decl_id and initiator_actor_id required",
 		}
 	}
 	if h.resolver == nil {
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
-			Code: channel.ErrCodeAuthorityUnavailable, Detail: "introduction resolver unavailable", Retryable: true,
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeAuthorityUnavailable, Detail: "introduction resolver unavailable", Retryable: true,
 		}
 	}
 	initiatorFacts, active, err := h.actors.ActorFacts(ctx, initiator)
@@ -35,8 +35,8 @@ func (h *Home) resolveIntroduction(
 		return actorctl.IntroduceRequest{}, err
 	}
 	if !active {
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
-			Code: channel.ErrCodeMemberInactive, Detail: "initiator is not an active member",
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeMemberInactive, Detail: "initiator is not an active member",
 		}
 	}
 
@@ -44,11 +44,11 @@ func (h *Home) resolveIntroduction(
 	facts, err := h.resolver.ResolveDeclaration(resolveCtx, h.channelID, declID)
 	cancel()
 	if err != nil {
-		code, retryable := channel.ErrCodeAuthorityUnavailable, true
-		if errors.Is(err, channel.ErrDeclarationNotFound) {
-			code, retryable = channel.ErrCodeDeclNotFound, false
+		code, retryable := channelspec.ErrCodeAuthorityUnavailable, true
+		if errors.Is(err, channelspec.ErrDeclarationNotFound) {
+			code, retryable = channelspec.ErrCodeDeclNotFound, false
 		}
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
 			Code: code, Detail: err.Error(), Retryable: retryable,
 		}
 	}
@@ -61,8 +61,8 @@ func (h *Home) resolveIntroduction(
 	// keeping every declaration owner non-empty.
 	if facts.Visibility != "public" &&
 		(initiatorFacts.Principal == "" || initiatorFacts.Principal != facts.OwnerPrincipal) {
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
-			Code: channel.ErrCodeForbidden, Detail: "declaration is private",
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeForbidden, Detail: "declaration is private",
 		}
 	}
 
@@ -70,13 +70,13 @@ func (h *Home) resolveIntroduction(
 	kind, found, err := h.resolver.ClassKind(kindCtx, facts.Class)
 	kindCancel()
 	if err != nil {
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
-			Code: channel.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true,
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true,
 		}
 	}
 	if !found || kind == actor.KindHuman || kind == actor.KindSystem {
-		return actorctl.IntroduceRequest{}, &channel.OperationError{
-			Code: channel.ErrCodeUnknownClass, Detail: "unknown class " + facts.Class,
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeUnknownClass, Detail: "unknown class " + facts.Class,
 		}
 	}
 
@@ -101,8 +101,8 @@ func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement,
 		return storespec.Placement{}, err
 	}
 	if len(bound) == 0 {
-		return storespec.Placement{}, &channel.OperationError{
-			Code: channel.ErrCodeInvalidDesiredHost, Detail: "daemon is not bound to this channel",
+		return storespec.Placement{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeInvalidDesiredHost, Detail: "daemon is not bound to this channel",
 		}
 	}
 	return storespec.NewDaemonPlacement(string(bound[0]))

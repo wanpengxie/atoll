@@ -67,11 +67,16 @@ var appSchema = []schemaObject{
 	)`},
 	{"table", "channels", `CREATE TABLE channels (
 		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL UNIQUE,
+		name TEXT NOT NULL,
 		type TEXT NOT NULL,
+		status TEXT NOT NULL CHECK(status IN ('present','retiring')),
+		owner_principal TEXT NOT NULL,
+		spec_json TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
 		parent_id TEXT
 	)`},
+	{"index", "ux_channels_present_name", `CREATE UNIQUE INDEX ux_channels_present_name
+		ON channels(name) WHERE status='present'`},
 	{"table", "principal_channels", `CREATE TABLE principal_channels (
 		principal TEXT NOT NULL,
 		channel_id TEXT NOT NULL,
@@ -81,71 +86,23 @@ var appSchema = []schemaObject{
 	)`},
 	{"index", "ix_principal_channels_channel", `CREATE INDEX ix_principal_channels_channel
 		ON principal_channels(channel_id)`},
-	{"table", "channel_provision_jobs", `CREATE TABLE channel_provision_jobs (
-		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		operation_id TEXT NOT NULL UNIQUE,
-		channel_id TEXT NOT NULL UNIQUE,
-		requested_by TEXT NOT NULL,
-		name TEXT NOT NULL,
-		type TEXT NOT NULL,
-		owner_principal TEXT NOT NULL,
-		spec_json TEXT NOT NULL,
-		receipt_json TEXT,
-		published_at INTEGER,
-		compensation_job_id INTEGER,
-		attempt INTEGER NOT NULL DEFAULT 0,
-		error_code TEXT,
-		last_error TEXT,
-		next_attempt_at INTEGER NOT NULL DEFAULT 0,
-		created_at INTEGER NOT NULL,
-		done_at INTEGER,
-		dead_at INTEGER
-	)`},
-	{"index", "ux_provision_active_name", `CREATE UNIQUE INDEX ux_provision_active_name
-		ON channel_provision_jobs(name) WHERE done_at IS NULL AND dead_at IS NULL`},
-	{"index", "ix_provision_pending", `CREATE INDEX ix_provision_pending
-		ON channel_provision_jobs(next_attempt_at,job_id) WHERE done_at IS NULL AND dead_at IS NULL AND compensation_job_id IS NULL`},
-	{"table", "channel_destroy_jobs", `CREATE TABLE channel_destroy_jobs (
-		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		operation_id TEXT NOT NULL UNIQUE,
-		channel_id TEXT NOT NULL UNIQUE,
-		requested_by TEXT NOT NULL,
-		attempt INTEGER NOT NULL DEFAULT 0,
-		error_code TEXT,
-		last_error TEXT,
-		next_attempt_at INTEGER NOT NULL DEFAULT 0,
-		created_at INTEGER NOT NULL,
-		done_at INTEGER,
-		dead_at INTEGER
-	)`},
-	{"index", "ix_destroy_pending", `CREATE INDEX ix_destroy_pending
-		ON channel_destroy_jobs(next_attempt_at,job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
-	{"table", "channel_admission_operations", `CREATE TABLE channel_admission_operations (
-		operation_id TEXT PRIMARY KEY,
-		idempotency_key TEXT,
+	{"table", "channel_decl_instances", `CREATE TABLE channel_decl_instances (
 		channel_id TEXT NOT NULL,
-		op TEXT NOT NULL CHECK(op IN ('join','introduce','attach','detach','remove')),
-		requested_by_principal TEXT,
-		requested_by_actor_id TEXT,
-		request_json TEXT NOT NULL,
-		request_digest TEXT NOT NULL,
-		status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','rejected','unresolved')),
-		result_json TEXT,
-		error_code TEXT,
-		attempt INTEGER NOT NULL DEFAULT 0,
-		next_attempt_at INTEGER NOT NULL DEFAULT 0,
-		created_at INTEGER NOT NULL,
-		done_at INTEGER,
-		CHECK ((NULLIF(requested_by_principal,'') IS NOT NULL) != (NULLIF(requested_by_actor_id,'') IS NOT NULL))
+		decl_id TEXT NOT NULL,
+		actor_id TEXT NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (channel_id, actor_id)
 	)`},
-	{"index", "ux_admission_principal_idem", `CREATE UNIQUE INDEX ux_admission_principal_idem
-		ON channel_admission_operations(requested_by_principal,idempotency_key)
-		WHERE requested_by_principal IS NOT NULL AND requested_by_principal<>'' AND idempotency_key IS NOT NULL`},
-	{"index", "ux_admission_actor_idem", `CREATE UNIQUE INDEX ux_admission_actor_idem
-		ON channel_admission_operations(channel_id,requested_by_actor_id,idempotency_key)
-		WHERE requested_by_actor_id IS NOT NULL AND requested_by_actor_id<>'' AND idempotency_key IS NOT NULL`},
-	{"index", "ix_admission_pending", `CREATE INDEX ix_admission_pending
-		ON channel_admission_operations(status) WHERE status='pending'`},
+	{"index", "ix_channel_decl_instances_decl", `CREATE INDEX ix_channel_decl_instances_decl
+		ON channel_decl_instances(decl_id)`},
+	{"table", "daemon_channels", `CREATE TABLE daemon_channels (
+		channel_id TEXT NOT NULL,
+		daemon_id TEXT NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (channel_id, daemon_id)
+	)`},
+	{"index", "ix_daemon_channels_daemon", `CREATE INDEX ix_daemon_channels_daemon
+		ON daemon_channels(daemon_id)`},
 	{"table", "channel_decl_overlays", `CREATE TABLE channel_decl_overlays (
 		channel_id TEXT NOT NULL,
 		decl_id TEXT NOT NULL,
@@ -157,7 +114,7 @@ var appSchema = []schemaObject{
 		id TEXT PRIMARY KEY,
 		owner_id TEXT NOT NULL REFERENCES users(id),
 		name TEXT NOT NULL,
-		api_key_hash TEXT NOT NULL,
+		api_key TEXT NOT NULL,
 		deleted_at INTEGER,
 		created_at INTEGER NOT NULL
 	)`},

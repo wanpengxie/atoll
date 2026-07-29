@@ -7,20 +7,21 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 type inertIntroductionResolver struct{}
 
-func (inertIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
-	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+func (inertIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error) {
+	return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 }
 func (inertIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (inertIntroductionResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
-	return channel.DaemonFacts{}, nil
+func (inertIntroductionResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
+	return channelspec.DaemonFacts{}, nil
 }
 
 type emptyCompositionResolver struct{}
@@ -44,20 +45,20 @@ func completeHomeTestConfig(cfg Config) Config {
 // expose a second mutation path.
 func admitThroughSysOp(h *Home, ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
 	if kind != actor.KindHuman {
-		return "", &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "admit creates human identities"}
+		return "", &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "admit creates human identities"}
 	}
-	result, err := SystemOps(h).Admit(ctx, channel.AdmitRequest{Ref: "test:admit:" + uuid.NewString(), Principal: principal})
+	result, err := SystemOps(h).Admit(ctx, channelspec.AdmitRequest{Ref: "test:admit:" + uuid.NewString(), Principal: principal})
 	return result.ActorID, err
 }
 
 func removeThroughSysOp(h *Home, ctx context.Context, target actor.ActorID) error {
-	_, err := SystemOps(h).Remove(ctx, channel.RemoveRequest{
+	_, err := SystemOps(h).Remove(ctx, channelspec.RemoveRequest{
 		Ref: "test:remove:" + uuid.NewString(), Target: target, InitiatorActorID: target,
 	})
 	return err
 }
 
 func isChannelUnavailableForTest(err error) bool {
-	var opErr *channel.OperationError
-	return errors.As(err, &opErr) && opErr.Code == channel.ErrCodeChannelUnavailable
+	var opErr *channelspec.OperationError
+	return errors.As(err, &opErr) && opErr.Code == channelspec.ErrCodeChannelUnavailable
 }

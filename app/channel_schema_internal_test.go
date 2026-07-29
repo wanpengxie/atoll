@@ -26,7 +26,7 @@ func TestChannelDirectorySchemaIsRealmScoped(t *testing.T) {
 		}
 		columns = append(columns, name)
 	}
-	want := []string{"id", "name", "type", "created_at", "parent_id"}
+	want := []string{"id", "name", "type", "status", "owner_principal", "spec_json", "created_at", "parent_id"}
 	if !reflect.DeepEqual(columns, want) {
 		t.Fatalf("channels columns=%v want %v", columns, want)
 	}

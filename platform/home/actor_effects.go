@@ -52,19 +52,6 @@ func (e homeActorEffects) ActorsEnded(ids []actor.ActorID) {
 	h.pokeReconcile()
 }
 
-// notifyMembership is the membership-change tail. The command layer carries its
-// own principals; nothing is echoed back from the store.
-func (h *Home) notifyMembership(principals ...string) {
-	if h == nil || h.onMembershipChange == nil {
-		return
-	}
-	for _, principal := range principals {
-		if principal != "" {
-			h.onMembershipChange(principal)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // lifecycle narration (best effort, never machine truth)
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -117,6 +118,7 @@ func finishTransition[T any](
 	a *actorSystem,
 	transition actorctl.Transition[T],
 	err error,
+	births ...channelspec.RelationDelta,
 ) (T, error) {
 	if err != nil {
 		return transition.Result, err
@@ -135,21 +137,47 @@ func finishTransition[T any](
 	if transition.Reconcile.Server || len(transition.Reconcile.Peers) != 0 {
 		a.home.pokeReconcile()
 	}
+	deltas := append([]channelspec.RelationDelta(nil), births...)
+	for _, fact := range transition.EndedFacts {
+		if fact.Principal != "" {
+			deltas = append(deltas, channelspec.RelationDelta{
+				Kind:      channelspec.RelationLeft,
+				Principal: fact.Principal, ActorID: fact.ID,
+			})
+		}
+		if fact.SourceDeclID != "" {
+			deltas = append(deltas, channelspec.RelationDelta{
+				Kind:   channelspec.RelationInstanceRemoved,
+				DeclID: fact.SourceDeclID, ActorID: fact.ID,
+			})
+		}
+	}
+	a.home.emitRelations(deltas...)
 	return transition.Result, nil
 }
 
 func (a *actorSystem) Admit(ctx context.Context, request actorctl.AdmitRequest) (actorctl.AdmitResult, error) {
 	t, err := a.home.controller.Admit(ctx, request)
-	result, err := finishTransition(a, t, err)
-	if err == nil && request.Principal != "" {
-		a.home.notifyMembership(request.Principal)
+	var birth []channelspec.RelationDelta
+	if err == nil && t.Result.Created {
+		birth = append(birth, channelspec.RelationDelta{
+			Kind:      channelspec.RelationJoined,
+			Principal: request.Principal, ActorID: t.Result.ActorID,
+		})
 	}
-	return result, err
+	return finishTransition(a, t, err, birth...)
 }
 
 func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (channel.IntroduceResult, error) {
 	t, err := a.home.controller.Introduce(ctx, request)
-	return finishTransition(a, t, err)
+	var birth []channelspec.RelationDelta
+	if err == nil && t.Result.Created {
+		birth = append(birth, channelspec.RelationDelta{
+			Kind:   channelspec.RelationIntroduced,
+			DeclID: request.DeclID, ActorID: t.Result.ActorID,
+		})
+	}
+	return finishTransition(a, t, err, birth...)
 }
 
 func (a *actorSystem) Fork(ctx context.Context, request actorctl.ForkRequest) (actorctl.ForkResult, error) {
@@ -170,23 +198,19 @@ func (a *actorSystem) ApplyDeclaration(ctx context.Context, change actorctl.Decl
 }
 
 func (a *actorSystem) End(ctx context.Context, request actorctl.EndRequest) (actorctl.EndResult, error) {
-	principals := a.principalsOf([]actor.ActorID{request.Target})
 	t, err := a.home.controller.End(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
 		a.home.announceEnded(ctx, t.Ended, request.Reason, endedBy(request.CallerActorID))
-		a.home.notifyMembership(principals...)
 	}
 	return result, err
 }
 
 func (a *actorSystem) Remove(ctx context.Context, request actorctl.RemoveRequest) (channel.RemoveResult, error) {
-	principals := a.principalsOf([]actor.ActorID{request.Target})
 	t, err := a.home.controller.Remove(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
 		a.home.announceEnded(ctx, t.Ended, "system_remove", actor.SystemActorID)
-		a.home.notifyMembership(principals...)
 	}
 	return result, err
 }
@@ -196,19 +220,6 @@ func endedBy(caller actor.ActorID) actor.ActorID {
 		return actor.SystemActorID
 	}
 	return caller
-}
-
-// principalsOf reads the login principals of ids before they are ended, so the
-// membership-change tail can name them afterwards.
-func (a *actorSystem) principalsOf(ids []actor.ActorID) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		facts, active, err := a.home.controller.ActorFacts(context.Background(), id)
-		if err == nil && active && facts.Principal != "" {
-			out = append(out, facts.Principal)
-		}
-	}
-	return out
 }
 
 func (a *actorSystem) PlanFor(domain actorhost.ExecutionDomain) ([]actorhost.Desired, error) {

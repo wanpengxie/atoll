@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -30,11 +31,11 @@ type DaemonLink interface {
 }
 
 type SysOp interface {
-	Admit(context.Context, channel.AdmitRequest) (channel.AdmitResult, error)
-	Introduce(context.Context, channel.IntroduceRequest) (channel.IntroduceResult, error)
-	Remove(context.Context, channel.RemoveRequest) (channel.RemoveResult, error)
-	AttachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error)
-	DetachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error)
+	Admit(context.Context, channelspec.AdmitRequest) (channel.AdmitResult, error)
+	Introduce(context.Context, channelspec.IntroduceRequest) (channel.IntroduceResult, error)
+	Remove(context.Context, channelspec.RemoveRequest) (channel.RemoveResult, error)
+	AttachDaemon(context.Context, channelspec.DaemonRequest) (channelspec.BindingResult, error)
+	DetachDaemon(context.Context, channelspec.DaemonRequest) (channelspec.BindingResult, error)
 }
 
 // View is the business membrane's read face. Every actor-truth method is
@@ -42,13 +43,13 @@ type SysOp interface {
 // runtime storage or control DTO.
 type View interface {
 	DefaultAgent(context.Context) (actor.ActorID, bool, error)
-	HumanRoster(context.Context) ([]channel.HumanRosterEntry, error)
+	HumanRoster(context.Context) ([]channelspec.HumanRosterEntry, error)
 	DeclaredInstances(context.Context, string) ([]actor.ActorID, error)
 	HasDeclaredInstance(context.Context, string) (bool, error)
 	ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
-	ActorFacts(context.Context, actor.ActorID) (channel.ActorFacts, bool, error)
+	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 	IsAttached(string) bool
 	IsBound(context.Context, string) (bool, error)
 	Resources() ResourceReadView
@@ -90,7 +91,7 @@ type viewAdapter struct{ home *home.Home }
 func (a viewAdapter) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	return a.home.View().DefaultAgent(ctx)
 }
-func (a viewAdapter) HumanRoster(ctx context.Context) ([]channel.HumanRosterEntry, error) {
+func (a viewAdapter) HumanRoster(ctx context.Context) ([]channelspec.HumanRosterEntry, error) {
 	return a.home.View().HumanRoster(ctx)
 }
 func (a viewAdapter) DeclaredInstances(ctx context.Context, d string) ([]actor.ActorID, error) {
@@ -108,7 +109,7 @@ func (a viewAdapter) OwnerPrincipal(ctx context.Context) (string, bool, error) {
 func (a viewAdapter) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, seq int64, limit int) ([]storespec.StoredRow, int64, error) {
 	return a.home.View().ReadVisibleAfterSeq(ctx, reader, seq, limit)
 }
-func (a viewAdapter) ActorFacts(ctx context.Context, id actor.ActorID) (channel.ActorFacts, bool, error) {
+func (a viewAdapter) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return a.home.View().ActorFacts(ctx, id)
 }
 

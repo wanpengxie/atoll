@@ -91,7 +91,7 @@ func daemonBodyBuilder(
 			input.ExecutionSpec.Config,
 		)
 		if !ok {
-			logger.Warn("platform.compute.actor_factory_missing",
+			logger.Error("platform.compute.actor_factory_missing",
 				"actor", input.ActorID, "class", input.ExecutionSpec.Class)
 			return nil
 		}
