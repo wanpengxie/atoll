@@ -114,3 +114,40 @@ func TestAfterFoldsAnAbsentPayloadOnBothHomes(t *testing.T) {
 		})
 	}
 }
+
+// TestAfterKeepsRawMessagePayloadByteForByte pins the byte-fidelity promise the
+// absorbed identity-flavoured timer verb used to make explicitly.
+//
+// That verb took a json.RawMessage and handed it to the Scheduler untouched, so
+// an off-process subject's payload arrived exactly as composed. Routing it
+// through json.Marshal is safe from the []byte→base64 trap (RawMessage returns
+// its own bytes) but NOT byte-preserving: encoding/json compacts whitespace. A
+// subject that composed indented JSON would have found it silently rewritten.
+func TestAfterKeepsRawMessagePayloadByteForByte(t *testing.T) {
+	spaced := json.RawMessage(`{ "note" : "keep  my  spacing" }`)
+
+	got, err := timerPayloadBytes(spaced)
+	if err != nil {
+		t.Fatalf("timerPayloadBytes(RawMessage): %v", err)
+	}
+	if string(got) != string(spaced) {
+		t.Fatalf("RawMessage payload was rewritten:\n got %s\nwant %s", got, spaced)
+	}
+}
+
+// TestAfterMarshalsEverythingElse is the other half: a plain Go value has no
+// chosen encoding, so it must still be marshalled (and invalid JSON must fail
+// at arm time, not at fire time).
+func TestAfterMarshalsEverythingElse(t *testing.T) {
+	got, err := timerPayloadBytes(map[string]int{"n": 1})
+	if err != nil {
+		t.Fatalf("timerPayloadBytes(map): %v", err)
+	}
+	if string(got) != `{"n":1}` {
+		t.Fatalf("map payload = %s, want {\"n\":1}", got)
+	}
+
+	if _, err := timerPayloadBytes(make(chan int)); err == nil {
+		t.Fatal("timerPayloadBytes: an unmarshalable value must fail at arm time, got nil error")
+	}
+}

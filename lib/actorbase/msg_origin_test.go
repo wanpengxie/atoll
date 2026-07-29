@@ -140,38 +140,64 @@ func TestLogOriginReplyAbsorbsAnExistingTerminal(t *testing.T) {
 // incarnation believing a request is open that truth has already closed.
 func TestTerminalWriteClosesTheLedgerEntryWhateverTheOrigin(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
-	e := newTestEngine(t, pen, Hooks{}, 8, 8)
-	e.lifeCtx = context.Background()
+	for _, verb := range terminalVerbs() {
+		t.Run(verb.name, func(t *testing.T) {
+			t.Parallel()
+			pen := &fakePen{self: "user:alice"}
+			e := newTestEngine(t, pen, Hooks{}, 8, 8)
+			e.lifeCtx = context.Background()
 
-	// The request arrived through the mailbox first: an entry exists and a
-	// delivery handle was already handed to the occupant.
-	env := newRequestEnv("r-deferred", -1)
-	env.Sender.ID = "agent:worker"
-	if !e.serve.admit(env) {
-		t.Fatal("expected admit to succeed")
-	}
-	ctx, ok := e.serve.ctxFor(env.ID)
-	if !ok {
-		t.Fatal("expected ctxFor to resolve the admitted entry")
-	}
-	delivered := NewMsg(OriginMailbox, ctx, *env)
-	if e.serve.len() != 1 {
-		t.Fatalf("serve ledger len = %d, want 1", e.serve.len())
-	}
+			// The request arrived through the mailbox first: an entry exists and
+			// a delivery handle was already handed to the occupant.
+			env := newRequestEnv(message.ID("r-deferred-"+verb.name), -1)
+			env.Sender.ID = "agent:worker"
+			if !e.serve.admit(env) {
+				t.Fatal("expected admit to succeed")
+			}
+			ctx, ok := e.serve.ctxFor(env.ID)
+			if !ok {
+				t.Fatal("expected ctxFor to resolve the admitted entry")
+			}
+			delivered := NewMsg(OriginMailbox, ctx, *env)
+			if e.serve.len() != 1 {
+				t.Fatalf("serve ledger len = %d, want 1", e.serve.len())
+			}
 
-	// The answer comes back later through the log, not through the delivery.
-	if _, err := e.Reply(logMsg(t, env), map[string]string{"decision": "approve"}); err != nil {
-		t.Fatalf("Reply(log origin) = %v, want nil", err)
-	}
+			// The answer comes back later through the log, not the delivery.
+			if _, err := verb.write(e, logMsg(t, env)); err != nil {
+				t.Fatalf("%s(log origin) = %v, want nil", verb.name, err)
+			}
 
-	if e.serve.len() != 0 {
-		t.Fatalf("serve ledger len after the terminal = %d, want 0", e.serve.len())
+			if e.serve.len() != 0 {
+				t.Fatalf("serve ledger len after the terminal = %d, want 0", e.serve.len())
+			}
+			select {
+			case <-delivered.Ctx().Done():
+			default:
+				t.Fatal("the original mailbox delivery's Ctx() was never cancelled")
+			}
+		})
 	}
-	select {
-	case <-delivered.Ctx().Done():
-	default:
-		t.Fatal("the original mailbox delivery's Ctx() was never cancelled")
+}
+
+// terminalVerbs is the closing pair. Reply and Fail BOTH end a request, so every
+// "a terminal write closes the account" assertion has to run against both — a
+// table that exercised only Reply let a missing close in Fail sit green.
+// Progress is deliberately absent: a provisional never closes.
+func terminalVerbs() []struct {
+	name  string
+	write func(*engine, Msg) (message.ID, error)
+} {
+	return []struct {
+		name  string
+		write func(*engine, Msg) (message.ID, error)
+	}{
+		{"Reply", func(e *engine, m Msg) (message.ID, error) {
+			return e.Reply(m, map[string]string{"decision": "approve"})
+		}},
+		{"Fail", func(e *engine, m Msg) (message.ID, error) {
+			return e.Fail(m, "refused", "not today")
+		}},
 	}
 }
 
@@ -180,21 +206,26 @@ func TestTerminalWriteClosesTheLedgerEntryWhateverTheOrigin(t *testing.T) {
 // is closed all the same, so the local account must close too.
 func TestTerminalWriteClosesTheLedgerEntryOnAnAbsorbedDuplicate(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice", reject: harness.HarnessTerminalDuplicate}
-	e := newTestEngine(t, pen, Hooks{}, 8, 8)
-	e.lifeCtx = context.Background()
+	for _, verb := range terminalVerbs() {
+		t.Run(verb.name, func(t *testing.T) {
+			t.Parallel()
+			pen := &fakePen{self: "user:alice", reject: harness.HarnessTerminalDuplicate}
+			e := newTestEngine(t, pen, Hooks{}, 8, 8)
+			e.lifeCtx = context.Background()
 
-	env := newRequestEnv("r-dup-close", -1)
-	env.Sender.ID = "agent:worker"
-	if !e.serve.admit(env) {
-		t.Fatal("expected admit to succeed")
-	}
+			env := newRequestEnv(message.ID("r-dup-close-"+verb.name), -1)
+			env.Sender.ID = "agent:worker"
+			if !e.serve.admit(env) {
+				t.Fatal("expected admit to succeed")
+			}
 
-	if _, err := e.Reply(logMsg(t, env), map[string]string{"decision": "approve"}); err != nil {
-		t.Fatalf("Reply against a duplicate = %v, want nil", err)
-	}
-	if e.serve.len() != 0 {
-		t.Fatalf("serve ledger len after an absorbed duplicate = %d, want 0", e.serve.len())
+			if _, err := verb.write(e, logMsg(t, env)); err != nil {
+				t.Fatalf("%s against a duplicate = %v, want nil", verb.name, err)
+			}
+			if e.serve.len() != 0 {
+				t.Fatalf("serve ledger len after an absorbed duplicate = %d, want 0", e.serve.len())
+			}
+		})
 	}
 }
 
@@ -382,8 +413,18 @@ func TestFailDerivesTheTerminalReasonFromWhoIsWriting(t *testing.T) {
 		if got.ErrorCode != "tool_unavailable" || got.Detail != "the door is shut" {
 			t.Fatalf("payload = %+v, want the code/detail as given", got)
 		}
-		if got.Cancelled {
-			t.Fatal("a receiver failure must NOT carry cancelled:true — nothing was cancelled")
+		// ABSENT, not false. Decoding into a bool cannot tell the two apart, and
+		// they are not the same statement on the wire: a reader that checks for
+		// the key would see `cancelled:false` as "this close was examined and
+		// judged not a cancellation", when the truth is that cancellation is not
+		// a concept on this arm at all. behavior.Fail's payload is the
+		// {error_code, detail} shape and must stay exactly that.
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(pen.last().Payload, &keys); err != nil {
+			t.Fatalf("payload key unmarshal: %v", err)
+		}
+		if _, present := keys["cancelled"]; present {
+			t.Fatalf("a receiver failure must not carry the cancelled key at all, got %s", pen.last().Payload)
 		}
 	})
 

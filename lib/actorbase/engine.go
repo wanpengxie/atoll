@@ -493,10 +493,13 @@ func (e *engine) Fail(msg Msg, code, detail string) (message.ID, error) {
 // that primitive is the {error_code, detail} receiver-failure shape's one
 // home, and the overload reject lane still uses it as such.
 //
-// KNOWN limit: on a self-addressed request the same identity is both caller
-// and receiver, both arms are authorised, and this derivation always picks
-// self-close — there is no way to say "I, the receiver, failed". No live path
-// does that; an explicit reason入口 can be added additively if one ever appears.
+// KNOWN limit: on a self-addressed request the same identity is both caller and
+// receiver, both arms are authorised, and this derivation always picks
+// self-close — there is no way to say "I, the receiver, failed". Post admits
+// such a request (it has no worker to deadlock, so it does not refuse one), so
+// the shape is reachable; what no current product flow needs is the ability to
+// EXPRESS a receiver failure on it. An explicit reason入口 can be added
+// additively the day one does.
 func (e *engine) writeFailure(msg Msg, code, detail string) (message.ID, error) {
 	self := e.Self()
 	if self == "" || self != msg.Sender.ID {
@@ -914,10 +917,10 @@ func normaliseTimerPayload(raw []byte) []byte {
 // SCHEDULER restarts and nothing about the actor. That made a second,
 // identity-flavoured timer verb a distinction without a difference.
 //
-// payload rides through json.Marshal. A json.RawMessage therefore stays JSON
-// (RawMessage.MarshalJSON hands its own bytes back, so no []byte→base64
-// corruption) though whitespace is compacted and invalid JSON is caught HERE
-// rather than at fire time — both strictly better than passing bytes through
+// payload goes through timerPayloadBytes: a json.RawMessage is stored byte-for
+// byte (the absorbed verb promised that to off-process subjects and still
+// does), anything else is marshalled — which also catches invalid JSON at arm
+// time rather than at fire time, strictly better than passing bytes through
 // unexamined.
 func (e *engine) After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error) {
 	// nil-arm底线 (S6): a host with no Schedule arm answers ErrUnsupported, never
@@ -925,7 +928,7 @@ func (e *engine) After(d time.Duration, msgType string, payload any, home schedu
 	if e.sched == nil {
 		return "", ErrUnsupported
 	}
-	raw, err := json.Marshal(payload)
+	raw, err := timerPayloadBytes(payload)
 	if err != nil {
 		return "", err
 	}
@@ -935,6 +938,28 @@ func (e *engine) After(d time.Duration, msgType string, payload any, home schedu
 		Type:    msgType,
 		Payload: normaliseTimerPayload(raw),
 	})
+}
+
+// timerPayloadBytes turns an author's payload into the bytes the Scheduler
+// stores, WITHOUT rewriting bytes the author already chose.
+//
+// A json.RawMessage is a deliberate statement: "these exact bytes are the
+// payload". Running it through json.Marshal is safe from the []byte→base64 trap
+// (RawMessage.MarshalJSON hands its own bytes back) but NOT byte-preserving —
+// encoding/json compacts whitespace on the way out. The verb this one absorbed
+// (the deleted AfterIdentity) took RawMessage and passed it to the Scheduler
+// untouched, so folding that caller onto a marshalling path would have silently
+// rewritten a payload an off-process subject composed. Byte fidelity was an
+// explicit promise there; it stays one here.
+//
+// Everything else is a Go value with no chosen encoding, so Marshal is exactly
+// right — and doing it here also means invalid JSON is caught at arm time
+// rather than surfacing as a harness reject when the timer eventually fires.
+func timerPayloadBytes(payload any) ([]byte, error) {
+	if raw, ok := payload.(json.RawMessage); ok {
+		return raw, nil
+	}
+	return json.Marshal(payload)
 }
 
 func (e *engine) CancelTimer(id schedule.TimerID) error {

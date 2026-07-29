@@ -481,7 +481,8 @@ func (s *Session) publishElig(globalErr bool, failedThisRound map[channel.ID]str
 
 // pumpChannel drains up to feedBatch rows after ch's cursor into the lane as feed
 // frames. Returns (full, ok): full = read a whole batch (积压续跑 → stay runnable);
-// ok=false = lane closed. receipt.seq is never folded here (write位≠读位).
+// ok=false = lane closed. Only a feed frame's own seq (a READ position) moves
+// the cursor; a submit receipt carries no seq to confuse it with.
 func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) {
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()

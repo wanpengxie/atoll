@@ -433,8 +433,9 @@ func interpretAfter(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
 	}
 	// Durable home: a person's reminder must survive a Scheduler restart, which
 	// is what the home parameter names (durability, not lifetime). p.Payload is
-	// json.RawMessage, so After's single marshal emits it verbatim rather than
-	// base64-ing a []byte — the same trap §7.1 names for resolve.
+	// json.RawMessage, which After stores byte for byte — the person's composed
+	// bytes reach the fired timer unrewritten, no []byte→base64 (the trap §7.1
+	// names for resolve) and no whitespace compaction either.
 	id, err := sys.After(durationMs(p.DurationMs), p.MsgType, p.Payload, schedule.TimerHomeDurable)
 	if err != nil {
 		return mapVerbErrFrame(err, f)
