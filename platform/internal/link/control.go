@@ -1,75 +1,34 @@
 package link
 
 import (
-	"encoding/json"
 	"fmt"
-	"sync"
-	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
-
-// AttachRequest is the stream-0 control message a daemon sends to join a
-// channel home. Actor intent is pulled separately as one full Plan snapshot;
-// attach carries no actor declarations or incremental lifecycle state. It
-// carries NO credential —
-// authentication is an app-layer concern resolved on the WS upgrade (the URL's
-// ?key= query) before the connection ever reaches the Acceptor; the link layer
-// is auth-agnostic (it does not care who the peer is, only its ResolveFunc
-// differs). A credential field here would be a dead leak of an app concern into
-// the wire vocabulary.
-type AttachRequest struct {
-	Proto int `json:"proto"`
-}
-
-// AttachReply is the home's stream-0 response: the assigned channel and the
-// accept verdict.
-type AttachReply struct {
-	ChannelID  channel.ID        `json:"channel_id"`
-	Generation SessionGeneration `json:"generation"`
-	Accepted   bool              `json:"accepted"`
-	Reason     string            `json:"reason,omitempty"`
-	// DaemonID is the authenticated compute id the app bound to this link before
-	// handing it to Home. The peer never supplies an identity claim on the link
-	// protocol; this reply lets it key local resource ownership by the server's
-	// authoritative identity.
-	DaemonID string `json:"daemon_id"`
-}
-
-// controlKind tags one stream-0 control payload (the link control plane is
-// JSON; actor streams are native ipc). The full vocabulary — attach, plan,
-// probe, storage and file-route RPCs — is enumerated by the per-endpoint known-kind
-// lists in control_dispatch.go, which the control tables must cover exactly.
-type controlKind string
-
-const (
-	ctrlAttach      controlKind = "attach"
-	ctrlAttachReply controlKind = "attach_reply"
-	ctrlPlanPull    controlKind = "plan_pull"
-	ctrlPlanReply   controlKind = "plan_reply"
-	ctrlPlanPoke    controlKind = "plan_poke"
-	ctrlProbe       controlKind = "session_probe"
-	ctrlProbeReply  controlKind = "session_probe_reply"
-)
-
-type PlanPull struct{}
-
-type Probe struct {
-	Nonce string `json:"nonce"`
-}
-
-type ProbeReply struct {
-	Nonce string `json:"nonce"`
-}
 
 type PlanReply struct {
 	Actors []platform.PlanActor `json:"actors"`
 	Error  string               `json:"error,omitempty"`
+}
+
+func (m PlanReply) validate() error {
+	for index, row := range m.Actors {
+		if row.ActorID == "" {
+			return fmt.Errorf("link: plan actor %d has no id", index)
+		}
+		if _, err := actorhost.ParseAttemptKey(string(row.AttemptKey)); err != nil {
+			return err
+		}
+		if _, ok := actor.ParseKind(string(row.Kind)); !ok {
+			return fmt.Errorf("link: plan actor %d has invalid kind", index)
+		}
+		if row.Class == "" {
+			return fmt.Errorf("link: plan actor %d has no class", index)
+		}
+	}
+	return nil
 }
 
 func requiredControlField(name, value string) error {
@@ -77,151 +36,4 @@ func requiredControlField(name, value string) error {
 		return fmt.Errorf("link: control field %s is required", name)
 	}
 	return nil
-}
-
-func (m AttachRequest) validate() error {
-	if m.Proto <= 0 {
-		return fmt.Errorf("link: attach proto must be positive")
-	}
-	return nil
-}
-
-func (m AttachReply) validate() error {
-	if !m.Accepted {
-		return requiredControlField("attach_reply.reason", m.Reason)
-	}
-	if err := requiredControlField("attach_reply.channel_id", string(m.ChannelID)); err != nil {
-		return err
-	}
-	if err := requiredControlField("attach_reply.generation", string(m.Generation)); err != nil {
-		return err
-	}
-	generation, err := uuid.Parse(string(m.Generation))
-	if err != nil || generation.Version() != 7 || generation.Variant() != uuid.RFC4122 ||
-		generation.String() != string(m.Generation) {
-		return fmt.Errorf("link: attach_reply.generation must be canonical UUIDv7")
-	}
-	return requiredControlField("attach_reply.daemon_id", m.DaemonID)
-}
-
-func (PlanPull) validate() error { return nil }
-
-func (m Probe) validate() error {
-	return requiredControlField("probe.nonce", m.Nonce)
-}
-
-func (m ProbeReply) validate() error {
-	return requiredControlField("probe_reply.nonce", m.Nonce)
-}
-
-func (m PlanReply) validate() error {
-	for i, planActor := range m.Actors {
-		if planActor.ActorID == "" {
-			return fmt.Errorf("link: plan_reply.actors[%d].actor_id is required", i)
-		}
-		if _, err := actorhost.ParseAttemptKey(string(planActor.AttemptKey)); err != nil {
-			return fmt.Errorf("link: plan_reply.actors[%d].attempt_key: %w", i, err)
-		}
-		if _, ok := actor.ParseKind(string(planActor.Kind)); !ok {
-			return fmt.Errorf("link: plan_reply.actors[%d].kind is invalid", i)
-		}
-		if planActor.Class == "" {
-			return fmt.Errorf("link: plan_reply.actors[%d].class is required", i)
-		}
-	}
-	return nil
-}
-
-// encodePlanPoke emits the deliberately empty, sole-key level-wake frame.
-func encodePlanPoke() []byte { return []byte(`{"kind":"plan_poke"}`) }
-
-// validPlanPoke accepts EXACTLY the one-field shape encodePlanPoke emits
-// (len==1 check). The two functions must change together: adding a field to
-// the encoder without relaxing this check makes every poke a protocol
-// violation that kills the session.
-func validPlanPoke(raw []byte) bool {
-	var value map[string]json.RawMessage
-	if json.Unmarshal(raw, &value) != nil || len(value) != 1 {
-		return false
-	}
-	kind, ok := value["kind"]
-	if !ok {
-		return false
-	}
-	var decoded controlKind
-	return json.Unmarshal(kind, &decoded) == nil && decoded == ctrlPlanPoke
-}
-
-// controlFrame is the stream-0 envelope: one kind, one optional payload each.
-type controlFrame struct {
-	RequestID   string         `json:"request_id,omitempty"`
-	Kind        controlKind    `json:"kind"`
-	Attach      *AttachRequest `json:"attach,omitempty"`
-	AttachReply *AttachReply   `json:"attach_reply,omitempty"`
-	PlanPull    *PlanPull      `json:"plan_pull,omitempty"`
-	PlanReply   *PlanReply     `json:"plan_reply,omitempty"`
-	Probe       *Probe         `json:"probe,omitempty"`
-	ProbeReply  *ProbeReply    `json:"probe_reply,omitempty"`
-}
-
-func encodeControl(f controlFrame) ([]byte, error) { return json.Marshal(f) }
-
-func decodeControl(b []byte) (controlFrame, error) {
-	var f controlFrame
-	if err := json.Unmarshal(b, &f); err != nil {
-		return controlFrame{}, fmt.Errorf("link: decode control: %w", err)
-	}
-	if f.Attach != nil {
-		if err := f.Attach.validate(); err != nil {
-			return controlFrame{}, err
-		}
-	}
-	if f.AttachReply != nil {
-		if err := f.AttachReply.validate(); err != nil {
-			return controlFrame{}, err
-		}
-	}
-	if f.PlanPull != nil {
-		if err := f.PlanPull.validate(); err != nil {
-			return controlFrame{}, err
-		}
-	}
-	if f.PlanReply != nil {
-		if err := f.PlanReply.validate(); err != nil {
-			return controlFrame{}, err
-		}
-	}
-	if f.Probe != nil {
-		if err := f.Probe.validate(); err != nil {
-			return controlFrame{}, err
-		}
-	}
-	if f.ProbeReply != nil {
-		if err := f.ProbeReply.validate(); err != nil {
-			return controlFrame{}, err
-		}
-	}
-	return f, nil
-}
-
-func peekControlKind(raw []byte) controlKind {
-	var head struct {
-		Kind controlKind `json:"kind"`
-	}
-	_ = json.Unmarshal(raw, &head)
-	return head.Kind
-}
-
-func waitGroupWithin(group *sync.WaitGroup, timeout time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		group.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
-	}
 }

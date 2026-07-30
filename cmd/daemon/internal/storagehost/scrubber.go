@@ -36,7 +36,7 @@ type TombstoneToReclaim struct{ TombstoneID, Coord string }
 type ActiveStaging struct{ Coord string }
 
 // ReclaimAckFunc is Pass's network callback — compute.Run's bridge supplies a
-// closure bound to whichever *link.Dialer is CURRENTLY connected (this
+// closure bound to this compartment's exact current lane (this
 // package never holds a live connection reference itself: nothing here
 // needs to survive a reconnect mid-call — each Pass is a single,
 // short-lived reconcile cycle the platform-side ticker re-issues wholesale
@@ -48,7 +48,7 @@ type ReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, e
 // behind, log (never auto-repair) a landed resource whose coord is missing
 // on disk. WHEN to run a pass (startup + periodic ticker) and HOW to reach
 // the home (SendReconcilePull/SendReclaimAck) are platform-side concerns
-// (compute.Run's bridge, which alone can hold a *link.Dialer) — this type is
+// (compute's bridge, which alone can hold a live lane) — this type is
 // pure local-filesystem policy, independently testable with no network.
 type Scrubber struct {
 	Reclaimer Reclaimer

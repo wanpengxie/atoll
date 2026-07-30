@@ -94,13 +94,10 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	// plan on stream 0, atomically publishes desired+builder, then declares/builds.
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
-	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), chID, apiKey)
+	serverWS := fmt.Sprintf("ws://%s/compute", srv.Listener.Addr())
 	plan := &e2eLinkPlan{chID: channel.ID(chID)}
 	go func() {
-		runErr <- compute.Run(ctx, compute.Config{
-			ServerWS: serverWS, Factories: plan,
-			Poll: 100 * time.Millisecond,
-		})
+		runErr <- compute.Run(ctx, daemonComputeConfig(t, serverWS, apiKey, plan, nil))
 	}()
 	t.Cleanup(func() {
 		cancel()

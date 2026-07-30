@@ -14,7 +14,7 @@ import (
 // tree with no entry is an assembly defect (a Go error), never a verdict.
 type DriverTable map[resourcespec.ResourceKind]resourcespec.Driver
 
-// StorageMount is one channel-attached daemon's storage-placement candidacy —
+// StorageMount is one channel-ready daemon's storage-placement candidacy —
 // §4.3 policy chain ③④'s raw input.
 type StorageMount struct {
 	DaemonID string
@@ -22,9 +22,9 @@ type StorageMount struct {
 }
 
 // StorageMounts is placement routing's mount-table Dep (期11 spec §4.3): "which
-// daemons are attached to this channel, and which of those are online right
-// now". The runtime tree DEFINES this contract; platform assembly FILLS it
-// (late-bound, closing over the link Acceptor's attach state — §4.3's own
+// daemons are bound to this channel and currently have a ready service lane".
+// The runtime tree DEFINES this contract; platform assembly FILLS it
+// (injected from the realm daemon host's positive-ready lane view —
 // injection-point discipline: "注入点契约 runtime 定,实现填充下游做"). This
 // package never imports platform/app to answer it itself.
 type StorageMounts interface {

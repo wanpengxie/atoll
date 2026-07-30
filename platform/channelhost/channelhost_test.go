@@ -18,7 +18,6 @@ import (
 )
 
 type testResolver struct {
-	daemonDeleted   bool
 	declaration     channelspec.DeclarationFacts
 	declarationLive bool
 }
@@ -96,67 +95,6 @@ func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool
 	}
 	return "", false, nil
 }
-func (r testResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{Deleted: r.daemonDeleted}, nil
-}
-
-func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	liveResolver := testResolver{}
-	host, err := New(root, HomeDeps{CompositionResolver: liveResolver, IntroductionResolver: liveResolver})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := (channelspec.RenderedSnapshot{
-		Class: "test-agent", Placement: channel.Placement{Kind: channel.PlacementDaemon, DesiredHost: "daemon-a"},
-	}).Seal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec := provisionSpec("offline-daemon")
-	spec.GenesisDeclarations = []GenesisDeclaration{{DeclID: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
-	if _, err := host.Provision(ctx, spec); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
-		t.Fatal(err)
-	}
-	bundle, ok := host.Acquire(spec.ChannelID)
-	if !ok {
-		t.Fatal("initial channel not serving")
-	}
-	if _, err := bundle.SysOp().AttachDaemon(ctx, channelspec.DaemonRequest{Ref: "offline:attach", DaemonID: "daemon-a"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	deletedResolver := testResolver{daemonDeleted: true}
-	reopened, err := New(root, HomeDeps{CompositionResolver: deletedResolver, IntroductionResolver: deletedResolver})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
-		t.Fatal(err)
-	}
-	bundle, ok = reopened.Acquire(spec.ChannelID)
-	if !ok {
-		t.Fatal("reopened channel not serving")
-	}
-	if bound, err := bundle.View().IsBound(ctx, "daemon-a"); err != nil || bound {
-		t.Fatalf("first sweep binding=(%v,%v), want detached", bound, err)
-	}
-	// Detach is a wiring-domain action: it removes the binding row and kills no
-	// actor. The daemon-placed actor stays a member with a dangling desired —
-	// re-attaching the same daemon id reconciles it back.
-	if rows, err := bundle.View().DeclaredInstances(ctx, "decl-a"); err != nil || len(rows) != 1 {
-		t.Fatalf("detach must not end the daemon-placed actor: instances=%v err=%v", rows, err)
-	}
-}
-
 func newTestHost(t *testing.T) *ChannelHost {
 	t.Helper()
 	host, err := New(t.TempDir(), HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}})
@@ -165,6 +103,47 @@ func newTestHost(t *testing.T) *ChannelHost {
 	}
 	t.Cleanup(func() { _ = host.Close() })
 	return host
+}
+
+func TestMembraneUnregisterPrecedesHomeQuiesce(t *testing.T) {
+	ctx := context.Background()
+	var opened Bundle
+	var host *ChannelHost
+	callback := make(chan error, 1)
+	host, err := New(t.TempDir(), HomeDeps{
+		CompositionResolver: testResolver{}, IntroductionResolver: testResolver{},
+		OnMembraneClose: func(id channel.ID, _ uint64) {
+			if _, visible := host.Acquire(id); visible {
+				callback <- errors.New("closing membrane remained published")
+				return
+			}
+			_, _, err := opened.View().OwnerPrincipal(ctx)
+			callback <- err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	id := channel.ID("staged-close")
+	if _, err := host.Provision(ctx, provisionSpec(id)); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); err != nil {
+		t.Fatal(err)
+	}
+	opened, _ = host.Acquire(id)
+	if err := host.Destroy(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-callback:
+		if err != nil {
+			t.Fatalf("membrane close ordering: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("membrane close callback did not run")
+	}
 }
 
 func provisionSpec(id channel.ID) ProvisionSpec {

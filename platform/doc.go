@@ -24,13 +24,15 @@
 //   - PlanActor (plan.go) — the authenticated link-plan DTO shared by the home
 //     provider and compute sink, including the declaration version and canonical
 //     declaration metadata both hosts compare.
+//   - DaemonMembrane / DaemonRoutes (daemonlink.go) — transport-free values
+//     shared by channel Homes and the realm daemon host.
 //
 // # Root-file topology
 //
 // Every non-test .go file directly under platform/ (sub-packages excluded —
 // platform/home, platform/compute, platform/subjectgate, and
 // platform/internal/* are packages of their own, not root files) falls into
-// this closed set: doc.go, decl.go, actorfactory.go, plan.go. archtest's root-
+// this closed set: doc.go, decl.go, actorfactory.go, plan.go, daemonlink.go. archtest's root-
 // classification anchor enforces this as a closed set — a new root file
 // turns that tripwire red; the root does not grow by accretion, only by a
 // spec decision that a new word is genuinely cross-host truth.
@@ -38,11 +40,11 @@
 // # The four jurisdictions
 //
 // platform/home is the channel-home assembly root (server side — one
-// channel's truth and execution wiring: Open/View/Admit/Restart/
-// ServeAttach/Subscribe/Close + the subjectgate slot seam). platform/compute
-// is the attached-compute assembly root (daemon side — one attached
-// process's own reconcile ring: Run/Config, dialing in, reattaching,
-// building/reopening streams). platform/subjectgate is the per-identity
+// channel's truth and execution wiring: Open/View/Admit/Restart/Subscribe/Close
+// plus the subjectgate slot seam; it owns no daemon transport).
+// platform/daemonhost owns realm-wide daemon carriers and channel lanes.
+// platform/compute is the daemon-side multi-compartment assembly root.
+// platform/subjectgate is the per-identity
 // binding-slot protocol both the gateway and a subject's own frame-driven
 // actions speak through. platform/internal/* is everything neither host's
 // public capability set names — hostcommon (the shared Build/OutcomeString +

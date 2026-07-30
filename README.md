@@ -87,7 +87,8 @@ runtime/     the kernel runtime (harness admission pipeline, actorrt cells/ports
 lib/         stdlib for actor authors (behavior, channelkit, metatool, introspect)
 platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word table);
              home/ (server-side channel-home assembly, ChannelHome), compute/
-             (daemon-side attached-compute assembly, Run), subjectgate/ +
+             daemonhost/ (realm device carriers), compute/ (daemon-side
+             multi-compartment assembly, Run), subjectgate/ +
              internal/ subpackages
 app/         reference realm (identity, channel directory/lifecycle, declarations,
              daemon tombstones, admission/lifecycle jobs, HTTP/WS)
@@ -108,8 +109,7 @@ bin/atoll-server --db /tmp/atoll-dev/app.db --channel-db-dir /tmp/atoll-dev/chan
 
 # 3. run a daemon (compute host; echo actor needs no external credentials)
 #    create a daemon in the UI/CLI to get an api-key, bind it to a channel
-bin/atoll-daemon --server "ws://localhost:8080/compute?key=<api-key>&channel=<chID>" \
-                 --key <api-key> --actors echo
+bin/atoll-daemon --server "ws://localhost:8080/compute" --key <api-key>
 
 # 4. tests
 make test

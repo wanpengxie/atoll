@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
-	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -46,6 +46,7 @@ type Config struct {
 	Clock                schedule.Clock
 	ReservationTimeout   time.Duration
 	OnRelationChange     func(channelpkg.ID, []channelspec.RelationDelta)
+	DaemonRoutes         platform.DaemonRoutes
 }
 
 // Home is the channel composition root. Runtime organs are held as peers;
@@ -92,13 +93,14 @@ type Home struct {
 	stateHandles   accessdoor.StateHandleResolver
 	engine         *schedule.Engine
 
-	signal       *tap.Signal
-	delivery     *tap.Pump
-	links        *link.Acceptor
-	presenceFold *presence.Fold
-	subjectgate  *subjectgate.Registry
-	factories    ActorFactoryResolver
-	opEntry      *opEntry
+	signal         *tap.Signal
+	delivery       *tap.Pump
+	daemonRoutes   platform.DaemonRoutes
+	daemonMembrane platform.DaemonMembrane
+	presenceFold   *presence.Fold
+	subjectgate    *subjectgate.Registry
+	factories      ActorFactoryResolver
+	opEntry        *opEntry
 
 	systemPen    harness.Pen
 	expiryCursor storespec.ExpiryCursor

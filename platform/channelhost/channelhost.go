@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -98,6 +99,9 @@ type HomeDeps struct {
 	CompositionResolver  home.CompositionResolver
 	IntroductionResolver home.IntroductionResolver
 	OnRelationChange     func(channel.ID, []channelspec.RelationDelta)
+	DaemonRoutes         platform.DaemonRoutes
+	OnMembraneOpen       func(channel.ID, uint64, platform.DaemonMembrane)
+	OnMembraneClose      func(channel.ID, uint64)
 	Logger               *slog.Logger
 }
 
@@ -110,11 +114,13 @@ const (
 )
 
 type entry struct {
-	home       *home.Home
-	sysOp      SysOp
-	generation uint64
-	state      entryState
-	closed     bool
+	home           *home.Home
+	sysOp          SysOp
+	generation     uint64
+	state          entryState
+	closed         bool
+	destroying     bool
+	membraneClosed bool
 	// genesisType is the channel type Open verified against genesis; the
 	// serving fast path re-checks ExpectedType against it instead of skipping
 	// the strict validation.
@@ -304,7 +310,14 @@ func storePlacement(in channel.Placement) (storespec.Placement, error) {
 func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	lock := h.idLock(spec.ChannelID)
 	lock.Lock()
-	defer lock.Unlock()
+	var notifyGeneration uint64
+	var notifyMembrane platform.DaemonMembrane
+	defer func() {
+		lock.Unlock()
+		if notifyGeneration != 0 && h.deps.OnMembraneOpen != nil {
+			h.deps.OnMembraneOpen(spec.ChannelID, notifyGeneration, notifyMembrane)
+		}
+	}()
 	if err := h.checkOpen(); err != nil {
 		return err
 	}
@@ -358,6 +371,8 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	}
 	h.entries[spec.ChannelID] = &entry{home: homeInstance, sysOp: home.SystemOps(homeInstance), generation: generation, state: stateServing, genesisType: spec.ExpectedType}
 	h.mu.Unlock()
+	notifyGeneration = generation
+	notifyMembrane = home.DaemonMembrane(homeInstance)
 	return nil
 }
 
@@ -374,6 +389,7 @@ func (h *ChannelHost) openHome(
 		CompositionResolver: h.deps.CompositionResolver, IntroductionResolver: h.deps.IntroductionResolver,
 		Logger: h.logger, BootstrapOwnerPrincipal: bootstrapOwner,
 		BootstrapDeclarations: bootstrapDeclarations,
+		DaemonRoutes:          h.deps.DaemonRoutes,
 	}
 	if bootstrap {
 		config.Genesis = genesis
@@ -400,21 +416,51 @@ func (h *ChannelHost) Acquire(id channel.ID) (Bundle, bool) {
 func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
 	lock := h.idLock(id)
 	lock.Lock()
-	defer lock.Unlock()
 	if err := h.checkOpen(); err != nil {
+		lock.Unlock()
 		return err
 	}
 	main, tombstone, err := h.paths(id)
 	if err != nil {
+		lock.Unlock()
 		return err
 	}
+	var notifyGeneration uint64
 	h.mu.Lock()
 	current := h.entries[id]
 	if current != nil {
+		if current.destroying {
+			h.mu.Unlock()
+			lock.Unlock()
+			return ErrChannelNotFound
+		}
+		current.destroying = true
 		current.state = stateSealing
+		if !current.membraneClosed {
+			current.membraneClosed = true
+			notifyGeneration = current.generation
+		}
 	}
 	alreadyClosed := current != nil && current.closed
 	h.mu.Unlock()
+	lock.Unlock()
+	if notifyGeneration != 0 && h.deps.OnMembraneClose != nil {
+		h.deps.OnMembraneClose(id, notifyGeneration)
+	}
+	lock.Lock()
+	defer func() {
+		if current != nil {
+			h.mu.Lock()
+			current.destroying = false
+			h.mu.Unlock()
+		}
+		lock.Unlock()
+	}()
+	if current != nil {
+		h.mu.RLock()
+		alreadyClosed = current.closed
+		h.mu.RUnlock()
+	}
 	if current != nil && !alreadyClosed {
 		// home.Shutdown is a slow IO operation and stays outside h.mu, but the
 		// entry state flip is a mutated field Acquire reads under h.mu.RLock, so
@@ -522,10 +568,21 @@ func (h *ChannelHost) Close() error {
 	h.mu.Lock()
 	h.closed = true
 	entries := make(map[channel.ID]*entry, len(h.entries))
+	notifications := make(map[channel.ID]uint64)
 	for id, e := range h.entries {
 		entries[id] = e
+		e.state = stateSealing
+		if !e.membraneClosed {
+			e.membraneClosed = true
+			notifications[id] = e.generation
+		}
 	}
 	h.mu.Unlock()
+	if h.deps.OnMembraneClose != nil {
+		for id, generation := range notifications {
+			h.deps.OnMembraneClose(id, generation)
+		}
+	}
 	var errs []error
 	for id, entry := range entries {
 		// Share the per-ID lock with the three lifecycle verbs so an in-flight

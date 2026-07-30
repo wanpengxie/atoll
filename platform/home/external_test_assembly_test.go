@@ -19,9 +19,6 @@ func (emptyIntroductionResolver) ResolveDeclaration(context.Context, channel.ID,
 func (emptyIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (emptyIntroductionResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
-}
 
 type emptyCompositionResolver struct{}
 

@@ -8,13 +8,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -39,6 +39,20 @@ type DaemonOutboundConfig struct {
 	RetryDelay   time.Duration
 }
 
+type laneActorStream interface {
+	Arms() link.RawActorArms
+	Done() <-chan struct{}
+	Close() error
+	SendCancelRequest(message.ID) error
+	PublishObs(string, []byte) error
+}
+
+type LaneSession interface {
+	IsCurrent() bool
+	Done() <-chan struct{}
+	OpenActorStream(context.Context, actor.ActorID, actorhost.AttemptKey) (laneActorStream, error)
+}
+
 // DaemonOutbound owns exact body slots and converges their future outbound
 // calls onto the current authenticated physical session. It owns neither actor
 // lifecycle truth nor session teardown.
@@ -52,8 +66,8 @@ type DaemonOutbound struct {
 	mu       sync.Mutex
 	sealed   bool
 	slots    map[*OutboundSlot]struct{}
-	session  *link.AuthenticatedLinkSession
-	watching map[*link.AuthenticatedLinkSession]struct{}
+	session  LaneSession
+	watching map[LaneSession]struct{}
 
 	workerWG sync.WaitGroup
 	runnerWG sync.WaitGroup
@@ -66,8 +80,8 @@ type DaemonOutbound struct {
 
 // OutboundArmsBundle is one immutable, atomically-published stream generation.
 type OutboundArmsBundle struct {
-	Session *link.AuthenticatedLinkSession
-	Stream  *link.ActorStream
+	Session LaneSession
+	Stream  laneActorStream
 
 	Pen       harness.Pen
 	Access    accessdoor.ResourceAccessHandle
@@ -141,7 +155,7 @@ func NewDaemonOutbound(cfg DaemonOutboundConfig) *DaemonOutbound {
 		poll:      poll,
 		retry:     retry,
 		slots:     make(map[*OutboundSlot]struct{}),
-		watching:  make(map[*link.AuthenticatedLinkSession]struct{}),
+		watching:  make(map[LaneSession]struct{}),
 		closeDone: make(chan struct{}),
 	}
 	outbound.runnerWG.Add(1)
@@ -253,9 +267,9 @@ func (d *DaemonOutbound) Prepare(
 	}, nil
 }
 
-// SetSession publishes an already-Plan-accepted exact physical session for
+// SetLane publishes an already-plan-accepted exact lane for
 // future stream convergence. It never closes the predecessor session.
-func (d *DaemonOutbound) SetSession(session *link.AuthenticatedLinkSession) error {
+func (d *DaemonOutbound) SetLane(session LaneSession) error {
 	if d == nil || session == nil || !session.IsCurrent() {
 		return ErrOutboundDisconnected
 	}
@@ -269,7 +283,7 @@ func (d *DaemonOutbound) SetSession(session *link.AuthenticatedLinkSession) erro
 		return nil
 	}
 	d.session = session
-	var oldStreams []*link.ActorStream
+	var oldStreams []laneActorStream
 	for slot := range d.slots {
 		slot.retryAt = time.Time{}
 		old := slot.arms.Swap(disconnectedOutboundBundle)
@@ -290,11 +304,11 @@ func (d *DaemonOutbound) SetSession(session *link.AuthenticatedLinkSession) erro
 	return nil
 }
 
-func (d *DaemonOutbound) watchSession(session *link.AuthenticatedLinkSession) {
+func (d *DaemonOutbound) watchSession(session LaneSession) {
 	defer d.workerWG.Done()
 	select {
 	case <-session.Done():
-		d.SessionDown(session)
+		d.LaneDown(session)
 	case <-d.ctx.Done():
 	}
 	d.mu.Lock()
@@ -302,12 +316,12 @@ func (d *DaemonOutbound) watchSession(session *link.AuthenticatedLinkSession) {
 	d.mu.Unlock()
 }
 
-// SessionDown clears only the exact current session.
-func (d *DaemonOutbound) SessionDown(session *link.AuthenticatedLinkSession) {
+// LaneDown clears only the exact current lane generation.
+func (d *DaemonOutbound) LaneDown(session LaneSession) {
 	if d == nil || session == nil {
 		return
 	}
-	var streams []*link.ActorStream
+	var streams []laneActorStream
 	d.mu.Lock()
 	if d.session == session {
 		d.session = nil
@@ -343,8 +357,8 @@ func (d *DaemonOutbound) convergePass() {
 
 func (d *DaemonOutbound) convergeSlot(slot *OutboundSlot) {
 	isCurrent := slot.current.IsCurrent()
-	var predecessor *link.ActorStream
-	var session *link.AuthenticatedLinkSession
+	var predecessor laneActorStream
+	var session LaneSession
 
 	d.mu.Lock()
 	if d.sealed || slot.closed.Load() {
@@ -398,7 +412,7 @@ func (d *DaemonOutbound) convergeSlot(slot *OutboundSlot) {
 	go d.openSlot(slot, session)
 }
 
-func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.AuthenticatedLinkSession) {
+func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session LaneSession) {
 	defer d.workerWG.Done()
 	if !session.IsCurrent() {
 		d.mu.Lock()
@@ -410,8 +424,8 @@ func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.Authenticate
 	}
 	stream, err := session.OpenActorStream(d.ctx, slot.id, slot.key)
 	stillCurrent := slot.current.IsCurrent()
-	var loser *link.ActorStream
-	var predecessor *link.ActorStream
+	var loser laneActorStream
+	var predecessor laneActorStream
 	published := false
 
 	d.mu.Lock()
@@ -475,8 +489,8 @@ func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.Authenticate
 
 func (d *DaemonOutbound) watchStream(
 	slot *OutboundSlot,
-	session *link.AuthenticatedLinkSession,
-	stream *link.ActorStream,
+	session LaneSession,
+	stream laneActorStream,
 ) {
 	defer d.workerWG.Done()
 	select {
@@ -521,7 +535,7 @@ func (s *OutboundSlot) Close() error {
 		s.pendingObs = nil
 		s.obsMu.Unlock()
 		owner := s.owner
-		var stream *link.ActorStream
+		var stream laneActorStream
 		owner.mu.Lock()
 		delete(owner.slots, s)
 		old := s.arms.Swap(disconnectedOutboundBundle)

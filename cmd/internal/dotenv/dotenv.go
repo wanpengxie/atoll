@@ -1,6 +1,6 @@
 // Package dotenv is a minimal .env loader for the server composition root
-// (cmd/server only — the daemon carries zero config file, A-P10; its creds ride
-// the ?key= link auth). Config enters the process exactly one way — the
+// (cmd/server only — the daemon carries zero config file, A-P10; its credential
+// rides the carrier's Bearer authorization). Config enters the process exactly one way — the
 // environment — and this is the dev-convenience bridge that seeds it from a
 // file so `make dev` and a bare binary run don't need a manual `source .env`.
 //

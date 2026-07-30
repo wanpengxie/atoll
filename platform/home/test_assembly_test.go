@@ -20,9 +20,6 @@ func (inertIntroductionResolver) ResolveDeclaration(context.Context, channel.ID,
 func (inertIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (inertIntroductionResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
-}
 
 type emptyCompositionResolver struct{}
 

@@ -37,9 +37,6 @@ func (gatewayTestCompositionResolver) ResolveDeclaration(context.Context, channe
 func (gatewayTestCompositionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (gatewayTestCompositionResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
-}
 
 // logCapture is a slog.Handler that records every emitted message (for telemetry
 // assertions — e.g. gateway.entitlement.paused/resumed, DoD-8).

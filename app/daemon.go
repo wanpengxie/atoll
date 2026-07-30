@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -61,43 +60,8 @@ func (a *App) handleListDaemons(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"daemons": result})
 }
 
-// daemonOnline reports whether daemon id has a live link attach right now. It is
-// online iff attached on any of its bound channels.
-// Read-time from each channel-home's View — derived, never a stored column.
-func (a *App) daemonOnline(ctx context.Context, daemonID string) (bool, error) {
-	check := func(chID channel.ID) (bool, error) {
-		release := a.channelLocks.lock(string(chID))
-		defer release()
-		bundle, ok := a.host.Acquire(chID)
-		if !ok {
-			return false, nil
-		}
-		bound, err := bundle.View().IsBound(ctx, daemonID)
-		if err != nil {
-			return false, nil
-		}
-		if err := a.relations.ReconcileBinding(ctx, chID, daemonID, bound); err != nil {
-			a.logger.Warn("daemon binding relation repair failed", "channel", chID, "daemon", daemonID, "err", err)
-		}
-		if !bound {
-			return false, nil
-		}
-		return bundle.View().IsAttached(daemonID), nil
-	}
-	ids, err := a.relations.BindingsOf(ctx, daemonID)
-	if err != nil {
-		return false, err
-	}
-	for _, ch := range ids {
-		online, err := check(ch)
-		if err != nil {
-			continue
-		}
-		if online {
-			return true, nil
-		}
-	}
-	return false, nil
+func (a *App) daemonOnline(_ context.Context, stringID string) (bool, error) {
+	return a.daemonHost.DaemonOnline(stringID), nil
 }
 
 func (a *App) directoryChannelIDs(ctx context.Context) ([]channel.ID, error) {
@@ -149,9 +113,8 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	})
 }
 
-// handleDeleteDaemon commits a permanent realm tombstone. Channel Homes pull
-// that value and detach their own bindings; this handler only observes serving
-// channels for a bounded convenience response.
+// handleDeleteDaemon commits the realm tombstone and immediately revokes the
+// device carrier. Channel-local bindings are intentionally retained.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	release := a.daemonLocks.lock(daemonID)
@@ -185,38 +148,11 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	}
 	release()
 	locked = false
-	a.pokeAllChannels(ctx)
-	convergence := "convergence_pending"
-	deadline := time.Now().Add(time.Second)
-	for {
-		if a.daemonConvergenceObservedClear(ctx, daemonID) {
-			convergence = "observed_clear"
-			break
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "authority_committed": true, "convergence": convergence})
-}
-
-func (a *App) daemonConvergenceObservedClear(ctx context.Context, daemonID string) bool {
-	ids, err := a.directoryChannelIDs(ctx)
-	if err != nil {
-		return false
-	}
-	for _, chID := range ids {
-		bundle, serving := a.host.Acquire(chID)
-		if !serving {
-			continue
-		}
-		bound, err := bundle.View().IsBound(ctx, daemonID)
-		if err != nil || bound || bundle.View().IsAttached(daemonID) {
-			return false
-		}
-	}
-	return true
+	a.daemonHost.RevokeDaemon(daemonID)
+	c.JSON(http.StatusOK, gin.H{
+		"ok": true, "authority_committed": true, "convergence": "revoked",
+		"diagnostics": a.daemonHost.Diagnostics(daemonID),
+	})
 }
 
 func (a *App) handleListChannelDaemons(c *gin.Context) {
@@ -257,7 +193,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 		}
 		result = append(result, gin.H{
 			"id": id, "name": name, "created_at": createdAt,
-			"online": bundle.View().IsAttached(id),
+			"online": a.daemonHost.LaneAttached(id, string(chID)),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -371,29 +307,20 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 }
 
 // ---------------------------------------------------------------------------
-// Auth helper: single path for compute connections
+// Credential resolver: transport authentication only. Binding is deliberately
+// absent; channel authority is evaluated by daemonhost's per-coordinate scan.
 // ---------------------------------------------------------------------------
 
-// authAndResolve verifies the API key, resolves the daemon ID, and checks that
-// the daemon is bound to the requested channel. This is the single auth path
-// for compute connections -- fleet never does auth itself.
-func (a *App) authAndResolve(apiKey string, chID channel.ID) (string, error) {
+func (a *App) resolveDaemonCredential(ctx context.Context, apiKey string) (string, int) {
 	var daemonID string
-	err := a.db.QueryRow(
+	err := a.db.QueryRowContext(ctx,
 		`SELECT id FROM daemons WHERE api_key = ? AND deleted_at IS NULL`, apiKey,
 	).Scan(&daemonID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", http.StatusUnauthorized
+	}
 	if err != nil {
-		return "", fmt.Errorf("invalid api key")
+		return "", http.StatusServiceUnavailable
 	}
-
-	bundle, ok := a.host.Acquire(chID)
-	if !ok {
-		return "", fmt.Errorf("channel unavailable")
-	}
-	bound, err := bundle.View().IsBound(context.Background(), daemonID)
-	if err != nil || !bound {
-		return "", fmt.Errorf("daemon not bound to channel")
-	}
-
-	return daemonID, nil
+	return daemonID, http.StatusOK
 }

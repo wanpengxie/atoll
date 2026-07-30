@@ -1,26 +1,15 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 )
-
-func TestStorageRootCloseDecisionTransfersOnForwarderLeak(t *testing.T) {
-	if shouldCloseStorageRoot(errors.Join(errors.New("other"), compute.ErrForwardersLeaked)) {
-		t.Fatal("forwarder leak must transfer Root ownership to process exit")
-	}
-	if !shouldCloseStorageRoot(errors.New("ordinary failure")) {
-		t.Fatal("ordinary failure must still close Root")
-	}
-}
 
 // Test-only classes: one that builds, one whose constructor always errors, one
 // that derives a different id — the three answers a class constructor can give

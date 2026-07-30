@@ -196,7 +196,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	serverWS := fmt.Sprintf("ws://%s/compute", srv.Listener.Addr())
 	xhsID, err := env.app.ComposeDaemonForTest(s.chID, "xhs", "xhs", daemonID, actor.KindTool)
 	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
@@ -227,9 +227,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 		},
 	})
 	go func() {
-		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, Factories: plan, Poll: 20 * time.Millisecond},
-		)
+		runErr <- compute.Run(ctx, daemonComputeConfig(t, serverWS, apiKey, plan, logger))
 	}()
 	t.Cleanup(func() {
 		cancel()

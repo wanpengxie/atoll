@@ -7,13 +7,9 @@ import (
 	"sync"
 )
 
-// Host ties the four §4.1 components into the one object cmd/daemon/main.go
-// constructs and injects into compute.Config.StorageHost (via a
-// small implements-the-interface adapter cmd/daemon/main.go itself writes —
-// Host's own method shapes are already exactly what that interface needs,
-// see its doc for why the interface lives in plain-typed form). One Host per
-// daemon process, scoped to the ONE channel compute.Run connects to (a daemon
-// hosts exactly one channel's assignment, cmd/daemon/main.go's own doc).
+// Host ties the four storage components into one channel-scoped resource set.
+// cmd/daemon constructs one Host per compute compartment, rooted beneath the
+// authenticated daemon root.
 type Host struct {
 	cr        *channelRoot
 	allocator Allocator

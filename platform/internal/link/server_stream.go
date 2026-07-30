@@ -8,10 +8,10 @@ import (
 	"io"
 	"sync"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/ipc"

@@ -85,10 +85,6 @@ func (r *declPullRealm) ClassKind(context.Context, string) (actor.Kind, bool, er
 	return r.kind, r.kindFound, r.kindErr
 }
 
-func (r *declPullRealm) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
-}
-
 func (r *declPullRealm) setFacts(class, config string) {
 	r.mu.Lock()
 	r.class, r.config = class, config

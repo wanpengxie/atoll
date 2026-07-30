@@ -7,11 +7,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -27,9 +27,6 @@ func (relationEventResolver) ResolveDeclaration(context.Context, channel.ID, str
 }
 func (relationEventResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return actor.KindAgent, true, nil
-}
-func (relationEventResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
 }
 
 func TestRelationEventsComeFromCommitRootsAndOpenSnapshot(t *testing.T) {

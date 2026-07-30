@@ -52,10 +52,6 @@ func (visibilityRealm) ClassKind(context.Context, string) (actor.Kind, bool, err
 	return actor.KindAgent, true, nil
 }
 
-func (visibilityRealm) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
-}
-
 func openVisibilityHome(t *testing.T, realm visibilityRealm) *home.Home {
 	t.Helper()
 	h, err := home.Open(home.Config{

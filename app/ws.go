@@ -1,13 +1,12 @@
 package app
 
 import (
-	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // ---------------------------------------------------------------------------
@@ -48,45 +47,24 @@ func (a *App) handleWS(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 func (a *App) handleCompute(c *gin.Context) {
-	// v1 approach: api-key + channel in query params. App does all auth
-	// (key verification + daemon-channel binding check) before handing off
-	// to the link acceptor, which receives the pre-authenticated daemonID.
-	apiKey := c.Query("key")
-	chIDStr := c.Query("channel")
-
-	if apiKey == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "api key required"})
+	if c.Query("key") != "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "query credentials are not accepted"})
 		return
 	}
-	if chIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "channel query param required"})
+	auth := c.GetHeader("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") ||
+		strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "malformed bearer authorization"})
 		return
 	}
-
-	chID := channel.ID(chIDStr)
-
-	// Single auth path: verify key + daemon-channel binding. The specific
-	// reason (bad key / no binding / db error) stays server-side — a public
-	// auth endpoint must not be an oracle, so the client gets one flat 403.
-	daemonID, err := a.authAndResolve(apiKey, chID)
-	if err != nil {
-		a.logger.Warn("compute attach: auth failed", "channel", chID, "err", err)
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-		return
-	}
-
-	bundle, err := a.acquireBundle(c.Request.Context(), chID)
-	if err != nil {
-		if errors.Is(err, errChannelNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
-			return
+	key := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	daemonID, status := a.resolveDaemonCredential(c.Request.Context(), key)
+	if status != http.StatusOK {
+		if status == http.StatusServiceUnavailable {
+			c.Header("Retry-After", "5")
 		}
-		a.logger.Warn("channel unavailable: directory has channel but its home is not open",
-			"channel", string(chID))
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+		c.JSON(status, gin.H{"error": http.StatusText(status)})
 		return
 	}
-
-	// Delegate to the link acceptor with the pre-authenticated daemonID.
-	bundle.Daemon().ServeAttach(c.Writer, c.Request, daemonID)
+	a.daemonHost.Serve(c.Writer, c.Request, daemonID)
 }

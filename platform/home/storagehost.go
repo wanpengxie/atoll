@@ -9,7 +9,7 @@ package home
 // No filesystem code lives here — Allocator/Streamer/Reclaimer/Scrubber stay
 // daemon-runtime-only (§8.2's server-zero-storage red line); this file only
 // ROUTES already-authorized control-plane decisions to the right live
-// connection (via link.Acceptor) and completes already-authorized outbox
+// per-channel daemon lane and completes already-authorized outbox
 // transactions (via the Platform-owned resource outbox).
 
 import (
@@ -17,10 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/access"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -39,42 +38,16 @@ func (o resourceOutbox) CommitReservation(
 	return o.completion.CommitReservation(ctx, id)
 }
 
-// lateAcceptor is the late-binding seam §4.3's own text names ("若装配时机
-// 上门先于acceptor建，注入一个late-bound的StorageMounts"): Home.Open's step 2
-// (runtime.OpenChannel, which needs StorageMounts/StorageControl already in
-// hand) runs BEFORE step 11 (link.NewAcceptor, the only thing that can
-// actually answer them — attach state lives on the Acceptor). A single
-// atomic pointer, set once by bindLateAcceptor after the Acceptor exists,
-// backs both lateStorageMounts and lateStorageControl below — every call
-// before that point sees a nil Acceptor and answers honestly (empty mount
-// list / "not wired yet" error) rather than blocking or panicking.
-type lateAcceptor struct {
-	p atomic.Pointer[link.Acceptor]
+type daemonStorageMounts struct {
+	routes platform.DaemonRoutes
+	chID   channelpkg.ID
 }
 
-func (l *lateAcceptor) bind(a *link.Acceptor) {
-	if !l.p.CompareAndSwap(nil, a) {
-		panic("platform: late acceptor bound twice")
+func (m daemonStorageMounts) ListStorageDaemons(context.Context, channelpkg.ID) ([]accessdoor.StorageMount, error) {
+	if m.routes == nil {
+		return nil, nil
 	}
-}
-func (l *lateAcceptor) get() *link.Acceptor { return l.p.Load() }
-
-// lateStorageMounts implements accessdoor.StorageMounts over a lateAcceptor
-// — the ONLY data source (期11 spec §4.3): every daemon with a live attach
-// on this channel's Acceptor is a storage-mount candidate, Online=true by
-// construction (an entry only exists while attached). This intentionally
-// never imports app: attach state is a
-// platform/link-native fact, not an app-side binding projection — day-1's
-// policy chain (①③④) needs nothing else (§4.3's ② — the ONLY chain step that
-// would need daemon ownership — is deferred whole).
-type lateStorageMounts struct{ acc *lateAcceptor }
-
-func (m lateStorageMounts) ListStorageDaemons(ctx context.Context, _ channelpkg.ID) ([]accessdoor.StorageMount, error) {
-	a := m.acc.get()
-	if a == nil {
-		return nil, nil // no candidates before the Acceptor exists — an honest empty list, not an error
-	}
-	ids := a.AttachedDaemonIDs()
+	ids := m.routes.AttachedDaemons(string(m.chID))
 	out := make([]accessdoor.StorageMount, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, accessdoor.StorageMount{DaemonID: id, Online: true})
@@ -82,48 +55,41 @@ func (m lateStorageMounts) ListStorageDaemons(ctx context.Context, _ channelpkg.
 	return out, nil
 }
 
-// lateStorageControl implements accessdoor.StorageControl over a
-// lateAcceptor: AllocRequest routes to the Acceptor's per-daemon live
-// connection table and blocks for the correlated AllocReply (§4.7's first
-// frame, link.Acceptor.SendAllocRequest).
-type lateStorageControl struct{ acc *lateAcceptor }
+// daemonStorageControl routes AllocRequest through the realm-owned daemon
+// carrier and this Home's lane, then waits for its exact-lane reply.
+type daemonStorageControl struct {
+	routes platform.DaemonRoutes
+	chID   channelpkg.ID
+}
 
-func (c lateStorageControl) AllocRequest(ctx context.Context, daemonID string, spec accessdoor.StorageAllocSpec) error {
-	a := c.acc.get()
-	if a == nil {
-		return errors.New("platform: storage control not wired yet (Acceptor not built)")
+func (c daemonStorageControl) AllocRequest(ctx context.Context, daemonID string, spec accessdoor.StorageAllocSpec) error {
+	if c.routes == nil {
+		return errors.New("platform: daemon routes unavailable")
 	}
-	return a.SendAllocRequest(ctx, daemonID, link.AllocRequest{
-		ChannelID: string(spec.ChannelID),
-		Coord:     spec.Coord,
-		Dir:       spec.Dir,
-	})
+	return c.routes.SendAlloc(ctx, daemonID, string(c.chID), spec.Coord, spec.Dir)
 }
 
 // ReclaimRequest implements accessdoor.StorageControl's 期11 review §2.5 #B
-// arm: routes the content-less create loser's coord reclaim to the Acceptor's
-// per-daemon live connection (link.Acceptor.SendReclaimRequest), the delete
-// mirror of AllocRequest above.
-func (c lateStorageControl) ReclaimRequest(ctx context.Context, daemonID string, coord string) error {
-	a := c.acc.get()
-	if a == nil {
-		return errors.New("platform: storage control not wired yet (Acceptor not built)")
+// arm: routes the content-less create loser's coord reclaim through the same
+// exact per-channel lane, the delete mirror of AllocRequest above.
+func (c daemonStorageControl) ReclaimRequest(ctx context.Context, daemonID string, coord string) error {
+	if c.routes == nil {
+		return errors.New("platform: daemon routes unavailable")
 	}
-	return a.SendReclaimRequest(ctx, daemonID, coord)
+	return c.routes.SendReclaim(ctx, daemonID, string(c.chID), coord)
 }
 
-// lateTransferControl implements accessdoor.TransferControl over a
-// lateAcceptor — §5's ticket-mint injection point, same late-bound discipline
-// as lateStorageMounts/lateStorageControl above (the Acceptor owns the
-// transfer table, which does not exist until step 11).
-type lateTransferControl struct{ acc *lateAcceptor }
+// daemonTransferControl mints a transfer ticket in the realm daemon host.
+type daemonTransferControl struct {
+	routes platform.DaemonRoutes
+	chID   channelpkg.ID
+}
 
-func (c lateTransferControl) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
-	a := c.acc.get()
-	if a == nil {
-		return "", errors.New("platform: transfer control not wired yet (Acceptor not built)")
+func (c daemonTransferControl) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
+	if c.routes == nil {
+		return "", errors.New("platform: daemon routes unavailable")
 	}
-	return a.OpenTransfer(ctx, targetDaemonID, coord, mode, reservationID)
+	return c.routes.OpenTransfer(ctx, targetDaemonID, string(c.chID), coord, mode, reservationID)
 }
 
 // homeStorageHostControl implements link.StorageHostControl over
@@ -225,7 +191,7 @@ func (h homeStorageHostControl) ReclaimAck(ctx context.Context, senderDaemonID, 
 	return h.outbox.ClearTombstone(ctx, tombstoneID)
 }
 
-func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords []string) ([]platform.StorageResourceCoord, []platform.StorageReservationCoord, []platform.StorageTombstoneCoord, error) {
 	// No separate sender-auth check here: unlike Committed/ReclaimAck (which
 	// name a specific reservation/tombstone id that could belong to ANOTHER
 	// daemon), ReconcilePull carries no target id of its own — senderDaemonID
@@ -288,24 +254,24 @@ func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonI
 		return nil, nil, nil, err
 	}
 
-	resources := make([]link.ReconcileResource, 0, len(rows))
+	resources := make([]platform.StorageResourceCoord, 0, len(rows))
 	for _, row := range rows {
-		resources = append(resources, link.ReconcileResource{Coord: row.Meta.PlacementCoord})
+		resources = append(resources, platform.StorageResourceCoord{Coord: row.Meta.PlacementCoord})
 	}
-	pendingReservations := make([]link.ReconcileReservation, 0, len(reservations))
+	pendingReservations := make([]platform.StorageReservationCoord, 0, len(reservations))
 	for _, r := range reservations {
-		pendingReservations = append(pendingReservations, link.ReconcileReservation{ReservationID: r.ReservationID, Coord: r.PlacementCoord})
+		pendingReservations = append(pendingReservations, platform.StorageReservationCoord{ReservationID: r.ReservationID, Coord: r.PlacementCoord})
 	}
-	pendingTombstones := make([]link.ReconcileTombstone, 0, len(tombstones))
+	pendingTombstones := make([]platform.StorageTombstoneCoord, 0, len(tombstones))
 	for _, t := range tombstones {
-		pendingTombstones = append(pendingTombstones, link.ReconcileTombstone{TombstoneID: t.TombstoneID, Coord: t.PlacementCoord})
+		pendingTombstones = append(pendingTombstones, platform.StorageTombstoneCoord{TombstoneID: t.TombstoneID, Coord: t.PlacementCoord})
 	}
 	return resources, pendingReservations, pendingTombstones, nil
 }
 
 var (
-	_ accessdoor.StorageMounts   = lateStorageMounts{}
-	_ accessdoor.StorageControl  = lateStorageControl{}
-	_ accessdoor.TransferControl = lateTransferControl{}
-	_ link.StorageHostControl    = homeStorageHostControl{}
+	_ accessdoor.StorageMounts        = daemonStorageMounts{}
+	_ accessdoor.StorageControl       = daemonStorageControl{}
+	_ accessdoor.TransferControl      = daemonTransferControl{}
+	_ platform.DaemonStorageAuthority = homeStorageHostControl{}
 )

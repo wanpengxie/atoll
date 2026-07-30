@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
@@ -291,34 +289,5 @@ func TestHomeStorageHostControl_ReconcilePull_DefaultTimeoutAndClock(t *testing.
 	wantCutoff := before.Add(-defaultReservationTimeout).UnixMilli()
 	if ob.sweepCalls[0].cutoffMs < wantCutoff {
 		t.Fatalf("sweep cutoffMs = %d, want >= %d (default timeout applied)", ob.sweepCalls[0].cutoffMs, wantCutoff)
-	}
-}
-
-func TestLateStorageMounts_BeforeAndAfterBind(t *testing.T) {
-	acc := &lateAcceptor{}
-	m := lateStorageMounts{acc: acc}
-
-	mounts, err := m.ListStorageDaemons(t.Context(), "ch1")
-	if err != nil || len(mounts) != 0 {
-		t.Fatalf("before bind: (%v,%v), want (empty,nil)", mounts, err)
-	}
-
-	a := &link.Acceptor{}
-	acc.bind(a)
-	// No attach has happened, so the mount list is still empty — this just
-	// proves the late-bind seam itself works (a real attach is exercised by
-	// the link package's own tests), not that Acceptor state is non-empty.
-	mounts, err = m.ListStorageDaemons(t.Context(), "ch1")
-	if err != nil || len(mounts) != 0 {
-		t.Fatalf("after bind, no attach: (%v,%v), want (empty,nil)", mounts, err)
-	}
-}
-
-func TestLateStorageControl_BeforeBindIsHonestError(t *testing.T) {
-	acc := &lateAcceptor{}
-	c := lateStorageControl{acc: acc}
-	err := c.AllocRequest(t.Context(), "daemon-1", accessdoor.StorageAllocSpec{ChannelID: "ch1", Coord: "coord-1"})
-	if err == nil {
-		t.Fatal("expected an error before the Acceptor is bound")
 	}
 }
