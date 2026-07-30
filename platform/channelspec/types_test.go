@@ -30,8 +30,8 @@ func TestOperationErrorClosedSet(t *testing.T) {
 	want := map[OperationErrorCode]bool{
 		ErrCodeBadPayload: true, ErrCodeChannelUnavailable: true, ErrCodeInvalidDesiredHost: true,
 		ErrCodeDeclNotFound: true, ErrCodeForbidden: true,
-		ErrCodeUnknownClass: true, ErrCodeProtectedActor: true, ErrCodeNotInComposition: true,
-		ErrCodeInternal: true, ErrCodeNotAcceptedSource: true, ErrCodeMemberInactive: true,
+		ErrCodeUnknownClass: true, ErrCodeProtectedActor: true,
+		ErrCodeNotAcceptedSource: true, ErrCodeMemberInactive: true,
 		ErrCodeAuthorityUnavailable: true,
 	}
 	if len(operationErrorCodes) != len(want) {
@@ -47,11 +47,8 @@ func TestOperationErrorClosedSet(t *testing.T) {
 		t.Fatalf("missing operate error codes %v", want)
 	}
 	for _, code := range operationErrorCodes {
-		if code == ErrCodeRefConflict {
-			t.Fatal("ref_conflict must not be in the operate error closed set")
-		}
 		if string(code) == "unauthorized_sender" {
-			t.Fatal("unauthorized_sender is not an operate error code")
+			t.Fatal("unauthorized_sender is a transport-gate refusal, not an operate error code")
 		}
 	}
 }

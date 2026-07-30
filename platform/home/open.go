@@ -348,6 +348,12 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.engine.Start()
 	h.delivery = tap.OpenPump(h.signal, h.query, from, deliveryHandle(h, cfg.ChannelID, logger), logger)
 
+	// Snapshot self-broadcast goes out BEFORE the reconcile sweep and its
+	// goroutine start emitting deltas: a birth delta applied downstream after
+	// the snapshot's reads but before its Reset apply would be wiped by the
+	// set alignment.
+	h.emitRelationSnapshot(ctx)
+
 	h.reconcileSweep(ctx)
 	reconcileCtx, stop := context.WithCancel(context.Background())
 	h.reconcileStop = stop
@@ -369,7 +375,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}()
 
 	logger.Info("platform.home.ready", "channel", cfg.ChannelID)
-	h.emitRelationSnapshot(ctx)
 	return h, nil
 }
 

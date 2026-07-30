@@ -120,8 +120,7 @@ func classifySysopError(code string) sysopErrorClass {
 	}
 }
 
-// sysopErrorHTTP maps a membrane operate code to its HTTP status (renamed
-// from admissionErrorHTTP when the admission ledger died).
+// sysopErrorHTTP maps a membrane operate code to its HTTP status.
 func sysopErrorHTTP(code string) int {
 	switch classifySysopError(code) {
 	case sysopBadRequest:

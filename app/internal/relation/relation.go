@@ -17,17 +17,11 @@ import (
 )
 
 type Store struct {
-	db     *sql.DB
-	now    func() int64
-	isBusy func(error) bool
+	db *sql.DB
 }
 
 func New(db *sql.DB) *Store {
-	return &Store{
-		db:     db,
-		now:    func() int64 { return time.Now().UnixMilli() },
-		isBusy: isSQLiteBusy,
-	}
+	return &Store{db: db}
 }
 
 // busyBackoff bounds the retries a write gets when SQLite reports lock
@@ -51,10 +45,14 @@ func isSQLiteBusy(err error) bool {
 // lock while this backs off; the pause is bounded (sum of busyBackoff) and
 // scoped to one channel — no transaction or DB lock is held between attempts.
 func (s *Store) withBusyRetry(ctx context.Context, fn func() error) error {
+	return retryOnBusy(ctx, isSQLiteBusy, fn)
+}
+
+func retryOnBusy(ctx context.Context, isBusy func(error) bool, fn func() error) error {
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = fn()
-		if err == nil || !s.isBusy(err) || attempt >= len(busyBackoff) {
+		if err == nil || !isBusy(err) || attempt >= len(busyBackoff) {
 			return err
 		}
 		select {
@@ -80,7 +78,7 @@ func (s *Store) applyOnce(ctx context.Context, chID channel.ID, deltas []channel
 		return err
 	}
 	defer tx.Rollback()
-	now := s.now()
+	now := time.Now().UnixMilli()
 	for _, delta := range deltas {
 		if delta.ChannelID != "" && delta.ChannelID != chID {
 			return fmt.Errorf("relation: delta channel %q does not match batch %q", delta.ChannelID, chID)

@@ -226,6 +226,9 @@ func (o realmOps) RevokeDeclaration(ctx context.Context, req realmtool.Requester
 }
 
 func (o realmOps) Introduce(ctx context.Context, req realmtool.Requester, declID string, _ realmtool.IntroduceOpts) (channel.IntroduceResult, error) {
+	if req.ActorID == "" || req.ChannelID == "" || req.RequestID == "" {
+		return channel.IntroduceResult{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "incomplete requester"}
+	}
 	ref := realmtool.DerivedRealmToolRef(req.ChannelID, req.RequestID)
 	outcome, err := forwardSysop(ctx, o.app, req.ChannelID, sysopForward[channel.IntroduceResult]{
 		Predicate: func(bundle channelhost.Bundle) (channel.IntroduceResult, bool, error) {
@@ -271,6 +274,9 @@ func (o realmOps) Introduce(ctx context.Context, req realmtool.Requester, declID
 }
 
 func (o realmOps) Remove(ctx context.Context, req realmtool.Requester, target actor.ActorID) (channel.RemoveResult, error) {
+	if req.ActorID == "" || req.ChannelID == "" || req.RequestID == "" {
+		return channel.RemoveResult{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "incomplete requester"}
+	}
 	if target == "" {
 		return channel.RemoveResult{}, &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "target required"}
 	}

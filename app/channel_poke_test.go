@@ -1,15 +1,13 @@
 package app_test
 
-// TestCreateChannelPokeAfterDirectoryCommit (连接模型勘误期 P1-4, 六轮终审): the creator's
-// two Admits inside handleCreateChannel each fire a membership-change poke SYNCHRONOUSLY
-// — before this test's fix, both fired while the `channels` directory row was still
-// uncommitted, so a session poked at that instant re-resolved into the SAME stale
-// "channel does not exist yet" answer (EntitlementSnapshot enumerates the directory
-// table). This test proves the REAL write order end-to-end: a live gateway session is
-// attached BEFORE the channel is created over real HTTP, then a submit naming the new
-// channel is driven immediately — no manual resolver edit, no hand-called g.Poke — and
-// must succeed within a short bound, proving the post-commit poke (not the 30s T_sweep
-// backstop) is what converged it.
+// TestCreateChannelPokeAfterDirectoryCommit: a live gateway session attached
+// BEFORE the channel exists must converge onto the newly created channel within
+// a short bound — no manual resolver edit, no hand-called g.Poke. The chain
+// under test: the create gate accepts the desired row, the arm converges the
+// physical home, whose open-time relation snapshot announces the creator's
+// membership; the app derives a membership poke from that delta and the
+// session's read pump re-resolves. The bound proves the event-driven path
+// (not the gateway's 30s sweep backstop) is what converged it.
 
 import (
 	"net/http"
@@ -78,8 +76,8 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 	s.StartFeed()
 	defer s.Close()
 
-	// Create the channel over REAL HTTP (the actual write order under test: two Admit
-	// pokes pre-commit, then handleCreateChannel's post-commit poke).
+	// Create the channel over REAL HTTP (acceptance commits the desired row;
+	// physical convergence and the membership poke follow asynchronously).
 	w := env.do(t, "POST", "/api/channels", map[string]any{"name": "fresh"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	chBody := respJSON(t, w)
@@ -90,7 +88,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 
 	// Drive a submit naming the brand-new channel IMMEDIATELY (no sleep, no manual
 	// g.Poke, no resolver hand-edit). It must stop being forbidden within a bound far
-	// short of T_sweep (30s) — proving the post-commit poke drove convergence.
+	// short of the 30s gateway sweep — proving the event-driven poke drove convergence.
 	deadline := time.After(2 * time.Second)
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
@@ -115,7 +113,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 		case <-tick.C:
 			continue
 		case <-deadline:
-			t.Fatalf("channel %s did not become eligible within 2s of its HTTP creation — the creator's live session must subscribe on the post-commit poke (P1-4), not wait T_sweep=%s", chID, 30*time.Second)
+			t.Fatalf("channel %s did not become eligible within 2s of its HTTP creation — the creator's live session must subscribe on the event-driven membership poke, not wait for the gateway sweep (%s)", chID, 30*time.Second)
 		}
 	}
 }

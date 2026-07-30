@@ -27,7 +27,6 @@ type lifecycleWorker struct {
 	wake   chan struct{}
 	done   chan struct{}
 	once   sync.Once
-	runMu  sync.Mutex
 
 	startMu sync.Mutex
 	started bool
@@ -119,8 +118,6 @@ func (w *lifecycleWorker) close() {
 }
 
 func (w *lifecycleWorker) lightScan() {
-	w.runMu.Lock()
-	defer w.runMu.Unlock()
 	w.pokeMu.Lock()
 	ids := w.poked
 	w.poked = make(map[channel.ID]struct{})
@@ -156,8 +153,6 @@ func (w *lifecycleWorker) retainRetry(id channel.ID) {
 }
 
 func (w *lifecycleWorker) fullScan() {
-	w.runMu.Lock()
-	defer w.runMu.Unlock()
 	rows, err := w.app.db.QueryContext(w.ctx, `SELECT id FROM channels ORDER BY id`)
 	if err != nil {
 		w.app.logger.Warn("channel desired scan failed", "err", err)

@@ -20,7 +20,9 @@ func (h *Home) emitRelations(deltas ...channelspec.RelationDelta) {
 
 // emitRelationSnapshot announces the membrane's complete relation facts once
 // after a real Home open succeeds. It is set alignment input, not a periodic
-// sweep and not a realm-side readback.
+// sweep and not a realm-side readback. A failed edge read drops the WHOLE
+// batch — a partial snapshot's Reset would delete live rows (under-grant);
+// the Error log is the only signal, and repair waits for the next real open.
 func (h *Home) emitRelationSnapshot(ctx context.Context) {
 	if h == nil || h.onRelationChange == nil {
 		return
@@ -28,7 +30,7 @@ func (h *Home) emitRelationSnapshot(ctx context.Context) {
 	deltas := []channelspec.RelationDelta{{ChannelID: h.channelID, Reset: true}}
 	roster, err := h.View().HumanRoster(ctx)
 	if err != nil {
-		h.logger.Warn("platform.relation_snapshot_failed", "channel", h.channelID, "edge", "membership", "err", err)
+		h.logger.Error("platform.relation_snapshot_failed", "channel", h.channelID, "edge", "membership", "err", err)
 		return
 	}
 	for _, entry := range roster {
@@ -39,7 +41,7 @@ func (h *Home) emitRelationSnapshot(ctx context.Context) {
 	}
 	instances, err := h.controller.DeclaredReconcileList()
 	if err != nil {
-		h.logger.Warn("platform.relation_snapshot_failed", "channel", h.channelID, "edge", "instances", "err", err)
+		h.logger.Error("platform.relation_snapshot_failed", "channel", h.channelID, "edge", "instances", "err", err)
 		return
 	}
 	for _, instance := range instances {
@@ -50,7 +52,7 @@ func (h *Home) emitRelationSnapshot(ctx context.Context) {
 	}
 	daemons, err := h.bindings.ListBoundDaemons(ctx)
 	if err != nil {
-		h.logger.Warn("platform.relation_snapshot_failed", "channel", h.channelID, "edge", "bindings", "err", err)
+		h.logger.Error("platform.relation_snapshot_failed", "channel", h.channelID, "edge", "bindings", "err", err)
 		return
 	}
 	for _, daemon := range daemons {

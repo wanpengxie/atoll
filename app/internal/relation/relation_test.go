@@ -164,12 +164,11 @@ func assertCount(t *testing.T, db *sql.DB, table string, want int) {
 // once. Losing an event batch has no later repair point on a long-serving
 // channel, so this behavior is contract, not tuning.
 func TestWithBusyRetryAbsorbsContention(t *testing.T) {
-	store, _ := testStore(t)
 	sentinel := errors.New("fake busy")
-	store.isBusy = func(err error) bool { return errors.Is(err, sentinel) }
+	isBusy := func(err error) bool { return errors.Is(err, sentinel) }
 
 	calls := 0
-	err := store.withBusyRetry(context.Background(), func() error {
+	err := retryOnBusy(context.Background(), isBusy, func() error {
 		calls++
 		if calls <= 2 {
 			return sentinel
@@ -181,7 +180,7 @@ func TestWithBusyRetryAbsorbsContention(t *testing.T) {
 	}
 
 	calls = 0
-	err = store.withBusyRetry(context.Background(), func() error {
+	err = retryOnBusy(context.Background(), isBusy, func() error {
 		calls++
 		return sentinel
 	})
@@ -191,7 +190,7 @@ func TestWithBusyRetryAbsorbsContention(t *testing.T) {
 
 	calls = 0
 	plain := errors.New("not busy")
-	err = store.withBusyRetry(context.Background(), func() error {
+	err = retryOnBusy(context.Background(), isBusy, func() error {
 		calls++
 		return plain
 	})

@@ -92,7 +92,8 @@ func daemonBodyBuilder(
 		)
 		if !ok {
 			logger.Error("platform.compute.actor_factory_missing",
-				"actor", input.ActorID, "class", input.ExecutionSpec.Class)
+				"actor", input.ActorID, "class", input.ExecutionSpec.Class,
+				"reason", "class_not_registered")
 			return nil
 		}
 		hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {

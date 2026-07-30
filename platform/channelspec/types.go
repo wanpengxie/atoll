@@ -10,6 +10,8 @@ import (
 )
 
 var (
+	// ErrDefaultAgentUnavailable distinguishes a corrupt/unreadable authoritative
+	// routing fold from the ordinary Unset state returned as found=false.
 	ErrDefaultAgentUnavailable = errors.New("channel: default agent unavailable")
 	ErrDeclarationNotFound     = errors.New("channel: declaration not found")
 	ErrDigestMismatch          = errors.New("channel: snapshot digest mismatch")
@@ -21,6 +23,10 @@ type ActorFacts struct {
 	Active    bool       `json:"active"`
 }
 
+// HumanRosterEntry is one row of the channel's human membership roster — the
+// entitlement projection's whole vocabulary. It is a business-membrane value:
+// no kind axis (every entry is human by construction), no definition, no
+// placement, no storage home.
 type HumanRosterEntry struct {
 	ActorID   actor.ActorID `json:"actor_id"`
 	Principal string        `json:"principal"`
@@ -37,6 +43,8 @@ type DeclarationFacts struct {
 	Config         json.RawMessage
 }
 
+// RenderedSnapshot is the complete, already-resolved declaration value accepted
+// by a channel. Channel storage has no global/local merge semantics.
 type RenderedSnapshot struct {
 	Class     string            `json:"class"`
 	Config    json.RawMessage   `json:"config,omitempty"`
@@ -61,6 +69,8 @@ func (s RenderedSnapshot) Validate() error {
 	return nil
 }
 
+// ContentDigest covers the rendered value only. Digest is deliberately
+// excluded so equal values can be detected across local declaration versions.
 func (s RenderedSnapshot) ContentDigest() (string, error) {
 	payload := struct {
 		Class     string            `json:"class"`
@@ -70,6 +80,7 @@ func (s RenderedSnapshot) ContentDigest() (string, error) {
 	return channel.Digest(payload)
 }
 
+// Seal computes and installs the content digest.
 func (s RenderedSnapshot) Seal() (RenderedSnapshot, error) {
 	digest, err := s.ContentDigest()
 	if err != nil {
@@ -89,19 +100,15 @@ const (
 	ErrCodeForbidden            OperationErrorCode = "forbidden"
 	ErrCodeUnknownClass         OperationErrorCode = "unknown_class"
 	ErrCodeProtectedActor       OperationErrorCode = "protected_actor"
-	ErrCodeNotInComposition     OperationErrorCode = "not_in_composition"
-	ErrCodeInternal             OperationErrorCode = "internal_error"
 	ErrCodeNotAcceptedSource    OperationErrorCode = "not_accepted_source"
 	ErrCodeMemberInactive       OperationErrorCode = "member_inactive"
 	ErrCodeAuthorityUnavailable OperationErrorCode = "authority_unavailable"
-	ErrCodeRefConflict          OperationErrorCode = "ref_conflict"
 )
 
 var operationErrorCodes = [...]OperationErrorCode{
 	ErrCodeBadPayload, ErrCodeChannelUnavailable, ErrCodeInvalidDesiredHost,
 	ErrCodeDeclNotFound, ErrCodeForbidden,
-	ErrCodeUnknownClass, ErrCodeProtectedActor, ErrCodeNotInComposition,
-	ErrCodeInternal,
+	ErrCodeUnknownClass, ErrCodeProtectedActor,
 	ErrCodeNotAcceptedSource, ErrCodeMemberInactive, ErrCodeAuthorityUnavailable,
 }
 

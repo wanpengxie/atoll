@@ -65,10 +65,11 @@ func TestWS_OversizedFrameClosesConn(t *testing.T) {
 	}
 }
 
-// TestHalfBuiltChannel_DeleteSucceeds pins #3 ①: a半成品 channel (app-db row + empty
-// channel-db membership, the createChannel crash window) must stay deletable. Delete
-// authority is realm-side owner policy and must remain recoverable when the
-// channel-local image is incomplete.
+// TestHalfBuiltChannel_DeleteSucceeds pins #3 ①: a半成品 channel (an accepted
+// desired row whose physical image has not converged yet — the ordinary
+// post-acceptance build window) must stay deletable. Delete authority is
+// realm-side owner policy and must remain recoverable when the channel-local
+// image is incomplete.
 func TestHalfBuiltChannel_DeleteSucceeds(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())

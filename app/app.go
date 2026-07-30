@@ -95,9 +95,12 @@ func New(cfg Config) (*App, error) {
 		IntroductionResolver: compositionResolver{app: a},
 		Logger:               logger,
 		OnRelationChange: func(chID channel.ID, deltas []channelspec.RelationDelta) {
+			// Two independent consumers of one delivery: the relation index
+			// records, the gateway poke derives from the deltas themselves.
+			// A failed index write must not mute the poke — the re-resolve it
+			// triggers reads membrane truth and is itself the repair path.
 			if err := a.relations.Apply(context.Background(), chID, deltas); err != nil {
 				a.logger.Warn("relation event apply failed", "channel", chID, "err", err)
-				return
 			}
 			for _, delta := range deltas {
 				if (delta.Kind == channelspec.RelationJoined || delta.Kind == channelspec.RelationLeft) &&
@@ -308,12 +311,4 @@ const (
 	// actor_decls declaration row, so it can't carry a default_class; it runs
 	// this fixed engine.
 	defaultBoostClass = "go-kimi"
-	// placementServer marks a composition instance the SERVER hosts (embedded
-	// cell). The reconcile ring only embodies these; daemon-placed rows are pulled
-	// by the daemon's own plan.
-	placementServer = "server"
-	// placementDaemon marks a composition instance a connected DAEMON hosts. The
-	// server never spawns these; the daemon pulls them over its bound link and
-	// builds them with its LOCAL creds.
-	placementDaemon = "daemon"
 )
