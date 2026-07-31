@@ -2,6 +2,7 @@ package daemonhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -91,11 +94,6 @@ func TestLaneTermination_RetiresLaneOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: channel.ID("channel-a"), State: "ready",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "channel-a") })
 	go func() {
 		var frame link.LaneFrame
@@ -129,14 +127,22 @@ func TestLaneTermination_RetiresLaneOnly(t *testing.T) {
 	}
 }
 
-func TestLaneAttached_RequiresPositiveReady(t *testing.T) {
+// TestLaneAttachedAnswersFromThisHostsLedgerOnly pins the answer to the two
+// facts this host owns. A device declaration cannot make it true and cannot
+// make it false, so no reply from the device can ever wedge this coordinate.
+func TestLaneAttachedAnswersFromThisHostsLedgerOnly(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	t.Cleanup(func() { _ = host.Close() })
+	var bound atomic.Bool
+	bound.Store(true)
 	host.Register("channel-a", 1, platform.DaemonMembrane{
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
 	carrier := dialTestCarrier(t, host)
+	if host.LaneAttached("daemon-a", "never-routed") {
+		t.Fatal("coordinate with no lane row was reported attached")
+	}
 	host.Scan()
 	conn, header, err := carrier.AcceptStream()
 	if err != nil {
@@ -147,20 +153,13 @@ func TestLaneAttached_RequiresPositiveReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(lane.RetireLogical)
-	if host.LaneAttached("daemon-a", "channel-a") {
-		t.Fatal("lane without ready declaration was reported attached")
-	}
-	_ = carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: "channel-a", State: "building",
-	})
-	time.Sleep(10 * time.Millisecond)
-	if host.LaneAttached("daemon-a", "channel-a") {
-		t.Fatal("building compartment was reported attached")
-	}
-	_ = carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: "channel-a", State: "ready",
-	})
 	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "channel-a") })
+
+	// The device says nothing at any point, and the answer still tracks the
+	// route exactly: unbinding retires the row and the answer follows it down.
+	bound.Store(false)
+	host.Scan()
+	waitFor(t, func() bool { return !host.LaneAttached("daemon-a", "channel-a") })
 }
 
 func TestMembraneGenerationCASRejectsLateCallbacks(t *testing.T) {
@@ -211,10 +210,7 @@ func TestDaemonFactSweepRevokesWithoutPostCommitHint(t *testing.T) {
 	deleted.Store(true)
 	host.Scan()
 	waitFor(t, func() bool { return !host.DaemonOnline("daemon-a") })
-	var terminal link.SpineFrame
-	if err := carrier.ReadSpine(&terminal); err != nil {
-		t.Fatal(err)
-	}
+	terminal := readTestSpine(t, carrier)
 	if terminal.Kind != link.SpineCarrierReject || terminal.Class != link.CarrierTerminal {
 		t.Fatalf("authority sweep verdict=%+v", terminal)
 	}
@@ -224,15 +220,24 @@ func TestDaemonFactSweepRevokesWithoutPostCommitHint(t *testing.T) {
 	}
 }
 
-func TestUnknownCoordinateDeclarationsAllocateNoCarrierState(t *testing.T) {
-	host := New(Config{ScanInterval: time.Hour})
+// TestDeviceTrafficAllocatesNoPerCoordinateState covers what the device can
+// still send now that the spine carries no coordinate it can name: a flood of
+// plan pulls. Each is answered from this host's own directory and must leave
+// no per-coordinate residue behind.
+//
+// The older flood — a device naming 256 channels of its choosing — is not
+// expressible any more: SpineFrame has no channel field for a device to fill,
+// so the compiler forbids the shape this used to police at runtime.
+func TestDeviceTrafficAllocatesNoPerCoordinateState(t *testing.T) {
+	host := New(Config{
+		ScanInterval: time.Hour,
+		Present:      func(context.Context) ([]channel.ID, error) { return nil, nil },
+	})
 	defer host.Close()
 	carrier := dialTestCarrier(t, host)
 	for i := 0; i < 256; i++ {
 		if err := carrier.SendSpine(link.SpineFrame{
-			Kind:    link.SpineCompartmentState,
-			Channel: channel.ID(fmt.Sprintf("unknown-%d", i)),
-			State:   "ready",
+			Kind: link.SpineCompartmentPlanPull, Nonce: fmt.Sprintf("pull-%d", i),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -240,29 +245,31 @@ func TestUnknownCoordinateDeclarationsAllocateNoCarrierState(t *testing.T) {
 	if err := carrier.SendSpine(link.SpineFrame{Kind: link.SpineProbe, Nonce: "flood-barrier"}); err != nil {
 		t.Fatal(err)
 	}
-	var reply link.SpineFrame
-	if err := carrier.ReadSpine(&reply); err != nil {
-		t.Fatal(err)
-	}
-	if reply.Kind != link.SpineProbeReply || reply.Nonce != "flood-barrier" {
-		t.Fatalf("probe barrier reply = %+v", reply)
-	}
+	waitFor(t, func() bool {
+		reply := readTestSpine(t, carrier)
+		return reply.Kind == link.SpineProbeReply && reply.Nonce == "flood-barrier"
+	})
 	host.mu.RLock()
 	current := host.daemons["daemon-a"].current
 	host.mu.RUnlock()
 	current.mu.Lock()
-	compartments := len(current.compartments)
+	lanes := len(current.lanes)
 	coordLocks := len(current.coordLocks)
 	coordTasks := len(current.coordTasks)
 	current.mu.Unlock()
-	if compartments != 0 || coordLocks != 0 || coordTasks != 0 {
-		t.Fatalf("unknown declarations allocated carrier state: compartments=%d locks=%d tasks=%d",
-			compartments, coordLocks, coordTasks)
+	if lanes != 0 || coordLocks != 0 || coordTasks != 0 {
+		t.Fatalf("device traffic allocated carrier state: lanes=%d locks=%d tasks=%d",
+			lanes, coordLocks, coordTasks)
 	}
 }
 
 func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
-	host := New(Config{ScanInterval: time.Hour})
+	host := New(Config{
+		ScanInterval: time.Hour,
+		Present: func(context.Context) ([]channel.ID, error) {
+			return []channel.ID{"a"}, nil
+		},
+	})
 	defer host.Close()
 	bundle := platform.DaemonMembrane{
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
@@ -284,11 +291,6 @@ func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
 		var frame link.LaneFrame
 		_ = g1.Decode(&frame)
 	}()
-	if err := carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: "a", State: "ready",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "a") })
 	host.Register("a", 2, bundle)
 	select {
@@ -308,15 +310,57 @@ func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
 		g2.RetireLogical()
 		g2.CollectPhysical()
 	}()
-	host.mu.RLock()
-	current := host.daemons["daemon-a"].current
-	host.mu.RUnlock()
-	current.mu.Lock()
-	view := current.compartments["a"]
-	current.mu.Unlock()
-	if view.closeSent {
-		t.Fatal("Home generation replacement sent compartment_close")
+	// Home replacement is a routing-generation event, not a value revocation:
+	// the snapshot must still name this channel under serve, so the device has
+	// no reason to retire the compartment it is rebinding.
+	plan := pullTestPlan(t, carrier)
+	if !containsChannel(plan.Serve, "a") {
+		t.Fatalf("Home generation replacement dropped the channel from serve: %+v", plan)
 	}
+}
+
+// pullTestPlan performs the device half of one compartment plan round trip.
+func pullTestPlan(t *testing.T, carrier *link.ClientCarrier) link.SpineFrame {
+	t.Helper()
+	nonce := "plan-" + uuid.NewString()
+	if err := carrier.SendSpine(link.SpineFrame{
+		Kind: link.SpineCompartmentPlanPull, Nonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 64; i++ {
+		reply := readTestSpine(t, carrier)
+		if reply.Kind == link.SpineCompartmentPlanReply && reply.Nonce == nonce {
+			return reply
+		}
+	}
+	t.Fatal("compartment plan reply never arrived")
+	return link.SpineFrame{}
+}
+
+// readTestSpine returns the next spine frame that carries a decision. Pokes are
+// contentless wakes the host may emit at any time, so a test that is waiting on
+// a verdict must not mistake one for an answer.
+func readTestSpine(t *testing.T, carrier *link.ClientCarrier) link.SpineFrame {
+	t.Helper()
+	for {
+		var frame link.SpineFrame
+		if err := carrier.ReadSpine(&frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame.Kind != link.SpineCompartmentPlanPoke {
+			return frame
+		}
+	}
+}
+
+func containsChannel(ids []channel.ID, want channel.ID) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEnsureLaneRetiresOldExactObjectWithoutDeletingReplacement(t *testing.T) {
@@ -398,11 +442,6 @@ func TestReconcile_EnsuresLaneRegardlessOfCompartmentState(t *testing.T) {
 	carrier := dialTestCarrier(t, host)
 	host.Scan()
 	first := adoptAndSuperviseTestLane(t, carrier)
-	if err := carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: "a", State: "ready",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "a") })
 	host.RetireLane("daemon-a", "a")
 	<-first.Done()
@@ -417,79 +456,94 @@ func TestReconcile_EnsuresLaneRegardlessOfCompartmentState(t *testing.T) {
 	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "a") })
 }
 
-func TestReconcile_ClosesUnboundCompartment(t *testing.T) {
-	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+// TestUnboundCoordinateLeavesTheSnapshotAndNothingElse pins that revocation is
+// one value write on this host's side. It retires the route and drops the
+// channel out of serve; it issues no teardown command and records nothing
+// about what the device does with the news.
+func TestUnboundCoordinateLeavesTheSnapshotAndNothingElse(t *testing.T) {
 	var bound atomic.Bool
 	bound.Store(true)
+	host := New(Config{
+		ScanInterval: time.Hour,
+		Present: func(context.Context) ([]channel.ID, error) {
+			return []channel.ID{"a"}, nil
+		},
+	})
+	defer host.Close()
 	host.Register("a", 1, platform.DaemonMembrane{
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
 	carrier := dialTestCarrier(t, host)
 	host.Scan()
 	_ = adoptAndSuperviseTestLane(t, carrier)
-	if err := carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: "a", State: "ready",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "a") })
+	if plan := pullTestPlan(t, carrier); !containsChannel(plan.Serve, "a") {
+		t.Fatalf("bound coordinate missing from serve: %+v", plan)
+	}
+
 	bound.Store(false)
 	host.Scan()
-	var command link.SpineFrame
-	if err := carrier.ReadSpine(&command); err != nil {
-		t.Fatal(err)
+	waitFor(t, func() bool { return !host.LaneAttached("daemon-a", "a") })
+	plan := pullTestPlan(t, carrier)
+	if containsChannel(plan.Serve, "a") || containsChannel(plan.Unknown, "a") {
+		t.Fatalf("unbound coordinate still named by the snapshot: %+v", plan)
 	}
-	if command.Kind != link.SpineCompartmentClose || command.Channel != "a" {
-		t.Fatalf("unbound command=%+v", command)
-	}
-	if host.LaneAttached("daemon-a", "a") || !host.DaemonOnline("daemon-a") {
-		t.Fatal("unbound convergence did not revoke only the coordinate")
+	if !host.DaemonOnline("daemon-a") {
+		t.Fatal("unbound convergence disturbed the carrier")
 	}
 }
 
-func TestGoneTimeoutIsObservationOnlyAndDoesNotReset(t *testing.T) {
-	now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
-	var clock atomic.Int64
-	clock.Store(now.UnixNano())
+// TestUnjudgeableCoordinateIsNamedUnknownAndNeverOmitted is the safety half of
+// the snapshot contract. A channel whose Home is not registered cannot be
+// judged, and omitting it would read to the device as "this channel is gone"
+// and destroy a compartment that must live.
+func TestUnjudgeableCoordinateIsNamedUnknownAndNeverOmitted(t *testing.T) {
 	host := New(Config{
 		ScanInterval: time.Hour,
-		Now:          func() time.Time { return time.Unix(0, clock.Load()).UTC() },
+		Present: func(context.Context) ([]channel.ID, error) {
+			return []channel.ID{"a", "b"}, nil
+		},
 	})
 	defer host.Close()
-	var bound atomic.Bool
-	bound.Store(true)
 	host.Register("a", 1, platform.DaemonMembrane{
-		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
 	carrier := dialTestCarrier(t, host)
-	host.Scan()
-	_ = adoptAndSuperviseTestLane(t, carrier)
-	_ = carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: "a", State: "ready",
+	plan := pullTestPlan(t, carrier)
+	if !containsChannel(plan.Serve, "a") {
+		t.Fatalf("judgeable bound channel missing from serve: %+v", plan)
+	}
+	if !containsChannel(plan.Unknown, "b") {
+		t.Fatalf("unregistered membrane was omitted instead of named unknown: %+v", plan)
+	}
+}
+
+// TestDirectoryFailureSuppressesTheWholeSnapshot holds the other half: a
+// snapshot this host cannot enumerate completely is not sent at all, because a
+// partial one would name fewer channels than exist and the device retires by
+// absence.
+func TestDirectoryFailureSuppressesTheWholeSnapshot(t *testing.T) {
+	host := New(Config{
+		ScanInterval: time.Hour,
+		Present: func(context.Context) ([]channel.ID, error) {
+			return nil, errors.New("directory unreachable")
+		},
 	})
-	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "a") })
-	bound.Store(false)
-	host.Scan()
-	var closeFrame link.SpineFrame
-	if err := carrier.ReadSpine(&closeFrame); err != nil {
+	defer host.Close()
+	carrier := dialTestCarrier(t, host)
+	if err := carrier.SendSpine(link.SpineFrame{
+		Kind: link.SpineCompartmentPlanPull, Nonce: "suppressed",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(defaultGoneTimeout + time.Second)
-	clock.Store(now.UnixNano())
-	host.Scan()
-	diagnostics := host.Diagnostics("daemon-a")
-	if len(diagnostics) != 1 || diagnostics[0].Kind != "gone_timeout" {
-		t.Fatalf("gone diagnostics=%+v", diagnostics)
+	if err := carrier.SendSpine(link.SpineFrame{
+		Kind: link.SpineProbe, Nonce: "barrier",
+	}); err != nil {
+		t.Fatal(err)
 	}
-	host.mu.RLock()
-	current := host.daemons["daemon-a"].current
-	host.mu.RUnlock()
-	current.mu.Lock()
-	view := current.compartments["a"]
-	current.mu.Unlock()
-	if !view.closeSent {
-		t.Fatal("observation timeout changed the revocation verdict")
+	reply := readTestSpine(t, carrier)
+	if reply.Kind != link.SpineProbeReply || reply.Nonce != "barrier" {
+		t.Fatalf("a snapshot was sent despite an unreadable directory: %+v", reply)
 	}
 }
 
@@ -512,8 +566,14 @@ func TestCarrierHalfOpenLeaseExpires(t *testing.T) {
 	waitFor(t, func() bool { return !host.DaemonOnline("daemon-a") })
 	readDone := make(chan error, 1)
 	go func() {
-		var frame link.SpineFrame
-		readDone <- first.ReadSpine(&frame)
+		for {
+			var frame link.SpineFrame
+			err := first.ReadSpine(&frame)
+			if err != nil || frame.Kind != link.SpineCompartmentPlanPoke {
+				readDone <- err
+				return
+			}
+		}
 	}()
 	select {
 	case err := <-readDone:
@@ -561,30 +621,6 @@ func TestDuplicateCurrentIsRetryableAndKeepsIncumbent(t *testing.T) {
 	if !host.DaemonOnline("daemon-a") {
 		t.Fatal("duplicate admission displaced the incumbent")
 	}
-}
-
-func TestCompartmentDeclarationsRemainInSpineOrder(t *testing.T) {
-	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
-	host.Register("a", 1, platform.DaemonMembrane{
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
-	carrier := dialTestCarrier(t, host)
-	for _, state := range []string{"building", "ready", "fault"} {
-		if err := carrier.SendSpine(link.SpineFrame{
-			Kind: link.SpineCompartmentState, Channel: "a", State: state,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	waitFor(t, func() bool {
-		host.mu.RLock()
-		current := host.daemons["daemon-a"].current
-		host.mu.RUnlock()
-		current.mu.Lock()
-		defer current.mu.Unlock()
-		return current.compartments["a"].state == CompartmentFault
-	})
 }
 
 func TestCoordinateBookkeepingReclaimsIdleEntries(t *testing.T) {

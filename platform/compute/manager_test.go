@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +30,14 @@ func (emptyFactories) BuildClass(actor.ActorID, string, json.RawMessage) (platfo
 	return platform.ActorFactory{}, false
 }
 
+// testPresent is the realm channel directory the host enumerates when a device
+// pulls its compartment snapshot. Every test that expects a compartment to be
+// retired needs one, because a host that cannot enumerate the directory
+// deliberately sends no snapshot at all.
+func testPresent(ids ...channel.ID) func(context.Context) ([]channel.ID, error) {
+	return func(context.Context) ([]channel.ID, error) { return ids, nil }
+}
+
 func waitCompute(t *testing.T, predicate func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -41,7 +50,10 @@ func waitCompute(t *testing.T, predicate func() bool) {
 }
 
 func TestCompartmentBuildsAndClosesOnlyByExplicitCommand(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	var bound atomic.Bool
 	bound.Store(true)
@@ -91,7 +103,10 @@ func TestCompartmentBuildsAndClosesOnlyByExplicitCommand(t *testing.T) {
 }
 
 func TestOneCarrierServicesTwoCompartmentsAndDetachIsLocal(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	var boundA, boundB atomic.Bool
 	boundA.Store(true)
@@ -265,7 +280,10 @@ func TestRetryAfterControlsRetryableHTTPDelay(t *testing.T) {
 }
 
 func TestCarrier_TombstoneStopsRedial(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host.Serve(w, r, "daemon-a")
@@ -326,8 +344,90 @@ func startTestCompute(
 	return cancel, done
 }
 
+// TestChannelDeletedWhileOfflineIsRetiredOnReconnect is the case the old
+// command-and-acknowledge shape could not reach at all: the channel goes away
+// while the device is not connected, so no teardown command could ever have
+// been delivered, and this host keeps no record that the device had anything
+// there. The device carries the coordinate itself, so its first snapshot after
+// reconnecting does not name the channel and it retires the compartment.
+func TestChannelDeletedWhileOfflineIsRetiredOnReconnect(t *testing.T) {
+	var present atomic.Value
+	present.Store([]channel.ID{"a"})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present: func(context.Context) ([]channel.ID, error) {
+			return present.Load().([]channel.ID), nil
+		},
+	})
+	t.Cleanup(func() { _ = host.Close() })
+	host.Register("a", 1, platform.DaemonMembrane{
+		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	})
+	var closed atomic.Int32
+	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
+		return CompartmentResources{
+			Factories: emptyFactories{},
+			Close:     func() error { closed.Add(1); return nil },
+		}, nil
+	})
+	waitCompute(t, func() bool {
+		host.Scan()
+		return host.LaneAttached("daemon-a", "a")
+	})
+
+	// The channel is destroyed: its Home unregisters and it leaves the realm
+	// directory. Nothing is sent to the device, which may well be offline.
+	host.Unregister("a", 1)
+	present.Store([]channel.ID(nil))
+
+	waitCompute(t, func() bool {
+		host.Scan()
+		return closed.Load() == 1
+	})
+}
+
+// TestUnjudgeableChannelKeepsTheCompartment is the other half of the contract.
+// A channel whose Home is closed cannot be judged, so the snapshot names it
+// unknown and the device must leave the compartment exactly where it is.
+func TestUnjudgeableChannelKeepsTheCompartment(t *testing.T) {
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("a"),
+	})
+	t.Cleanup(func() { _ = host.Close() })
+	host.Register("a", 1, platform.DaemonMembrane{
+		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	})
+	var closed atomic.Int32
+	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
+		return CompartmentResources{
+			Factories: emptyFactories{},
+			Close:     func() error { closed.Add(1); return nil },
+		}, nil
+	})
+	waitCompute(t, func() bool {
+		host.Scan()
+		return host.LaneAttached("daemon-a", "a")
+	})
+
+	// Home closes but the channel still exists: unjudgeable, not gone.
+	host.Unregister("a", 1)
+	for i := 0; i < 5; i++ {
+		host.Scan()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if closed.Load() != 0 {
+		t.Fatalf("an unjudgeable channel destroyed its compartment %d times", closed.Load())
+	}
+}
+
 func TestCompartment_RebuildsAfterCloseWhenRebound(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	var bound atomic.Bool
 	bound.Store(true)
@@ -376,7 +476,10 @@ func TestCompartment_RebuildsAfterCloseWhenRebound(t *testing.T) {
 
 func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 	run := func(t *testing.T, finalBound bool, replacePending bool) int32 {
-		host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+		host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 		t.Cleanup(func() { _ = host.Close() })
 		var bound atomic.Bool
 		bound.Store(true)
@@ -453,7 +556,10 @@ func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 }
 
 func TestLaneRetirementPreservesCompartmentAndPullsFullPlan(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	var pulls atomic.Int32
 	host.Register("a", 1, platform.DaemonMembrane{
@@ -491,7 +597,10 @@ func TestLaneRetirementPreservesCompartmentAndPullsFullPlan(t *testing.T) {
 }
 
 func TestLongCompartmentBuildSurvivesLaneChurnWithoutDoubleBuild(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	host.Register("a", 1, platform.DaemonMembrane{
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
@@ -526,7 +635,10 @@ func TestLongCompartmentBuildSurvivesLaneChurnWithoutDoubleBuild(t *testing.T) {
 }
 
 func TestBlockedCompartmentDoesNotStarveSibling(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	for _, id := range []string{"a", "b"} {
 		host.Register(channel.ID(id), 1, platform.DaemonMembrane{
@@ -550,16 +662,19 @@ func TestBlockedCompartmentDoesNotStarveSibling(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("A did not enter its blocked build")
 	}
+	// B converges while A is still inside its build. Readiness is A's own local
+	// fact and this host never learns it, so the property under test is exactly
+	// that B got its route and its build regardless of A being stuck.
 	waitCompute(t, func() bool { return host.LaneAttached("daemon-a", "b") })
-	if host.LaneAttached("daemon-a", "a") {
-		t.Fatal("blocked A was reported ready")
-	}
 	close(blockA)
 	waitCompute(t, func() bool { return host.LaneAttached("daemon-a", "a") })
 }
 
 func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	var blockA atomic.Bool
 	enteredA := make(chan struct{})
@@ -608,7 +723,10 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 }
 
 func TestCondemnedCompartmentNeverBuildsSecondResourceSet(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	var bound atomic.Bool
 	bound.Store(true)
@@ -617,20 +735,32 @@ func TestCondemnedCompartmentNeverBuildsSecondResourceSet(t *testing.T) {
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
 	var builds atomic.Int32
+	var closeAttempts atomic.Int32
 	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
 		builds.Add(1)
 		return CompartmentResources{
 			Factories: emptyFactories{},
-			Close:     func() error { return errors.New("injected close failure") },
+			Close: func() error {
+				closeAttempts.Add(1)
+				return errors.New("injected close failure")
+			},
 		}, nil
 	})
+	// Wait for the resource set itself, not for the route. A live lane no longer
+	// implies a finished build, and this test needs the first set to exist
+	// before it can ask whether a second one is ever created.
 	waitCompute(t, func() bool {
 		host.Scan()
-		return host.LaneAttached("daemon-a", "a")
+		return builds.Load() == 1
 	})
 	bound.Store(false)
 	host.Scan()
-	waitCompute(t, func() bool { return !host.LaneAttached("daemon-a", "a") })
+	// The failing Close is what condemns this coordinate, so wait for it rather
+	// than for the route to drop.
+	waitCompute(t, func() bool {
+		host.Scan()
+		return closeAttempts.Load() >= 1
+	})
 	bound.Store(true)
 	for i := 0; i < 3; i++ {
 		host.Scan()
@@ -639,13 +769,13 @@ func TestCondemnedCompartmentNeverBuildsSecondResourceSet(t *testing.T) {
 	if builds.Load() != 1 {
 		t.Fatalf("condemned coordinate built %d resource sets", builds.Load())
 	}
-	if host.LaneAttached("daemon-a", "a") {
-		t.Fatal("condemned coordinate answered ready")
-	}
 }
 
 func TestCompartmentFaultRetriesInPlaceAndBecomesReady(t *testing.T) {
-	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
 	t.Cleanup(func() { _ = host.Close() })
 	host.Register("a", 1, platform.DaemonMembrane{
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
@@ -662,16 +792,304 @@ func TestCompartmentFaultRetriesInPlaceAndBecomesReady(t *testing.T) {
 		host.Scan()
 		return attempts.Load() >= 1 && len(host.LaneView("daemon-a")) == 1
 	})
+	// A fault is the compartment's own business: it retries in place and the
+	// route is never disturbed, which is what the unchanged lane generation
+	// across the retry proves.
 	first := host.LaneView("daemon-a")[0].LaneGen
-	if host.LaneAttached("daemon-a", "a") {
-		t.Fatal("faulted compartment was reported ready")
-	}
-	waitCompute(t, func() bool {
-		return attempts.Load() >= 2 && host.LaneAttached("daemon-a", "a")
-	})
+	waitCompute(t, func() bool { return attempts.Load() >= 2 })
 	second := host.LaneView("daemon-a")[0].LaneGen
 	if first != second {
 		t.Fatal("fault recovery reopened the lane instead of healing the compartment")
+	}
+}
+
+// TestSnapshotRetirementIsExactObject holds the teardown to the compartment the
+// snapshot actually condemned. A snapshot is computed, then acted on; a rebind
+// landing in between installs a newer compartment at the same coordinate, and
+// re-looking the coordinate up would destroy that newer one instead.
+func TestSnapshotRetirementIsExactObject(t *testing.T) {
+	manager := newCompartmentManager(
+		context.Background(), Config{}, slog.New(slog.DiscardHandler),
+	)
+	condemned := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	manager.cells["a"] = condemned
+
+	// The rebind: a different compartment now occupies this coordinate.
+	replacement := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	manager.cells["a"] = replacement
+
+	manager.closeExactCompartment(condemned)
+
+	manager.mu.Lock()
+	survivor := manager.cells["a"]
+	manager.mu.Unlock()
+	if survivor != replacement {
+		t.Fatalf("stale snapshot retired the replacement compartment: %p want %p",
+			survivor, replacement)
+	}
+	replacement.mu.Lock()
+	closing := replacement.closing
+	replacement.mu.Unlock()
+	if closing {
+		t.Fatal("stale snapshot put the replacement compartment into teardown")
+	}
+}
+
+// The first two generations are real ones captured from a failing run: they
+// were minted inside the same millisecond, so their timestamp prefixes are
+// identical and only the sub-millisecond sequence distinguishes them. An
+// ordering that gave up at the millisecond would fail here, and the hazard
+// only occurs when two lanes are opened this close together.
+const (
+	openedFirst  = link.LaneGeneration("019fb62d-8798-71be-a7a1-0a7e28255421")
+	openedSecond = link.LaneGeneration("019fb62d-8798-7967-a764-3e1465ec07da")
+	openedThird  = link.LaneGeneration("019fb62d-8799-7c04-b0f2-5d1a9e77f310")
+)
+
+// laneAdmissionFixture drives the real admission path with nothing else
+// attached. The compartment it hands out already has a build in flight, so an
+// admitted lane is installed and nothing further is started — admission is the
+// only behaviour under test.
+type laneAdmissionFixture struct {
+	t       *testing.T
+	manager *compartmentManager
+	carrier *link.ClientCarrier
+	cell    *compartment
+	lanes   []*clientLane
+}
+
+func newLaneAdmissionFixture(t *testing.T) *laneAdmissionFixture {
+	t.Helper()
+	manager := newCompartmentManager(
+		context.Background(), Config{}, slog.New(slog.DiscardHandler),
+	)
+	carrier := &link.ClientCarrier{}
+	manager.carrier = carrier
+	cell := &compartment{
+		manager: manager, chID: "a",
+		stopBuild: make(chan struct{}),
+		buildDone: make(chan struct{}),
+	}
+	manager.cells["a"] = cell
+	fixture := &laneAdmissionFixture{t: t, manager: manager, carrier: carrier, cell: cell}
+	t.Cleanup(func() {
+		for _, lane := range fixture.lanes {
+			lane.retireLogical()
+		}
+		fixture.manager.wg.Wait()
+	})
+	return fixture
+}
+
+func (f *laneAdmissionFixture) lane(
+	carrier *link.ClientCarrier, gen link.LaneGeneration,
+) *clientLane {
+	f.t.Helper()
+	local, remote := net.Pipe()
+	f.t.Cleanup(func() { _ = remote.Close() })
+	stream, err := link.AdoptLane(carrier, link.DeviceStreamHeader{
+		Kind: link.DeviceStreamLaneControl, Channel: "a", LaneGen: gen,
+	}, local)
+	if err != nil {
+		f.t.Fatalf("adopt lane %q: %v", gen, err)
+	}
+	lane := newClientLane(f.manager, carrier, stream)
+	f.lanes = append(f.lanes, lane)
+	return lane
+}
+
+func (f *laneAdmissionFixture) slots() (lane, pending *clientLane) {
+	f.cell.mu.Lock()
+	defer f.cell.mu.Unlock()
+	return f.cell.lane, f.cell.pending
+}
+
+// TestLaneAdmissionOrdersByGeneration is the deterministic form of the
+// arrival-order hazard: two lanes for one coordinate are opened by the server
+// in a known order, each header is parsed by its own worker, and they can
+// therefore reach admission in either order.
+func TestLaneAdmissionOrdersByGeneration(t *testing.T) {
+	t.Run("out of order arrival is refused", func(t *testing.T) {
+		fixture := newLaneAdmissionFixture(t)
+		newer := fixture.lane(fixture.carrier, openedSecond)
+		older := fixture.lane(fixture.carrier, openedFirst)
+
+		fixture.manager.acceptLane(newer)
+		fixture.manager.acceptLane(older)
+
+		if lane, _ := fixture.slots(); lane != newer {
+			t.Fatal("an older arrival displaced the generation the server routes on")
+		}
+		if !older.stream.Retired() {
+			t.Fatal("the refused arrival was left running")
+		}
+		if newer.stream.Retired() {
+			t.Fatal("admitting an older arrival retired the installed lane")
+		}
+	})
+	// The reordering is what admission defends against, but the ordinary case
+	// is these same two lanes arriving in the order they were opened. Both
+	// generations were minted inside one millisecond, so an ordering that
+	// stopped at the timestamp would refuse the lane the server just opened
+	// and leave the coordinate on a route the server has already abandoned.
+	t.Run("in order arrival installs", func(t *testing.T) {
+		fixture := newLaneAdmissionFixture(t)
+		older := fixture.lane(fixture.carrier, openedFirst)
+		newer := fixture.lane(fixture.carrier, openedSecond)
+
+		fixture.manager.acceptLane(older)
+		fixture.manager.acceptLane(newer)
+
+		if lane, _ := fixture.slots(); lane != newer {
+			t.Fatal("the generation the server had just opened was refused")
+		}
+		if !older.stream.Retired() {
+			t.Fatal("the superseded lane was left running")
+		}
+	})
+}
+
+// TestRetiredLaneDoesNotReopenItsCoordinateToOlderGenerations holds the
+// watermark to the coordinate rather than to the slot. A lane retiring empties
+// the slot, and reading the admitted generation back out of the slot would let
+// anything at all in from that moment on.
+func TestRetiredLaneDoesNotReopenItsCoordinateToOlderGenerations(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	newer := fixture.lane(fixture.carrier, openedSecond)
+	older := fixture.lane(fixture.carrier, openedFirst)
+
+	fixture.manager.acceptLane(newer)
+	newer.retireLogical()
+	if lane, _ := fixture.slots(); lane != nil {
+		t.Fatal("retirement did not empty the slot, so this test proves nothing")
+	}
+
+	fixture.manager.acceptLane(older)
+	if lane, _ := fixture.slots(); lane != nil {
+		t.Fatal("a generation the coordinate had already moved past was readmitted")
+	}
+}
+
+// TestTeardownSlotKeepsTheNewestGeneration covers the same watermark question
+// during teardown, where the installed slot is empty by construction and the
+// arriving lane is parked for the compartment that will replace this one.
+func TestTeardownSlotKeepsTheNewestGeneration(t *testing.T) {
+	t.Run("older arrival is refused", func(t *testing.T) {
+		fixture := newLaneAdmissionFixture(t)
+		fixture.cell.closing = true
+		newer := fixture.lane(fixture.carrier, openedSecond)
+		older := fixture.lane(fixture.carrier, openedFirst)
+
+		fixture.manager.acceptLane(newer)
+		fixture.manager.acceptLane(older)
+
+		if _, pending := fixture.slots(); pending != newer {
+			t.Fatal("an older arrival took the slot the next compartment inherits")
+		}
+	})
+	t.Run("newer arrival replaces", func(t *testing.T) {
+		fixture := newLaneAdmissionFixture(t)
+		fixture.cell.closing = true
+		second := fixture.lane(fixture.carrier, openedSecond)
+		third := fixture.lane(fixture.carrier, openedThird)
+
+		fixture.manager.acceptLane(second)
+		fixture.manager.acceptLane(third)
+
+		if _, pending := fixture.slots(); pending != third {
+			t.Fatal("the newest generation was not parked for the next compartment")
+		}
+		if !second.stream.Retired() {
+			t.Fatal("the superseded lane was left running")
+		}
+	})
+}
+
+// TestRedeliveredGenerationIsRefused pins that a generation names exactly one
+// stream: a second stream carrying a generation already admitted must not
+// displace the one that is live.
+func TestRedeliveredGenerationIsRefused(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	installed := fixture.lane(fixture.carrier, openedSecond)
+	duplicate := fixture.lane(fixture.carrier, openedSecond)
+
+	fixture.manager.acceptLane(installed)
+	fixture.manager.acceptLane(duplicate)
+
+	if lane, _ := fixture.slots(); lane != installed {
+		t.Fatal("a redelivered generation displaced the live lane")
+	}
+	if !duplicate.stream.Retired() {
+		t.Fatal("the redelivered stream was left running")
+	}
+}
+
+// TestLaneFromAStaleCarrierIsRefusedRegardlessOfGeneration pins that the
+// carrier decides first. Generations order within one carrier only, so a lane
+// whose carrier is gone is not admissible however new its generation looks —
+// the redial loop does not wait for the dead carrier's stream workers.
+func TestLaneFromAStaleCarrierIsRefusedRegardlessOfGeneration(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	current := fixture.lane(fixture.carrier, openedFirst)
+	fixture.manager.acceptLane(current)
+
+	stale := fixture.lane(&link.ClientCarrier{}, openedThird)
+	fixture.manager.acceptLane(stale)
+
+	if lane, _ := fixture.slots(); lane != current {
+		t.Fatal("a lane from a carrier this device no longer holds was installed")
+	}
+	if !stale.stream.Retired() {
+		t.Fatal("the refused stream from the stale carrier was left running")
+	}
+}
+
+// TestLaneFromAStaleCarrierCreatesNoCompartment is the other half of the
+// carrier check: refusing after the lookup would still leave an empty
+// compartment at a coordinate this device was never told to serve.
+func TestLaneFromAStaleCarrierCreatesNoCompartment(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = remote.Close() })
+	staleCarrier := &link.ClientCarrier{}
+	stream, err := link.AdoptLane(staleCarrier, link.DeviceStreamHeader{
+		Kind: link.DeviceStreamLaneControl, Channel: "unserved", LaneGen: openedThird,
+	}, local)
+	if err != nil {
+		t.Fatalf("adopt lane: %v", err)
+	}
+	lane := newClientLane(fixture.manager, staleCarrier, stream)
+	fixture.lanes = append(fixture.lanes, lane)
+
+	fixture.manager.acceptLane(lane)
+
+	fixture.manager.mu.Lock()
+	_, conjured := fixture.manager.cells["unserved"]
+	fixture.manager.mu.Unlock()
+	if conjured {
+		t.Fatal("a lane from a stale carrier conjured a compartment out of nothing")
+	}
+}
+
+// TestCarrierDownClearsTheGenerationWatermark pins the scope of the ordering.
+// Generation identity is really (carrier, lane); the next carrier mints its own
+// series, so its first lane must be admissible even when it compares lower than
+// what the previous carrier had reached.
+func TestCarrierDownClearsTheGenerationWatermark(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	fixture.manager.acceptLane(fixture.lane(fixture.carrier, openedThird))
+
+	fixture.manager.carrierDown(fixture.carrier)
+	next := &link.ClientCarrier{}
+	fixture.manager.mu.Lock()
+	fixture.manager.carrier = next
+	fixture.manager.mu.Unlock()
+
+	arrival := fixture.lane(next, openedFirst)
+	fixture.manager.acceptLane(arrival)
+
+	if lane, _ := fixture.slots(); lane != arrival {
+		t.Fatal("the previous carrier's watermark barred the new carrier's lane")
 	}
 }
 

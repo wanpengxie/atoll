@@ -278,52 +278,87 @@ const (
 	CarrierRetryable CarrierClass = "retryable"
 )
 
+// SpineFrame is the closed carrier-spine vocabulary.
+//
+// Compartment existence is NOT a command here: the device converges its own
+// compartment set onto a complete authoritative snapshot it pulls, exactly as
+// actor bodies converge onto AcceptFullDesired. The spine therefore carries a
+// contentless poke plus one request/reply pair, and never a per-coordinate
+// teardown command, a device-state report, or an acknowledgement.
 type SpineFrame struct {
 	Kind       string            `json:"kind"`
 	DaemonID   string            `json:"daemon_id,omitempty"`
 	CarrierGen CarrierGeneration `json:"carrier_gen,omitempty"`
 	Class      CarrierClass      `json:"class,omitempty"`
 	Reason     string            `json:"reason,omitempty"`
-	Channel    channel.ID        `json:"channel,omitempty"`
-	State      string            `json:"state,omitempty"`
 	Nonce      string            `json:"nonce,omitempty"`
+
+	// Serve/Unknown carry the compartment plan reply. Every channel the realm
+	// directory enumerated lands in exactly one of them; a channel in neither
+	// no longer exists and the device retires its compartment. The server only
+	// answers when it can enumerate the directory completely — a partial
+	// snapshot would make the device tear down compartments that must live.
+	Serve   []channel.ID `json:"serve,omitempty"`
+	Unknown []channel.ID `json:"unknown,omitempty"`
 }
 
 func (f SpineFrame) Validate() error {
 	switch f.Kind {
 	case SpineCarrierAccept:
 		if f.DaemonID == "" || f.CarrierGen == "" || f.Class != "" ||
-			f.Reason != "" || f.Channel != "" || f.State != "" || f.Nonce != "" {
+			f.Reason != "" || f.Nonce != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: malformed carrier_accept")
 		}
 	case SpineCarrierReject:
 		if (f.Class != CarrierTerminal && f.Class != CarrierRetryable) || f.Reason == "" ||
-			f.DaemonID != "" || f.CarrierGen != "" || f.Channel != "" ||
-			f.State != "" || f.Nonce != "" {
+			f.DaemonID != "" || f.CarrierGen != "" || f.Nonce != "" ||
+			len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: malformed carrier_reject")
 		}
-	case SpineCompartmentState:
-		if f.Channel == "" || f.DaemonID != "" || f.CarrierGen != "" ||
-			f.Class != "" || f.Nonce != "" {
-			return errors.New("link: compartment_state channel required")
+	case SpineCompartmentPlanPoke:
+		if f.DaemonID != "" || f.CarrierGen != "" || f.Class != "" ||
+			f.Reason != "" || f.Nonce != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
+			return errors.New("link: compartment_plan_poke carries no payload")
 		}
-		switch f.State {
-		case "building", "ready", "fault", "gone":
-		default:
-			return errors.New("link: invalid compartment state")
+	case SpineCompartmentPlanPull:
+		if f.Nonce == "" || f.DaemonID != "" || f.CarrierGen != "" ||
+			f.Class != "" || f.Reason != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
+			return errors.New("link: compartment_plan_pull nonce required")
 		}
-	case SpineCompartmentClose:
-		if f.Channel == "" || f.DaemonID != "" || f.CarrierGen != "" ||
-			f.Class != "" || f.Reason != "" || f.State != "" || f.Nonce != "" {
-			return errors.New("link: compartment_close channel required")
+	case SpineCompartmentPlanReply:
+		if f.Nonce == "" || f.DaemonID != "" || f.CarrierGen != "" ||
+			f.Class != "" || f.Reason != "" {
+			return errors.New("link: malformed compartment_plan_reply")
+		}
+		if err := validatePlanSet(f.Serve, f.Unknown); err != nil {
+			return err
 		}
 	case SpineProbe, SpineProbeReply:
 		if f.Nonce == "" || f.DaemonID != "" || f.CarrierGen != "" ||
-			f.Class != "" || f.Reason != "" || f.Channel != "" || f.State != "" {
+			f.Class != "" || f.Reason != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: probe nonce required")
 		}
 	default:
 		return fmt.Errorf("link: unknown spine frame kind %q", f.Kind)
+	}
+	return nil
+}
+
+// validatePlanSet holds the snapshot to the one property the device relies on
+// when it retires a compartment: every named channel appears exactly once, so
+// "named in neither list" unambiguously means the channel no longer exists.
+func validatePlanSet(serve, unknown []channel.ID) error {
+	seen := make(map[channel.ID]struct{}, len(serve)+len(unknown))
+	for _, list := range [][]channel.ID{serve, unknown} {
+		for _, id := range list {
+			if id == "" {
+				return errors.New("link: compartment plan names an empty channel")
+			}
+			if _, dup := seen[id]; dup {
+				return fmt.Errorf("link: compartment plan names %q twice", id)
+			}
+			seen[id] = struct{}{}
+		}
 	}
 	return nil
 }
@@ -490,8 +525,9 @@ func validateRequestID(outer, inner string, validation error) error {
 const (
 	SpineCarrierAccept    = "carrier_accept"
 	SpineCarrierReject    = "carrier_reject"
-	SpineCompartmentState = "compartment_state"
-	SpineCompartmentClose = "compartment_close"
+	SpineCompartmentPlanPoke  = "compartment_plan_poke"
+	SpineCompartmentPlanPull  = "compartment_plan_pull"
+	SpineCompartmentPlanReply = "compartment_plan_reply"
 	SpineProbe            = "probe"
 	SpineProbeReply       = "probe_reply"
 )

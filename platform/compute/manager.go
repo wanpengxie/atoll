@@ -35,6 +35,12 @@ type compartmentManager struct {
 	cells      map[string]*compartment
 	terminal   chan error
 	wg         sync.WaitGroup
+
+	// planWake is a level, not a queue: a poke that arrives while a pull is in
+	// flight just means "pull again", and coalescing pokes is correct.
+	planWake    chan struct{}
+	planReplyMu sync.Mutex
+	planWaiter  map[string]chan link.SpineFrame
 }
 
 type compartment struct {
@@ -49,6 +55,15 @@ type compartment struct {
 	condemned    bool
 	lane         *clientLane
 	pending      *clientLane
+	// latestLaneGen is the highest generation this coordinate has admitted on
+	// the carrier the manager currently holds. It is its own field and never
+	// read back out of the slots: a slot empties when a lane retires and while
+	// the compartment tears down, and an empty slot must not readmit a
+	// generation this coordinate already moved past. It is cleared only when
+	// the carrier goes down, because generation identity is really
+	// (carrier, lane) and generations minted by different carriers do not
+	// order against each other.
+	latestLaneGen link.LaneGeneration
 	resources    CompartmentResources
 	host         *actorhost.HostSupervisor
 	outbound     *DaemonOutbound
@@ -64,7 +79,9 @@ type compartment struct {
 func newCompartmentManager(ctx context.Context, cfg Config, logger *slog.Logger) *compartmentManager {
 	return &compartmentManager{
 		ctx: ctx, cfg: cfg, logger: logger, cells: make(map[string]*compartment),
-		terminal: make(chan error, 1),
+		terminal:   make(chan error, 1),
+		planWake:   make(chan struct{}, 1),
+		planWaiter: make(map[string]chan link.SpineFrame),
 	}
 }
 
@@ -83,15 +100,11 @@ func (m *compartmentManager) bindCarrier(
 	m.carrierGen = accepted.CarrierGen
 	m.daemonID = accepted.DaemonID
 	m.root = root
-	cells := make([]*compartment, 0, len(m.cells))
-	for _, cell := range m.cells {
-		cells = append(cells, cell)
-	}
-	m.wg.Add(2)
+	// Surviving compartments announce nothing on a new carrier. The reconcile
+	// loop below pulls the snapshot and converges them, which is the same path
+	// that runs every period — reconnection is not a special case.
+	m.wg.Add(3)
 	m.mu.Unlock()
-	for _, cell := range cells {
-		cell.redeclare(carrier)
-	}
 	go func() {
 		defer m.wg.Done()
 		m.readSpine(carrier)
@@ -99,6 +112,10 @@ func (m *compartmentManager) bindCarrier(
 	go func() {
 		defer m.wg.Done()
 		m.acceptLanes(carrier)
+	}()
+	go func() {
+		defer m.wg.Done()
+		m.reconcilePlan(carrier)
 	}()
 }
 
@@ -114,8 +131,10 @@ func (m *compartmentManager) readSpine(carrier *link.ClientCarrier) {
 			return
 		}
 		switch frame.Kind {
-		case link.SpineCompartmentClose:
-			m.closeCompartment(string(frame.Channel))
+		case link.SpineCompartmentPlanPoke:
+			m.wakePlan()
+		case link.SpineCompartmentPlanReply:
+			m.deliverPlan(frame)
 		case link.SpineProbe:
 			if carrier.SendSpine(link.SpineFrame{Kind: link.SpineProbeReply, Nonce: frame.Nonce}) != nil {
 				return
@@ -143,6 +162,119 @@ func (m *compartmentManager) readSpine(carrier *link.ClientCarrier) {
 	}
 }
 
+// wakePlan raises the pull level. It never blocks and never queues: N pokes
+// between two pulls mean exactly what one poke means.
+func (m *compartmentManager) wakePlan() {
+	select {
+	case m.planWake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *compartmentManager) deliverPlan(frame link.SpineFrame) {
+	m.planReplyMu.Lock()
+	waiter := m.planWaiter[frame.Nonce]
+	delete(m.planWaiter, frame.Nonce)
+	m.planReplyMu.Unlock()
+	if waiter != nil {
+		waiter <- frame
+	}
+}
+
+// reconcilePlan is this device's compartment reconcile loop. It pulls the whole
+// authoritative snapshot and converges the local compartment set onto it — the
+// same shape actorhost uses for bodies (pull full desired, retire whatever the
+// snapshot did not name). The server issues no teardown command, so nothing
+// here waits on one, and a snapshot that never arrives leaves every compartment
+// exactly where it is.
+func (m *compartmentManager) reconcilePlan(carrier *link.ClientCarrier) {
+	m.wakePlan()
+	ticker := time.NewTicker(compartmentPlanInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-carrier.Done():
+			return
+		case <-ticker.C:
+		case <-m.planWake:
+		}
+		plan, ok := m.pullPlanSnapshot(carrier)
+		if !ok {
+			continue
+		}
+		m.convergeToPlan(plan)
+	}
+}
+
+func (m *compartmentManager) pullPlanSnapshot(carrier *link.ClientCarrier) (link.SpineFrame, bool) {
+	nonce := uuid.NewString()
+	waiter := make(chan link.SpineFrame, 1)
+	m.planReplyMu.Lock()
+	m.planWaiter[nonce] = waiter
+	m.planReplyMu.Unlock()
+	drop := func() {
+		m.planReplyMu.Lock()
+		delete(m.planWaiter, nonce)
+		m.planReplyMu.Unlock()
+	}
+	if err := carrier.SendSpine(link.SpineFrame{
+		Kind: link.SpineCompartmentPlanPull, Nonce: nonce,
+	}); err != nil {
+		drop()
+		return link.SpineFrame{}, false
+	}
+	timer := time.NewTimer(compartmentPlanTimeout)
+	defer timer.Stop()
+	select {
+	case reply := <-waiter:
+		return reply, true
+	case <-timer.C:
+		drop()
+		return link.SpineFrame{}, false
+	case <-carrier.Done():
+		drop()
+		return link.SpineFrame{}, false
+	case <-m.ctx.Done():
+		drop()
+		return link.SpineFrame{}, false
+	}
+}
+
+// convergeToPlan retires every compartment the snapshot did not name.
+//
+// A channel in Unknown is one the server could not judge this round; it is
+// named precisely so that "absent" keeps its single meaning — the channel no
+// longer exists — and a compartment is only ever destroyed by that.
+func (m *compartmentManager) convergeToPlan(plan link.SpineFrame) {
+	named := make(map[string]struct{}, len(plan.Serve)+len(plan.Unknown))
+	for _, id := range plan.Serve {
+		named[string(id)] = struct{}{}
+	}
+	for _, id := range plan.Unknown {
+		named[string(id)] = struct{}{}
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	// Capture the exact compartments this snapshot condemns. Re-looking them up
+	// by coordinate at teardown time would let a rebind that happened in between
+	// hand us a newer compartment the snapshot never spoke about.
+	stale := make([]*compartment, 0)
+	for chID, cell := range m.cells {
+		if _, keep := named[chID]; !keep {
+			stale = append(stale, cell)
+		}
+	}
+	m.mu.Unlock()
+	for _, cell := range stale {
+		m.closeExactCompartment(cell)
+	}
+}
+
 func (m *compartmentManager) acceptLanes(carrier *link.ClientCarrier) {
 	_ = carrier.ServeStreams(func(conn net.Conn, header link.DeviceStreamHeader) {
 		if header.Kind == link.DeviceStreamCarrier {
@@ -162,7 +294,12 @@ func (m *compartmentManager) acceptLanes(carrier *link.ClientCarrier) {
 func (m *compartmentManager) acceptLane(lane *clientLane) {
 	chID := string(lane.stream.Channel)
 	m.mu.Lock()
-	if m.closed {
+	// A lane is admissible only on the carrier this manager currently holds.
+	// The redial loop does not join the dead carrier's stream workers, so one
+	// that already parsed its header can land here after the next carrier is
+	// bound. Turning it away before the compartment lookup also keeps it from
+	// conjuring a compartment at a coordinate this device does not serve.
+	if m.closed || m.carrier != lane.carrier {
 		m.mu.Unlock()
 		lane.stream.RetireLogical()
 		lane.stream.CollectPhysical()
@@ -194,8 +331,29 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 		cell.declare("fault", "condemned")
 		return
 	}
+	// Streams are accepted in the order the server opened them, but each one's
+	// header is parsed by its own worker, so two generations opened close
+	// together can arrive here in either order. Installing the older one would
+	// retire the generation the server is actually routing on, leaving both
+	// ends without a lane until the next authority scan.
+	//
+	// Lane generations are canonical lowercase UUIDv7 values minted through
+	// NewLaneGeneration by the one server process. Their lexical order follows
+	// the UUIDv7 timestamp and its monotonic sub-millisecond sequence, so
+	// comparing the strings compares the mint order. Admission depends on that
+	// ordering, and only within one carrier. An equal generation is refused
+	// too: a generation names exactly one stream.
+	gen := lane.stream.Gen
+	if cell.latestLaneGen != "" && gen <= cell.latestLaneGen {
+		cell.mu.Unlock()
+		lane.start()
+		m.mu.Unlock()
+		lane.retireLogical()
+		return
+	}
 	if cell.closing {
 		old := cell.pending
+		cell.latestLaneGen = gen
 		cell.pending = lane
 		cell.mu.Unlock()
 		lane.start()
@@ -206,6 +364,7 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 		return
 	}
 	old := cell.lane
+	cell.latestLaneGen = gen
 	cell.lane = lane
 	needsBuild := cell.host == nil
 	startBuild := needsBuild && cell.buildDone == nil
@@ -278,6 +437,10 @@ func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 		cell.lane = nil
 		pending := cell.pending
 		cell.pending = nil
+		// The watermark went down with the carrier that gave it meaning. The
+		// next carrier's generations are minted by a different lane series and
+		// are not comparable with this one, so the coordinate starts over.
+		cell.latestLaneGen = ""
 		cell.mu.Unlock()
 		if lane != nil {
 			lanes = append(lanes, lane)
@@ -294,6 +457,21 @@ func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 	}
 }
 
+// closeExactCompartment retires this exact compartment, and only while it is
+// still the one installed at its coordinate.
+func (m *compartmentManager) closeExactCompartment(cell *compartment) {
+	if cell == nil {
+		return
+	}
+	m.mu.Lock()
+	current := !m.closed && m.cells[cell.chID] == cell
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	m.closeCompartment(cell.chID)
+}
+
 func (m *compartmentManager) closeCompartment(chID string) {
 	m.mu.Lock()
 	if m.closed {
@@ -303,11 +481,9 @@ func (m *compartmentManager) closeCompartment(chID string) {
 	cell := m.cells[chID]
 	m.mu.Unlock()
 	if cell == nil {
-		if carrier, _ := m.currentCarrier(); carrier != nil {
-			_ = carrier.SendSpine(link.SpineFrame{
-				Kind: link.SpineCompartmentState, Channel: linkChannel(chID), State: "gone",
-			})
-		}
+		// Nothing here to retire. Convergence is idempotent by construction, so
+		// an absent compartment needs no answer and produces no send — which is
+		// why no one has to speak for a compartment that does not exist.
 		return
 	}
 	cell.mu.Lock()
@@ -615,29 +791,14 @@ func (c *compartment) laneDown(exact *clientLane) {
 	c.mu.Unlock()
 }
 
+// declare records this compartment's state locally and sends nothing. The
+// state is this device's own physical fact; the server routes by its own
+// ledger and never consults it, so there is no report, no acknowledgement, and
+// no ordering obligation between compartments.
 func (c *compartment) declare(state, reason string) {
-	carrier, _ := c.manager.currentCarrier()
 	c.mu.Lock()
 	c.state, c.reason = state, reason
-	if carrier != nil {
-		_ = carrier.SendSpine(link.SpineFrame{
-			Kind: link.SpineCompartmentState, Channel: linkChannel(c.chID),
-			State: state, Reason: reason,
-		})
-	}
 	c.mu.Unlock()
-}
-
-func (c *compartment) redeclare(carrier *link.ClientCarrier) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closing || c.condemned {
-		return
-	}
-	_ = carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: linkChannel(c.chID),
-		State: c.state, Reason: c.reason,
-	})
 }
 
 func (c *compartment) close() {
@@ -691,12 +852,9 @@ func (c *compartment) close() {
 		c.condemn(closeErr.Error())
 		return
 	}
-	carrier, _ := c.manager.currentCarrier()
-	if carrier != nil {
-		_ = carrier.SendSpine(link.SpineFrame{
-			Kind: link.SpineCompartmentState, Channel: linkChannel(c.chID), State: "gone",
-		})
-	}
+	// Teardown ends here. Nothing is reported: the server holds no projection of
+	// this compartment, so there is no row to delete and no flag to clear, and
+	// this removal races with nothing on the other end.
 	c.manager.mu.Lock()
 	if c.manager.cells[c.chID] == c {
 		delete(c.manager.cells, c.chID)

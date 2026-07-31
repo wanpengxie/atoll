@@ -29,6 +29,12 @@ const (
 	redialMaxBackoff       = 30 * time.Second
 	carrierAcceptTimeout   = 10 * time.Second
 	compartmentJoinTimeout = 30 * time.Second
+
+	// compartmentPlanInterval is the floor on how stale this device's
+	// compartment set can be with no poke at all. Pokes only buy latency; this
+	// tick is what makes the loop self-healing when one is lost.
+	compartmentPlanInterval = 30 * time.Second
+	compartmentPlanTimeout  = 20 * time.Second
 )
 
 type Config struct {

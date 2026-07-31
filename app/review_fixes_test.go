@@ -131,18 +131,18 @@ func TestDeleteDaemonRevokesDeviceAndKeepsBinding(t *testing.T) {
 	if body["authority_committed"] != true || body["convergence"] != "revoked" {
 		t.Fatalf("delete response=%#v", body)
 	}
+	// Revocation is recorded on its own. There is no companion "the device never
+	// confirmed" note any more: this host holds no projection of the device's
+	// compartments, so there is nothing whose absence it could report on.
 	diagnostics := body["diagnostics"].([]any)
-	var sawRevoke, sawTerminalGone bool
+	var sawRevoke bool
 	for _, raw := range diagnostics {
-		switch raw.(map[string]any)["kind"] {
-		case "revoke":
+		if raw.(map[string]any)["kind"] == "revoke" {
 			sawRevoke = true
-		case "gone_unobserved_terminal":
-			sawTerminalGone = true
 		}
 	}
-	if !sawRevoke || !sawTerminalGone {
-		t.Fatalf("delete diagnostics=%#v, want revoke and terminal gone observation", diagnostics)
+	if !sawRevoke {
+		t.Fatalf("delete diagnostics=%#v, want the revoke record", diagnostics)
 	}
 	select {
 	case err := <-runErr:

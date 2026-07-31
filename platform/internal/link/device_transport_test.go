@@ -176,9 +176,22 @@ func TestClosedWireVocabularyRejectsSmuggledPayloads(t *testing.T) {
 		t.Fatal("actor header accepted a carrier-only protocol field")
 	}
 	if err := (SpineFrame{
-		Kind: SpineCompartmentClose, Channel: "a", Reason: "smuggled",
+		Kind: SpineCompartmentPlanPoke, Reason: "smuggled",
 	}).Validate(); err == nil {
-		t.Fatal("compartment_close accepted an unrelated field")
+		t.Fatal("compartment_plan_poke accepted a payload")
+	}
+	// A channel named twice would make "absent from both lists" ambiguous, and
+	// absence is the only thing that makes the device retire a compartment.
+	if err := (SpineFrame{
+		Kind: SpineCompartmentPlanReply, Nonce: "n",
+		Serve: []channel.ID{"a"}, Unknown: []channel.ID{"a"},
+	}).Validate(); err == nil {
+		t.Fatal("compartment plan named one channel in both lists")
+	}
+	if err := (SpineFrame{
+		Kind: SpineCompartmentPlanReply, Nonce: "n", Serve: []channel.ID{""},
+	}).Validate(); err == nil {
+		t.Fatal("compartment plan named an empty channel")
 	}
 	if err := (LaneFrame{
 		Kind: LaneAllocRequest, RequestID: "outer",

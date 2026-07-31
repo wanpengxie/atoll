@@ -57,14 +57,10 @@ type Config struct {
 	Now          func() time.Time
 }
 
-type CompartmentState string
-
-const (
-	CompartmentBuilding CompartmentState = "building"
-	CompartmentReady    CompartmentState = "ready"
-	CompartmentFault    CompartmentState = "fault"
-	CompartmentGone     CompartmentState = "gone"
-)
+// Compartment existence is the device's own physical fact and this host keeps
+// no projection of it. The device converges its compartment set onto the
+// complete snapshot it pulls (compartment_plan_pull), so there is no teardown
+// command to track, no declaration to cache, and no acknowledgement to await.
 
 type LaneView struct {
 	ChID        channel.ID
@@ -86,14 +82,6 @@ type membraneRow struct {
 	bundle     platform.DaemonMembrane
 }
 
-type compartmentView struct {
-	state     CompartmentState
-	reason    string
-	closeSent bool
-	closeAt   time.Time
-	goneTimed bool
-}
-
 type carrierRow struct {
 	host     *Host
 	daemonID string
@@ -101,13 +89,12 @@ type carrierRow struct {
 	wire     *link.ServerCarrier
 	sealed   atomic.Bool
 
-	mu           sync.Mutex
-	lanes        map[channel.ID]*serverLane
-	retirements  map[channel.ID]uint64
-	compartments map[channel.ID]compartmentView
-	coordLocks   map[channel.ID]*coordGate
-	coordTasks   map[channel.ID]*coordTask
-	lastSeen     time.Time
+	mu          sync.Mutex
+	lanes       map[channel.ID]*serverLane
+	retirements map[channel.ID]uint64
+	coordLocks  map[channel.ID]*coordGate
+	coordTasks  map[channel.ID]*coordTask
+	lastSeen    time.Time
 }
 
 type coordGate struct {
@@ -340,12 +327,11 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 	}
 	carrier := &carrierRow{
 		host: h, daemonID: daemonID, wire: wire,
-		lanes:        make(map[channel.ID]*serverLane),
-		retirements:  make(map[channel.ID]uint64),
-		compartments: make(map[channel.ID]compartmentView),
-		coordLocks:   make(map[channel.ID]*coordGate),
-		coordTasks:   make(map[channel.ID]*coordTask),
-		lastSeen:     h.now(),
+		lanes:       make(map[channel.ID]*serverLane),
+		retirements: make(map[channel.ID]uint64),
+		coordLocks:  make(map[channel.ID]*coordGate),
+		coordTasks:  make(map[channel.ID]*coordTask),
+		lastSeen:    h.now(),
 	}
 	if err := h.admit(carrier); err != nil {
 		class := link.CarrierRetryable
@@ -435,8 +421,8 @@ func (h *Host) readSpine(carrier *carrierRow) {
 		}
 		h.mu.Unlock()
 		switch frame.Kind {
-		case link.SpineCompartmentState:
-			h.recordCompartmentState(carrier, frame)
+		case link.SpineCompartmentPlanPull:
+			h.answerCompartmentPlan(carrier, frame.Nonce)
 		case link.SpineProbe:
 			if carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineProbeReply, Nonce: frame.Nonce}) != nil {
 				return
@@ -444,42 +430,98 @@ func (h *Host) readSpine(carrier *carrierRow) {
 			continue
 		case link.SpineProbeReply:
 		default:
+			_ = carrier.wire.Close()
 			return
 		}
 	}
 }
 
-func (h *Host) recordCompartmentState(carrier *carrierRow, frame link.SpineFrame) {
-	state := CompartmentState(frame.State)
+// answerCompartmentPlan replies with the complete channel snapshot this daemon
+// must converge onto, or stays silent.
+//
+// Silence is the only safe partial answer: the device retires every compartment
+// whose channel the snapshot did not name, so a snapshot missing a channel the
+// realm still has would destroy a compartment that must live. A channel this
+// host cannot judge right now (its Home is not open, or the binding store is
+// unreachable) is therefore named in Unknown rather than omitted, and a
+// directory enumeration that fails at all suppresses the reply entirely.
+func (h *Host) answerCompartmentPlan(carrier *carrierRow, nonce string) {
+	if carrier == nil || carrier.sealed.Load() || h.cfg.Present == nil {
+		return
+	}
 	h.mu.RLock()
 	row := h.daemons[carrier.daemonID]
 	currentCarrier := row != nil && row.current == carrier
-	_, membraneKnown := h.membranes[frame.Channel]
 	h.mu.RUnlock()
-	if !currentCarrier || carrier.sealed.Load() {
+	if !currentCarrier {
 		return
 	}
-
-	carrier.mu.Lock()
-	defer carrier.mu.Unlock()
-	if state == CompartmentGone {
-		// gone may legitimately arrive after its lane and membrane were removed.
-		// It can only delete a previously admitted coordinate and never allocates.
-		if _, admitted := carrier.compartments[frame.Channel]; admitted {
-			delete(carrier.compartments, frame.Channel)
+	ctx, cancel := context.WithTimeout(h.ctx, defaultFactTimeout)
+	present, err := h.cfg.Present(ctx)
+	cancel()
+	if err != nil {
+		return
+	}
+	serve := make([]channel.ID, 0, len(present))
+	unknown := make([]channel.ID, 0)
+	for _, chID := range present {
+		h.mu.RLock()
+		membrane, known := h.membranes[chID]
+		h.mu.RUnlock()
+		if !known {
+			unknown = append(unknown, chID)
+			continue
 		}
+		bound, err := h.isBound(carrier.daemonID, membrane.bundle.IsBound)
+		if err != nil {
+			unknown = append(unknown, chID)
+			continue
+		}
+		if bound {
+			serve = append(serve, chID)
+		}
+	}
+	sortChannels(serve)
+	sortChannels(unknown)
+	_ = carrier.wire.SendSpine(link.SpineFrame{
+		Kind: link.SpineCompartmentPlanReply, Nonce: nonce, Serve: serve, Unknown: unknown,
+	})
+}
+
+func sortChannels(ids []channel.ID) {
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+}
+
+// PokeCompartmentPlan tells one daemon its channel snapshot moved. It carries
+// no payload and needs no delivery guarantee: the device also pulls on carrier
+// establishment and on its own period, so a lost poke costs latency only.
+func (h *Host) PokeCompartmentPlan(daemonID string) {
+	h.mu.RLock()
+	row := h.daemons[daemonID]
+	var carrier *carrierRow
+	if row != nil {
+		carrier = row.current
+	}
+	h.mu.RUnlock()
+	if carrier == nil || carrier.sealed.Load() {
 		return
 	}
-	// Compartment declarations and lane admission travel on different streams;
-	// their arrival order is intentionally undefined. The authoritative membrane
-	// table bounds allocation without coupling compartment truth to lane presence.
-	if !membraneKnown {
-		return
+	_ = carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineCompartmentPlanPoke})
+}
+
+// pokeAllCompartmentPlans fans the poke to every live carrier. Channel-level
+// truth changes (a binding flip, a channel gone) move the snapshot of every
+// daemon that could be serving it, and this host does not track which ones do.
+func (h *Host) pokeAllCompartmentPlans() {
+	h.mu.RLock()
+	carriers := h.currentCarriersLocked()
+	h.mu.RUnlock()
+	for _, carrier := range carriers {
+		if carrier == nil || carrier.sealed.Load() {
+			continue
+		}
+		_ = carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineCompartmentPlanPoke})
 	}
-	current := carrier.compartments[frame.Channel]
-	current.state = state
-	current.reason = frame.Reason
-	carrier.compartments[frame.Channel] = current
 }
 
 func (h *Host) acceptStreams(carrier *carrierRow) {
@@ -546,7 +588,6 @@ func (h *Host) cleanupCarrier(carrier *carrierRow) {
 		lanes = append(lanes, lane)
 	}
 	carrier.lanes = make(map[channel.ID]*serverLane)
-	carrier.compartments = make(map[channel.ID]compartmentView)
 	carrier.mu.Unlock()
 	for _, lane := range lanes {
 		lane.retireLogical()
@@ -590,19 +631,20 @@ func (h *Host) Scan() {
 		for id := range membranes {
 			coords[id] = struct{}{}
 		}
+		// The scan domain is this host's own truth only: registered membranes and
+		// the lanes it opened. Compartments the device holds are not in it — the
+		// device converges those itself against the snapshot it pulls, so this
+		// host never needs to name a coordinate it no longer has a record of.
 		carrier.mu.Lock()
 		for id := range carrier.lanes {
-			coords[id] = struct{}{}
-		}
-		for id := range carrier.compartments {
 			coords[id] = struct{}{}
 		}
 		carrier.mu.Unlock()
 		for chID := range coords {
 			h.markCoordDirty(carrier, chID)
 		}
-		h.observeGoneTimeouts(carrier)
 	}
+	h.pokeAllCompartmentPlans()
 }
 
 func (h *Host) markCoordDirty(carrier *carrierRow, chID channel.ID) {
@@ -683,31 +725,6 @@ func (h *Host) daemonFact(daemonID string) DaemonFact {
 	}
 }
 
-func (h *Host) observeGoneTimeouts(carrier *carrierRow) {
-	now := h.now()
-	var diagnostics []Diagnostic
-	carrier.mu.Lock()
-	for chID, view := range carrier.compartments {
-		if !view.closeSent || view.goneTimed || now.Sub(view.closeAt) < defaultGoneTimeout {
-			continue
-		}
-		view.goneTimed = true
-		carrier.compartments[chID] = view
-		laneGen := link.LaneGeneration("")
-		if lane := carrier.lanes[chID]; lane != nil {
-			laneGen = lane.stream.Gen
-		}
-		diagnostics = append(diagnostics, Diagnostic{
-			CarrierGen: carrier.gen, ChID: chID, LaneGen: laneGen,
-			Kind: "gone_timeout", Time: now,
-		})
-	}
-	carrier.mu.Unlock()
-	for _, diagnostic := range diagnostics {
-		h.recordDiagnostic(carrier.daemonID, diagnostic)
-	}
-}
-
 func (h *Host) reconcileCoord(carrier *carrierRow, chID channel.ID) {
 	if carrier == nil || carrier.sealed.Load() {
 		return
@@ -736,23 +753,11 @@ func (h *Host) reconcileCoordLocked(
 		carrier.ensureLane(chID, membrane)
 		return
 	}
+	// Unbinding retires the route and nothing else. Whether the device still
+	// holds a compartment here is the device's own business: it will see this
+	// channel drop out of its next snapshot and retire it itself. The poke that
+	// shortens that wait is issued once per scan, not once per coordinate.
 	carrier.retireLane(chID)
-	carrier.mu.Lock()
-	_, hasCompartment := carrier.compartments[chID]
-	carrier.mu.Unlock()
-	if hasCompartment && carrier.wire.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentClose, Channel: chID,
-	}) == nil {
-		carrier.mu.Lock()
-		view := carrier.compartments[chID]
-		if !view.closeSent {
-			view.closeAt = h.now()
-			view.goneTimed = false
-		}
-		view.closeSent = true
-		carrier.compartments[chID] = view
-		carrier.mu.Unlock()
-	}
 }
 
 func (h *Host) isBound(
@@ -859,6 +864,15 @@ func (h *Host) DaemonOnline(daemonID string) bool {
 	return row != nil && row.current != nil && !row.current.sealed.Load()
 }
 
+// LaneAttached answers whether this host has routed this channel to this
+// daemon. It is a conjunction of this host's own ledger — a live current
+// carrier and a live lane row — and consults nothing the device reported.
+//
+// Whether the device's compartment finished building is the device's fact, and
+// a cached copy of it could only ever be stale: it says "ready" for a
+// compartment that may have faulted a millisecond later. Answering from a
+// stale copy bought a narrow false positive and cost a permanent false
+// negative every time the copy got stuck, so the copy is gone.
 func (h *Host) LaneAttached(daemonID, chID string) bool {
 	h.mu.RLock()
 	row := h.daemons[daemonID]
@@ -870,13 +884,10 @@ func (h *Host) LaneAttached(daemonID, chID string) bool {
 	if carrier == nil || carrier.sealed.Load() {
 		return false
 	}
-	id := channel.ID(chID)
 	carrier.mu.Lock()
 	defer carrier.mu.Unlock()
-	lane := carrier.lanes[id]
-	view, ok := carrier.compartments[id]
-	return lane != nil && !lane.stream.Retired() && ok &&
-		view.state == CompartmentReady && !view.closeSent
+	lane := carrier.lanes[channel.ID(chID)]
+	return lane != nil && !lane.stream.Retired()
 }
 
 func (h *Host) AttachedDaemons(chID string) []string {
@@ -981,10 +992,6 @@ func (h *Host) RevokeDaemon(daemonID string) {
 		for _, lane := range carrier.lanes {
 			lanes = append(lanes, lane)
 		}
-		compartments := make(map[channel.ID]compartmentView, len(carrier.compartments))
-		for chID, view := range carrier.compartments {
-			compartments[chID] = view
-		}
 		carrier.lanes = make(map[channel.ID]*serverLane)
 		carrier.mu.Unlock()
 		for _, lane := range lanes {
@@ -996,14 +1003,6 @@ func (h *Host) RevokeDaemon(daemonID string) {
 		h.recordDiagnostic(daemonID, Diagnostic{
 			CarrierGen: carrier.gen, Kind: "revoke", Time: h.now(),
 		})
-		for chID, view := range compartments {
-			if view.state != CompartmentGone {
-				h.recordDiagnostic(daemonID, Diagnostic{
-					CarrierGen: carrier.gen, ChID: chID,
-					Kind: "gone_unobserved_terminal", Time: h.now(),
-				})
-			}
-		}
 		_ = carrier.wire.Close()
 		for _, lane := range lanes {
 			<-lane.stream.PhysicalDone()
