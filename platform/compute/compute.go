@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	redialInitialBackoff   = time.Second
-	redialMaxBackoff       = 30 * time.Second
-	carrierAcceptTimeout   = 10 * time.Second
+	redialInitialBackoff = time.Second
+	redialMaxBackoff     = 30 * time.Second
+	carrierAcceptTimeout = 10 * time.Second
 
 	// compartmentPlanInterval is the floor on how stale this device's
 	// compartment set can be with no poke at all. Pokes only buy latency; this
@@ -189,25 +189,39 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		manager.bindCarrier(wire, accepted, root)
 		backoff = redialInitialBackoff
-		select {
-		case <-ctx.Done():
-			_ = wire.Close()
-			return nil
-		case err := <-manager.terminal:
+		if err, retry := awaitCarrierCycle(ctx, manager.terminal, wire.Done()); !retry {
 			_ = wire.Close()
 			return err
-		case <-wire.Done():
-			select {
-			case err := <-manager.terminal:
-				return err
-			default:
-			}
-			manager.carrierDown(wire)
 		}
+		manager.carrierDown(wire)
 		if !waitBackoff(ctx, jitterBackoff(backoff)) {
 			return nil
 		}
 		backoff = nextRedialBackoff(backoff)
+	}
+}
+
+// awaitCarrierCycle gives an already-buffered terminal verdict precedence over
+// the physical done edge it causes. A tombstone reject and transport closure
+// can become readable together; choosing the latter as retryable would redial a
+// daemon the authority has just permanently rejected.
+func awaitCarrierCycle(
+	ctx context.Context,
+	terminal <-chan error,
+	done <-chan struct{},
+) (err error, retry bool) {
+	select {
+	case <-ctx.Done():
+		return nil, false
+	case err := <-terminal:
+		return err, false
+	case <-done:
+		select {
+		case err := <-terminal:
+			return err, false
+		default:
+			return nil, true
+		}
 	}
 }
 

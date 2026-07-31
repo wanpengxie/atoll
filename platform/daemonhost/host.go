@@ -34,6 +34,16 @@ const (
 	diagnosticCapacity     = 64
 )
 
+// factTimeout is a test seam for non-cooperative platform callbacks. Production
+// always leaves it at the named construction constant above.
+var factTimeout = defaultFactTimeout
+
+// sendCarrierAccept is the narrow fault-injection seam for the post-admission
+// accept write. Production always uses the direct spine send below.
+var sendCarrierAccept = func(wire *link.ServerCarrier, frame link.SpineFrame) error {
+	return wire.SendSpine(frame)
+}
+
 var (
 	ErrClosed           = errors.New("daemonhost: closed")
 	ErrDuplicateCurrent = errors.New("daemonhost: duplicate current carrier")
@@ -372,12 +382,8 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 	wire, err := link.AcceptDeviceCarrier(ws, h.logger.With("daemon", daemonID))
 	if err != nil {
 		if wire != nil {
-			class := link.CarrierRetryable
-			if errors.Is(err, link.ErrProtocolVersion) {
-				class = link.CarrierTerminal
-			}
 			_ = wire.SendSpine(link.SpineFrame{
-				Kind: link.SpineCarrierReject, Class: class, Reason: err.Error(),
+				Kind: link.SpineCarrierReject, Class: handshakeRejectClass(err), Reason: err.Error(),
 			})
 			_ = wire.Close()
 		} else {
@@ -422,7 +428,7 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		defer h.wg.Done()
 		h.runCarrier(carrier)
 	}()
-	if err := wire.SendSpine(link.SpineFrame{
+	if err := sendCarrierAccept(wire, link.SpineFrame{
 		Kind: link.SpineCarrierAccept, DaemonID: daemonID, CarrierGen: carrier.gen,
 	}); err != nil {
 		h.beginCarrierShutdown(carrier)
@@ -430,6 +436,13 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 	}
 	h.Scan()
 	<-wire.Done()
+}
+
+func handshakeRejectClass(err error) link.CarrierClass {
+	if errors.Is(err, link.ErrProtocolVersion) {
+		return link.CarrierTerminal
+	}
+	return link.CarrierRetryable
 }
 
 func (h *Host) admit(carrier *carrierRow) error {
@@ -523,7 +536,7 @@ func (h *Host) answerCompartmentPlan(carrier *carrierRow, nonce string) {
 	if !currentCarrier {
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.ctx, defaultFactTimeout)
+	ctx, cancel := context.WithTimeout(h.ctx, factTimeout)
 	present, err := h.cfg.Present(ctx)
 	cancel()
 	if err != nil {
@@ -593,30 +606,38 @@ func (h *Host) pokeAllCompartmentPlans() {
 
 func (h *Host) acceptStreams(carrier *carrierRow) {
 	_ = carrier.wire.ServeStreams(func(conn net.Conn, header link.DeviceStreamHeader) {
-		if header.Kind == link.DeviceStreamCarrier {
-			_ = conn.Close()
-			_ = carrier.wire.Close()
-			return
-		}
-		if header.Kind != link.DeviceStreamActor {
-			_ = conn.Close()
-			return
-		}
-		if err := header.Validate(); err != nil {
-			_ = conn.Close()
-			return
-		}
-		carrier.mu.Lock()
-		lane := carrier.lanes[header.Channel]
-		current := lane != nil && lane.stream.Gen == header.LaneGen && !lane.stream.Retired()
-		carrier.mu.Unlock()
-		if !current {
-			_ = conn.Close()
-			return
-		}
-		lane.acceptActor(conn)
+		h.acceptStream(carrier, conn, header)
 	})
 	_ = carrier.wire.Close()
+}
+
+func (h *Host) acceptStream(
+	carrier *carrierRow,
+	conn net.Conn,
+	header link.DeviceStreamHeader,
+) {
+	if header.Kind == link.DeviceStreamCarrier {
+		_ = conn.Close()
+		_ = carrier.wire.Close()
+		return
+	}
+	if header.Kind != link.DeviceStreamActor {
+		_ = conn.Close()
+		return
+	}
+	if err := header.Validate(); err != nil {
+		_ = conn.Close()
+		return
+	}
+	carrier.mu.Lock()
+	lane := carrier.lanes[header.Channel]
+	current := lane != nil && lane.stream.Gen == header.LaneGen && !lane.stream.Retired()
+	carrier.mu.Unlock()
+	if !current {
+		_ = conn.Close()
+		return
+	}
+	lane.acceptActor(conn)
 }
 
 // sealCarrierLocked is the carrier registry's single decision write. h.mu must
@@ -766,7 +787,7 @@ func (h *Host) markCoordDirty(carrier *carrierRow, chID channel.ID) {
 }
 
 func (h *Host) presentChannels() ([]channel.ID, error) {
-	ctx, cancel := context.WithTimeout(h.ctx, defaultFactTimeout)
+	ctx, cancel := context.WithTimeout(h.ctx, factTimeout)
 	defer cancel()
 	type result struct {
 		ids []channel.ID
@@ -786,7 +807,7 @@ func (h *Host) presentChannels() ([]channel.ID, error) {
 }
 
 func (h *Host) daemonFact(daemonID string) DaemonFact {
-	ctx, cancel := context.WithTimeout(h.ctx, defaultFactTimeout)
+	ctx, cancel := context.WithTimeout(h.ctx, factTimeout)
 	defer cancel()
 	done := make(chan DaemonFact, 1)
 	go func() { done <- h.cfg.DaemonFact(ctx, daemonID) }()
@@ -837,7 +858,7 @@ func (h *Host) isBound(
 	daemonID string,
 	resolve func(context.Context, string) (bool, error),
 ) (bool, error) {
-	ctx, cancel := context.WithTimeout(h.ctx, defaultFactTimeout)
+	ctx, cancel := context.WithTimeout(h.ctx, factTimeout)
 	defer cancel()
 	type result struct {
 		bound bool

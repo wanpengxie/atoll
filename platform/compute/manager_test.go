@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -22,6 +23,9 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 type emptyFactories struct{}
@@ -29,6 +33,50 @@ type emptyFactories struct{}
 func (emptyFactories) BuildClass(actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
 }
+
+type teardownOrderActor struct {
+	outbound *DaemonOutbound
+	started  chan struct{}
+	mu       *sync.Mutex
+	order    *[]string
+}
+
+func (*teardownOrderActor) Receive(context.Context, *message.Envelope) error { return nil }
+func (a *teardownOrderActor) Start(context.Context, actorrt.ActorContext) error {
+	close(a.started)
+	return nil
+}
+func (a *teardownOrderActor) Stop(context.Context) error {
+	a.outbound.mu.Lock()
+	sealed := a.outbound.sealed
+	a.outbound.mu.Unlock()
+	if !sealed {
+		return errors.New("actor host closed before outbound was sealed")
+	}
+	a.mu.Lock()
+	*a.order = append(*a.order, "host")
+	a.mu.Unlock()
+	return nil
+}
+
+type teardownOrderStream struct {
+	close func()
+	done  chan struct{}
+}
+
+func (*teardownOrderStream) Arms() link.RawActorArms { return link.RawActorArms{} }
+func (s *teardownOrderStream) Done() <-chan struct{} { return s.done }
+func (s *teardownOrderStream) Close() error {
+	s.close()
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
+	return nil
+}
+func (*teardownOrderStream) SendCancelRequest(message.ID) error { return nil }
+func (*teardownOrderStream) PublishObs(string, []byte) error    { return nil }
 
 // testPresent is the realm channel directory the host enumerates when a device
 // pulls its compartment snapshot. Every test that expects a compartment to be
@@ -312,6 +360,126 @@ func TestCarrier_TombstoneStopsRedial(t *testing.T) {
 	}
 }
 
+func TestBufferedTerminalRejectAlwaysBeatsCarrierDone(t *testing.T) {
+	want := terminalCarrierError{err: errors.New("revoked")}
+	for i := 0; i < 1_000; i++ {
+		terminal := make(chan error, 1)
+		terminal <- want
+		done := make(chan struct{})
+		close(done)
+		err, retry := awaitCarrierCycle(context.Background(), terminal, done)
+		var terminalErr terminalCarrierError
+		if retry || !errors.As(err, &terminalErr) {
+			t.Fatalf("iteration %d result=(%v,retry=%v)", i, err, retry)
+		}
+	}
+}
+
+func TestPlanReplyNonceRoutesOnlyToItsExactWaiter(t *testing.T) {
+	manager := newCompartmentManager(
+		context.Background(), Config{}, slog.New(slog.DiscardHandler),
+	)
+	waiter := make(chan link.SpineFrame, 1)
+	manager.planReplyMu.Lock()
+	manager.planWaiter["right"] = waiter
+	manager.planReplyMu.Unlock()
+
+	manager.deliverPlan(link.SpineFrame{
+		Kind: link.SpineCompartmentPlanReply, Nonce: "wrong",
+	})
+	select {
+	case reply := <-waiter:
+		t.Fatalf("wrong nonce delivered %+v", reply)
+	default:
+	}
+	manager.planReplyMu.Lock()
+	_, retained := manager.planWaiter["right"]
+	manager.planReplyMu.Unlock()
+	if !retained {
+		t.Fatal("wrong nonce deleted the real waiter")
+	}
+
+	want := link.SpineFrame{
+		Kind: link.SpineCompartmentPlanReply, Nonce: "right",
+		Serve: []channel.ID{"a"},
+	}
+	manager.deliverPlan(want)
+	if got := <-waiter; got.Nonce != "right" || len(got.Serve) != 1 {
+		t.Fatalf("exact reply=%+v", got)
+	}
+	manager.planReplyMu.Lock()
+	_, retained = manager.planWaiter["right"]
+	manager.planReplyMu.Unlock()
+	if retained {
+		t.Fatal("delivered waiter remained registered")
+	}
+}
+
+func TestPlanSnapshotTimeoutPreservesCompartmentsAndDropsWaiter(t *testing.T) {
+	previous := planReplyTimeout
+	planReplyTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { planReplyTimeout = previous })
+
+	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
+	t.Cleanup(func() { _ = host.Close() })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host.Serve(w, r, "daemon-a")
+	}))
+	t.Cleanup(server.Close)
+	carrier, _, err := link.DialDeviceCarrier(
+		t.Context(), "ws"+strings.TrimPrefix(server.URL, "http"), "test", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = carrier.Close() })
+	var accepted link.SpineFrame
+	if err := carrier.ReadSpine(&accepted); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newCompartmentManager(
+		context.Background(), Config{}, slog.New(slog.DiscardHandler),
+	)
+	cell := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	manager.cells["a"] = cell
+	if _, ok := manager.pullPlanSnapshot(carrier); ok {
+		t.Fatal("silent peer produced a snapshot")
+	}
+	if manager.cells["a"] != cell {
+		t.Fatal("missing snapshot retired a compartment")
+	}
+	manager.planReplyMu.Lock()
+	pending := len(manager.planWaiter)
+	manager.planReplyMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("snapshot timeout retained %d waiters", pending)
+	}
+	if !host.DaemonOnline("daemon-a") {
+		t.Fatal("snapshot timeout tore down a healthy carrier")
+	}
+}
+
+func TestPlanWakeIsACoalescedLevel(t *testing.T) {
+	manager := newCompartmentManager(
+		context.Background(), Config{}, slog.New(slog.DiscardHandler),
+	)
+	for i := 0; i < 1_000; i++ {
+		manager.wakePlan()
+	}
+	if got := len(manager.planWake); got != 1 {
+		t.Fatalf("wake level depth=%d, want 1", got)
+	}
+	<-manager.planWake
+	if got := len(manager.planWake); got != 0 {
+		t.Fatalf("consumed wake depth=%d", got)
+	}
+	manager.wakePlan()
+	if got := len(manager.planWake); got != 1 {
+		t.Fatalf("wake could not be raised again: depth=%d", got)
+	}
+}
+
 func startTestCompute(
 	t *testing.T,
 	host *daemonhost.Host,
@@ -342,6 +510,32 @@ func startTestCompute(
 		}
 	})
 	return cancel, done
+}
+
+func TestLanePlanPokePullsFreshPlan(t *testing.T) {
+	var pulls atomic.Int32
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("a"),
+	})
+	t.Cleanup(func() { _ = host.Close() })
+	host.Register("a", 1, platform.DaemonMembrane{
+		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
+			pulls.Add(1)
+			return nil, nil
+		},
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	})
+	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
+		return CompartmentResources{Factories: emptyFactories{}}, nil
+	})
+	waitCompute(t, func() bool {
+		host.Scan()
+		return host.LaneAttached("daemon-a", "a") && pulls.Load() > 0
+	})
+	baseline := pulls.Load()
+	host.PokePlan("daemon-a", "a")
+	waitCompute(t, func() bool { return pulls.Load() > baseline })
 }
 
 // TestChannelDeletedWhileOfflineIsRetiredOnReconnect is the case the old
@@ -709,6 +903,7 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 			host.LaneAttached("daemon-a", "b")
 	})
 	blockA.Store(true)
+	baselineB := pullsB.Load()
 	host.RetireLane("daemon-a", "a")
 	host.Scan()
 	select {
@@ -718,7 +913,7 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 	}
 	host.RetireLane("daemon-a", "b")
 	host.Scan()
-	waitCompute(t, func() bool { return pullsB.Load() >= 2 })
+	waitCompute(t, func() bool { return pullsB.Load() > baselineB })
 	release.Do(func() { close(releaseA) })
 }
 
@@ -1216,6 +1411,172 @@ func TestCarrierDownDoesNotWaitForLaneCollection(t *testing.T) {
 	}
 	if installed, _ := fixture.slots(); installed != nil {
 		t.Fatal("carrierDown returned with the lane still installed")
+	}
+}
+
+func TestCompartmentRollbackAndClosePreserveTeardownOrder(t *testing.T) {
+	for _, mode := range []string{"rollback", "close"} {
+		t.Run(mode, func(t *testing.T) {
+			var orderMu sync.Mutex
+			var order []string
+			record := func(step string) {
+				orderMu.Lock()
+				order = append(order, step)
+				orderMu.Unlock()
+			}
+			runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+			var cancelled atomic.Bool
+			cancel := func() {
+				cancelled.Store(true)
+				record("cancel")
+				runtimeCancel()
+			}
+			outbound := NewDaemonOutbound(DaemonOutboundConfig{Parent: runtimeCtx})
+			started := make(chan struct{})
+			impl := &teardownOrderActor{
+				outbound: outbound, started: started, mu: &orderMu, order: &order,
+			}
+			host, err := actorhost.New(actorhost.Config{
+				Parent: runtimeCtx, Domain: "daemon-a",
+				BodyBuilder: func(actorhost.BodyBuildInput) actorrt.Actor { return impl },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = host.Close(context.Background())
+				_ = outbound.Close(context.Background())
+			})
+			key, err := actorhost.NewAttemptKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := host.AcceptFullDesired([]actorhost.Desired{actorhost.BodyDesired{
+				ActorID: "actor-a", AttemptKey: key,
+				ExecutionSpec: actorhost.ExecutionSpec{
+					Kind: actor.KindAgent, Class: "test",
+				},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			host.Wake()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("actor did not start")
+			}
+
+			stream := &teardownOrderStream{
+				done: make(chan struct{}),
+				close: func() {
+					if err := host.AcceptFullDesired(nil); !errors.Is(err, actorhost.ErrHostClosed) {
+						t.Errorf("residual closed before host: %v", err)
+					}
+					record("residual")
+				},
+			}
+			slot := &OutboundSlot{owner: outbound}
+			slot.arms.Store(&OutboundArmsBundle{Stream: stream})
+			outbound.mu.Lock()
+			outbound.slots[slot] = struct{}{}
+			outbound.mu.Unlock()
+			resources := CompartmentResources{
+				Close: func() error {
+					if !cancelled.Load() {
+						return errors.New("resources closed before runtime cancellation")
+					}
+					outbound.mu.Lock()
+					sealed, residual := outbound.sealed, len(outbound.slots)
+					outbound.mu.Unlock()
+					if !sealed || residual != 0 {
+						return fmt.Errorf("resources saw outbound sealed=%v residual=%d", sealed, residual)
+					}
+					if err := host.AcceptFullDesired(nil); !errors.Is(err, actorhost.ErrHostClosed) {
+						return fmt.Errorf("resources closed before host: %w", err)
+					}
+					record("resources")
+					return nil
+				},
+			}
+
+			switch mode {
+			case "rollback":
+				if err := rollbackCompartment(host, outbound, cancel, resources); err != nil {
+					t.Fatal(err)
+				}
+			case "close":
+				manager := newCompartmentManager(
+					context.Background(), Config{}, slog.New(slog.DiscardHandler),
+				)
+				storageDone := make(chan struct{})
+				close(storageDone)
+				cell := &compartment{
+					manager: manager, chID: "a", stopBuild: make(chan struct{}),
+					host: host, outbound: outbound, cancel: cancel,
+					resources: resources, storageDone: storageDone,
+				}
+				manager.cells["a"] = cell
+				cell.close()
+				if _, exists := manager.cells["a"]; exists {
+					t.Fatal("successful close retained the compartment")
+				}
+			}
+			orderMu.Lock()
+			got := strings.Join(order, ",")
+			orderMu.Unlock()
+			if got != "host,residual,cancel,resources" {
+				t.Fatalf("teardown order=%q", got)
+			}
+		})
+	}
+}
+
+func TestCompartmentBuildRollsBackFactorylessResources(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		closeErr       error
+		wantCondemned  bool
+		wantErrorPiece string
+	}{
+		{name: "clean rollback", wantErrorPiece: "factories required"},
+		{
+			name:     "failed rollback condemns coordinate",
+			closeErr: errors.New("resource close failed"), wantCondemned: true,
+			wantErrorPiece: "resource close failed",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var closes atomic.Int32
+			manager := newCompartmentManager(
+				context.Background(),
+				Config{BuildCompartment: func(string, string) (CompartmentResources, error) {
+					return CompartmentResources{Close: func() error {
+						closes.Add(1)
+						return test.closeErr
+					}}, nil
+				}},
+				slog.New(slog.DiscardHandler),
+			)
+			manager.root = t.TempDir()
+			manager.daemonID = "daemon-a"
+			cell := &compartment{
+				manager: manager, chID: "a", stopBuild: make(chan struct{}),
+			}
+			manager.cells["a"] = cell
+			err := cell.build()
+			if err == nil || !strings.Contains(err.Error(), test.wantErrorPiece) {
+				t.Fatalf("build error=%v, want %q", err, test.wantErrorPiece)
+			}
+			if closes.Load() != 1 {
+				t.Fatalf("resource closes=%d", closes.Load())
+			}
+			cell.mu.Lock()
+			condemned := cell.condemned
+			cell.mu.Unlock()
+			if condemned != test.wantCondemned {
+				t.Fatalf("condemned=%v, want %v", condemned, test.wantCondemned)
+			}
+		})
 	}
 }
 

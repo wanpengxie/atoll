@@ -26,6 +26,10 @@ var laneRPCTimeout = link.LaneRPCTimeout
 // own — teardown holds the coordinate out of service while it runs.
 var compartmentJoinTimeout = 30 * time.Second
 
+// planReplyTimeout is a test seam for a peer that remains connected but never
+// answers a snapshot pull. Production leaves it at §2.8's named budget.
+var planReplyTimeout = compartmentPlanTimeout
+
 type compartmentManager struct {
 	ctx    context.Context
 	cfg    Config
@@ -69,16 +73,16 @@ type compartment struct {
 	// (carrier, lane) and generations minted by different carriers do not
 	// order against each other.
 	latestLaneGen link.LaneGeneration
-	resources    CompartmentResources
-	host         *actorhost.HostSupervisor
-	outbound     *DaemonOutbound
-	storage      *storageHostForwarder
-	runtimeCtx   context.Context
-	cancel       context.CancelFunc
-	storageDone  chan struct{}
-	buildDone    chan struct{}
-	stopBuild    chan struct{}
-	stopOnce     sync.Once
+	resources     CompartmentResources
+	host          *actorhost.HostSupervisor
+	outbound      *DaemonOutbound
+	storage       *storageHostForwarder
+	runtimeCtx    context.Context
+	cancel        context.CancelFunc
+	storageDone   chan struct{}
+	buildDone     chan struct{}
+	stopBuild     chan struct{}
+	stopOnce      sync.Once
 }
 
 func newCompartmentManager(ctx context.Context, cfg Config, logger *slog.Logger) *compartmentManager {
@@ -230,7 +234,7 @@ func (m *compartmentManager) pullPlanSnapshot(carrier *link.ClientCarrier) (link
 		drop()
 		return link.SpineFrame{}, false
 	}
-	timer := time.NewTimer(compartmentPlanTimeout)
+	timer := time.NewTimer(planReplyTimeout)
 	defer timer.Stop()
 	select {
 	case reply := <-waiter:

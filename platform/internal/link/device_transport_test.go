@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 
@@ -167,6 +168,25 @@ func TestLane_StaleGenerationFenced(t *testing.T) {
 	}
 	// A stale cancel is deliberately dropped before it can reach the endpoint.
 	binding.CancelRequest("stale-request")
+}
+
+func TestNewLaneGenerationIsCanonicalUUIDv7AndStrictlyIncreasing(t *testing.T) {
+	const samples = 256
+	var previous LaneGeneration
+	for i := 0; i < samples; i++ {
+		generation := NewLaneGeneration()
+		parsed, err := uuid.Parse(string(generation))
+		if err != nil {
+			t.Fatalf("generation %q is not a UUID: %v", generation, err)
+		}
+		if parsed.Version() != 7 || parsed.String() != string(generation) {
+			t.Fatalf("generation %q is not canonical UUIDv7", generation)
+		}
+		if previous != "" && generation <= previous {
+			t.Fatalf("generation %q did not advance past %q", generation, previous)
+		}
+		previous = generation
+	}
 }
 
 func TestClosedWireVocabularyRejectsSmuggledPayloads(t *testing.T) {
