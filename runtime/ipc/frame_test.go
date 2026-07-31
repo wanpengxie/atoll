@@ -452,9 +452,9 @@ func TestReadRejectsMalformedJSON(t *testing.T) {
 
 // --- concurrent writes are atomic per frame -------------------------------
 
-// Write holds wmu across header+body, so concurrent writers never interleave
-// a header from one frame with the body of another. We fan N writers at one
-// codec and require the reader to recover N intact, well-formed frames.
+// Write holds wmu while emitting each complete frame in one call. We fan N
+// writers at one codec and require the reader to recover N intact,
+// well-formed frames.
 func TestConcurrentWritesDoNotInterleave(t *testing.T) {
 	var buf bytes.Buffer
 	c := NewCodec(&buf, &buf)
@@ -506,9 +506,7 @@ func TestWriteMarshalError(t *testing.T) {
 	}
 }
 
-// failWriter fails its Nth Write call (1-based), succeeding before then. It
-// lets a test target the length-prefix write (n=1) vs the body write (n=2)
-// independently — the two distinct error returns inside Codec.Write.
+// failWriter fails its Nth Write call (1-based), succeeding before then.
 type failWriter struct {
 	calls  int
 	failOn int
@@ -523,34 +521,32 @@ func (f *failWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Write returns the writer error from the LENGTH-PREFIX write (the first of
-// the two w.Write calls). The error is propagated raw (no wrapping) so the
-// host can inspect the underlying transport failure (e.g. a broken pipe).
-func TestWriteHeaderWriteError(t *testing.T) {
-	boom := errors.New("header boom")
+// Codec.Write serializes the length prefix and body into one underlying Write.
+// This is the stream-owner contract: one deadline covers one complete frame,
+// with no second application write that can outlive that deadline.
+func TestWriteUsesOneUnderlyingWrite(t *testing.T) {
+	boom := errors.New("wire boom")
 	w := &failWriter{failOn: 1, err: boom}
 	c := NewCodec(nil, w)
 	err := c.Write(Frame{Kind: KindDown})
 	if err != boom {
-		t.Fatalf("Write header-fail err = %v, want %v", err, boom)
+		t.Fatalf("Write err = %v, want %v", err, boom)
 	}
 	if w.calls != 1 {
-		t.Fatalf("expected to stop after the failed header write, saw %d writes", w.calls)
+		t.Fatalf("frame used %d underlying writes, want exactly 1", w.calls)
 	}
 }
 
-// Write returns the writer error from the BODY write (the second w.Write
-// call, after the header wrote fine). Propagated raw, same as the header path.
-func TestWriteBodyWriteError(t *testing.T) {
-	boom := errors.New("body boom")
-	w := &failWriter{failOn: 2, err: boom}
-	c := NewCodec(nil, w)
-	err := c.Write(Frame{Kind: KindDown})
-	if err != boom {
-		t.Fatalf("Write body-fail err = %v, want %v", err, boom)
-	}
-	if w.calls != 2 {
-		t.Fatalf("expected header write then failed body write (2 calls), saw %d", w.calls)
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	return len(p) - 1, nil
+}
+
+func TestWriteRejectsShortUnderlyingWrite(t *testing.T) {
+	err := NewCodec(nil, shortWriter{}).Write(Frame{Kind: KindDown})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Write short-write err = %v, want %v", err, io.ErrShortWrite)
 	}
 }
 

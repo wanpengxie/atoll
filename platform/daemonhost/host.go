@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"sort"
 	"sync"
@@ -29,6 +30,7 @@ const (
 	defaultGoneTimeout     = 30 * time.Second
 	defaultLaneOpenTimeout = 10 * time.Second
 	defaultDiagnosticTTL   = 10 * time.Minute
+	transferTicketTTL      = 10 * time.Minute
 	diagnosticCapacity     = 64
 )
 
@@ -455,11 +457,7 @@ func (h *Host) readSpine(carrier *carrierRow) {
 }
 
 func (h *Host) acceptStreams(carrier *carrierRow) {
-	for {
-		conn, header, err := carrier.wire.AcceptStream()
-		if err != nil {
-			return
-		}
+	_ = carrier.wire.ServeStreams(func(conn net.Conn, header link.DeviceStreamHeader) {
 		if header.Kind == link.DeviceStreamCarrier {
 			_ = conn.Close()
 			_ = carrier.wire.Close()
@@ -467,11 +465,11 @@ func (h *Host) acceptStreams(carrier *carrierRow) {
 		}
 		if header.Kind != link.DeviceStreamActor {
 			_ = conn.Close()
-			continue
+			return
 		}
 		if err := header.Validate(); err != nil {
 			_ = conn.Close()
-			continue
+			return
 		}
 		carrier.mu.Lock()
 		lane := carrier.lanes[header.Channel]
@@ -479,10 +477,10 @@ func (h *Host) acceptStreams(carrier *carrierRow) {
 		carrier.mu.Unlock()
 		if !current {
 			_ = conn.Close()
-			continue
+			return
 		}
 		lane.acceptActor(conn)
-	}
+	})
 }
 
 func (h *Host) carrierDown(carrier *carrierRow) {
@@ -1045,27 +1043,45 @@ func (h *Host) OpenTransfer(
 		return "", ErrLaneUnavailable
 	}
 	token := uuid.NewString()
+	now := h.now()
 	h.mu.Lock()
+	h.sweepExpiredTransfersLocked(now)
 	h.transfers[token] = transferTicket{
 		daemonID: daemonID, chID: chID, coord: coord, mode: mode,
-		reservationID: reservationID, expires: h.now().Add(10 * time.Minute),
+		reservationID: reservationID, expires: now.Add(transferTicketTTL),
 	}
 	h.mu.Unlock()
 	return token, nil
 }
 
 func (h *Host) resolveTransfer(daemonID, chID, token string) (transferTicket, bool) {
+	now := h.now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ticket, ok := h.transfers[token]
 	if !ok || ticket.daemonID != daemonID || ticket.chID != chID ||
-		h.now().After(ticket.expires) {
-		if ok && h.now().After(ticket.expires) {
+		transferTicketExpired(ticket, now) {
+		if ok && transferTicketExpired(ticket, now) {
 			delete(h.transfers, token)
 		}
 		return transferTicket{}, false
 	}
 	return ticket, true
+}
+
+func transferTicketExpired(ticket transferTicket, now time.Time) bool {
+	return !now.Before(ticket.expires)
+}
+
+// sweepExpiredTransfersLocked bounds the table to tickets minted within one
+// TTL window. Mint-time GC needs no extra goroutine and reclaims tickets that
+// were opened but never redeemed.
+func (h *Host) sweepExpiredTransfersLocked(now time.Time) {
+	for token, ticket := range h.transfers {
+		if transferTicketExpired(ticket, now) {
+			delete(h.transfers, token)
+		}
+	}
 }
 
 func (h *Host) Close() error {

@@ -3,6 +3,7 @@ package daemonhost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 )
+
+var laneRPCTimeout = link.LaneRPCTimeout
 
 type serverLane struct {
 	carrier  *carrierRow
@@ -271,7 +274,7 @@ func (l *serverLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.
 		l.mu.Unlock()
 		return link.LaneFrame{}, err
 	}
-	timer := time.NewTimer(20 * time.Second)
+	timer := time.NewTimer(laneRPCTimeout)
 	defer timer.Stop()
 	select {
 	case reply, ok := <-waiter:
@@ -288,7 +291,7 @@ func (l *serverLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.
 		l.mu.Lock()
 		delete(l.pending, id)
 		l.mu.Unlock()
-		return link.LaneFrame{}, errors.New("daemonhost: lane RPC timeout")
+		return link.LaneFrame{}, fmt.Errorf("daemonhost: lane RPC %s: %w", id, link.ErrLaneRPCTimeout)
 	}
 }
 

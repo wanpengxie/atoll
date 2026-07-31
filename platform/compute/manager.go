@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
+
+var laneRPCTimeout = link.LaneRPCTimeout
 
 type compartmentManager struct {
 	ctx    context.Context
@@ -141,11 +144,7 @@ func (m *compartmentManager) readSpine(carrier *link.ClientCarrier) {
 }
 
 func (m *compartmentManager) acceptLanes(carrier *link.ClientCarrier) {
-	for {
-		conn, header, err := carrier.AcceptStream()
-		if err != nil {
-			return
-		}
+	_ = carrier.ServeStreams(func(conn net.Conn, header link.DeviceStreamHeader) {
 		if header.Kind == link.DeviceStreamCarrier {
 			_ = conn.Close()
 			_ = carrier.Close()
@@ -153,11 +152,11 @@ func (m *compartmentManager) acceptLanes(carrier *link.ClientCarrier) {
 		}
 		laneStream, err := link.AdoptLane(carrier, header, conn)
 		if err != nil {
-			continue
+			return
 		}
 		lane := newClientLane(m, carrier, laneStream)
 		m.acceptLane(lane)
-	}
+	})
 }
 
 func (m *compartmentManager) acceptLane(lane *clientLane) {
@@ -962,6 +961,22 @@ func (l *clientLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.
 		l.mu.Unlock()
 		return link.LaneFrame{}, err
 	}
+	reply, err := waitClientLaneReply(ctx, waiter, l.stream.Done())
+	if err != nil {
+		l.mu.Lock()
+		delete(l.pending, id)
+		l.mu.Unlock()
+	}
+	return reply, err
+}
+
+func waitClientLaneReply(
+	ctx context.Context,
+	waiter <-chan link.LaneFrame,
+	streamDone <-chan struct{},
+) (link.LaneFrame, error) {
+	timer := time.NewTimer(laneRPCTimeout)
+	defer timer.Stop()
 	select {
 	case reply, ok := <-waiter:
 		if !ok {
@@ -969,14 +984,10 @@ func (l *clientLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.
 		}
 		return reply, nil
 	case <-ctx.Done():
-		l.mu.Lock()
-		delete(l.pending, id)
-		l.mu.Unlock()
 		return link.LaneFrame{}, ctx.Err()
-	case <-l.stream.Done():
-		l.mu.Lock()
-		delete(l.pending, id)
-		l.mu.Unlock()
+	case <-timer.C:
+		return link.LaneFrame{}, link.ErrLaneRPCTimeout
+	case <-streamDone:
 		return link.LaneFrame{}, ErrOutboundDisconnected
 	}
 }

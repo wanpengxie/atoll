@@ -26,6 +26,7 @@ import (
 const (
 	ProtocolVersion         = 3
 	StreamHeaderReadTimeout = 30 * time.Second
+	LaneRPCTimeout          = 20 * time.Second
 	streamWriteBudget       = 10 * time.Second
 	maxStreamHeaderBytes    = 64 << 10
 )
@@ -33,6 +34,7 @@ const (
 var (
 	errLinkClosed      = errors.New("link: closed")
 	ErrProtocolVersion = errors.New("link: unsupported carrier protocol")
+	ErrLaneRPCTimeout  = errors.New("link: lane RPC timeout")
 )
 
 func writeStreamJSON(w io.Writer, value any) error {
@@ -80,6 +82,42 @@ func readStreamJSON(r io.Reader, value any) error {
 			return err
 		}
 	}
+}
+
+// actorStreamConn is the actor stream's single write owner. Every complete IPC
+// frame reaches this Write exactly once: Codec serializes the frame, then this
+// owner holds the stream-wide deadline across that one transport write. A
+// failed or timed-out actor write closes only this actor stream.
+type actorStreamConn struct {
+	net.Conn
+	logger *slog.Logger
+
+	writeMu sync.Mutex
+	// budget overrides streamWriteBudget in tests.
+	budget time.Duration
+}
+
+func newActorStreamConn(conn net.Conn, logger *slog.Logger) *actorStreamConn {
+	return &actorStreamConn{Conn: conn, logger: logger}
+}
+
+func (c *actorStreamConn) Write(payload []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	budget := c.budget
+	if budget <= 0 {
+		budget = streamWriteBudget
+	}
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(budget))
+	n, err := c.Conn.Write(payload)
+	_ = c.Conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("link.actor_stream_write_failed", "error", err)
+		}
+		_ = c.Conn.Close()
+	}
+	return n, err
 }
 
 type yamuxLogWriter struct{ logger *slog.Logger }
@@ -373,6 +411,9 @@ type rawCarrier struct {
 	sealed    atomic.Bool
 	closeOnce sync.Once
 	done      chan struct{}
+
+	streamWorkerMu sync.Mutex
+	streamWorkers  sync.WaitGroup
 }
 
 func newRawCarrier(session *yamux.Session, spine net.Conn, logger *slog.Logger) *rawCarrier {
@@ -454,16 +495,72 @@ func (c *rawCarrier) open(ctx context.Context, header DeviceStreamHeader) (net.C
 }
 
 func (c *rawCarrier) accept() (net.Conn, DeviceStreamHeader, error) {
-	var header DeviceStreamHeader
-	conn, err := c.session.Accept()
+	conn, err := c.acceptRaw()
 	if err != nil {
-		return nil, header, err
+		return nil, DeviceStreamHeader{}, err
 	}
+	return c.adoptAccepted(conn)
+}
+
+func (c *rawCarrier) acceptRaw() (net.Conn, error) {
+	if c == nil || c.sealed.Load() {
+		return nil, errLinkClosed
+	}
+	return c.session.Accept()
+}
+
+func (c *rawCarrier) adoptAccepted(conn net.Conn) (net.Conn, DeviceStreamHeader, error) {
+	var header DeviceStreamHeader
 	if err := readStreamJSON(conn, &header); err != nil {
 		_ = conn.Close()
 		return nil, header, err
 	}
+	if header.Kind == DeviceStreamActor {
+		conn = newActorStreamConn(conn, c.logger)
+	}
 	return conn, header, nil
+}
+
+func (c *rawCarrier) beginStreamWorker() bool {
+	c.streamWorkerMu.Lock()
+	defer c.streamWorkerMu.Unlock()
+	if c.sealed.Load() {
+		return false
+	}
+	c.streamWorkers.Add(1)
+	return true
+}
+
+// serveStreams keeps Accept independent from per-stream header and actor
+// handshake progress. Each accepted stream is parsed by a tracked worker; a
+// half-open stream therefore cannot block admission of its siblings. Closing
+// the carrier unblocks the workers, and this method joins all of them before
+// returning to the carrier supervisor.
+func (c *rawCarrier) serveStreams(handle func(net.Conn, DeviceStreamHeader)) error {
+	for {
+		conn, err := c.acceptRaw()
+		if err != nil {
+			c.streamWorkers.Wait()
+			return err
+		}
+		if !c.beginStreamWorker() {
+			_ = conn.Close()
+			c.streamWorkers.Wait()
+			return errLinkClosed
+		}
+		go func() {
+			defer c.streamWorkers.Done()
+			conn, header, err := c.adoptAccepted(conn)
+			if err != nil {
+				return
+			}
+			if handle == nil {
+				_ = conn.Close()
+				return
+			}
+			handle(conn, header)
+		}()
+	}
 }
 
 func (c *rawCarrier) Close() error {
@@ -472,7 +569,9 @@ func (c *rawCarrier) Close() error {
 	}
 	var err error
 	c.closeOnce.Do(func() {
+		c.streamWorkerMu.Lock()
 		c.sealed.Store(true)
+		c.streamWorkerMu.Unlock()
 		close(c.done)
 		if c.spine != nil {
 			err = c.spine.Close()
@@ -578,9 +677,13 @@ func (c *ServerCarrier) OpenLane(ctx context.Context, chID channel.ID, generatio
 }
 
 func (c *ClientCarrier) OpenActor(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
-	return c.open(ctx, DeviceStreamHeader{
+	conn, err := c.open(ctx, DeviceStreamHeader{
 		Kind: DeviceStreamActor, Channel: chID, LaneGen: generation,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return newActorStreamConn(conn, c.logger), nil
 }
 
 func (c *ServerCarrier) AcceptStream() (net.Conn, DeviceStreamHeader, error) {
@@ -589,6 +692,14 @@ func (c *ServerCarrier) AcceptStream() (net.Conn, DeviceStreamHeader, error) {
 
 func (c *ClientCarrier) AcceptStream() (net.Conn, DeviceStreamHeader, error) {
 	return c.accept()
+}
+
+func (c *ServerCarrier) ServeStreams(handle func(net.Conn, DeviceStreamHeader)) error {
+	return c.serveStreams(handle)
+}
+
+func (c *ClientCarrier) ServeStreams(handle func(net.Conn, DeviceStreamHeader)) error {
+	return c.serveStreams(handle)
 }
 
 type LaneStream struct {

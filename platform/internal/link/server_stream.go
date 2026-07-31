@@ -18,8 +18,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/remoteingress"
 )
 
-const serverStreamQueue = 64
-
 // serverActorHandlers is the endpoint's outward call table. The identity
 // coordinate is NOT in it: (id, key) are fixed on the endpoint at handshake
 // time and passed down on every call, so a frame can carry an operation but
@@ -51,7 +49,6 @@ type serverActorEndpoint struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	sendq  chan ipc.Frame
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -75,17 +72,13 @@ func newServerActorEndpoint(
 	return &serverActorEndpoint{
 		id: id, key: key, conn: conn, codec: codec,
 		handlers: handlers, ctx: ctx, cancel: cancel,
-		sendq: make(chan ipc.Frame, serverStreamQueue), done: make(chan struct{}),
+		done: make(chan struct{}),
 	}
 }
 
 func (s *serverActorEndpoint) Run(context.Context) error {
-	errs := make(chan error, 2)
-	go func() { errs <- s.writeLoop() }()
-	go func() { errs <- s.readLoop() }()
-	err := <-errs
+	err := s.readLoop()
 	_ = s.Close()
-	<-errs
 	close(s.done)
 	return err
 }
@@ -112,17 +105,7 @@ func (s *serverActorEndpoint) Deliver(env *message.Envelope) error {
 	if err != nil {
 		return err
 	}
-	select {
-	case <-s.ctx.Done():
-		return actorrt.ErrUnitStopped
-	default:
-	}
-	select {
-	case s.sendq <- ipc.Frame{Kind: ipc.KindDeliver, Payload: raw}:
-		return nil
-	default:
-		return actorrt.ErrMailboxFull
-	}
+	return s.send(ipc.Frame{Kind: ipc.KindDeliver, Payload: raw})
 }
 
 func (s *serverActorEndpoint) CancelRequest(id message.ID) {
@@ -133,23 +116,25 @@ func (s *serverActorEndpoint) CancelRequest(id message.ID) {
 	if err != nil {
 		return
 	}
-	select {
-	case s.sendq <- ipc.Frame{Kind: ipc.KindCancel, Payload: raw}:
-	default:
-	}
+	_ = s.send(ipc.Frame{Kind: ipc.KindCancel, Payload: raw})
 }
 
-func (s *serverActorEndpoint) writeLoop() error {
-	for {
-		select {
-		case <-s.ctx.Done():
-			return s.ctx.Err()
-		case frame := <-s.sendq:
-			if err := s.codec.Write(frame); err != nil {
-				return err
-			}
-		}
+// send is the endpoint's only outbound path. It writes directly through the
+// actor stream owner: no queue, writer goroutine, capacity, or overflow policy.
+func (s *serverActorEndpoint) send(frame ipc.Frame) error {
+	if s == nil {
+		return actorrt.ErrUnitStopped
 	}
+	select {
+	case <-s.ctx.Done():
+		return actorrt.ErrUnitStopped
+	default:
+	}
+	if err := s.codec.Write(frame); err != nil {
+		_ = s.Close()
+		return err
+	}
+	return nil
 }
 
 func (s *serverActorEndpoint) readLoop() error {
@@ -244,7 +229,7 @@ func (s *serverActorEndpoint) handleEmit(payload []byte) error {
 	if err != nil {
 		return err
 	}
-	return s.codec.Write(ipc.Frame{Kind: ipc.KindEmitAck, Payload: raw})
+	return s.send(ipc.Frame{Kind: ipc.KindEmitAck, Payload: raw})
 }
 
 var errRelayUnavailable = errors.New("link: relay handler unavailable")
@@ -263,7 +248,7 @@ func (s *serverActorEndpoint) handleRelay(
 	if err != nil {
 		return err
 	}
-	return s.codec.Write(ipc.Frame{Kind: ackKind, Payload: raw})
+	return s.send(ipc.Frame{Kind: ackKind, Payload: raw})
 }
 
 func (s *serverActorEndpoint) handleFork(payload []byte) error {
@@ -299,7 +284,7 @@ func (s *serverActorEndpoint) handleFork(payload []byte) error {
 	if err != nil {
 		return err
 	}
-	return s.codec.Write(ipc.Frame{Kind: ipc.KindSpawnAck, Payload: raw})
+	return s.send(ipc.Frame{Kind: ipc.KindSpawnAck, Payload: raw})
 }
 
 func (s *serverActorEndpoint) handleEnd(payload []byte) error {
@@ -324,7 +309,7 @@ func (s *serverActorEndpoint) handleEnd(payload []byte) error {
 	if err != nil {
 		return err
 	}
-	return s.codec.Write(ipc.Frame{Kind: ipc.KindEndAck, Payload: raw})
+	return s.send(ipc.Frame{Kind: ipc.KindEndAck, Payload: raw})
 }
 
 var _ actorhost.ActorEndpoint = (*serverActorEndpoint)(nil)

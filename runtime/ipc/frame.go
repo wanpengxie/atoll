@@ -23,9 +23,9 @@ const (
 	// one-time authentication.
 	KindHandshake Kind = "handshake"
 	// KindDeliver (host→remote): one envelope into the bound actor's mailbox.
-	// Fire-and-forget — the transport's own flow control IS the backpressure
-	// (a full pipe/socket buffer surfaces as MailboxFull on the host's
-	// non-blocking enqueue).
+	// Fire-and-forget — the transport's own flow control IS the backpressure:
+	// the stream owner writes synchronously and its bounded write fails if the
+	// peer stops reading. There is no application delivery queue.
 	KindDeliver Kind = "deliver"
 	// KindEmit (remote→host): the bound actor emitted an envelope upward. The
 	// host route relays it to the harness — the single channel-log
@@ -278,7 +278,6 @@ type Codec struct {
 	r   *bufio.Reader
 	w   io.Writer
 	wmu sync.Mutex
-	hdr [4]byte // Write's length-prefix scratch, reused under wmu.
 }
 
 // NewCodec wraps r/w as a frame Codec.
@@ -295,14 +294,17 @@ func (c *Codec) Write(f Frame) error {
 	if len(raw) > MaxFrameBytes {
 		return errors.New("ipc: frame too large")
 	}
+	wire := make([]byte, 4+len(raw))
+	binary.BigEndian.PutUint32(wire[:4], uint32(len(raw)))
+	copy(wire[4:], raw)
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	binary.BigEndian.PutUint32(c.hdr[:], uint32(len(raw)))
-	if _, err := c.w.Write(c.hdr[:]); err != nil {
+	n, err := c.w.Write(wire)
+	if err != nil {
 		return err
 	}
-	if _, err := c.w.Write(raw); err != nil {
-		return err
+	if n != len(wire) {
+		return io.ErrShortWrite
 	}
 	return nil
 }

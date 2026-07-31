@@ -700,6 +700,27 @@ func TestInFlightRPCsRetireWithTheirExactLane(t *testing.T) {
 	}
 }
 
+func TestClientLaneRPCWaitHasIndependentTimeout(t *testing.T) {
+	previous := laneRPCTimeout
+	laneRPCTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { laneRPCTimeout = previous })
+
+	waiter := make(chan link.LaneFrame)
+	streamDone := make(chan struct{})
+	started := time.Now()
+	_, err := waitClientLaneReply(context.Background(), waiter, streamDone)
+	elapsed := time.Since(started)
+	if !errors.Is(err, link.ErrLaneRPCTimeout) {
+		t.Fatalf("wait error = %v, want %v", err, link.ErrLaneRPCTimeout)
+	}
+	if elapsed < laneRPCTimeout*8/10 {
+		t.Fatalf("RPC wait returned after %v, before %v timeout", elapsed, laneRPCTimeout)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("RPC wait exceeded independent timeout: %v", elapsed)
+	}
+}
+
 func TestGoneSendFailureDoesNotBlockCompartmentRemoval(t *testing.T) {
 	manager := &compartmentManager{
 		ctx: context.Background(), carrier: &link.ClientCarrier{},
