@@ -2,6 +2,7 @@ package daemonhost
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -223,36 +224,40 @@ func TestDaemonFactSweepRevokesWithoutPostCommitHint(t *testing.T) {
 	}
 }
 
-func TestUnknownCoordinateNeverInfersCompartmentClose(t *testing.T) {
+func TestUnknownCoordinateDeclarationsAllocateNoCarrierState(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close()
 	carrier := dialTestCarrier(t, host)
-	if err := carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCompartmentState, Channel: "unknown", State: "ready",
-	}); err != nil {
+	for i := 0; i < 256; i++ {
+		if err := carrier.SendSpine(link.SpineFrame{
+			Kind:    link.SpineCompartmentState,
+			Channel: channel.ID(fmt.Sprintf("unknown-%d", i)),
+			State:   "ready",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := carrier.SendSpine(link.SpineFrame{Kind: link.SpineProbe, Nonce: "flood-barrier"}); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool {
-		host.mu.RLock()
-		row := host.daemons["daemon-a"]
-		host.mu.RUnlock()
-		if row == nil || row.current == nil {
-			return false
-		}
-		row.current.mu.Lock()
-		_, ok := row.current.compartments["unknown"]
-		row.current.mu.Unlock()
-		return ok
-	})
-	host.Scan()
+	var reply link.SpineFrame
+	if err := carrier.ReadSpine(&reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Kind != link.SpineProbeReply || reply.Nonce != "flood-barrier" {
+		t.Fatalf("probe barrier reply = %+v", reply)
+	}
 	host.mu.RLock()
 	current := host.daemons["daemon-a"].current
 	host.mu.RUnlock()
 	current.mu.Lock()
-	view := current.compartments["unknown"]
+	compartments := len(current.compartments)
+	coordLocks := len(current.coordLocks)
+	coordTasks := len(current.coordTasks)
 	current.mu.Unlock()
-	if view.closeSent {
-		t.Fatal("missing membrane was collapsed into an unbind command")
+	if compartments != 0 || coordLocks != 0 || coordTasks != 0 {
+		t.Fatalf("unknown declarations allocated carrier state: compartments=%d locks=%d tasks=%d",
+			compartments, coordLocks, coordTasks)
 	}
 }
 
@@ -513,6 +518,9 @@ func TestDuplicateCurrentIsRetryableAndKeepsIncumbent(t *testing.T) {
 func TestCompartmentDeclarationsRemainInSpineOrder(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close()
+	host.Register("a", 1, platform.DaemonMembrane{
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	})
 	carrier := dialTestCarrier(t, host)
 	for _, state := range []string{"building", "ready", "fault"} {
 		if err := carrier.SendSpine(link.SpineFrame{
@@ -529,6 +537,69 @@ func TestCompartmentDeclarationsRemainInSpineOrder(t *testing.T) {
 		defer current.mu.Unlock()
 		return current.compartments["a"].state == CompartmentFault
 	})
+}
+
+func TestCoordinateBookkeepingReclaimsIdleEntries(t *testing.T) {
+	host := New(Config{ScanInterval: time.Hour})
+	defer host.Close()
+	host.Register("a", 1, platform.DaemonMembrane{
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	})
+	carrier := dialTestCarrier(t, host)
+	host.Scan()
+	_ = adoptAndSuperviseTestLane(t, carrier)
+
+	waitFor(t, func() bool {
+		host.mu.RLock()
+		current := host.daemons["daemon-a"].current
+		host.mu.RUnlock()
+		current.mu.Lock()
+		defer current.mu.Unlock()
+		return len(current.coordLocks) == 0 && len(current.coordTasks) == 0
+	})
+}
+
+func TestCoordinateGateSerializesAndReclaims(t *testing.T) {
+	carrier := &carrierRow{coordLocks: make(map[channel.ID]*coordGate)}
+	unlockFirst := carrier.lockCoord("a")
+	enteredSecond := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		unlockSecond := carrier.lockCoord("a")
+		close(enteredSecond)
+		<-releaseSecond
+		unlockSecond()
+		close(secondDone)
+	}()
+	waitFor(t, func() bool {
+		carrier.mu.Lock()
+		defer carrier.mu.Unlock()
+		return carrier.coordLocks["a"].refs == 2
+	})
+	select {
+	case <-enteredSecond:
+		t.Fatal("second coordinate executor entered before the first released")
+	default:
+	}
+	unlockFirst()
+	select {
+	case <-enteredSecond:
+	case <-time.After(time.Second):
+		t.Fatal("second coordinate executor did not enter after release")
+	}
+	close(releaseSecond)
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second coordinate executor did not release")
+	}
+	carrier.mu.Lock()
+	remaining := len(carrier.coordLocks)
+	carrier.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("coordinate gate map retained %d idle entries", remaining)
+	}
 }
 
 func TestOpenTransfer_TTLReclaimsAbandonedTokens(t *testing.T) {

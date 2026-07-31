@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -718,6 +719,21 @@ func TestClientLaneRPCWaitHasIndependentTimeout(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Fatalf("RPC wait exceeded independent timeout: %v", elapsed)
+	}
+}
+
+func TestLaneSessionOpenErrorReturnsNilInterface(t *testing.T) {
+	session := &laneSession{lane: &clientLane{
+		manager: &compartmentManager{logger: slog.New(slog.DiscardHandler)},
+	}}
+	stream, err := session.OpenActorStream(
+		context.Background(), "actor-a", "attempt-a",
+	)
+	if err == nil {
+		t.Fatal("invalid physical lane opened an actor stream")
+	}
+	if stream != nil {
+		t.Fatalf("open error returned non-nil typed interface %T", stream)
 	}
 }
 

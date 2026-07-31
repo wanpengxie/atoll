@@ -1,6 +1,7 @@
 package link
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -29,18 +30,23 @@ const (
 	LaneRPCTimeout          = 20 * time.Second
 	streamWriteBudget       = 10 * time.Second
 	maxStreamHeaderBytes    = 64 << 10
+	maxControlFrameBytes    = 1 << 24
 )
 
 var (
-	errLinkClosed      = errors.New("link: closed")
-	ErrProtocolVersion = errors.New("link: unsupported carrier protocol")
-	ErrLaneRPCTimeout  = errors.New("link: lane RPC timeout")
+	errLinkClosed           = errors.New("link: closed")
+	ErrProtocolVersion      = errors.New("link: unsupported carrier protocol")
+	ErrLaneRPCTimeout       = errors.New("link: lane RPC timeout")
+	errControlFrameTooLarge = errors.New("link: control frame too large")
 )
 
 func writeStreamJSON(w io.Writer, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err
+	}
+	if len(payload) > maxStreamHeaderBytes {
+		return fmt.Errorf("link: stream header too large: %d > %d", len(payload), maxStreamHeaderBytes)
 	}
 	payload = append(payload, '\n')
 	if deadline, ok := w.(interface{ SetWriteDeadline(time.Time) error }); ok {
@@ -49,6 +55,17 @@ func writeStreamJSON(w io.Writer, value any) error {
 	}
 	_, err = w.Write(payload)
 	return err
+}
+
+func marshalControlJSON(value any) ([]byte, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > maxControlFrameBytes {
+		return nil, fmt.Errorf("%w: %d > %d", errControlFrameTooLarge, len(payload), maxControlFrameBytes)
+	}
+	return append(payload, '\n'), nil
 }
 
 func readStreamJSON(r io.Reader, value any) error {
@@ -62,16 +79,7 @@ func readStreamJSON(r io.Reader, value any) error {
 		n, err := r.Read(one)
 		if n == 1 {
 			if one[0] == '\n' {
-				decoder := json.NewDecoder(bytes.NewReader(payload))
-				decoder.DisallowUnknownFields()
-				if err := decoder.Decode(value); err != nil {
-					return err
-				}
-				var trailing any
-				if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-					return errors.New("link: trailing stream header data")
-				}
-				return nil
+				return decodeStrictJSON(payload, value)
 			}
 			payload = append(payload, one[0])
 			if len(payload) > maxStreamHeaderBytes {
@@ -79,6 +87,55 @@ func readStreamJSON(r io.Reader, value any) error {
 			}
 		}
 		if err != nil {
+			return err
+		}
+	}
+}
+
+func decodeStrictJSON(payload []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("link: trailing JSON frame data")
+	}
+	return nil
+}
+
+// boundedJSONDecoder owns one newline-delimited control stream. It never lets
+// json.Decoder read ahead across frame boundaries and never retains more than
+// max bytes of attacker-controlled input for one frame.
+type boundedJSONDecoder struct {
+	reader *bufio.Reader
+	max    int
+}
+
+func newBoundedJSONDecoder(reader io.Reader, max int) *boundedJSONDecoder {
+	return &boundedJSONDecoder{reader: bufio.NewReader(reader), max: max}
+}
+
+func (d *boundedJSONDecoder) Decode(value any) error {
+	if d == nil || d.reader == nil || d.max <= 0 {
+		return errors.New("link: invalid control decoder")
+	}
+	payload := make([]byte, 0, min(d.max, 4<<10))
+	for {
+		fragment, err := d.reader.ReadSlice('\n')
+		complete := len(fragment) > 0 && fragment[len(fragment)-1] == '\n'
+		if complete {
+			fragment = fragment[:len(fragment)-1]
+		}
+		if len(fragment) > d.max-len(payload) {
+			return fmt.Errorf("%w: limit %d", errControlFrameTooLarge, d.max)
+		}
+		payload = append(payload, fragment...)
+		if complete {
+			return decodeStrictJSON(payload, value)
+		}
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
 			return err
 		}
 	}
@@ -404,7 +461,7 @@ const (
 type rawCarrier struct {
 	session      *yamux.Session
 	spine        net.Conn
-	spineDecoder *json.Decoder
+	spineDecoder *boundedJSONDecoder
 	logger       *slog.Logger
 
 	spineSend sync.Mutex
@@ -420,10 +477,9 @@ func newRawCarrier(session *yamux.Session, spine net.Conn, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	decoder := json.NewDecoder(spine)
-	decoder.DisallowUnknownFields()
 	c := &rawCarrier{
-		session: session, spine: spine, spineDecoder: decoder, logger: logger,
+		session: session, spine: spine,
+		spineDecoder: newBoundedJSONDecoder(spine, maxControlFrameBytes), logger: logger,
 		done: make(chan struct{}),
 	}
 	return c
@@ -433,16 +489,15 @@ func (c *rawCarrier) sendSpine(frame SpineFrame) error {
 	if c == nil || c.sealed.Load() {
 		return errLinkClosed
 	}
-	payload, err := json.Marshal(frame)
+	payload, err := marshalControlJSON(frame)
 	if err != nil {
 		return err
 	}
-	payload = append(payload, '\n')
 	c.spineSend.Lock()
-	defer c.spineSend.Unlock()
 	_ = c.spine.SetWriteDeadline(time.Now().Add(streamWriteBudget))
 	_, err = c.spine.Write(payload)
 	_ = c.spine.SetWriteDeadline(time.Time{})
+	c.spineSend.Unlock()
 	if err != nil {
 		_ = c.Close()
 	}
@@ -707,7 +762,7 @@ type LaneStream struct {
 	Channel channel.ID
 	Gen     LaneGeneration
 	conn    net.Conn
-	decoder *json.Decoder
+	decoder *boundedJSONDecoder
 
 	sendMu       sync.Mutex
 	retired      atomic.Bool
@@ -719,11 +774,10 @@ type LaneStream struct {
 }
 
 func newLaneStream(carrier *rawCarrier, chID channel.ID, generation LaneGeneration, conn net.Conn) *LaneStream {
-	decoder := json.NewDecoder(conn)
-	decoder.DisallowUnknownFields()
 	return &LaneStream{
 		carrier: carrier, Channel: chID, Gen: generation, conn: conn,
-		decoder: decoder, done: make(chan struct{}), physicalDone: make(chan struct{}),
+		decoder: newBoundedJSONDecoder(conn, maxControlFrameBytes),
+		done:    make(chan struct{}), physicalDone: make(chan struct{}),
 	}
 }
 
@@ -744,11 +798,10 @@ func (l *LaneStream) Send(value any) error {
 	if l == nil || l.retired.Load() {
 		return errLinkClosed
 	}
-	payload, err := json.Marshal(value)
+	payload, err := marshalControlJSON(value)
 	if err != nil {
 		return err
 	}
-	payload = append(payload, '\n')
 	l.sendMu.Lock()
 	_ = l.conn.SetWriteDeadline(time.Now().Add(streamWriteBudget))
 	_, err = l.conn.Write(payload)

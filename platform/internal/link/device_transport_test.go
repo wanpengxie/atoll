@@ -280,3 +280,85 @@ func TestLaneConcurrentWritersUseOneDeadlineOwner(t *testing.T) {
 	lane.RetireLogical()
 	lane.CollectPhysical()
 }
+
+func TestBoundedControlDecoderRejectsOversizedFrameAndPreservesBoundaries(t *testing.T) {
+	const limit = 64
+	decoder := newBoundedJSONDecoder(strings.NewReader(
+		"{\"value\":\"one\"}\n{\"value\":\"two\"}\n",
+	), limit)
+	var first, second struct {
+		Value string `json:"value"`
+	}
+	if err := decoder.Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if first.Value != "one" || second.Value != "two" {
+		t.Fatalf("decoded frames = %q, %q", first.Value, second.Value)
+	}
+
+	oversized := newBoundedJSONDecoder(
+		strings.NewReader(strings.Repeat("x", limit+1)+"\n"), limit,
+	)
+	var value any
+	if err := oversized.Decode(&value); !errors.Is(err, errControlFrameTooLarge) {
+		t.Fatalf("oversized frame error = %v, want %v", err, errControlFrameTooLarge)
+	}
+	if maxControlFrameBytes != 1<<24 {
+		t.Fatalf("production control frame limit = %d, want 16MiB", maxControlFrameBytes)
+	}
+	conn := &serialWriteConn{}
+	carrier := newRawCarrier(nil, conn, nil)
+	lane := newLaneStream(carrier, "a", "g1", conn)
+	if carrier.spineDecoder.max != maxControlFrameBytes ||
+		lane.decoder.max != maxControlFrameBytes {
+		t.Fatalf("production decoder limits: spine=%d lane=%d want=%d",
+			carrier.spineDecoder.max, lane.decoder.max, maxControlFrameBytes)
+	}
+}
+
+type failingSpineConn struct {
+	onClose func()
+}
+
+func (*failingSpineConn) Read([]byte) (int, error) {
+	return 0, context.Canceled
+}
+func (*failingSpineConn) Write([]byte) (int, error) {
+	return 0, errors.New("injected spine write failure")
+}
+func (c *failingSpineConn) Close() error {
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return nil
+}
+func (*failingSpineConn) LocalAddr() net.Addr              { return testAddr("local") }
+func (*failingSpineConn) RemoteAddr() net.Addr             { return testAddr("remote") }
+func (*failingSpineConn) SetDeadline(time.Time) error      { return nil }
+func (*failingSpineConn) SetReadDeadline(time.Time) error  { return nil }
+func (*failingSpineConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestSpineWriteFailureClosesAfterReleasingSendLock(t *testing.T) {
+	conn := &failingSpineConn{}
+	carrier := newRawCarrier(nil, conn, nil)
+	var closeSawUnlocked atomic.Bool
+	conn.onClose = func() {
+		if carrier.spineSend.TryLock() {
+			closeSawUnlocked.Store(true)
+			carrier.spineSend.Unlock()
+		}
+	}
+
+	if err := carrier.sendSpine(SpineFrame{Kind: SpineProbe, Nonce: "probe"}); err == nil {
+		t.Fatal("injected spine write failure reported success")
+	}
+	if !closeSawUnlocked.Load() {
+		t.Fatal("sendSpine called Close while holding spineSend")
+	}
+	if !carrier.sealed.Load() {
+		t.Fatal("spine write failure did not close the carrier")
+	}
+}

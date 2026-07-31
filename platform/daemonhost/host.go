@@ -105,9 +105,14 @@ type carrierRow struct {
 	lanes        map[channel.ID]*serverLane
 	retirements  map[channel.ID]uint64
 	compartments map[channel.ID]compartmentView
-	coordLocks   map[channel.ID]*sync.Mutex
+	coordLocks   map[channel.ID]*coordGate
 	coordTasks   map[channel.ID]*coordTask
 	lastSeen     time.Time
+}
+
+type coordGate struct {
+	mu   sync.Mutex
+	refs int
 }
 
 type coordTask struct {
@@ -257,9 +262,8 @@ func (h *Host) replaceMembrane(carrier *carrierRow, chID channel.ID, generation 
 	if carrier == nil || carrier.sealed.Load() {
 		return
 	}
-	lock := carrier.coordLock(chID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := carrier.lockCoord(chID)
+	defer unlock()
 	h.mu.RLock()
 	membrane, known := h.membranes[chID]
 	h.mu.RUnlock()
@@ -288,15 +292,14 @@ func (h *Host) Unregister(chID channel.ID, generation uint64) {
 	carriers := h.currentCarriersLocked()
 	h.mu.Unlock()
 	for _, carrier := range carriers {
-		lock := carrier.coordLock(chID)
-		lock.Lock()
+		unlock := carrier.lockCoord(chID)
 		h.mu.RLock()
 		_, stillRegistered := h.membranes[chID]
 		h.mu.RUnlock()
 		if !stillRegistered {
 			carrier.retireLane(chID)
 		}
-		lock.Unlock()
+		unlock()
 	}
 }
 
@@ -340,7 +343,7 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		lanes:        make(map[channel.ID]*serverLane),
 		retirements:  make(map[channel.ID]uint64),
 		compartments: make(map[channel.ID]compartmentView),
-		coordLocks:   make(map[channel.ID]*sync.Mutex),
+		coordLocks:   make(map[channel.ID]*coordGate),
 		coordTasks:   make(map[channel.ID]*coordTask),
 		lastSeen:     h.now(),
 	}
@@ -419,9 +422,11 @@ func (h *Host) readSpine(carrier *carrierRow) {
 	for {
 		var frame link.SpineFrame
 		if err := carrier.wire.ReadSpine(&frame); err != nil {
+			_ = carrier.wire.Close()
 			return
 		}
 		if err := frame.Validate(); err != nil {
+			_ = carrier.wire.Close()
 			return
 		}
 		h.mu.Lock()
@@ -429,31 +434,52 @@ func (h *Host) readSpine(carrier *carrierRow) {
 			carrier.lastSeen = h.now()
 		}
 		h.mu.Unlock()
-		carrier.mu.Lock()
 		switch frame.Kind {
 		case link.SpineCompartmentState:
-			switch CompartmentState(frame.State) {
-			case CompartmentGone:
-				delete(carrier.compartments, frame.Channel)
-			case CompartmentBuilding, CompartmentReady, CompartmentFault:
-				current := carrier.compartments[frame.Channel]
-				current.state = CompartmentState(frame.State)
-				current.reason = frame.Reason
-				carrier.compartments[frame.Channel] = current
-			}
+			h.recordCompartmentState(carrier, frame)
 		case link.SpineProbe:
-			carrier.mu.Unlock()
 			if carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineProbeReply, Nonce: frame.Nonce}) != nil {
 				return
 			}
 			continue
 		case link.SpineProbeReply:
 		default:
-			carrier.mu.Unlock()
 			return
 		}
-		carrier.mu.Unlock()
 	}
+}
+
+func (h *Host) recordCompartmentState(carrier *carrierRow, frame link.SpineFrame) {
+	state := CompartmentState(frame.State)
+	h.mu.RLock()
+	row := h.daemons[carrier.daemonID]
+	currentCarrier := row != nil && row.current == carrier
+	_, membraneKnown := h.membranes[frame.Channel]
+	h.mu.RUnlock()
+	if !currentCarrier || carrier.sealed.Load() {
+		return
+	}
+
+	carrier.mu.Lock()
+	defer carrier.mu.Unlock()
+	if state == CompartmentGone {
+		// gone may legitimately arrive after its lane and membrane were removed.
+		// It can only delete a previously admitted coordinate and never allocates.
+		if _, admitted := carrier.compartments[frame.Channel]; admitted {
+			delete(carrier.compartments, frame.Channel)
+		}
+		return
+	}
+	// Compartment declarations and lane admission travel on different streams;
+	// their arrival order is intentionally undefined. The authoritative membrane
+	// table bounds allocation without coupling compartment truth to lane presence.
+	if !membraneKnown {
+		return
+	}
+	current := carrier.compartments[frame.Channel]
+	current.state = state
+	current.reason = frame.Reason
+	carrier.compartments[frame.Channel] = current
 }
 
 func (h *Host) acceptStreams(carrier *carrierRow) {
@@ -481,6 +507,7 @@ func (h *Host) acceptStreams(carrier *carrierRow) {
 		}
 		lane.acceptActor(conn)
 	})
+	_ = carrier.wire.Close()
 }
 
 func (h *Host) carrierDown(carrier *carrierRow) {
@@ -609,6 +636,9 @@ func (h *Host) markCoordDirty(carrier *carrierRow, chID channel.ID) {
 			if task == nil || !task.dirty {
 				if task != nil {
 					task.running = false
+					if carrier.coordTasks[chID] == task {
+						delete(carrier.coordTasks, chID)
+					}
 				}
 				carrier.mu.Unlock()
 				return
@@ -682,9 +712,8 @@ func (h *Host) reconcileCoord(carrier *carrierRow, chID channel.ID) {
 	if carrier == nil || carrier.sealed.Load() {
 		return
 	}
-	lock := carrier.coordLock(chID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := carrier.lockCoord(chID)
+	defer unlock()
 	h.mu.RLock()
 	membrane, known := h.membranes[chID]
 	h.mu.RUnlock()
@@ -749,15 +778,26 @@ func (h *Host) isBound(
 	}
 }
 
-func (c *carrierRow) coordLock(chID channel.ID) *sync.Mutex {
+func (c *carrierRow) lockCoord(chID channel.ID) func() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	lock := c.coordLocks[chID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		c.coordLocks[chID] = lock
+	gate := c.coordLocks[chID]
+	if gate == nil {
+		gate = &coordGate{}
+		c.coordLocks[chID] = gate
 	}
-	return lock
+	gate.refs++
+	c.mu.Unlock()
+
+	gate.mu.Lock()
+	return func() {
+		gate.mu.Unlock()
+		c.mu.Lock()
+		gate.refs--
+		if gate.refs == 0 && c.coordLocks[chID] == gate {
+			delete(c.coordLocks, chID)
+		}
+		c.mu.Unlock()
+	}
 }
 
 func (c *carrierRow) ensureLane(chID channel.ID, membrane membraneRow) {
@@ -981,10 +1021,9 @@ func (h *Host) RetireLane(daemonID, chID string) {
 	h.mu.RUnlock()
 	if carrier != nil {
 		id := channel.ID(chID)
-		lock := carrier.coordLock(id)
-		lock.Lock()
+		unlock := carrier.lockCoord(id)
 		carrier.retireLane(id)
-		lock.Unlock()
+		unlock()
 	}
 }
 

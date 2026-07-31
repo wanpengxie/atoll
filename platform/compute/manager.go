@@ -746,7 +746,14 @@ func (s *laneSession) OpenActorStream(
 		Carrier: s.lane.carrier, Lane: s.lane.stream, Host: host,
 		Control: s.lane, Files: s.lane.local, Logger: s.lane.manager.logger,
 	}
-	return client.OpenActorStream(ctx, id, key)
+	stream, err := client.OpenActorStream(ctx, id, key)
+	if err != nil {
+		// Converting a nil *DeviceActorStream directly to laneActorStream would
+		// create a non-nil interface and make the retry cleanup call Close on a
+		// nil receiver.
+		return nil, err
+	}
+	return stream, nil
 }
 
 func newClientLane(
