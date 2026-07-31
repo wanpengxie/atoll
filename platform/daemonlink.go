@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -48,6 +49,15 @@ type StorageTombstoneCoord struct {
 	TombstoneID string `json:"tombstone_id"`
 	Coord       string `json:"coord"`
 }
+
+// ErrDaemonNotReady is SendAlloc/SendReclaim's "the daemon did not attempt
+// it" answer: a lane to the daemon exists, but it is not yet bound to a built
+// compartment for that channel. It is deliberately distinct from the daemon
+// refusing the operation — nothing was attempted, so there is no verdict, and
+// the same call may succeed once the daemon's compartment is up. The daemon
+// projects no readiness state into the home's ledger, so this is the only
+// point at which the home can learn it.
+var ErrDaemonNotReady = errors.New("platform: daemon has no built compartment for this channel yet")
 
 // DaemonRoutes is the transport face injected into Homes. All coordinates are
 // explicit; implementations must treat an unavailable route as an error or an

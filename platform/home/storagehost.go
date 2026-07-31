@@ -66,7 +66,18 @@ func (c daemonStorageControl) AllocRequest(ctx context.Context, daemonID string,
 	if c.routes == nil {
 		return errors.New("platform: daemon routes unavailable")
 	}
-	return c.routes.SendAlloc(ctx, daemonID, string(c.chID), spec.Coord, spec.Dir)
+	return asDoorStorageError(c.routes.SendAlloc(ctx, daemonID, string(c.chID), spec.Coord, spec.Dir))
+}
+
+// asDoorStorageError translates the transport's not-attempted answer into the
+// door's own vocabulary. The door cannot recognise platform.ErrDaemonNotReady
+// itself — runtime does not import platform — so this assembly seam is the
+// only place the two names can meet.
+func asDoorStorageError(err error) error {
+	if errors.Is(err, platform.ErrDaemonNotReady) {
+		return fmt.Errorf("%w: %v", accessdoor.ErrStorageNotReady, err)
+	}
+	return err
 }
 
 // ReclaimRequest implements accessdoor.StorageControl's 期11 review §2.5 #B
@@ -76,7 +87,7 @@ func (c daemonStorageControl) ReclaimRequest(ctx context.Context, daemonID strin
 	if c.routes == nil {
 		return errors.New("platform: daemon routes unavailable")
 	}
-	return c.routes.SendReclaim(ctx, daemonID, string(c.chID), coord)
+	return asDoorStorageError(c.routes.SendReclaim(ctx, daemonID, string(c.chID), coord))
 }
 
 // daemonTransferControl mints a transfer ticket in the realm daemon host.

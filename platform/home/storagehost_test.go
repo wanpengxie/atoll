@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
@@ -87,6 +90,54 @@ func (f *fakeOutbox) TouchReservationsByCoords(ctx context.Context, daemonID str
 }
 
 var _ resourcespec.ResourceOutbox = (*fakeOutbox)(nil)
+
+// fixedRoutes answers every storage route with one canned error — these tests
+// are about what this seam does to that error, not about transport.
+type fixedRoutes struct{ err error }
+
+func (fixedRoutes) PokePlan(string, string) {}
+func (r fixedRoutes) SendAlloc(context.Context, string, string, string, bool) error {
+	return r.err
+}
+func (r fixedRoutes) SendReclaim(context.Context, string, string, string) error { return r.err }
+func (fixedRoutes) OpenTransfer(
+	context.Context, string, string, string, access.Operation, string,
+) (string, error) {
+	return "", nil
+}
+func (fixedRoutes) AttachedDaemons(string) []string  { return nil }
+func (fixedRoutes) LaneAttached(string, string) bool { return false }
+func (fixedRoutes) RetireLane(string, string)        {}
+
+var _ platform.DaemonRoutes = fixedRoutes{}
+
+// TestStorageControlKeepsNotAttemptedDistinctFromRefused pins the one point in
+// the process where the transport's "the daemon attempted nothing" answer and
+// the door's own name for it can meet: runtime never imports platform, so if
+// this seam drops the translation, the door's caller sees an opaque error and
+// treats a still-building daemon as a hard create failure. Nothing downstream
+// can recover the distinction once it is lost here.
+func TestStorageControlKeepsNotAttemptedDistinctFromRefused(t *testing.T) {
+	control := daemonStorageControl{routes: fixedRoutes{err: platform.ErrDaemonNotReady}, chID: "channel-a"}
+	if err := control.AllocRequest(context.Background(), "daemon-1", accessdoor.StorageAllocSpec{
+		Coord: "coord-a",
+	}); !errors.Is(err, accessdoor.ErrStorageNotReady) {
+		t.Fatalf("AllocRequest error=%v, want it to carry accessdoor.ErrStorageNotReady", err)
+	}
+	if err := control.ReclaimRequest(context.Background(), "daemon-1", "coord-a"); !errors.Is(err, accessdoor.ErrStorageNotReady) {
+		t.Fatalf("ReclaimRequest error=%v, want it to carry accessdoor.ErrStorageNotReady", err)
+	}
+
+	// The other half: a refusal must not acquire the sentinel on the way
+	// through, or the guard above would hold for a seam that relabelled
+	// everything.
+	refused := errors.New("disk full")
+	control = daemonStorageControl{routes: fixedRoutes{err: refused}, chID: "channel-a"}
+	err := control.AllocRequest(context.Background(), "daemon-1", accessdoor.StorageAllocSpec{Coord: "coord-a"})
+	if !errors.Is(err, refused) || errors.Is(err, accessdoor.ErrStorageNotReady) {
+		t.Fatalf("a refusal must stay a refusal, got %v", err)
+	}
+}
 
 func TestHomeStorageHostControl_Committed_SenderAuth(t *testing.T) {
 	t.Run("matching sender lands the reservation", func(t *testing.T) {

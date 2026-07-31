@@ -356,6 +356,100 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 		})
 	}
 
+	// A daemon that has not built its compartment yet answers not_ready, and
+	// that answer is not a refusal — it says nothing was attempted. The home
+	// must be able to tell the two apart, because it decides whether the
+	// operation may be retried on that same daemon. Folding not_ready into the
+	// !OK branch (the shape this replaced) made an unmade decision
+	// indistinguishable from a made one, and the caller then treated a
+	// still-building daemon as a hard create failure.
+	t.Run("not ready is not a refusal", func(t *testing.T) {
+		for _, test := range []struct {
+			name      string
+			operation func(*Host) error
+			reply     func(link.LaneFrame) link.LaneFrame
+		}{
+			{
+				name: "alloc",
+				operation: func(host *Host) error {
+					return host.SendAlloc(t.Context(), "daemon-a", "channel-a", "coord-a", false)
+				},
+				reply: func(request link.LaneFrame) link.LaneFrame {
+					return link.LaneFrame{
+						Kind: link.LaneAllocReply, RequestID: request.RequestID,
+						AllocReply: &link.AllocReply{
+							RequestID: request.RequestID,
+							NotReady:  true, Reason: "compartment not built yet",
+						},
+					}
+				},
+			},
+			{
+				name: "reclaim",
+				operation: func(host *Host) error {
+					return host.SendReclaim(t.Context(), "daemon-a", "channel-a", "coord-a")
+				},
+				reply: func(request link.LaneFrame) link.LaneFrame {
+					return link.LaneFrame{
+						Kind: link.LaneReclaimReply, RequestID: request.RequestID,
+						ReclaimReply: &link.ReclaimReply{
+							RequestID: request.RequestID,
+							NotReady:  true, Reason: "compartment not built yet",
+						},
+					}
+				},
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				host, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+				deviceDone := make(chan error, 1)
+				go func() {
+					var request link.LaneFrame
+					if err := lane.Decode(&request); err != nil {
+						deviceDone <- err
+						return
+					}
+					deviceDone <- lane.Send(test.reply(request))
+				}()
+				err := test.operation(host)
+				if !errors.Is(err, platform.ErrDaemonNotReady) {
+					t.Fatalf("error=%v, want it to carry platform.ErrDaemonNotReady", err)
+				}
+				if err := <-deviceDone; err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+
+		// The other half: a daemon that IS ready must not produce the sentinel,
+		// or the guard above would hold for an implementation that returned it
+		// unconditionally.
+		t.Run("a ready daemon does not carry the sentinel", func(t *testing.T) {
+			host, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+			deviceDone := make(chan error, 1)
+			go func() {
+				var request link.LaneFrame
+				if err := lane.Decode(&request); err != nil {
+					deviceDone <- err
+					return
+				}
+				deviceDone <- lane.Send(link.LaneFrame{
+					Kind: link.LaneAllocReply, RequestID: request.RequestID,
+					AllocReply: &link.AllocReply{
+						RequestID: request.RequestID, Reason: "disk full",
+					},
+				})
+			}()
+			err := host.SendAlloc(t.Context(), "daemon-a", "channel-a", "coord-a", false)
+			if err == nil || errors.Is(err, platform.ErrDaemonNotReady) {
+				t.Fatalf("a refusal must stay a refusal, got %v", err)
+			}
+			if err := <-deviceDone; err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+
 	t.Run("independent timeout", func(t *testing.T) {
 		previous := laneRPCTimeout
 		laneRPCTimeout = 30 * time.Millisecond

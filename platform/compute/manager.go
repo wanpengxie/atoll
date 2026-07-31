@@ -780,6 +780,7 @@ func (c *compartment) bindLane(lane *clientLane) {
 	lane.local = resources.LocalFileOpener
 	lane.storage = resources.StorageHost
 	lane.outbound = outbound
+	lane.bound = true
 	lane.mu.Unlock()
 	desired, err := lane.pullPlan(c.manager.ctx)
 	if err != nil {
@@ -917,9 +918,14 @@ type clientLane struct {
 	replan       chan struct{}
 	host         *actorhost.HostSupervisor
 	actorSession *laneSession
-	local        LocalFileOpener
-	storage      StorageHost
-	outbound     *DaemonOutbound
+	// bound records that bindLane has installed this lane's resources. It is
+	// its own field rather than a nil check on the two below, because a bound
+	// compartment may legitimately have no storage host configured — that is a
+	// standing verdict, while not-yet-bound is the absence of one.
+	bound    bool
+	local    LocalFileOpener
+	storage  StorageHost
+	outbound *DaemonOutbound
 }
 
 type laneSession struct{ lane *clientLane }
@@ -930,11 +936,11 @@ func (s *laneSession) OpenActorStream(
 	ctx context.Context, id actor.ActorID, key actorhost.AttemptKey,
 ) (laneActorStream, error) {
 	s.lane.mu.Lock()
-	host := s.lane.host
+	host, files := s.lane.host, s.lane.local
 	s.lane.mu.Unlock()
 	client := &link.ClientActorLane{
 		Carrier: s.lane.carrier, Lane: s.lane.stream, Host: host,
-		Control: s.lane, Files: s.lane.local, Logger: s.lane.manager.logger,
+		Control: s.lane, Files: files, Logger: s.lane.manager.logger,
 	}
 	stream, err := client.OpenActorStream(ctx, id, key)
 	if err != nil {
@@ -964,6 +970,18 @@ func (l *clientLane) setHost(host *actorhost.HostSupervisor) {
 	l.mu.Lock()
 	l.host = host
 	l.mu.Unlock()
+}
+
+// boundResources reads the resources bindLane installs on this lane, and
+// whether it has run at all. The reader is running before they are installed —
+// a lane starts reading the moment it is admitted, while bindLane runs
+// afterwards (immediately for an already-built compartment, only after the
+// build succeeds for a new one) — so every read from the reader's side is
+// concurrent with that write and must take the lane's lock.
+func (l *clientLane) boundResources() (LocalFileOpener, StorageHost, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.local, l.storage, l.bound
 }
 func (l *clientLane) setRetire(fn func(*clientLane)) {
 	l.mu.Lock()
@@ -1051,12 +1069,24 @@ func (l *clientLane) readLoop() {
 		case link.LaneAllocRequest:
 			request := frame.AllocRequest
 			reply := &link.AllocReply{RequestID: frame.RequestID}
-			if request == nil || l.storage == nil {
+			_, storage, bound := l.boundResources()
+			switch {
+			case request == nil:
+				reply.Reason = "compute: malformed alloc request"
+			case !bound:
+				// Nothing was attempted: this lane has no compartment behind it
+				// yet. Answering !OK alone would report a refusal this device
+				// never made.
+				reply.NotReady = true
+				reply.Reason = "compute: compartment not built yet"
+			case storage == nil:
 				reply.Reason = "compute: storage unavailable"
-			} else if err := l.storage.Alloc(request.Coord, request.Dir); err != nil {
-				reply.Reason = err.Error()
-			} else {
-				reply.OK = true
+			default:
+				if err := storage.Alloc(request.Coord, request.Dir); err != nil {
+					reply.Reason = err.Error()
+				} else {
+					reply.OK = true
+				}
 			}
 			if l.stream.Send(link.LaneFrame{
 				Kind: link.LaneAllocReply, RequestID: frame.RequestID, AllocReply: reply,
@@ -1066,12 +1096,21 @@ func (l *clientLane) readLoop() {
 		case link.LaneReclaimRequest:
 			request := frame.ReclaimRequest
 			reply := &link.ReclaimReply{RequestID: frame.RequestID}
-			if request == nil || l.local == nil {
+			local, _, bound := l.boundResources()
+			switch {
+			case request == nil:
+				reply.Reason = "compute: malformed reclaim request"
+			case !bound:
+				reply.NotReady = true
+				reply.Reason = "compute: compartment not built yet"
+			case local == nil:
 				reply.Reason = "compute: storage unavailable"
-			} else if err := l.local.ReclaimCoord(request.Coord); err != nil {
-				reply.Reason = err.Error()
-			} else {
-				reply.OK = true
+			default:
+				if err := local.ReclaimCoord(request.Coord); err != nil {
+					reply.Reason = err.Error()
+				} else {
+					reply.OK = true
+				}
 			}
 			if l.stream.Send(link.LaneFrame{
 				Kind: link.LaneReclaimReply, RequestID: frame.RequestID, ReclaimReply: reply,

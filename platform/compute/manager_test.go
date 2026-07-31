@@ -1089,6 +1089,16 @@ func (f *laneAdmissionFixture) lane(
 	carrier *link.ClientCarrier, gen link.LaneGeneration,
 ) *clientLane {
 	f.t.Helper()
+	lane, _ := f.lanePeer(carrier, gen)
+	return lane
+}
+
+// lanePeer is lane plus the server end of its wire, for the tests that need to
+// put frames on the lane rather than only watch which slot it lands in.
+func (f *laneAdmissionFixture) lanePeer(
+	carrier *link.ClientCarrier, gen link.LaneGeneration,
+) (*clientLane, net.Conn) {
+	f.t.Helper()
 	local, remote := net.Pipe()
 	f.t.Cleanup(func() { _ = remote.Close() })
 	stream, err := link.AdoptLane(carrier, link.DeviceStreamHeader{
@@ -1099,13 +1109,159 @@ func (f *laneAdmissionFixture) lane(
 	}
 	lane := newClientLane(f.manager, carrier, stream)
 	f.lanes = append(f.lanes, lane)
-	return lane
+	return lane, remote
 }
 
 func (f *laneAdmissionFixture) slots() (lane, pending *clientLane) {
 	f.cell.mu.Lock()
 	defer f.cell.mu.Unlock()
 	return f.cell.lane, f.cell.pending
+}
+
+type bindableStorage struct{}
+
+func (bindableStorage) Alloc(string, bool) error { return nil }
+func (bindableStorage) Reconcile(context.Context, []StorageResourceCoord,
+	[]StorageReservationCoord, []StorageTombstoneCoord, StorageReclaimAckFunc) {
+}
+func (bindableStorage) ActiveWriteCoords() []string { return nil }
+
+// TestUnboundLaneAnswersNotReadyRatherThanRefusing pins that a lane with no
+// compartment behind it reports that it attempted nothing, instead of issuing a
+// refusal it never made.
+//
+// The invariant: a device answers for what it decided. A lane carries frames
+// from the moment it is admitted, and its compartment is built afterwards — a
+// build that retries with backoff, so the gap can be minutes — so the home can
+// and does arrive during it. If that arrival produces a plain !OK, the home
+// reads a verdict where the device formed none, and the create it was serving
+// dies instead of being retried once the compartment is up.
+//
+// Both halves are here on purpose: the unbound one alone would still pass for
+// an implementation that answered not_ready unconditionally.
+func TestUnboundLaneAnswersNotReadyRatherThanRefusing(t *testing.T) {
+	ask := func(t *testing.T, bind bool) link.AllocReply {
+		t.Helper()
+		fixture := newLaneAdmissionFixture(t)
+		lane, peer := fixture.lanePeer(fixture.carrier, "0198f000-0000-7000-8000-00000000000a")
+		fixture.manager.acceptLane(lane)
+		if installed, _ := fixture.slots(); installed != lane {
+			t.Fatalf("lane was not admitted, nothing is reading")
+		}
+		if bind {
+			// Exactly what bindLane installs.
+			lane.mu.Lock()
+			lane.storage = bindableStorage{}
+			lane.bound = true
+			lane.mu.Unlock()
+		}
+		if err := json.NewEncoder(peer).Encode(link.LaneFrame{
+			Kind:      link.LaneAllocRequest,
+			RequestID: "r",
+			AllocRequest: &link.AllocRequest{
+				RequestID: "r", Coord: "c",
+			},
+		}); err != nil {
+			t.Fatalf("send alloc_request: %v", err)
+		}
+		var frame link.LaneFrame
+		if err := json.NewDecoder(peer).Decode(&frame); err != nil {
+			t.Fatalf("read alloc_reply: %v", err)
+		}
+		if frame.AllocReply == nil {
+			t.Fatalf("reply carried no alloc_reply: %+v", frame)
+		}
+		if err := frame.Validate(); err != nil {
+			t.Fatalf("device sent an invalid reply: %v", err)
+		}
+		return *frame.AllocReply
+	}
+
+	t.Run("unbound lane attempted nothing", func(t *testing.T) {
+		reply := ask(t, false)
+		if !reply.NotReady {
+			t.Fatalf("not_ready=false: the device reported a refusal it never made (%+v)", reply)
+		}
+		if reply.OK {
+			t.Fatalf("ok=true on an unbound lane: %+v", reply)
+		}
+	})
+
+	t.Run("bound lane answers for what it did", func(t *testing.T) {
+		reply := ask(t, true)
+		if reply.NotReady {
+			t.Fatalf("not_ready=true after binding: %+v", reply)
+		}
+		if !reply.OK {
+			t.Fatalf("ok=false after binding: %+v", reply)
+		}
+	})
+}
+
+// TestLaneReadsBoundResourcesUnderTheLaneLock pins that the lane reader and
+// bindLane agree on a lock for the resources bindLane installs.
+//
+// The invariant: a lane starts reading the moment it is admitted, and its
+// resources are installed afterwards — immediately for an already-built
+// compartment, only after a successful build (which retries with backoff, so
+// possibly minutes later) for a new one. The reader's reads are therefore
+// always concurrent with that write, and unsynchronized reads of an interface
+// value can observe a half-written one.
+//
+// This cannot be raised to a compiler guarantee: Go has no way to require that
+// a field be read under a particular mutex. It is pinned by putting real
+// alloc/reclaim traffic on a lane while a bindLane-shaped write lands, and
+// letting the race detector adjudicate.
+func TestLaneReadsBoundResourcesUnderTheLaneLock(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	lane, peer := fixture.lanePeer(fixture.carrier, "0198f000-0000-7000-8000-000000000001")
+
+	fixture.manager.acceptLane(lane)
+	if installed, _ := fixture.slots(); installed != lane {
+		t.Fatalf("lane was not admitted, nothing is reading")
+	}
+
+	start := make(chan struct{})
+	rounds := 0
+	traffic := make(chan struct{})
+	go func() {
+		defer close(traffic)
+		encoder, decoder := json.NewEncoder(peer), json.NewDecoder(peer)
+		<-start
+		for range 200 {
+			if encoder.Encode(link.LaneFrame{
+				Kind:      link.LaneAllocRequest,
+				RequestID: "r",
+				AllocRequest: &link.AllocRequest{
+					RequestID: "r", Coord: "c",
+				},
+			}) != nil {
+				return
+			}
+			var reply link.LaneFrame
+			if decoder.Decode(&reply) != nil {
+				return
+			}
+			rounds++
+		}
+	}()
+
+	// Exactly the write bindLane performs, in its own goroutine exactly as
+	// acceptLane spawns it.
+	go func() {
+		<-start
+		lane.mu.Lock()
+		lane.storage = bindableStorage{}
+		lane.mu.Unlock()
+	}()
+
+	close(start)
+	<-traffic
+	// Without this the test passes vacuously when a malformed frame makes the
+	// reader hang up before it ever reaches the resource read.
+	if rounds == 0 {
+		t.Fatalf("no alloc round trip completed, the read under test never ran")
+	}
 }
 
 // TestLaneAdmissionOrdersByGeneration is the deterministic form of the

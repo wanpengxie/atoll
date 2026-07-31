@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 )
 
@@ -310,11 +311,14 @@ func (l *serverLane) alloc(ctx context.Context, coord string, dir bool) error {
 	if err != nil {
 		return err
 	}
-	if reply.AllocReply == nil || !reply.AllocReply.OK {
-		if reply.AllocReply != nil {
-			return errors.New(reply.AllocReply.Reason)
-		}
+	if reply.AllocReply == nil {
 		return errors.New("daemonhost: malformed alloc reply")
+	}
+	if reply.AllocReply.NotReady {
+		return fmt.Errorf("%w: %s", platform.ErrDaemonNotReady, reply.AllocReply.Reason)
+	}
+	if !reply.AllocReply.OK {
+		return errors.New(reply.AllocReply.Reason)
 	}
 	return nil
 }
@@ -326,11 +330,14 @@ func (l *serverLane) reclaim(ctx context.Context, coord string) error {
 	if err != nil {
 		return err
 	}
-	if reply.ReclaimReply == nil || !reply.ReclaimReply.OK {
-		if reply.ReclaimReply != nil {
-			return errors.New(reply.ReclaimReply.Reason)
-		}
+	if reply.ReclaimReply == nil {
 		return errors.New("daemonhost: malformed reclaim reply")
+	}
+	if reply.ReclaimReply.NotReady {
+		return fmt.Errorf("%w: %s", platform.ErrDaemonNotReady, reply.ReclaimReply.Reason)
+	}
+	if !reply.ReclaimReply.OK {
+		return errors.New(reply.ReclaimReply.Reason)
 	}
 	return nil
 }

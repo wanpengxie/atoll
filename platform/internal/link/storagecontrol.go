@@ -28,9 +28,20 @@ type AllocRequest struct {
 // the failure (a Go-error-shaped string, not an access verdict — this RPC
 // plane carries no authorization decision of its own, the door already made
 // one before sending AllocRequest).
+//
+// NotReady is the third disposition, and it is NOT a verdict: the lane exists
+// but is not yet bound to a built compartment, so the daemon did not attempt
+// the mkdir/touch and holds no opinion about whether it would have succeeded.
+// The home may reach a lane in that state at any time — the lane starts
+// carrying frames the moment it is admitted, and its compartment is built
+// afterwards — and the daemon deliberately projects no readiness state into
+// the home's ledger, so the home cannot know in advance. Folding this into
+// !OK would make a refusal the daemon never issued indistinguishable from one
+// it did.
 type AllocReply struct {
 	RequestID string `json:"request_id"`
 	OK        bool   `json:"ok"`
+	NotReady  bool   `json:"not_ready,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 
@@ -112,10 +123,13 @@ type ReclaimRequest struct {
 // ReclaimReply is daemon→home: the reclaim verdict — OK once the coord's local
 // bytes are gone (or were already absent), else Reason names the failure (a
 // Go-error-shaped string, not an access verdict — same discipline as
-// AllocReply).
+// AllocReply). NotReady carries the same not-a-verdict meaning it does on
+// AllocReply: the lane is not bound to a built compartment yet, so nothing was
+// attempted.
 type ReclaimReply struct {
 	RequestID string `json:"request_id"`
 	OK        bool   `json:"ok"`
+	NotReady  bool   `json:"not_ready,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 
@@ -169,6 +183,9 @@ func (m AllocRequest) validate() error {
 func (m AllocReply) validate() error {
 	if err := requiredControlField("alloc_reply.request_id", m.RequestID); err != nil {
 		return err
+	}
+	if m.OK && m.NotReady {
+		return errors.New("link: alloc_reply.not_ready contradicts ok")
 	}
 	if !m.OK {
 		return requiredControlField("alloc_reply.reason", m.Reason)
@@ -226,6 +243,9 @@ func (m ReclaimRequest) validate() error {
 func (m ReclaimReply) validate() error {
 	if err := requiredControlField("reclaim_reply.request_id", m.RequestID); err != nil {
 		return err
+	}
+	if m.OK && m.NotReady {
+		return errors.New("link: reclaim_reply.not_ready contradicts ok")
 	}
 	if !m.OK {
 		return requiredControlField("reclaim_reply.reason", m.Reason)

@@ -2,6 +2,7 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -62,6 +63,24 @@ type (
 // §4.7 Committed handler must preserve.
 var ErrReservationLost = resourcespec.ErrReservationLost
 
+// ErrStorageNotReady is StorageControl's "nothing was attempted" answer: the
+// placement daemon holds a live lane but has not built the compartment behind
+// it yet. It is NOT a failure verdict — the daemon formed no opinion about
+// this coord, so the door must not report the create as refused, and the same
+// call may succeed once the daemon's compartment is up.
+//
+// It reaches the door's caller as a Go error rather than an Outcome verdict,
+// on the same footing as an unreachable daemon: the door's verdict set covers
+// what the resolve→authorize→execute pipeline DECIDED, and this is the case
+// where no decision was reached. The caller owns the retry — the door does not
+// wait on it, because a compartment build retries with backoff and can take
+// minutes, and burying that inside one synchronous create would turn a
+// distributed wait into an unbounded one.
+//
+// The reservation is left standing either way (the Scrubber's timeout sweep
+// owns it), so a retried create is safe.
+var ErrStorageNotReady = errors.New("accessdoor: storage daemon not ready for this channel")
+
 // StorageControl is the door's send-half of the daemon control-RPC plane
 // (期11 spec §4.7): having chosen a placement daemon from StorageMounts plus
 // ActorAuthority placement and generated a coord (resourcespec.GenerateCoord), the
@@ -75,6 +94,9 @@ var ErrReservationLost = resourcespec.ErrReservationLost
 // injection point letting door.create actually ISSUE the chosen placement's
 // AllocRequest rather than stopping at "here is a daemon id".
 type StorageControl interface {
+	// AllocRequest returns ErrStorageNotReady when the placement daemon is
+	// reachable but has not built its compartment for this channel yet — see
+	// that sentinel's doc for why it is not a failure verdict.
 	AllocRequest(ctx context.Context, daemonID string, spec StorageAllocSpec) error
 	// ReclaimRequest collects an orphaned coord's already-allocated bytes on
 	// daemonID (期11 review §2.5 #B). It is the content-less create loser's

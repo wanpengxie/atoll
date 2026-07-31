@@ -257,9 +257,13 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		if aerr := d.deps.StorageControl.AllocRequest(ctx, daemonID, StorageAllocSpec{
 			ChannelID: d.deps.ChannelID, Coord: coord, Dir: spec.Dir,
 		}); aerr != nil {
-			// Alloc failed / daemon unreachable / timed out: the reservation
-			// is left standing — the Scrubber's §1.7 timeout sweep (server-
-			// side, by reserved_at) reclaims it. Nothing to undo here.
+			// Alloc failed / daemon unreachable / timed out / daemon not
+			// ready (ErrStorageNotReady, wrapped and passed through so the
+			// caller can tell "nothing was attempted, retry" from "the daemon
+			// refused"): the reservation is left standing — the Scrubber's
+			// §1.7 timeout sweep (server-side, by reserved_at) reclaims it.
+			// Nothing to undo here, and nothing is waited on: a compartment
+			// build retries with backoff, so the retry is the caller's.
 			return Outcome{}, aerr
 		}
 		_, found, cerr := d.deps.Registry.CommitReservation(ctx, reservationID)
