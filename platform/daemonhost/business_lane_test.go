@@ -523,7 +523,7 @@ func TestDiagnosticsAreBoundedFIFOAndRowsRespectOwnershipLifetime(t *testing.T) 
 		current: sealedCurrent, diagnostic: []Diagnostic{{Kind: "old", Time: old}},
 	}
 	host.mu.Unlock()
-	host.probeCarriers()
+	host.expireStaleDiagnostics()
 	host.mu.RLock()
 	_, expired := host.daemons["expired"]
 	_, tombstone := host.daemons["tombstone"]

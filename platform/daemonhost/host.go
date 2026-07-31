@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -105,12 +106,29 @@ type carrierRow struct {
 	coordLocks  map[channel.ID]*coordGate
 	coordTasks  map[channel.ID]*coordTask
 
-	// lastSeen and probeNonce are guarded by Host.mu, not by the mu above:
-	// the lease decision is the host's, and it is taken while walking every
-	// carrier at once. probeNonce is the probe this host has sent and not yet
-	// had answered; empty means there is nothing outstanding to match.
-	lastSeen   time.Time
-	probeNonce string
+	// planWake is the level for "this device asked for its channel snapshot",
+	// answered by this carrier's own worker rather than inline on the spine
+	// reader. Building that answer costs one bounded lookup per channel, and
+	// while the reader is inside it nothing else on this spine is read —
+	// including the probe replies the lease depends on. planNonce is the pull
+	// being answered; a newer pull replaces it, because the device pulls one at
+	// a time and only issues a second after abandoning the first.
+	planWake  chan struct{}
+	planNonce string
+	planAsked bool
+
+	// lastSeen and outstandingProbes are guarded by Host.mu, not by the mu
+	// above: the lease decision is the host's.
+	//
+	// outstandingProbes holds every probe sent within the current lease window
+	// that has not been answered. A reply is late, not wrong: it still proves a
+	// round trip completed, so keeping only the newest probe would refuse every
+	// reply from a device whose round trip merely exceeds the probe interval and
+	// kill a connection that is answering. The list is bounded by the number of
+	// probes one lease window can hold, and a matched reply clears it — a
+	// completed round trip supersedes everything older.
+	lastSeen          time.Time
+	outstandingProbes []string
 
 	// physical counts this carrier's physical sub-lifetimes: one ticket per lane
 	// open, held from before the open starts until that lane's reader has
@@ -192,7 +210,7 @@ func (h *Host) run() {
 		case <-scanTicker.C:
 			h.Scan()
 		case <-probeTicker.C:
-			h.probeCarriers()
+			h.expireStaleDiagnostics()
 		}
 	}
 }
@@ -204,53 +222,96 @@ func (h *Host) now() time.Time {
 	return time.Now()
 }
 
-func (h *Host) probeCarriers() {
+// superviseLease runs one carrier's liveness on that carrier's own schedule.
+//
+// It is per carrier because the probe is a blocking write: a device that has
+// stopped reading holds the write open for its whole budget, and a single loop
+// walking every carrier would spend that budget inside the broken one while the
+// healthy ones' leases run out unprobed — a detector stalled by exactly the
+// fault it exists to detect, reaping the connections that were fine. Here a
+// jammed write delays only its own carrier, and delaying its own probe is the
+// correct verdict for it.
+func (h *Host) superviseLease(carrier *carrierRow, spineDone <-chan struct{}) {
+	ticker := time.NewTicker(defaultProbeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-spineDone:
+			return
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		h.probeOnce(carrier)
+	}
+}
+
+// probeOnce is one carrier's liveness cycle: reap it if its lease has run out,
+// otherwise ask it for a round trip.
+func (h *Host) probeOnce(carrier *carrierRow) {
+	if carrier == nil || carrier.sealed.Load() {
+		return
+	}
+	// Sampled before the lock: Now is a caller-supplied clock and must never be
+	// invoked while this host's table is held.
 	now := h.now()
 	h.mu.Lock()
-	type outstandingProbe struct {
-		carrier *carrierRow
-		nonce   string
+	row := h.daemons[carrier.daemonID]
+	if row == nil || row.current != carrier {
+		h.mu.Unlock()
+		return
 	}
-	var carriers []outstandingProbe
-	var expired []*carrierRow
-	for _, row := range h.daemons {
-		carrier := row.current
-		if carrier == nil || carrier.sealed.Load() {
-			continue
+	if now.Sub(carrier.lastSeen) > h.cfg.LeaseTTL {
+		sealed := h.sealCarrierLocked(carrier)
+		h.mu.Unlock()
+		if sealed {
+			h.beginCarrierShutdown(carrier)
 		}
-		if now.Sub(carrier.lastSeen) > h.cfg.LeaseTTL {
-			if h.sealCarrierLocked(carrier) {
-				expired = append(expired, carrier)
-			}
-			continue
-		}
-		// A fresh probe replaces whatever is outstanding. The previous one went
-		// unanswered for a whole interval, so a reply to it no longer attests
-		// anything about the round trip this host is asking about now.
-		nonce := uuid.NewString()
-		carrier.probeNonce = nonce
-		carriers = append(carriers, outstandingProbe{carrier: carrier, nonce: nonce})
+		return
 	}
+	nonce := uuid.NewString()
+	carrier.outstandingProbes = h.appendOutstandingProbe(carrier.outstandingProbes, nonce)
+	h.mu.Unlock()
+	if carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineProbe, Nonce: nonce}) != nil {
+		h.beginCarrierShutdown(carrier)
+	}
+}
+
+// expireStaleDiagnostics drops the rows kept only to explain why a daemon that
+// has no carrier lost it. This is bookkeeping over the whole table, not a
+// liveness decision, so it stays on the host's own loop.
+func (h *Host) expireStaleDiagnostics() {
+	now := h.now()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	for daemonID, row := range h.daemons {
 		if row.current == nil && !row.tombstone && len(row.diagnostic) > 0 &&
 			now.Sub(row.diagnostic[len(row.diagnostic)-1].Time) >= defaultDiagnosticTTL {
 			delete(h.daemons, daemonID)
 		}
 	}
-	h.mu.Unlock()
-	for _, carrier := range expired {
-		h.beginCarrierShutdown(carrier)
-	}
-	for _, probe := range carriers {
-		if err := probe.carrier.wire.SendSpine(link.SpineFrame{
-			Kind: link.SpineProbe, Nonce: probe.nonce,
-		}); err != nil {
-			h.beginCarrierShutdown(probe.carrier)
-		}
-	}
 }
 
-// renewLeaseOnProbeReply renews only when the reply answers the probe this host
+// appendOutstandingProbe records a freshly sent probe, keeping only as many as
+// one lease window can hold. Anything older than that cannot renew a lease that
+// has already expired, so remembering it would only grow the list.
+func (h *Host) appendOutstandingProbe(probes []string, nonce string) []string {
+	probes = append(probes, nonce)
+	if depth := h.outstandingProbeDepth(); len(probes) > depth {
+		probes = probes[len(probes)-depth:]
+	}
+	return probes
+}
+
+func (h *Host) outstandingProbeDepth() int {
+	depth := int(h.cfg.LeaseTTL / defaultProbeInterval)
+	if depth < 1 {
+		return 1
+	}
+	return depth
+}
+
+// renewLeaseOnProbeReply renews only when the reply answers a probe this host
 // actually sent.
 //
 // The lease attests a round trip. Anything the device sends proves only that
@@ -258,6 +319,10 @@ func (h *Host) probeCarriers() {
 // whose downstream direction is dead online forever: it would go on pulling and
 // talking while every frame this host sends is lost, and the daemon could never
 // be replaced because a current carrier is already recorded.
+//
+// Any still-outstanding probe counts, not just the newest. A reply that took
+// longer than the probe interval is late, not false — the round trip it proves
+// really did happen.
 func (h *Host) renewLeaseOnProbeReply(carrier *carrierRow, nonce string) {
 	if carrier == nil || nonce == "" {
 		return
@@ -265,10 +330,13 @@ func (h *Host) renewLeaseOnProbeReply(carrier *carrierRow, nonce string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	row := h.daemons[carrier.daemonID]
-	if row == nil || row.current != carrier || carrier.probeNonce != nonce {
+	if row == nil || row.current != carrier {
 		return
 	}
-	carrier.probeNonce = ""
+	if !slices.Contains(carrier.outstandingProbes, nonce) {
+		return
+	}
+	carrier.outstandingProbes = nil
 	carrier.lastSeen = h.now()
 }
 
@@ -398,6 +466,7 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		coordLocks:  make(map[channel.ID]*coordGate),
 		coordTasks:  make(map[channel.ID]*coordTask),
 		lastSeen:    h.now(),
+		planWake:    make(chan struct{}, 1),
 	}
 	if err := h.admit(carrier); err != nil {
 		class := link.CarrierRetryable
@@ -472,14 +541,24 @@ func (h *Host) admit(carrier *carrierRow) error {
 // stays until the lanes it owned have collected.
 func (h *Host) runCarrier(carrier *carrierRow) {
 	var readers sync.WaitGroup
-	readers.Add(2)
+	spineDone := make(chan struct{})
+	readers.Add(4)
 	go func() {
 		defer readers.Done()
+		defer close(spineDone)
 		h.readSpine(carrier)
 	}()
 	go func() {
 		defer readers.Done()
 		h.acceptStreams(carrier)
+	}()
+	go func() {
+		defer readers.Done()
+		h.answerPlanPulls(carrier, spineDone)
+	}()
+	go func() {
+		defer readers.Done()
+		h.superviseLease(carrier, spineDone)
 	}()
 	readers.Wait()
 	// A natural disconnect reaches shutdown here; a shutdown decided elsewhere
@@ -501,7 +580,7 @@ func (h *Host) readSpine(carrier *carrierRow) {
 		}
 		switch frame.Kind {
 		case link.SpineCompartmentPlanPull:
-			h.answerCompartmentPlan(carrier, frame.Nonce)
+			askForPlanAnswer(carrier, frame.Nonce)
 		case link.SpineProbe:
 			if carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineProbeReply, Nonce: frame.Nonce}) != nil {
 				return
@@ -512,6 +591,40 @@ func (h *Host) readSpine(carrier *carrierRow) {
 		default:
 			_ = carrier.wire.Close()
 			return
+		}
+	}
+}
+
+// askForPlanAnswer hands one pull to this carrier's answering worker and
+// returns immediately, so the spine reader goes straight back to reading.
+func askForPlanAnswer(carrier *carrierRow, nonce string) {
+	carrier.mu.Lock()
+	carrier.planNonce = nonce
+	carrier.planAsked = true
+	carrier.mu.Unlock()
+	select {
+	case carrier.planWake <- struct{}{}:
+	default:
+	}
+}
+
+// answerPlanPulls answers this carrier's pulls, one at a time, until its spine
+// reader has ended. Answering the newest pull is always right: the device
+// issues a second one only after giving up on the first, so a superseded nonce
+// has no waiter left to satisfy.
+func (h *Host) answerPlanPulls(carrier *carrierRow, spineDone <-chan struct{}) {
+	for {
+		select {
+		case <-spineDone:
+			return
+		case <-carrier.planWake:
+		}
+		carrier.mu.Lock()
+		nonce, asked := carrier.planNonce, carrier.planAsked
+		carrier.planAsked = false
+		carrier.mu.Unlock()
+		if asked {
+			h.answerCompartmentPlan(carrier, nonce)
 		}
 	}
 }

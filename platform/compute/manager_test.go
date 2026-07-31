@@ -115,10 +115,11 @@ func TestCompartmentBuildsAndClosesOnlyByExplicitCommand(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+	home := t.TempDir()
 	go func() {
 		done <- Run(ctx, Config{
 			ServerWS:   "ws" + strings.TrimPrefix(server.URL, "http"),
-			Credential: "secret", AtollHome: t.TempDir(),
+			Credential: "secret", AtollHome: home,
 			BuildCompartment: func(string, string) (CompartmentResources, error) {
 				return CompartmentResources{Factories: emptyFactories{}}, nil
 			},
@@ -177,10 +178,11 @@ func TestOneCarrierServicesTwoCompartmentsAndDetachIsLocal(t *testing.T) {
 	closes := map[string]int{}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+	home := t.TempDir()
 	go func() {
 		done <- Run(ctx, Config{
 			ServerWS:   "ws" + strings.TrimPrefix(server.URL, "http"),
-			Credential: "secret", AtollHome: t.TempDir(),
+			Credential: "secret", AtollHome: home,
 			BuildCompartment: func(chID, _ string) (CompartmentResources, error) {
 				mu.Lock()
 				builds[chID]++
@@ -338,10 +340,11 @@ func TestCarrier_TombstoneStopsRedial(t *testing.T) {
 	}))
 	defer server.Close()
 	done := make(chan error, 1)
+	home := t.TempDir()
 	go func() {
 		done <- Run(t.Context(), Config{
 			ServerWS:   "ws" + strings.TrimPrefix(server.URL, "http"),
-			Credential: "secret", AtollHome: t.TempDir(),
+			Credential: "secret", AtollHome: home,
 			BuildCompartment: func(string, string) (CompartmentResources, error) {
 				return CompartmentResources{Factories: emptyFactories{}}, nil
 			},
@@ -492,10 +495,16 @@ func startTestCompute(
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+	// t.TempDir registers its RemoveAll the first time it is called, and
+	// cleanups run last-registered-first. Calling it inside the goroutine below
+	// races that registration against the shutdown cleanup right after: lose it
+	// and the tree is removed while this compute is still running, which then
+	// recreates directories under it and fails the removal.
+	home := t.TempDir()
 	go func() {
 		done <- Run(ctx, Config{
 			ServerWS:   "ws" + strings.TrimPrefix(server.URL, "http"),
-			Credential: "secret", AtollHome: t.TempDir(), BuildCompartment: builder,
+			Credential: "secret", AtollHome: home, BuildCompartment: builder,
 		})
 	}()
 	t.Cleanup(func() {
