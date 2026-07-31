@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +107,79 @@ func TestCancelForwardOnWedgedStreamIsBoundedAndLocal(t *testing.T) {
 	}
 }
 
+type blockingActorCloseConn struct {
+	readWake     chan struct{}
+	closeStarted chan struct{}
+	closeRelease chan struct{}
+	wakeOnce     sync.Once
+}
+
+func newBlockingActorCloseConn() *blockingActorCloseConn {
+	return &blockingActorCloseConn{
+		readWake: make(chan struct{}), closeStarted: make(chan struct{}),
+		closeRelease: make(chan struct{}),
+	}
+}
+
+func (c *blockingActorCloseConn) Read([]byte) (int, error) {
+	<-c.readWake
+	return 0, errors.New("injected actor read wake")
+}
+func (*blockingActorCloseConn) Write([]byte) (int, error) {
+	return 0, errors.New("injected actor write failure")
+}
+func (c *blockingActorCloseConn) Close() error {
+	close(c.closeStarted)
+	<-c.closeRelease
+	return nil
+}
+func (*blockingActorCloseConn) LocalAddr() net.Addr  { return testAddr("local") }
+func (*blockingActorCloseConn) RemoteAddr() net.Addr { return testAddr("remote") }
+func (*blockingActorCloseConn) SetDeadline(time.Time) error {
+	return nil
+}
+func (c *blockingActorCloseConn) SetReadDeadline(time.Time) error {
+	c.wakeOnce.Do(func() { close(c.readWake) })
+	return nil
+}
+func (*blockingActorCloseConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestActorWriteFailureReturnsBeforeReaderOwnedClose(t *testing.T) {
+	physical := newBlockingActorCloseConn()
+	conn := newActorStreamConn(physical, nil)
+	endpoint := newServerActorEndpoint(
+		context.Background(), "actor-a", "attempt-a", conn, nil, serverActorHandlers{},
+	)
+	runDone := make(chan struct{})
+	go func() {
+		_ = endpoint.Run(context.Background())
+		close(runDone)
+	}()
+
+	started := time.Now()
+	if err := endpoint.Deliver(&message.Envelope{ID: "message-a"}); err == nil {
+		t.Fatal("injected actor write failure reported success")
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("actor send waited for physical Close: %v", elapsed)
+	}
+	select {
+	case <-physical.closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("actor reader did not take ownership of physical Close")
+	}
+	if !conn.writeMu.TryLock() {
+		t.Fatal("physical Close started while actor write lock was held")
+	}
+	conn.writeMu.Unlock()
+	close(physical.closeRelease)
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("actor reader did not finish physical collection")
+	}
+}
+
 func TestServeStreamsDoesNotLetHalfOpenHeaderBlockSibling(t *testing.T) {
 	serverTransport, clientTransport := net.Pipe()
 	serverSession, err := yamux.Server(serverTransport, linkYamuxConfig())
@@ -196,6 +270,103 @@ func TestServeStreamsDoesNotLetHalfOpenHeaderBlockSibling(t *testing.T) {
 	case <-serveDone:
 	case <-time.After(time.Second):
 		t.Fatal("stream workers did not join after carrier close")
+	}
+}
+
+func TestServeStreamsBoundsHalfOpenAdmissionWorkers(t *testing.T) {
+	serverTransport, clientTransport := net.Pipe()
+	serverSession, err := yamux.Server(serverTransport, linkYamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientSession, err := yamux.Client(clientTransport, linkYamuxConfig())
+	if err != nil {
+		_ = serverSession.Close()
+		t.Fatal(err)
+	}
+	carrier := &ServerCarrier{newRawCarrier(serverSession, nil, nil)}
+	t.Cleanup(func() {
+		_ = carrier.Close()
+		_ = clientSession.Close()
+	})
+
+	handled := make(chan DeviceStreamHeader, 1)
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- carrier.ServeStreams(func(conn net.Conn, header DeviceStreamHeader) {
+			defer conn.Close()
+			handled <- header
+		})
+	}()
+
+	halfOpen := make([]net.Conn, 0, maxStreamAdmissionWorkers)
+	for range maxStreamAdmissionWorkers {
+		conn, err := clientSession.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		halfOpen = append(halfOpen, conn)
+	}
+	waitUntil := func(predicate func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for !predicate() {
+			if time.Now().After(deadline) {
+				t.Fatal("condition did not converge")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitUntil(func() bool {
+		return len(carrier.streamWorkerSlots) == maxStreamAdmissionWorkers
+	})
+
+	overflow, err := clientSession.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = overflow.SetReadDeadline(time.Now().Add(time.Second))
+	var one [1]byte
+	if _, err := overflow.Read(one[:]); err == nil {
+		t.Fatal("stream above admission worker limit remained open")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("stream above admission worker limit was not promptly rejected")
+	}
+	_ = overflow.Close()
+	if workers := len(carrier.streamWorkerSlots); workers > maxStreamAdmissionWorkers {
+		t.Fatalf("admission workers = %d, limit = %d", workers, maxStreamAdmissionWorkers)
+	}
+
+	_ = halfOpen[0].Close()
+	waitUntil(func() bool {
+		return len(carrier.streamWorkerSlots) < maxStreamAdmissionWorkers
+	})
+	healthy, err := clientSession.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStreamJSON(healthy, DeviceStreamHeader{
+		Kind: DeviceStreamActor, Channel: "channel-a", LaneGen: "generation-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case header := <-handled:
+		if header.Channel != "channel-a" {
+			t.Fatalf("handled header = %+v", header)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("healthy stream was not admitted after a worker slot was released")
+	}
+	for _, conn := range halfOpen[1:] {
+		_ = conn.Close()
+	}
+	_ = healthy.Close()
+	_ = carrier.Close()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("bounded admission workers did not join on carrier close")
 	}
 }
 

@@ -67,15 +67,6 @@ func (l *ClientActorLane) OpenActorStream(
 		return nil, err
 	}
 	codec := ipc.NewCodec(stream, stream)
-	raw, err := json.Marshal(ipc.HandshakePayload{LeaseID: string(id), AttemptKey: string(key)})
-	if err != nil {
-		_ = stream.Close()
-		return nil, err
-	}
-	if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: raw}); err != nil {
-		_ = stream.Close()
-		return nil, err
-	}
 	writer := NewRemoteWriter(codec)
 	accessRelay := newRelayClient(codec, ipc.KindAccess)
 	scheduleRelay := newRelayClient(codec, ipc.KindSchedule)
@@ -87,7 +78,19 @@ func (l *ClientActorLane) OpenActorStream(
 		cancel:   func(requestID message.ID) { l.Host.CancelRequest(id, requestID) },
 		done:     make(chan struct{}),
 	}
+	// The reader is also the actor stream's physical supervisor. Start it before
+	// the handshake write so every write-failure path can wake an existing
+	// collector instead of synchronously waiting in Close.
 	go readDeviceActorStream(actorStream, l.Logger)
+	raw, err := json.Marshal(ipc.HandshakePayload{LeaseID: string(id), AttemptKey: string(key)})
+	if err != nil {
+		failActorStream(stream)
+		return nil, err
+	}
+	if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: raw}); err != nil {
+		failActorStream(stream)
+		return nil, err
+	}
 	resource := ActorStreamResource{
 		Arms: RawActorArms{
 			Pen: writer, Access: &remoteResourceHandle{

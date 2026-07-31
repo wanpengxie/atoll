@@ -25,12 +25,13 @@ import (
 )
 
 const (
-	ProtocolVersion         = 3
-	StreamHeaderReadTimeout = 30 * time.Second
-	LaneRPCTimeout          = 20 * time.Second
-	streamWriteBudget       = 10 * time.Second
-	maxStreamHeaderBytes    = 64 << 10
-	maxControlFrameBytes    = 1 << 24
+	ProtocolVersion           = 3
+	StreamHeaderReadTimeout   = 30 * time.Second
+	LaneRPCTimeout            = 20 * time.Second
+	streamWriteBudget         = 10 * time.Second
+	maxStreamHeaderBytes      = 64 << 10
+	maxControlFrameBytes      = 1 << 24
+	maxStreamAdmissionWorkers = 64
 )
 
 var (
@@ -150,6 +151,7 @@ type actorStreamConn struct {
 	logger *slog.Logger
 
 	writeMu sync.Mutex
+	failed  atomic.Bool
 	// budget overrides streamWriteBudget in tests.
 	budget time.Duration
 }
@@ -158,9 +160,30 @@ func newActorStreamConn(conn net.Conn, logger *slog.Logger) *actorStreamConn {
 	return &actorStreamConn{Conn: conn, logger: logger}
 }
 
+func wakeActorStreamReader(conn net.Conn) {
+	if conn != nil {
+		_ = conn.SetReadDeadline(time.Unix(1, 0))
+	}
+}
+
+func failActorStream(conn net.Conn) {
+	if owner, ok := conn.(*actorStreamConn); ok {
+		owner.failed.Store(true)
+		wakeActorStreamReader(owner.Conn)
+		return
+	}
+	wakeActorStreamReader(conn)
+}
+
 func (c *actorStreamConn) Write(payload []byte) (int, error) {
+	if c == nil || c.failed.Load() {
+		return 0, errLinkClosed
+	}
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	if c.failed.Load() {
+		c.writeMu.Unlock()
+		return 0, errLinkClosed
+	}
 	budget := c.budget
 	if budget <= 0 {
 		budget = streamWriteBudget
@@ -169,12 +192,27 @@ func (c *actorStreamConn) Write(payload []byte) (int, error) {
 	n, err := c.Conn.Write(payload)
 	_ = c.Conn.SetWriteDeadline(time.Time{})
 	if err != nil {
+		c.failed.Store(true)
+	}
+	c.writeMu.Unlock()
+	if err != nil {
 		if c.logger != nil {
 			c.logger.Warn("link.actor_stream_write_failed", "error", err)
 		}
-		_ = c.Conn.Close()
+		// The established actor reader is this stream's physical supervisor.
+		// Wake it after publishing the failed level; it owns Close, which may
+		// wait for yamux's connection write timeout.
+		wakeActorStreamReader(c.Conn)
 	}
 	return n, err
+}
+
+func (c *actorStreamConn) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.failed.Store(true)
+	return c.Conn.Close()
 }
 
 type yamuxLogWriter struct{ logger *slog.Logger }
@@ -469,8 +507,9 @@ type rawCarrier struct {
 	closeOnce sync.Once
 	done      chan struct{}
 
-	streamWorkerMu sync.Mutex
-	streamWorkers  sync.WaitGroup
+	streamWorkerMu    sync.Mutex
+	streamWorkers     sync.WaitGroup
+	streamWorkerSlots chan struct{}
 }
 
 func newRawCarrier(session *yamux.Session, spine net.Conn, logger *slog.Logger) *rawCarrier {
@@ -480,7 +519,8 @@ func newRawCarrier(session *yamux.Session, spine net.Conn, logger *slog.Logger) 
 	c := &rawCarrier{
 		session: session, spine: spine,
 		spineDecoder: newBoundedJSONDecoder(spine, maxControlFrameBytes), logger: logger,
-		done: make(chan struct{}),
+		done:              make(chan struct{}),
+		streamWorkerSlots: make(chan struct{}, maxStreamAdmissionWorkers),
 	}
 	return c
 }
@@ -582,8 +622,18 @@ func (c *rawCarrier) beginStreamWorker() bool {
 	if c.sealed.Load() {
 		return false
 	}
-	c.streamWorkers.Add(1)
-	return true
+	select {
+	case c.streamWorkerSlots <- struct{}{}:
+		c.streamWorkers.Add(1)
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *rawCarrier) endStreamWorker() {
+	<-c.streamWorkerSlots
+	c.streamWorkers.Done()
 }
 
 // serveStreams keeps Accept independent from per-stream header and actor
@@ -600,11 +650,14 @@ func (c *rawCarrier) serveStreams(handle func(net.Conn, DeviceStreamHeader)) err
 		}
 		if !c.beginStreamWorker() {
 			_ = conn.Close()
-			c.streamWorkers.Wait()
-			return errLinkClosed
+			if c.sealed.Load() {
+				c.streamWorkers.Wait()
+				return errLinkClosed
+			}
+			continue
 		}
 		go func() {
-			defer c.streamWorkers.Done()
+			defer c.endStreamWorker()
 			conn, header, err := c.adoptAccepted(conn)
 			if err != nil {
 				return

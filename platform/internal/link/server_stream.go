@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"net"
 	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -43,7 +43,7 @@ type serverActorHandlers struct {
 type serverActorEndpoint struct {
 	id       actor.ActorID
 	key      actorhost.AttemptKey
-	conn     io.ReadWriteCloser
+	conn     net.Conn
 	codec    *ipc.Codec
 	handlers serverActorHandlers
 
@@ -58,7 +58,7 @@ func newServerActorEndpoint(
 	parent context.Context,
 	id actor.ActorID,
 	key actorhost.AttemptKey,
-	conn io.ReadWriteCloser,
+	conn net.Conn,
 	codec *ipc.Codec,
 	handlers serverActorHandlers,
 ) *serverActorEndpoint {
@@ -131,7 +131,10 @@ func (s *serverActorEndpoint) send(frame ipc.Frame) error {
 	default:
 	}
 	if err := s.codec.Write(frame); err != nil {
-		_ = s.Close()
+		// actorStreamConn has already published the write failure and woken this
+		// endpoint's reader. The reader owns physical Close so this caller is not
+		// held behind yamux's connection write timeout.
+		failActorStream(s.conn)
 		return err
 	}
 	return nil

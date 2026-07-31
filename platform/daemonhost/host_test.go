@@ -319,6 +319,54 @@ func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
 	}
 }
 
+func TestEnsureLaneRetiresOldExactObjectWithoutDeletingReplacement(t *testing.T) {
+	host := New(Config{ScanInterval: time.Hour})
+	defer host.Close()
+	bundle := platform.DaemonMembrane{
+		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	}
+	host.Register("a", 1, bundle)
+	carrier := dialTestCarrier(t, host)
+	host.Scan()
+	g1 := adoptAndSuperviseTestLane(t, carrier)
+	host.mu.RLock()
+	current := host.daemons["daemon-a"].current
+	host.mu.RUnlock()
+	waitFor(t, func() bool {
+		current.mu.Lock()
+		defer current.mu.Unlock()
+		lane := current.lanes["a"]
+		return lane != nil && lane.stream.Gen == g1.Gen
+	})
+	current.ensureLane("a", membraneRow{generation: 2, bundle: bundle})
+	g2 := adoptAndSuperviseTestLane(t, carrier)
+	t.Cleanup(func() {
+		g2.RetireLogical()
+		select {
+		case <-g2.PhysicalDone():
+		case <-time.After(time.Second):
+			t.Error("replacement lane did not complete physical collection")
+		}
+	})
+
+	select {
+	case <-g1.Done():
+	case <-time.After(time.Second):
+		t.Fatal("old lane was not retired after replacement installation")
+	}
+	current.mu.Lock()
+	replacement := current.lanes["a"]
+	current.mu.Unlock()
+	if replacement == nil {
+		t.Fatal("old lane retirement deleted the replacement row")
+	}
+	if replacement.stream.Gen != g2.Gen || replacement.stream.Retired() {
+		t.Fatalf("current row = (%q, retired=%v), replacement = %q",
+			replacement.stream.Gen, replacement.stream.Retired(), g2.Gen)
+	}
+}
+
 func TestRetireLane_DeletesRowSynchronously(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close()
