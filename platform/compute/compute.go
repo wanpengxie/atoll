@@ -28,7 +28,6 @@ const (
 	redialInitialBackoff   = time.Second
 	redialMaxBackoff       = 30 * time.Second
 	carrierAcceptTimeout   = 10 * time.Second
-	compartmentJoinTimeout = 30 * time.Second
 
 	// compartmentPlanInterval is the floor on how stale this device's
 	// compartment set can be with no poke at all. Pokes only buy latency; this

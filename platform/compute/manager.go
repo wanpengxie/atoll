@@ -21,6 +21,11 @@ import (
 
 var laneRPCTimeout = link.LaneRPCTimeout
 
+// compartmentJoinTimeout bounds one compartment's teardown. Every step of that
+// teardown runs under it, including the ones that accept no context of their
+// own — teardown holds the coordinate out of service while it runs.
+var compartmentJoinTimeout = 30 * time.Second
+
 type compartmentManager struct {
 	ctx    context.Context
 	cfg    Config
@@ -692,6 +697,25 @@ func ensureDirectory(path string) error {
 	return nil
 }
 
+// withinJoinBudget runs a teardown step that takes no context under the
+// compartment's join budget.
+//
+// The step keeps running if the budget expires — nothing here can interrupt a
+// call that does not accept cancellation — but the teardown stops waiting and
+// says which step it gave up on. Teardown holds this coordinate out of service
+// while it runs, so a step outside the budget stalls the coordinate for as long
+// as it takes, which is exactly what the budget exists to prevent.
+func withinJoinBudget(ctx context.Context, step string, run func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("compute: %s exceeded the compartment join budget", step)
+	}
+}
+
 func rollbackCompartment(
 	host *actorhost.HostSupervisor,
 	outbound *DaemonOutbound,
@@ -708,13 +732,15 @@ func rollbackCompartment(
 		rollbackErr = errors.Join(rollbackErr, host.Close(ctx))
 	}
 	if outbound != nil {
-		rollbackErr = errors.Join(rollbackErr, outbound.CloseResidual())
+		rollbackErr = errors.Join(rollbackErr,
+			withinJoinBudget(ctx, "outbound residual close", outbound.CloseResidual))
 	}
 	if cancel != nil {
 		cancel()
 	}
 	if resources.Close != nil {
-		rollbackErr = errors.Join(rollbackErr, resources.Close())
+		rollbackErr = errors.Join(rollbackErr,
+			withinJoinBudget(ctx, "compartment resource close", resources.Close))
 	}
 	return rollbackErr
 }
@@ -830,7 +856,8 @@ func (c *compartment) close() {
 		closeErr = errors.Join(closeErr, host.Close(ctx))
 	}
 	if outbound != nil {
-		closeErr = errors.Join(closeErr, outbound.CloseResidual())
+		closeErr = errors.Join(closeErr,
+			withinJoinBudget(ctx, "outbound residual close", outbound.CloseResidual))
 	}
 	if cancel != nil {
 		cancel()
@@ -843,7 +870,8 @@ func (c *compartment) close() {
 		}
 	}
 	if resources.Close != nil {
-		closeErr = errors.Join(closeErr, resources.Close())
+		closeErr = errors.Join(closeErr,
+			withinJoinBudget(ctx, "compartment resource close", resources.Close))
 	}
 	if lane != nil {
 		lane.retireLogical()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -465,5 +466,66 @@ func TestStreamOpenIsBoundedAndRefusesInsteadOfQueueing(t *testing.T) {
 	_ = carrier.Close()
 	waitForLink(t, "closing the carrier did not free the open seats", func() bool {
 		return carrier.openInFlight.Load() == 0
+	})
+}
+
+type admissionLogCapture struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (c *admissionLogCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *admissionLogCapture) Handle(_ context.Context, record slog.Record) error {
+	c.mu.Lock()
+	c.messages = append(c.messages, record.Message)
+	c.mu.Unlock()
+	return nil
+}
+func (c *admissionLogCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *admissionLogCapture) WithGroup(string) slog.Handler      { return c }
+func (c *admissionLogCapture) has(message string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, seen := range c.messages {
+		if seen == message {
+			return true
+		}
+	}
+	return false
+}
+
+// TestStreamAdmissionAtCapacitySaysSo pins the other half of a ceiling: turning
+// a stream away is correct, doing it silently is not. From the outside a carrier
+// sitting at its admission ceiling is indistinguishable from a slow peer, and
+// the only place that distinction exists is here.
+func TestStreamAdmissionAtCapacitySaysSo(t *testing.T) {
+	local, remote := net.Pipe()
+	peer, err := yamux.Client(remote, linkYamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	session, err := yamux.Server(local, linkYamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spine, spinePeer := net.Pipe()
+	t.Cleanup(func() { _ = spinePeer.Close() })
+	capture := &admissionLogCapture{}
+	carrier := newRawCarrier(session, spine, slog.New(capture))
+	t.Cleanup(func() { _ = carrier.Close() })
+
+	for i := 0; i < maxStreamAdmissionWorkers; i++ {
+		carrier.streamWorkerSlots <- struct{}{}
+	}
+	go func() { _ = carrier.serveStreams(nil) }()
+
+	stream, err := peer.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stream.Close() })
+	waitForLink(t, "a stream turned away at the ceiling was never reported", func() bool {
+		return capture.has("link.stream_admission_busy")
 	})
 }

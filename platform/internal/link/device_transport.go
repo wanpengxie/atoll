@@ -721,6 +721,11 @@ func (c *rawCarrier) serveStreams(handle func(net.Conn, DeviceStreamHeader)) err
 				c.streamWorkers.Wait()
 				return errLinkClosed
 			}
+			// Refusing is correct; refusing silently is not. A carrier sitting
+			// at its admission ceiling looks exactly like a slow peer from the
+			// outside, and the outbound ceiling says so too.
+			c.logger.Warn("link.stream_admission_busy",
+				"capacity", maxStreamAdmissionWorkers)
 			continue
 		}
 		go func() {

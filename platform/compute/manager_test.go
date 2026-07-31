@@ -1218,3 +1218,46 @@ func TestCarrierDownDoesNotWaitForLaneCollection(t *testing.T) {
 		t.Fatal("carrierDown returned with the lane still installed")
 	}
 }
+
+// TestTeardownStepsWithoutCancellationStayInsideTheJoinBudget pins the budget to
+// the whole teardown, not to the steps that happen to accept a context. The
+// compartment resources handed in by the host close through a plain func() error
+// — arbitrary code this package cannot interrupt — and teardown holds the
+// coordinate out of service the entire time it runs.
+func TestTeardownStepsWithoutCancellationStayInsideTheJoinBudget(t *testing.T) {
+	previous := compartmentJoinTimeout
+	compartmentJoinTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { compartmentJoinTimeout = previous })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	manager := newCompartmentManager(
+		context.Background(), Config{}, slog.New(slog.DiscardHandler),
+	)
+	cell := &compartment{
+		manager: manager, chID: "a", stopBuild: make(chan struct{}),
+		resources: CompartmentResources{Close: func() error { <-release; return nil }},
+	}
+	manager.cells["a"] = cell
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		cell.close()
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("teardown waited on a close step that accepts no cancellation")
+	}
+
+	cell.mu.Lock()
+	condemned, reason := cell.condemned, cell.reason
+	cell.mu.Unlock()
+	if !condemned {
+		t.Fatal("teardown gave up on a step and still reported a clean removal")
+	}
+	if !strings.Contains(reason, "join budget") {
+		t.Fatalf("teardown reason=%q, want the step it gave up on", reason)
+	}
+}
