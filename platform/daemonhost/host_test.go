@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -773,4 +774,335 @@ func TestCoordinateExecutorsDoNotLetBlockedABarB(t *testing.T) {
 		lane.CollectPhysical()
 	}()
 	releaseOnce.Do(func() { close(release) })
+}
+
+type testClock struct{ nanos atomic.Int64 }
+
+func newTestClock(at time.Time) *testClock {
+	clock := &testClock{}
+	clock.nanos.Store(at.UnixNano())
+	return clock
+}
+
+func (c *testClock) now() time.Time          { return time.Unix(0, c.nanos.Load()).UTC() }
+func (c *testClock) advance(d time.Duration) { c.nanos.Add(int64(d)) }
+
+// spineBarrier proves this host has read everything the device sent before it.
+// A device-initiated probe is answered inline by the spine reader, so the
+// matching reply can only come back after the frames queued ahead of it were
+// handled.
+func spineBarrier(t *testing.T, carrier *link.ClientCarrier) {
+	t.Helper()
+	nonce := "barrier-" + uuid.NewString()
+	if err := carrier.SendSpine(link.SpineFrame{Kind: link.SpineProbe, Nonce: nonce}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 64; i++ {
+		reply := readTestSpine(t, carrier)
+		if reply.Kind == link.SpineProbeReply && reply.Nonce == nonce {
+			return
+		}
+	}
+	t.Fatal("the spine barrier never came back")
+}
+
+func carrierLastSeen(t *testing.T, host *Host, daemonID string) time.Time {
+	t.Helper()
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	row := host.daemons[daemonID]
+	if row == nil || row.current == nil {
+		t.Fatal("no current carrier to read the lease from")
+	}
+	return row.current.lastSeen
+}
+
+// TestDeviceTrafficDoesNotRenewTheLease pins what the lease attests: a round
+// trip. Everything the device sends proves only that its own send path works.
+// A carrier whose downstream direction is dead would otherwise stay recorded as
+// current forever — it keeps talking, this host keeps believing it, and every
+// frame this host sends is lost while no replacement can take the daemon.
+func TestDeviceTrafficDoesNotRenewTheLease(t *testing.T) {
+	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	host := New(Config{ScanInterval: time.Hour, LeaseTTL: time.Second, Now: clock.now})
+	defer host.Close()
+	carrier := dialTestCarrier(t, host)
+	if !host.DaemonOnline("daemon-a") {
+		t.Fatal("carrier was not admitted")
+	}
+
+	// Well-formed traffic, acted on by this host, arriving after the lease
+	// would have run out. It is not evidence of a round trip.
+	clock.advance(2 * time.Second)
+	spineBarrier(t, carrier)
+
+	host.probeCarriers()
+	waitFor(t, func() bool { return !host.DaemonOnline("daemon-a") })
+}
+
+// TestOnlyTheMatchingProbeReplyRenewsTheLease is the other half: the reply that
+// answers the probe this host actually sent does renew, and one that answers
+// nothing does not.
+func TestOnlyTheMatchingProbeReplyRenewsTheLease(t *testing.T) {
+	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	host := New(Config{ScanInterval: time.Hour, LeaseTTL: time.Second, Now: clock.now})
+	defer host.Close()
+	carrier := dialTestCarrier(t, host)
+	admitted := carrierLastSeen(t, host, "daemon-a")
+
+	clock.advance(500 * time.Millisecond)
+	host.probeCarriers()
+	probe := readTestSpine(t, carrier)
+	if probe.Kind != link.SpineProbe || probe.Nonce == "" {
+		t.Fatalf("host sent %+v, want a probe carrying a nonce", probe)
+	}
+
+	if err := carrier.SendSpine(link.SpineFrame{
+		Kind: link.SpineProbeReply, Nonce: "answers-nothing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	spineBarrier(t, carrier)
+	if got := carrierLastSeen(t, host, "daemon-a"); !got.Equal(admitted) {
+		t.Fatal("a probe reply that answered no outstanding probe renewed the lease")
+	}
+
+	if err := carrier.SendSpine(link.SpineFrame{
+		Kind: link.SpineProbeReply, Nonce: probe.Nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return carrierLastSeen(t, host, "daemon-a").After(admitted) })
+
+	// 1.2s since admission, 0.7s since the answered probe: the renewal is what
+	// keeps this carrier alive.
+	clock.advance(700 * time.Millisecond)
+	host.probeCarriers()
+	if !host.DaemonOnline("daemon-a") {
+		t.Fatal("a carrier that answered this host's probe was reaped anyway")
+	}
+}
+
+// TestClosedHostRefusesCarriersBeforeTheHandshake pins where the refusal
+// happens. Upgrading first and rejecting afterwards spends a websocket on a
+// host that will never serve it, and leaves the caller holding a carrier-level
+// reject in place of an HTTP answer it can attribute.
+func TestClosedHostRefusesCarriersBeforeTheHandshake(t *testing.T) {
+	host := New(Config{ScanInterval: time.Hour})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host.Serve(w, r, "daemon-a")
+	}))
+	defer server.Close()
+	if err := host.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("closed host answered %d, want 503", response.StatusCode)
+	}
+	if !strings.Contains(string(body), "daemon host closed") {
+		t.Fatalf("closed host answered %q with no attribution", strings.TrimSpace(string(body)))
+	}
+
+	carrier, _, err := link.DialDeviceCarrier(
+		t.Context(), "ws"+strings.TrimPrefix(server.URL, "http"), "test", nil)
+	if err == nil {
+		_ = carrier.Close()
+		t.Fatal("a closed host upgraded a carrier")
+	}
+}
+
+// wedgedLaneHost hands back a host with one lane whose reader is parked inside
+// the membrane's Plan. This is the state every decision below has to survive:
+// the reader is not blocked on a read, so retiring the lane cannot wake it, and
+// the physical end of that lane will not be collected until the gate opens.
+type wedgedLaneHost struct {
+	host        *Host
+	carrier     *link.ClientCarrier
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+// unblock lets the parked membrane call return. Cleanup always calls it, so a
+// test that never does cannot leave a goroutine parked in the test process.
+func (w *wedgedLaneHost) unblock() {
+	w.releaseOnce.Do(func() { close(w.release) })
+}
+
+func newWedgedLaneHost(t *testing.T, cfg Config) *wedgedLaneHost {
+	t.Helper()
+	entered := make(chan struct{})
+	var once sync.Once
+	cfg.Present = func(context.Context) ([]channel.ID, error) {
+		return []channel.ID{"channel-a"}, nil
+	}
+	host := New(cfg)
+	wedged := &wedgedLaneHost{host: host, release: make(chan struct{})}
+	release := wedged.release
+	t.Cleanup(func() {
+		wedged.unblock()
+		_ = host.Close()
+	})
+	host.Register("channel-a", 1, platform.DaemonMembrane{
+		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
+			once.Do(func() { close(entered) })
+			<-release
+			return nil, nil
+		},
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	})
+	wedged.carrier = dialTestCarrier(t, host)
+	host.Scan()
+	lane := adoptAndSuperviseTestLane(t, wedged.carrier)
+	if err := lane.Send(link.LaneFrame{
+		Kind: link.LanePlanPull, RequestID: "wedge",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the lane reader never entered the membrane call")
+	}
+	return wedged
+}
+
+// within runs an operation and fails if it has not returned by the deadline. An
+// explicit bound is the point: relying on the package timeout would report a
+// hang without naming which decision hung.
+func within(t *testing.T, what string, budget time.Duration, operation func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		operation()
+	}()
+	select {
+	case <-done:
+	case <-time.After(budget):
+		t.Fatalf("%s did not return within %s while a lane reader was wedged", what, budget)
+	}
+}
+
+// TestRevocationDoesNotWaitOnAWedgedLane pins the boundary between the value
+// decision and the physical collection. Revoking a daemon is a ledger write;
+// making it wait for a lane's reader to notice puts a device's stuck handler in
+// front of an HTTP request that has nothing to do with it.
+func TestRevocationDoesNotWaitOnAWedgedLane(t *testing.T) {
+	wedged := newWedgedLaneHost(t, Config{ScanInterval: time.Hour})
+
+	within(t, "RevokeDaemon", 2*time.Second, func() {
+		wedged.host.RevokeDaemon("daemon-a")
+	})
+
+	if wedged.host.DaemonOnline("daemon-a") {
+		t.Fatal("revocation returned without withdrawing the carrier")
+	}
+	if wedged.host.LaneAttached("daemon-a", "channel-a") {
+		t.Fatal("revocation returned while its lane was still routable")
+	}
+	var revoked bool
+	for _, diagnostic := range wedged.host.Diagnostics("daemon-a") {
+		if diagnostic.Kind == "revoke" {
+			revoked = true
+		}
+	}
+	if !revoked {
+		t.Fatal("revocation returned without recording itself")
+	}
+}
+
+// TestScanAndLeaseSweepDoNotWaitOnAWedgedLane covers the two periodic decisions.
+// They share one goroutine, so either of them blocking stops every daemon in the
+// realm from having lanes opened, reopened, or reaped — not just the stuck one.
+func TestScanAndLeaseSweepDoNotWaitOnAWedgedLane(t *testing.T) {
+	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	var deleted atomic.Bool
+	wedged := newWedgedLaneHost(t, Config{
+		ScanInterval: time.Hour, LeaseTTL: time.Second, Now: clock.now,
+		DaemonFact: func(context.Context, string) DaemonFact {
+			if deleted.Load() {
+				return DaemonDeleted
+			}
+			return DaemonAlive
+		},
+	})
+
+	// The scan now finds this daemon deleted, which routes it into revocation.
+	deleted.Store(true)
+	within(t, "Scan", 2*time.Second, func() { wedged.host.Scan() })
+
+	clock.advance(2 * time.Second)
+	within(t, "probeCarriers", 2*time.Second, func() { wedged.host.probeCarriers() })
+}
+
+// TestCarrierSupervisorJoinsItsWedgedLane is the other half: nobody on a
+// decision path waits, but the lane's reader still has an owner. The carrier's
+// supervisor is it, and Close joins the supervisors.
+func TestCarrierSupervisorJoinsItsWedgedLane(t *testing.T) {
+	wedged := newWedgedLaneHost(t, Config{ScanInterval: time.Hour})
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		_ = wedged.host.Close()
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close reported everything joined while a lane reader was still parked")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	wedged.unblock()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close never completed after the wedged reader was released")
+	}
+}
+
+// TestFailedLaneOpenReturnsItsPhysicalTicket pins the accounting of the ticket
+// that lets a carrier's supervisor join its lanes. The ticket is taken before
+// the open, so it covers the whole span; an open that never produces a lane
+// must hand it straight back. A ticket returned zero times is not a leak that
+// shows up as a leak — it is a supervisor that never finishes, and with it a
+// Close that never returns.
+func TestFailedLaneOpenReturnsItsPhysicalTicket(t *testing.T) {
+	host := New(Config{ScanInterval: time.Hour})
+	t.Cleanup(func() { _ = host.Close() })
+	// A carrier with no transport behind it: every open fails immediately,
+	// which is the branch under test.
+	carrier := &carrierRow{
+		host: host, daemonID: "daemon-a", gen: "g1", wire: &link.ServerCarrier{},
+		lanes:       make(map[channel.ID]*serverLane),
+		retirements: make(map[channel.ID]uint64),
+		coordLocks:  make(map[channel.ID]*coordGate),
+		coordTasks:  make(map[channel.ID]*coordTask),
+	}
+	membrane := membraneRow{generation: 1, bundle: platform.DaemonMembrane{
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	}}
+	for i := 0; i < 4; i++ {
+		carrier.ensureLane(channel.ID(fmt.Sprintf("channel-%d", i)), membrane)
+	}
+
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		carrier.physical.Wait()
+	}()
+	select {
+	case <-joined:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a lane open that produced nothing kept its ticket, so this carrier can never be joined")
+	}
 }

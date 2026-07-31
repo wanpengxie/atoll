@@ -477,9 +477,9 @@ func TestCompartment_RebuildsAfterCloseWhenRebound(t *testing.T) {
 func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 	run := func(t *testing.T, finalBound bool, replacePending bool) int32 {
 		host := daemonhost.New(daemonhost.Config{
-		ScanInterval: time.Hour,
-		Present:      testPresent("channel-a", "a", "b"),
-	})
+			ScanInterval: time.Hour,
+			Present:      testPresent("channel-a", "a", "b"),
+		})
 		t.Cleanup(func() { _ = host.Close() })
 		var bound atomic.Bool
 		bound.Store(true)
@@ -1172,5 +1172,49 @@ func TestGoneSendFailureDoesNotBlockCompartmentRemoval(t *testing.T) {
 	}
 	if _, exists := manager.cells["a"]; exists {
 		t.Fatal("failed gone send kept the dead compartment in the manager")
+	}
+}
+
+// TestCarrierDownDoesNotWaitForLaneCollection pins reconnection to the value
+// decision alone. Closing the carrier closes its session, so the physical end
+// is already reclaimed; what remains is each lane reader noticing, and a reader
+// parked inside a local storage call may not notice for a long time. Waiting
+// for it here would put one stuck compartment in front of the whole device
+// coming back.
+//
+// The lane below is installed without a reader, which is the deterministic form
+// of that hazard: nothing will ever collect it.
+func TestCarrierDownDoesNotWaitForLaneCollection(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	lane := fixture.lane(fixture.carrier, openedFirst)
+	fixture.cell.mu.Lock()
+	fixture.cell.lane = lane
+	fixture.cell.latestLaneGen = openedFirst
+	fixture.cell.mu.Unlock()
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		fixture.manager.carrierDown(fixture.carrier)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("carrierDown waited on a lane that nothing was going to collect")
+	}
+
+	select {
+	case <-lane.stream.PhysicalDone():
+		t.Fatal("the lane was collected after all, so this test proves nothing")
+	default:
+	}
+	fixture.manager.mu.Lock()
+	carrier := fixture.manager.carrier
+	fixture.manager.mu.Unlock()
+	if carrier != nil {
+		t.Fatal("carrierDown returned without withdrawing the carrier")
+	}
+	if installed, _ := fixture.slots(); installed != nil {
+		t.Fatal("carrierDown returned with the lane still installed")
 	}
 }

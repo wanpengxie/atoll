@@ -94,7 +94,24 @@ type carrierRow struct {
 	retirements map[channel.ID]uint64
 	coordLocks  map[channel.ID]*coordGate
 	coordTasks  map[channel.ID]*coordTask
-	lastSeen    time.Time
+
+	// lastSeen and probeNonce are guarded by Host.mu, not by the mu above:
+	// the lease decision is the host's, and it is taken while walking every
+	// carrier at once. probeNonce is the probe this host has sent and not yet
+	// had answered; empty means there is nothing outstanding to match.
+	lastSeen   time.Time
+	probeNonce string
+
+	// physical counts this carrier's physical sub-lifetimes: one ticket per lane
+	// open, held from before the open starts until that lane's reader has
+	// collected. It is not a ledger and takes part in no routing or liveness
+	// decision — it exists so this carrier's supervisor, the single owner of
+	// those goroutines, can join them at the end.
+	//
+	// Issuing a ticket is serialised with sealed under mu, so no ticket can
+	// appear after the supervisor has begun waiting.
+	physical sync.WaitGroup
+	stopOnce sync.Once
 }
 
 type coordGate struct {
@@ -180,7 +197,11 @@ func (h *Host) now() time.Time {
 func (h *Host) probeCarriers() {
 	now := h.now()
 	h.mu.Lock()
-	var carriers []*carrierRow
+	type outstandingProbe struct {
+		carrier *carrierRow
+		nonce   string
+	}
+	var carriers []outstandingProbe
 	var expired []*carrierRow
 	for _, row := range h.daemons {
 		carrier := row.current
@@ -193,7 +214,12 @@ func (h *Host) probeCarriers() {
 			}
 			continue
 		}
-		carriers = append(carriers, carrier)
+		// A fresh probe replaces whatever is outstanding. The previous one went
+		// unanswered for a whole interval, so a reply to it no longer attests
+		// anything about the round trip this host is asking about now.
+		nonce := uuid.NewString()
+		carrier.probeNonce = nonce
+		carriers = append(carriers, outstandingProbe{carrier: carrier, nonce: nonce})
 	}
 	for daemonID, row := range h.daemons {
 		if row.current == nil && !row.tombstone && len(row.diagnostic) > 0 &&
@@ -203,15 +229,37 @@ func (h *Host) probeCarriers() {
 	}
 	h.mu.Unlock()
 	for _, carrier := range expired {
-		h.cleanupCarrier(carrier)
+		h.beginCarrierShutdown(carrier)
 	}
-	for _, carrier := range carriers {
-		if err := carrier.wire.SendSpine(link.SpineFrame{
-			Kind: link.SpineProbe, Nonce: uuid.NewString(),
+	for _, probe := range carriers {
+		if err := probe.carrier.wire.SendSpine(link.SpineFrame{
+			Kind: link.SpineProbe, Nonce: probe.nonce,
 		}); err != nil {
-			h.carrierDown(carrier)
+			h.beginCarrierShutdown(probe.carrier)
 		}
 	}
+}
+
+// renewLeaseOnProbeReply renews only when the reply answers the probe this host
+// actually sent.
+//
+// The lease attests a round trip. Anything the device sends proves only that
+// its own send path works, so renewing on inbound traffic would keep a carrier
+// whose downstream direction is dead online forever: it would go on pulling and
+// talking while every frame this host sends is lost, and the daemon could never
+// be replaced because a current carrier is already recorded.
+func (h *Host) renewLeaseOnProbeReply(carrier *carrierRow, nonce string) {
+	if carrier == nil || nonce == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	row := h.daemons[carrier.daemonID]
+	if row == nil || row.current != carrier || carrier.probeNonce != nonce {
+		return
+	}
+	carrier.probeNonce = ""
+	carrier.lastSeen = h.now()
 }
 
 func (h *Host) Register(chID channel.ID, generation uint64, bundle platform.DaemonMembrane) {
@@ -305,6 +353,18 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		http.Error(w, "authenticated daemon id required", http.StatusUnauthorized)
 		return
 	}
+	// Admission is refused before the handshake. Upgrading first and rejecting
+	// afterwards spends a websocket on a host that will never serve it, and
+	// hands the caller a carrier-level reject in place of an HTTP answer it can
+	// attribute. admit remains the authority — this gate only keeps a closed
+	// host from taking connections it has already stopped serving.
+	h.mu.RLock()
+	closed := h.closed
+	h.mu.RUnlock()
+	if closed {
+		http.Error(w, "daemon host closed", http.StatusServiceUnavailable)
+		return
+	}
 	ws, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -344,17 +404,16 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		_ = wire.Close()
 		return
 	}
-	if err := wire.SendSpine(link.SpineFrame{
-		Kind: link.SpineCarrierAccept, DaemonID: daemonID, CarrierGen: carrier.gen,
-	}); err != nil {
-		h.carrierDown(carrier)
-		return
-	}
+	// The supervisor starts the moment this carrier is in the ledger, before the
+	// accept frame goes out. Admission publishes it as current, so a concurrent
+	// scan can already open lanes on it; starting the supervisor afterwards left
+	// a window where a failed accept write produced a carrier with lanes and no
+	// owner to join them. h.wg is registered under h.mu, the same lock Close
+	// writes h.closed under, so no supervisor can be added after Close waits.
 	h.mu.Lock()
-	row := h.daemons[daemonID]
-	if h.closed || row == nil || row.current != carrier || carrier.sealed.Load() {
+	if h.closed {
 		h.mu.Unlock()
-		h.carrierDown(carrier)
+		h.beginCarrierShutdown(carrier)
 		return
 	}
 	h.wg.Add(1)
@@ -363,6 +422,12 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		defer h.wg.Done()
 		h.runCarrier(carrier)
 	}()
+	if err := wire.SendSpine(link.SpineFrame{
+		Kind: link.SpineCarrierAccept, DaemonID: daemonID, CarrierGen: carrier.gen,
+	}); err != nil {
+		h.beginCarrierShutdown(carrier)
+		return
+	}
 	h.Scan()
 	<-wire.Done()
 }
@@ -389,8 +454,10 @@ func (h *Host) admit(carrier *carrierRow) error {
 	return nil
 }
 
+// runCarrier is this carrier's supervisor and the only place that joins its
+// physical children. Every other shutdown caller decides and leaves; this one
+// stays until the lanes it owned have collected.
 func (h *Host) runCarrier(carrier *carrierRow) {
-	defer h.carrierDown(carrier)
 	var readers sync.WaitGroup
 	readers.Add(2)
 	go func() {
@@ -402,6 +469,10 @@ func (h *Host) runCarrier(carrier *carrierRow) {
 		h.acceptStreams(carrier)
 	}()
 	readers.Wait()
+	// A natural disconnect reaches shutdown here; a shutdown decided elsewhere
+	// already ran and this is a no-op. Either way the join below happens once.
+	h.beginCarrierShutdown(carrier)
+	carrier.physical.Wait()
 }
 
 func (h *Host) readSpine(carrier *carrierRow) {
@@ -415,11 +486,6 @@ func (h *Host) readSpine(carrier *carrierRow) {
 			_ = carrier.wire.Close()
 			return
 		}
-		h.mu.Lock()
-		if row := h.daemons[carrier.daemonID]; row != nil && row.current == carrier {
-			carrier.lastSeen = h.now()
-		}
-		h.mu.Unlock()
 		switch frame.Kind {
 		case link.SpineCompartmentPlanPull:
 			h.answerCompartmentPlan(carrier, frame.Nonce)
@@ -429,6 +495,7 @@ func (h *Host) readSpine(carrier *carrierRow) {
 			}
 			continue
 		case link.SpineProbeReply:
+			h.renewLeaseOnProbeReply(carrier, frame.Nonce)
 		default:
 			_ = carrier.wire.Close()
 			return
@@ -552,26 +619,18 @@ func (h *Host) acceptStreams(carrier *carrierRow) {
 	_ = carrier.wire.Close()
 }
 
-func (h *Host) carrierDown(carrier *carrierRow) {
-	if carrier == nil {
-		return
-	}
-	h.mu.Lock()
-	if !h.sealCarrierLocked(carrier) {
-		h.mu.Unlock()
-		return
-	}
-	h.mu.Unlock()
-	h.cleanupCarrier(carrier)
-}
-
-// sealCarrierLocked is the carrier registry's single decision write. h.mu
-// must be held; all physical collection happens after it returns.
+// sealCarrierLocked is the carrier registry's single decision write. h.mu must
+// be held. It also takes carrier.mu for the sealed write, so that sealing and
+// issuing a physical ticket cannot interleave: whichever wins, the supervisor's
+// wait either never sees a ticket or is guaranteed to see it.
 func (h *Host) sealCarrierLocked(carrier *carrierRow) bool {
+	carrier.mu.Lock()
 	if carrier.sealed.Load() {
+		carrier.mu.Unlock()
 		return false
 	}
 	carrier.sealed.Store(true)
+	carrier.mu.Unlock()
 	if row := h.daemons[carrier.daemonID]; row != nil && row.current == carrier {
 		row.current = nil
 		if !row.tombstone && len(row.diagnostic) == 0 {
@@ -581,7 +640,24 @@ func (h *Host) sealCarrierLocked(carrier *carrierRow) bool {
 	return true
 }
 
-func (h *Host) cleanupCarrier(carrier *carrierRow) {
+// beginCarrierShutdown is the one shutdown entry, and it is a decision only.
+// When it returns, this carrier and its lanes are gone from every ledger this
+// host answers from and the wire is closing — nothing here waits for a lane's
+// physical collection.
+//
+// That collection has an owner: the carrier's supervisor, which is the single
+// place that joins these goroutines. Waiting for it here instead would put a
+// device's stuck handler in front of revocation, scanning, lease sweeping and
+// the accept path, which is how one wedged daemon used to stall the realm.
+//
+// Idempotent: a second call finds no lanes and a wire already closing.
+func (h *Host) beginCarrierShutdown(carrier *carrierRow) {
+	if carrier == nil {
+		return
+	}
+	h.mu.Lock()
+	h.sealCarrierLocked(carrier)
+	h.mu.Unlock()
 	carrier.mu.Lock()
 	lanes := make([]*serverLane, 0, len(carrier.lanes))
 	for _, lane := range carrier.lanes {
@@ -592,10 +668,7 @@ func (h *Host) cleanupCarrier(carrier *carrierRow) {
 	for _, lane := range lanes {
 		lane.retireLogical()
 	}
-	_ = carrier.wire.Close()
-	for _, lane := range lanes {
-		<-lane.stream.PhysicalDone()
-	}
+	carrier.stopOnce.Do(func() { _ = carrier.wire.Close() })
 }
 
 func (h *Host) Scan() {
@@ -807,17 +880,28 @@ func (c *carrierRow) lockCoord(chID channel.ID) func() {
 
 func (c *carrierRow) ensureLane(chID channel.ID, membrane membraneRow) {
 	c.mu.Lock()
+	if c.sealed.Load() {
+		c.mu.Unlock()
+		return
+	}
 	if current := c.lanes[chID]; current != nil && !current.stream.Retired() &&
 		current.membrane.generation == membrane.generation {
 		c.mu.Unlock()
 		return
 	}
+	// The ticket is taken before the open, under the same lock that seals the
+	// carrier: a shutdown racing this either wins, and no ticket is issued, or
+	// loses, and the supervisor's wait is guaranteed to see this one. It covers
+	// the whole span — a failed open returns it below, a successful one hands
+	// it to the lane's reader, which is what eventually collects.
+	c.physical.Add(1)
 	c.mu.Unlock()
 	generation := link.NewLaneGeneration()
 	ctx, cancel := context.WithTimeout(c.host.ctx, defaultLaneOpenTimeout)
 	stream, err := c.wire.OpenLane(ctx, chID, generation)
 	cancel()
 	if err != nil {
+		c.physical.Done()
 		return
 	}
 	lane := newServerLane(c, stream, membrane)
@@ -832,14 +916,14 @@ func (c *carrierRow) ensureLane(chID channel.ID, membrane membraneRow) {
 	c.mu.Lock()
 	if c.sealed.Load() || stream.Retired() {
 		c.mu.Unlock()
-		lane.start()
+		lane.start(&c.physical)
 		stream.RetireLogical()
 		return
 	}
 	old := c.lanes[chID]
 	c.lanes[chID] = lane
 	c.mu.Unlock()
-	lane.start()
+	lane.start(&c.physical)
 	if old != nil {
 		old.retireLogical()
 	}
@@ -981,33 +1065,22 @@ func (h *Host) RevokeDaemon(daemonID string) {
 	}
 	row.tombstone = true
 	carrier := row.current
-	row.current = nil
 	if carrier != nil {
-		carrier.sealed.Store(true)
+		h.sealCarrierLocked(carrier)
 	}
 	h.mu.Unlock()
-	if carrier != nil {
-		carrier.mu.Lock()
-		lanes := make([]*serverLane, 0, len(carrier.lanes))
-		for _, lane := range carrier.lanes {
-			lanes = append(lanes, lane)
-		}
-		carrier.lanes = make(map[channel.ID]*serverLane)
-		carrier.mu.Unlock()
-		for _, lane := range lanes {
-			lane.retireLogical()
-		}
-		_ = carrier.wire.SendSpine(link.SpineFrame{
-			Kind: link.SpineCarrierReject, Class: link.CarrierTerminal, Reason: "daemon revoked",
-		})
-		h.recordDiagnostic(daemonID, Diagnostic{
-			CarrierGen: carrier.gen, Kind: "revoke", Time: h.now(),
-		})
-		_ = carrier.wire.Close()
-		for _, lane := range lanes {
-			<-lane.stream.PhysicalDone()
-		}
+	if carrier == nil {
+		return
 	}
+	// Best effort, and before the wire closes. The tombstone above is the
+	// revocation; whether this frame lands changes nothing about it.
+	_ = carrier.wire.SendSpine(link.SpineFrame{
+		Kind: link.SpineCarrierReject, Class: link.CarrierTerminal, Reason: "daemon revoked",
+	})
+	h.recordDiagnostic(daemonID, Diagnostic{
+		CarrierGen: carrier.gen, Kind: "revoke", Time: h.now(),
+	})
+	h.beginCarrierShutdown(carrier)
 }
 
 func (h *Host) RetireLane(daemonID, chID string) {
@@ -1130,16 +1203,15 @@ func (h *Host) Close() error {
 	}
 	h.closed = true
 	carriers := h.currentCarriersLocked()
-	for _, row := range h.daemons {
-		if row.current != nil {
-			row.current.sealed.Store(true)
-		}
-		row.current = nil
-	}
 	h.mu.Unlock()
+	// Cancelling first is what lets a well-behaved handler leave: every host
+	// implementation a lane reader calls receives this context. Close still has
+	// no deadline of its own — its whole value is the guarantee that everything
+	// this host owns has finished, and a Close that returned without it would
+	// be indistinguishable from one that kept it.
 	h.cancel()
 	for _, carrier := range carriers {
-		h.cleanupCarrier(carrier)
+		h.beginCarrierShutdown(carrier)
 	}
 	h.wg.Wait()
 	return nil

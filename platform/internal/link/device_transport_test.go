@@ -375,3 +375,95 @@ func TestSpineWriteFailureClosesAfterReleasingSendLock(t *testing.T) {
 		t.Fatal("spine write failure did not close the carrier")
 	}
 }
+
+func waitForLink(t *testing.T, reason string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal(reason)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// parkedOpenCarrier hands back a carrier whose peer never accepts a stream. The
+// first open goes through and every one after it parks inside the library, so
+// the seats stay taken — which is the only state where a ceiling means
+// anything.
+func parkedOpenCarrier(t *testing.T) *rawCarrier {
+	t.Helper()
+	local, remote := net.Pipe()
+	clientConfig := linkYamuxConfig()
+	clientConfig.AcceptBacklog = 1
+	client, err := yamux.Client(local, clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := yamux.Server(remote, linkYamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	spine, spinePeer := net.Pipe()
+	t.Cleanup(func() { _ = spinePeer.Close() })
+	carrier := newRawCarrier(client, spine, nil)
+	t.Cleanup(func() { _ = carrier.Close() })
+	return carrier
+}
+
+// TestStreamOpenIsBoundedAndRefusesInsteadOfQueueing pins the outbound
+// counterpart of admission: this carrier opens at most a fixed number of
+// streams at once. A device reconnecting converges every outbound slot in one
+// pass, so without a ceiling the burst is however many the application happens
+// to hold, each parked inside a library call the caller cannot interrupt.
+//
+// Refusal — not queueing — is what makes the ceiling real: a waiting line holds
+// the same goroutines somewhere else. Both callers already converge by coming
+// back, so a refusal costs one retry interval and nothing else.
+func TestStreamOpenIsBoundedAndRefusesInsteadOfQueueing(t *testing.T) {
+	carrier := parkedOpenCarrier(t)
+	header := DeviceStreamHeader{Kind: DeviceStreamActor, Channel: "a", LaneGen: "g1"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	for i := 0; i < maxStreamOpenAttempts*2; i++ {
+		go func() { _, _ = carrier.open(ctx, header) }()
+	}
+	waitForLink(t, "opens never reached the ceiling", func() bool {
+		inFlight := carrier.openInFlight.Load()
+		if inFlight > maxStreamOpenAttempts {
+			t.Fatalf("%d opens were in flight at once, above the ceiling of %d",
+				inFlight, maxStreamOpenAttempts)
+		}
+		return inFlight == maxStreamOpenAttempts
+	})
+
+	// At the ceiling the next open must come back on its own. If it queued
+	// instead, this would hang: nothing below ever frees a seat.
+	refused := make(chan error, 1)
+	go func() {
+		_, err := carrier.open(context.Background(), header)
+		refused <- err
+	}()
+	select {
+	case err := <-refused:
+		if !errors.Is(err, errOpenBusy) {
+			t.Fatalf("open at the ceiling returned %v, want the busy refusal", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an open at the ceiling queued instead of being refused")
+	}
+
+	// A seat belongs to the physical open, not to the caller waiting on it.
+	// Abandoning the wait leaves the library call in flight, so the seat must
+	// stay taken — otherwise the ceiling counts callers and bounds nothing.
+	cancel()
+	if _, err := carrier.open(context.Background(), header); !errors.Is(err, errOpenBusy) {
+		t.Fatalf("open after caller cancellation returned %v; a seat was freed by a caller giving up", err)
+	}
+
+	_ = carrier.Close()
+	waitForLink(t, "closing the carrier did not free the open seats", func() bool {
+		return carrier.openInFlight.Load() == 0
+	})
+}

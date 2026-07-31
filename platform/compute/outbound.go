@@ -29,7 +29,11 @@ var (
 
 const (
 	defaultOutboundPoll  = 100 * time.Millisecond
-	defaultOutboundRetry = 100 * time.Millisecond
+	// A failed open is retried on a fixed cadence, not a backoff: the carrier
+	// refuses an open outright once its in-flight ceiling is reached, so a burst
+	// of slots converges by coming back rather than by queueing. One second
+	// keeps that return cheap enough to leave the refusal loggable.
+	defaultOutboundRetry = 1 * time.Second
 )
 
 // DaemonOutboundConfig configures the daemon-private physical-link organ.

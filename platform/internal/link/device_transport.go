@@ -32,6 +32,7 @@ const (
 	maxStreamHeaderBytes      = 64 << 10
 	maxControlFrameBytes      = 1 << 24
 	maxStreamAdmissionWorkers = 64
+	maxStreamOpenAttempts     = 32
 )
 
 var (
@@ -39,6 +40,7 @@ var (
 	ErrProtocolVersion      = errors.New("link: unsupported carrier protocol")
 	ErrLaneRPCTimeout       = errors.New("link: lane RPC timeout")
 	errControlFrameTooLarge = errors.New("link: control frame too large")
+	errOpenBusy             = errors.New("link: open capacity busy")
 )
 
 func writeStreamJSON(w io.Writer, value any) error {
@@ -546,6 +548,12 @@ type rawCarrier struct {
 	streamWorkerMu    sync.Mutex
 	streamWorkers     sync.WaitGroup
 	streamWorkerSlots chan struct{}
+
+	// Outbound counterpart of streamWorkerSlots: how many stream opens this
+	// carrier may have in flight at once. openInFlight is the seat count made
+	// readable, so a carrier at its ceiling is visible rather than merely slow.
+	streamOpenSlots chan struct{}
+	openInFlight    atomic.Int64
 }
 
 func newRawCarrier(session *yamux.Session, spine net.Conn, logger *slog.Logger) *rawCarrier {
@@ -557,6 +565,7 @@ func newRawCarrier(session *yamux.Session, spine net.Conn, logger *slog.Logger) 
 		spineDecoder: newBoundedJSONDecoder(spine, maxControlFrameBytes), logger: logger,
 		done:              make(chan struct{}),
 		streamWorkerSlots: make(chan struct{}, maxStreamAdmissionWorkers),
+		streamOpenSlots:   make(chan struct{}, maxStreamOpenAttempts),
 	}
 	return c
 }
@@ -588,12 +597,34 @@ func (c *rawCarrier) open(ctx context.Context, header DeviceStreamHeader) (net.C
 	if c == nil || c.sealed.Load() {
 		return nil, errLinkClosed
 	}
+	// A seat is taken before the worker starts and released by the worker, never
+	// by this call. Caller cancellation only abandons the wait: the library open
+	// the worker started is still in flight and may still produce a stream, so
+	// releasing on return would make the ceiling a fiction.
+	//
+	// A full pool is refused outright rather than queued. Queueing would move
+	// the goroutines from inside the library to a waiting line without reducing
+	// their number, and both callers already converge by retry — the device
+	// retries its outbound slot, the host reopens the lane on its next scan.
+	select {
+	case c.streamOpenSlots <- struct{}{}:
+		c.openInFlight.Add(1)
+	default:
+		c.logger.Warn("link.open_capacity_busy",
+			"kind", header.Kind, "channel", header.Channel,
+			"in_flight", c.openInFlight.Load(), "capacity", maxStreamOpenAttempts)
+		return nil, errOpenBusy
+	}
 	type result struct {
 		conn net.Conn
 		err  error
 	}
 	ch := make(chan result)
 	go func() {
+		defer func() {
+			c.openInFlight.Add(-1)
+			<-c.streamOpenSlots
+		}()
 		conn, err := c.session.Open()
 		opened := result{conn: conn, err: err}
 		select {

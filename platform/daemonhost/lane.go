@@ -35,8 +35,15 @@ func newServerLane(carrier *carrierRow, stream *link.LaneStream, membrane membra
 	}
 }
 
-func (l *serverLane) start() {
-	go l.readLoop()
+// start takes the carrier's physical ticket for this lane. The reader is what
+// eventually closes this lane's actor streams and its stream, so the ticket is
+// returned only once that has happened — taking it as a parameter keeps the
+// pairing at a single call site instead of two bookkeeping halves.
+func (l *serverLane) start(physical *sync.WaitGroup) {
+	go func() {
+		defer physical.Done()
+		l.readLoop()
+	}()
 }
 
 func (l *serverLane) current() bool {

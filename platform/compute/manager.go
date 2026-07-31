@@ -430,7 +430,6 @@ func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 		cells = append(cells, cell)
 	}
 	m.mu.Unlock()
-	lanes := make([]*clientLane, 0, len(cells)*2)
 	for _, cell := range cells {
 		cell.mu.Lock()
 		lane := cell.lane
@@ -443,18 +442,19 @@ func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 		cell.latestLaneGen = ""
 		cell.mu.Unlock()
 		if lane != nil {
-			lanes = append(lanes, lane)
 			lane.retireLogical()
 		}
 		if pending != nil {
-			lanes = append(lanes, pending)
 			pending.retireLogical()
 		}
 	}
+	// Closing the carrier closes its session, and with it every stream on it —
+	// the physical end is reclaimed right here. What remains is each lane
+	// reader noticing, and this is the redial loop: making reconnection wait on
+	// a reader that may be parked inside a local storage call would put one
+	// stuck compartment in front of the whole device coming back. Those readers
+	// already have an owner in m.wg, which the manager joins when it shuts down.
 	_ = exact.Close()
-	for _, lane := range lanes {
-		<-lane.stream.PhysicalDone()
-	}
 }
 
 // closeExactCompartment retires this exact compartment, and only while it is
