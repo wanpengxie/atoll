@@ -92,7 +92,7 @@ func newLifecycleTestApp(t *testing.T) (*App, *countedHost) {
 	}
 	host := &countedHost{LocalHost: real}
 	a.host = host
-	t.Cleanup(func() { _ = real.Close() })
+	t.Cleanup(func() { _ = real.Close(context.Background()) })
 	return a, host
 }
 

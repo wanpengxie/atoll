@@ -42,7 +42,7 @@ type Service interface {
 	Destroy(context.Context, channel.ID) error
 	Open(context.Context, OpenSpec) error
 	Census(context.Context) ([]CensusEntry, error)
-	Close() error
+	Close(context.Context) error
 }
 
 type LocalHost interface {
@@ -564,7 +564,13 @@ func (h *ChannelHost) checkOpen() error {
 	return nil
 }
 
-func (h *ChannelHost) Close() error {
+// Close tears down every serving Home under the caller's budget: one shared
+// deadline bounds the whole sweep, so a wedged store cannot hold the process
+// shutdown hostage past it. A Home that could not close in time stays
+// registered with its account in the returned error — a repeat Close retries
+// exactly those — and its store close keeps running in the background, where
+// process death is what finally reclaims it.
+func (h *ChannelHost) Close(ctx context.Context) error {
 	h.mu.Lock()
 	h.closed = true
 	entries := make(map[channel.ID]*entry, len(h.entries))
@@ -601,7 +607,7 @@ func (h *ChannelHost) Close() error {
 			// Only a clean shutdown marks the entry closed: a failed Home close
 			// stays honestly un-closed (Home's owner-join/teardown/store close
 			// sequence is retryable; never fake terminal state on an error).
-			if err := home.Shutdown(entry.home); err != nil {
+			if err := home.ShutdownWithin(entry.home, ctx); err != nil {
 				failed = true
 				errs = append(errs, fmt.Errorf("channelhost: close %s: %w", id, err))
 			} else {

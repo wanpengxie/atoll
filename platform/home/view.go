@@ -7,7 +7,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/humancell"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
@@ -39,8 +38,6 @@ type viewAuthority interface {
 type View struct {
 	visible      storespec.VisibleMessageQuery
 	authority    viewAuthority
-	daemonRoutes platform.DaemonRoutes
-	channelID    channel.ID
 	presence     presence.View
 	actors       *actorSystem
 	nowMs        func() int64
@@ -59,8 +56,6 @@ func (h *Home) View() View {
 	return View{
 		visible:        h.visible,
 		authority:      h.actors,
-		daemonRoutes:   h.daemonRoutes,
-		channelID:      h.channelID,
 		presence:       presence.NewView(h.presenceFold, h.actors, h.actors),
 		actors:         h.actors,
 		nowMs:          h.nowMs,
@@ -166,15 +161,6 @@ func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
 		return time.Time{}, false
 	}
 	return stat.StartedAt, true
-}
-
-// IsAttached reports whether the daemon can serve this channel now: current
-// carrier, current lane, and a positive ready compartment declaration.
-func (v View) IsAttached(daemonID string) bool {
-	if v.daemonRoutes == nil {
-		return false
-	}
-	return v.daemonRoutes.LaneAttached(daemonID, string(v.channelID))
 }
 
 func (v View) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,14 @@ import (
 type closeTestActor struct{}
 
 func (closeTestActor) Receive(context.Context, *message.Envelope) error { return nil }
+
+// closeHomeWithin drives the ctx-budget close the way ShutdownWithin does,
+// with the budget the old duration-based tests were written against.
+func closeHomeWithin(h *Home, reason string, budget time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	return h.closeInternalUnder(reason, ctx)
+}
 
 // closeTestStore is a record port whose UpdateDefinition blocks until released,
 // so one admitted command can be held inside the Controller while Close runs.
@@ -79,6 +88,52 @@ func (*closeTestStore) Deregister(context.Context, []actor.ActorID) error {
 
 func (*closeTestStore) InstallEntry(storespec.ActorRecord) {}
 
+// A store close that never returns must not hold the caller past its budget:
+// the wait is abandoned with its account in the error, the close keeps running
+// in the background, and whichever attempt finishes marks the level so a
+// retry after it converges to a clean nil.
+func TestWedgedStoreCloseIsAbandonedWithAccountAndRetryConverges(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h := &Home{
+		closeDone: make(chan struct{}),
+		logger:    slog.New(slog.DiscardHandler),
+		closeStore: func() error {
+			close(entered)
+			<-release
+			return nil
+		},
+	}
+
+	err := closeHomeWithin(h, "wedged-store", 200*time.Millisecond)
+	if err == nil {
+		t.Fatal("close returned nil while the store close was still running")
+	}
+	if !strings.Contains(err.Error(), "store close abandoned") {
+		t.Fatalf("close error carries no abandonment account: %v", err)
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("the store close was never even attempted")
+	}
+	if h.storeCloseDone.Load() {
+		t.Fatal("an abandoned store close marked itself done")
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for !h.storeCloseDone.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the background store close never marked the level after release")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := closeHomeWithin(h, "retry", time.Second); err != nil {
+		t.Fatalf("retry after the background close settled: %v", err)
+	}
+}
+
 func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T) {
 	store := newCloseTestStore()
 	controller, err := actorctl.New(store, func() int64 { return 1 })
@@ -118,7 +173,7 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 	}()
 	<-store.entered
 
-	if err := home.closeInternalWithin("timeout-test", time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+	if err := closeHomeWithin(home, "timeout-test", time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("first Close error=%v, want deadline exceeded", err)
 	}
 	select {
@@ -135,7 +190,7 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 	if active, err := controller.IsActive(context.Background(), "agent"); err != nil || !active {
 		t.Fatalf("Controller was torn down across failed Quiesce: active=%v err=%v", active, err)
 	}
-	if err := home.closeInternalWithin("retry-test", time.Second); err != nil {
+	if err := closeHomeWithin(home, "retry-test", time.Second); err != nil {
 		t.Fatalf("retry Close: %v", err)
 	}
 	select {

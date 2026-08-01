@@ -221,7 +221,7 @@ func (a *App) Close(ctx context.Context) error {
 	if a.lifecycle != nil {
 		lifecycleErr = a.lifecycle.close(ctx)
 	}
-	return errors.Join(lifecycleErr, a.daemonHost.Close(ctx), a.host.Close())
+	return errors.Join(lifecycleErr, a.daemonHost.Close(ctx), a.host.Close(ctx))
 }
 
 // ---------------------------------------------------------------------------

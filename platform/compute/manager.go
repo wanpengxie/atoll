@@ -510,8 +510,14 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 			lane.retireLogical()
 			return
 		}
+		// The build's ledger ticket is taken under the same m.mu the final
+		// join checks: a BuildCompartment that ignores every stop signal is
+		// counted and named by the abandonment account instead of outliving a
+		// close that answered nil.
+		m.addWorkers(1)
 		m.mu.Unlock()
 		go func() {
+			defer m.workerDone()
 			defer func() {
 				cell.mu.Lock()
 				if cell.buildDone != nil {
@@ -555,7 +561,15 @@ func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 		// next carrier's generations are minted by a different lane series and
 		// are not comparable with this one, so the coordinate starts over.
 		cell.latestLaneGen = ""
+		storage := cell.storage
 		cell.mu.Unlock()
+		// Same ownership transfer as condemn: nulling cell.lane disarms
+		// laneDown's exact-lane guard, so the forwarder unbind happens here —
+		// the disconnect window skips quietly instead of failing every pump
+		// pass through the dead lane until the next carrier binds.
+		if lane != nil && storage != nil {
+			storage.Rebind(nil)
+		}
 		if lane != nil {
 			lane.retireLogical()
 		}
@@ -916,7 +930,15 @@ func (c *compartment) condemn(reason string) {
 	c.lane = nil
 	pending := c.pending
 	c.pending = nil
+	storage := c.storage
 	c.mu.Unlock()
+	// Clearing c.lane above is exactly what makes laneDown's exact-lane guard
+	// skip, so the forwarder unbind laneDown owns falls to this path: a
+	// condemned coordinate's forwarder must not keep pulling through a dead
+	// lane it also keeps alive.
+	if lane != nil && storage != nil {
+		storage.Rebind(nil)
+	}
 	if lane != nil {
 		lane.retireLogical()
 	}
@@ -1026,7 +1048,20 @@ func (c *compartment) close() {
 		case <-buildDone:
 		case <-ctx.Done():
 			c.condemn("compartment build join timeout")
-			go c.reclaimAfterBuild(buildDone)
+			c.manager.mu.Lock()
+			if !c.manager.closed {
+				// The reclaimer is the runtime arm only — during shutdown the
+				// manager owns every remaining coordinate and process exit is
+				// what reclaims the build — and it holds a ledger ticket for
+				// the same reason the build does: whoever waits on the wedged
+				// build is a live worker the close account must see.
+				c.manager.addWorkers(1)
+				go func() {
+					defer c.manager.workerDone()
+					c.reclaimAfterBuild(buildDone)
+				}()
+			}
+			c.manager.mu.Unlock()
 			return
 		}
 	}
@@ -1125,8 +1160,6 @@ func (c *compartment) reclaimAfterBuild(buildDone <-chan struct{}) {
 	}
 	c.close()
 }
-
-func linkChannel(value string) channel.ID { return channel.ID(value) }
 
 type clientLane struct {
 	manager *compartmentManager

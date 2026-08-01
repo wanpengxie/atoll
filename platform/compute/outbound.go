@@ -555,14 +555,6 @@ func (s *OutboundSlot) Close() error {
 	return nil
 }
 
-// Coordinate reports the exact slot's welded actor coordinate.
-func (s *OutboundSlot) Coordinate() (actor.ActorID, actorhost.AttemptKey) {
-	if s == nil {
-		return "", ""
-	}
-	return s.id, s.key
-}
-
 // CancelRequest and PublishObs are actorbase/actorrt host hooks, not actor
 // capabilities. They use the same exact slot and one-load/one-call discipline
 // as the five capability facades and never buffer or retry across disconnects.

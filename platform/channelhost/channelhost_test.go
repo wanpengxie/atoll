@@ -63,7 +63,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if err != nil || len(initialRows) != 1 {
 		t.Fatalf("equal first sweep double-wrote genesis: instances=%+v err=%v", initialRows, err)
 	}
-	if err := host.Close(); err != nil {
+	if err := host.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,7 +72,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer reopened.Close(context.Background())
 	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func newTestHost(t *testing.T) *ChannelHost {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	return host
 }
 
@@ -124,7 +124,7 @@ func TestMembraneUnregisterPrecedesHomeQuiesce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer host.Close()
+	defer host.Close(context.Background())
 	id := channel.ID("staged-close")
 	if _, err := host.Provision(ctx, provisionSpec(id)); err != nil {
 		t.Fatal(err)

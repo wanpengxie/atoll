@@ -1311,6 +1311,72 @@ func TestWedgedStorageExecutorDoesNotBlockLaneTraffic(t *testing.T) {
 // from returning past its close budget, and the abandonment account must name
 // the parked call from the stall ledger — an exit that said only "timed out"
 // would leave the operator diffing logs for the culprit.
+// TestWedgedBuildIsCountedInTheCloseAccount pins the close contract onto the
+// build worker: a BuildCompartment that ignores every stop signal must not be
+// invisible to the final join — the close answers ErrCloseAbandoned with the
+// worker in its account instead of pretending clean with nil.
+func TestWedgedBuildIsCountedInTheCloseAccount(t *testing.T) {
+	previousBudget := computeCloseBudget
+	computeCloseBudget = 300 * time.Millisecond
+	previousJoin := compartmentJoinTimeout
+	compartmentJoinTimeout = 100 * time.Millisecond
+	t.Cleanup(func() {
+		computeCloseBudget = previousBudget
+		compartmentJoinTimeout = previousJoin
+	})
+
+	host := daemonhost.New(daemonhost.Config{
+		ScanInterval: time.Hour,
+		Present:      testPresent("channel-a", "a", "b"),
+	})
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
+	host.Register("channel-a", 1, platform.DaemonMembrane{
+		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
+		IsBound: func(context.Context, string) (bool, error) { return true, nil },
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host.Serve(w, r, "daemon-a")
+	}))
+	t.Cleanup(server.Close)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	t.Cleanup(func() { close(release) })
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	home := t.TempDir()
+	go func() {
+		done <- Run(ctx, Config{
+			ServerWS:   "ws" + strings.TrimPrefix(server.URL, "http"),
+			Credential: "secret", AtollHome: home,
+			BuildCompartment: func(string, string) (CompartmentResources, error) {
+				enteredOnce.Do(func() { close(entered) })
+				<-release
+				// The straggler unwinds through the error path, which stops at
+				// the closing check without touching any seam the test cleanup
+				// is about to restore.
+				return CompartmentResources{}, errors.New("wedge released during teardown")
+			},
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the build under test never started")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCloseAbandoned) {
+			t.Fatalf("close over a wedged build answered %v, want ErrCloseAbandoned", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("close never answered while the build was wedged")
+	}
+}
+
 func TestWedgedStorageReaderDoesNotHoldRunHostage(t *testing.T) {
 	previous := computeCloseBudget
 	computeCloseBudget = 200 * time.Millisecond
@@ -1749,6 +1815,44 @@ func TestCarrierDownClearsTheGenerationWatermark(t *testing.T) {
 	if lane, _ := fixture.slots(); lane != arrival {
 		t.Fatal("the previous carrier's watermark barred the new carrier's lane")
 	}
+}
+
+// TestClearingTheLaneUnbindsTheStorageForwarderOnEveryPath pins the unbind to
+// the paths that clear cell.lane themselves: carrierDown and condemn null the
+// lane before retiring it, which is exactly what makes laneDown's exact-lane
+// guard skip — so each of those paths owns the forwarder unbind it disarmed,
+// or the disconnect window fails every pump pass through a dead lane.
+func TestClearingTheLaneUnbindsTheStorageForwarderOnEveryPath(t *testing.T) {
+	bindForwarder := func(fixture *laneAdmissionFixture) *storageHostForwarder {
+		lane := fixture.lane(fixture.carrier, openedFirst)
+		fixture.manager.acceptLane(lane)
+		fwd := newStorageHostForwarder(nil, nil, 0)
+		fwd.Rebind(lane)
+		fixture.cell.mu.Lock()
+		fixture.cell.storage = fwd
+		fixture.cell.mu.Unlock()
+		return fwd
+	}
+	t.Run("carrier down", func(t *testing.T) {
+		fixture := newLaneAdmissionFixture(t)
+		fwd := bindForwarder(fixture)
+
+		fixture.manager.carrierDown(fixture.carrier)
+
+		if fwd.current() != nil {
+			t.Fatal("carrier down left the forwarder bound to the dead lane")
+		}
+	})
+	t.Run("condemn", func(t *testing.T) {
+		fixture := newLaneAdmissionFixture(t)
+		fwd := bindForwarder(fixture)
+
+		fixture.cell.condemn("test")
+
+		if fwd.current() != nil {
+			t.Fatal("condemn left the forwarder bound to the dead lane")
+		}
+	})
 }
 
 func TestInFlightRPCsRetireWithTheirExactLane(t *testing.T) {

@@ -24,7 +24,7 @@ func newBareAppForTest(t *testing.T) *App {
 		t.Fatal(err)
 	}
 	a.host = host
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	return a
 }
 

@@ -97,7 +97,7 @@ func parkCloseInsideTeardown(
 	restartRecv(t, "the reconcile pass to reach the parked resolver", gate.entered)
 
 	result := make(chan error, 1)
-	go func() { result <- h.closeInternalWithin(reason, restartWaitBudget) }()
+	go func() { result <- closeHomeWithin(h, reason, restartWaitBudget) }()
 	restartEventually(t, "the close gate to be published", func() bool { return h.closed.Load() })
 	assertTeardownUnfinished(t, h)
 	return result
@@ -166,7 +166,7 @@ func TestConcurrentCloseRunsExactlyOneTeardownAndEveryCallerWaitsForIt(t *testin
 	for range followers {
 		go func() {
 			launched <- struct{}{}
-			results <- h.closeInternalWithin("follower", restartWaitBudget)
+			results <- closeHomeWithin(h, "follower", restartWaitBudget)
 		}()
 	}
 	for range followers {
@@ -199,7 +199,7 @@ func TestConcurrentCloseRunsExactlyOneTeardownAndEveryCallerWaitsForIt(t *testin
 	}
 	// The single-ownership claim is about the barrier, not about a race window:
 	// a later, uncontended caller must still find the teardown spent.
-	if err := h.closeInternalWithin("late", restartWaitBudget); err != nil {
+	if err := closeHomeWithin(h, "late", restartWaitBudget); err != nil {
 		t.Fatalf("sequential Close after the concurrent ones: %v", err)
 	}
 	if got := handler.count("platform.home.closed"); got != 1 {
@@ -229,7 +229,7 @@ func TestTeardownPanicStaysWithItsOwnerAndStillOpensTheBarrier(t *testing.T) {
 	owner := make(chan any, 2)
 	go func() {
 		defer func() { owner <- recover() }()
-		_ = h.closeInternalWithin("panicking-owner", restartWaitBudget)
+		_ = closeHomeWithin(h, "panicking-owner", restartWaitBudget)
 		owner <- nil
 	}()
 	restartEventually(t, "the close gate to be published", func() bool { return h.closed.Load() })
@@ -239,7 +239,7 @@ func TestTeardownPanicStaysWithItsOwnerAndStillOpensTheBarrier(t *testing.T) {
 	waiterLaunched := make(chan struct{})
 	go func() {
 		close(waiterLaunched)
-		waiter <- h.closeInternalWithin("waiter", restartWaitBudget)
+		waiter <- closeHomeWithin(h, "waiter", restartWaitBudget)
 	}()
 	restartRecv(t, "the waiting caller to call Close", waiterLaunched)
 

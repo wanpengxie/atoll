@@ -3,7 +3,6 @@ package channelhost
 import (
 	"context"
 
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -16,7 +15,6 @@ import (
 type Bundle interface {
 	Generation() uint64
 	Gateway() GatewayHitch
-	DaemonMembrane() platform.DaemonMembrane
 	SysOp() SysOp
 	View() View
 }
@@ -46,7 +44,6 @@ type View interface {
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
 	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
-	IsAttached(string) bool
 	IsBound(context.Context, string) (bool, error)
 	Resources() ResourceReadView
 }
@@ -65,10 +62,7 @@ type bundle struct {
 
 func (b *bundle) Generation() uint64    { return b.generation }
 func (b *bundle) Gateway() GatewayHitch { return gatewayAdapter{b.home} }
-func (b *bundle) DaemonMembrane() platform.DaemonMembrane {
-	return home.DaemonMembrane(b.home)
-}
-func (b *bundle) SysOp() SysOp { return b.sysOp }
+func (b *bundle) SysOp() SysOp          { return b.sysOp }
 func (b *bundle) View() View   { return viewAdapter{b.home} }
 
 type gatewayAdapter struct{ home *home.Home }
@@ -105,7 +99,6 @@ func (a viewAdapter) ActorFacts(ctx context.Context, id actor.ActorID) (channels
 	return a.home.View().ActorFacts(ctx, id)
 }
 
-func (a viewAdapter) IsAttached(id string) bool { return a.home.View().IsAttached(id) }
 func (a viewAdapter) IsBound(ctx context.Context, id string) (bool, error) {
 	return a.home.View().IsBound(ctx, id)
 }

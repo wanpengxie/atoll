@@ -29,7 +29,6 @@ const (
 	defaultLeaseTTL        = 30 * time.Second
 	defaultProbeInterval   = 10 * time.Second
 	defaultFactTimeout     = 2 * time.Second
-	defaultGoneTimeout     = 30 * time.Second
 	defaultLaneOpenTimeout = 10 * time.Second
 	defaultDiagnosticTTL   = 10 * time.Minute
 	transferTicketTTL      = 10 * time.Minute

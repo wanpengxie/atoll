@@ -45,15 +45,6 @@ func (l *ClientActorLane) IsCurrent() bool {
 	return l != nil && l.Carrier != nil && l.Lane != nil && !l.Lane.Retired()
 }
 
-func (l *ClientActorLane) Done() <-chan struct{} {
-	if l == nil || l.Lane == nil {
-		done := make(chan struct{})
-		close(done)
-		return done
-	}
-	return l.Lane.Done()
-}
-
 func (l *ClientActorLane) OpenActorStream(
 	ctx context.Context,
 	id actor.ActorID,
