@@ -344,5 +344,4 @@ func waitBackoff(ctx context.Context, value time.Duration) bool {
 	}
 }
 
-var ErrForwardersLeaked = errors.New("compute: forwarders leaked")
 var _ actorhost.HostEventSink = (*daemonHostEvents)(nil)

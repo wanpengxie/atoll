@@ -574,7 +574,9 @@ func TestNonCooperativePlatformCallbacksStayBoundedAndUnknown(t *testing.T) {
 		host := New(Config{ScanInterval: time.Hour})
 		t.Cleanup(func() { _ = host.Close() })
 		started := time.Now()
-		bound, err := host.isBound("daemon-a", func(context.Context, string) (bool, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), factTimeout)
+		t.Cleanup(cancel)
+		bound, err := host.isBound(ctx, "daemon-a", func(context.Context, string) (bool, error) {
 			<-release
 			return false, nil
 		})

@@ -35,15 +35,14 @@ type compartmentManager struct {
 	cfg    Config
 	logger *slog.Logger
 
-	mu         sync.Mutex
-	closed     bool
-	carrier    *link.ClientCarrier
-	carrierGen link.CarrierGeneration
-	daemonID   string
-	root       string
-	cells      map[string]*compartment
-	terminal   chan error
-	wg         sync.WaitGroup
+	mu       sync.Mutex
+	closed   bool
+	carrier  *link.ClientCarrier
+	daemonID string
+	root     string
+	cells    map[string]*compartment
+	terminal chan error
+	wg       sync.WaitGroup
 
 	// planWake is a level, not a queue: a poke that arrives while a pull is in
 	// flight just means "pull again", and coalescing pokes is correct.
@@ -62,8 +61,14 @@ type compartment struct {
 	closing      bool
 	closeStarted bool
 	condemned    bool
-	lane         *clientLane
-	pending      *clientLane
+	// leaked marks resources a failed rollback or teardown left behind. A
+	// leaked coordinate never returns to service: building a second resource
+	// set over one that may still be alive is the one thing condemnation
+	// exists to prevent. Without the mark, condemnation alone cannot say
+	// whether the coordinate is merely retired or actually unsafe.
+	leaked  bool
+	lane    *clientLane
+	pending *clientLane
 	// latestLaneGen is the highest generation this coordinate has admitted on
 	// the carrier the manager currently holds. It is its own field and never
 	// read back out of the slots: a slot empties when a lane retires and while
@@ -106,7 +111,6 @@ func (m *compartmentManager) bindCarrier(
 		return
 	}
 	m.carrier = carrier
-	m.carrierGen = accepted.CarrierGen
 	m.daemonID = accepted.DaemonID
 	m.root = root
 	// Surviving compartments announce nothing on a new carrier. The reconcile
@@ -420,12 +424,6 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 	}()
 }
 
-func (m *compartmentManager) currentCarrier() (*link.ClientCarrier, link.CarrierGeneration) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.carrier, m.carrierGen
-}
-
 func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 	m.mu.Lock()
 	if m.carrier != exact {
@@ -433,7 +431,6 @@ func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 		return
 	}
 	m.carrier = nil
-	m.carrierGen = ""
 	cells := make([]*compartment, 0, len(m.cells))
 	for _, cell := range m.cells {
 		cells = append(cells, cell)
@@ -638,7 +635,7 @@ func (c *compartment) build() (retErr error) {
 			closeErr = resources.Close()
 		}
 		if closeErr != nil {
-			c.condemn("compartment resource rollback failed: " + closeErr.Error())
+			c.condemnLeaked("compartment resource rollback failed: " + closeErr.Error())
 			return errors.Join(errors.New("compute: compartment factories required"), closeErr)
 		}
 		return errors.New("compute: compartment factories required")
@@ -654,7 +651,7 @@ func (c *compartment) build() (retErr error) {
 	if err != nil {
 		rollbackErr := rollbackCompartment(nil, outbound, cancel, resources)
 		if rollbackErr != nil {
-			c.condemn("compartment rollback failed: " + rollbackErr.Error())
+			c.condemnLeaked("compartment rollback failed: " + rollbackErr.Error())
 		}
 		return errors.Join(err, rollbackErr)
 	}
@@ -665,7 +662,7 @@ func (c *compartment) build() (retErr error) {
 		c.mu.Unlock()
 		rollbackErr := rollbackCompartment(host, outbound, cancel, resources)
 		if rollbackErr != nil {
-			c.condemn("compartment rollback failed: " + rollbackErr.Error())
+			c.condemnLeaked("compartment rollback failed: " + rollbackErr.Error())
 		}
 		return errors.Join(errors.New("compute: compartment closed during build"), rollbackErr)
 	}
@@ -763,7 +760,20 @@ func (c *compartment) condemn(reason string) {
 	if pending != nil {
 		pending.retireLogical()
 	}
+	c.manager.logger.Error("platform.compute.compartment_condemned",
+		"channel", c.chID, "reason", reason)
 	c.declare("fault", "condemned: "+reason)
+}
+
+// condemnLeaked condemns this coordinate and records that the resources it
+// held were not provably released. reclaimAfterBuild consults the mark: a
+// coordinate whose build settled clean is freed, a leaked one stays out of
+// service until the process restarts.
+func (c *compartment) condemnLeaked(reason string) {
+	c.mu.Lock()
+	c.leaked = true
+	c.mu.Unlock()
+	c.condemn(reason)
 }
 
 func (c *compartment) bindLane(lane *clientLane) {
@@ -843,6 +853,7 @@ func (c *compartment) close() {
 		case <-buildDone:
 		case <-ctx.Done():
 			c.condemn("compartment build join timeout")
+			go c.reclaimAfterBuild(buildDone)
 			return
 		}
 	}
@@ -882,12 +893,19 @@ func (c *compartment) close() {
 		lane.retireLogical()
 	}
 	if closeErr != nil {
-		c.condemn(closeErr.Error())
+		c.condemnLeaked(closeErr.Error())
 		return
 	}
-	// Teardown ends here. Nothing is reported: the server holds no projection of
-	// this compartment, so there is no row to delete and no flag to clear, and
-	// this removal races with nothing on the other end.
+	c.forget()
+}
+
+// forget releases this coordinate once nothing this compartment held can still
+// be alive. Nothing is reported: the server holds no projection of this
+// compartment, so there is no row to delete and no flag to clear, and this
+// removal races with nothing on the other end. Only the exact object leaves
+// the table: a replacement installed at the same coordinate meanwhile is
+// someone else's to retire.
+func (c *compartment) forget() {
 	c.manager.mu.Lock()
 	if c.manager.cells[c.chID] == c {
 		delete(c.manager.cells, c.chID)
@@ -900,6 +918,39 @@ func (c *compartment) close() {
 	if pending != nil && !pending.stream.Retired() {
 		c.manager.acceptLane(pending)
 	}
+}
+
+// reclaimAfterBuild frees a coordinate that close gave up on because its build
+// overran the join budget. Condemnation already holds new lanes off the
+// coordinate, so all that remains is deciding what the overrunning build left
+// behind — and only the build settling can answer that. Once it does, the
+// build has either installed nothing, rolled back cleanly, installed a
+// resource set nobody has torn down, or recorded a leak. Rerunning close under
+// a fresh budget covers the first three — every teardown step is nil-guarded,
+// so a build that left nothing behind falls straight through to the release —
+// and the leak mark keeps the last one out of service: a coordinate that could
+// not release its resources must never build a second set over them.
+func (c *compartment) reclaimAfterBuild(buildDone <-chan struct{}) {
+	select {
+	case <-buildDone:
+	case <-c.manager.ctx.Done():
+		return
+	}
+	c.mu.Lock()
+	leaked := c.leaked
+	c.mu.Unlock()
+	if leaked {
+		return
+	}
+	c.manager.mu.Lock()
+	closed := c.manager.closed
+	c.manager.mu.Unlock()
+	if closed {
+		// Shutdown owns every remaining coordinate; a late reclaim would race
+		// its sweep for no benefit.
+		return
+	}
+	c.close()
 }
 
 func linkChannel(value string) channel.ID { return channel.ID(value) }

@@ -1787,3 +1787,126 @@ func TestTeardownStepsWithoutCancellationStayInsideTheJoinBudget(t *testing.T) {
 		t.Fatalf("teardown reason=%q, want the step it gave up on", reason)
 	}
 }
+
+// TestOverrunningBuildThatSettlesCleanFreesTheCoordinate pins the release half
+// of condemnation. A build that overruns the join budget poisons its
+// coordinate, but once that build settles without leaving resources behind,
+// the coordinate must return to service — otherwise one slow build costs the
+// device that channel until the process restarts, while the server reopens a
+// lane every scan and the device refuses each one forever.
+func TestOverrunningBuildThatSettlesCleanFreesTheCoordinate(t *testing.T) {
+	previous := compartmentJoinTimeout
+	compartmentJoinTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { compartmentJoinTimeout = previous })
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	manager := newCompartmentManager(
+		context.Background(),
+		Config{BuildCompartment: func(string, string) (CompartmentResources, error) {
+			close(entered)
+			<-release
+			return CompartmentResources{Factories: emptyFactories{}}, nil
+		}},
+		slog.New(slog.DiscardHandler),
+	)
+	manager.root = t.TempDir()
+	manager.daemonID = "daemon-a"
+	cell := &compartment{
+		manager: manager, chID: "a",
+		stopBuild: make(chan struct{}), buildDone: make(chan struct{}),
+	}
+	manager.cells["a"] = cell
+	go func() {
+		defer func() {
+			cell.mu.Lock()
+			if cell.buildDone != nil {
+				close(cell.buildDone)
+				cell.buildDone = nil
+			}
+			cell.mu.Unlock()
+		}()
+		cell.buildLoop()
+	}()
+	<-entered
+
+	manager.closeCompartment("a")
+	waitCompute(t, func() bool {
+		cell.mu.Lock()
+		defer cell.mu.Unlock()
+		return cell.condemned
+	})
+	close(release)
+	waitCompute(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		_, occupied := manager.cells["a"]
+		return !occupied
+	})
+}
+
+// TestOverrunningBuildWhoseRollbackFailsStaysOutOfService pins the other half:
+// a coordinate whose rollback could not release its resources never returns to
+// service, because a second resource set over one that may still be alive is
+// the one thing condemnation exists to prevent.
+func TestOverrunningBuildWhoseRollbackFailsStaysOutOfService(t *testing.T) {
+	previous := compartmentJoinTimeout
+	compartmentJoinTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { compartmentJoinTimeout = previous })
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	manager := newCompartmentManager(
+		context.Background(),
+		Config{BuildCompartment: func(string, string) (CompartmentResources, error) {
+			close(entered)
+			<-release
+			return CompartmentResources{
+				Factories: emptyFactories{},
+				Close:     func() error { return errors.New("injected close failure") },
+			}, nil
+		}},
+		slog.New(slog.DiscardHandler),
+	)
+	manager.root = t.TempDir()
+	manager.daemonID = "daemon-a"
+	cell := &compartment{
+		manager: manager, chID: "a",
+		stopBuild: make(chan struct{}), buildDone: make(chan struct{}),
+	}
+	manager.cells["a"] = cell
+	go func() {
+		defer func() {
+			cell.mu.Lock()
+			if cell.buildDone != nil {
+				close(cell.buildDone)
+				cell.buildDone = nil
+			}
+			cell.mu.Unlock()
+		}()
+		cell.buildLoop()
+	}()
+	<-entered
+
+	manager.closeCompartment("a")
+	waitCompute(t, func() bool {
+		cell.mu.Lock()
+		defer cell.mu.Unlock()
+		return cell.condemned
+	})
+	close(release)
+	// The build settles by recording the leak; give the reclaimer every chance
+	// to act before asserting it did not.
+	waitCompute(t, func() bool {
+		cell.mu.Lock()
+		defer cell.mu.Unlock()
+		return cell.leaked && cell.buildDone == nil
+	})
+	time.Sleep(50 * time.Millisecond)
+	manager.mu.Lock()
+	survivor := manager.cells["a"]
+	manager.mu.Unlock()
+	if survivor != cell {
+		t.Fatal("a coordinate that failed to release its resources returned to service")
+	}
+}

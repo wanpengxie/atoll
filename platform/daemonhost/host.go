@@ -49,6 +49,10 @@ var (
 	ErrClosed           = errors.New("daemonhost: closed")
 	ErrDuplicateCurrent = errors.New("daemonhost: duplicate current carrier")
 	ErrLaneUnavailable  = errors.New("daemonhost: lane unavailable")
+
+	// errUnknownMembrane marks a present channel with no registered membrane in
+	// a snapshot round: nobody can judge its binding, so it answers Unknown.
+	errUnknownMembrane = errors.New("daemonhost: no membrane registered")
 )
 
 type DaemonFact uint8
@@ -99,6 +103,14 @@ type carrierRow struct {
 	gen      link.CarrierGeneration
 	wire     *link.ServerCarrier
 	sealed   atomic.Bool
+	// accepted flips once the carrier_accept frame has gone out. Admission
+	// publishes the carrier before the accept is written — a failed accept
+	// needs an owner for the lanes a concurrent scan may already have opened —
+	// so a scan's poke could otherwise reach the spine first and violate the
+	// device's first-frame contract: the verdict, before anything else. Pokes
+	// are lossy by design (the device pulls on establishment anyway), so the
+	// gate skips them, never queues them.
+	accepted atomic.Bool
 
 	mu          sync.Mutex
 	lanes       map[channel.ID]*serverLane
@@ -503,6 +515,7 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		h.beginCarrierShutdown(carrier)
 		return
 	}
+	carrier.accepted.Store(true)
 	h.Scan()
 	<-wire.Done()
 }
@@ -649,28 +662,54 @@ func (h *Host) answerCompartmentPlan(carrier *carrierRow, nonce string) {
 	if !currentCarrier {
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.ctx, factTimeout)
-	present, err := h.cfg.Present(ctx)
-	cancel()
+	// presentChannels, not a direct call: Present is one global callback, and
+	// this worker is joined at carrier shutdown. A direct call that ignores its
+	// context would wedge every carrier's answer worker at once — unlike a lane
+	// callback, whose wedge is confined to its own lane by design.
+	present, err := h.presentChannels()
 	if err != nil {
 		return
 	}
 	serve := make([]channel.ID, 0, len(present))
 	unknown := make([]channel.ID, 0)
-	for _, chID := range present {
+	// The whole membership round shares one budget, and the queries run
+	// concurrently under it. The device waits a fixed time for this reply, so
+	// the server's spend must stay below that no matter how many channels are
+	// present — per-channel budgets that stack serially grow past any client
+	// wait. A channel whose query does not answer in time is not omitted but
+	// named Unknown: "absent" keeps its single meaning — the channel no longer
+	// exists — and a slow store degrades judgment, never correctness.
+	queryCtx, cancelQueries := context.WithTimeout(h.ctx, factTimeout)
+	defer cancelQueries()
+	type verdict struct {
+		bound bool
+		err   error
+	}
+	verdicts := make([]verdict, len(present))
+	var queries sync.WaitGroup
+	for i, chID := range present {
 		h.mu.RLock()
 		membrane, known := h.membranes[chID]
 		h.mu.RUnlock()
 		if !known {
-			unknown = append(unknown, chID)
+			verdicts[i] = verdict{err: errUnknownMembrane}
 			continue
 		}
-		bound, err := h.isBound(carrier.daemonID, membrane.bundle.IsBound)
-		if err != nil {
+		queries.Add(1)
+		go func(i int, resolve func(context.Context, string) (bool, error)) {
+			defer queries.Done()
+			bound, err := h.isBound(queryCtx, carrier.daemonID, resolve)
+			verdicts[i] = verdict{bound: bound, err: err}
+		}(i, membrane.bundle.IsBound)
+	}
+	// isBound returns at the budget's edge even when the callback does not, so
+	// this join is bounded by the shared deadline.
+	queries.Wait()
+	for i, chID := range present {
+		switch {
+		case verdicts[i].err != nil:
 			unknown = append(unknown, chID)
-			continue
-		}
-		if bound {
+		case verdicts[i].bound:
 			serve = append(serve, chID)
 		}
 	}
@@ -696,7 +735,7 @@ func (h *Host) PokeCompartmentPlan(daemonID string) {
 		carrier = row.current
 	}
 	h.mu.RUnlock()
-	if carrier == nil || carrier.sealed.Load() {
+	if carrier == nil || carrier.sealed.Load() || !carrier.accepted.Load() {
 		return
 	}
 	_ = carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineCompartmentPlanPoke})
@@ -710,7 +749,7 @@ func (h *Host) pokeAllCompartmentPlans() {
 	carriers := h.currentCarriersLocked()
 	h.mu.RUnlock()
 	for _, carrier := range carriers {
-		if carrier == nil || carrier.sealed.Load() {
+		if carrier == nil || carrier.sealed.Load() || !carrier.accepted.Load() {
 			continue
 		}
 		_ = carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineCompartmentPlanPoke})
@@ -952,7 +991,9 @@ func (h *Host) reconcileCoordLocked(
 	chID channel.ID,
 	membrane membraneRow,
 ) {
-	bound, err := h.isBound(carrier.daemonID, membrane.bundle.IsBound)
+	ctx, cancel := context.WithTimeout(h.ctx, factTimeout)
+	defer cancel()
+	bound, err := h.isBound(ctx, carrier.daemonID, membrane.bundle.IsBound)
 	if err != nil {
 		return
 	}
@@ -967,12 +1008,15 @@ func (h *Host) reconcileCoordLocked(
 	carrier.retireLane(chID)
 }
 
+// isBound runs one binding query under the caller's budget. The caller decides
+// how calls share that budget — the snapshot answer pools one budget across
+// every channel, reconciliation spends one per coordinate — so the deadline
+// lives with the caller, not here.
 func (h *Host) isBound(
+	ctx context.Context,
 	daemonID string,
 	resolve func(context.Context, string) (bool, error),
 ) (bool, error) {
-	ctx, cancel := context.WithTimeout(h.ctx, factTimeout)
-	defer cancel()
 	type result struct {
 		bound bool
 		err   error

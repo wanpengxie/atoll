@@ -320,6 +320,52 @@ func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
 	}
 }
 
+// TestSnapshotAnswerSpendsOneBudgetAcrossAllChannels pins how budgets nest on
+// the snapshot path: the device waits a fixed time for one reply, so the
+// server's spend must stay below that no matter how many channels are present.
+// Every binding query here blocks forever; the reply must still arrive within
+// one pooled budget — naming each stuck channel Unknown — not after
+// per-channel budgets stacked serially past any client wait.
+func TestSnapshotAnswerSpendsOneBudgetAcrossAllChannels(t *testing.T) {
+	previous := factTimeout
+	factTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { factTimeout = previous })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	const channels = 8
+	present := make([]channel.ID, 0, channels)
+	for i := 0; i < channels; i++ {
+		present = append(present, channel.ID(fmt.Sprintf("ch-%02d", i)))
+	}
+	host := New(Config{
+		ScanInterval: time.Hour,
+		Present:      func(context.Context) ([]channel.ID, error) { return present, nil },
+	})
+	defer host.Close()
+	for _, chID := range present {
+		host.Register(chID, 1, platform.DaemonMembrane{
+			Plan: func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
+			IsBound: func(context.Context, string) (bool, error) {
+				<-release
+				return false, nil
+			},
+		})
+	}
+	carrier := dialTestCarrier(t, host)
+	started := time.Now()
+	plan := pullTestPlan(t, carrier)
+	elapsed := time.Since(started)
+	// Serial per-channel budgets would spend channels × factTimeout; half that
+	// is unambiguous evidence of pooling.
+	if elapsed > time.Duration(channels)*factTimeout/2 {
+		t.Fatalf("snapshot answer took %v across %d stuck channels", elapsed, channels)
+	}
+	if len(plan.Unknown) != channels || len(plan.Serve) != 0 {
+		t.Fatalf("stuck queries answered serve=%v unknown=%v", plan.Serve, plan.Unknown)
+	}
+}
+
 // pullTestPlan performs the device half of one compartment plan round trip.
 func pullTestPlan(t *testing.T, carrier *link.ClientCarrier) link.SpineFrame {
 	t.Helper()
