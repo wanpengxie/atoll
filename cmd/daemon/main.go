@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
@@ -39,6 +40,11 @@ import (
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 )
+
+// shutdownGrace bounds the whole graceful teardown after the first signal.
+// Twice the single-compartment join budget: a teardown still running past that
+// is not finishing, it is wedged on something cancellation cannot reach.
+const shutdownGrace = 60 * time.Second
 
 // classFactories resolves one body's factory at BUILD time from the class and
 // config that body's own desired carries — the daemon-side mirror of the server
@@ -95,6 +101,21 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// A device daemon is a user-run process with no supervisor behind it, so
+	// both escape hatches a supervised server takes for granted are built here:
+	// the first signal starts the graceful teardown and immediately restores
+	// default signal handling, so a second Ctrl-C hard-kills a wedged teardown;
+	// and if the teardown itself exceeds the grace period — the shape is a lane
+	// answer parked inside an uncancellable storage syscall — the process exits
+	// on its own. Reconciliation is crash-safe, so exiting here is exactly one
+	// crash, not corruption.
+	go func() {
+		<-ctx.Done()
+		stop()
+		time.Sleep(shutdownGrace)
+		slog.Error("daemon: graceful shutdown exceeded its grace period; exiting")
+		os.Exit(1)
+	}()
 
 	// Device identity + atoll home resolve first — an assigned device actor
 	// derives its id from DeviceName; loopers' situation facts derive from the
