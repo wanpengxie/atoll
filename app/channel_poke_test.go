@@ -10,6 +10,7 @@ package app_test
 // (not the gateway's 30s sweep backstop) is what converged it.
 
 import (
+	"context"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -53,7 +54,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 	a.SetMembershipPoke(gw.Poke)
 	t.Cleanup(func() {
 		gw.Close()
-		a.Close()
+		a.Close(context.Background())
 		db.Close()
 	})
 

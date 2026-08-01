@@ -156,7 +156,7 @@ func setupTestApp(t *testing.T) *testEnv {
 		// testAgentBuilder in its build path) BEFORE nil-ing the global — else a
 		// still-running ticker races the write under -race.
 		gw.Close()
-		a.Close()
+		a.Close(context.Background())
 		testAgentBuilder = nil
 		db.Close()
 	})

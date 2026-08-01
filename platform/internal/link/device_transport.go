@@ -247,7 +247,16 @@ type DeviceStreamKind string
 const (
 	DeviceStreamCarrier     DeviceStreamKind = "carrier"
 	DeviceStreamLaneControl DeviceStreamKind = "lane_control"
-	DeviceStreamActor       DeviceStreamKind = "actor"
+	// DeviceStreamStorage is a lane's storage sibling: the stream that carries
+	// the server's storage instructions (alloc/reclaim) and nothing else. It is
+	// its own stream because its consumer is the one reader that legitimately
+	// blocks — those instructions end in filesystem syscalls no context can
+	// recall — and a queue must ride a single physical dependency: a dead disk
+	// may freeze the storage stream, never the plan traffic beside it. It
+	// carries its lane's generation and has no identity of its own: it is
+	// admitted only against that exact lane and dies with it.
+	DeviceStreamStorage DeviceStreamKind = "storage"
+	DeviceStreamActor   DeviceStreamKind = "actor"
 )
 
 type DeviceStreamHeader struct {
@@ -263,7 +272,7 @@ func (h DeviceStreamHeader) Validate() error {
 		if h.ProtoVersion <= 0 || h.Channel != "" || h.LaneGen != "" {
 			return errors.New("link: malformed carrier stream header")
 		}
-	case DeviceStreamLaneControl, DeviceStreamActor:
+	case DeviceStreamLaneControl, DeviceStreamStorage, DeviceStreamActor:
 		if h.ProtoVersion != 0 || h.Channel == "" || h.LaneGen == "" {
 			return fmt.Errorf("link: malformed %s stream header", h.Kind)
 		}
@@ -856,6 +865,22 @@ func (c *ServerCarrier) OpenLane(ctx context.Context, chID channel.ID, generatio
 	return newLaneStream(c.rawCarrier, chID, generation, conn), nil
 }
 
+// OpenStorage opens the storage sibling of an admitted lane, keyed by that
+// lane's generation. The device opens it — the same direction as actor
+// streams — because the device is the only side that knows the moment
+// generation G became its current lane, so the pair cannot race: by the time
+// this is called, the server's lane G already exists or was already retired,
+// and the server's admission answers exactly and finally either way.
+func (c *ClientCarrier) OpenStorage(ctx context.Context, chID channel.ID, generation LaneGeneration) (*LaneStream, error) {
+	conn, err := c.open(ctx, DeviceStreamHeader{
+		Kind: DeviceStreamStorage, Channel: chID, LaneGen: generation,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newLaneStream(c.rawCarrier, chID, generation, conn), nil
+}
+
 func (c *ClientCarrier) OpenActor(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
 	conn, err := c.open(ctx, DeviceStreamHeader{
 		Kind: DeviceStreamActor, Channel: chID, LaneGen: generation,
@@ -913,6 +938,18 @@ func AdoptLane(carrier *ClientCarrier, header DeviceStreamHeader, conn net.Conn)
 			_ = conn.Close()
 		}
 		return nil, errors.New("link: malformed lane stream")
+	}
+	return newLaneStream(carrier.rawCarrier, header.Channel, header.LaneGen, conn), nil
+}
+
+// AdoptStorage wraps a device-opened storage stream on the server side.
+func AdoptStorage(carrier *ServerCarrier, header DeviceStreamHeader, conn net.Conn) (*LaneStream, error) {
+	if carrier == nil || conn == nil || header.Validate() != nil ||
+		header.Kind != DeviceStreamStorage {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return nil, errors.New("link: malformed storage stream")
 	}
 	return newLaneStream(carrier.rawCarrier, header.Channel, header.LaneGen, conn), nil
 }

@@ -27,7 +27,7 @@ func (f *fakeApp) Shutdown(context.Context) error {
 	return f.shutErr
 }
 
-func (f *fakeApp) Close() error {
+func (f *fakeApp) Close(context.Context) error {
 	f.r.steps = append(f.r.steps, "homes-close")
 	return f.closeErr
 }

@@ -164,7 +164,7 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 	}
 	gw, err := gateway.New(gateway.Config{Resolver: testGatewayResolver(a)})
 	if err != nil {
-		a.Close()
+		a.Close(context.Background())
 		db.Close()
 		t.Fatalf("gateway.New: %v", err)
 	}
@@ -175,7 +175,7 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 	t.Cleanup(func() {
 		testAgentBuilder = nil
 		gw.Close()
-		a.Close()
+		a.Close(context.Background())
 		db.Close()
 	})
 

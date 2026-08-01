@@ -21,7 +21,7 @@ func TestEntitlementSnapshotHonorsCanceledContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = a.Close() })
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, _, err := a.EntitlementSnapshot(ctx, "nobody"); !errors.Is(err, context.Canceled) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -105,16 +106,27 @@ func (w *lifecycleWorker) notify(id channel.ID) {
 	}
 }
 
-func (w *lifecycleWorker) close() {
+// close joins the worker under the caller's budget. The worker leaves on its
+// own cancellation whenever the converge it is inside honours context; one
+// that does not cannot be recalled, so expiry reports the abandonment instead
+// of holding the whole app teardown behind it.
+func (w *lifecycleWorker) close(ctx context.Context) error {
+	var err error
 	w.once.Do(func() {
 		w.cancel()
 		w.startMu.Lock()
 		started := w.started
 		w.startMu.Unlock()
-		if started {
-			<-w.done
+		if !started {
+			return
+		}
+		select {
+		case <-w.done:
+		case <-ctx.Done():
+			err = fmt.Errorf("app: channel lifecycle worker abandoned mid-converge: %w", ctx.Err())
 		}
 	})
+	return err
 }
 
 func (w *lifecycleWorker) lightScan() {

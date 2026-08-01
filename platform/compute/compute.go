@@ -104,7 +104,7 @@ type terminalCarrierError struct{ err error }
 func (e terminalCarrierError) Error() string { return e.err.Error() }
 func (e terminalCarrierError) Unwrap() error { return e.err }
 
-func Run(ctx context.Context, cfg Config) error {
+func Run(ctx context.Context, cfg Config) (retErr error) {
 	if cfg.ServerWS == "" {
 		return errors.New("compute: ServerWS required")
 	}
@@ -125,7 +125,10 @@ func Run(ctx context.Context, cfg Config) error {
 	var daemonLock *os.File
 	var daemonID string
 	defer func() {
-		manager.close()
+		// Teardown's verdict joins Run's own: a close that had to abandon
+		// workers surfaces its account to the caller instead of vanishing
+		// behind the defer.
+		retErr = errors.Join(retErr, manager.close())
 		if daemonLock != nil {
 			_ = daemonLock.Close()
 		}

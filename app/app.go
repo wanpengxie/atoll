@@ -108,8 +108,9 @@ func New(cfg Config) (*App, error) {
 		},
 	})
 	if cfg.HostFactory == nil {
-		_ = a.daemonHost.Close()
-		return nil, errors.New("app: HostFactory required")
+		return nil, errors.Join(
+			errors.New("app: HostFactory required"),
+			a.daemonHost.Close(context.Background()))
 	}
 	host, err := cfg.HostFactory(channelhost.HomeDeps{
 		CompositionResolver:  compositionResolver{app: a},
@@ -136,8 +137,9 @@ func New(cfg Config) (*App, error) {
 		},
 	})
 	if err != nil {
-		_ = a.daemonHost.Close()
-		return nil, fmt.Errorf("app: construct ChannelHost: %w", err)
+		return nil, errors.Join(
+			fmt.Errorf("app: construct ChannelHost: %w", err),
+			a.daemonHost.Close(context.Background()))
 	}
 	a.host = host
 
@@ -208,12 +210,18 @@ func (a *App) Shutdown(ctx context.Context) error {
 }
 
 // Close joins realm workers before transferring process teardown to ChannelHost,
-// the sole owner of serving Home instances and their physical stores.
-func (a *App) Close() error {
+// the sole owner of serving Home instances and their physical stores. The
+// caller's budget bounds every join: whatever refuses to leave in time is
+// abandoned with its account in the returned error, because process death —
+// not this ordering — is what actually reclaims a worker that ignores
+// cancellation, and the stores' crash safety — not this ordering — is what
+// keeps their data intact.
+func (a *App) Close(ctx context.Context) error {
+	var lifecycleErr error
 	if a.lifecycle != nil {
-		a.lifecycle.close()
+		lifecycleErr = a.lifecycle.close(ctx)
 	}
-	return errors.Join(a.daemonHost.Close(), a.host.Close())
+	return errors.Join(lifecycleErr, a.daemonHost.Close(ctx), a.host.Close())
 }
 
 // ---------------------------------------------------------------------------

@@ -86,7 +86,7 @@ func openBusinessTestLane(
 			return []channel.ID{"channel-a"}, nil
 		},
 	})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	if membrane.IsBound == nil {
 		membrane.IsBound = func(context.Context, string) (bool, error) { return true, nil }
 	}
@@ -286,10 +286,115 @@ func hostLaneStillCurrent(lane *link.LaneStream) bool {
 	return lane != nil && !lane.Retired()
 }
 
+// TestStorageSiblingSharesItsLaneLifecycle pins that the pair is one
+// lifecycle: the sibling carries its lane's generation and nothing of its own,
+// so the lane's retirement takes it, its death takes the lane, and a
+// generation already spent admits no sibling — while refusing one never harms
+// the live lane it does not belong to.
+func TestStorageSiblingSharesItsLaneLifecycle(t *testing.T) {
+	t.Run("lane retirement takes the sibling", func(t *testing.T) {
+		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		storage := openTestStorageSibling(t, host, carrier, lane)
+		host.RetireLane("daemon-a", "channel-a")
+		expectStreamDeath(t, storage, "the lane retired but its storage sibling stayed live")
+	})
+
+	t.Run("sibling death retires the lane", func(t *testing.T) {
+		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		storage := openTestStorageSibling(t, host, carrier, lane)
+		storage.RetireLogical()
+		storage.CollectPhysical()
+		waitFor(t, func() bool { return !host.LaneAttached("daemon-a", "channel-a") })
+		expectStreamDeath(t, lane, "the sibling died but the lane stayed live")
+	})
+
+	t.Run("a sibling for a spent generation is refused", func(t *testing.T) {
+		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		openTestStorageSibling(t, host, carrier, lane)
+		bogus, err := carrier.OpenStorage(
+			context.Background(), "channel-a", link.LaneGeneration("0198f000-0000-7000-8000-00000000dead"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			bogus.RetireLogical()
+			bogus.CollectPhysical()
+		}()
+		var frame link.LaneFrame
+		if err := bogus.Decode(&frame); err == nil {
+			t.Fatalf("a sibling with a foreign generation was served a frame: %+v", frame)
+		}
+		if !host.LaneAttached("daemon-a", "channel-a") {
+			t.Fatal("refusing the foreign sibling harmed the lane it did not belong to")
+		}
+	})
+}
+
+// expectStreamDeath reads the device end until the wire dies under it. Death
+// is only observable to a reader — retirement on the far side closes the
+// stream when the far reader collects, and this side notices as a read error.
+func expectStreamDeath(t *testing.T, stream *link.LaneStream, message string) {
+	t.Helper()
+	dead := make(chan struct{})
+	go func() {
+		defer close(dead)
+		for {
+			var frame link.LaneFrame
+			if stream.Decode(&frame) != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-dead:
+	case <-time.After(2 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+// openTestStorageSibling performs the device half of the storage-sibling open
+// and waits until the host has attached it — storage RPCs sent before the
+// attach answer NotReady by design, which is not what these tests probe.
+func openTestStorageSibling(
+	t *testing.T, host *Host, carrier *link.ClientCarrier, lane *link.LaneStream,
+) *link.LaneStream {
+	t.Helper()
+	storage, err := carrier.OpenStorage(context.Background(), lane.Channel, lane.Gen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		storage.RetireLogical()
+		storage.CollectPhysical()
+	})
+	waitFor(t, func() bool {
+		host.mu.RLock()
+		row := host.daemons["daemon-a"]
+		var current *carrierRow
+		if row != nil {
+			current = row.current
+		}
+		host.mu.RUnlock()
+		if current == nil {
+			return false
+		}
+		current.mu.Lock()
+		serverLane := current.lanes[lane.Channel]
+		current.mu.Unlock()
+		if serverLane == nil {
+			return false
+		}
+		serverLane.mu.Lock()
+		defer serverLane.mu.Unlock()
+		return serverLane.storage != nil
+	})
+	return storage
+}
+
 func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T) {
 	t.Run("missing lane", func(t *testing.T) {
 		host := New(Config{ScanInterval: time.Hour})
-		t.Cleanup(func() { _ = host.Close() })
+		t.Cleanup(func() { _ = host.Close(context.Background()) })
 		if err := host.SendAlloc(t.Context(), "daemon-a", "channel-a", "coord-a", false); !errors.Is(err, ErrLaneUnavailable) {
 			t.Fatalf("SendAlloc error=%v", err)
 		}
@@ -333,15 +438,16 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			host, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+			host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+			storage := openTestStorageSibling(t, host, carrier, lane)
 			deviceDone := make(chan error, 1)
 			go func() {
 				var request link.LaneFrame
-				if err := lane.Decode(&request); err != nil {
+				if err := storage.Decode(&request); err != nil {
 					deviceDone <- err
 					return
 				}
-				deviceDone <- lane.Send(test.reply(request))
+				deviceDone <- storage.Send(test.reply(request))
 			}()
 			err := test.operation(host)
 			if test.want == "" && err != nil {
@@ -401,15 +507,16 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 			},
 		} {
 			t.Run(test.name, func(t *testing.T) {
-				host, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+				host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+				storage := openTestStorageSibling(t, host, carrier, lane)
 				deviceDone := make(chan error, 1)
 				go func() {
 					var request link.LaneFrame
-					if err := lane.Decode(&request); err != nil {
+					if err := storage.Decode(&request); err != nil {
 						deviceDone <- err
 						return
 					}
-					deviceDone <- lane.Send(test.reply(request))
+					deviceDone <- storage.Send(test.reply(request))
 				}()
 				err := test.operation(host)
 				if !errors.Is(err, platform.ErrDaemonNotReady) {
@@ -425,15 +532,16 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 		// or the guard above would hold for an implementation that returned it
 		// unconditionally.
 		t.Run("a ready daemon does not carry the sentinel", func(t *testing.T) {
-			host, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+			host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+			storage := openTestStorageSibling(t, host, carrier, lane)
 			deviceDone := make(chan error, 1)
 			go func() {
 				var request link.LaneFrame
-				if err := lane.Decode(&request); err != nil {
+				if err := storage.Decode(&request); err != nil {
 					deviceDone <- err
 					return
 				}
-				deviceDone <- lane.Send(link.LaneFrame{
+				deviceDone <- storage.Send(link.LaneFrame{
 					Kind: link.LaneAllocReply, RequestID: request.RequestID,
 					AllocReply: &link.AllocReply{
 						RequestID: request.RequestID, Reason: "disk full",
@@ -454,11 +562,12 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 		previous := laneRPCTimeout
 		laneRPCTimeout = 30 * time.Millisecond
 		t.Cleanup(func() { laneRPCTimeout = previous })
-		host, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		storage := openTestStorageSibling(t, host, carrier, lane)
 		received := make(chan struct{})
 		go func() {
 			var request link.LaneFrame
-			if lane.Decode(&request) == nil {
+			if storage.Decode(&request) == nil {
 				close(received)
 			}
 		}()
@@ -484,7 +593,7 @@ func TestTransferTicketAuthorizationPrecedesMutationAndIsIdempotent(t *testing.T
 		ScanInterval: time.Hour,
 		Now:          func() time.Time { return now },
 	})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	host.mu.Lock()
 	host.daemons["daemon-a"] = &daemonRow{current: &carrierRow{
 		lanes: map[channel.ID]*serverLane{"channel-a": {}},
@@ -542,7 +651,7 @@ func TestNonCooperativePlatformCallbacksStayBoundedAndUnknown(t *testing.T) {
 				return []channel.ID{"channel-a"}, nil
 			},
 		})
-		t.Cleanup(func() { _ = host.Close() })
+		t.Cleanup(func() { _ = host.Close(context.Background()) })
 		started := time.Now()
 		ids, err := host.presentChannels()
 		if err == nil || ids != nil || time.Since(started) > time.Second {
@@ -560,7 +669,7 @@ func TestNonCooperativePlatformCallbacksStayBoundedAndUnknown(t *testing.T) {
 				return DaemonDeleted
 			},
 		})
-		t.Cleanup(func() { _ = host.Close() })
+		t.Cleanup(func() { _ = host.Close(context.Background()) })
 		started := time.Now()
 		if fact := host.daemonFact("daemon-a"); fact != DaemonUnavailable ||
 			time.Since(started) > time.Second {
@@ -572,7 +681,7 @@ func TestNonCooperativePlatformCallbacksStayBoundedAndUnknown(t *testing.T) {
 		release := make(chan struct{})
 		t.Cleanup(func() { close(release) })
 		host := New(Config{ScanInterval: time.Hour})
-		t.Cleanup(func() { _ = host.Close() })
+		t.Cleanup(func() { _ = host.Close(context.Background()) })
 		started := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), factTimeout)
 		t.Cleanup(cancel)
@@ -592,7 +701,7 @@ func TestDiagnosticsAreBoundedFIFOAndRowsRespectOwnershipLifetime(t *testing.T) 
 		ScanInterval: time.Hour,
 		Now:          func() time.Time { return now },
 	})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	for i := 0; i < diagnosticCapacity+3; i++ {
 		host.recordDiagnostic("fifo", Diagnostic{
 			Kind: string(rune('a' + i)), Time: now.Add(time.Duration(i)),
@@ -632,7 +741,7 @@ func TestDiagnosticsAreBoundedFIFOAndRowsRespectOwnershipLifetime(t *testing.T) 
 
 func TestUnexpectedSpineFrameClosesTheCarrier(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	carrier := dialTestCarrier(t, host)
 	if err := carrier.SendSpine(link.SpineFrame{
 		Kind: link.SpineCarrierAccept, DaemonID: "forged",
@@ -673,7 +782,7 @@ func TestHandshakeRejectClassification(t *testing.T) {
 
 func TestBeginCarrierShutdownIsIdempotentAtTheLedgerBoundary(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	carrier := &carrierRow{
 		host: host, daemonID: "daemon-a", wire: &link.ServerCarrier{},
 		lanes: make(map[channel.ID]*serverLane),
@@ -701,7 +810,7 @@ func TestBeginCarrierShutdownIsIdempotentAtTheLedgerBoundary(t *testing.T) {
 
 func TestScanPokesEveryCurrentCarrierExactlyOnce(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	dial := func(daemonID string) *link.ClientCarrier {
 		t.Helper()
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -772,7 +881,7 @@ func TestActorAdmissionIsOwnedByTheLaneHeaderMembrane(t *testing.T) {
 			return []channel.ID{"a", "b"}, nil
 		},
 	})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var authA, authB atomic.Int32
 	attachedA := make(chan actor.ActorID, 1)
 	host.Register("a", 1, platform.DaemonMembrane{
@@ -882,7 +991,7 @@ func TestActorAdmissionIsOwnedByTheLaneHeaderMembrane(t *testing.T) {
 
 func TestCarrierKindChildClosesTheWholeCarrier(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	client := dialTestCarrier(t, host)
 	host.mu.RLock()
 	serverCarrier := host.daemons["daemon-a"].current
@@ -951,7 +1060,7 @@ func TestCarrierAcceptWriteFailureWithdrawsLedgerAndJoinsSupervisor(t *testing.T
 
 	closed := make(chan struct{})
 	go func() {
-		_ = host.Close()
+		_ = host.Close(context.Background())
 		close(closed)
 	}()
 	select {

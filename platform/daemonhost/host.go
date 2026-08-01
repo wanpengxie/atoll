@@ -5,6 +5,7 @@ package daemonhost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -49,6 +50,14 @@ var (
 	ErrClosed           = errors.New("daemonhost: closed")
 	ErrDuplicateCurrent = errors.New("daemonhost: duplicate current carrier")
 	ErrLaneUnavailable  = errors.New("daemonhost: lane unavailable")
+
+	// ErrCloseAbandoned is Close's honest expiry verdict: the budget ran out
+	// with work still uncollected, and the error says how much. A close that
+	// kept waiting instead would guarantee nothing — a reader parked in a
+	// callback that ignores cancellation never returns, and process death is
+	// what actually reclaims it — while a close that returned nil would fake
+	// cleanliness. The accounting is the guarantee now.
+	ErrCloseAbandoned = errors.New("daemonhost: close abandoned uncollected work")
 
 	// errUnknownMembrane marks a present channel with no registered membrane in
 	// a snapshot round: nobody can judge its binding, so it answers Unknown.
@@ -184,6 +193,12 @@ type Host struct {
 	transfers        map[string]transferTicket
 	wg               sync.WaitGroup
 	upgrader         websocket.Upgrader
+
+	// liveSupervisors and liveReaders mirror h.wg for accounting only: a
+	// bounded Close that gives up must report what it abandoned, and a
+	// WaitGroup cannot be read. They take part in no decision.
+	liveSupervisors atomic.Int64
+	liveReaders     atomic.Int64
 }
 
 func New(cfg Config) *Host {
@@ -504,9 +519,11 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		return
 	}
 	h.wg.Add(1)
+	h.liveSupervisors.Add(1)
 	h.mu.Unlock()
 	go func() {
 		defer h.wg.Done()
+		defer h.liveSupervisors.Add(-1)
 		h.runCarrier(carrier)
 	}()
 	if err := sendCarrierAccept(wire, link.SpineFrame{
@@ -773,12 +790,16 @@ func (h *Host) acceptStream(
 		_ = carrier.wire.Close()
 		return
 	}
-	if header.Kind != link.DeviceStreamActor {
+	if header.Kind != link.DeviceStreamActor && header.Kind != link.DeviceStreamStorage {
 		_ = conn.Close()
 		return
 	}
 	if err := header.Validate(); err != nil {
 		_ = conn.Close()
+		return
+	}
+	if header.Kind == link.DeviceStreamStorage {
+		h.acceptStorageStream(carrier, conn, header)
 		return
 	}
 	carrier.mu.Lock()
@@ -790,6 +811,49 @@ func (h *Host) acceptStream(
 		return
 	}
 	lane.acceptActor(conn)
+}
+
+// acceptStorageStream admits a lane's storage sibling. Admission is exact: the
+// stream carries its lane's generation and attaches only to that lane, still
+// installed and unretired — a generation is spent with its lane, so a stale or
+// duplicate sibling is refused by closing it, never parked. A sibling can
+// legitimately race the lane's own installation here and lose; the refusal
+// then retires the device's fresh lane through the pair's fate-sharing, and
+// the next scan reopens a whole pair — one self-healing churn, the transient
+// this system's convergence already pays for everywhere else. The reader's
+// physical ticket follows ensureLane's discipline: issued under the carrier
+// lock against sealing, so the supervisor's wait either never sees it or is
+// guaranteed to see it.
+func (h *Host) acceptStorageStream(
+	carrier *carrierRow,
+	conn net.Conn,
+	header link.DeviceStreamHeader,
+) {
+	carrier.mu.Lock()
+	lane := carrier.lanes[header.Channel]
+	current := lane != nil && lane.stream.Gen == header.LaneGen && !lane.stream.Retired()
+	if !current || carrier.sealed.Load() {
+		carrier.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	carrier.takeReader()
+	carrier.mu.Unlock()
+	stream, err := link.AdoptStorage(carrier.wire, header, conn)
+	if err != nil {
+		carrier.returnReader()
+		return
+	}
+	if !lane.attachStorage(stream) {
+		stream.RetireLogical()
+		stream.CollectPhysical()
+		carrier.returnReader()
+		return
+	}
+	go func() {
+		defer carrier.returnReader()
+		lane.storageLoop(stream)
+	}()
 }
 
 // sealCarrierLocked is the carrier registry's single decision write. h.mu must
@@ -1034,6 +1098,19 @@ func (h *Host) isBound(
 	}
 }
 
+// takeReader issues one physical ticket and counts it. The WaitGroup is what
+// the supervisor joins; the counter is what a bounded close reports when it
+// gives up. Both move together or the account lies.
+func (c *carrierRow) takeReader() {
+	c.physical.Add(1)
+	c.host.liveReaders.Add(1)
+}
+
+func (c *carrierRow) returnReader() {
+	c.host.liveReaders.Add(-1)
+	c.physical.Done()
+}
+
 func (c *carrierRow) lockCoord(chID channel.ID) func() {
 	c.mu.Lock()
 	gate := c.coordLocks[chID]
@@ -1072,14 +1149,14 @@ func (c *carrierRow) ensureLane(chID channel.ID, membrane membraneRow) {
 	// loses, and the supervisor's wait is guaranteed to see this one. It covers
 	// the whole span — a failed open returns it below, a successful one hands
 	// it to the lane's reader, which is what eventually collects.
-	c.physical.Add(1)
+	c.takeReader()
 	c.mu.Unlock()
 	generation := link.NewLaneGeneration()
 	ctx, cancel := context.WithTimeout(c.host.ctx, defaultLaneOpenTimeout)
 	stream, err := c.wire.OpenLane(ctx, chID, generation)
 	cancel()
 	if err != nil {
-		c.physical.Done()
+		c.returnReader()
 		return
 	}
 	lane := newServerLane(c, stream, membrane)
@@ -1094,14 +1171,14 @@ func (c *carrierRow) ensureLane(chID channel.ID, membrane membraneRow) {
 	c.mu.Lock()
 	if c.sealed.Load() || stream.Retired() {
 		c.mu.Unlock()
-		lane.start(&c.physical)
+		lane.start()
 		stream.RetireLogical()
 		return
 	}
 	old := c.lanes[chID]
 	c.lanes[chID] = lane
 	c.mu.Unlock()
-	lane.start(&c.physical)
+	lane.start()
 	if old != nil {
 		old.retireLogical()
 	}
@@ -1373,26 +1450,44 @@ func (h *Host) sweepExpiredTransfersLocked(now time.Time) {
 	}
 }
 
-func (h *Host) Close() error {
+// Close tears the host down under the caller's budget. Cancelling first is
+// what lets a well-behaved handler leave: every host implementation a lane
+// reader calls receives this context. The join is bounded because waiting past
+// the budget guarantees nothing — a reader parked in a callback that ignores
+// cancellation never returns, and process death is what actually reclaims it;
+// this host's own data never depended on the join either, that lives in the
+// stores' crash safety. Expiry therefore returns the account of what was
+// abandoned instead of pretending completion, and a clean join returns nil —
+// a bounded close that faked either verdict would be worse than the hang it
+// replaced.
+func (h *Host) Close(ctx context.Context) error {
 	h.mu.Lock()
-	if h.closed {
+	if !h.closed {
+		h.closed = true
+		carriers := h.currentCarriersLocked()
 		h.mu.Unlock()
+		h.cancel()
+		for _, carrier := range carriers {
+			h.beginCarrierShutdown(carrier)
+		}
+	} else {
+		h.mu.Unlock()
+	}
+	// The watcher goroutine outlives an expired budget: it is the one waiter
+	// the WaitGroup API requires, and it parks harmlessly until the wedged
+	// reader — or the process — goes away.
+	joined := make(chan struct{})
+	go func() {
+		h.wg.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
 		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %d carrier supervisors, %d lane readers still out",
+			ErrCloseAbandoned, h.liveSupervisors.Load(), h.liveReaders.Load())
 	}
-	h.closed = true
-	carriers := h.currentCarriersLocked()
-	h.mu.Unlock()
-	// Cancelling first is what lets a well-behaved handler leave: every host
-	// implementation a lane reader calls receives this context. Close still has
-	// no deadline of its own — its whole value is the guarantee that everything
-	// this host owns has finished, and a Close that returned without it would
-	// be indistinguishable from one that kept it.
-	h.cancel()
-	for _, carrier := range carriers {
-		h.beginCarrierShutdown(carrier)
-	}
-	h.wg.Wait()
-	return nil
 }
 
 var _ platform.DaemonRoutes = (*Host)(nil)

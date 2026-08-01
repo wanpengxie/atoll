@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,7 @@ func TestStart_ConvergesMissingChannelImageFromDesiredValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("one missing image blocked realm startup: %v", err)
 	}
-	t.Cleanup(func() { _ = a.Close() })
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
 	// Construction wires but never runs; the boot full scan belongs to Start
 	// (assembly-complete boundary).
 	a.Start()

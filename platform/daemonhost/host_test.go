@@ -78,7 +78,7 @@ func adoptAndSuperviseTestLane(t *testing.T, carrier *link.ClientCarrier) *link.
 
 func TestLaneTermination_RetiresLaneOnly(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
 	host.Register("channel-a", 1, platform.DaemonMembrane{
@@ -133,7 +133,7 @@ func TestLaneTermination_RetiresLaneOnly(t *testing.T) {
 // make it false, so no reply from the device can ever wedge this coordinate.
 func TestLaneAttachedAnswersFromThisHostsLedgerOnly(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
 	host.Register("channel-a", 1, platform.DaemonMembrane{
@@ -165,7 +165,7 @@ func TestLaneAttachedAnswersFromThisHostsLedgerOnly(t *testing.T) {
 
 func TestMembraneGenerationCASRejectsLateCallbacks(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+	defer host.Close(context.Background())
 	bundle := platform.DaemonMembrane{
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}
@@ -187,7 +187,7 @@ func TestMembraneGenerationCASRejectsLateCallbacks(t *testing.T) {
 
 func TestRevokeBeforeAdmissionLeavesTombstoneFence(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+	defer host.Close(context.Background())
 	host.RevokeDaemon("daemon-a")
 	carrier := &carrierRow{host: host, daemonID: "daemon-a", gen: "g1"}
 	if err := host.admit(carrier); err == nil {
@@ -206,7 +206,7 @@ func TestDaemonFactSweepRevokesWithoutPostCommitHint(t *testing.T) {
 			return DaemonAlive
 		},
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	carrier := dialTestCarrier(t, host)
 	deleted.Store(true)
 	host.Scan()
@@ -234,7 +234,7 @@ func TestDeviceTrafficAllocatesNoPerCoordinateState(t *testing.T) {
 		ScanInterval: time.Hour,
 		Present:      func(context.Context) ([]channel.ID, error) { return nil, nil },
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	carrier := dialTestCarrier(t, host)
 	for i := 0; i < 256; i++ {
 		if err := carrier.SendSpine(link.SpineFrame{
@@ -271,7 +271,7 @@ func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
 			return []channel.ID{"a"}, nil
 		},
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	bundle := platform.DaemonMembrane{
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
@@ -342,7 +342,7 @@ func TestSnapshotAnswerSpendsOneBudgetAcrossAllChannels(t *testing.T) {
 		ScanInterval: time.Hour,
 		Present:      func(context.Context) ([]channel.ID, error) { return present, nil },
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	for _, chID := range present {
 		host.Register(chID, 1, platform.DaemonMembrane{
 			Plan: func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
@@ -412,7 +412,7 @@ func containsChannel(ids []channel.ID, want channel.ID) bool {
 
 func TestEnsureLaneRetiresOldExactObjectWithoutDeletingReplacement(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+	defer host.Close(context.Background())
 	bundle := platform.DaemonMembrane{
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
@@ -460,7 +460,7 @@ func TestEnsureLaneRetiresOldExactObjectWithoutDeletingReplacement(t *testing.T)
 
 func TestRetireLane_DeletesRowSynchronously(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+	defer host.Close(context.Background())
 	host.Register("a", 1, platform.DaemonMembrane{
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -482,7 +482,7 @@ func TestRetireLane_DeletesRowSynchronously(t *testing.T) {
 
 func TestReconcile_EnsuresLaneRegardlessOfCompartmentState(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+	defer host.Close(context.Background())
 	host.Register("a", 1, platform.DaemonMembrane{
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -516,7 +516,7 @@ func TestUnboundCoordinateLeavesTheSnapshotAndNothingElse(t *testing.T) {
 			return []channel.ID{"a"}, nil
 		},
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	host.Register("a", 1, platform.DaemonMembrane{
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -551,7 +551,7 @@ func TestUnjudgeableCoordinateIsNamedUnknownAndNeverOmitted(t *testing.T) {
 			return []channel.ID{"a", "b"}, nil
 		},
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	host.Register("a", 1, platform.DaemonMembrane{
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -576,7 +576,7 @@ func TestDirectoryFailureSuppressesTheWholeSnapshot(t *testing.T) {
 			return nil, errors.New("directory unreachable")
 		},
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	carrier := dialTestCarrier(t, host)
 	if err := carrier.SendSpine(link.SpineFrame{
 		Kind: link.SpineCompartmentPlanPull, Nonce: "suppressed",
@@ -602,7 +602,7 @@ func TestCarrierHalfOpenLeaseExpires(t *testing.T) {
 		ScanInterval: time.Hour, LeaseTTL: time.Second,
 		Now: func() time.Time { return time.Unix(0, clock.Load()).UTC() },
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	first := dialTestCarrier(t, host)
 	if !host.DaemonOnline("daemon-a") {
 		t.Fatal("first carrier was not admitted")
@@ -638,7 +638,7 @@ func TestCarrierHalfOpenLeaseExpires(t *testing.T) {
 
 func TestDuplicateCurrentIsRetryableAndKeepsIncumbent(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+	defer host.Close(context.Background())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host.Serve(w, r, "daemon-a")
 	}))
@@ -672,7 +672,7 @@ func TestDuplicateCurrentIsRetryableAndKeepsIncumbent(t *testing.T) {
 
 func TestCoordinateBookkeepingReclaimsIdleEntries(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close()
+	defer host.Close(context.Background())
 	host.Register("a", 1, platform.DaemonMembrane{
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -739,7 +739,7 @@ func TestOpenTransfer_TTLReclaimsAbandonedTokens(t *testing.T) {
 		ScanInterval: time.Hour,
 		Now:          func() time.Time { return now },
 	})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	carrier := &carrierRow{
 		lanes: map[channel.ID]*serverLane{"a": {}},
 	}
@@ -781,7 +781,7 @@ func TestOpenTransfer_TTLReclaimsAbandonedTokens(t *testing.T) {
 
 func TestCoordinateExecutorsDoNotLetBlockedABarB(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enterOnce, releaseOnce sync.Once
@@ -888,7 +888,7 @@ func carrierLastSeen(t *testing.T, host *Host, daemonID string) time.Time {
 func TestDeviceTrafficDoesNotRenewTheLease(t *testing.T) {
 	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
 	host := New(Config{ScanInterval: time.Hour, LeaseTTL: time.Second, Now: clock.now})
-	defer host.Close()
+	defer host.Close(context.Background())
 	carrier := dialTestCarrier(t, host)
 	if !host.DaemonOnline("daemon-a") {
 		t.Fatal("carrier was not admitted")
@@ -924,7 +924,7 @@ func TestBlockedSnapshotAnswerDoesNotStallTheLease(t *testing.T) {
 			return []channel.ID{"channel-a"}, nil
 		},
 	})
-	defer host.Close()
+	defer host.Close(context.Background())
 	host.Register("channel-a", 1, platform.DaemonMembrane{
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) {
@@ -974,7 +974,7 @@ func TestBlockedSnapshotAnswerDoesNotStallTheLease(t *testing.T) {
 func TestALateProbeReplyStillRenewsTheLease(t *testing.T) {
 	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
 	host := New(Config{ScanInterval: time.Hour, LeaseTTL: 30 * time.Second, Now: clock.now})
-	defer host.Close()
+	defer host.Close(context.Background())
 	carrier := dialTestCarrier(t, host)
 	admitted := carrierLastSeen(t, host, "daemon-a")
 
@@ -1004,7 +1004,7 @@ func TestALateProbeReplyStillRenewsTheLease(t *testing.T) {
 func TestOnlyTheMatchingProbeReplyRenewsTheLease(t *testing.T) {
 	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
 	host := New(Config{ScanInterval: time.Hour, LeaseTTL: time.Second, Now: clock.now})
-	defer host.Close()
+	defer host.Close(context.Background())
 	carrier := dialTestCarrier(t, host)
 	admitted := carrierLastSeen(t, host, "daemon-a")
 
@@ -1051,7 +1051,7 @@ func TestClosedHostRefusesCarriersBeforeTheHandshake(t *testing.T) {
 		host.Serve(w, r, "daemon-a")
 	}))
 	defer server.Close()
-	if err := host.Close(); err != nil {
+	if err := host.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1108,7 +1108,7 @@ func newWedgedLaneHost(t *testing.T, cfg Config) *wedgedLaneHost {
 	release := wedged.release
 	t.Cleanup(func() {
 		wedged.unblock()
-		_ = host.Close()
+		_ = host.Close(context.Background())
 	})
 	host.Register("channel-a", 1, platform.DaemonMembrane{
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
@@ -1209,25 +1209,50 @@ func TestScanAndLeaseSweepDoNotWaitOnAWedgedLane(t *testing.T) {
 // TestCarrierSupervisorJoinsItsWedgedLane is the other half: nobody on a
 // decision path waits, but the lane's reader still has an owner. The carrier's
 // supervisor is it, and Close joins the supervisors.
-func TestCarrierSupervisorJoinsItsWedgedLane(t *testing.T) {
+// TestWedgedLaneCloseIsBoundedAndAccounted replaces the retired
+// TestCarrierSupervisorJoinsItsWedgedLane, whose doctrine — "Close must not
+// return while a reader is parked" — assumed waiting always ends. A reader
+// parked in a callback that ignores cancellation never returns; only process
+// death reclaims it, and the data never depended on the join (that is the
+// stores' crash safety). The threat the old wall held — a shutdown that fakes
+// cleanliness — is held by accounting now: Close returns within the caller's
+// budget, and an expired budget must carry the exact count of what was
+// abandoned, never nil.
+func TestWedgedLaneCloseIsBoundedAndAccounted(t *testing.T) {
 	wedged := newWedgedLaneHost(t, Config{ScanInterval: time.Hour})
 
-	closed := make(chan struct{})
-	go func() {
-		defer close(closed)
-		_ = wedged.host.Close()
-	}()
-	select {
-	case <-closed:
-		t.Fatal("Close reported everything joined while a lane reader was still parked")
-	case <-time.After(200 * time.Millisecond):
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var err error
+	within(t, "bounded close", 5*time.Second, func() { err = wedged.host.Close(ctx) })
+	if !errors.Is(err, ErrCloseAbandoned) {
+		t.Fatalf("close error=%v, want the abandonment account", err)
+	}
+	if !strings.Contains(err.Error(), "1 carrier supervisors") ||
+		!strings.Contains(err.Error(), "1 lane readers") {
+		t.Fatalf("account=%q, want 1 supervisor and 1 reader named", err.Error())
 	}
 
+	// The other half of honesty: once the wedge releases, a re-close with an
+	// open budget must drain fully and report clean.
 	wedged.unblock()
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Close never completed after the wedged reader was released")
+	if err := wedged.host.Close(context.Background()); err != nil {
+		t.Fatalf("close after release: %v", err)
+	}
+}
+
+// TestCleanCloseReportsCleanWithinBudget is the inverse half: with nothing
+// wedged, a bounded close must return nil inside its budget — an
+// unconditional accounting error would pass the wall above too.
+func TestCleanCloseReportsCleanWithinBudget(t *testing.T) {
+	host := New(Config{ScanInterval: time.Hour})
+	dialTestCarrier(t, host)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var err error
+	within(t, "clean close", 6*time.Second, func() { err = host.Close(ctx) })
+	if err != nil {
+		t.Fatalf("clean teardown reported abandonment: %v", err)
 	}
 }
 
@@ -1239,7 +1264,7 @@ func TestCarrierSupervisorJoinsItsWedgedLane(t *testing.T) {
 // Close that never returns.
 func TestFailedLaneOpenReturnsItsPhysicalTicket(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
-	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	// A carrier with no transport behind it: every open fails immediately,
 	// which is the branch under test.
 	carrier := &carrierRow{

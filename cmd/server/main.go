@@ -36,10 +36,12 @@ import (
 const shutdownTimeout = 30 * time.Second
 
 // appShutdowner is the graceful-teardown surface gracefulShutdown drives (App
-// satisfies it).
+// satisfies it). Close takes the same shutdown budget as the drain: every step
+// spends from one purse, and a step that exhausts it abandons its stragglers
+// with an account instead of holding the process for the supervisor's KILL.
 type appShutdowner interface {
 	Shutdown(context.Context) error
-	Close() error
+	Close(context.Context) error
 }
 
 // gracefulShutdown runs the ordered teardown — the order IS the semantics: ①
@@ -55,7 +57,7 @@ func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner,
 	logger.Info("server: shutdown step 2/4: silencing gateway")
 	e2 := gw.Close()
 	logger.Info("server: shutdown step 3/4: closing realm workers and channel host")
-	e3 := a.Close()
+	e3 := a.Close(ctx)
 	logger.Info("server: shutdown step 4/4: closing app db")
 	e4 := db.Close()
 	return errors.Join(e1, e2, e3, e4)

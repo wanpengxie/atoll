@@ -21,9 +21,16 @@ type serverLane struct {
 	stream   *link.LaneStream
 	membrane membraneRow
 
-	retire    sync.Once
-	mu        sync.Mutex
-	retired   bool
+	retire  sync.Once
+	mu      sync.Mutex
+	retired bool
+	// storage is the device-opened storage sibling of this lane. Alloc and
+	// reclaim ride it instead of the lane so that the device's storage
+	// executor — the one reader that legitimately blocks in a filesystem
+	// syscall — can freeze without freezing plan traffic. It shares this
+	// lane's generation and has no lifecycle of its own: admitted only against
+	// this exact lane, retired with it, and its death retires the lane.
+	storage   *link.LaneStream
 	pending   map[string]chan link.LaneFrame
 	actors    map[uint64]func()
 	nextActor uint64
@@ -36,13 +43,12 @@ func newServerLane(carrier *carrierRow, stream *link.LaneStream, membrane membra
 	}
 }
 
-// start takes the carrier's physical ticket for this lane. The reader is what
-// eventually closes this lane's actor streams and its stream, so the ticket is
-// returned only once that has happened — taking it as a parameter keeps the
-// pairing at a single call site instead of two bookkeeping halves.
-func (l *serverLane) start(physical *sync.WaitGroup) {
+// start consumes the physical ticket ensureLane took for this lane. The
+// reader is what eventually closes this lane's actor streams and its stream,
+// so the ticket is returned only once that has happened.
+func (l *serverLane) start() {
 	go func() {
-		defer physical.Done()
+		defer l.carrier.returnReader()
 		l.readLoop()
 	}()
 }
@@ -159,9 +165,11 @@ func (l *serverLane) readLoop() {
 			}) != nil {
 				return
 			}
-		case link.LaneAllocReply, link.LaneReclaimReply, link.LaneResolveCoordReply:
+		case link.LaneResolveCoordReply:
 			l.deliver(frame.RequestID, frame)
 		default:
+			// Alloc and reclaim replies belong on the storage sibling now; one
+			// arriving here is a protocol violation like any other unknown kind.
 			return
 		}
 	}
@@ -220,11 +228,57 @@ func (l *serverLane) retireLogical() {
 func (l *serverLane) markStreamRetired() {
 	l.mu.Lock()
 	l.retired = true
+	storage := l.storage
 	pending := l.pending
 	l.pending = make(map[string]chan link.LaneFrame)
 	l.mu.Unlock()
+	// The pair shares one generation: half a pair routes storage into nowhere,
+	// so the lane's retirement takes the storage sibling with it. Its reader
+	// wakes on the retire and collects the physical end itself.
+	if storage != nil {
+		storage.RetireLogical()
+	}
 	for _, waiter := range pending {
 		close(waiter)
+	}
+}
+
+// attachStorage installs the device-opened storage sibling. One per lane: a
+// generation names exactly one pair, so a duplicate is refused, and a retired
+// lane refuses too — its generation is spent.
+func (l *serverLane) attachStorage(stream *link.LaneStream) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.retired || l.storage != nil {
+		return false
+	}
+	l.storage = stream
+	return true
+}
+
+// storageLoop reads the storage sibling. It only dispatches: every frame here
+// is a reply to an RPC this host sent, so nothing in this loop blocks on
+// anything but the wire. Exit retires the whole pair.
+func (l *serverLane) storageLoop(stream *link.LaneStream) {
+	defer stream.CollectPhysical()
+	defer l.retireLogical()
+	for {
+		var frame link.LaneFrame
+		if err := stream.Decode(&frame); err != nil {
+			return
+		}
+		if err := frame.Validate(); err != nil {
+			return
+		}
+		if !l.current() {
+			return
+		}
+		switch frame.Kind {
+		case link.LaneAllocReply, link.LaneReclaimReply:
+			l.deliver(frame.RequestID, frame)
+		default:
+			return
+		}
 	}
 }
 
@@ -256,7 +310,7 @@ func (l *serverLane) deliver(id string, frame link.LaneFrame) {
 	}
 }
 
-func (l *serverLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.LaneFrame, error) {
+func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame) (link.LaneFrame, error) {
 	if !l.current() {
 		return link.LaneFrame{}, ErrLaneUnavailable
 	}
@@ -274,9 +328,17 @@ func (l *serverLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.
 		l.mu.Unlock()
 		return link.LaneFrame{}, ErrLaneUnavailable
 	}
+	storage := l.storage
+	if storage == nil {
+		l.mu.Unlock()
+		// Half-open pair: the lane is admitted but the device has not opened
+		// its storage sibling yet. Nothing was attempted, so the verdict is
+		// the same as an unbuilt compartment — retry later, not a refusal.
+		return link.LaneFrame{}, fmt.Errorf("%w: storage stream not yet open", platform.ErrDaemonNotReady)
+	}
 	l.pending[id] = waiter
 	l.mu.Unlock()
-	if err := l.stream.Send(frame); err != nil {
+	if err := storage.Send(frame); err != nil {
 		l.mu.Lock()
 		delete(l.pending, id)
 		l.mu.Unlock()
@@ -304,7 +366,7 @@ func (l *serverLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.
 }
 
 func (l *serverLane) alloc(ctx context.Context, coord string, dir bool) error {
-	reply, err := l.roundTrip(ctx, link.LaneFrame{
+	reply, err := l.storageRoundTrip(ctx, link.LaneFrame{
 		Kind:         link.LaneAllocRequest,
 		AllocRequest: &link.AllocRequest{Coord: coord, Dir: dir},
 	})
@@ -324,7 +386,7 @@ func (l *serverLane) alloc(ctx context.Context, coord string, dir bool) error {
 }
 
 func (l *serverLane) reclaim(ctx context.Context, coord string) error {
-	reply, err := l.roundTrip(ctx, link.LaneFrame{
+	reply, err := l.storageRoundTrip(ctx, link.LaneFrame{
 		Kind: link.LaneReclaimRequest, ReclaimRequest: &link.ReclaimRequest{Coord: coord},
 	})
 	if err != nil {

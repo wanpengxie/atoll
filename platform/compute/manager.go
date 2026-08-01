@@ -8,7 +8,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +33,38 @@ var compartmentJoinTimeout = 30 * time.Second
 // answers a snapshot pull. Production leaves it at §2.8's named budget.
 var planReplyTimeout = compartmentPlanTimeout
 
+// storageOpenTimeout bounds opening a lane's storage sibling. A failed open
+// retires the lane, so this is a retry cadence, not a correctness bound.
+var storageOpenTimeout = 10 * time.Second
+
+// openStorageStream is the narrow seam through which a lane opens its storage
+// sibling. Production always uses the carrier's real open; admission fixtures
+// that fake the carrier at the pipe level replace it.
+var openStorageStream = func(
+	ctx context.Context, carrier *link.ClientCarrier,
+	chID channel.ID, gen link.LaneGeneration,
+) (*link.LaneStream, error) {
+	return carrier.OpenStorage(ctx, chID, gen)
+}
+
+// storageStallThreshold is how long a storage call may sit inside its syscall
+// before the stall sweep names it. Detection only: the call cannot be
+// recalled, and its stream already confines the freeze to storage traffic.
+var storageStallThreshold = 30 * time.Second
+
+// computeCloseBudget bounds Run's whole teardown. It is the library's own
+// budget — Run has no caller deadline for teardown — and sits under
+// cmd/daemon's process watchdog so the library reports and returns before the
+// backstop shoots the process.
+var computeCloseBudget = 45 * time.Second
+
+// ErrCloseAbandoned is the teardown's honest expiry verdict: the budget ran
+// out with workers still uncollected, and the error names them from the stall
+// ledger. Waiting longer would collect nothing a wait can collect — the only
+// workers that miss this deadline are parked in storage syscalls no
+// cancellation reaches, and process death is what actually reclaims them.
+var ErrCloseAbandoned = errors.New("compute: close abandoned uncollected workers")
+
 type compartmentManager struct {
 	ctx    context.Context
 	cfg    Config
@@ -49,6 +84,67 @@ type compartmentManager struct {
 	planWake    chan struct{}
 	planReplyMu sync.Mutex
 	planWaiter  map[string]chan link.SpineFrame
+
+	// stallMu guards the ledger of storage calls currently inside their
+	// syscall. It is a leaf lock: taken around map writes only, never while
+	// holding or taking any other lock.
+	stallMu sync.Mutex
+	stalls  map[*storageStall]struct{}
+
+	// liveWorkers mirrors m.wg for accounting only: a bounded close that gives
+	// up must report how many it abandoned, and a WaitGroup cannot be read.
+	liveWorkers atomic.Int64
+}
+
+func (m *compartmentManager) addWorkers(n int) {
+	m.liveWorkers.Add(int64(n))
+	m.wg.Add(n)
+}
+
+func (m *compartmentManager) workerDone() {
+	m.wg.Done()
+	m.liveWorkers.Add(-1)
+}
+
+// storageStall is one storage call in flight: which channel, which operation,
+// which coordinate, since when. The ledger exists because these calls are the
+// one thing in the device that cancellation cannot reach — a frozen one must
+// be named by the sweep, never hang silently.
+type storageStall struct {
+	chID  string
+	op    string
+	coord string
+	since time.Time
+}
+
+func (m *compartmentManager) beginStorageOp(chID, op, coord string) *storageStall {
+	mark := &storageStall{chID: chID, op: op, coord: coord, since: time.Now()}
+	m.stallMu.Lock()
+	m.stalls[mark] = struct{}{}
+	m.stallMu.Unlock()
+	return mark
+}
+
+func (m *compartmentManager) endStorageOp(mark *storageStall) {
+	m.stallMu.Lock()
+	delete(m.stalls, mark)
+	m.stallMu.Unlock()
+}
+
+// sweepStorageStalls names every storage call that has been inside its syscall
+// past the threshold. It runs on the plan loop's cadence and repeats while the
+// stall lasts — a frozen executor stays visible for as long as it is frozen.
+func (m *compartmentManager) sweepStorageStalls() {
+	now := time.Now()
+	m.stallMu.Lock()
+	for mark := range m.stalls {
+		if stalled := now.Sub(mark.since); stalled >= storageStallThreshold {
+			m.logger.Error("platform.compute.storage_call_stalled",
+				"channel", mark.chID, "op", mark.op, "coord", mark.coord,
+				"stalled_for", stalled.Round(time.Second).String())
+		}
+	}
+	m.stallMu.Unlock()
 }
 
 type compartment struct {
@@ -96,6 +192,7 @@ func newCompartmentManager(ctx context.Context, cfg Config, logger *slog.Logger)
 		terminal:   make(chan error, 1),
 		planWake:   make(chan struct{}, 1),
 		planWaiter: make(map[string]chan link.SpineFrame),
+		stalls:     make(map[*storageStall]struct{}),
 	}
 }
 
@@ -116,18 +213,18 @@ func (m *compartmentManager) bindCarrier(
 	// Surviving compartments announce nothing on a new carrier. The reconcile
 	// loop below pulls the snapshot and converges them, which is the same path
 	// that runs every period — reconnection is not a special case.
-	m.wg.Add(3)
+	m.addWorkers(3)
 	m.mu.Unlock()
 	go func() {
-		defer m.wg.Done()
+		defer m.workerDone()
 		m.readSpine(carrier)
 	}()
 	go func() {
-		defer m.wg.Done()
+		defer m.workerDone()
 		m.acceptLanes(carrier)
 	}()
 	go func() {
-		defer m.wg.Done()
+		defer m.workerDone()
 		m.reconcilePlan(carrier)
 	}()
 }
@@ -213,6 +310,7 @@ func (m *compartmentManager) reconcilePlan(carrier *link.ClientCarrier) {
 		case <-ticker.C:
 		case <-m.planWake:
 		}
+		m.sweepStorageStalls()
 		plan, ok := m.pullPlanSnapshot(carrier)
 		if !ok {
 			continue
@@ -385,14 +483,22 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 		cell.buildDone = make(chan struct{})
 	}
 	if !needsBuild {
-		m.wg.Add(1)
+		m.addWorkers(1)
 	}
+	// The storage sibling's opener doubles as its reader; its ticket is taken
+	// here, under the same m.mu the manager's close checks, so no worker can
+	// appear after the final join began.
+	m.addWorkers(1)
 	cell.mu.Unlock()
 	lane.start()
 	m.mu.Unlock()
 	if old != nil {
 		old.retireLogical()
 	}
+	go func() {
+		defer m.workerDone()
+		lane.openStorage()
+	}()
 	if startBuild {
 		cell.declare("building", "")
 		m.mu.Lock()
@@ -419,7 +525,7 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 		return
 	}
 	go func() {
-		defer m.wg.Done()
+		defer m.workerDone()
 		cell.bindLane(lane)
 	}()
 }
@@ -523,20 +629,27 @@ func (m *compartmentManager) closeCompartment(chID string) {
 	}
 	cell.closeStarted = true
 	cell.mu.Unlock()
-	m.wg.Add(1)
+	m.addWorkers(1)
 	m.mu.Unlock()
 	go func() {
-		defer m.wg.Done()
+		defer m.workerDone()
 		cell.close()
 	}()
 }
 
-func (m *compartmentManager) close() {
+// close tears the manager down under computeCloseBudget and answers with what
+// it could not collect. The budget covers the whole teardown from this call:
+// per-cell dismantling spends from its own per-cell budgets as before, and
+// whatever remains bounds the final join. Expiry names the abandoned workers
+// from the stall ledger instead of pretending completion — the account is the
+// guarantee, and process death is what actually reclaims a reader parked in a
+// syscall cancellation cannot reach.
+func (m *compartmentManager) close() error {
+	deadline := time.Now().Add(computeCloseBudget)
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		m.wg.Wait()
-		return
+		return m.joinWorkers(deadline)
 	}
 	m.closed = true
 	carrier := m.carrier
@@ -559,7 +672,49 @@ func (m *compartmentManager) close() {
 			cell.close()
 		}
 	}
-	m.wg.Wait()
+	return m.joinWorkers(deadline)
+}
+
+func (m *compartmentManager) joinWorkers(deadline time.Time) error {
+	// The watcher outlives an expired budget: it is the one waiter the
+	// WaitGroup API requires, and it parks harmlessly until the wedged worker
+	// — or the process — goes away.
+	joined := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(joined)
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-joined:
+		return nil
+	case <-timer.C:
+	}
+	stalled := m.describeStalls()
+	m.logger.Error("platform.compute.close_abandoned",
+		"workers", m.liveWorkers.Load(), "stalled_storage_calls", stalled)
+	return fmt.Errorf("%w: %d workers still out; stalled storage calls: %s",
+		ErrCloseAbandoned, m.liveWorkers.Load(), stalled)
+}
+
+// describeStalls renders the stall ledger for the abandonment account: every
+// storage call still inside its syscall, by channel, operation, coordinate,
+// and age.
+func (m *compartmentManager) describeStalls() string {
+	now := time.Now()
+	m.stallMu.Lock()
+	defer m.stallMu.Unlock()
+	if len(m.stalls) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(m.stalls))
+	for mark := range m.stalls {
+		parts = append(parts, fmt.Sprintf("%s %s %s for %s",
+			mark.chID, mark.op, mark.coord, now.Sub(mark.since).Round(time.Second)))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "; ")
 }
 
 func (c *compartment) buildLoop() {
@@ -960,15 +1115,20 @@ type clientLane struct {
 	carrier *link.ClientCarrier
 	stream  *link.LaneStream
 
-	mu           sync.Mutex
-	startOnce    sync.Once
-	retire       sync.Once
-	retired      bool
-	onRetire     func(*clientLane)
-	pending      map[string]chan link.LaneFrame
-	replan       chan struct{}
-	host         *actorhost.HostSupervisor
-	actorSession *laneSession
+	mu          sync.Mutex
+	startOnce   sync.Once
+	storageOnce sync.Once
+	retire      sync.Once
+	retired     bool
+	onRetire    func(*clientLane)
+	// storageStream is the storage sibling this device opened for this lane's
+	// generation. It has no lifecycle of its own: it dies with the lane and
+	// its death retires the lane.
+	storageStream *link.LaneStream
+	pending       map[string]chan link.LaneFrame
+	replan        chan struct{}
+	host          *actorhost.HostSupervisor
+	actorSession  *laneSession
 	// bound records that bindLane has installed this lane's resources. It is
 	// its own field rather than a nil check on the two below, because a bound
 	// compartment may legitimately have no storage host configured — that is a
@@ -1060,13 +1220,13 @@ func (l *clientLane) current() bool {
 }
 func (l *clientLane) start() {
 	l.startOnce.Do(func() {
-		l.manager.wg.Add(2)
+		l.manager.addWorkers(2)
 		go func() {
-			defer l.manager.wg.Done()
+			defer l.manager.workerDone()
 			l.readLoop()
 		}()
 		go func() {
-			defer l.manager.wg.Done()
+			defer l.manager.workerDone()
 			l.replanLoop()
 		}()
 	})
@@ -1080,10 +1240,17 @@ func (l *clientLane) markStreamRetired() {
 	l.retire.Do(func() {
 		l.mu.Lock()
 		l.retired = true
+		storage := l.storageStream
 		pending := l.pending
 		l.pending = make(map[string]chan link.LaneFrame)
 		onRetire := l.onRetire
 		l.mu.Unlock()
+		// The pair shares one generation: the lane's retirement takes its
+		// storage sibling with it, and the sibling's reader collects the
+		// physical end after it wakes.
+		if storage != nil {
+			storage.RetireLogical()
+		}
 		for _, waiter := range pending {
 			close(waiter)
 		}
@@ -1117,6 +1284,64 @@ func (l *clientLane) readLoop() {
 			case l.replan <- struct{}{}:
 			default:
 			}
+		default:
+			// Storage instructions belong on the storage sibling now; one
+			// arriving here is a protocol violation like any other unknown
+			// kind. This reader only dispatches and pokes — it never executes,
+			// so nothing on the lane can block behind a filesystem call.
+			return
+		}
+	}
+}
+
+// openStorage opens this lane's storage sibling and becomes its reader. A
+// failed open retires the lane: half a pair is not a lane — without its
+// sibling the server's storage face answers NotReady forever while the lane
+// looks healthy, and retiring lets the server's next scan reopen a whole pair.
+func (l *clientLane) openStorage() {
+	l.storageOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(l.manager.ctx, storageOpenTimeout)
+		stream, err := openStorageStream(ctx, l.carrier, l.stream.Channel, l.stream.Gen)
+		cancel()
+		if err != nil {
+			l.retireLogical()
+			return
+		}
+		l.mu.Lock()
+		if l.retired {
+			l.mu.Unlock()
+			stream.RetireLogical()
+			stream.CollectPhysical()
+			return
+		}
+		l.storageStream = stream
+		l.mu.Unlock()
+		l.storageLoop(stream)
+	})
+}
+
+// storageLoop executes the server's storage instructions. This is the one
+// reader in the device that legitimately blocks: Alloc and ReclaimCoord end in
+// filesystem syscalls no context can recall. That is exactly why they ride
+// their own stream — a dead disk freezes this loop and nothing else; plan
+// replies and pokes keep flowing on the lane — and why every operation is
+// marked in the manager's stall ledger while it runs: a frozen executor must
+// be named, never silent. Exit retires the whole pair.
+func (l *clientLane) storageLoop(stream *link.LaneStream) {
+	defer stream.CollectPhysical()
+	defer l.retireLogical()
+	for {
+		var frame link.LaneFrame
+		if err := stream.Decode(&frame); err != nil {
+			return
+		}
+		if err := frame.Validate(); err != nil {
+			return
+		}
+		if !l.current() {
+			return
+		}
+		switch frame.Kind {
 		case link.LaneAllocRequest:
 			request := frame.AllocRequest
 			reply := &link.AllocReply{RequestID: frame.RequestID}
@@ -1133,13 +1358,16 @@ func (l *clientLane) readLoop() {
 			case storage == nil:
 				reply.Reason = "compute: storage unavailable"
 			default:
-				if err := storage.Alloc(request.Coord, request.Dir); err != nil {
+				mark := l.manager.beginStorageOp(string(stream.Channel), "alloc", request.Coord)
+				err := storage.Alloc(request.Coord, request.Dir)
+				l.manager.endStorageOp(mark)
+				if err != nil {
 					reply.Reason = err.Error()
 				} else {
 					reply.OK = true
 				}
 			}
-			if l.stream.Send(link.LaneFrame{
+			if stream.Send(link.LaneFrame{
 				Kind: link.LaneAllocReply, RequestID: frame.RequestID, AllocReply: reply,
 			}) != nil {
 				return
@@ -1157,13 +1385,16 @@ func (l *clientLane) readLoop() {
 			case local == nil:
 				reply.Reason = "compute: storage unavailable"
 			default:
-				if err := local.ReclaimCoord(request.Coord); err != nil {
+				mark := l.manager.beginStorageOp(string(stream.Channel), "reclaim", request.Coord)
+				err := local.ReclaimCoord(request.Coord)
+				l.manager.endStorageOp(mark)
+				if err != nil {
 					reply.Reason = err.Error()
 				} else {
 					reply.OK = true
 				}
 			}
-			if l.stream.Send(link.LaneFrame{
+			if stream.Send(link.LaneFrame{
 				Kind: link.LaneReclaimReply, RequestID: frame.RequestID, ReclaimReply: reply,
 			}) != nil {
 				return
