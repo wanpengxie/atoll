@@ -2,8 +2,8 @@ package channelhost
 
 import (
 	"context"
-	"net/http"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -16,7 +16,7 @@ import (
 type Bundle interface {
 	Generation() uint64
 	Gateway() GatewayHitch
-	Daemon() DaemonLink
+	DaemonMembrane() platform.DaemonMembrane
 	SysOp() SysOp
 	View() View
 }
@@ -24,10 +24,6 @@ type Bundle interface {
 type GatewayHitch interface {
 	SubjectSlotFor(actor.ActorID) (*subjectgate.Slot, bool)
 	Subscribe() (<-chan struct{}, func())
-}
-
-type DaemonLink interface {
-	ServeAttach(http.ResponseWriter, *http.Request, string)
 }
 
 type SysOp interface {
@@ -69,9 +65,11 @@ type bundle struct {
 
 func (b *bundle) Generation() uint64    { return b.generation }
 func (b *bundle) Gateway() GatewayHitch { return gatewayAdapter{b.home} }
-func (b *bundle) Daemon() DaemonLink    { return daemonAdapter{b.home} }
-func (b *bundle) SysOp() SysOp          { return b.sysOp }
-func (b *bundle) View() View            { return viewAdapter{b.home} }
+func (b *bundle) DaemonMembrane() platform.DaemonMembrane {
+	return home.DaemonMembrane(b.home)
+}
+func (b *bundle) SysOp() SysOp { return b.sysOp }
+func (b *bundle) View() View   { return viewAdapter{b.home} }
 
 type gatewayAdapter struct{ home *home.Home }
 
@@ -79,12 +77,6 @@ func (a gatewayAdapter) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, boo
 	return home.GatewaySlot(a.home, id)
 }
 func (a gatewayAdapter) Subscribe() (<-chan struct{}, func()) { return home.GatewaySubscribe(a.home) }
-
-type daemonAdapter struct{ home *home.Home }
-
-func (a daemonAdapter) ServeAttach(w http.ResponseWriter, r *http.Request, daemon string) {
-	home.LinkServe(a.home, w, r, daemon)
-}
 
 type viewAdapter struct{ home *home.Home }
 

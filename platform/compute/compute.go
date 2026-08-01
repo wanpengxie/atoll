@@ -3,10 +3,17 @@ package compute
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand"
-	"sync"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
@@ -18,33 +25,30 @@ import (
 )
 
 const (
-	defaultComputePoll   = 30 * time.Second
 	redialInitialBackoff = time.Second
 	redialMaxBackoff     = 30 * time.Second
+	carrierAcceptTimeout = 10 * time.Second
+
+	// compartmentPlanInterval is the floor on how stale this device's
+	// compartment set can be with no poke at all. Pokes only buy latency; this
+	// tick is what makes the loop self-healing when one is lost.
+	compartmentPlanInterval = 30 * time.Second
+	compartmentPlanTimeout  = 20 * time.Second
 )
 
-// Config configures one daemon execution domain. Factories resolves a class
-// into this daemon's factory at body-build time — the desired snapshot pulled
-// over the link is the ONE plan ledger, exactly as on the server host; actor
-// bodies and the physical link are deliberately owned by different organs.
 type Config struct {
 	ServerWS         string
+	Credential       string
+	AtollHome        string
 	Logger           *slog.Logger
-	Factories        ActorFactorySource
-	Poll             time.Duration
-	StorageHost      StorageHost
+	BuildCompartment CompartmentBuilder
 	ScrubberInterval time.Duration
-	LocalFileOpener  LocalFileOpener
 }
 
 type daemonHostEvents struct{ outbound *DaemonOutbound }
 
 func (*daemonHostEvents) OnBodyExited(actor.ActorID, actorhost.AttemptKey, actorrt.Incarnation, error) {
 }
-
-// OnBodyObs forwards one observation the Host already ruled current. The
-// Incarnation is what selects the slot — the coordinate cannot, since an
-// abandoned build shares it with the body that replaced it.
 func (e *daemonHostEvents) OnBodyObs(
 	_ actor.ActorID,
 	_ actorhost.AttemptKey,
@@ -64,15 +68,11 @@ func daemonBodyBuilder(
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return func(input actorhost.BodyBuildInput) actorrt.Actor {
-		prepared, prepareErr := outbound.Prepare(
-			input.ActorID,
-			input.AttemptKey,
-			input.Self,
-			input.Identity,
-			input.Attempt,
-			input.Current,
+		prepared, err := outbound.Prepare(
+			input.ActorID, input.AttemptKey, input.Self,
+			input.Identity, input.Attempt, input.Current,
 		)
-		if prepareErr != nil {
+		if err != nil {
 			return nil
 		}
 		transferred := false
@@ -81,210 +81,119 @@ func daemonBodyBuilder(
 				_ = prepared.Slot.Close()
 			}
 		}()
-		// The factory is derived here, from the spec this build claim carries —
-		// the exact generation by construction. A class this daemon cannot build
-		// fails this body alone, loudly; the Host retries it on its own backoff
-		// while every other row converges.
 		factory, ok := factories.BuildClass(
-			input.ActorID,
-			input.ExecutionSpec.Class,
-			input.ExecutionSpec.Config,
-		)
+			input.ActorID, input.ExecutionSpec.Class, input.ExecutionSpec.Config)
 		if !ok {
 			logger.Error("platform.compute.actor_factory_missing",
-				"actor", input.ActorID, "class", input.ExecutionSpec.Class,
-				"reason", "class_not_registered")
+				"actor", input.ActorID, "class", input.ExecutionSpec.Class)
 			return nil
 		}
 		hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {
 			_ = prepared.Slot.CancelRequest(requestID)
 		}}
-		body := hostcommon.Build(prepared.Caps, hooks, factory)
-		wrapped := prepared.Wrap(body)
-		if wrapped != nil {
+		body := prepared.Wrap(hostcommon.Build(prepared.Caps, hooks, factory))
+		if body != nil {
 			transferred = true
 		}
-		return wrapped
+		return body
 	}
 }
 
-func Run(ctx context.Context, cfg Config) (retErr error) {
-	if cfg.Factories == nil {
-		return errors.New("compute: Factories required")
-	}
+type terminalCarrierError struct{ err error }
+
+func (e terminalCarrierError) Error() string { return e.err.Error() }
+func (e terminalCarrierError) Unwrap() error { return e.err }
+
+func Run(ctx context.Context, cfg Config) error {
 	if cfg.ServerWS == "" {
 		return errors.New("compute: ServerWS required")
+	}
+	if cfg.Credential == "" {
+		return errors.New("compute: Credential required")
+	}
+	if cfg.AtollHome == "" {
+		return errors.New("compute: AtollHome required")
+	}
+	if cfg.BuildCompartment == nil {
+		return errors.New("compute: BuildCompartment required")
 	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	poll := cfg.Poll
-	if poll <= 0 {
-		poll = defaultComputePoll
-	}
-
-	// Runtime organs use an explicit composition lifetime. The caller context
-	// stops link admission, but must not asynchronously tear down sessions or
-	// bodies ahead of the ordered close DAG below.
-	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
-	outbound := NewDaemonOutbound(DaemonOutboundConfig{Parent: runtimeCtx})
-	storage := newStorageHostForwarder(cfg.StorageHost, logger, cfg.ScrubberInterval)
-	var storageWG sync.WaitGroup
-	storageWG.Add(1)
-	go func() {
-		defer storageWG.Done()
-		storage.pump(ctx)
+	manager := newCompartmentManager(ctx, cfg, logger)
+	var daemonLock *os.File
+	var daemonID string
+	defer func() {
+		manager.close()
+		if daemonLock != nil {
+			_ = daemonLock.Close()
+		}
 	}()
-
-	var host *actorhost.HostSupervisor
-	var currentSession *link.AuthenticatedLinkSession
-	closeRuntime := func() {
-		defer runtimeCancel()
-		sealCtx, sealCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := outbound.Seal(sealCtx); err != nil {
-			retErr = errors.Join(retErr, err)
-		}
-		sealCancel()
-		if host != nil {
-			hostCtx, hostCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := host.Close(hostCtx); err != nil {
-				retErr = errors.Join(retErr, err)
-			}
-			hostCancel()
-		}
-		if err := outbound.CloseResidual(); err != nil {
-			retErr = errors.Join(retErr, err)
-		}
-		if currentSession != nil {
-			outbound.SessionDown(currentSession)
-			if err := currentSession.Close(); err != nil {
-				retErr = errors.Join(retErr, err)
-			}
-			sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			select {
-			case <-currentSession.Done():
-			case <-sessionCtx.Done():
-				retErr = errors.Join(retErr, errors.New("compute: link session leak"))
-			}
-			sessionCancel()
-			currentSession = nil
-		}
-		retErr = errors.Join(retErr, awaitForwarders(&storageWG, 5*time.Second))
-	}
-	defer closeRuntime()
-
-	planWake := make(chan struct{}, 1)
-	sessionLedger := link.NewRemoteSessionLedger(logger)
 	backoff := redialInitialBackoff
 	for {
-		dialCfg := link.DialConfig{
-			SessionLedger: sessionLedger,
-			PlanChanged: func() {
-				select {
-				case planWake <- struct{}{}:
-				default:
-				}
-			},
-			LocalFileOpener: cfg.LocalFileOpener,
-		}
-		if cfg.StorageHost != nil {
-			dialCfg.AllocHandler = storage.handleAlloc
-		}
-		dialer, err := link.Dial(ctx, cfg.ServerWS, dialCfg, logger)
+		wire, response, err := link.DialDeviceCarrier(ctx, cfg.ServerWS, cfg.Credential, logger)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			logger.Warn("platform.compute.dial_failed", "err", err, "retry_in", backoff)
+			if terminalHTTP(response) {
+				if response.Body != nil {
+					_ = response.Body.Close()
+				}
+				return terminalCarrierError{fmt.Errorf("compute: carrier rejected: %s", response.Status)}
+			}
+			delay := retryAfter(response, jitterBackoff(backoff), time.Now())
+			if response != nil && response.Body != nil {
+				_ = response.Body.Close()
+			}
+			if !waitBackoff(ctx, delay) {
+				return nil
+			}
+			backoff = nextRedialBackoff(backoff)
+			continue
+		}
+		accepted, err := awaitCarrierVerdict(wire)
+		if err != nil {
+			_ = wire.Close()
+			if terminal, ok := err.(terminalCarrierError); ok {
+				return terminal
+			}
 			if !waitBackoff(ctx, jitterBackoff(backoff)) {
 				return nil
 			}
 			backoff = nextRedialBackoff(backoff)
 			continue
 		}
-
-		if host == nil {
-			domain := actorhost.ExecutionDomain(dialer.DaemonID())
-			host, err = actorhost.New(actorhost.Config{
-				Parent:      runtimeCtx,
-				Domain:      domain,
-				Logger:      logger,
-				Events:      &daemonHostEvents{outbound: outbound},
-				BodyBuilder: daemonBodyBuilder(outbound, cfg.Factories, logger),
-			})
+		root, err := coordinatePath(filepath.Join(cfg.AtollHome, "daemons"), accepted.DaemonID)
+		if err != nil {
+			_ = wire.Close()
+			return terminalCarrierError{fmt.Errorf("compute: invalid daemon root: %w", err)}
+		}
+		if daemonLock == nil {
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				_ = wire.Close()
+				return fmt.Errorf("compute: create daemon root: %w", err)
+			}
+			daemonLock, err = lockDaemonRoot(root)
 			if err != nil {
-				_ = dialer.Close()
+				_ = wire.Close()
 				return err
 			}
+			daemonID = accepted.DaemonID
+		} else if accepted.DaemonID != daemonID {
+			_ = wire.Close()
+			return terminalCarrierError{fmt.Errorf(
+				"compute: authenticated daemon identity changed from %q to %q",
+				daemonID, accepted.DaemonID)}
 		}
-
-		session, err := link.NewAuthenticatedLinkSession(link.AuthenticatedLinkSessionConfig{
-			Peer:      actorhost.ExecutionDomain("server"),
-			Authority: dialer.Authority(),
-			OpenActorStream: func(
-				openCtx context.Context,
-				id actor.ActorID,
-				key actorhost.AttemptKey,
-			) (link.ActorStreamResource, error) {
-				return dialer.OpenExactActorStream(openCtx, id, key, host)
-			},
-			CloseTransport: dialer.Close,
-			TransportDone:  dialer.Done(),
-		})
-		if err != nil {
-			_ = dialer.Close()
-			return err
-		}
-		storage.Rebind(dialer)
-
-		if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
-			logger.Warn("platform.compute.plan_rejected", "err", err)
-			_ = session.Close()
-			<-session.Done()
-			if ctx.Err() != nil {
-				return nil
-			}
-			if !waitBackoff(ctx, jitterBackoff(backoff)) {
-				return nil
-			}
-			backoff = nextRedialBackoff(backoff)
-			continue
-		}
-		if err := outbound.SetSession(session); err != nil {
-			_ = session.Close()
-			<-session.Done()
-			return err
-		}
-		currentSession = session
-		host.Wake()
-		outbound.Wake()
+		manager.bindCarrier(wire, accepted, root)
 		backoff = redialInitialBackoff
-
-		ticker := time.NewTicker(poll)
-		connected := true
-		for connected {
-			select {
-			case <-ctx.Done():
-				ticker.Stop()
-				return nil
-			case <-session.Done():
-				connected = false
-			case <-planWake:
-				if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
-					logger.Warn("platform.compute.plan_refresh_failed", "err", err)
-				}
-			case <-ticker.C:
-				if err := acceptDaemonPlan(ctx, dialer, host); err != nil {
-					logger.Warn("platform.compute.plan_refresh_failed", "err", err)
-				}
-			}
+		if err, retry := awaitCarrierCycle(ctx, manager.terminal, wire.Done()); !retry {
+			_ = wire.Close()
+			return err
 		}
-		ticker.Stop()
-		currentSession = nil
-		outbound.SessionDown(session)
-		_ = session.Close()
-		logger.Warn("platform.compute.link_down", "retry_in", backoff)
+		manager.carrierDown(wire)
 		if !waitBackoff(ctx, jitterBackoff(backoff)) {
 			return nil
 		}
@@ -292,34 +201,120 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 	}
 }
 
-// acceptDaemonPlan pulls the authenticated plan and hands it to the Host as
-// one desired snapshot. That is the whole of it: there is no second ledger to
-// publish into, so nothing can sit on a different generation than the desired
-// the Host serves. A row this daemon cannot build is discovered at that row's
-// own body build, logged there, and retried on the Host's backoff — it does
-// not hold the rest of the plan hostage the way whole-plan eager rejection
-// did (which kept truth-dead bodies running and healthy rows waiting for as
-// long as one bad row stayed bad).
-func acceptDaemonPlan(
+// awaitCarrierCycle gives an already-buffered terminal verdict precedence over
+// the physical done edge it causes. A tombstone reject and transport closure
+// can become readable together; choosing the latter as retryable would redial a
+// daemon the authority has just permanently rejected.
+func awaitCarrierCycle(
 	ctx context.Context,
-	dialer *link.Dialer,
-	host *actorhost.HostSupervisor,
-) error {
-	plan, err := dialer.PullPlan(ctx)
+	terminal <-chan error,
+	done <-chan struct{},
+) (err error, retry bool) {
+	select {
+	case <-ctx.Done():
+		return nil, false
+	case err := <-terminal:
+		return err, false
+	case <-done:
+		select {
+		case err := <-terminal:
+			return err, false
+		default:
+			return nil, true
+		}
+	}
+}
+
+func awaitCarrierVerdict(wire *link.ClientCarrier) (link.SpineFrame, error) {
+	type result struct {
+		frame link.SpineFrame
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var frame link.SpineFrame
+		err := wire.ReadSpine(&frame)
+		done <- result{frame: frame, err: err}
+	}()
+	timer := time.NewTimer(carrierAcceptTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		if result.err != nil {
+			return link.SpineFrame{}, result.err
+		}
+		if err := result.frame.Validate(); err != nil {
+			return link.SpineFrame{}, err
+		}
+		switch result.frame.Kind {
+		case link.SpineCarrierAccept:
+			if result.frame.DaemonID == "" || result.frame.CarrierGen == "" {
+				return link.SpineFrame{}, errors.New("compute: malformed carrier_accept")
+			}
+			return result.frame, nil
+		case link.SpineCarrierReject:
+			err := fmt.Errorf("compute: carrier rejected: %s", result.frame.Reason)
+			if result.frame.Class == link.CarrierTerminal {
+				return link.SpineFrame{}, terminalCarrierError{err}
+			}
+			return link.SpineFrame{}, err
+		default:
+			return link.SpineFrame{}, errors.New("compute: carrier verdict required")
+		}
+	case <-timer.C:
+		return link.SpineFrame{}, errors.New("compute: carrier_accept timeout")
+	}
+}
+
+func terminalHTTP(response *http.Response) bool {
+	if response == nil {
+		return false
+	}
+	return response.StatusCode >= 400 && response.StatusCode < 500 &&
+		response.StatusCode != http.StatusTooManyRequests
+}
+
+func retryAfter(response *http.Response, fallback time.Duration, now time.Time) time.Duration {
+	if response == nil ||
+		(response.StatusCode != http.StatusTooManyRequests && response.StatusCode < 500) {
+		return fallback
+	}
+	value := strings.TrimSpace(response.Header.Get("Retry-After"))
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return fallback
+}
+
+func lockDaemonRoot(root string) (*os.File, error) {
+	path := filepath.Join(root, ".atoll.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("compute: open daemon lock: %w", err)
 	}
-	desired := make([]actorhost.Desired, 0, len(plan))
-	for _, row := range plan {
-		desired = append(desired, actorhost.BodyDesired{
-			ActorID: row.ActorID, AttemptKey: row.AttemptKey,
-			ExecutionSpec: actorhost.ExecutionSpec{
-				Kind: row.Kind, Class: row.Class,
-				Config: append([]byte(nil), row.Config...),
-			},
-		})
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("compute: daemon root is already in use: %w", err)
 	}
-	return host.AcceptFullDesired(desired)
+	return file, nil
+}
+
+func coordinatePath(base, coordinate string) (string, error) {
+	if coordinate == "" || filepath.IsAbs(coordinate) ||
+		filepath.Clean(coordinate) != coordinate || coordinate == "." ||
+		strings.ContainsAny(coordinate, `/\`) {
+		return "", errors.New("coordinate must be one relative path segment")
+	}
+	path := filepath.Join(base, coordinate)
+	relative, err := filepath.Rel(base, path)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("coordinate escapes its root")
+	}
+	return path, nil
 }
 
 func nextRedialBackoff(current time.Duration) time.Duration {
@@ -331,11 +326,11 @@ func nextRedialBackoff(current time.Duration) time.Duration {
 }
 
 func jitterBackoff(value time.Duration) time.Duration {
-	half := value / 2
-	if half <= 0 {
+	span := value / 5
+	if span <= 0 {
 		return value
 	}
-	return half + time.Duration(rand.Int63n(int64(half)+1))
+	return value - span + time.Duration(rand.Int63n(int64(2*span)+1))
 }
 
 func waitBackoff(ctx context.Context, value time.Duration) bool {
@@ -350,23 +345,4 @@ func waitBackoff(ctx context.Context, value time.Duration) bool {
 }
 
 var ErrForwardersLeaked = errors.New("compute: forwarders leaked")
-
-// awaitForwarders joins the forwarder waitgroup within timeout. A timeout
-// means a forwarder goroutine outlived the ordered close DAG: root ownership
-// still transfers (the caller returns), and the incident surfaces as
-// ErrForwardersLeaked instead of a silent hang.
-func awaitForwarders(wg *sync.WaitGroup, timeout time.Duration) error {
-	joined := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(joined)
-	}()
-	select {
-	case <-joined:
-		return nil
-	case <-time.After(timeout):
-		return ErrForwardersLeaked
-	}
-}
-
 var _ actorhost.HostEventSink = (*daemonHostEvents)(nil)

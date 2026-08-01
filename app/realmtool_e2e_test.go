@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
 func realmToolRequest(t *testing.T, env *testEnv, setup setupResult, client *wsClient, tool actor.ActorID, typ string, payload any) map[string]json.RawMessage {
@@ -255,10 +255,9 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 	computeErr := make(chan error, 1)
 	plan := &e2eLinkPlan{chID: channel.ID(setup.chID)}
 	go func() {
-		computeErr <- compute.Run(computeCtx, compute.Config{
-			ServerWS:  fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), setup.chID, daemon["api_key"].(string)),
-			Factories: plan, Poll: 20 * time.Millisecond,
-		})
+		computeErr <- compute.Run(computeCtx, daemonComputeConfig(t,
+			fmt.Sprintf("ws://%s/compute", srv.Listener.Addr()),
+			daemon["api_key"].(string), plan, nil))
 	}()
 	t.Cleanup(func() {
 		cancelCompute()

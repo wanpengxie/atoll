@@ -160,8 +160,8 @@ func (e *opEntry) DetachDaemon(
 		return channelspec.BindingResult{}, err
 	}
 	e.home.announceAudit(ctx, "detach_daemon", map[string]any{"daemon_id": req.DaemonID})
-	if e.home.links != nil {
-		e.home.links.KickDaemon(req.DaemonID)
+	if e.home.daemonRoutes != nil {
+		e.home.daemonRoutes.RetireLane(req.DaemonID, string(e.home.channelID))
 	}
 	e.home.pokeReconcile()
 	if removed {

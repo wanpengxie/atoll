@@ -1,27 +1,13 @@
 package link
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
-	"time"
-
-	"github.com/google/uuid"
 )
 
-// storagecontrol.go is the daemon storage host's control-RPC WIRE FORMAT
-// (期11 spec §4.7): four request/response frame pairs riding the SAME
-// stream-0 control plane attach/attach_reply already uses (controlFrame,
-// controlKind — control.go), extended additively. §4.7's own text names
-// yamux's eventual dedicated control stream as the PRIMARY carrier once §5
-// lands it ("对齐§5.2主选yamux...fallback触发时才落stream-0新增control
-// kind") — this section builds before §5 exists, so it lands on the named
-// FALLBACK carrier (stream-0) now. The message SHAPES below are carrier-
-// agnostic (plain structs, JSON-encoded exactly like AttachRequest/Reply
-// already are) — §5 migrating the carrier to a yamux control stream is a
-// transport swap underneath these types, not a redesign of them.
+// The structs in this file are the lane_control storage vocabulary. The
+// stream header fixes daemon and channel ownership; payloads therefore carry
+// operation data and correlation only.
 
 // AllocRequest is home→daemon: "prepare to receive/hold bytes at coord"
 // (§4.7's first frame). The door already resolved placement + wrote a
@@ -33,7 +19,6 @@ import (
 // staged under this SAME coord.
 type AllocRequest struct {
 	RequestID string `json:"request_id"`
-	ChannelID string `json:"channel_id"`
 	Coord     string `json:"coord"`
 	Dir       bool   `json:"dir"`
 }
@@ -43,9 +28,20 @@ type AllocRequest struct {
 // the failure (a Go-error-shaped string, not an access verdict — this RPC
 // plane carries no authorization decision of its own, the door already made
 // one before sending AllocRequest).
+//
+// NotReady is the third disposition, and it is NOT a verdict: the lane exists
+// but is not yet bound to a built compartment, so the daemon did not attempt
+// the mkdir/touch and holds no opinion about whether it would have succeeded.
+// The home may reach a lane in that state at any time — the lane starts
+// carrying frames the moment it is admitted, and its compartment is built
+// afterwards — and the daemon deliberately projects no readiness state into
+// the home's ledger, so the home cannot know in advance. Folding this into
+// !OK would make a refusal the daemon never issued indistinguishable from one
+// it did.
 type AllocReply struct {
 	RequestID string `json:"request_id"`
 	OK        bool   `json:"ok"`
+	NotReady  bool   `json:"not_ready,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 
@@ -127,10 +123,13 @@ type ReclaimRequest struct {
 // ReclaimReply is daemon→home: the reclaim verdict — OK once the coord's local
 // bytes are gone (or were already absent), else Reason names the failure (a
 // Go-error-shaped string, not an access verdict — same discipline as
-// AllocReply).
+// AllocReply). NotReady carries the same not-a-verdict meaning it does on
+// AllocReply: the lane is not bound to a built compartment yet, so nothing was
+// attempted.
 type ReclaimReply struct {
 	RequestID string `json:"request_id"`
 	OK        bool   `json:"ok"`
+	NotReady  bool   `json:"not_ready,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 
@@ -178,15 +177,15 @@ func (m AllocRequest) validate() error {
 	if err := requiredControlField("alloc_request.request_id", m.RequestID); err != nil {
 		return err
 	}
-	if err := requiredControlField("alloc_request.channel_id", m.ChannelID); err != nil {
-		return err
-	}
 	return requiredControlField("alloc_request.coord", m.Coord)
 }
 
 func (m AllocReply) validate() error {
 	if err := requiredControlField("alloc_reply.request_id", m.RequestID); err != nil {
 		return err
+	}
+	if m.OK && m.NotReady {
+		return errors.New("link: alloc_reply.not_ready contradicts ok")
 	}
 	if !m.OK {
 		return requiredControlField("alloc_reply.reason", m.Reason)
@@ -245,6 +244,9 @@ func (m ReclaimReply) validate() error {
 	if err := requiredControlField("reclaim_reply.request_id", m.RequestID); err != nil {
 		return err
 	}
+	if m.OK && m.NotReady {
+		return errors.New("link: reclaim_reply.not_ready contradicts ok")
+	}
 	if !m.OK {
 		return requiredControlField("reclaim_reply.reason", m.Reason)
 	}
@@ -271,198 +273,4 @@ func (m ReconcilePullReply) validate() error {
 		}
 	}
 	return nil
-}
-
-// controlKind additions (additive to control.go's closed set — attach/
-// attach_reply are untouched, this is a widening not a redefinition).
-const (
-	ctrlAllocRequest       controlKind = "alloc_request"
-	ctrlAllocReply         controlKind = "alloc_reply"
-	ctrlCommitted          controlKind = "committed"
-	ctrlCommittedReply     controlKind = "committed_reply"
-	ctrlReclaimAck         controlKind = "reclaim_ack"
-	ctrlReclaimAckReply    controlKind = "reclaim_ack_reply"
-	ctrlReconcilePull      controlKind = "reconcile_pull"
-	ctrlReconcilePullReply controlKind = "reconcile_pull_reply"
-	ctrlReclaimRequest     controlKind = "reclaim_request"
-	ctrlReclaimReply       controlKind = "reclaim_reply"
-)
-
-// newRequestID mints a fresh correlation id for one control-RPC round trip
-// (§4.7: "correlation 带单调 request_id 应答回携" — uuid is used here as the
-// uniqueness source; the spec's "单调" concern is about NOT re-using an id
-// mid-flight, which a fresh uuid per call trivially satisfies, not literal
-// increasing-integer monotonicity).
-func newRequestID() string { return uuid.NewString() }
-
-// errPendingCancelled is delivered to a pendingReplies waiter whose entry was
-// cancelled (e.g. the link tore down) rather than answered.
-var errPendingCancelled = errors.New("link: control RPC cancelled (link closed before a reply arrived)")
-
-// pendingReplies is the generic correlation table BOTH directions of the
-// storage control-RPC plane share: the Acceptor uses one (keyed by
-// AllocReply.RequestID) to await a daemon's alloc_reply; the Dialer uses
-// three (Committed/ReclaimAck/ReconcilePull reply kinds) to await the home's
-// responses to its own outbound sends. One request_id may have at most one
-// waiter at a time — a second register under a live id would silently
-// orphan the first (never done by any caller here: each call mints a fresh
-// id via newRequestID).
-type pendingReplies[T any] struct {
-	mu      sync.Mutex
-	waiters map[string]chan T
-}
-
-func newPendingReplies[T any]() *pendingReplies[T] {
-	return &pendingReplies[T]{waiters: map[string]chan T{}}
-}
-
-// register opens a fresh waiter slot for id. The channel is buffered 1 so a
-// deliver that races a caller's own timeout/cancel never blocks the
-// delivering goroutine (the control-frame read loop).
-func (p *pendingReplies[T]) register(id string) chan T {
-	ch := make(chan T, 1)
-	p.mu.Lock()
-	p.waiters[id] = ch
-	p.mu.Unlock()
-	return ch
-}
-
-// deliver hands v to id's waiter and reports whether correlation succeeded.
-// Business replies may ignore false after their caller timed out; attach_reply
-// treats false as a protocol violation because one link has exactly one attach.
-func (p *pendingReplies[T]) deliver(id string, v T) bool {
-	p.mu.Lock()
-	ch := p.waiters[id]
-	delete(p.waiters, id)
-	p.mu.Unlock()
-	if ch == nil {
-		return false
-	}
-	select {
-	case ch <- v:
-	default:
-	}
-	return true
-}
-
-// cancel drops id's waiter without delivering — used by the caller's own
-// ctx/timeout path so a late reply after the caller gave up cannot leak the
-// map entry.
-func (p *pendingReplies[T]) cancel(id string) {
-	p.mu.Lock()
-	delete(p.waiters, id)
-	p.mu.Unlock()
-}
-
-// controlRPCTimeout bounds every storage control-RPC round trip on both
-// sides (AllocRequest waiting for AllocReply; the daemon's Committed/
-// ReclaimAck/ReconcilePull waiting for their replies) — a wedged peer must
-// not hang the caller forever. A real Allocator mkdir or Scrubber reconcile
-// pull may legitimately take longer than a bare control-frame round trip; this
-// operation timeout is independent of the session probe verdict.
-var controlRPCTimeout = 20 * time.Second
-
-// wait blocks for id's reply on ch, honoring ctx, the link's done channel,
-// and controlRPCTimeout — the shared tail every storage control-RPC send
-// (both directions) runs after writing its request frame. It cancels id's
-// registration on every non-success exit so a late/never-arriving reply
-// cannot leak the pendingReplies map entry.
-func (p *pendingReplies[T]) wait(ctx context.Context, id string, ch chan T, done <-chan struct{}) (T, error) {
-	var zero T
-	timeout := time.NewTimer(controlRPCTimeout)
-	defer timeout.Stop()
-	select {
-	case v := <-ch:
-		return v, nil
-	case <-ctx.Done():
-		p.cancel(id)
-		return zero, ctx.Err()
-	case <-done:
-		p.cancel(id)
-		return zero, errPendingCancelled
-	case <-timeout.C:
-		p.cancel(id)
-		return zero, fmt.Errorf("link: control RPC %s: %w", id, errControlRPCTimeout)
-	}
-}
-
-var errControlRPCTimeout = errors.New("timed out waiting for a reply")
-
-// encodeStorageControl / decodeStorageControl mirror encodeControl/
-// decodeControl's JSON discipline for the four new frame kinds — kept
-// separate from control.go's controlFrame struct only to avoid bloating its
-// single struct with eight more optional pointer fields; the wire encoding
-// (one JSON object per control substream payload) is identical.
-type storageControlFrame struct {
-	Kind               controlKind         `json:"kind"`
-	AllocRequest       *AllocRequest       `json:"alloc_request,omitempty"`
-	AllocReply         *AllocReply         `json:"alloc_reply,omitempty"`
-	Committed          *Committed          `json:"committed,omitempty"`
-	CommittedReply     *CommittedReply     `json:"committed_reply,omitempty"`
-	ReclaimAck         *ReclaimAck         `json:"reclaim_ack,omitempty"`
-	ReclaimAckReply    *ReclaimAckReply    `json:"reclaim_ack_reply,omitempty"`
-	ReconcilePull      *ReconcilePull      `json:"reconcile_pull,omitempty"`
-	ReconcilePullReply *ReconcilePullReply `json:"reconcile_pull_reply,omitempty"`
-	ReclaimRequest     *ReclaimRequest     `json:"reclaim_request,omitempty"`
-	ReclaimReply       *ReclaimReply       `json:"reclaim_reply,omitempty"`
-}
-
-func encodeStorageControl(f storageControlFrame) ([]byte, error) { return json.Marshal(f) }
-
-func decodeStorageControl(b []byte) (storageControlFrame, error) {
-	var f storageControlFrame
-	if err := json.Unmarshal(b, &f); err != nil {
-		return storageControlFrame{}, fmt.Errorf("link: decode storage control: %w", err)
-	}
-	if f.AllocRequest != nil {
-		if err := f.AllocRequest.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.AllocReply != nil {
-		if err := f.AllocReply.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.Committed != nil {
-		if err := f.Committed.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.CommittedReply != nil {
-		if err := f.CommittedReply.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.ReclaimAck != nil {
-		if err := f.ReclaimAck.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.ReclaimAckReply != nil {
-		if err := f.ReclaimAckReply.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.ReconcilePull != nil {
-		if err := f.ReconcilePull.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.ReconcilePullReply != nil {
-		if err := f.ReconcilePullReply.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.ReclaimRequest != nil {
-		if err := f.ReclaimRequest.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	if f.ReclaimReply != nil {
-		if err := f.ReclaimReply.validate(); err != nil {
-			return storageControlFrame{}, err
-		}
-	}
-	return f, nil
 }

@@ -9,8 +9,8 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
-	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
@@ -60,6 +60,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{}),
 		nowMs:            func() int64 { return time.Now().UnixMilli() },
 		onRelationChange: cfg.OnRelationChange,
+		daemonRoutes:     cfg.DaemonRoutes,
 		subjectgate:      subjectgate.NewRegistry(),
 		pokeCh:           make(chan struct{}, 1),
 	}
@@ -80,7 +81,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 
 	h.signal = tap.NewSignal()
-	lateAcc := &lateAcceptor{}
 	cs, err := runtime.OpenChannel(ctx, cfg.ChannelID, cfg.DBPath, runtime.OpenChannelOptions{
 		MustExist: cfg.MustExistDB, OnCommit: h.signal.Notify,
 	})
@@ -143,15 +143,14 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// locals for the same reason cs is — a door kept on Home is a door every
 	// method in this package can knock on.
 	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
-		Registry:       cs.Assembly.Resources,
-		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
-		Authority:      h.actors,
-		State:          cs.Assembly.State,
-		ChannelID:      cfg.ChannelID,
-		StorageMounts:  lateStorageMounts{acc: lateAcc},
-		StorageControl: lateStorageControl{acc: lateAcc},
-
-		TransferControl: lateTransferControl{acc: lateAcc},
+		Registry:        cs.Assembly.Resources,
+		Drivers:         accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
+		Authority:       h.actors,
+		State:           cs.Assembly.State,
+		ChannelID:       cfg.ChannelID,
+		StorageMounts:   daemonStorageMounts{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
+		StorageControl:  daemonStorageControl{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
+		TransferControl: daemonTransferControl{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build access door: %w", err)
@@ -302,10 +301,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.sweepSubjectSlots(ctx)
 
-	links, err := link.NewAcceptor(link.Config{
+	storageAuthority := homeStorageHostControl{
+		outbox: h.outbox, timeout: cfg.ReservationTimeout, logger: logger,
+	}
+	h.daemonMembrane = platform.DaemonMembrane{
 		Ingress:         remoteIngress,
-		ChannelID:       cfg.ChannelID,
-		Logger:          logger,
 		AuthorizeAttach: h.actors.AuthorizeAttach,
 		AttachBinding:   h.actors.AttachBinding,
 		BindingDown:     h.actors.BindingDown,
@@ -320,26 +320,12 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		},
 		ObserveDown:   h.presenceFold.OnRemoteDown,
 		CancelRequest: h.handleCancelUpstream,
-		StorageHostControl: homeStorageHostControl{
-			outbox: h.outbox, timeout: cfg.ReservationTimeout, logger: logger,
+		Storage:       storageAuthority,
+		Plan:          h.planForDaemon,
+		IsBound: func(ctx context.Context, daemonID string) (bool, error) {
+			return h.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
 		},
-		Plan: h.planForDaemon,
-		CanAttach: func(ctx context.Context, daemonID string) error {
-			bound, err := h.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
-			if err != nil {
-				return err
-			}
-			if !bound {
-				return errors.New("link: daemon_binding_stale")
-			}
-			return nil
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("platform: construct link acceptor: %w", err)
 	}
-	h.links = links
-	lateAcc.bind(links)
 
 	from, err := h.query.MaxSeq(ctx)
 	if err != nil {

@@ -47,6 +47,14 @@ func (a *App) ActorFactsForTest(chID channel.ID, id actor.ActorID) (channelspec.
 	return bundle.View().ActorFacts(context.Background(), id)
 }
 
+func (a *App) DaemonBoundForTest(chID channel.ID, daemonID string) (bool, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return false, errTestChannelNotLoaded
+	}
+	return bundle.View().IsBound(context.Background(), daemonID)
+}
+
 // HumanRosterForTest asks the membrane's entitlement projection.
 func (a *App) HumanRosterForTest(chID channel.ID) ([]channelspec.HumanRosterEntry, error) {
 	bundle, ok := a.host.Acquire(chID)

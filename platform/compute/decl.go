@@ -31,13 +31,27 @@ type ActorFactorySource interface {
 	) (def platform.ActorFactory, ok bool)
 }
 
+// CompartmentResources are the channel-scoped physical resources constructed
+// as one transaction when the first lane for a coordinate arrives.
+type CompartmentResources struct {
+	Factories       ActorFactorySource
+	StorageHost     StorageHost
+	LocalFileOpener LocalFileOpener
+	Close           func() error
+}
+
+type CompartmentBuilder func(
+	channelID string,
+	workspaceDir string,
+) (CompartmentResources, error)
+
 // LocalFileOpener mirrors platform/internal/link.LocalFileOpener's exact
 // method set (期11 spec §5/§3.4's "daemon 本地颁 os.Root 子句柄") — a
 // SEPARATE named interface (not an alias) purely so cmd/daemon/main.go's
 // wiring code reads against platform's own public vocabulary rather than
 // reaching into platform/internal/link (which it cannot import); Go's
 // structural interface typing makes the two directly interchangeable at
-// Run's Dialer.SetLocalFileOpener call site with no adapter needed.
+// the compartment builder boundary with no adapter needed.
 type LocalFileOpener interface {
 	OpenRead(coord string) (io.ReadSeekCloser, error)
 	OpenWrite(coord string) (accessdoor.LocalWriteHandle, error)
@@ -71,7 +85,7 @@ type (
 
 // StorageReclaimAckFunc is Reconcile's network callback — Run's
 // bridge (storageHostForwarder) supplies a closure bound to whichever
-// *link.Dialer is CURRENTLY connected; the StorageHost implementor never
+// exact lane is current; the StorageHost implementor never
 // holds a live connection reference itself.
 type StorageReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, err error)
 

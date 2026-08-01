@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -21,10 +20,6 @@ import (
 // replays a collaboration request.
 func (h *Home) reconcileSweep(ctx context.Context) {
 	h.reconcileDeclarations(ctx)
-	if ctx.Err() != nil {
-		return
-	}
-	h.reconcileDaemonTombstones(ctx)
 	if ctx.Err() != nil {
 		return
 	}
@@ -93,36 +88,6 @@ func (h *Home) reconcileDeclarations(ctx context.Context) {
 		}); err != nil {
 			h.logger.Warn("platform.declaration_pull.apply_failed",
 				"actor", instance.ID, "declaration", instance.SourceDeclID, "error", err)
-		}
-	}
-}
-
-// reconcileDaemonTombstones detaches daemons the realm has deleted. Detach is a
-// wiring-domain action: it removes the binding row and kills no actor. Actors
-// left placed on the gone daemon dangle legally.
-func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
-	if h.resolver == nil || h.actors == nil || h.opEntry == nil {
-		return
-	}
-	ids, err := h.bindings.ListBoundDaemons(ctx)
-	if err != nil {
-		h.logger.Warn("platform.daemon_pull.list_failed", "error", err)
-		return
-	}
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return
-		}
-		resolveCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)
-		facts, resolveErr := h.resolver.DaemonFacts(resolveCtx, string(id))
-		cancel()
-		if resolveErr != nil || !facts.Deleted {
-			continue
-		}
-		if _, err := h.opEntry.DetachDaemon(ctx, channelspec.DaemonRequest{
-			Ref: "daemon-pull:v1:" + uuid.NewString(), DaemonID: string(id),
-		}); err != nil {
-			h.logger.Warn("platform.daemon_pull.detach_failed", "daemon", id, "error", err)
 		}
 	}
 }

@@ -49,13 +49,13 @@ test-full:
 test-strict:
 	go test -race ./...
 
-# e2e-loop — server frame contract + canonical authenticated server/daemon journey.
+# e2e-loop — the four daemon-device black-box acceptance scenarios.
 # 裸 go test ./... 不受影响（ATOLL_E2E_BIN 空则 skip）。
 e2e-loop: build-go
-	@for test in TestGatewayFrames TestDaemonBinaryCanonicalControl; do \
+	@for test in TestDaemonOneCarrierServesTwoChannels TestDaemonDetachOneChannelDoesNotAffectOther TestDaemonCarrierReconnectRestoresCompartments TestDaemonQueryCredentialRejectedWithoutLoggingSecret; do \
 		ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -list "^$$test$$" | grep -qx "$$test" || { echo "[e2e] missing $$test" >&2; exit 1; }; \
 	done
-	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run '^(TestGatewayFrames|TestDaemonBinaryCanonicalControl)$$' -v -timeout 600s
+	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run '^(TestDaemonOneCarrierServesTwoChannels|TestDaemonDetachOneChannelDoesNotAffectOther|TestDaemonCarrierReconnectRestoresCompartments|TestDaemonQueryCredentialRejectedWithoutLoggingSecret)$$' -v -timeout 600s
 
 # lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
 lint: check-gateway-retired check-link-seam-retired

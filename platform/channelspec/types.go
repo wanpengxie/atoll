@@ -32,10 +32,6 @@ type HumanRosterEntry struct {
 	Principal string        `json:"principal"`
 }
 
-type DaemonFacts struct {
-	Deleted bool
-}
-
 type DeclarationFacts struct {
 	OwnerPrincipal string
 	Visibility     string

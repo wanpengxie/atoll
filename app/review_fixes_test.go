@@ -1,10 +1,15 @@
 package app_test
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -71,74 +76,107 @@ func TestDeleteDaemonTombstonePersistFailureReturns5xx(t *testing.T) {
 	}
 }
 
-// TestDeleteDaemonTombstonePullRemovesBindings proves a permanent realm value plus
-// Home pull eventually removes the channel-local binding.
-func TestDeleteDaemonTombstonePullRemovesBindings(t *testing.T) {
+func TestDeleteDaemonRevokesDeviceAndKeepsBinding(t *testing.T) {
 	env := setupTestApp(t)
-	_, cookies := register(t, env, "kick@example.com", "secret123", "Owner")
+	server := httptest.NewServer(env.handler)
+	defer server.Close()
+	_, cookies := register(t, env, "revoke-device@example.com", "secret123", "Owner")
 
-	w := env.do(t, "POST", "/api/daemons", map[string]any{"name": "box"}, cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonID := respJSON(t, w)["id"].(string)
+	created := env.do(t, http.MethodPost, "/api/daemons", map[string]any{"name": "box"}, cookies)
+	assertStatus(t, created, http.StatusCreated)
+	daemonID := respJSON(t, created)["id"].(string)
+	channelResponse := env.do(t, http.MethodPost, "/api/channels", map[string]any{"name": "c"}, cookies)
+	assertStatus(t, channelResponse, http.StatusCreated)
+	channelID := respJSON(t, channelResponse)["id"].(string)
+	bound := env.do(t, http.MethodPost, "/api/channels/"+channelID+"/daemons",
+		map[string]any{"daemon_id": daemonID}, cookies)
+	assertStatus(t, bound, http.StatusOK)
 
-	cookies2 := cookies
-	chBody := env.do(t, "POST", "/api/channels", map[string]any{"name": "c"}, cookies2)
-	assertStatus(t, chBody, http.StatusCreated)
-	chID := respJSON(t, chBody)["id"].(string)
-	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons",
-		map[string]any{"daemon_id": daemonID}, cookies2)
-	assertStatus(t, w, http.StatusOK)
-
-	// Delete commits the permanent daemon tombstone; the response reports authority
-	// commitment separately from the bounded convergence observation.
-	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
-	assertStatus(t, w, http.StatusOK)
-	first := respJSON(t, w)
-	if first["authority_committed"] != true || (first["convergence"] != "observed_clear" && first["convergence"] != "convergence_pending") {
-		t.Fatalf("first delete response=%#v", first)
-	}
-	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
-	assertStatus(t, w, http.StatusOK)
-	second := respJSON(t, w)
-	if second["authority_committed"] != true || (second["convergence"] != "observed_clear" && second["convergence"] != "convergence_pending") {
-		t.Fatalf("idempotent delete response=%#v", second)
-	}
-
-	// Daemon gone.
-	w = env.do(t, "GET", "/api/daemons", nil, cookies2)
-	assertStatus(t, w, http.StatusOK)
-	ds, _ := respJSON(t, w)["daemons"].([]any)
-	for _, d := range ds {
-		if d.(map[string]any)["id"] == daemonID {
-			t.Fatalf("daemon still present after delete")
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	computeConfig := daemonComputeConfig(
+		t,
+		fmt.Sprintf("ws://%s/compute", server.Listener.Addr()),
+		respJSON(t, created)["api_key"].(string),
+		&e2eLinkPlan{chID: channel.ID(channelID)},
+		nil,
+	)
+	go func() {
+		runErr <- compute.Run(ctx, computeConfig)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(3 * time.Second):
 		}
-	}
-	// Binding gone after Home's next pull (poked by the
-	// delete handler; level semantics — poll, don't assume synchronous).
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		w = env.do(t, "GET", "/api/channels/"+chID+"/daemons", nil, cookies2)
-		assertStatus(t, w, http.StatusOK)
-		cds, _ := respJSON(t, w)["daemons"].([]any)
-		survived := false
-		for _, d := range cds {
-			if d.(map[string]any)["id"] == daemonID {
-				survived = true
+	})
+	waitDaemonComposition(t, func() bool {
+		listed := env.do(t, http.MethodGet, "/api/daemons", nil, cookies)
+		if listed.Code != http.StatusOK {
+			return false
+		}
+		for _, raw := range respJSON(t, listed)["daemons"].([]any) {
+			daemon := raw.(map[string]any)
+			if daemon["id"] == daemonID && daemon["online"] == true {
+				return true
 			}
 		}
-		if !survived {
-			// Removing a reference remains legal after the daemon referent has
-			// retired. The handler authenticates against the tombstoned owner row
-			// and the membrane operation is idempotent.
-			detached := env.do(t, http.MethodDelete, "/api/channels/"+chID+"/daemons/"+daemonID, nil, cookies2)
-			assertStatus(t, detached, http.StatusOK)
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("channel binding survived daemon tombstone convergence")
-		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	}, "device carrier never became online")
+
+	deleted := env.do(t, http.MethodDelete, "/api/daemons/"+daemonID, nil, cookies)
+	assertStatus(t, deleted, http.StatusOK)
+	body := respJSON(t, deleted)
+	if body["authority_committed"] != true || body["convergence"] != "revoked" {
+		t.Fatalf("delete response=%#v", body)
 	}
+	// Revocation is recorded on its own. There is no companion "the device never
+	// confirmed" note any more: this host holds no projection of the device's
+	// compartments, so there is nothing whose absence it could report on.
+	diagnostics := body["diagnostics"].([]any)
+	var sawRevoke bool
+	for _, raw := range diagnostics {
+		if raw.(map[string]any)["kind"] == "revoke" {
+			sawRevoke = true
+		}
+	}
+	if !sawRevoke {
+		t.Fatalf("delete diagnostics=%#v, want the revoke record", diagnostics)
+	}
+	select {
+	case err := <-runErr:
+		if err == nil || !strings.Contains(err.Error(), "daemon revoked") {
+			t.Fatalf("compute result=%v, want terminal daemon-revoked result", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("compute kept running after daemon revocation")
+	}
+
+	stillBound, err := env.app.DaemonBoundForTest(channel.ID(channelID), daemonID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stillBound {
+		t.Fatalf("realm tombstone removed channel-local binding %q", daemonID)
+	}
+}
+
+func TestComputeRejectsQueryCredentialAndMalformedBearer(t *testing.T) {
+	env := setupTestApp(t)
+	query := env.do(t, http.MethodGet, "/compute?key=must-not-enter-logs", nil, nil)
+	assertStatus(t, query, http.StatusUnauthorized)
+
+	missing := env.do(t, http.MethodGet, "/compute", nil, nil)
+	assertStatus(t, missing, http.StatusBadRequest)
+	malformed := env.doHeaders(t, http.MethodGet, "/compute", nil, nil, map[string]string{
+		"Authorization": "Basic credentials",
+	})
+	assertStatus(t, malformed, http.StatusBadRequest)
+	invalid := env.doHeaders(t, http.MethodGet, "/compute", nil, nil, map[string]string{
+		"Authorization": "Bearer invalid",
+	})
+	assertStatus(t, invalid, http.StatusUnauthorized)
 }
 
 func TestChannelDaemonListIncludesBindingsOwnedByOtherMembers(t *testing.T) {

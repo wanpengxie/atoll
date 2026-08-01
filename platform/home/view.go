@@ -7,9 +7,9 @@ import (
 	"io"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/humancell"
-	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -39,7 +39,8 @@ type viewAuthority interface {
 type View struct {
 	visible      storespec.VisibleMessageQuery
 	authority    viewAuthority
-	links        *link.Acceptor
+	daemonRoutes platform.DaemonRoutes
+	channelID    channel.ID
 	presence     presence.View
 	actors       *actorSystem
 	nowMs        func() int64
@@ -58,7 +59,8 @@ func (h *Home) View() View {
 	return View{
 		visible:        h.visible,
 		authority:      h.actors,
-		links:          h.links,
+		daemonRoutes:   h.daemonRoutes,
+		channelID:      h.channelID,
 		presence:       presence.NewView(h.presenceFold, h.actors, h.actors),
 		actors:         h.actors,
 		nowMs:          h.nowMs,
@@ -166,13 +168,13 @@ func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
 	return stat.StartedAt, true
 }
 
-// IsAttached reports whether daemon (compute) id has a live attach right now
-// (L0 attachment) — read-time, derived from the link acceptor, never stored.
+// IsAttached reports whether the daemon can serve this channel now: current
+// carrier, current lane, and a positive ready compartment declaration.
 func (v View) IsAttached(daemonID string) bool {
-	if v.links == nil {
+	if v.daemonRoutes == nil {
 		return false
 	}
-	return v.links.IsAttached(daemonID)
+	return v.daemonRoutes.LaneAttached(daemonID, string(v.channelID))
 }
 
 func (v View) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {

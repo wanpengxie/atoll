@@ -61,10 +61,6 @@ func (g *lifecycleReconcileGate) ClassKind(context.Context, string) (actor.Kind,
 	return "", false, nil
 }
 
-func (g *lifecycleReconcileGate) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
-}
-
 // lifecycleCloseConfig is a bootstrap channel carrying ONE declared agent —
 // the declared instance is what gives the reconcile pass something to resolve,
 // which is what makes the gate above reachable.

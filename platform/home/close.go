@@ -45,9 +45,6 @@ func (h *Home) closeInternalWithin(reason string, timeout time.Duration) error {
 				}
 			}
 		}
-		if h.links != nil {
-			faults = appendIfError(faults, h.links.Close())
-		}
 		if h.delivery != nil {
 			h.delivery.Close()
 		}

@@ -1,9 +1,9 @@
-// Command daemon runs a v2 attached compute (hosts actor cells; no truth).
-// Cloud daemon and user/proxy daemon are the same binary.
+// Command daemon runs one authenticated device carrier and a compartment for
+// every bound channel. Cloud and user/proxy daemons are the same binary.
 //
 // What the daemon RUNS is NOT "one of every compiled class" — it is exactly the
-// set the SERVER assigns this channel (channel composition placement='daemon'),
-// pulled over the authenticated link control stream. Two
+// sets the server assigns each channel (channel composition
+// placement='daemon'), pulled over that channel's lane. Two
 // orthogonal axes: compiled-in (availability — actors/all + agent/all are linked
 // so the daemon CAN build any tool/looper/device) vs run (the pulled assignment
 // decides). NOTHING auto-runs. tool / looper / device are uniform — all just
@@ -17,15 +17,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"log"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
@@ -42,15 +39,6 @@ import (
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 )
-
-// channelFromServerURL extracts the ?channel= query from the server WS URL.
-func channelFromServerURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	return u.Query().Get("channel")
-}
 
 // classFactories resolves one body's factory at BUILD time from the class and
 // config that body's own desired carries — the daemon-side mirror of the server
@@ -99,7 +87,7 @@ func main() {
 	ws := flag.String("server", "ws://localhost:8080/compute", "server WS url")
 	key := flag.String("key", "", "api key")
 	name := flag.String("name", "", "device name; default: hostname")
-	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.atoll/workspace")
+	workspace := flag.String("workspace", "", "atoll home; default: ~/.atoll")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -108,7 +96,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Device identity + workspace root resolve first — an assigned device actor
+	// Device identity + atoll home resolve first — an assigned device actor
 	// derives its id from DeviceName; loopers' situation facts derive from the
 	// workspace.
 	deviceName := *name
@@ -119,78 +107,36 @@ func main() {
 		}
 		deviceName = host
 	}
-	wsRoot := *workspace
-	if wsRoot == "" {
+	atollHome := *workspace
+	if atollHome == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			log.Fatalf("daemon: home dir: %v", err)
 		}
-		wsRoot = filepath.Join(home, ".atoll", "workspace")
+		atollHome = filepath.Join(home, ".atoll")
 	}
-
-	chID := channelFromServerURL(*ws)
-	// Assembly-root check: a daemon hosts exactly ONE channel's assignment, named
-	// by the server WS url's ?channel=. Missing it means we cannot know what to
-	// build — fatal at the earliest point with a fix-it diagnostic (fetchPlan
-	// would otherwise surface a murky 400/403 far downstream).
-	if chID == "" {
-		log.Fatalf("daemon: -server %q has no ?channel= query; pass e.g. -server ws://host:8080/compute?channel=<channel-id>", *ws)
-	}
-
-	// The daemon's compute plan is pulled over its authenticated link on every
-	// reconcile pass and handed to the Host as one desired snapshot — the one
-	// plan ledger. Factories resolve per body at build time from that desired's
-	// own spec, exactly as the server host resolves against its registry.
-	factories := classFactories{chID: chID, wsRoot: wsRoot, deviceName: deviceName, logger: logger}
-
-	// The link layer is auth-agnostic: the api key rides the server WS url's query
-	// string (?key=), which the app layer resolves on WS upgrade. There is no
-	// separate credential field on compute.Config.
-	serverWS := *ws
-	if *key != "" {
-		sep := "?"
-		if strings.Contains(serverWS, "?") {
-			sep = "&"
-		}
-		serverWS += sep + "key=" + url.QueryEscape(*key)
-	}
-
-	// Storage host (期11 §4): the file-kind resource axis's physical half —
-	// os.Root-confined, this channel's own resources/<channelID>/{live,
-	// staging} tree, a SIBLING of wsRoot/<channelID>'s device workspace tree
-	// (never nested under it, §4.2). Opened unconditionally: a daemon that
-	// never hosts a file-kind resource simply never receives an AllocRequest
-	// for it (compute.Run's bridge only calls into StorageHost when the home
-	// actually sends one), so there is no cost to always wiring it — and no
-	// silent gap the day a channel this daemon serves DOES need file
-	// placement.
-	sh, err := storagehost.Open(wsRoot, chID, logger)
-	if err != nil {
-		log.Fatalf("daemon: open storage host: %v", err)
-	}
-	closeStorageRoot := true
-	defer func() {
-		if closeStorageRoot {
-			_ = sh.Close()
-		}
-	}()
 
 	if err := compute.Run(ctx, compute.Config{
-		ServerWS:        serverWS,
-		Logger:          logger.With("channel", chID),
-		Factories:       factories,
-		StorageHost:     storageHostAdapter{host: sh},
-		LocalFileOpener: storageHostAdapter{host: sh},
+		ServerWS:   *ws,
+		Credential: *key,
+		AtollHome:  atollHome,
+		Logger:     logger,
+		BuildCompartment: func(chID, workspaceDir string) (compute.CompartmentResources, error) {
+			daemonRoot := filepath.Dir(filepath.Dir(workspaceDir))
+			sh, err := storagehost.Open(daemonRoot, chID, logger.With("channel", chID))
+			if err != nil {
+				return compute.CompartmentResources{}, err
+			}
+			adapter := storageHostAdapter{host: sh}
+			return compute.CompartmentResources{
+				Factories: classFactories{
+					chID: chID, wsRoot: workspaceDir, deviceName: deviceName,
+					logger: logger.With("channel", chID),
+				},
+				StorageHost: adapter, LocalFileOpener: adapter, Close: sh.Close,
+			}, nil
+		},
 	}); err != nil {
-		if !shouldCloseStorageRoot(err) {
-			closeStorageRoot = false
-			logger.Error("daemon: storage root ownership transferred to process exit", "err", err)
-			return
-		}
 		log.Fatalf("daemon: %v", err)
 	}
-}
-
-func shouldCloseStorageRoot(err error) bool {
-	return !errors.Is(err, compute.ErrForwardersLeaked)
 }

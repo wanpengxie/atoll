@@ -21,8 +21,8 @@ type homeActorEffects struct{ home *Home }
 func (e homeActorEffects) PlanPoke(domain actorhost.ExecutionDomain) {
 	if e.home != nil {
 		e.home.pokeReconcile()
-		if e.home.links != nil {
-			e.home.links.PokePlan(string(domain))
+		if e.home.daemonRoutes != nil {
+			e.home.daemonRoutes.PokePlan(string(domain), string(e.home.channelID))
 		}
 	}
 }

@@ -65,12 +65,12 @@ func cannedUp(down devDownFrame) devUpFrame {
 
 // TestXHSLiveEndToEnd is the green gate for the xhs adapter under REAL live
 // conditions: a real HTTP/WS server, a real daemon (compute.Run) that
-// attaches over a real /compute WS and hosts the tool:xhs cell, a real device
+// serves a lane over a real /compute WS and hosts the tool:xhs cell, a real device
 // connected over the cell's private /device WS, and a real xhs.search request
 // that traverses the whole path and comes back as a completed response.
 //
 // Stages asserted in order:
-//  1. daemon attaches  → tool:xhs appears as a channel member (/actors)
+//  1. daemon serves    → tool:xhs appears as a channel member (/actors)
 //  2. device connects  → adapter accepts the /device WS
 //  3. request routes   → device receives a down-frame (cmd=search)
 //  4. reply returns    → channel gets a kind=response, completed, results
@@ -94,7 +94,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 
 	// --- run the daemon: real /compute attach + hosted tool:xhs cell --------
 	ctx, cancel := context.WithCancel(context.Background())
-	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	serverWS := fmt.Sprintf("ws://%s/compute", srv.Listener.Addr())
 	xhsID, err := env.app.ComposeDaemonForTest(s.chID, "xhs", "xhs", daemonID, actor.KindTool)
 	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
@@ -111,9 +111,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 		})},
 	}})
 	go func() {
-		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, Factories: plan, Poll: 20 * time.Millisecond},
-		)
+		runErr <- compute.Run(ctx, daemonComputeConfig(t, serverWS, apiKey, plan, logger))
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -294,7 +292,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	serverWS := fmt.Sprintf("ws://%s/compute", srv.Listener.Addr())
 	xhsID, err := env.app.ComposeDaemonForTest(s.chID, "xhs", "xhs", daemonID, actor.KindTool)
 	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
@@ -310,9 +308,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 		})},
 	}})
 	go func() {
-		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, Factories: plan, Poll: 20 * time.Millisecond},
-		)
+		runErr <- compute.Run(ctx, daemonComputeConfig(t, serverWS, apiKey, plan, logger))
 	}()
 	t.Cleanup(func() {
 		cancel()

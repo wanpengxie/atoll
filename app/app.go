@@ -20,6 +20,7 @@ import (
 	relationstore "github.com/wanpengxie/atoll/app/internal/relation"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -40,10 +41,11 @@ type App struct {
 	engine *gin.Engine
 	srv    *http.Server // set by Run; drained by Shutdown
 
-	mu       sync.RWMutex
-	createMu sync.Mutex
-	host     channelhost.LocalHost
-	uiDist   string
+	mu         sync.RWMutex
+	createMu   sync.Mutex
+	host       channelhost.LocalHost
+	daemonHost *daemonhost.Host
+	uiDist     string
 
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
 	// is the injected direct Gateway.Poke callback that the platform emission
@@ -87,13 +89,35 @@ func New(cfg Config) (*App, error) {
 		daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
 	}
 	a.relations = relationstore.New(a.db)
+	a.daemonHost = daemonhost.New(daemonhost.Config{
+		Logger: logger,
+		Present: func(ctx context.Context) ([]channel.ID, error) {
+			return a.directoryChannelIDs(ctx)
+		},
+		DaemonFact: func(ctx context.Context, daemonID string) daemonhost.DaemonFact {
+			var deleted sql.NullInt64
+			err := a.db.QueryRowContext(ctx, `SELECT deleted_at FROM daemons WHERE id=?`, daemonID).Scan(&deleted)
+			switch {
+			case errors.Is(err, sql.ErrNoRows), err == nil && deleted.Valid:
+				return daemonhost.DaemonDeleted
+			case err != nil:
+				return daemonhost.DaemonUnavailable
+			default:
+				return daemonhost.DaemonAlive
+			}
+		},
+	})
 	if cfg.HostFactory == nil {
+		_ = a.daemonHost.Close()
 		return nil, errors.New("app: HostFactory required")
 	}
 	host, err := cfg.HostFactory(channelhost.HomeDeps{
 		CompositionResolver:  compositionResolver{app: a},
 		IntroductionResolver: compositionResolver{app: a},
 		Logger:               logger,
+		DaemonRoutes:         a.daemonHost,
+		OnMembraneOpen:       a.daemonHost.Register,
+		OnMembraneClose:      a.daemonHost.Unregister,
 		OnRelationChange: func(chID channel.ID, deltas []channelspec.RelationDelta) {
 			// Two independent consumers of one delivery: the relation index
 			// records, the gateway poke derives from the deltas themselves.
@@ -108,9 +132,11 @@ func New(cfg Config) (*App, error) {
 					a.membershipPoke(delta.Principal)
 				}
 			}
+			a.daemonHost.Scan()
 		},
 	})
 	if err != nil {
+		_ = a.daemonHost.Close()
 		return nil, fmt.Errorf("app: construct ChannelHost: %w", err)
 	}
 	a.host = host
@@ -187,7 +213,7 @@ func (a *App) Close() error {
 	if a.lifecycle != nil {
 		a.lifecycle.close()
 	}
-	return a.host.Close()
+	return errors.Join(a.daemonHost.Close(), a.host.Close())
 }
 
 // ---------------------------------------------------------------------------

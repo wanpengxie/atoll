@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
@@ -89,6 +90,54 @@ func (f *fakeOutbox) TouchReservationsByCoords(ctx context.Context, daemonID str
 }
 
 var _ resourcespec.ResourceOutbox = (*fakeOutbox)(nil)
+
+// fixedRoutes answers every storage route with one canned error — these tests
+// are about what this seam does to that error, not about transport.
+type fixedRoutes struct{ err error }
+
+func (fixedRoutes) PokePlan(string, string) {}
+func (r fixedRoutes) SendAlloc(context.Context, string, string, string, bool) error {
+	return r.err
+}
+func (r fixedRoutes) SendReclaim(context.Context, string, string, string) error { return r.err }
+func (fixedRoutes) OpenTransfer(
+	context.Context, string, string, string, access.Operation, string,
+) (string, error) {
+	return "", nil
+}
+func (fixedRoutes) AttachedDaemons(string) []string  { return nil }
+func (fixedRoutes) LaneAttached(string, string) bool { return false }
+func (fixedRoutes) RetireLane(string, string)        {}
+
+var _ platform.DaemonRoutes = fixedRoutes{}
+
+// TestStorageControlKeepsNotAttemptedDistinctFromRefused pins the one point in
+// the process where the transport's "the daemon attempted nothing" answer and
+// the door's own name for it can meet: runtime never imports platform, so if
+// this seam drops the translation, the door's caller sees an opaque error and
+// treats a still-building daemon as a hard create failure. Nothing downstream
+// can recover the distinction once it is lost here.
+func TestStorageControlKeepsNotAttemptedDistinctFromRefused(t *testing.T) {
+	control := daemonStorageControl{routes: fixedRoutes{err: platform.ErrDaemonNotReady}, chID: "channel-a"}
+	if err := control.AllocRequest(context.Background(), "daemon-1", accessdoor.StorageAllocSpec{
+		Coord: "coord-a",
+	}); !errors.Is(err, accessdoor.ErrStorageNotReady) {
+		t.Fatalf("AllocRequest error=%v, want it to carry accessdoor.ErrStorageNotReady", err)
+	}
+	if err := control.ReclaimRequest(context.Background(), "daemon-1", "coord-a"); !errors.Is(err, accessdoor.ErrStorageNotReady) {
+		t.Fatalf("ReclaimRequest error=%v, want it to carry accessdoor.ErrStorageNotReady", err)
+	}
+
+	// The other half: a refusal must not acquire the sentinel on the way
+	// through, or the guard above would hold for a seam that relabelled
+	// everything.
+	refused := errors.New("disk full")
+	control = daemonStorageControl{routes: fixedRoutes{err: refused}, chID: "channel-a"}
+	err := control.AllocRequest(context.Background(), "daemon-1", accessdoor.StorageAllocSpec{Coord: "coord-a"})
+	if !errors.Is(err, refused) || errors.Is(err, accessdoor.ErrStorageNotReady) {
+		t.Fatalf("a refusal must stay a refusal, got %v", err)
+	}
+}
 
 func TestHomeStorageHostControl_Committed_SenderAuth(t *testing.T) {
 	t.Run("matching sender lands the reservation", func(t *testing.T) {
@@ -291,34 +340,5 @@ func TestHomeStorageHostControl_ReconcilePull_DefaultTimeoutAndClock(t *testing.
 	wantCutoff := before.Add(-defaultReservationTimeout).UnixMilli()
 	if ob.sweepCalls[0].cutoffMs < wantCutoff {
 		t.Fatalf("sweep cutoffMs = %d, want >= %d (default timeout applied)", ob.sweepCalls[0].cutoffMs, wantCutoff)
-	}
-}
-
-func TestLateStorageMounts_BeforeAndAfterBind(t *testing.T) {
-	acc := &lateAcceptor{}
-	m := lateStorageMounts{acc: acc}
-
-	mounts, err := m.ListStorageDaemons(t.Context(), "ch1")
-	if err != nil || len(mounts) != 0 {
-		t.Fatalf("before bind: (%v,%v), want (empty,nil)", mounts, err)
-	}
-
-	a := &link.Acceptor{}
-	acc.bind(a)
-	// No attach has happened, so the mount list is still empty — this just
-	// proves the late-bind seam itself works (a real attach is exercised by
-	// the link package's own tests), not that Acceptor state is non-empty.
-	mounts, err = m.ListStorageDaemons(t.Context(), "ch1")
-	if err != nil || len(mounts) != 0 {
-		t.Fatalf("after bind, no attach: (%v,%v), want (empty,nil)", mounts, err)
-	}
-}
-
-func TestLateStorageControl_BeforeBindIsHonestError(t *testing.T) {
-	acc := &lateAcceptor{}
-	c := lateStorageControl{acc: acc}
-	err := c.AllocRequest(t.Context(), "daemon-1", accessdoor.StorageAllocSpec{ChannelID: "ch1", Coord: "coord-1"})
-	if err == nil {
-		t.Fatal("expected an error before the Acceptor is bound")
 	}
 }

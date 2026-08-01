@@ -45,10 +45,6 @@ func (r *mutableDeclarationResolver) ClassKind(_ context.Context, class string) 
 	return "", false, nil
 }
 
-func (r *mutableDeclarationResolver) DaemonFacts(context.Context, string) (channelspec.DaemonFacts, error) {
-	return channelspec.DaemonFacts{}, nil
-}
-
 func (r *mutableDeclarationResolver) BuildClass(
 	channel.ID, actor.ActorID, string, json.RawMessage,
 ) (platform.ActorFactory, bool) {

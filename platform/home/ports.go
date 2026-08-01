@@ -1,8 +1,7 @@
 package home
 
 import (
-	"net/http"
-
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
@@ -24,6 +23,4 @@ func GatewaySubscribe(h *Home) (<-chan struct{}, func()) { return h.subscribe() 
 // on delivery: the periodic sweep is the backstop.
 func Poke(h *Home) { h.pokeReconcile() }
 
-func LinkServe(h *Home, w http.ResponseWriter, r *http.Request, daemonID string) {
-	h.serveAttach(w, r, daemonID)
-}
+func DaemonMembrane(h *Home) platform.DaemonMembrane { return h.daemonMembrane }

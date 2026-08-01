@@ -2,7 +2,6 @@ package home
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -21,8 +20,7 @@ func (h *Home) hooks() actorbase.Hooks {
 // cancelRequest reaches the request-scope of cancel(scope) for one in-flight
 // request `target` is running under `requestID`. Home holds the runtime
 // directly (cell/port hosting is transport-neutral inside it — cancellation
-// reaches a daemon-hosted port the same way it reaches a local cell) so this
-// is a direct call, no Acceptor indirection needed. No-op if the request
+// reaches a daemon-hosted port the same way it reaches a local cell). No-op if the request
 // already closed or `target` has no current endpoint — cancel is a
 // best-effort hint, the caller's closure owns the terminal.
 func (h *Home) cancelRequest(target actor.ActorID, requestID message.ID) {
@@ -64,17 +62,6 @@ func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID)
 		return
 	}
 	h.cancelRequest(req.Audience[0], requestID)
-}
-
-// ServeAttach is the attach admission surface: the app hands an upgraded WS request here so a
-// daemon can attach its actor streams. Home keeps the internal link acceptor and
-// only exposes this capability — the acceptor object never escapes.
-func (h *Home) serveAttach(w http.ResponseWriter, r *http.Request, daemonID string) {
-	if h.closed.Load() || h.links == nil {
-		http.Error(w, "home closed", http.StatusServiceUnavailable)
-		return
-	}
-	h.links.Serve(w, r, daemonID)
 }
 
 // Subscribe is the subscription registration surface (client push): a client stream subscribes to

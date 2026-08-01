@@ -10,21 +10,15 @@ import (
 // wsByteStream adapts a gorilla *websocket.Conn into a plain io.ReadWriteCloser
 // byte stream — the carrier shape yamux.Client/yamux.Server want. This is the
 // 期11 spec §5.2 "换底" seam: the link runs a single top-level yamux SESSION
-// directly over the raw WS connection (linksession.go), and yamux wants a byte
+// directly over the raw WS connection, and yamux wants a byte
 // stream, not WS's per-call binary-MESSAGE transport (ReadMessage/WriteMessage)
 // — so this type exists to bridge WS's message framing down to bytes.
 //
-// wsByteStream is the ONLY adapter that ever touches a link's *websocket.Conn:
-// gorilla's NextReader/NextWriter (used here) is not safe to mix with
-// ReadMessage/WriteMessage on the same conn (they share the same underlying
-// connection cursor), so nothing else may read/write the raw conn directly —
-// the retired wsConn (control.go, 期11 片② deleted it) used to be the other
-// half of that hazard; now there is only one adapter, so the hazard is gone
-// by construction rather than by discipline.
+// wsByteStream is the only adapter that touches the websocket connection.
+// Gorilla permits one reader and one writer, so this adapter serializes each
+// direction and no other layer accesses websocket message framing.
 //
-// This is the ONE carrier the top-level yamux session (linksession.go) rides on
-// (期11 片②): dial.go/accept.go build yamux.Client/yamux.Server directly over a
-// wsByteStream — the self-rolled mux (frame.go) is retired.
+// This is the one byte carrier the device's top-level yamux session rides on.
 type wsByteStream struct {
 	ws *websocket.Conn
 
@@ -56,8 +50,8 @@ type wsByteStream struct {
 // newWSByteStream wraps ws as a byte-stream io.ReadWriteCloser. This is the
 // RAW carrier yamux itself reads/writes — it carries yamux's own internal
 // keepalive ping/pong alongside every substream's bytes, indistinguishably.
-// It intentionally carries no session-liveness hook: only a matched probe reply
-// read from the control spine refreshes the session ledger.
+// It intentionally carries no session-liveness hook: spine traffic refreshes
+// the carrier lease.
 func newWSByteStream(ws *websocket.Conn) *wsByteStream {
 	return &wsByteStream{ws: ws}
 }
