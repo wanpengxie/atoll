@@ -14,6 +14,8 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/link"
 )
 
+// laneRPCTimeout is a test seam. Production always leaves it at the protocol
+// budget.
 var laneRPCTimeout = link.LaneRPCTimeout
 
 type serverLane struct {

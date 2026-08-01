@@ -288,7 +288,14 @@ func (h *Host) probeOnce(carrier *carrierRow) {
 		h.mu.Unlock()
 		return
 	}
-	if now.Sub(carrier.lastSeen) > h.cfg.LeaseTTL {
+	// A lease is only ever reaped over an unanswered question, never over
+	// silence this host did not probe. Expiry alone proves nothing when the
+	// TTL undercuts the probe cadence — the first tick would arrive with the
+	// lease already stale and reap every healthy carrier before one probe was
+	// sent. Falling through to the probe instead makes any TTL safe: the
+	// carrier gets asked, an answer renews as usual, and only a probe still
+	// outstanding at the next expired tick condemns it.
+	if now.Sub(carrier.lastSeen) > h.cfg.LeaseTTL && len(carrier.outstandingProbes) > 0 {
 		sealed := h.sealCarrierLocked(carrier)
 		h.mu.Unlock()
 		if sealed {
@@ -354,6 +361,8 @@ func (h *Host) renewLeaseOnProbeReply(carrier *carrierRow, nonce string) {
 	if carrier == nil || nonce == "" {
 		return
 	}
+	// The clock is caller-supplied and must never run under the ledger lock.
+	now := h.now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	row := h.daemons[carrier.daemonID]
@@ -364,7 +373,7 @@ func (h *Host) renewLeaseOnProbeReply(carrier *carrierRow, nonce string) {
 		return
 	}
 	carrier.outstandingProbes = nil
-	carrier.lastSeen = h.now()
+	carrier.lastSeen = now
 }
 
 func (h *Host) Register(chID channel.ID, generation uint64, bundle platform.DaemonMembrane) {
@@ -387,6 +396,11 @@ func (h *Host) Register(chID channel.ID, generation uint64, bundle platform.Daem
 		return
 	}
 	h.membranes[chID] = membraneRow{generation: generation, bundle: bundle}
+	// The installed row now outranks the fence for every generation the fence
+	// could refuse, so the entry is spent — dropping it here is what keeps the
+	// fence map bounded by live churn instead of growing one entry per channel
+	// ever retired.
+	delete(h.retiredMembranes, chID)
 	carriers := h.currentCarriersLocked()
 	h.mu.Unlock()
 	for _, carrier := range carriers {
@@ -420,13 +434,17 @@ func (h *Host) Unregister(chID channel.ID, generation uint64) {
 		h.mu.Unlock()
 		return
 	}
-	if generation > h.retiredMembranes[chID] {
-		h.retiredMembranes[chID] = generation
-	}
 	row, ok := h.membranes[chID]
 	if !ok || row.generation != generation {
+		// Nothing of this generation is installed, so nothing retires — and a
+		// fence must not advance for a retirement that never happened, or a
+		// close callback racing ahead of its open would seal a generation the
+		// open then cannot install.
 		h.mu.Unlock()
 		return
+	}
+	if generation > h.retiredMembranes[chID] {
+		h.retiredMembranes[chID] = generation
 	}
 	delete(h.membranes, chID)
 	carriers := h.currentCarriersLocked()
@@ -739,23 +757,6 @@ func (h *Host) answerCompartmentPlan(carrier *carrierRow, nonce string) {
 
 func sortChannels(ids []channel.ID) {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-}
-
-// PokeCompartmentPlan tells one daemon its channel snapshot moved. It carries
-// no payload and needs no delivery guarantee: the device also pulls on carrier
-// establishment and on its own period, so a lost poke costs latency only.
-func (h *Host) PokeCompartmentPlan(daemonID string) {
-	h.mu.RLock()
-	row := h.daemons[daemonID]
-	var carrier *carrierRow
-	if row != nil {
-		carrier = row.current
-	}
-	h.mu.RUnlock()
-	if carrier == nil || carrier.sealed.Load() || !carrier.accepted.Load() {
-		return
-	}
-	_ = carrier.wire.SendSpine(link.SpineFrame{Kind: link.SpineCompartmentPlanPoke})
 }
 
 // pokeAllCompartmentPlans fans the poke to every live carrier. Channel-level

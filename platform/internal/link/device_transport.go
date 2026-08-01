@@ -992,14 +992,18 @@ func (l *LaneStream) RetireLogical() {
 	}
 	l.retire.Do(func() {
 		l.retired.Store(true)
-		if l.onRetire != nil {
-			l.onRetire(l)
-		}
 		close(l.done)
 		// A yamux local Close does not wake this side's blocked Read. The
 		// reader is the lane's physical supervisor, so retire only breaks that
 		// Read; the reader itself performs CollectPhysical after it wakes.
 		_ = l.conn.SetReadDeadline(time.Unix(1, 0))
+		// The injected callback runs last: everything above must happen even
+		// if it panics or parks, because sync.Once never re-runs its body, and
+		// a retire whose done never closed strands every waiter forever.
+		// rawCarrier.Close orders its own finishers the same way.
+		if l.onRetire != nil {
+			l.onRetire(l)
+		}
 	})
 }
 

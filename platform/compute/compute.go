@@ -150,6 +150,8 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 			if response != nil && response.Body != nil {
 				_ = response.Body.Close()
 			}
+			logger.Warn("platform.compute.carrier_dial_failed",
+				"err", err, "retry_in", delay.Round(time.Millisecond).String())
 			if !waitBackoff(ctx, delay) {
 				return nil
 			}
@@ -162,7 +164,10 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 			if terminal, ok := err.(terminalCarrierError); ok {
 				return terminal
 			}
-			if !waitBackoff(ctx, jitterBackoff(backoff)) {
+			delay := jitterBackoff(backoff)
+			logger.Warn("platform.compute.carrier_verdict_retryable",
+				"err", err, "retry_in", delay.Round(time.Millisecond).String())
+			if !waitBackoff(ctx, delay) {
 				return nil
 			}
 			backoff = nextRedialBackoff(backoff)
@@ -197,6 +202,9 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 			return err
 		}
 		manager.carrierDown(wire)
+		if ctx.Err() == nil {
+			logger.Warn("platform.compute.carrier_down", "daemon", daemonID)
+		}
 		if !waitBackoff(ctx, jitterBackoff(backoff)) {
 			return nil
 		}

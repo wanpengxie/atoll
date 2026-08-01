@@ -609,6 +609,10 @@ func TestCarrierHalfOpenLeaseExpires(t *testing.T) {
 	}
 	now = now.Add(2 * time.Second)
 	clock.Store(now.UnixNano())
+	// A lease reaps only over an unanswered question: the first probe asks,
+	// and the half-open carrier's silence on it is what the second one
+	// condemns.
+	probeCarrierNow(t, host, "daemon-a")
 	probeCarrierNow(t, host, "daemon-a")
 	waitFor(t, func() bool { return !host.DaemonOnline("daemon-a") })
 	readDone := make(chan error, 1)
@@ -616,7 +620,11 @@ func TestCarrierHalfOpenLeaseExpires(t *testing.T) {
 		for {
 			var frame link.SpineFrame
 			err := first.ReadSpine(&frame)
-			if err != nil || frame.Kind != link.SpineCompartmentPlanPoke {
+			// Pokes and probes are contentless: a poke is a wake, a probe is
+			// the liveness question the reap was preceded by. Neither is a
+			// decision frame, and this reader is waiting for the wire to die.
+			if err != nil || (frame.Kind != link.SpineCompartmentPlanPoke &&
+				frame.Kind != link.SpineProbe) {
 				readDone <- err
 				return
 			}
@@ -880,6 +888,32 @@ func carrierLastSeen(t *testing.T, host *Host, daemonID string) time.Time {
 	return row.current.lastSeen
 }
 
+// TestExpiredLeaseIsAskedBeforeItIsReaped pins the reap's evidence rule: a
+// lease is only ever reaped over an unanswered probe, never over silence this
+// host did not question. Without it, any LeaseTTL below the probe cadence
+// reaps every healthy carrier at its first tick — the lease expires before
+// the first question is even sent — and the realm flaps forever on one
+// misconfigured knob.
+func TestExpiredLeaseIsAskedBeforeItIsReaped(t *testing.T) {
+	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	host := New(Config{ScanInterval: time.Hour, LeaseTTL: time.Second, Now: clock.now})
+	defer host.Close(context.Background())
+	carrier := dialTestCarrier(t, host)
+	_ = carrier
+	clock.advance(2 * time.Second)
+
+	// Expired, but never probed: this tick must ask, not reap.
+	probeCarrierNow(t, host, "daemon-a")
+	if !host.DaemonOnline("daemon-a") {
+		t.Fatal("an expired lease was reaped before its carrier was ever probed")
+	}
+
+	// The question went unanswered across another expired tick: now the reap
+	// has its evidence.
+	probeCarrierNow(t, host, "daemon-a")
+	waitFor(t, func() bool { return !host.DaemonOnline("daemon-a") })
+}
+
 // TestDeviceTrafficDoesNotRenewTheLease pins what the lease attests: a round
 // trip. Everything the device sends proves only that its own send path works.
 // A carrier whose downstream direction is dead would otherwise stay recorded as
@@ -895,8 +929,11 @@ func TestDeviceTrafficDoesNotRenewTheLease(t *testing.T) {
 	}
 
 	// Well-formed traffic, acted on by this host, arriving after the lease
-	// would have run out. It is not evidence of a round trip.
+	// would have run out. It is not evidence of a round trip: the first probe
+	// asks, the traffic between the probes renews nothing, and the second
+	// probe reaps over the unanswered first.
 	clock.advance(2 * time.Second)
+	probeCarrierNow(t, host, "daemon-a")
 	spineBarrier(t, carrier)
 
 	probeCarrierNow(t, host, "daemon-a")

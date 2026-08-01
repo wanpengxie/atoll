@@ -51,16 +51,6 @@ func (f *storageHostForwarder) current() storageControlClient {
 	return f.client
 }
 
-func (f *storageHostForwarder) handleAlloc(request link.AllocRequest) link.AllocReply {
-	if f.host == nil {
-		return link.AllocReply{OK: false, Reason: "compute: no storage host wired"}
-	}
-	if err := f.host.Alloc(request.Coord, request.Dir); err != nil {
-		return link.AllocReply{OK: false, Reason: err.Error()}
-	}
-	return link.AllocReply{OK: true}
-}
-
 func (f *storageHostForwarder) pump(ctx context.Context) {
 	if f.host == nil {
 		return

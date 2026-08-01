@@ -681,9 +681,13 @@ func TestCompartment_RebuildsAfterCloseWhenRebound(t *testing.T) {
 			},
 		}, nil
 	})
+	// Wait for the resource set itself, not only the route: LaneAttached is
+	// the server's ledger and holds before the device has even built. An
+	// unbind landing before the first build call closes a compartment that
+	// never held resources — nothing ever enters the blocking Close.
 	waitCompute(t, func() bool {
 		host.Scan()
-		return host.LaneAttached("daemon-a", "a")
+		return host.LaneAttached("daemon-a", "a") && builds.Load() >= 1
 	})
 	bound.Store(false)
 	scanUntil(t, host, func() bool {
@@ -740,9 +744,13 @@ func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 				},
 			}, nil
 		})
+		// Wait for the resource set itself, not only the route: LaneAttached
+		// is the server's ledger and holds before the device has even built.
+		// An unbind landing before the first build call closes a compartment
+		// that never held resources — nothing ever enters the blocking Close.
 		waitCompute(t, func() bool {
 			host.Scan()
-			return host.LaneAttached("daemon-a", "a")
+			return host.LaneAttached("daemon-a", "a") && builds.Load() >= 1
 		})
 		bound.Store(false)
 		scanUntil(t, host, func() bool {

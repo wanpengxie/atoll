@@ -22,11 +22,14 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
+// laneRPCTimeout is a test seam. Production always leaves it at the protocol
+// budget.
 var laneRPCTimeout = link.LaneRPCTimeout
 
 // compartmentJoinTimeout bounds one compartment's teardown. Every step of that
 // teardown runs under it, including the ones that accept no context of their
-// own — teardown holds the coordinate out of service while it runs.
+// own — teardown holds the coordinate out of service while it runs. It is a
+// var as a test seam only; production always leaves it at the named budget.
 var compartmentJoinTimeout = 30 * time.Second
 
 // planReplyTimeout is a test seam for a peer that remains connected but never
@@ -35,7 +38,7 @@ var planReplyTimeout = compartmentPlanTimeout
 
 // storageOpenTimeout bounds opening a lane's storage sibling. A failed open
 // retires the lane, so this is a retry cadence, not a correctness bound.
-var storageOpenTimeout = 10 * time.Second
+const storageOpenTimeout = 10 * time.Second
 
 // openStorageStream is the narrow seam through which a lane opens its storage
 // sibling. Production always uses the carrier's real open; admission fixtures
@@ -736,6 +739,11 @@ func (c *compartment) buildLoop() {
 				return
 			}
 			c.declare("fault", err.Error())
+			// The declared state has no reader in production; the log is what
+			// makes a compartment that fails to build every round visible.
+			c.manager.logger.Warn("platform.compute.compartment_build_failed",
+				"channel", c.chID, "err", err,
+				"retry_in", backoff.Round(time.Second).String())
 		}
 		timer := time.NewTimer(jitterBackoff(backoff))
 		select {
@@ -984,7 +992,17 @@ func (c *compartment) laneDown(exact *clientLane) {
 		return
 	}
 	c.lane = nil
+	storage := c.storage
 	c.mu.Unlock()
+	// The forwarder must not keep pulling through the retired lane: unbinding
+	// lets the pump skip quietly until the next lane binds, instead of failing
+	// every pass through a dead reference it also keeps alive. The exact-lane
+	// guard above is what makes this safe against a replacement: a newer
+	// lane's binding never gets overwritten, because its predecessor's
+	// laneDown already returned at the guard.
+	if storage != nil {
+		storage.Rebind(nil)
+	}
 }
 
 // declare records this compartment's state locally and sends nothing. The
