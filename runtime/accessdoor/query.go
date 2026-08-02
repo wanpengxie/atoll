@@ -323,11 +323,10 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	}
 }
 
-// stat runs the read-face projection: resolve, then owner-root-or-any-grant visibility via
-// the SAME effectiveOps union set.go's decay law shares with the set arm
-// (期11 spec §2 item 2's three-loci contract — this is the second locus).
-// Zero rights masquerades as not_found (§3.6/design doc B1) — a deliberate,
-// documented choice, not a bug to "fix" back to access_denied.
+// stat runs the read-face projection: resolve, then membership visibility via
+// the SAME effectiveOps formula the invoke gate uses (one formula, all loci).
+// Zero rights (a non-member) masquerades as not_found (§3.6/design doc B1) —
+// a deliberate, documented choice, not a bug to "fix" back to access_denied.
 func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (StatResult, error) {
 	d.resourceGate.Lock()
 	defer d.resourceGate.Unlock()
@@ -338,11 +337,11 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 	if !exists {
 		return StatResult{Reject: QueryNotFound}, nil
 	}
-	eff, err := d.effectiveOps(ctx, caller, id)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return StatResult{}, err
 	}
-	ops := opSetFromEffective(eff)
+	ops := opSetFromEffective(effectiveOps(caller, facts.Active, facts.Owner, meta.CreatedBy))
 	if len(ops) == 0 {
 		return StatResult{Reject: QueryNotFound}, nil
 	}
@@ -360,11 +359,11 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 
 // list runs the read-face pagination: decode/validate the door's own
 // (prefix-fingerprinted) cursor, delegate the raw range scan to
-// Registry.List, then owner-root-or-any-grant-project each returned row using the grant
-// projection List ALREADY fetched (effectiveOpsFromGrants) — the whole point
-// of Registry.List returning full per-row grants is so a page of N
-// resources costs ONE membership check total, never N×(ActorAllows+
-// MembersAllow) round trips (期11 spec §1.9'⑤/§3.7).
+// Registry.List, then project each returned row through the SAME
+// effectiveOps formula every other locus uses — the caller's facts are
+// resolved ONCE for the whole page (membership does not change mid-scan), so
+// a page of N resources costs one facts lookup total. A non-member sees
+// zero entries (membrane-uniform: visibility is membership).
 func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (ListPage, error) {
 	d.resourceGate.Lock()
 	defer d.resourceGate.Unlock()
@@ -387,14 +386,12 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 	if err != nil {
 		return ListPage{}, err
 	}
-	isMember := facts.Active
 
 	entries := make([]ListEntry, 0, len(rows))
 	for _, row := range rows {
-		eff := effectiveOpsFromGrants(caller, row.Grants, isMember, facts.Active && facts.Owner)
-		ops := opSetFromEffective(eff)
+		ops := opSetFromEffective(effectiveOps(caller, facts.Active, facts.Owner, row.Meta.CreatedBy))
 		if len(ops) == 0 {
-			continue // non-owner any-grant projection: zero rights on this row = invisible
+			continue // non-member: zero rights on every row = invisible
 		}
 		entries = append(entries, ListEntry{ID: row.ID, Kind: row.Meta.Kind, Ops: ops})
 	}
@@ -404,38 +401,6 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		next = encodeQueryCursor(q.Prefix, nextRegistryCursor)
 	}
 	return ListPage{Entries: entries, Next: next}, nil
-}
-
-// effectiveOpsFromGrants computes the SAME union formula effectiveOps does
-// (IsOwner(caller) ∪ ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller))) directly over an
-// ALREADY-FETCHED grant projection (a ResourceRow.Grants slice), rather than
-// re-querying the registry per op per row — List's row-level shortcut. isMember
-// is resolved ONCE for the whole page (membership does not change mid-scan),
-// mirroring effectiveOps' own single-resolve discipline.
-func effectiveOpsFromGrants(caller actor.ActorID, grants []access.Grant, isMember, isOwner bool) map[access.Operation]bool {
-	eff := make(map[access.Operation]bool, len(objectOps))
-	if isOwner {
-		for _, op := range objectOps {
-			eff[op] = true
-		}
-		return eff
-	}
-	for _, g := range grants {
-		var applies bool
-		switch g.GranteeKind {
-		case access.GranteeActor:
-			applies = g.Grantee == caller
-		case access.GranteeMembers:
-			applies = isMember
-		}
-		if !applies {
-			continue
-		}
-		for _, op := range g.Ops {
-			eff[op] = true
-		}
-	}
-	return eff
 }
 
 // --- Query-layer cursor: prefix-fingerprint + opaque wrap of Registry.List's

@@ -76,7 +76,7 @@ func TestStateBackingSelectionIsTheOnlyClassificationConsumer(t *testing.T) {
 	for name, handle := range map[string]AccessHandle{
 		"entry": entryHandle, "durable": durableHandle,
 	} {
-		out, err := handle.Invoke(ctx, access.OpCreate, "k", []byte("v"), nil)
+		out, err := handle.Invoke(ctx, access.OpCreate, "k", []byte("v"))
 		if err != nil || out.RejectReason != "" {
 			t.Fatalf("%s create: out=%+v err=%v", name, out, err)
 		}
@@ -106,7 +106,7 @@ func TestLocalMintReadsClassificationOnceAndWeldsTheBacking(t *testing.T) {
 	}
 	reads := entries.calls
 	for i := 0; i < 3; i++ {
-		if _, err := handle.Invoke(ctx, access.OpRead, "k", nil, nil); err != nil {
+		if _, err := handle.Invoke(ctx, access.OpRead, "k", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,14 +132,14 @@ func TestForgetActorsReleasesTheProcessLocusOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := entryHandle.Invoke(ctx, access.OpCreate, "k", []byte("v"), nil); err != nil {
+	if _, err := entryHandle.Invoke(ctx, access.OpCreate, "k", []byte("v")); err != nil {
 		t.Fatal(err)
 	}
 	durableHandle, err := resolver.ResolveAuthority(ctx, liveAuthority{id: "agent:declared"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := durableHandle.Invoke(ctx, access.OpCreate, "k", []byte("v"), nil); err != nil {
+	if _, err := durableHandle.Invoke(ctx, access.OpCreate, "k", []byte("v")); err != nil {
 		t.Fatal(err)
 	}
 	durableWrites := len(durable.createCalls) + len(durable.writeCalls) + len(durable.deleteCalls)
@@ -156,7 +156,7 @@ func TestForgetActorsReleasesTheProcessLocusOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := fresh.Invoke(ctx, access.OpRead, "k", nil, nil)
+	out, err := fresh.Invoke(ctx, access.OpRead, "k", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,9 +36,9 @@ func TestDoorStat(t *testing.T) {
 		}
 	})
 
-	t.Run("zero rights masquerades as not_found", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: false, membersAllow: false}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
+	t.Run("a non-member's zero rights masquerade as not_found", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: false})
 		res, err := d.stat(context.Background(), "a", "r1")
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
@@ -48,15 +48,15 @@ func TestDoorStat(t *testing.T) {
 		}
 	})
 
-	t.Run("holder sees meta + effective ops, never a coord field", func(t *testing.T) {
+	t.Run("a member sees meta + effective ops, never a coord field", func(t *testing.T) {
 		meta := resourcespec.ResourceMeta{
 			Kind: resourcespec.KindFile, CreatedAt: 42,
 			PlacementKind:     resourcespec.PlacementDaemonLocal,
 			PlacementDaemonID: "", PlacementCoord: "should-never-surface",
 			CreatedBy: "creator",
 		}
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
 		res, err := d.stat(context.Background(), "a", "r1")
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
@@ -67,12 +67,24 @@ func TestDoorStat(t *testing.T) {
 		if res.Meta.CreatedAt != 42 || res.Meta.CreatedBy != "creator" || res.Meta.Kind != resourcespec.KindFile || res.Meta.PlacementKind != resourcespec.PlacementDaemonLocal {
 			t.Fatalf("meta = %+v", res.Meta)
 		}
-		if len(res.Ops) == 0 {
-			t.Fatalf("expected non-empty effective ops for an ActorAllows holder")
+		if len(res.Ops) != 2 {
+			t.Fatalf("ops = %v, want {read,write} for a non-creator member (delete is creator ∨ owner, PM-D3)", res.Ops)
 		}
 		// StatMeta structurally has no PlacementCoord field — the compiler
 		// itself enforces this (there is no res.Meta.PlacementCoord to even
 		// reference); this test documents the intent alongside the type.
+	})
+
+	t.Run("the creator's Stat echoes delete too (PM-D3)", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("a")}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
+		res, err := d.stat(context.Background(), "a", "r1")
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if len(res.Ops) != len(objectOps) {
+			t.Fatalf("ops = %v, want the full object set for the creator", res.Ops)
+		}
 	})
 
 	t.Run("resolve error is a Go error", func(t *testing.T) {
@@ -84,9 +96,9 @@ func TestDoorStat(t *testing.T) {
 		}
 	})
 
-	t.Run("effectiveOps computation error is a Go error", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllowsErr: errors.New("x")}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
+	t.Run("facts error is a Go error", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{err: errors.New("x")})
 		_, err := d.stat(context.Background(), "a", "r1")
 		if err == nil {
 			t.Fatalf("expected Go error")
@@ -96,18 +108,15 @@ func TestDoorStat(t *testing.T) {
 
 // --- List ---
 
-func rowWithActorGrant(id resource.ResourceID, kind resourcespec.ResourceKind, createdAt int64, grantee string, ops ...access.Operation) resourcespec.ResourceRow {
+func rowBy(id resource.ResourceID, kind resourcespec.ResourceKind, createdAt int64, creator string) resourcespec.ResourceRow {
 	return resourcespec.ResourceRow{
 		ID:   id,
-		Meta: resourcespec.ResourceMeta{Kind: kind, CreatedAt: createdAt},
-		Grants: []access.Grant{
-			{GranteeKind: access.GranteeActor, Grantee: actor.ActorID(grantee), Ops: ops},
-		},
+		Meta: resourcespec.ResourceMeta{Kind: kind, CreatedAt: createdAt, CreatedBy: actor.ActorID(creator)},
 	}
 }
 
 func TestDoorList(t *testing.T) {
-	t.Run("owner sees zero-grant rows with full ops", func(t *testing.T) {
+	t.Run("owner sees every row with full ops", func(t *testing.T) {
 		reg := &fakeRegistry{listRows: []resourcespec.ResourceRow{{ID: "orphan", Meta: metaKV()}}}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true, isOwner: true})
 		page, err := d.list(context.Background(), "owner", ListQuery{})
@@ -115,73 +124,48 @@ func TestDoorList(t *testing.T) {
 			t.Fatalf("owner list = (%+v,%v), want orphan with full ops", page, err)
 		}
 	})
-	t.Run("filters rows the caller has zero rights on", func(t *testing.T) {
+
+	t.Run("a member sees every row (membrane-uniform), delete echoed only on own rows", func(t *testing.T) {
 		reg := &fakeRegistry{
 			listRows: []resourcespec.ResourceRow{
-				rowWithActorGrant("r1", resourcespec.KindKV, 1, "a", access.OpRead),
-				rowWithActorGrant("r2", resourcespec.KindKV, 2, "someone-else", access.OpRead),
+				rowBy("r1", resourcespec.KindKV, 1, "a"),
+				rowBy("r2", resourcespec.KindKV, 2, "someone-else"),
 			},
 		}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
 		page, err := d.list(context.Background(), "a", ListQuery{})
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
-		if len(page.Entries) != 1 || page.Entries[0].ID != "r1" {
-			t.Fatalf("entries = %+v, want only r1", page.Entries)
+		if len(page.Entries) != 2 {
+			t.Fatalf("entries = %+v, want both rows visible to a member", page.Entries)
+		}
+		if len(page.Entries[0].Ops) != len(objectOps) {
+			t.Fatalf("own row ops = %v, want full set (creator, PM-D3)", page.Entries[0].Ops)
+		}
+		if len(page.Entries[1].Ops) != 2 {
+			t.Fatalf("foreign row ops = %v, want {read,write} only", page.Entries[1].Ops)
 		}
 	})
 
-	t.Run("empty Entries with non-empty Next when every scanned row is invisible", func(t *testing.T) {
+	t.Run("a non-member sees empty Entries with non-empty Next", func(t *testing.T) {
 		reg := &fakeRegistry{
 			listRows: []resourcespec.ResourceRow{
-				rowWithActorGrant("r1", resourcespec.KindKV, 1, "someone-else", access.OpRead),
+				rowBy("r1", resourcespec.KindKV, 1, "someone-else"),
 			},
 			listNextCursor: "raw-cursor-from-registry",
 		}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: false})
 		page, err := d.list(context.Background(), "a", ListQuery{})
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
 		if len(page.Entries) != 0 {
-			t.Fatalf("entries = %+v, want empty (all rows invisible)", page.Entries)
+			t.Fatalf("entries = %+v, want empty (non-member sees nothing)", page.Entries)
 		}
 		if page.Next == "" {
 			t.Fatalf("Next must stay non-empty — caller must keep pulling past an all-invisible page")
 		}
-	})
-
-	t.Run("members grant counts only for a current member", func(t *testing.T) {
-		row := resourcespec.ResourceRow{
-			ID:   "r1",
-			Meta: resourcespec.ResourceMeta{Kind: resourcespec.KindKV, CreatedAt: 1},
-			Grants: []access.Grant{
-				{GranteeKind: access.GranteeMembers, Ops: []access.Operation{access.OpRead}},
-			},
-		}
-		reg := &fakeRegistry{listRows: []resourcespec.ResourceRow{row}}
-
-		t.Run("member sees it", func(t *testing.T) {
-			d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
-			page, err := d.list(context.Background(), "a", ListQuery{})
-			if err != nil {
-				t.Fatalf("unexpected Go error: %v", err)
-			}
-			if len(page.Entries) != 1 {
-				t.Fatalf("entries = %+v, want r1 visible to a member", page.Entries)
-			}
-		})
-		t.Run("non-member does not", func(t *testing.T) {
-			d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: false})
-			page, err := d.list(context.Background(), "a", ListQuery{})
-			if err != nil {
-				t.Fatalf("unexpected Go error: %v", err)
-			}
-			if len(page.Entries) != 0 {
-				t.Fatalf("entries = %+v, want none for a non-member", page.Entries)
-			}
-		})
 	})
 
 	t.Run("limit normalization: non-positive defaults, over-ceiling caps", func(t *testing.T) {
@@ -300,7 +284,7 @@ func TestListFrameCapBound(t *testing.T) {
 		page.Entries[i] = ListEntry{
 			ID:   resource.ResourceID("workspace/some/reasonably/deep/path/resource-identifier-0000000000"),
 			Kind: resourcespec.KindFile,
-			Ops:  OpSet{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete},
+			Ops:  OpSet{access.OpRead, access.OpWrite, access.OpDelete},
 		}
 	}
 	raw, err := json.Marshal(page)

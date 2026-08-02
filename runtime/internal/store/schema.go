@@ -123,43 +123,33 @@ CREATE TABLE IF NOT EXISTS channel_daemon_bindings (
 -- exactly-once-external-effect use case demands it.)
 
 -- =============================================================
--- 4) resources + resource_grants  (access plane)
+-- 4) resources  (access plane)
 -- =============================================================
--- The plane-2 object-lifecycle truth: existence + inline bytes (resources) and
--- the authorization relation R (resource_grants). Same channel sqlite as the
--- message log — access is channel-scoped, so R and resource bytes
--- share the one DB as sibling tables, never a separate library.
+-- The plane-2 object-lifecycle truth: existence + inline bytes. Same channel
+-- sqlite as the message log — access is channel-scoped.
+--
+-- There is NO authorization relation table: the membrane is a uniform trust
+-- phase (PM-D1) — read/write authorization is channel membership itself
+-- (owner root ∪ active member), judged at the door from membership facts;
+-- delete additionally distinguishes the creator via created_by (PM-D3).
+-- Per-object grants structurally cannot exist.
 --
 -- No scope column on resources, ever (owner-pinned): actor-scoped objects
 -- live in a SEPARATE storage locus (the actor_state table below), so
 -- scope is expressed by the STRUCTURE an object lives in, not a column (Unix:
 -- an anonymous mapping is not a file tagged "anonymous"). This table holds only
 -- channel-scoped objects.
---
--- No CHECK on grantee_kind: it is a Go-enforced closed set (access.GranteeKind,
--- validated by the door's ValidateGrant on the write path), same discipline as
--- sender_kind / actor_kind above — a DB CHECK would weld an evolving vocabulary
--- to every existing channel file.
 CREATE TABLE IF NOT EXISTS resources (
   resource_id           TEXT PRIMARY KEY,
   kind                  TEXT NOT NULL,
   bytes                 BLOB,                     -- KindKV driver's inline bytes; NULL for kv = resolved-but-empty, ALWAYS NULL for file (its bytes live at placement_coord, never inline)
   placement_daemon_id   TEXT NOT NULL DEFAULT '', -- explicit routing column: which daemon's Streamer holds the bytes; '' for kv
   placement_coord       TEXT NOT NULL DEFAULT '', -- opaque storage handle, server-registry-generated (§1.6); '' for kv; NEVER crosses Stat/List to a caller (§3.6 red line, enforced one layer up)
-  created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; PURE AUDIT column, not the authorization predicate (authorization = channel owner root OR grants in resource_grants)
+  created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; AUTHORIZATION PREDICATE since PM-D3 (op=delete = creator ∨ channel owner root, judged at the door) and the audit record it always was; read/write never consult it (membrane-uniform, PM-D1)
   source_channel_id     TEXT,
   source_resource_id    TEXT,
   created_at            INTEGER NOT NULL,
   is_dir                INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- file BYTE-SHAPE bit (the inode's S_IFDIR analogue): 1 = directory-shaped file resource (workspace, bytes = a whole tree委托真fs, Open→os.Root lease句柄), 0 = regular blob (Open→single-file staging句柄) / kv (always 0). Structural boolean integrity, KEEPS its CHECK (same discipline as is_terminal); this is the door's Open ROUTING truth, read at resolve, never a leaf the daemon re-derives from disk
-);
-
-CREATE TABLE IF NOT EXISTS resource_grants (
-  resource_id  TEXT NOT NULL,
-  grantee_kind TEXT NOT NULL,             -- access.GranteeKind closed set
-  grantee      TEXT NOT NULL DEFAULT '',  -- actor id when kind=actor; '' when kind=members (sum form persisted in full)
-  ops          TEXT NOT NULL,             -- JSON array of access.Operation
-  PRIMARY KEY (resource_id, grantee_kind, grantee),
-  FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
 );
 
 -- =============================================================
@@ -210,8 +200,8 @@ CREATE INDEX IF NOT EXISTS ix_resource_tombstones_daemon ON resource_tombstones(
 -- everything else — access is channel-scoped — but a SEPARATE table because scope is
 -- expressed by WHICH structure an object lives in, never by a column (Unix: an
 -- anonymous mapping is not a file tagged "anonymous", it simply is not in the fs
--- namespace). The collapsed authorization (reachable set ≡ {owner}) means there
--- is no R here — no resource_grants sibling: the byte row IS the whole object.
+-- namespace). The collapsed authorization (reachable set ≡ {owner}) means the
+-- byte row IS the whole object.
 -- Keyed (owner_id, resource_id) — the door welds owner at handle mint, so owner
 -- is a coordinate, not a per-call arg. Rows of a dead owner are NOT cleared on
 -- deregister: ActorIDs are never reused and every belonging is keyed by
@@ -288,7 +278,6 @@ func ChannelLocalTables() []string {
 		"channel_genesis",
 		"channel_daemon_bindings",
 		"resources",
-		"resource_grants",
 		"resource_reservations",
 		"resource_tombstones",
 		"actor_state",

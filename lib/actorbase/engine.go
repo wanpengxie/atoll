@@ -781,35 +781,19 @@ func (r resourceAdapter) Read(id resource.ResourceID) (accessdoor.Outcome, error
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Invoke(r.ctx(), access.OpRead, id, nil, nil)
+	return r.h.Invoke(r.ctx(), access.OpRead, id, nil)
 }
 func (r resourceAdapter) Write(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Invoke(r.ctx(), access.OpWrite, id, args, nil)
+	return r.h.Invoke(r.ctx(), access.OpWrite, id, args)
 }
 func (r resourceAdapter) Delete(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Invoke(r.ctx(), access.OpDelete, id, nil, nil)
-}
-
-// ShareActor/ShareMembers are OpSet sugar (期11 spec §3.9': "各拼 Grant 塞
-// Invocation{Op:OpSet} 调 Invoke — 与 Open/Write→Invoke 同构") — a Proc body
-// never hand-assembles an access.Grant.
-func (r resourceAdapter) ShareActor(id resource.ResourceID, actorID actor.ActorID, ops []access.Operation) (accessdoor.Outcome, error) {
-	if r.h == nil {
-		return accessdoor.Outcome{}, ErrUnsupported
-	}
-	return r.h.Invoke(r.ctx(), access.OpSet, id, nil, &access.Grant{GranteeKind: access.GranteeActor, Grantee: actorID, Ops: ops})
-}
-func (r resourceAdapter) ShareMembers(id resource.ResourceID, ops []access.Operation) (accessdoor.Outcome, error) {
-	if r.h == nil {
-		return accessdoor.Outcome{}, ErrUnsupported
-	}
-	return r.h.Invoke(r.ctx(), access.OpSet, id, nil, &access.Grant{GranteeKind: access.GranteeMembers, Ops: ops})
+	return r.h.Invoke(r.ctx(), access.OpDelete, id, nil)
 }
 
 // Stat/List are the read face's zero-reinterpretation pass-through.
@@ -857,7 +841,7 @@ func (s stateAdapter) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if s.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return s.h.Invoke(s.ctx(), access.OpRead, id, nil, nil)
+	return s.h.Invoke(s.ctx(), access.OpRead, id, nil)
 }
 
 // Put upserts key — the absorbed StateKV.Put semantics the verb table
@@ -870,12 +854,12 @@ func (s stateAdapter) Put(id resource.ResourceID, args []byte) (accessdoor.Outco
 	if s.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	out, err := s.h.Invoke(s.ctx(), access.OpWrite, id, args, nil)
+	out, err := s.h.Invoke(s.ctx(), access.OpWrite, id, args)
 	if err != nil {
 		return out, err
 	}
 	if out.RejectReason == access.ResourceNotFound {
-		return s.h.Invoke(s.ctx(), access.OpCreate, id, args, nil)
+		return s.h.Invoke(s.ctx(), access.OpCreate, id, args)
 	}
 	return out, nil
 }
@@ -883,7 +867,7 @@ func (s stateAdapter) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if s.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return s.h.Invoke(s.ctx(), access.OpDelete, id, nil, nil)
+	return s.h.Invoke(s.ctx(), access.OpDelete, id, nil)
 }
 
 func (e *engine) State() StateHandle       { return stateAdapter{h: e.state, ctx: e.life} }

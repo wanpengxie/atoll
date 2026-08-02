@@ -254,14 +254,12 @@ type CancelTimerPayload struct {
 type ResourceOp string
 
 const (
-	ResCreate       ResourceOp = "create"
-	ResRead         ResourceOp = "read"
-	ResWrite        ResourceOp = "write"
-	ResDelete       ResourceOp = "delete"
-	ResStat         ResourceOp = "stat"
-	ResList         ResourceOp = "list"
-	ResShareActor   ResourceOp = "share_actor"
-	ResShareMembers ResourceOp = "share_members"
+	ResCreate ResourceOp = "create"
+	ResRead   ResourceOp = "read"
+	ResWrite  ResourceOp = "write"
+	ResDelete ResourceOp = "delete"
+	ResStat   ResourceOp = "stat"
+	ResList   ResourceOp = "list"
 )
 
 type ResourceQuery struct {

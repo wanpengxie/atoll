@@ -34,22 +34,11 @@ type fakeRegistry struct {
 	clearTombstoneFound     bool
 	clearTombstoneErr       error
 
-	actorAllows    bool
-	actorAllowsErr error
-
-	membersAllow    bool
-	membersAllowErr error
-
-	setGrantErr error
-	setGrants   []access.Grant
-
 	deleteErr   error
 	deleteCalls []resource.ResourceID
 
 	// listRows/listNextCursor/listErr back List — canned per §3.7's door
-	// tests (Stat/List projection), which need MULTIPLE rows with distinct
-	// grant shapes at once (a single-bool fake cannot express that, same
-	// reasoning decay_test.go's real-store rig documents for the set arm).
+	// tests (Stat/List projection).
 	listRows       []resourcespec.ResourceRow
 	listNextCursor string
 	listErr        error
@@ -162,29 +151,12 @@ func (r *fakeRegistry) TouchReservationsByCoords(ctx context.Context, daemonID s
 }
 
 // List is §3.7's door-level consumer (door.list, query.go): canned rows +
-// nextCursor let a test drive the any-grant projection over MULTIPLE rows
-// with distinct grant shapes in one call — a single-bool fake cannot express
-// that.
+// nextCursor let a test drive the membership projection over MULTIPLE rows
+// in one call.
 func (r *fakeRegistry) List(ctx context.Context, prefix string, limit int, cursor string) ([]resourcespec.ResourceRow, string, error) {
 	r.calls++
 	r.listCalls = append(r.listCalls, listCall{prefix: prefix, limit: limit, cursor: cursor})
 	return r.listRows, r.listNextCursor, r.listErr
-}
-
-func (r *fakeRegistry) ActorAllows(ctx context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error) {
-	r.calls++
-	return r.actorAllows, r.actorAllowsErr
-}
-
-func (r *fakeRegistry) MembersAllow(ctx context.Context, id resource.ResourceID, op access.Operation) (bool, error) {
-	r.calls++
-	return r.membersAllow, r.membersAllowErr
-}
-
-func (r *fakeRegistry) SetGrant(ctx context.Context, id resource.ResourceID, g access.Grant) error {
-	r.calls++
-	r.setGrants = append(r.setGrants, g)
-	return r.setGrantErr
 }
 
 func (r *fakeRegistry) Delete(ctx context.Context, id resource.ResourceID) error {
@@ -396,6 +368,14 @@ func (s *fakeStateStore) Delete(ctx context.Context, owner actor.ActorID, id res
 // metaKV is the ResourceMeta Resolve returns for the day-1 kind.
 func metaKV() resourcespec.ResourceMeta {
 	return resourcespec.ResourceMeta{Kind: resourcespec.KindKV, CreatedAt: 1}
+}
+
+// metaKVBy is metaKV with an explicit creator — the PM-D3 delete predicate
+// (CreatedBy) a delete-path test pins.
+func metaKVBy(creator actor.ActorID) resourcespec.ResourceMeta {
+	m := metaKV()
+	m.CreatedBy = creator
+	return m
 }
 
 // newDoor builds a bare door directly (the package's own test may reach past the

@@ -162,7 +162,6 @@ func (h resourceShell) Invoke(
 	access.Operation,
 	resource.ResourceID,
 	[]byte,
-	*access.Grant,
 ) (accessdoor.Outcome, error) {
 	if err := h.log.record("access", h.authority); err != nil {
 		return accessdoor.Outcome{}, err

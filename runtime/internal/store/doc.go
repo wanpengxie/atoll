@@ -19,7 +19,7 @@
 //   - sqlite.go            — sql.DB factory (channel-local; per-connection
 //     pragmas ride the DSN, pool pinned to 1).
 //   - schema.go            — DDL constants (messages / actor_registry /
-//     resources / resource_grants / actor_state / timers). v2: no
+//     resources / actor_state / timers). v2: no
 //     worker_locks (the channel has a single write path by construction — a
 //     structural invariant, not a per-row lease), no
 //     action_ledger (turn-replay idempotency is an application concern, not

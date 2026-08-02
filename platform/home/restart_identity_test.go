@@ -243,7 +243,7 @@ func TestBootRestoresEveryDurableIdentityKindWholeAndImmediatelyGated(t *testing
 		if err != nil {
 			t.Fatalf("restored %s could not resolve a state handle at boot: %v", id, err)
 		}
-		out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil, nil)
+		out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil)
 		if err != nil || out.RejectReason == access.OwnerInactive {
 			t.Fatalf("restored %s was refused by the state door at boot: %+v err=%v", id, out, err)
 		}
@@ -433,11 +433,11 @@ func TestForkedEntryIdentityDoesNotSurviveAHomeRestart(t *testing.T) {
 		t.Fatalf("entry child state handle in its own session: %v", err)
 	}
 	if out, err := handle.Invoke(
-		ctx, access.OpCreate, restartGateProbeKey, []byte(`"alive"`), nil,
+		ctx, access.OpCreate, restartGateProbeKey, []byte(`"alive"`),
 	); err != nil || !out.Accepted() {
 		t.Fatalf("entry child state create: %+v err=%v", out, err)
 	}
-	if out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil, nil); err != nil ||
+	if out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil); err != nil ||
 		!out.Accepted() || string(out.Value) != `"alive"` {
 		t.Fatalf("entry child state read: %+v err=%v", out, err)
 	}
@@ -529,7 +529,7 @@ func TestEndedIdentityLosesItsStateHandleTheMomentEndCommits(t *testing.T) {
 			t.Fatalf("%s identity %s: %v", name, id, err)
 		}
 		if out, err := handle.Invoke(
-			ctx, access.OpCreate, restartGateProbeKey, []byte(`"alive"`), nil,
+			ctx, access.OpCreate, restartGateProbeKey, []byte(`"alive"`),
 		); err != nil || !out.Accepted() {
 			t.Fatalf("%s identity %s state create: %+v err=%v", name, id, out, err)
 		}
@@ -538,12 +538,12 @@ func TestEndedIdentityLosesItsStateHandleTheMomentEndCommits(t *testing.T) {
 
 		// The handle already in hand carries the authority, never a snapshot:
 		// the door re-runs the verdict on every call, so it is refused now.
-		out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil, nil)
+		out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil)
 		if err != nil || out.RejectReason != access.OwnerInactive {
 			t.Fatalf("%s identity %s still served after End: %+v err=%v", name, id, out, err)
 		}
 		if out, err := handle.Invoke(
-			ctx, access.OpWrite, restartGateProbeKey, []byte(`"zombie"`), nil,
+			ctx, access.OpWrite, restartGateProbeKey, []byte(`"zombie"`),
 		); err != nil || out.RejectReason != access.OwnerInactive {
 			t.Fatalf("%s identity %s still writable after End: %+v err=%v", name, id, out, err)
 		}

@@ -68,20 +68,20 @@ func TestNewFailFast(t *testing.T) {
 }
 
 func TestAccessRejectsInvalidAdmission(t *testing.T) {
-	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
 	authority := &fakeMembership{isMember: true}
 	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: authority, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := m.MintAuthority(nil).Invoke(context.Background(), access.OpRead, "r", nil, nil)
+	out, err := m.MintAuthority(nil).Invoke(context.Background(), access.OpRead, "r", nil)
 	if !errors.Is(err, ErrAuthorInactive) {
 		t.Fatalf("inactive author outcome=(%+v,%v)", out, err)
 	}
 }
 
 // TestMintedHandleRunsFullPath: a handle from the sealed Minter runs ingress +
-// overreach + tree, and welds its caller into the create/authorization checks.
+// tree, and welds its caller into the create/authorization checks.
 func TestMintedHandleRunsFullPath(t *testing.T) {
 	reg := &fakeRegistry{}
 	drv := &fakeDriver{}
@@ -92,9 +92,9 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	}
 	h := m.MintAuthority(accessAuthority("a"))
 
-	// malformed (set without grant) → Go error, tree never reached.
-	if _, err := h.Invoke(t.Context(), access.OpSet, "r1", nil, nil); err == nil {
-		t.Fatalf("expected ErrMalformed for set with nil grant")
+	// malformed (out-of-set op) → Go error, tree never reached.
+	if _, err := h.Invoke(t.Context(), access.Operation("bogus"), "r1", nil); err == nil {
+		t.Fatalf("expected ErrMalformed for an out-of-set op")
 	}
 	if len(reg.createCalls) != 0 {
 		t.Fatalf("no store call should occur on a malformed request")
@@ -103,7 +103,7 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	// a bare op=create through Invoke is rejected outright (期11 §3.1 "create
 	// 单入口") — the resource face has exactly one create locus, the Create
 	// method below.
-	if _, err := h.Invoke(t.Context(), access.OpCreate, "r1", []byte("v"), nil); !errors.Is(err, ErrCreateViaInvoke) {
+	if _, err := h.Invoke(t.Context(), access.OpCreate, "r1", []byte("v")); !errors.Is(err, ErrCreateViaInvoke) {
 		t.Fatalf("expected ErrCreateViaInvoke for a bare op=create through Invoke, got %v", err)
 	}
 	if len(reg.createCalls) != 0 {

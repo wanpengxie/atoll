@@ -472,12 +472,6 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 	case subjectgate.ResDelete:
 		out, err := rh.Delete(rid)
 		return resourceOutcomeFrameFor(f, out, err)
-	case subjectgate.ResShareActor:
-		out, err := rh.ShareActor(rid, actor.ActorID(p.Target), operationsOf(p.Ops))
-		return resourceOutcomeFrameFor(f, out, err)
-	case subjectgate.ResShareMembers:
-		out, err := rh.ShareMembers(rid, operationsOf(p.Ops))
-		return resourceOutcomeFrameFor(f, out, err)
 	// --- pure-read ops ---
 	case subjectgate.ResRead:
 		out, err := rh.Read(rid)

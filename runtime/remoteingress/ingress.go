@@ -116,7 +116,6 @@ type AccessRequest struct {
 	Operation access.Operation
 	Resource  resource.ResourceID
 	Args      []byte
-	Grant     *access.Grant
 
 	Spec    accessdoor.CreateSpec
 	Initial []byte
@@ -224,7 +223,7 @@ func (i *ingress) Access(
 			i.authorities.IdentityAuthorityFor(id),
 			accessdoor.StateOp{
 				Operation: request.Operation, Resource: request.Resource,
-				Args: request.Args, Grant: request.Grant,
+				Args: request.Args,
 			},
 		)
 		return AccessResponse{Outcome: outcome}, err
@@ -237,7 +236,7 @@ func (i *ingress) Access(
 			return AccessResponse{}, ErrInvalidRequest
 		}
 		outcome, err := handle.Invoke(
-			ctx, request.Operation, request.Resource, request.Args, request.Grant,
+			ctx, request.Operation, request.Resource, request.Args,
 		)
 		return AccessResponse{Outcome: outcome}, err
 	case AccessCreate:

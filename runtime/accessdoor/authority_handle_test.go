@@ -88,7 +88,6 @@ func TestAuthorityAccessAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 		Registry: &fakeRegistry{
 			resolveExists: true,
 			resolveMeta:   metaKV(),
-			actorAllows:   true,
 		},
 		Drivers:   DriverTable{resourcespec.KindKV: driver},
 		Authority: backing,
@@ -107,7 +106,7 @@ func TestAuthorityAccessAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 	}, 1)
 	go func() {
 		out, err := handle.Invoke(
-			context.Background(), access.OpRead, "resource:authority", nil, nil,
+			context.Background(), access.OpRead, "resource:authority", nil,
 		)
 		done <- struct {
 			out Outcome
@@ -125,7 +124,7 @@ func TestAuthorityAccessAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 		t.Fatalf("authority calls=%d, want one", got)
 	}
 	out, err := handle.Invoke(
-		t.Context(), access.OpRead, "resource:authority", nil, nil,
+		t.Context(), access.OpRead, "resource:authority", nil,
 	)
 	if err != nil || out.RejectReason != access.OwnerInactive {
 		t.Fatalf("next stale Invoke=(%+v,%v)", out, err)
@@ -168,7 +167,7 @@ func TestAuthorityStateAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 	}, 1)
 	go func() {
 		out, err := handle.Invoke(
-			context.Background(), access.OpRead, "state:authority", nil, nil,
+			context.Background(), access.OpRead, "state:authority", nil,
 		)
 		done <- struct {
 			out Outcome
@@ -185,7 +184,7 @@ func TestAuthorityStateAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 	if got := authority.calls.Load(); got != 1 {
 		t.Fatalf("authority calls=%d, want one", got)
 	}
-	out, err := handle.Invoke(t.Context(), access.OpRead, "state:authority", nil, nil)
+	out, err := handle.Invoke(t.Context(), access.OpRead, "state:authority", nil)
 	if err != nil || out.RejectReason != access.OwnerInactive {
 		t.Fatalf("next inactive State.Invoke=(%+v,%v)", out, err)
 	}

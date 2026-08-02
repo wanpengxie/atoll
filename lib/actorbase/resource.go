@@ -2,7 +2,6 @@ package actorbase
 
 import (
 	"github.com/wanpengxie/atoll/protocol/access"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -11,10 +10,12 @@ import (
 // ResourceHandle is sys.Resource()'s thin wrap over the access plane's
 // RESOURCE face (accessdoor.ResourceAccessHandle) — the verb table's "Access
 // 臂" row. It is a zero-second-semantics narrowing, not a reinterpretation:
-// AccessHandle.Invoke takes one op out of the closed set plus an optional
-// Grant operand; Read/Write/Delete split that single method into their
-// non-grant verbs so a Proc body never hand-assembles an access.Operation it
-// has no legitimate use for.
+// AccessHandle.Invoke takes one op out of the closed set;
+// Read/Write/Delete split that single method into named verbs
+// so a Proc body never hand-assembles an access.Operation it
+// has no legitimate use for. There are NO share verbs: authorization is
+// membrane-uniform (PM-D1) — membership itself is the read/write right, so
+// there is nothing to share.
 //
 // Create (期11 spec §3.1's "create 单入口") now goes through the door's OWN
 // dedicated Create method under the hood — this interface keeps its
@@ -23,9 +24,7 @@ import (
 // built this period (S4/S5 land the daemon-side machinery Create's file
 // branch needs first).
 //
-// ShareActor/ShareMembers/Stat/List are 期11 §3's "词表糖名" additions — the
-// Share verbs are OpSet sugar (a Proc body never hand-assembles an
-// access.Grant), Stat/List are the read face landing here with zero
+// Stat/List are the read face landing here with zero
 // reinterpretation (same accessdoor.StatResult/ListPage/ListQuery shapes,
 // just reachable without an accessdoor import in domain code).
 type ResourceHandle interface {
@@ -38,23 +37,14 @@ type ResourceHandle interface {
 	// Write mutates an EXISTING resource's bytes (access.OpWrite); a
 	// not-yet-created id is resource_not_found, not a silent create.
 	Write(id resource.ResourceID, args []byte) (accessdoor.Outcome, error)
-	// Delete is the resource's explicit, non-lossy death (access.OpDelete).
+	// Delete is the resource's explicit, non-lossy death (access.OpDelete) —
+	// authorized for the creator or the channel owner (PM-D3).
 	Delete(id resource.ResourceID) (accessdoor.Outcome, error)
 
-	// ShareActor grants ops on id to a single actor identity (chmod-style
-	// SET; an empty ops revokes) — the sugar over Invoke(OpSet) with an
-	// actor-kind Grant, so a Proc body never hand-assembles one. Day-1
-	// narrowed to ops⊆{read,write} by the door's existing overreach check
-	// (unchanged, enforced beneath this sugar).
-	ShareActor(id resource.ResourceID, actorID actor.ActorID, ops []access.Operation) (accessdoor.Outcome, error)
-	// ShareMembers is ShareActor's members-grantee twin — grants ops to the
-	// container channel's current membership (late-bound at check time).
-	ShareMembers(id resource.ResourceID, ops []access.Operation) (accessdoor.Outcome, error)
-
-	// Stat projects id's owner-root-or-any-grant-visible metadata + caller's effective ops.
+	// Stat projects id's member-visible metadata + caller's effective ops.
 	Stat(id resource.ResourceID) (accessdoor.StatResult, error)
-	// List enumerates channel-scoped resources this caller can see (owner root
-	// or any-grant projection), paginated.
+	// List enumerates channel-scoped resources this caller can see
+	// (membrane-uniform: any active member), paginated.
 	List(q accessdoor.ListQuery) (accessdoor.ListPage, error)
 
 	// Open is file kind's own byte-access verb (期11 spec §3.9': "file 读/写

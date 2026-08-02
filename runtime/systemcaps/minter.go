@@ -31,7 +31,7 @@ type unsupportedState struct{}
 var ErrStateUnsupported = errors.New("systemcaps: the kernel has no state backing")
 
 func (unsupportedState) Invoke(
-	context.Context, access.Operation, resource.ResourceID, []byte, *access.Grant,
+	context.Context, access.Operation, resource.ResourceID, []byte,
 ) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{}, ErrStateUnsupported
 }

@@ -164,7 +164,7 @@ func (r accessRequest) decode() (remoteingress.AccessRequest, error) {
 		return remoteingress.AccessRequest{
 			Kind: remoteingress.AccessInvoke, Scope: scope,
 			Operation: r.Inv.Operation, Resource: r.Inv.Resource,
-			Args: r.Inv.Args, Grant: r.Inv.Grant,
+			Args: r.Inv.Args,
 		}, nil
 	case accessKindCreate:
 		if r.Create == nil {
@@ -378,8 +378,8 @@ type remoteAccessHandle struct {
 // (unconfirmed in-flight) yields the outcome_unknown VERDICT — the one reason
 // only the wire path can produce (an in-proc invoke is synchronous and never
 // does). A definite host error (malformed / not-live) is returned as-is.
-func (h *remoteAccessHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
-	return invokeRoundTrip(ctx, h.relay, h.scope, op, id, args, grant)
+func (h *remoteAccessHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	return invokeRoundTrip(ctx, h.relay, h.scope, op, id, args)
 }
 
 // invokeRoundTrip is the Invocation arm's round-trip, shared by BOTH the
@@ -387,11 +387,11 @@ func (h *remoteAccessHandle) Invoke(ctx context.Context, op access.Operation, id
 // wire proxies — they carry byte-for-byte the same Invoke contract, so the
 // wire encoding must not drift between the two even though the two Go types
 // stay separate (§3.2's "膜层与 wire 层各拆两型").
-func invokeRoundTrip(ctx context.Context, relay *relayClient, scope accessScope, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
+func invokeRoundTrip(ctx context.Context, relay *relayClient, scope accessScope, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	payload, err := json.Marshal(accessRequest{
 		Kind:  accessKindInvocation,
 		Scope: scope,
-		Inv:   &access.Invocation{Resource: id, Operation: op, Args: args, Grant: grant},
+		Inv:   &access.Invocation{Resource: id, Operation: op, Args: args},
 	})
 	if err != nil {
 		return accessdoor.Outcome{}, err
@@ -430,8 +430,8 @@ type remoteResourceHandle struct {
 
 // Invoke satisfies accessdoor.AccessHandle (embedded in ResourceAccessHandle)
 // over the wire — always channel-scoped.
-func (h *remoteResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
-	return invokeRoundTrip(ctx, h.relay, accessScopeChannel, op, id, args, grant)
+func (h *remoteResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	return invokeRoundTrip(ctx, h.relay, accessScopeChannel, op, id, args)
 }
 
 // Create satisfies accessdoor.ResourceAccessHandle's create-arm over the
@@ -577,7 +577,7 @@ func (h *remoteScheduleHandle) Ack(ctx context.Context, id schedule.TimerID) err
 // OpRead/OpWrite(file) via Invoke, then redeems the accepted outcome's
 // Route into a live FileAccess in one call.
 func (h *remoteResourceHandle) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
-	out, err := h.Invoke(ctx, mode, id, nil, nil)
+	out, err := h.Invoke(ctx, mode, id, nil)
 	if err != nil {
 		return accessdoor.FileAccess{}, accessdoor.Outcome{}, err
 	}

@@ -21,8 +21,8 @@ import (
 var kvSpec = resourcespec.CreateSpec{Kind: resourcespec.KindKV}
 
 // TestAccessDoorVerticalSlice drives the whole plane-2 door assembled by
-// OpenChannel over a real sqlite file — every branch (two loci, the
-// grantee-kind union, day-1 Ops narrowing, non-lossy delete, fresh re-birth,
+// OpenChannel over a real sqlite file — every branch (membrane-uniform
+// read/write, PM-D3 creator-delete, non-lossy delete, fresh re-birth,
 // and dynamic membership) against the actual resourceRegistry + kvDriver +
 // membership adapter, not fakes. It is the integration counterpart to
 // accessdoor's in-package unit tests: those exercise the tree with injected
@@ -67,89 +67,53 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectReason(t, "A re-create same id", out, err, access.AlreadyExists)
 
-	// ---- Step 2: object op via R (creator has full rights; B has none) ----
-	out, err = hA.Invoke(ctx, access.OpWrite, rid, v2, nil)
+	// ---- Step 2: membrane-uniform read/write (PM-D1) — membership IS the
+	// right; no grant ceremony exists anywhere in this slice ----
+	out, err = hA.Invoke(ctx, access.OpWrite, rid, v2)
 	expectAccepted(t, "A write", out, err)
 
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "B read (no grant)", out, err, access.AccessDenied)
-
-	// ---- Step 3: actor grant {read} to B ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B, access.OpRead))
-	expectAccepted(t, "A set(actor:B,{read})", out, err)
-
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectAccepted(t, "B read (granted)", out, err)
+	out, err = hB.Invoke(ctx, access.OpRead, rid, nil)
+	expectAccepted(t, "B read (membership is the right)", out, err)
 	expectBytes(t, "B read value", out, v2)
 
-	out, err = hB.Invoke(ctx, access.OpWrite, rid, v1, nil)
-	expectReason(t, "B write (read-only grant)", out, err, access.AccessDenied)
+	out, err = hC.Invoke(ctx, access.OpRead, rid, nil)
+	expectAccepted(t, "C read (uniform)", out, err)
 
-	// ---- Step 4: members grant + union visibility + revoke ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, membersGrant(access.OpRead))
-	expectAccepted(t, "A set(members,{read})", out, err)
+	out, err = hB.Invoke(ctx, access.OpWrite, rid, v1)
+	expectAccepted(t, "B write (uniform)", out, err)
 
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectAccepted(t, "C read (members late-binding)", out, err)
-	expectBytes(t, "C read value", out, v2)
+	// ---- Step 3: delete is the one creator-distinguished op (PM-D3) ----
+	out, err = hB.Invoke(ctx, access.OpDelete, rid, nil)
+	expectReason(t, "B delete (not creator, not owner)", out, err, access.AccessDenied)
 
-	// Revoke B's DIRECT entry — B stays readable via the members entry (union).
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B))
-	expectAccepted(t, "A set(actor:B,∅) revoke", out, err)
+	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil)
+	expectAccepted(t, "A delete (creator)", out, err)
 
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectAccepted(t, "B read (still visible via members union)", out, err)
-	expectBytes(t, "B read value via members", out, v2)
-
-	// Revoke the members entry — now neither B nor C can read.
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, membersGrant())
-	expectAccepted(t, "A set(members,∅) revoke", out, err)
-
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "B read (all grants revoked)", out, err, access.AccessDenied)
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "C read (all grants revoked)", out, err, access.AccessDenied)
-
-	// ---- Step 5: day-1 Ops narrowing + ingress malformed ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B, access.OpRead, access.OpDelete))
-	expectReason(t, "A set(actor:B,{read,delete}) day-1 narrowing", out, err, access.AccessDenied)
-
-	_, err = hA.Invoke(ctx, access.OpSet, rid, nil, nil)
-	expectMalformed(t, "A set with nil grant", err)
-
-	// ---- Step 6: non-lossy delete + idempotency + fresh re-birth ----
-	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil, nil)
-	expectAccepted(t, "A delete", out, err)
-
-	out, err = hA.Invoke(ctx, access.OpRead, rid, nil, nil)
+	// ---- Step 4: non-lossy delete + idempotency + fresh re-birth ----
+	out, err = hA.Invoke(ctx, access.OpRead, rid, nil)
 	expectReason(t, "read after delete", out, err, access.ResourceNotFound)
-	out, err = hA.Invoke(ctx, access.OpWrite, rid, v1, nil)
+	out, err = hA.Invoke(ctx, access.OpWrite, rid, v1)
 	expectReason(t, "write after delete", out, err, access.ResourceNotFound)
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B, access.OpRead))
-	expectReason(t, "set after delete", out, err, access.ResourceNotFound)
-	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil, nil)
+	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil)
 	expectReason(t, "repeat delete (idempotent)", out, err, access.ResourceNotFound)
 
 	// Fresh birth: create has no memory of the deleted id.
 	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectAccepted(t, "A re-create after delete (fresh birth)", out, err)
 
-	// ---- Step 7: dynamic membership (exit loses, join gains) ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, membersGrant(access.OpRead))
-	expectAccepted(t, "A set(members,{read}) on fresh resource", out, err)
-
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
+	// ---- Step 5: dynamic membership (exit loses everything, join gains) ----
+	out, err = hC.Invoke(ctx, access.OpRead, rid, nil)
 	expectAccepted(t, "C read before deregister", out, err)
 
 	if err := endDeclaredTest(ctx, cs.ChannelStores, C, 100); err != nil {
 		t.Fatalf("deregister C: %v", err)
 	}
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "C read after deregister (exit loses grant)", out, err, access.AccessDenied)
+	out, err = hC.Invoke(ctx, access.OpRead, rid, nil)
+	expectReason(t, "C read after deregister (exit loses membership rights)", out, err, access.AccessDenied)
 
 	E = seedMember(t, cs, E)
 	hE := cs.Access.MintAuthority(identityAuthority{id: E})
-	out, err = hE.Invoke(ctx, access.OpRead, rid, nil, nil)
+	out, err = hE.Invoke(ctx, access.OpRead, rid, nil)
 	expectAccepted(t, "E read after joining (late join gains access)", out, err)
 	expectBytes(t, "E read value", out, v1)
 }
@@ -173,27 +137,14 @@ func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
 	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "orphan-coord"); err != nil {
 		t.Fatal(err)
 	}
-	// Model a stranded row: the daemon has retired and its ordinary members
-	// grant has been revoked, leaving no grant entry that can recover it.
-	registry := rawResourceRegistryForTest(cs)
-	if err := registry.SetGrant(ctx, rid, access.Grant{GranteeKind: access.GranteeMembers}); err != nil {
-		t.Fatal(err)
-	}
+	// The stranded row was created by the system actor — the owner is NOT its
+	// creator, so this delete goes through PM-D3's owner-root 兜底 half, the
+	// exact authority that makes a stranded row a removable end state.
 	page, err := owner.List(ctx, accessdoor.ListQuery{})
 	if err != nil || len(page.Entries) != 1 || page.Entries[0].ID != rid {
 		t.Fatalf("owner List stranded = (%+v,%v)", page, err)
 	}
-	grant := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "peer", Ops: []access.Operation{access.OpRead, access.OpWrite}}
-	out, err := owner.Invoke(ctx, access.OpSet, rid, nil, grant)
-	expectAccepted(t, "owner grants read/write", out, err)
-	grant.Ops = []access.Operation{access.OpRead, access.OpDelete}
-	out, err = owner.Invoke(ctx, access.OpSet, rid, nil, grant)
-	expectReason(t, "owner remains under day-1 grant ceiling", out, err, access.AccessDenied)
-	// Restore the zero-grant stranded shape before manual recovery.
-	if err := registry.SetGrant(ctx, rid, access.Grant{GranteeKind: access.GranteeActor, Grantee: "peer"}); err != nil {
-		t.Fatal(err)
-	}
-	out, err = owner.Invoke(ctx, access.OpDelete, rid, nil, nil)
+	out, err := owner.Invoke(ctx, access.OpDelete, rid, nil)
 	expectAccepted(t, "owner deletes stranded resource", out, err)
 	page, err = owner.List(ctx, accessdoor.ListQuery{})
 	if err != nil || len(page.Entries) != 0 {
@@ -326,14 +277,6 @@ func seedMember(t *testing.T, cs *testAccessChannel, id actor.ActorID) actor.Act
 		t.Fatalf("seed member %s: %v", id, err)
 	}
 	return minted
-}
-
-func actorGrant(id actor.ActorID, ops ...access.Operation) *access.Grant {
-	return &access.Grant{GranteeKind: access.GranteeActor, Grantee: id, Ops: ops}
-}
-
-func membersGrant(ops ...access.Operation) *access.Grant {
-	return &access.Grant{GranteeKind: access.GranteeMembers, Ops: ops}
 }
 
 func expectAccepted(t *testing.T, label string, out accessdoor.Outcome, err error) {

@@ -25,7 +25,6 @@ type StateOp struct {
 	Operation access.Operation
 	Resource  resource.ResourceID
 	Args      []byte
-	Grant     *access.Grant
 }
 
 // StateHandleResolver is the state organ's own face. Backing selection lives
@@ -147,7 +146,7 @@ func (h *actorStateHandles) StateIngress(
 	if err != nil {
 		return Outcome{}, err
 	}
-	return handle.Invoke(ctx, op.Operation, op.Resource, op.Args, op.Grant)
+	return handle.Invoke(ctx, op.Operation, op.Resource, op.Args)
 }
 
 // ForgetActors releases the in-memory state rows of dead ids. It is plain

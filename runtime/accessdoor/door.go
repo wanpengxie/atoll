@@ -78,7 +78,7 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 }
 
 // invoke runs the decision tree for one welded caller. ingress has already run
-// (boundHandle.Invoke → ingress → day1OpsOverreach → invoke), so op/args/grant
+// (boundHandle.Invoke → ingress → invoke), so op/args
 // are structurally valid here.
 //
 // Two error channels, deliberately distinct:
@@ -90,7 +90,7 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 //     verdict (Outcome.RejectReason, nil error), including an executor failure
 //     (driver_error). Folding EXECUTE failures into Go errors would leave
 //     driver_error unproducible — the bug v1 shipped.
-func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
+func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
 	d.resourceGate.Lock()
 	defer d.resourceGate.Unlock()
 	meta, exists, err := d.deps.Registry.Resolve(ctx, id)
@@ -113,19 +113,14 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 	if err != nil {
 		return Outcome{}, err
 	}
-	// ---- owner root ∪ A8: actor entry ∪ (members entry ∧ current member) ----
-	// The owner root short-circuits before any registry round trip. The rest is
-	// opAllowed — the SAME predicate effectiveOps ranges over, asked here for
-	// exactly the one op this call carries (never all four: invoke is the hot
-	// path, and the other three ops are not being judged).
-	allowed := facts.Active && facts.Owner
-	if !allowed {
-		allowed, err = d.opAllowed(ctx, caller, id, op, facts.Active)
-		if err != nil {
-			return Outcome{}, err
-		}
-	}
-	if !allowed {
+	// ---- membrane-uniform authorization (PM-D1/PM-D3) ----
+	// The membrane is one trust phase: read/write on any channel-scoped
+	// resource is membership itself — active member ⇒ allowed, no per-object
+	// relation is consulted (none exists). delete alone distinguishes the
+	// creation fact: creator ∨ channel owner root (PM-D3, meta.CreatedBy is
+	// the authorization predicate). effectiveOps (query.go) is the SAME
+	// formula ranged over the op set — one formula, two loci.
+	if !effectiveOps(caller, facts.Active, facts.Owner, meta.CreatedBy)[op] {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
 
@@ -175,51 +170,13 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		}
 		return Outcome{}, nil
 
-	case access.OpSet:
-		// set's executor is the substrate authz manager (Registry), not a driver.
-		// grant is non-nil and structurally valid (ingress), so the deref is safe.
-		//
-		// Authorization DECAY LAW (期11 spec §2 item 1): set(X, ops) additionally
-		// requires ops ⊆ effectiveOps(caller) — the ESCALATION check, distinct
-		// from the union-authorize step above (which only confirmed caller holds
-		// SET-right on id at all, not that the payload ops stay within caller's
-		// own reach). Without this, a set-right holder could grant a subject
-		// (themselves or a colluding third party) MORE than they themselves
-		// hold — self-escalation / collusion. Revoke (grant.Ops == ∅) is
-		// trivially legal for ANY caller (∅ ⊆ any set) and is short-circuited
-		// here rather than routed through effectiveOps: the empty loop below
-		// already accepts it, but skipping the (up to 4×ActorAllows +
-		// 4×MembersAllow + IsMember) computation entirely keeps revoke cheap
-		// and — more importantly — keeps revoke from depending on that
-		// computation SUCCEEDING (a Registry hiccup must never block a revoke
-		// that is unconditionally legal on its face).
-		if len(grant.Ops) > 0 {
-			eff, everr := d.effectiveOps(ctx, caller, id)
-			if everr != nil {
-				return Outcome{}, everr
-			}
-			for _, op := range grant.Ops {
-				if !eff[op] {
-					return Outcome{RejectReason: access.AccessDenied}, nil
-				}
-			}
-		}
-		serr := d.deps.Registry.SetGrant(ctx, id, *grant)
-		if serr != nil {
-			if errors.Is(serr, resourcespec.ErrResourceNotFound) {
-				return Outcome{RejectReason: access.ResourceNotFound}, nil
-			}
-			return executeFailure(ctx, serr) // executor-authored (reason.go)
-		}
-		return Outcome{}, nil
-
 	case access.OpDelete:
 		// Time-order is KIND-DEPENDENT (期11 spec §1 item 8 — the flip from
 		// the universal "bytes first, existence row last" contract):
 		if meta.Kind == resourcespec.KindFile {
 			// file: ROW-FIRST-BYTES-LAST. Registry.Delete ALREADY runs this
-			// as one transaction (read row → write tombstone → delete row +
-			// grants, built in S1) — there is no Driver call at all: file has
+			// as one transaction (read row → write tombstone → delete row,
+			// built in S1) — there is no Driver call at all: file has
 			// no Driver (its bytes are realized by the daemon-side
 			// Allocator/Streamer, never a DriverTable entry), and the actual
 			// byte collection is the daemon-side Reclaimer's ASYNC job (§4,

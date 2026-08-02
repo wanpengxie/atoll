@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -48,33 +47,32 @@ func TestStateSlice1_PrivacyByStructure(t *testing.T) {
 	v := []byte("A's private bytes")
 
 	// A drives the full CRUD over its own key — all pass under the welded owner.
-	acc(t, "A create own")(hA.Invoke(ctx, access.OpCreate, id, v, nil))
-	out, err := hA.Invoke(ctx, access.OpRead, id, nil, nil)
+	acc(t, "A create own")(hA.Invoke(ctx, access.OpCreate, id, v))
+	out, err := hA.Invoke(ctx, access.OpRead, id, nil)
 	expectAccepted(t, "A read own", out, err)
 	expectBytes(t, "A read own value", out, v)
-	acc(t, "A write own")(hA.Invoke(ctx, access.OpWrite, id, []byte("v2"), nil))
-	acc(t, "A delete own")(hA.Invoke(ctx, access.OpDelete, id, nil, nil))
-	acc(t, "A re-create own")(hA.Invoke(ctx, access.OpCreate, id, v, nil))
+	acc(t, "A write own")(hA.Invoke(ctx, access.OpWrite, id, []byte("v2")))
+	acc(t, "A delete own")(hA.Invoke(ctx, access.OpDelete, id, nil))
+	acc(t, "A re-create own")(hA.Invoke(ctx, access.OpCreate, id, v))
 
 	// B reads A's id: the row is not in B's (owner=B, id) namespace → not_found,
 	// and specifically NOT access_denied (no R was consulted).
-	out, err = hB.Invoke(ctx, access.OpRead, id, nil, nil)
+	out, err = hB.Invoke(ctx, access.OpRead, id, nil)
 	expectStateNotFoundNotDenied(t, "B read A's id", out, err)
 	// B writing/deleting A's id is equally invisible, never a denial.
-	out, err = hB.Invoke(ctx, access.OpWrite, id, v, nil)
+	out, err = hB.Invoke(ctx, access.OpWrite, id, v)
 	expectStateNotFoundNotDenied(t, "B write A's id", out, err)
-	out, err = hB.Invoke(ctx, access.OpDelete, id, nil, nil)
+	out, err = hB.Invoke(ctx, access.OpDelete, id, nil)
 	expectStateNotFoundNotDenied(t, "B delete A's id", out, err)
 }
 
-// ---- slice 2: four-step ingress order + op distinctions --------------------
+// ---- slice 2: ingress order + op distinctions --------------------
 
-// TestStateSlice2_FourStepOrderAndOpDistinctions pins the four-step actor-scoped
+// TestStateSlice2_IngressOrderAndOpDistinctions pins the actor-scoped
 // ingress order and the collapsed op verdicts through the assembled handle. The
-// three signal classes stay distinct: ErrOpNotInScope (category error, ≠
-// ErrMalformed), ErrMalformed (wire-shape fault), and the RESOLVE-stage verdicts
-// (already_exists / resource_not_found).
-func TestStateSlice2_FourStepOrderAndOpDistinctions(t *testing.T) {
+// two signal classes stay distinct: ErrMalformed (wire-shape fault) and the
+// RESOLVE-stage verdicts (already_exists / resource_not_found).
+func TestStateSlice2_IngressOrderAndOpDistinctions(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
@@ -82,42 +80,33 @@ func TestStateSlice2_FourStepOrderAndOpDistinctions(t *testing.T) {
 	hA := cs.Access.MintStateAuthority(identityAuthority{id: A})
 	const id = resource.ResourceID("k")
 
-	// set never exists on this locus, regardless of grant shape → ErrOpNotInScope
-	// (and, load-bearing, NOT ErrMalformed — the two signals are distinct).
-	_, err := hA.Invoke(ctx, access.OpSet, id, nil, nil)
-	expectOpNotInScope(t, "set without grant", err)
-	_, err = hA.Invoke(ctx, access.OpSet, id, nil, actorGrant(A, access.OpRead))
-	expectOpNotInScope(t, "set with grant", err)
-
 	// step ①: garbage op (out of the closed set) is a wire-shape fault → ErrMalformed.
-	_, err = hA.Invoke(ctx, access.Operation("chmod"), id, nil, nil)
+	_, err := hA.Invoke(ctx, access.Operation("chmod"), id, nil)
 	expectMalformed(t, "garbage op", err)
+	// the retired set verb is out of the closed set too — same signal.
+	_, err = hA.Invoke(ctx, access.Operation("set"), id, nil)
+	expectMalformed(t, "retired set verb", err)
 
 	// step ②: empty ResourceID → ErrMalformed.
-	_, err = hA.Invoke(ctx, access.OpCreate, resource.ResourceID(""), nil, nil)
+	_, err = hA.Invoke(ctx, access.OpCreate, resource.ResourceID(""), nil)
 	expectMalformed(t, "empty id create", err)
 
-	// step ④: a legal op carrying a grant is malformed (no op on this locus carries
-	// a Grant operand — set was the only grant-bearing op and it is gone).
-	_, err = hA.Invoke(ctx, access.OpCreate, id, []byte("v"), actorGrant(A, access.OpRead))
-	expectMalformed(t, "create with grant", err)
-
 	// create-then-recreate: the second create collides atomically → already_exists.
-	acc(t, "create")(hA.Invoke(ctx, access.OpCreate, id, []byte("v"), nil))
-	out, err := hA.Invoke(ctx, access.OpCreate, id, []byte("v"), nil)
+	acc(t, "create")(hA.Invoke(ctx, access.OpCreate, id, []byte("v")))
+	out, err := hA.Invoke(ctx, access.OpCreate, id, []byte("v"))
 	expectReason(t, "re-create same id", out, err, access.AlreadyExists)
 
 	// write / delete on an ABSENT id → resource_not_found (birth is create).
 	const absent = resource.ResourceID("never-born")
-	out, err = hA.Invoke(ctx, access.OpWrite, absent, []byte("v"), nil)
+	out, err = hA.Invoke(ctx, access.OpWrite, absent, []byte("v"))
 	expectReason(t, "write absent", out, err, access.ResourceNotFound)
-	out, err = hA.Invoke(ctx, access.OpDelete, absent, nil, nil)
+	out, err = hA.Invoke(ctx, access.OpDelete, absent, nil)
 	expectReason(t, "delete absent", out, err, access.ResourceNotFound)
 
 	// repeated delete is idempotent: delete an existing id, then delete again →
 	// honestly not-found (the second call is a safe retry).
-	acc(t, "delete existing")(hA.Invoke(ctx, access.OpDelete, id, nil, nil))
-	out, err = hA.Invoke(ctx, access.OpDelete, id, nil, nil)
+	acc(t, "delete existing")(hA.Invoke(ctx, access.OpDelete, id, nil))
+	out, err = hA.Invoke(ctx, access.OpDelete, id, nil)
 	expectReason(t, "repeat delete idempotent", out, err, access.ResourceNotFound)
 }
 
@@ -143,8 +132,8 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 
 	// create(nil) → existing row, NULL bytes → read: accepted, Found:false, Value:nil.
 	const nullID = resource.ResourceID("null-bytes")
-	acc(t, "create(nil)")(hA.Invoke(ctx, access.OpCreate, nullID, nil, nil))
-	out, err := hA.Invoke(ctx, access.OpRead, nullID, nil, nil)
+	acc(t, "create(nil)")(hA.Invoke(ctx, access.OpCreate, nullID, nil))
+	out, err := hA.Invoke(ctx, access.OpRead, nullID, nil)
 	if err != nil {
 		t.Fatalf("read(null): unexpected Go error: %v", err)
 	}
@@ -160,8 +149,8 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 
 	// create([]byte{}) → existing row, empty non-nil blob → read: Found:true, Value len 0.
 	const emptyID = resource.ResourceID("empty-value")
-	acc(t, "create([]byte{})")(hA.Invoke(ctx, access.OpCreate, emptyID, []byte{}, nil))
-	out, err = hA.Invoke(ctx, access.OpRead, emptyID, nil, nil)
+	acc(t, "create([]byte{})")(hA.Invoke(ctx, access.OpCreate, emptyID, []byte{}))
+	out, err = hA.Invoke(ctx, access.OpRead, emptyID, nil)
 	if err != nil {
 		t.Fatalf("read(empty): unexpected Go error: %v", err)
 	}
@@ -198,12 +187,12 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 	v := []byte("continuity across incarnations")
 
 	h1 := cs.Access.MintStateAuthority(identityAuthority{id: A})
-	acc(t, "gen-1 create checkpoint")(h1.Invoke(ctx, access.OpCreate, id, v, nil))
+	acc(t, "gen-1 create checkpoint")(h1.Invoke(ctx, access.OpCreate, id, v))
 
 	// A fresh MintState for the same owner (a later "incarnation"'s handle) reads
 	// back the earlier handle's bytes: DATA is welded to identity.
 	h2 := cs.Access.MintStateAuthority(identityAuthority{id: A})
-	out, err := h2.Invoke(ctx, access.OpRead, id, nil, nil)
+	out, err := h2.Invoke(ctx, access.OpRead, id, nil)
 	expectAccepted(t, "gen-2 read checkpoint", out, err)
 	expectBytes(t, "gen-2 checkpoint value", out, v)
 }
@@ -229,7 +218,7 @@ func TestStateSlice4_DeregisterTouchesRecordsOnly(t *testing.T) {
 	const kvID = resource.ResourceID("kv:doc")
 	kvBytes := []byte("channel-scoped, survives dereg")
 
-	acc(t, "A create actor-scoped state")(hState.Invoke(ctx, access.OpCreate, stateID, []byte("cursor"), nil))
+	acc(t, "A create actor-scoped state")(hState.Invoke(ctx, access.OpCreate, stateID, []byte("cursor")))
 	acc(t, "A create channel-scoped kv")(hChan.Create(ctx, kvID, kvSpec, kvBytes))
 
 	if err := endDeclaredTest(ctx, cs.ChannelStores, A, 100); err != nil {
@@ -274,27 +263,27 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 	const stateOnly = resource.ResourceID("state-only")
 	const chanOnly = resource.ResourceID("chan-only")
 
-	acc(t, "create state-only in actor_state")(hState.Invoke(ctx, access.OpCreate, stateOnly, []byte("s"), nil))
+	acc(t, "create state-only in actor_state")(hState.Invoke(ctx, access.OpCreate, stateOnly, []byte("s")))
 	acc(t, "create chan-only in resources")(hChan.Create(ctx, chanOnly, kvSpec, []byte("c")))
 
 	// channel-scoped handle cannot see the state-only id (not in resources).
-	out, err := hChan.Invoke(ctx, access.OpRead, stateOnly, nil, nil)
+	out, err := hChan.Invoke(ctx, access.OpRead, stateOnly, nil)
 	expectReason(t, "channel handle reads state-only id", out, err, access.ResourceNotFound)
 
 	// actor-scoped handle cannot see the chan-only id (not in actor_state) — and it
 	// is not_found, never access_denied (the collapsed branch consults no R).
-	out, err = hState.Invoke(ctx, access.OpRead, chanOnly, nil, nil)
+	out, err = hState.Invoke(ctx, access.OpRead, chanOnly, nil)
 	expectStateNotFoundNotDenied(t, "state handle reads chan-only id", out, err)
 
 	// The same id string lives independently in each locus: two distinct rows,
 	// each handle reads its own locus's value.
 	const dup = resource.ResourceID("dup")
-	acc(t, "state create dup")(hState.Invoke(ctx, access.OpCreate, dup, []byte("state-value"), nil))
+	acc(t, "state create dup")(hState.Invoke(ctx, access.OpCreate, dup, []byte("state-value")))
 	acc(t, "channel create dup")(hChan.Create(ctx, dup, kvSpec, []byte("chan-value")))
-	out, err = hState.Invoke(ctx, access.OpRead, dup, nil, nil)
+	out, err = hState.Invoke(ctx, access.OpRead, dup, nil)
 	expectAccepted(t, "state read dup", out, err)
 	expectBytes(t, "state dup value", out, []byte("state-value"))
-	out, err = hChan.Invoke(ctx, access.OpRead, dup, nil, nil)
+	out, err = hChan.Invoke(ctx, access.OpRead, dup, nil)
 	expectAccepted(t, "channel read dup", out, err)
 	expectBytes(t, "channel dup value", out, []byte("chan-value"))
 }
@@ -333,14 +322,3 @@ func expectStateNotFoundNotDenied(t *testing.T, label string, out accessdoor.Out
 	}
 }
 
-// expectOpNotInScope asserts the category-error signal AND its distinctness from
-// ErrMalformed — the two protocol-error classes must not collapse into one word.
-func expectOpNotInScope(t *testing.T, label string, err error) {
-	t.Helper()
-	if !errors.Is(err, accessdoor.ErrOpNotInScope) {
-		t.Fatalf("%s: err = %v, want ErrOpNotInScope", label, err)
-	}
-	if errors.Is(err, accessdoor.ErrMalformed) {
-		t.Fatalf("%s: err = ErrMalformed, want ErrOpNotInScope (category error ≠ wire-shape fault)", label)
-	}
-}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -15,11 +14,6 @@ import (
 // is decided INSIDE Registry.Create's transaction (within the race window) —
 // the door never resolves-then-creates in two steps.
 var ErrAlreadyExists = errors.New("resourcespec: resource already exists")
-
-// ErrResourceNotFound is SetGrant's same-transaction existence sentinel. It
-// applies equally to replace and revoke, so a dead resource never turns into a
-// foreign-key/driver error or a misleading successful no-op.
-var ErrResourceNotFound = errors.New("resourcespec: resource not found")
 
 // ErrOwnerInactive means an actor-scoped resource could not be born because
 // its owning actor was missing or already deregistered. StateStore.Create
@@ -79,11 +73,11 @@ type ResourceMeta struct {
 	// truth, not a caller-facing shape.
 	PlacementCoord string
 
-	// CreatedBy is the durable creator identity — a PURE AUDIT column, not
-	// an authorization predicate: ordinary creator authority is the full-rights
-	// grant Create writes into R (an actor entry via SetGrant's shape), while
-	// the channel owner root is independently authoritative. Neither path reads
-	// this audit field.
+	// CreatedBy is the durable creator identity — an AUTHORIZATION PREDICATE
+	// since PM-D3: op=delete is allowed to the creator (caller == CreatedBy)
+	// or the channel owner root, judged at the door. It doubles as the audit
+	// record it always was; read/write never consult it (membrane-uniform,
+	// PM-D1).
 	CreatedBy actor.ActorID
 
 	// Dir is the file BYTE-SHAPE bit (the inode's S_IFDIR analogue, 期11 丁12):
@@ -136,18 +130,14 @@ type TombstoneRow struct {
 	DeletedAt      int64
 }
 
-// ResourceRow is one List row: an id + its full meta + its COMPLETE grant
-// projection (every persisted (grantee_kind, grantee) entry on it, with
-// ops). The full grant projection lets the door's effectiveOps(caller) — the
-// union ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller)) — be computed
-// per row from data ALREADY fetched here, not a second per-op round trip
-// back into the registry (期11 spec §1 item 9⑤: "避免 per-op N 次查询，一次
-// 返回整行 grant 投影"). List does NOT grant-filter — that projection is the
-// door's job (§3.7); List only scans and returns raw rows.
+// ResourceRow is one List row: an id + its full meta. Authorization is
+// membrane-uniform (PM-D1), so a row needs no per-row grant projection — the
+// door derives caller's ops from membership facts + Meta.CreatedBy alone.
+// List does NOT authorization-filter — that projection is the door's job
+// (§3.7); List only scans and returns raw rows.
 type ResourceRow struct {
-	ID     resource.ResourceID
-	Meta   ResourceMeta
-	Grants []access.Grant
+	ID   resource.ResourceID
+	Meta ResourceMeta
 }
 
 // ResourceBirthPlan carries only stable resource provenance. Authorization has
@@ -177,12 +167,13 @@ type Registry interface {
 
 	// Create is op=create's ATOMIC birth event (the IMMEDIATE-landing half —
 	// kv, and empty/dir file creates that carry no byte stream, §1.5): the
-	// existence row (kind + routing/audit columns) + the
-	// creator's full-rights grant (an actor entry, ops = read/write/set/delete)
-	// + the initial bytes, all in ONE transaction. The atomicity is a
+	// existence row (kind + routing + created_by columns) + the initial
+	// bytes, all in ONE transaction. There is NO grant write: authorization
+	// is membrane-uniform (PM-D1) and creator delete-right is the created_by
+	// column itself (PM-D3). The atomicity is a
 	// door-visible contract, not an implementation coincidence: create is the
-	// single event that spans existence, R, and bytes, so splitting it would
-	// open a half-built window (a visible row with no grant / no bytes). A
+	// single event that spans existence and bytes, so splitting it would
+	// open a half-built window (a visible row with no bytes). A
 	// colliding id returns ErrAlreadyExists. The byte realizer participates as
 	// store-internal collaboration (day-1: same DB, same transaction, free); a
 	// future external-byte driver orders its own internals as "bytes first,
@@ -234,31 +225,10 @@ type Registry interface {
 	// clean its staged bytes, never retries the write.
 	CommitReservation(ctx context.Context, reservationID string) (landed LandedResource, found bool, err error)
 
-	// ActorAllows is the actor-entry half of R.allows for OBJECT ops: whether
-	// caller's direct actor entry grants op. members late-binding is NOT here —
-	// that is the door's job: the door unions this with MembersAllow gated by a
-	// membership check, resolved at check time (grant.go: "resolved by the door
-	// AT CHECK TIME").
-	ActorAllows(ctx context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error)
-
-	// MembersAllow reports whether a members-kind entry on id grants op. It does
-	// NOT look at caller: whether caller is a current member is decided by the
-	// door's membership check, and the two halves are unioned at the door
-	// (allow-only, no precedence).
-	MembersAllow(ctx context.Context, id resource.ResourceID, op access.Operation) (bool, error)
-
-	// SetGrant implements op=set: REPLACE the grantee's entry with g (chmod/
-	// setfacl SET semantics; g.Ops == ∅ REVOKES = deletes the row). g has
-	// already passed the door's ingress ValidateGrant, so the Registry trusts
-	// the caller and only stores (mirrors storespec's store-not-validate
-	// discipline). The entry key is (id, g.GranteeKind, g.Grantee) — the sum
-	// form persisted in full. If id is absent, including on revoke, SetGrant
-	// returns ErrResourceNotFound.
-	SetGrant(ctx context.Context, id resource.ResourceID, g access.Grant) error
-
-	// Delete removes the resource row + ALL its grants in one transaction.
-	// Non-lossy is guaranteed by the door only reaching here after Allows
-	// passes. Delete is idempotent and retryable (a repeat delete on an
+	// Delete removes the resource row in one transaction.
+	// Non-lossy is guaranteed by the door only reaching here after its
+	// authorization gate (PM-D3: creator ∨ channel owner). Delete is
+	// idempotent and retryable (a repeat delete on an
 	// already-gone id is a clean no-op), needing no cross-call atomicity
 	// (only create does, for its controller-grab window).
 	//
@@ -270,7 +240,7 @@ type Registry interface {
 	//   - file: ROW-FIRST-BYTES-LAST — this call reads the row (kind,
 	//     placement_daemon_id, placement_coord) inside its own
 	//     transaction, writes a resource_tombstones row from those values,
-	//     THEN deletes the resource row + grants — all ONE transaction. The
+	//     THEN deletes the resource row — all ONE transaction. The
 	//     daemon-side Reclaimer (§4, a later addition) consumes the
 	//     tombstone asynchronously and only then removes the bytes,
 	//     confirming via ReclaimAck (§4.7) so the caller can ClearTombstone.
@@ -383,8 +353,8 @@ type Registry interface {
 
 // ResourceOutbox is the NARROW slice of Registry the home-side daemon
 // control-RPC handler needs (期11 spec §4.7's Committed/ReclaimAck/
-// ReconcilePull handlers) — deliberately excluding ActorAllows/MembersAllow/
-// SetGrant/Create/Delete/Resolve (the general authorization-relation surface
+// ReconcilePull handlers) — deliberately excluding
+// Create/Delete/Resolve (the general access surface
 // the access door alone may drive, the anti-bypass wall runtime.ChannelStores
 // already draws by not re-exporting the raw Registry). Outbox completion is a
 // DIFFERENT concern from a caller-facing access decision: the door already

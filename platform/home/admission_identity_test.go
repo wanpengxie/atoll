@@ -175,7 +175,7 @@ func TestReadmittingARemovedPrincipalMintsABrandNewIdentity(t *testing.T) {
 		t.Fatalf("state handle for the first identity: %v", err)
 	}
 	if out, err := handle.Invoke(
-		ctx, access.OpCreate, admissionProbeKey, []byte(`"first-life"`), nil,
+		ctx, access.OpCreate, admissionProbeKey, []byte(`"first-life"`),
 	); err != nil || !out.Accepted() {
 		t.Fatalf("first identity state create: %+v err=%v", out, err)
 	}
@@ -232,7 +232,7 @@ func TestReadmittingARemovedPrincipalMintsABrandNewIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state handle for the reborn identity: %v", err)
 	}
-	out, err := rebornHandle.Invoke(ctx, access.OpRead, admissionProbeKey, nil, nil)
+	out, err := rebornHandle.Invoke(ctx, access.OpRead, admissionProbeKey, nil)
 	if err != nil {
 		t.Fatalf("reborn identity state read: %v", err)
 	}

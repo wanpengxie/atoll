@@ -93,14 +93,14 @@ func (p outboundProbePen) Write(_ context.Context, env *message.Envelope) (harne
 
 type outboundProbeState struct{ probe *outboundProbe }
 
-func (p outboundProbeState) Invoke(context.Context, access.Operation, resource.ResourceID, []byte, *access.Grant) (accessdoor.Outcome, error) {
+func (p outboundProbeState) Invoke(context.Context, access.Operation, resource.ResourceID, []byte) (accessdoor.Outcome, error) {
 	p.probe.stateCalls.Add(1)
 	return accessdoor.Outcome{}, nil
 }
 
 type outboundProbeAccess struct{ probe *outboundProbe }
 
-func (p outboundProbeAccess) Invoke(context.Context, access.Operation, resource.ResourceID, []byte, *access.Grant) (accessdoor.Outcome, error) {
+func (p outboundProbeAccess) Invoke(context.Context, access.Operation, resource.ResourceID, []byte) (accessdoor.Outcome, error) {
 	p.probe.accessCalls.Add(1)
 	return accessdoor.Outcome{}, nil
 }
@@ -414,7 +414,7 @@ func TestOutboundSlotStartsFailClosedThenPublishesFiveArmsAtomically(t *testing.
 	if _, err := build.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "offline"}); !errors.Is(err, ErrOutboundDisconnected) {
 		t.Fatalf("offline Write error = %v", err)
 	}
-	outcome, err := build.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:x", nil, nil)
+	outcome, err := build.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:x", nil)
 	if err != nil || outcome.RejectReason != access.OutcomeUnknown {
 		t.Fatalf("offline access = %#v, %v", outcome, err)
 	}
@@ -430,10 +430,10 @@ func TestOutboundSlotStartsFailClosedThenPublishesFiveArmsAtomically(t *testing.
 	if _, err := build.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "pen"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := build.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:a", nil, nil); err != nil {
+	if _, err := build.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:a", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := build.prepared.Caps.State.Invoke(t.Context(), access.OpRead, "resource:s", nil, nil); err != nil {
+	if _, err := build.prepared.Caps.State.Invoke(t.Context(), access.OpRead, "resource:s", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := build.prepared.Caps.Schedule.Schedule(t.Context(), schedule.ScheduleReq{}); err != nil {
@@ -763,7 +763,7 @@ func TestAcceptedPlanReplacementFencesRunArmsButKeepsIdentityArms(t *testing.T) 
 	if _, err := b1.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "stale-run"}); !errors.Is(err, ErrOutboundNotCurrent) {
 		t.Fatalf("G1 Pen after accepted G2 err=%v", err)
 	}
-	if _, err := b1.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:stale-run", nil, nil); !errors.Is(err, ErrOutboundNotCurrent) {
+	if _, err := b1.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:stale-run", nil); !errors.Is(err, ErrOutboundNotCurrent) {
 		t.Fatalf("G1 Access after accepted G2 err=%v", err)
 	}
 	// Lifecycle is a run arm too — link's handler table makes carrying the
@@ -780,7 +780,7 @@ func TestAcceptedPlanReplacementFencesRunArmsButKeepsIdentityArms(t *testing.T) 
 	); !errors.Is(err, ErrOutboundNotCurrent) {
 		t.Fatalf("G1 EndSelf after accepted G2 err=%v", err)
 	}
-	if _, err := b1.prepared.Caps.State.Invoke(t.Context(), access.OpRead, "resource:identity", nil, nil); err != nil {
+	if _, err := b1.prepared.Caps.State.Invoke(t.Context(), access.OpRead, "resource:identity", nil); err != nil {
 		t.Fatalf("G1 State lost A-level authority across replacement: %v", err)
 	}
 	if _, err := b1.prepared.Caps.Schedule.Schedule(t.Context(), schedule.ScheduleReq{}); err != nil {

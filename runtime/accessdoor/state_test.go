@@ -11,41 +11,24 @@ import (
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
-// TestIngressStateRules exercises the four-step actor-scoped ingress sequence,
-// pinning the divergence from the channel-scoped ingress: set is a CATEGORY error
-// (ErrOpNotInScope), never ErrMalformed, and never a verdict.
+// TestIngressStateRules exercises the actor-scoped ingress sequence — the
+// SAME named checks the channel-scoped ingress runs.
 func TestIngressStateRules(t *testing.T) {
-	grant := func(ops ...access.Operation) *access.Grant {
-		return &access.Grant{GranteeKind: access.GranteeActor, Grantee: "b", Ops: ops}
-	}
-
 	tests := []struct {
-		name string
-		op   access.Operation
-		id   resource.ResourceID
-		args []byte
-		gr   *access.Grant
-		// exactly one of the following is expected:
-		wantMalformed  bool
-		wantNotInScope bool
+		name          string
+		op            access.Operation
+		id            resource.ResourceID
+		args          []byte
+		wantMalformed bool
 	}{
-		// ① closed set — garbage op is a wire-shape fault, NOT ErrOpNotInScope.
+		// ① closed set.
 		{name: "garbage op → malformed", op: access.Operation("frobnicate"), id: "k", wantMalformed: true},
+		{name: "retired set verb → malformed (out of set)", op: access.Operation("set"), id: "k", wantMalformed: true},
 
 		// ② empty id.
 		{name: "empty id → malformed", op: access.OpCreate, id: "", wantMalformed: true},
 
-		// ③ set is a category error regardless of grant shape.
-		{name: "set without grant → not in scope", op: access.OpSet, id: "k", wantNotInScope: true},
-		{name: "set with grant → not in scope", op: access.OpSet, id: "k", gr: grant(access.OpRead), wantNotInScope: true},
-		{name: "set with bogus grant → not in scope (not malformed)", op: access.OpSet, id: "k",
-			gr: &access.Grant{GranteeKind: "role", Ops: []access.Operation{access.OpCreate}}, wantNotInScope: true},
-
-		// ④ op×shape: no grant on this locus; delete is by-id.
-		{name: "create with grant → malformed", op: access.OpCreate, id: "k", gr: grant(access.OpRead), wantMalformed: true},
-		{name: "read with grant → malformed", op: access.OpRead, id: "k", gr: grant(access.OpRead), wantMalformed: true},
-		{name: "write with grant → malformed", op: access.OpWrite, id: "k", gr: grant(access.OpRead), wantMalformed: true},
-		{name: "delete with grant → malformed", op: access.OpDelete, id: "k", gr: grant(access.OpRead), wantMalformed: true},
+		// ③ op×shape: delete is by-id.
 		{name: "delete with args → malformed", op: access.OpDelete, id: "k", args: []byte("x"), wantMalformed: true},
 
 		// well-formed shapes.
@@ -59,28 +42,15 @@ func TestIngressStateRules(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ingressState(tc.op, tc.id, tc.args, tc.gr)
-			switch {
-			case tc.wantMalformed:
+			err := ingressState(tc.op, tc.id, tc.args)
+			if tc.wantMalformed {
 				if !errors.Is(err, ErrMalformed) {
 					t.Fatalf("err = %v, want ErrMalformed", err)
 				}
-				// negative assertion: malformed is NOT the category error.
-				if errors.Is(err, ErrOpNotInScope) {
-					t.Fatalf("err = ErrOpNotInScope, want ErrMalformed (wire-shape fault ≠ category error)")
-				}
-			case tc.wantNotInScope:
-				if !errors.Is(err, ErrOpNotInScope) {
-					t.Fatalf("err = %v, want ErrOpNotInScope", err)
-				}
-				// negative assertion: the category error is NOT a bad-wire fault.
-				if errors.Is(err, ErrMalformed) {
-					t.Fatalf("err = ErrMalformed, want ErrOpNotInScope (category error ≠ wire-shape fault)")
-				}
-			default:
-				if err != nil {
-					t.Fatalf("unexpected err: %v", err)
-				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
 			}
 		})
 	}
@@ -294,17 +264,16 @@ func TestMintStateWeldsOwner(t *testing.T) {
 	}
 	h := m.MintStateAuthority(accessAuthority("owner-a"))
 
-	// set on an actor-scoped handle → ErrOpNotInScope, StateStore never touched.
-	if _, err := h.Invoke(t.Context(), access.OpSet, "k", nil,
-		&access.Grant{GranteeKind: access.GranteeActor, Grantee: "b", Ops: []access.Operation{access.OpRead}}); !errors.Is(err, ErrOpNotInScope) {
-		t.Fatalf("set err = %v, want ErrOpNotInScope", err)
+	// an out-of-set op → ErrMalformed, StateStore never touched.
+	if _, err := h.Invoke(t.Context(), access.Operation("bogus"), "k", nil); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("bogus op err = %v, want ErrMalformed", err)
 	}
 	if len(st.createCalls)+len(st.readCalls)+len(st.writeCalls)+len(st.deleteCalls) != 0 {
-		t.Fatalf("StateStore touched on an out-of-scope op")
+		t.Fatalf("StateStore touched on a malformed op")
 	}
 
 	// well-formed create → welded owner reaches Create.
-	out, err := h.Invoke(t.Context(), access.OpCreate, "k", []byte("v"), nil)
+	out, err := h.Invoke(t.Context(), access.OpCreate, "k", []byte("v"))
 	mustAccept(t, out, err)
 	if len(st.createCalls) != 1 || st.createCalls[0].owner != "owner-a" {
 		t.Fatalf("create call = %+v, want owner-a welded", st.createCalls)

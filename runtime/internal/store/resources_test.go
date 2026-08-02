@@ -1,10 +1,12 @@
 package store
 
-// White-box tests for the access-plane store: resourceRegistry (R + existence
+// White-box tests for the access-plane store: resourceRegistry (existence
 // + create/delete outbox) and kvDriver (inline bytes). Both are unexported and
 // reachable only from inside the package — the same confinement the
 // message-log store relies on. They run over a real channel sqlite
-// (ChannelLocalDDL), no fakes.
+// (ChannelLocalDDL), no fakes. There is no authorization relation here:
+// judgment is the door's (membrane-uniform, PM-D1/PM-D3), the store only
+// records created_by.
 
 import (
 	"context"
@@ -13,7 +15,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -24,7 +25,7 @@ import (
 var creatorBirthPlan = resourcespec.ResourceBirthPlan{}
 
 // openResourceReg opens a fresh temp-dir channel sqlite with the full DDL
-// (resources + resource_grants + resource_reservations + resource_tombstones
+// (resources + resource_reservations + resource_tombstones
 // present, foreign_keys=ON) and returns a registry over it, registering
 // cleanup.
 func openResourceReg(t *testing.T) *resourceRegistry {
@@ -48,9 +49,9 @@ func createKV(t *testing.T, reg *resourceRegistry, id resource.ResourceID, creat
 	}
 }
 
-// --- Create: atomicity (row + full grant + bytes) + collision sentinel -------
+// --- Create: atomicity (row + bytes) + collision sentinel -------
 
-func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
+func TestResource_CreateWritesRowAndBytes(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
@@ -68,12 +69,9 @@ func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
 	if meta.CreatedAt <= 0 {
 		t.Errorf("created_at=%d must be stamped positive", meta.CreatedAt)
 	}
-
-	// Creator holds the full object-rights grant (read/write/set/delete).
-	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete} {
-		if !allowActor(t, reg, "actor:a", "kv:doc", op) {
-			t.Errorf("creator must hold op=%s in its full grant", op)
-		}
+	// created_by is the PM-D3 delete predicate — it must land at birth.
+	if meta.CreatedBy != "actor:a" {
+		t.Errorf("created_by=%q want actor:a (the PM-D3 delete predicate)", meta.CreatedBy)
 	}
 
 	// Initial bytes are readable.
@@ -134,10 +132,9 @@ func TestResource_ReservationPersistsSourceProvenance(t *testing.T) {
 	if meta.SourceChannelID != plan.SourceChannelID || meta.SourceResourceID != plan.SourceResourceID {
 		t.Fatalf("landed provenance=%+v, want %+v", meta, plan)
 	}
-	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete} {
-		if !allowActor(t, reg, "run:ended-before-commit", "file:run", op) {
-			t.Fatalf("creator missing %s after reservation landing", op)
-		}
+	// The landed row carries the door-authenticated creator (PM-D3 predicate).
+	if meta.CreatedBy != "run:ended-before-commit" {
+		t.Fatalf("created_by=%q want the reservation's creator", meta.CreatedBy)
 	}
 }
 
@@ -225,13 +222,13 @@ func TestResource_CreateCollisionSentinel(t *testing.T) {
 	if err.Error() != "resourcespec: resource already exists" {
 		t.Errorf("collision err=%v want ErrAlreadyExists", err)
 	}
-	// The colliding create left the original untouched (no controller grab, no
+	// The colliding create left the original untouched (no creator grab, no
 	// byte overwrite).
 	if val, _, _ := kvOf(reg).Read(ctx, "kv:doc"); string(val) != "v1" {
 		t.Errorf("bytes after collision=%q want v1 (unchanged)", val)
 	}
-	if allowActor(t, reg, "actor:b", "kv:doc", access.OpRead) {
-		t.Error("colliding creator b must NOT have grabbed any grant")
+	if meta, _, _ := reg.Resolve(ctx, "kv:doc"); meta.CreatedBy != "actor:a" {
+		t.Errorf("created_by after collision=%q want actor:a (the loser must not grab the creator column)", meta.CreatedBy)
 	}
 }
 
@@ -285,10 +282,6 @@ func TestResource_ReserveCreateAndCommitLandsRow(t *testing.T) {
 	}
 	if meta.PlacementDaemonID != "daemon-1" || meta.PlacementCoord != "coord-1" {
 		t.Errorf("placement = (%q,%q) want (daemon-1,coord-1)", meta.PlacementDaemonID, meta.PlacementCoord)
-	}
-	// Creator holds the full object-rights grant, same as the direct path.
-	if !allowActor(t, reg, "actor:a", "file:doc", access.OpDelete) {
-		t.Error("committed creator must hold the full-rights grant")
 	}
 }
 
@@ -756,74 +749,14 @@ func TestResource_ListByPlacementDaemonFiltersPerDaemonAndExcludesKV(t *testing.
 	if len(rows) != 1 || rows[0].ID != "file:a" {
 		t.Fatalf("ListByPlacementDaemon(daemon-1) = %+v, want exactly [file:a]", rows)
 	}
-	if len(rows[0].Grants) != 1 {
-		t.Errorf("ListByPlacementDaemon row grants = %d, want the creator's full-rights grant", len(rows[0].Grants))
-	}
 }
 
-// --- SetGrant: replace + revoke, and the two query halves --------------------
+// --- Delete: removes the row; file additionally tombstones --------
 
-func TestResource_SetGrantReplaceAndRevoke(t *testing.T) {
-	reg := openResourceReg(t)
-	createKV(t, reg, "kv:doc", "actor:a", nil)
-
-	// Grant B read only.
-	set(t, reg, "kv:doc", grantActor("actor:b", access.OpRead))
-	if !allowActor(t, reg, "actor:b", "kv:doc", access.OpRead) {
-		t.Error("B must have read after set")
-	}
-	if allowActor(t, reg, "actor:b", "kv:doc", access.OpWrite) {
-		t.Error("B must NOT have write (grant was read-only)")
-	}
-
-	// Replace (not merge) with read+write.
-	set(t, reg, "kv:doc", grantActor("actor:b", access.OpRead, access.OpWrite))
-	if !allowActor(t, reg, "actor:b", "kv:doc", access.OpWrite) {
-		t.Error("B must have write after replacing grant")
-	}
-
-	// Revoke: empty ops deletes the entry.
-	set(t, reg, "kv:doc", grantActor("actor:b"))
-	if allowActor(t, reg, "actor:b", "kv:doc", access.OpRead) {
-		t.Error("B read must be gone after revoke (∅ ops)")
-	}
-}
-
-func TestResource_MembersEntryQuerySplit(t *testing.T) {
-	reg := openResourceReg(t)
-	createKV(t, reg, "kv:doc", "actor:a", nil)
-
-	// A members entry (grantee empty) grants read.
-	set(t, reg, "kv:doc", grantMembers(access.OpRead))
-
-	// MembersAllow sees it; it does NOT look at any caller.
-	if !allowMembers(t, reg, "kv:doc", access.OpRead) {
-		t.Error("MembersAllow(read) must be true")
-	}
-	if allowMembers(t, reg, "kv:doc", access.OpWrite) {
-		t.Error("MembersAllow(write) must be false (only read granted)")
-	}
-
-	// The actor-entry half is independent: B has no direct entry.
-	if allowActor(t, reg, "actor:b", "kv:doc", access.OpRead) {
-		t.Error("ActorAllows must NOT see the members entry (two separate halves)")
-	}
-
-	// Revoke the members entry.
-	set(t, reg, "kv:doc", grantMembers())
-	if allowMembers(t, reg, "kv:doc", access.OpRead) {
-		t.Error("members entry must be gone after ∅ revoke")
-	}
-}
-
-// --- Delete: cascades row + all grants; file additionally tombstones --------
-
-func TestResource_DeleteCascadesRowAndGrants(t *testing.T) {
+func TestResource_DeleteRemovesRow(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	createKV(t, reg, "kv:doc", "actor:a", nil)
-	set(t, reg, "kv:doc", grantActor("actor:b", access.OpRead))
-	set(t, reg, "kv:doc", grantMembers(access.OpRead))
 
 	if err := reg.Delete(ctx, "kv:doc"); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -831,16 +764,6 @@ func TestResource_DeleteCascadesRowAndGrants(t *testing.T) {
 
 	if _, ok, _ := reg.Resolve(ctx, "kv:doc"); ok {
 		t.Error("resource must not resolve after delete")
-	}
-	// All grants gone (creator, B, members).
-	if allowActor(t, reg, "actor:a", "kv:doc", access.OpRead) {
-		t.Error("creator grant must be cascaded away by Delete")
-	}
-	if allowActor(t, reg, "actor:b", "kv:doc", access.OpRead) {
-		t.Error("B grant must be cascaded away by Delete")
-	}
-	if allowMembers(t, reg, "kv:doc", access.OpRead) {
-		t.Error("members grant must be cascaded away by Delete")
 	}
 
 	// Delete is idempotent: deleting an absent id is a clean no-op.
@@ -863,7 +786,7 @@ func TestResource_DeleteKVWritesNoTombstone(t *testing.T) {
 	}
 }
 
-// file delete is row-first-bytes-last + tombstone (§1.8): the row/grants are
+// file delete is row-first-bytes-last + tombstone (§1.8): the row is
 // gone but a tombstone row carries daemon_id/coord/kind for the
 // (later) Reclaimer, and ClearTombstone removes it once collection is
 // confirmed.
@@ -878,7 +801,7 @@ func TestResource_DeleteFileWritesTombstoneThenClearTombstone(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	// Row + grants gone (same non-lossy cascade as kv).
+	// Row gone (same non-lossy shape as kv).
 	if _, ok, _ := reg.Resolve(ctx, "file:doc"); ok {
 		t.Error("file resource must not resolve after delete")
 	}
@@ -1066,14 +989,12 @@ func TestResource_ListNonPositiveLimitErrors(t *testing.T) {
 	}
 }
 
-// List does NOT grant-filter — it returns the FULL grant projection per row,
-// including entries the door would later filter away for a given caller.
-func TestResource_ListReturnsFullGrantProjection(t *testing.T) {
+// List does NOT authorization-filter — every row comes back with full meta
+// (created_by included), and the door projects per caller one layer up.
+func TestResource_ListCarriesCreatedBy(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	createKV(t, reg, "kv:doc", "actor:a", nil)
-	set(t, reg, "kv:doc", grantActor("actor:b", access.OpRead))
-	set(t, reg, "kv:doc", grantMembers(access.OpRead))
 
 	rows, _, err := reg.List(ctx, "", 50, "")
 	if err != nil {
@@ -1082,8 +1003,8 @@ func TestResource_ListReturnsFullGrantProjection(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d want 1", len(rows))
 	}
-	if len(rows[0].Grants) != 3 { // creator full grant + actor:b read + members read
-		t.Fatalf("grants=%+v want 3 entries (creator, actor:b, members)", rows[0].Grants)
+	if rows[0].Meta.CreatedBy != "actor:a" {
+		t.Fatalf("created_by=%q want actor:a (the door's PM-D3 projection input)", rows[0].Meta.CreatedBy)
 	}
 }
 
@@ -1193,39 +1114,6 @@ func TestKVDriver_DeleteIsNoop(t *testing.T) {
 func mustCreate(t *testing.T, reg *resourceRegistry, id resource.ResourceID, creator actor.ActorID) {
 	t.Helper()
 	createKV(t, reg, id, creator, nil)
-}
-
-func set(t *testing.T, reg *resourceRegistry, id resource.ResourceID, g access.Grant) {
-	t.Helper()
-	if err := reg.SetGrant(context.Background(), id, g); err != nil {
-		t.Fatalf("SetGrant %q %+v: %v", id, g, err)
-	}
-}
-
-func grantActor(who actor.ActorID, ops ...access.Operation) access.Grant {
-	return access.Grant{GranteeKind: access.GranteeActor, Grantee: who, Ops: ops}
-}
-
-func grantMembers(ops ...access.Operation) access.Grant {
-	return access.Grant{GranteeKind: access.GranteeMembers, Ops: ops}
-}
-
-func allowActor(t *testing.T, reg *resourceRegistry, caller actor.ActorID, id resource.ResourceID, op access.Operation) bool {
-	t.Helper()
-	ok, err := reg.ActorAllows(context.Background(), caller, id, op)
-	if err != nil {
-		t.Fatalf("ActorAllows(%q,%q,%s): %v", caller, id, op, err)
-	}
-	return ok
-}
-
-func allowMembers(t *testing.T, reg *resourceRegistry, id resource.ResourceID, op access.Operation) bool {
-	t.Helper()
-	ok, err := reg.MembersAllow(context.Background(), id, op)
-	if err != nil {
-		t.Fatalf("MembersAllow(%q,%s): %v", id, op, err)
-	}
-	return ok
 }
 
 // countRows is a raw row-count probe over the given table — used only to

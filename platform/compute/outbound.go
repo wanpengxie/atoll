@@ -773,7 +773,7 @@ func (p outboundPen) Write(ctx context.Context, env *message.Envelope) (harness.
 
 type outboundState struct{ slot *OutboundSlot }
 
-func (a outboundState) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
+func (a outboundState) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	bundle, err := a.slot.loadIdentity()
 	if errors.Is(err, ErrOutboundDisconnected) {
 		return accessdoor.Outcome{RejectReason: access.OutcomeUnknown}, nil
@@ -781,12 +781,12 @@ func (a outboundState) Invoke(ctx context.Context, op access.Operation, id resou
 	if err != nil {
 		return accessdoor.Outcome{}, err
 	}
-	return bundle.State.Invoke(ctx, op, id, args, grant)
+	return bundle.State.Invoke(ctx, op, id, args)
 }
 
 type outboundResourceAccess struct{ slot *OutboundSlot }
 
-func (a outboundResourceAccess) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
+func (a outboundResourceAccess) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	bundle, err := a.slot.loadAttempt()
 	if errors.Is(err, ErrOutboundDisconnected) {
 		return accessdoor.Outcome{RejectReason: access.OutcomeUnknown}, nil
@@ -794,7 +794,7 @@ func (a outboundResourceAccess) Invoke(ctx context.Context, op access.Operation,
 	if err != nil {
 		return accessdoor.Outcome{}, err
 	}
-	return bundle.Access.Invoke(ctx, op, id, args, grant)
+	return bundle.Access.Invoke(ctx, op, id, args)
 }
 
 func (a outboundResourceAccess) Create(ctx context.Context, id resource.ResourceID, spec accessdoor.CreateSpec, initial []byte) (accessdoor.Outcome, error) {

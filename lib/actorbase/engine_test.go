@@ -73,7 +73,7 @@ func (p *fakePen) count() int {
 // Invoke — a wider double is harmless there, Go interfaces are structural).
 type fakeAccess struct{}
 
-func (fakeAccess) Invoke(_ context.Context, op access.Operation, id resource.ResourceID, args []byte, _ *access.Grant) (accessdoor.Outcome, error) {
+func (fakeAccess) Invoke(_ context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{Value: args}, nil
 }
 

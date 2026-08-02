@@ -55,11 +55,12 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 
 // ChannelLocalTables enumerates exactly the surviving channel-local tables:
 // the message log, the actor registry, the access plane's channel-scoped
-// resources + resource_grants + the create/delete outbox's two server-side
+// resources + the create/delete outbox's two server-side
 // durable halves (resource_reservations + resource_tombstones, 期11 spec
 // §1.3), the actor-scoped state locus actor_state, and the identity-level
-// pending-timer control plane timers (type_registry's two tables +
-// actor_cursors are deleted).
+// pending-timer control plane timers. There is no resource_grants table:
+// authorization is membrane-uniform (PM-D1), judged from membership facts +
+// created_by — per-object grants structurally cannot exist.
 func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{
 		"messages":       true,
@@ -68,7 +69,6 @@ func TestChannelLocalTables_Set(t *testing.T) {
 		"channel_genesis":         true,
 		"channel_daemon_bindings": true,
 		"resources":               true,
-		"resource_grants":         true,
 		"resource_reservations":   true,
 		"resource_tombstones":     true,
 		"actor_state":             true,

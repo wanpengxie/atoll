@@ -43,7 +43,7 @@ const KindFile = resourcespec.KindFile
 // (boundStateHandle) and the port implementation (remoteAccessHandle) are
 // twins of one contract, both minted behind the same authority-welding seam.
 type AccessHandle interface {
-	Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error)
+	Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error)
 }
 
 // ResourceAccessHandle is the RESOURCE-FACE capability (channel-scoped,
@@ -136,24 +136,20 @@ func (h boundHandle) authorize(ctx context.Context) error {
 var ErrCreateViaInvoke = fmt.Errorf("%w: op=create must use the Create method, not Invoke (资源面 create 单入口)", ErrMalformed)
 
 // Invoke runs ingress (structure → ErrMalformed), then the create单入口 gate,
-// then the day-1 Ops-overreach judgment (→ access_denied verdict), then the
-// decision tree under the welded caller. The rejection layers stay distinct:
-// a structural fault is a Go error before anything resolves; overreach is a
-// verdict.
-func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
+// then the decision tree under the welded caller. The rejection layers stay
+// distinct: a structural fault is a Go error before anything resolves; an
+// authorization failure is a verdict.
+func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
 	if err := h.authorize(ctx); err != nil {
 		return Outcome{RejectReason: access.OwnerInactive}, nil
 	}
-	if err := ingress(op, id, args, grant); err != nil {
+	if err := ingress(op, id, args); err != nil {
 		return Outcome{}, err
 	}
 	if op == access.OpCreate {
 		return Outcome{}, ErrCreateViaInvoke
 	}
-	if over, ok := day1OpsOverreach(op, grant); ok && over {
-		return Outcome{RejectReason: access.AccessDenied}, nil
-	}
-	return h.door.invoke(ctx, h.caller, op, id, args, grant)
+	return h.door.invoke(ctx, h.caller, op, id, args)
 }
 
 // Create runs the create-specific ingress (structure → ErrMalformed), then
@@ -244,14 +240,13 @@ func (h rejectedStateHandle) Invoke(
 	access.Operation,
 	resource.ResourceID,
 	[]byte,
-	*access.Grant,
 ) (Outcome, error) {
 	return Outcome{}, h.err
 }
 
 type rejectedResourceHandle struct{ err error }
 
-func (h rejectedResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
+func (h rejectedResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
 	return Outcome{}, h.err
 }
 func (h rejectedResourceHandle) Create(context.Context, resource.ResourceID, CreateSpec, []byte) (Outcome, error) {

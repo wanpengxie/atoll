@@ -4,15 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"path/filepath"
-	"slices"
-	"sort"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -113,85 +108,41 @@ func TestEndedIdentityPenIsRefusedOnTheMessageWritePath(t *testing.T) {
 }
 
 const (
-	grantLedgerSource  = "decl:grant-ledger"
-	grantLedgerChannel = channel.ID("grant-ledger")
-	grantLedgerPrivate = resource.ResourceID("resource:private-credential")
+	deathCutSource   = "decl:death-cut"
+	deathCutChannel  = channel.ID("death-cut")
+	deathCutResource = resource.ResourceID("resource:creator-work")
 )
 
-// grantLedgerObjectOps mirrors accessdoor's own closed object-verb set. Asking
-// all four is what separates "no members entry" from "no members entry for the
-// one op I happened to check".
-var grantLedgerObjectOps = []access.Operation{
-	access.OpRead, access.OpWrite, access.OpSet, access.OpDelete,
-}
-
-// grantLedgerGrants renders one resource's COMPLETE persisted grant projection
-// as a sorted, comparable set — every (grantee_kind, grantee) entry with its
-// ops. Comparing this across an event is stronger than asking about any single
-// predicate: it catches a mint of ANY shape, not only the members-kind one the
-// withdrawn rule happened to use.
-func grantLedgerGrants(
-	t *testing.T,
-	registry resourcespec.Registry,
-	id resource.ResourceID,
-) []string {
-	t.Helper()
-	rows, _, err := registry.List(context.Background(), string(id), 100, "")
-	if err != nil {
-		t.Fatalf("list grants of %q: %v", id, err)
-	}
-	var out []string
-	for _, row := range rows {
-		if row.ID != id {
-			continue
-		}
-		for _, grant := range row.Grants {
-			ops := make([]string, 0, len(grant.Ops))
-			for _, op := range grant.Ops {
-				ops = append(ops, string(op))
-			}
-			sort.Strings(ops)
-			out = append(out, fmt.Sprintf("%s/%s=[%s]",
-				grant.GranteeKind, grant.Grantee, strings.Join(ops, ",")))
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// T62. The other half of the death cut: what End does to the GRANTS ledger of
-// the resources a dying actor created.
+// T62. The other half of the death cut: what End does to the RESOURCE ROWS a
+// dying actor created.
 //
 // The rule (control-model-harden §3) is "只删不补" — the death path retires the
-// identity and touches nothing else. The v1.x design it replaced auto-granted
-// members{read,write} on a dead creator's resources so the channel would not be
-// left holding an orphan; it was withdrawn because it publishes a deliberately
-// PRIVATE resource — a credential — to every member the instant its creator
-// dies. The collective's reach is decided at BIRTH or not at all.
+// identity and touches nothing else. Under the membrane-uniform model
+// (PM-D1/PM-D3) that means: the resource row survives byte-for-byte — it is
+// neither deleted nor "handed off" (created_by, the PM-D3 delete predicate,
+// keeps naming the dead creator; delete authority falls to the channel owner
+// root alone, never silently to another member).
 //
 // Why this test has to live over a real Home rather than beside the door's own
 // succession tests: a test that kills the actor by calling the store's
 // Deregister cannot observe this rule at all. Deregister is one
-// `UPDATE actor_registry SET deregistered_at=?` and has no reach into
-// resource_grants, so "no compensating grant appeared" is true there by
-// construction of the function being called, in every possible world. The rule
-// lives one layer up, in the End COMMAND — Controller.End → Terminal →
-// Deregister, plus home's own ActorsEnded effects — which is exactly the layer
-// a reintroduced auto-grant would naturally be written into, and exactly the
-// layer this test routes through. (The door package cannot reach it: actorctl
-// depends on accessdoor through lib/actorcaps, so an accessdoor-internal test
-// importing actorctl would close an import cycle.)
-func TestEndingAnActorMintsNoGrantOnTheResourcesItCreated(t *testing.T) {
+// `UPDATE actor_registry SET deregistered_at=?` and structurally cannot reach
+// the resources table, so "the row was untouched" is true there by
+// construction. The rule lives one layer up, in the End COMMAND —
+// Controller.End → Terminal → Deregister, plus home's own ActorsEnded effects
+// — which is exactly the layer a compensating rewrite would naturally be
+// written into, and exactly the layer this test routes through.
+func TestEndingAnActorLeavesItsResourceRowsUntouched(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	h, err := Open(Config{
-		ChannelID:            grantLedgerChannel,
+		ChannelID:            deathCutChannel,
 		DBPath:               dbPath,
 		CompositionResolver:  routingResolver{},
 		IntroductionResolver: inertIntroductionResolver{},
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: grantLedgerSource, Class: "routing-live",
+			SourceDeclID: deathCutSource, Class: "routing-live",
 			Kind: actor.KindAgent, Placement: storespec.NewServerPlacement(),
 			CreatedAt: time.Now().UnixMilli(),
 		}},
@@ -202,7 +153,7 @@ func TestEndingAnActorMintsNoGrantOnTheResourcesItCreated(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	instances, err := h.controller.DeclaredInstances(grantLedgerSource)
+	instances, err := h.controller.DeclaredInstances(deathCutSource)
 	if err != nil || len(instances) != 1 {
 		t.Fatalf("bootstrap creator missing: %v err=%v", instances, err)
 	}
@@ -212,7 +163,7 @@ func TestEndingAnActorMintsNoGrantOnTheResourcesItCreated(t *testing.T) {
 	// lets it go out of scope), so the ledger is read through a second store
 	// handle on the same file — the same back-door read restart_crash_window
 	// uses to inspect durable truth behind a running Home.
-	stores, err := runtime.OpenChannel(ctx, grantLedgerChannel, dbPath,
+	stores, err := runtime.OpenChannel(ctx, deathCutChannel, dbPath,
 		runtime.OpenChannelOptions{MustExist: true})
 	if err != nil {
 		t.Fatalf("open a store handle on the live channel: %v", err)
@@ -220,26 +171,16 @@ func TestEndingAnActorMintsNoGrantOnTheResourcesItCreated(t *testing.T) {
 	t.Cleanup(func() { _ = stores.Close() })
 	registry := stores.Assembly.Resources
 
-	// A private resource under the CreatorIdentity birth form: birth installs
-	// the creator's own entry and nothing else. No members row is written, and
-	// that absence is the thing the death path must preserve.
-	if err := registry.Create(ctx, grantLedgerPrivate, resourcespec.KindKV,
-		creator, "", "", []byte(`"secret"`), resourcespec.ResourceBirthPlan{}); err != nil {
-		t.Fatalf("create the private resource: %v", err)
+	if err := registry.Create(ctx, deathCutResource, resourcespec.KindKV,
+		creator, "", "", []byte(`"work product"`), resourcespec.ResourceBirthPlan{}); err != nil {
+		t.Fatalf("create the resource: %v", err)
 	}
-
-	before := grantLedgerGrants(t, registry, grantLedgerPrivate)
-	if len(before) == 0 {
-		t.Fatal("birth installed no grant at all; the fixture is not the CreatorIdentity form")
+	before, exists, err := registry.Resolve(ctx, deathCutResource)
+	if err != nil || !exists {
+		t.Fatalf("resolve before the end: exists=%v err=%v", exists, err)
 	}
-	for _, op := range grantLedgerObjectOps {
-		allowed, err := registry.MembersAllow(ctx, grantLedgerPrivate, op)
-		if err != nil {
-			t.Fatalf("MembersAllow(%q) before the end: %v", op, err)
-		}
-		if allowed {
-			t.Fatalf("the resource was already collective for %q before anyone died", op)
-		}
+	if before.CreatedBy != creator {
+		t.Fatalf("created_by=%q before the end, want the creator", before.CreatedBy)
 	}
 
 	// The real command — the one an operator and a declaration removal both
@@ -251,28 +192,14 @@ func TestEndingAnActorMintsNoGrantOnTheResourcesItCreated(t *testing.T) {
 		t.Fatalf("the creator survived its own End: active=%v err=%v", active, err)
 	}
 
-	// 只删不补, asked twice. First the specific rule: no members entry, for any
-	// object verb.
-	for _, op := range grantLedgerObjectOps {
-		allowed, err := registry.MembersAllow(ctx, grantLedgerPrivate, op)
-		if err != nil {
-			t.Fatalf("MembersAllow(%q) after the end: %v", op, err)
-		}
-		if allowed {
-			t.Fatalf("ending the creator minted a members grant for %q — "+
-				"a private resource just became the whole channel's", op)
-		}
-	}
-	// Then the general one: the ledger is byte-for-byte what it was. A
-	// compensating grant of any shape — members, or a hand-off to some
-	// surviving actor — fails here.
-	if after := grantLedgerGrants(t, registry, grantLedgerPrivate); !slices.Equal(before, after) {
-		t.Fatalf("the end rewrote the grants ledger: before=%v after=%v", before, after)
-	}
-
-	// And the resource itself outlived its creator: existence is channel-scoped,
-	// so the death path did not delete it either.
-	if _, exists, err := registry.Resolve(ctx, grantLedgerPrivate); err != nil || !exists {
+	// 只删不补: the row survives byte-for-byte. created_by still names the dead
+	// creator (no hand-off — the PM-D3 predicate is a birth fact, not a lease),
+	// and existence is channel-scoped (the death path did not delete it).
+	after, exists, err := registry.Resolve(ctx, deathCutResource)
+	if err != nil || !exists {
 		t.Fatalf("the resource died with its creator: exists=%v err=%v", exists, err)
+	}
+	if after != before {
+		t.Fatalf("the end rewrote the resource row: before=%+v after=%+v", before, after)
 	}
 }
