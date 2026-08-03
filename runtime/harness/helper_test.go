@@ -122,3 +122,22 @@ func runStep(t *testing.T, mk func(Deps) step, deps Deps, ctx context.Context, e
 	}
 	return mk(deps).Run(ctx, env)
 }
+
+// stubLog is a MessageLog whose method behaviour is supplied per-test — the
+// injectable seam for error / defensive branches the real store won't produce
+// on demand (append faults, lookup faults, panics).
+type stubLog struct {
+	appendFn   func(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error)
+	findByID   func(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error)
+	hasFinalFn func(ctx context.Context, parentID message.ID) (bool, error)
+}
+
+func (s stubLog) Append(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
+	return s.appendFn(ctx, env, isTerminal)
+}
+func (s stubLog) FindByID(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error) {
+	return s.findByID(ctx, id)
+}
+func (s stubLog) HasFinalResponse(ctx context.Context, parentID message.ID) (bool, error) {
+	return s.hasFinalFn(ctx, parentID)
+}

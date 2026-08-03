@@ -1,5 +1,8 @@
 package store
 
+// In-package (white-box) test helpers shared by the registry-seeded suites
+// (state, timers). It holds no tests of its own.
+
 import (
 	"context"
 

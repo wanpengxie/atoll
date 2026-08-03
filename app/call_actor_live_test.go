@@ -1,27 +1,26 @@
 package app_test
 
-// metatool_live_test is the device-adapter slice acceptance ③: an AGENT, using
-// its REAL invocation machinery (metatool.Shell.call_actor — the SAME shell the
-// go-kimi Bridge holds), drives a daemon-hosted adapter end to end. Nothing here
-// is mocked except the device's canned replies and the LLM (the test drives the
-// shell directly instead of letting a model emit the tool call).
+// call_actor_live_test pins the agent's REAL invocation machinery end to end:
+// metatool.ExecuteCallActor over the substrate JobTable (the same out-station
+// account production agents drive through metatool.Exec) against a daemon-hosted
+// adapter. Nothing here is mocked except the device's canned replies and the LLM
+// (the test drives call_actor directly instead of letting a model emit the call).
 //
 // Full live path per call:
 //   metatool.ExecuteCallActor (the agent's real call entry)
-//     → shell builds + emits a kind=request into the live channel home
+//     → JobTable submits a kind=request into the live channel home
 //       → home routes it over the daemon /compute link to the hosted cell
 //         → adapter dispatches a device down-frame
 //           → mock device replies a canned up-frame
 //         → adapter commits a kind=response into the channel
 //       → home routes the response back to the agent cell (audience = caller)
-//     → cell.Receive feeds shell.Deliver → call_actor returns the device result.
+//     → the engine's own pump matches the response to the ledger
+//     → call_actor returns the device result.
 //
-// The agent cell is built by a custom AgentFactory: it HOLDS a metatool.Shell
-// exactly as kimiagent.Bridge does (NewShell with the cell's pen as Writer) and
-// its Receive forwards responses to shell.Deliver — the kimiagent Receive path
-// minus the LLM. The test then drives call_actor on its own goroutine while the
-// cell goroutine delivers; the shell's two-goroutine contract (Arm on the caller
-// edge, Match on the mailbox) is what production relies on.
+// The agent cell is an actorbase.Proc whose engine IS the JobTable; its run
+// loop idles on sys.Recv() to keep the cell live while the test drives the
+// meta-tool Exec face from a separate goroutine (JobTable is cross-goroutine
+// safe by design — the mind-binding caller class).
 
 import (
 	"context"
@@ -56,7 +55,7 @@ import (
 )
 
 // Fixed loopback device ports for this test's two adapters. Distinct from the
-// xhs_live_test ports (18090/18091) so concurrent live tests never collide.
+// device_adapter_live_test ports (18090/18091) so concurrent live tests never collide.
 const (
 	metatoolXHSDeviceAddr  = "127.0.0.1:18092"
 	metatoolKimiDeviceAddr = "127.0.0.1:18093"

@@ -11,11 +11,10 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
-// This file covers the SystemKernel lifecycle state machine required by
-// harden03-phase-b-build-spec-revision §13.2 ("SystemKernel: invalid
-// identity/unit；double Start；Start×Close 共同串行且 -race 无裂锁；unexpected
-// Done fatal；normal close last") and the §7 fault-table rows for adopt/Start
-// failure and unexpected Done.
+// The SystemKernel lifecycle state machine: invalid identity/unit rejection,
+// double Start, Start×Close mutual serialization (-race clean), unexpected
+// Done is fatal, normal close reports last — plus the fault rows for
+// adopt/Start failure and unexpected Done.
 
 func TestKernelStartRejectsInvalidUnit(t *testing.T) {
 	t.Parallel()

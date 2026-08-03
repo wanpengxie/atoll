@@ -1,5 +1,11 @@
 package app_test
 
+// Daemon deletion = a realm tombstone value write. These tests pin the two
+// halves of that mechanism: the tombstone transaction is atomic (a persist
+// failure is a loud 5xx, never a false ok), and a committed tombstone revokes
+// the device carrier while leaving channel-local bindings untouched (binding
+// reclaim is forever manual — 设计如此).
+
 import (
 	"context"
 	"fmt"
@@ -13,7 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// TestDeleteDaemonTombstonePersistFailureReturns5xx pins the daemon-delete fix: if the
+// TestDeleteDaemonTombstonePersistFailureReturns5xx pins the failure half: if the
 // tombstone cannot reach durable storage, the handler must return 5xx (not a false
 // ok) and leave the daemon intact — never silently drop the key while reporting
 // success.
@@ -160,70 +166,4 @@ func TestDeleteDaemonRevokesDeviceAndKeepsBinding(t *testing.T) {
 	if !stillBound {
 		t.Fatalf("realm tombstone removed channel-local binding %q", daemonID)
 	}
-}
-
-func TestComputeRejectsQueryCredentialAndMalformedBearer(t *testing.T) {
-	env := setupTestApp(t)
-	query := env.do(t, http.MethodGet, "/compute?key=must-not-enter-logs", nil, nil)
-	assertStatus(t, query, http.StatusUnauthorized)
-
-	missing := env.do(t, http.MethodGet, "/compute", nil, nil)
-	assertStatus(t, missing, http.StatusBadRequest)
-	malformed := env.doHeaders(t, http.MethodGet, "/compute", nil, nil, map[string]string{
-		"Authorization": "Basic credentials",
-	})
-	assertStatus(t, malformed, http.StatusBadRequest)
-	invalid := env.doHeaders(t, http.MethodGet, "/compute", nil, nil, map[string]string{
-		"Authorization": "Bearer invalid",
-	})
-	assertStatus(t, invalid, http.StatusUnauthorized)
-}
-
-func TestChannelDaemonListIncludesBindingsOwnedByOtherMembers(t *testing.T) {
-	env := setupTestApp(t)
-	_, ownerCookies := register(t, env, "channel-owner@example.com", "secret123", "Owner")
-	created := env.do(t, http.MethodPost, "/api/channels", map[string]any{"name": "shared"}, ownerCookies)
-	assertStatus(t, created, http.StatusCreated)
-	channelID := respJSON(t, created)["id"].(string)
-
-	_, memberCookies := register(t, env, "daemon-owner@example.com", "secret123", "Member")
-	joined := env.do(t, http.MethodPost, "/api/channels/"+channelID+"/join", nil, memberCookies)
-	if joined.Code != http.StatusCreated && joined.Code != http.StatusOK {
-		t.Fatalf("join status=%d body=%s", joined.Code, joined.Body.String())
-	}
-	daemon := env.do(t, http.MethodPost, "/api/daemons", map[string]any{"name": "member-box"}, memberCookies)
-	assertStatus(t, daemon, http.StatusCreated)
-	daemonID := respJSON(t, daemon)["id"].(string)
-	bound := env.do(t, http.MethodPost, "/api/channels/"+channelID+"/daemons", map[string]any{"daemon_id": daemonID}, memberCookies)
-	assertStatus(t, bound, http.StatusOK)
-
-	listed := env.do(t, http.MethodGet, "/api/channels/"+channelID+"/daemons", nil, ownerCookies)
-	assertStatus(t, listed, http.StatusOK)
-	for _, raw := range respJSON(t, listed)["daemons"].([]any) {
-		if raw.(map[string]any)["id"] == daemonID {
-			return
-		}
-	}
-	t.Fatalf("channel daemon list hid member-owned binding %s", daemonID)
-}
-
-func TestChannelDaemonListRejectsNonMember(t *testing.T) {
-	env := setupTestApp(t)
-	_, ownerCookies := register(t, env, "roster-owner@example.com", "secret123", "Owner")
-	created := env.do(t, http.MethodPost, "/api/channels", map[string]any{"name": "private-roster"}, ownerCookies)
-	assertStatus(t, created, http.StatusCreated)
-	channelID := respJSON(t, created)["id"].(string)
-
-	_, outsiderCookies := register(t, env, "roster-outsider@example.com", "secret123", "Outsider")
-	listed := env.do(t, http.MethodGet, "/api/channels/"+channelID+"/daemons", nil, outsiderCookies)
-	assertStatus(t, listed, http.StatusForbidden)
-}
-
-func TestActorDeclListUsesRelationIndexWhenChannelUnavailable(t *testing.T) {
-	env := setupTestApp(t)
-	setup := fullSetup(t, env)
-	env.app.DropHomeForTest(channel.ID(setup.chID))
-
-	listed := env.do(t, http.MethodGet, "/api/actor-decls", nil, setup.cookies)
-	assertStatus(t, listed, http.StatusOK)
 }

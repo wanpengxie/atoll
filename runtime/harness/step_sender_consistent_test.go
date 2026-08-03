@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -84,5 +85,20 @@ func TestStepSenderConsistent_ForcedKindOverwrite(t *testing.T) {
 	}
 	if e.Sender.Kind != actor.KindTool {
 		t.Fatalf("sender.kind = %q, want welded truth tool", e.Sender.Kind)
+	}
+}
+
+// ctx canceled before run → the final guard returns ctx.Err(). (The
+// Lookup-error seam this step used to have is gone: no registry lookup left —
+// identity is pen-welded, liveness gated one layer up by the pen's Admit();
+// that gate's coverage lives in authority_pen_test.go.)
+func TestStepSenderConsistent_CtxCanceled(t *testing.T) {
+	deps := Deps{ChannelID: testChannelID}
+	ctx, cancel := context.WithCancel(ctxCallerKind("agent:p", actor.KindAgent))
+	cancel() // canceled before run → final guard returns ctx.Err()
+	env := validEvent("m1", "agent:p")
+	_, err := runStep(t, newStepSenderConsistent, deps, ctx, env)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }

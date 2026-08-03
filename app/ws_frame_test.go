@@ -681,3 +681,52 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 		t.Fatalf("non-member after: want forbidden, got %v", errFrame)
 	}
 }
+
+// TestWS_OversizedFrameClosesConn pins the ws read-limit hardening: a write
+// frame past wsMaxFrameBytes (a few hundred KB) is a malformed / hostile client, so
+// SetReadLimit fails the read and the server closes the conn — the client's next
+// read errors within a short window instead of the server allocating unboundedly.
+// (The write-deadline + ping/pong keepalive on the same link are pure server-side
+// network behaviour, not black-box observable in a fast unit test; asserted by
+// construction, see ws.go.)
+func TestWS_OversizedFrameClosesConn(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	hdr := http.Header{}
+	var parts []string
+	for _, ck := range s.cookies {
+		parts = append(parts, ck.Name+"="+ck.Value)
+	}
+	hdr.Set("Cookie", strings.Join(parts, "; "))
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	defer conn.Close()
+
+	// Opening attach frame (channel-blind, v2 — the connector's read limit is armed
+	// before this read).
+	if err := conn.WriteJSON(map[string]any{"v": 2, "frame_type": "attach"}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	// ~2 MB frame — well past the 512KB read limit (connector SetReadLimit).
+	big := strings.Repeat("x", 2*1024*1024)
+	if err := conn.WriteJSON(map[string]any{
+		"v": 2, "frame_type": "submit",
+		"payload": map[string]any{"channel_id": s.chID, "msg_type": "chat.text", "kind": "event", "payload": map[string]any{"text": big}},
+	}); err != nil {
+		return // a write error here already means the server closed — acceptable
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return // server closed the conn after the oversized frame — as required
+		}
+	}
+}

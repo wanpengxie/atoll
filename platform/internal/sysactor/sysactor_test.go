@@ -3,6 +3,7 @@ package sysactor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -238,5 +239,119 @@ func TestActorListSynthesizesKernelEntryFromConstant(t *testing.T) {
 	}
 	if !sawKernel {
 		t.Fatalf("kernel entry absent from catalog: %+v", catalog)
+	}
+}
+
+// TestReceive_NonRequestIgnored proves the system actor does not synthesize for
+// anything but the two reserved requests: events and other reserved requests
+// are silently left (no reply), so the caller's closure times out instead.
+func TestReceive_NonRequestIgnored(t *testing.T) {
+	cases := []struct {
+		kind message.Kind
+		typ  string
+	}{
+		{message.KindEvent, "some.event"},
+		{message.KindRequest, "actor.other"},
+		{message.KindResponse, introspect.QueryList},
+	}
+	for _, c := range cases {
+		sys := &fakeSys{}
+		s := New(Deps{Authority: fakeRegistry{}})
+		msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "e1", Kind: c.kind, Type: c.typ})
+		s.handle(sys, msg)
+		if len(sys.replies) != 0 {
+			t.Fatalf("Receive(%s/%s) wrote %d replies, want 0 (not synthesized)", c.kind, c.typ, len(sys.replies))
+		}
+	}
+}
+
+// errRegistry fails the roster read, exercising the authority-error early
+// return in respondList (a substrate read failure writes nothing — the same
+// "does not synthesize" posture as an unrouted type, never a bogus empty
+// directory).
+type errRegistry struct{ err error }
+
+func (e errRegistry) IsActive(context.Context, actor.ActorID) (bool, error) {
+	return false, nil
+}
+func (e errRegistry) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
+	return nil, e.err
+}
+
+// TestRespondList_RegistryError proves a substrate read failure (the roster read)
+// writes no reply — never swallowed into a bogus empty directory.
+func TestRespondList_RegistryError(t *testing.T) {
+	listReq := requestMsg("q1", introspect.QueryList, nil)
+	sys := &fakeSys{}
+	s := New(Deps{Authority: errRegistry{err: errors.New("registry down")}})
+
+	s.handle(sys, listReq)
+	if len(sys.replies) != 0 {
+		t.Fatalf("expected no reply on registry error, got %d", len(sys.replies))
+	}
+}
+
+// TestObs_NilStat proves the nil-seam contract: with no liveness seam wired,
+// actor.list composes everyone absent with zero uptime (advisory, never a gate).
+func TestObs_NilStat(t *testing.T) {
+	reg := fakeRegistry{rows: []storespec.Record{
+		{ID: "actor:a", Kind: actor.KindAgent},
+	}}
+	listReq := requestMsg("q1", introspect.QueryList, nil)
+	sys := &fakeSys{}
+	// Stat left nil → everyone absent.
+	s := New(Deps{Authority: reg})
+
+	s.handle(sys, listReq)
+	raw, err := json.Marshal(sys.replies[0].v)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
+	}
+	var cat introspect.Catalog
+	if err := json.Unmarshal(raw, &cat); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// One member plus the kernel entry the projection layer synthesizes from the
+	// identity constant (the kernel has no record to list).
+	if len(cat.Actors) != 2 {
+		t.Fatalf("catalog has %d actors, want member + kernel", len(cat.Actors))
+	}
+	for _, row := range cat.Actors {
+		if row.Present || row.UptimeMs != 0 {
+			t.Fatalf("nil stat row=%+v, want absent/zero uptime", row)
+		}
+	}
+}
+
+// TestObs_PresentZeroStartedAt proves the present-but-zero-bind-instant case:
+// when the seam reports present with a zero StartedAt, uptime stays 0 (the
+// !startedAt.IsZero() guard) while present is still true.
+func TestObs_PresentZeroStartedAt(t *testing.T) {
+	reg := fakeRegistry{rows: []storespec.Record{
+		{ID: "actor:a", Kind: actor.KindAgent},
+	}}
+	listReq := requestMsg("q1", introspect.QueryList, nil)
+	sys := &fakeSys{}
+	// present=true but started=zero time → uptime guarded to 0.
+	s := New(Deps{
+		Authority: reg,
+		Presence:  fakeStat{present: map[actor.ActorID]bool{"actor:a": true}},
+		Clock:     func() time.Time { return time.Unix(1000, 0) },
+	})
+
+	s.handle(sys, listReq)
+	raw, err := json.Marshal(sys.replies[0].v)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
+	}
+	var cat introspect.Catalog
+	if err := json.Unmarshal(raw, &cat); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !cat.Actors[0].Present {
+		t.Fatalf("present=false, want true")
+	}
+	if cat.Actors[0].UptimeMs != 0 {
+		t.Fatalf("uptime=%d, want 0 (zero StartedAt guarded)", cat.Actors[0].UptimeMs)
 	}
 }

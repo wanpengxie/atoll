@@ -126,3 +126,12 @@ func TestStepNormalize_TimeRelationGuard(t *testing.T) {
 		})
 	}
 }
+
+// nil envelope short-circuit: Chain.Write guards nil before the loop, so the
+// step's own nil branch is only reachable by calling the step directly.
+func TestStepNormalize_NilEnvelope(t *testing.T) {
+	out, err := newStepNormalize(Deps{NowMs: func() int64 { return fixedNowMs }}).Run(context.Background(), nil)
+	if err != nil || !out.Continue() {
+		t.Fatalf("nil envelope normalize = out=%+v err=%v, want continue/no-error", out, err)
+	}
+}
