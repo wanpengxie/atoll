@@ -78,6 +78,11 @@ func (s *Scrubber) Pass(ctx context.Context, cr *channelRoot, resources []Resour
 	s.logOrphanLiveCount(cr, resources, pendingReservations, pendingTombstones)
 }
 
+// logOrphanLiveCount is count-and-log ONLY — bytes in live/ with no
+// accounting row (crash mid-delete / supersede stragglers) are reported,
+// never reclaimed. Reverse-direction auto-sweep is a known gap: pure
+// space leak, correctness unaffected; build it when disk growth
+// actually hurts.
 func (s *Scrubber) logOrphanLiveCount(cr *channelRoot, resources []ResourceLanded, reservations []ReservationPending, tombstones []TombstoneToReclaim) {
 	accounted := make(map[string]bool, len(resources)+len(reservations)+len(tombstones))
 	for _, r := range resources {
@@ -107,7 +112,10 @@ func (s *Scrubber) logOrphanLiveCount(cr *channelRoot, resources []ResourceLande
 // confirms via ack (§4.7's third frame, closing delete's outbox). A Reclaim
 // failure is logged and left for the NEXT pass to retry (the tombstone
 // stays in the home's pending set until a ReclaimAck actually lands) —
-// never a partial ack.
+// never a partial ack. A permanently-failing coord therefore warns on
+// every pass forever: accepted — no production path can mint a malformed
+// coord, and a loud repeating log is the honest failure mode, not a
+// silent drop of the tombstone.
 func (s *Scrubber) reclaimPendingTombstones(ctx context.Context, cr *channelRoot, pending []TombstoneToReclaim, ack ReclaimAckFunc) {
 	for _, ts := range pending {
 		if err := s.Reclaimer.Reclaim(cr, ts.Coord); err != nil {

@@ -26,6 +26,10 @@ type Host struct {
 	// file per concurrent OpenWrite on the SAME coord (streamer.go's own
 	// "concurrent writes to the same coord each get their own staging
 	// file") — the coord must stay "active" until every one of them closes.
+	// Known debt: a WriteHandle never Closed pins its refcount — and thus
+	// its staging entry's sweep protection — until process exit. Bounded
+	// by actor count; the proper fix is tying handle lifetime to the
+	// owning actor's incarnation death, not a patch here.
 	activeWritesMu sync.Mutex
 	activeWrites   map[string]int
 }

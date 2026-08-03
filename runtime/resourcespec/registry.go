@@ -307,6 +307,10 @@ type Registry interface {
 	// orphan; a row here with no matching coord on disk is a lost-byte
 	// anomaly — both the Scrubber's concern, not this method's). Same
 	// per-daemon confinement as the two List*ByDaemon methods above.
+	// All three per-daemon lists are unpaginated full slices: reply size
+	// grows with the daemon's placement set, unbounded — fine at today's
+	// scale, but a very large reply also has to fit the wire's
+	// single-substream flow-control window.
 	ListByPlacementDaemon(ctx context.Context, daemonID string) ([]ResourceRow, error)
 
 	// SweepExpiredReservations deletes — and returns — every reservation
@@ -328,7 +332,10 @@ type Registry interface {
 	// one). This is the server-side mirror of Delete's tombstone reclaim:
 	// reservations never grow unbounded from an abandoned/lost create,
 	// matching §1.7's "三触发全在 server 侧收口" account (①success ②loser
-	// ③this one).
+	// ③this one). Since the ONLY caller is that per-daemon ReconcilePull
+	// handler, a daemon that never polls again leaves its rows unswept
+	// forever — dead weight in the table, not a correctness hole (nothing
+	// reads them but its own pull).
 	SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]ReservationRow, error)
 
 	// TouchReservationsByCoords bumps last_progress_at = atMs for every
