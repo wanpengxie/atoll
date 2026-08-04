@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform"
@@ -146,7 +147,7 @@ func setupTestApp(t *testing.T) *testEnv {
 		t.Fatalf("gateway.New: %v", err)
 	}
 	gw.Start()
-	a.SetGateway(web.New(gw))
+	a.SetGateway(web.New(gw, contract.Version))
 	a.SetMembershipPoke(gw.Poke)
 
 	t.Cleanup(func() {

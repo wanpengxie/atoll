@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 )
 
@@ -23,17 +24,17 @@ import (
 // (for every eligible channel) and the standard frames UP (each naming its channel_id).
 func (a *App) handleWS(c *gin.Context) {
 	if a.wsGateway == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "gateway unavailable"})
+		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeUnavailable, "gateway unavailable")
 		return
 	}
 	token, err := c.Cookie(middleware.SessionCookie)
 	if err != nil || token == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
+		writeAPIError(c, http.StatusUnauthorized, contract.CodeNotAuthenticated, "not authenticated")
 		return
 	}
 	userID, ok := middleware.VerifySession(c.Request.Context(), a.db, token)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid session"})
+		writeAPIError(c, http.StatusUnauthorized, contract.CodeNotAuthenticated, "invalid session")
 		return
 	}
 
@@ -48,13 +49,13 @@ func (a *App) handleWS(c *gin.Context) {
 
 func (a *App) handleCompute(c *gin.Context) {
 	if c.Query("key") != "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "query credentials are not accepted"})
+		writeAPIError(c, http.StatusUnauthorized, contract.CodeNotAuthenticated, "query credentials are not accepted")
 		return
 	}
 	auth := c.GetHeader("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") ||
 		strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "malformed bearer authorization"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeBadPayload, "malformed bearer authorization")
 		return
 	}
 	key := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
@@ -63,7 +64,11 @@ func (a *App) handleCompute(c *gin.Context) {
 		if status == http.StatusServiceUnavailable {
 			c.Header("Retry-After", "5")
 		}
-		c.JSON(status, gin.H{"error": http.StatusText(status)})
+		code := contract.CodeNotAuthenticated
+		if status == http.StatusServiceUnavailable {
+			code = contract.CodeUnavailable
+		}
+		writeAPIError(c, status, code, http.StatusText(status))
 		return
 	}
 	a.daemonHost.Serve(c.Writer, c.Request, daemonID)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -42,7 +43,7 @@ func (a *App) handleJoinChannel(c *gin.Context) {
 	if outcome.Changed {
 		status = http.StatusCreated
 	}
-	c.JSON(status, gin.H{"actor_id": outcome.Value.ActorID, "changed": outcome.Changed})
+	c.JSON(status, contract.Membership{ActorID: string(outcome.Value.ActorID), Changed: outcome.Changed})
 }
 
 type introduceForwardValue struct {
@@ -91,11 +92,12 @@ func introduceCall(
 }
 
 func (a *App) handleIntroduceActor(c *gin.Context) {
-	var input struct {
-		DeclID string `json:"decl_id"`
+	var input contract.IntroduceActorRequest
+	if !decodeRequest(c, &input) {
+		return
 	}
-	if err := c.ShouldBindJSON(&input); err != nil || strings.TrimSpace(input.DeclID) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "decl_id required"})
+	if strings.TrimSpace(input.DeclID) == "" {
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "decl_id required")
 		return
 	}
 	input.DeclID = strings.TrimSpace(input.DeclID)
@@ -108,12 +110,11 @@ func (a *App) handleIntroduceActor(c *gin.Context) {
 		return
 	}
 	if !outcome.Changed {
-		c.JSON(http.StatusOK, gin.H{"changed": false, "instances": outcome.Value.Instances})
+		c.JSON(http.StatusOK, contract.IntroduceActorResponse{Changed: false, Instances: actorIDStrings(outcome.Value.Instances)})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{
-		"changed": true, "actor_id": outcome.Value.Result.ActorID,
-		"instances": outcome.Value.Instances,
+	c.JSON(http.StatusCreated, contract.IntroduceActorResponse{
+		Changed: true, ActorID: string(outcome.Value.Result.ActorID), Instances: actorIDStrings(outcome.Value.Instances),
 	})
 }
 
@@ -147,7 +148,7 @@ func removeCall(ctx context.Context, principal string, target actor.ActorID) sys
 func (a *App) handleRemoveChannelActor(c *gin.Context) {
 	target := actor.ActorID(strings.TrimSpace(c.Param("actorID")))
 	if target == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "actor_id required"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "actor_id required")
 		return
 	}
 	outcome, err := forwardSysop(
@@ -158,5 +159,13 @@ func (a *App) handleRemoveChannelActor(c *gin.Context) {
 		writeSysopError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"changed": outcome.Changed, "removed": outcome.Value.Removed})
+	c.JSON(http.StatusOK, contract.RemoveActorResponse{Changed: outcome.Changed, Removed: actorIDStrings(outcome.Value.Removed)})
+}
+
+func actorIDStrings(ids []actor.ActorID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = string(id)
+	}
+	return out
 }

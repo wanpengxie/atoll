@@ -82,7 +82,7 @@ func TestDetachDaemonUnavailableChannelIsExplicit(t *testing.T) {
 	}
 	w := env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s", s.chID, daemonID), nil, s.cookies)
 	assertStatus(t, w, http.StatusServiceUnavailable)
-	if body := respJSON(t, w); body["retry"] != "safe" {
+	if body := respJSON(t, w); body["will_retry"] != true || body["code"] != "result_unknown" {
 		t.Fatalf("detach unknown=%v", body)
 	}
 }

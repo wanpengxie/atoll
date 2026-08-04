@@ -55,8 +55,8 @@ func TestNewErrorFrameCarriesFlatContract(t *testing.T) {
 	}
 }
 
-// TestFrameRoundTrip round-trips every frame type through Marshal/ParseFrame,
-// asserts the version bit rides, and that an unknown frame_type is refused.
+// TestFrameRoundTrip round-trips every frame type through tolerant envelope
+// parsing and asserts the version bit rides.
 func TestFrameRoundTrip(t *testing.T) {
 	cases := []struct {
 		name string
@@ -87,9 +87,9 @@ func TestFrameRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal: %v", err)
 			}
-			got, err := ParseFrame(b)
+			got, err := ParseEnvelope(b)
 			if err != nil {
-				t.Fatalf("ParseFrame: %v", err)
+				t.Fatalf("ParseEnvelope: %v", err)
 			}
 			if got.V != FrameVersion {
 				t.Fatalf("version bit lost: %d", got.V)
@@ -101,17 +101,61 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 }
 
-func TestFrameUnknownTypeRejected(t *testing.T) {
-	b := []byte(`{"v":2,"frame_type":"teleport"}`)
-	if _, err := ParseFrame(b); err == nil {
-		t.Fatal("expected unknown frame_type to be refused")
+func TestDirectionalUnknownTypePolicy(t *testing.T) {
+	b := []byte(`{"v":2,"frame_type":"teleport","payload":{"future":true}}`)
+	if _, err := ParseUpstreamFrame(b); !errors.Is(err, ErrUnknownFrameType) {
+		t.Fatalf("upstream unknown kind must fail closed, got %v", err)
+	}
+	down, err := ParseDownstream(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := down.(UnknownFrame); !ok {
+		t.Fatalf("downstream unknown kind must use UnknownFrame, got %T", down)
+	}
+}
+
+func TestUpstreamUnknownFieldsRejected(t *testing.T) {
+	for _, b := range []string{
+		`{"v":2,"frame_type":"attach","ref":"r1","unexpected":true,"payload":{}}`,
+		`{"v":2,"frame_type":"attach","ref":"r1","payload":{"since":{},"unexpected":true}}`,
+		`{"v":2,"frame_type":"submit","ref":"r1","payload":{"channel_id":"c1","msg_type":"m","unexpected":true}}`,
+		`{"v":2,"frame_type":"resolve","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","decision":"ok","unexpected":true}}`,
+		`{"v":2,"frame_type":"cancel","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","unexpected":true}}`,
+		`{"v":2,"frame_type":"after","ref":"r1","payload":{"channel_id":"c1","duration_ms":1,"msg_type":"m","unexpected":true}}`,
+		`{"v":2,"frame_type":"cancel_timer","ref":"r1","payload":{"channel_id":"c1","timer_id":"t1","unexpected":true}}`,
+		`{"v":2,"frame_type":"resource","ref":"r1","payload":{"channel_id":"c1","op":"read","resource_id":"r1","unexpected":true}}`,
+	} {
+		f, err := ParseUpstreamFrame([]byte(b))
+		if err == nil {
+			t.Fatalf("unknown upstream field accepted: %s", b)
+		}
+		if f.Ref != "r1" {
+			t.Fatalf("readable ref must survive validation failure: %#v", f)
+		}
+	}
+}
+
+func TestDownstreamUnknownFieldsIgnored(t *testing.T) {
+	b := []byte(`{"v":2,"frame_type":"feed","future_envelope":true,"payload":{"channel_id":"c1","seq":1,"envelope":{},"future_payload":true}}`)
+	down, err := ParseDownstream(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feed, ok := down.(FeedFrame)
+	if !ok {
+		t.Fatalf("got %T", down)
+	}
+	var payload FeedPayload
+	if err := feed.DecodePayload(&payload); err != nil || payload.ChannelID != "c1" {
+		t.Fatalf("downstream additive payload failed: %#v, %v", payload, err)
 	}
 }
 
 func TestFrameVersionRejected(t *testing.T) {
 	// v1 (the pre-连接模型勘误期 envelope) is now refused — v2 is the current version.
 	b := []byte(`{"v":1,"frame_type":"attach"}`)
-	if _, err := ParseFrame(b); err == nil {
+	if _, err := ParseEnvelope(b); err == nil {
 		t.Fatal("expected version mismatch to be refused")
 	}
 }
@@ -125,10 +169,24 @@ func TestFrameSizeLimit(t *testing.T) {
 	if _, err := f.Marshal(); err == nil {
 		t.Fatal("expected oversize frame Marshal to be refused")
 	}
-	// ParseFrame also refuses oversize bytes.
+	// ParseEnvelope also refuses oversize bytes.
 	over := make([]byte, MaxFrameBytes+1)
-	if _, err := ParseFrame(over); err == nil {
-		t.Fatal("expected oversize ParseFrame to be refused")
+	if _, err := ParseEnvelope(over); err == nil {
+		t.Fatal("expected oversize ParseEnvelope to be refused")
+	}
+}
+
+func TestAttachReceiptCarriesContractVersion(t *testing.T) {
+	f, err := NewFrame(FrameReceipt, "attach-ref", AttachReceipt{ContractVersion: "1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got AttachReceipt
+	if err := f.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ContractVersion != "1.0" || f.Ref != "attach-ref" {
+		t.Fatalf("bad attach receipt: %#v %#v", f, got)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"modernc.org/sqlite"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -30,37 +31,33 @@ func (a *App) handleListChannels(c *gin.Context) {
 	query += ` ORDER BY created_at,id`
 	rows, err := a.db.QueryContext(c.Request.Context(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
 	defer rows.Close()
-	result := make([]gin.H, 0)
+	result := make([]contract.Channel, 0)
 	for rows.Next() {
 		var id, name, typ, status, owner string
 		var created int64
 		var parent sql.NullString
 		if err := rows.Scan(&id, &name, &typ, &status, &owner, &created, &parent); err != nil {
-			c.JSON(500, gin.H{"error": "query failed"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 			return
 		}
 		result = append(result, channelJSON(id, name, typ, status, owner, created, parent))
 	}
 	if err := rows.Err(); err != nil {
-		c.JSON(500, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"channels": result})
+	c.JSON(http.StatusOK, contract.ChannelList{Channels: result})
 }
 
-func channelJSON(id, name, typ, status, owner string, created int64, parent sql.NullString) gin.H {
-	row := gin.H{
-		"id": id, "name": name, "type": typ, "status": status,
-		"owner_principal": owner, "created_at": created,
-	}
+func channelJSON(id, name, typ, status, owner string, created int64, parent sql.NullString) contract.Channel {
+	row := contract.Channel{ID: id, Name: name, Type: typ, Status: status, OwnerPrincipal: owner, CreatedAt: created}
 	if parent.Valid {
-		row["parent_id"] = parent.String
-	} else {
-		row["parent_id"] = nil
+		parentID := parent.String
+		row.ParentID = &parentID
 	}
 	return row
 }
@@ -70,13 +67,12 @@ func channelJSON(id, name, typ, status, owner string, created int64, parent sql.
 // stateless arm brings the physical side up after the answer.
 func (a *App) handleCreateChannel(c *gin.Context) {
 	caller := middleware.UserID(c)
-	var req struct {
-		Name     string  `json:"name"`
-		Type     string  `json:"type"`
-		ParentID *string `json:"parent_id"`
+	var req contract.CreateChannelRequest
+	if !decodeRequest(c, &req) {
+		return
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
-		c.JSON(400, gin.H{"error": "name required"})
+	if strings.TrimSpace(req.Name) == "" {
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "name required")
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
@@ -84,19 +80,19 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		req.Type = "group"
 	}
 	if req.Type != "group" {
-		c.JSON(400, gin.H{"error": "invalid channel type"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "invalid channel type")
 		return
 	}
 	now := time.Now().UnixMilli()
 	chID := channel.ID(uuid.NewString())
 	snapshot, err := (channelspec.RenderedSnapshot{Class: defaultBoostClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
 	if err != nil {
-		c.JSON(500, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	realmSnapshot, err := (channelspec.RenderedSnapshot{Class: realmToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
 	if err != nil {
-		c.JSON(500, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: req.Type, OwnerPrincipal: caller, CreatedAt: now,
@@ -109,7 +105,7 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	}
 	raw, err := json.Marshal(spec)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	a.createMu.Lock()
@@ -122,22 +118,22 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	)
 	a.createMu.Unlock()
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "create unavailable", "retry": "safe"})
+		writeRetryingAPIError(c, http.StatusServiceUnavailable, contract.CodeUnavailable, "create unavailable")
 		return
 	}
 	if parentMissing {
-		c.JSON(http.StatusConflict, gin.H{"error": "parent_not_present"})
+		writeAPIError(c, http.StatusConflict, contract.CodeParentNotPresent, "parent not present")
 		return
 	}
 	if conflict {
-		c.JSON(http.StatusConflict, gin.H{"error": "channel name already exists"})
+		writeAPIError(c, http.StatusConflict, contract.CodeAlreadyExists, "channel name already exists")
 		return
 	}
 	row := channelJSON(
 		string(accepted.ID), accepted.Name, accepted.Type, accepted.Status,
 		accepted.Owner, accepted.Created, accepted.Parent,
 	)
-	row["changed"] = changed
+	row.Changed = &changed
 	status := http.StatusOK
 	if changed {
 		status = http.StatusCreated
@@ -271,17 +267,17 @@ func (a *App) handleGetChannel(c *gin.Context) {
 		FROM channels WHERE id=? AND status='present'`, chID).
 		Scan(&id, &name, &typ, &status, &owner, &created, &parent)
 	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(404, gin.H{"error": "channel not found"})
+		writeAPIError(c, http.StatusNotFound, contract.CodeChannelNotFound, "channel not found")
 		return
 	}
 	if err != nil {
-		c.JSON(500, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
 	row := channelJSON(id, name, typ, status, owner, created, parent)
 	if bundle, ok := a.host.Acquire(channel.ID(chID)); ok {
 		if value, found, err := bundle.View().DefaultAgent(c.Request.Context()); err == nil && found {
-			row["default_agent"] = string(value)
+			row.DefaultAgent = string(value)
 		}
 	}
 	c.JSON(200, row)
@@ -294,27 +290,27 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 	defer release()
 	accepted, err := a.acceptDeleteChannel(c.Request.Context(), channel.ID(chID), caller)
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "delete unavailable", "retry": "safe"})
+		writeRetryingAPIError(c, http.StatusServiceUnavailable, contract.CodeUnavailable, "delete unavailable")
 		return
 	}
 	switch accepted {
 	case deleteAlreadyRetired:
-		c.JSON(http.StatusOK, gin.H{"status": "retiring", "changed": false})
+		c.JSON(http.StatusOK, contract.ChannelDeletion{Status: "retiring", Changed: false})
 		return
 	case deleteRowAbsent:
 		// The predicate "must not exist" already holds; claiming a status for
 		// a row that never existed would be a false statement.
-		c.JSON(http.StatusOK, gin.H{"changed": false})
+		c.JSON(http.StatusOK, contract.ChannelDeletion{Changed: false})
 		return
 	case deleteForbidden:
-		c.JSON(http.StatusForbidden, gin.H{"error": "channel owner required"})
+		writeAPIError(c, http.StatusForbidden, contract.CodeForbidden, "channel owner required")
 		return
 	case deleteAccepted:
 		// Fall through to the destructive tail below.
 	default:
 		// Fail closed: an outcome this switch does not know must never fall
 		// into the destructive accepted tail.
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "unknown delete outcome"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "unknown delete outcome")
 		return
 	}
 	// Read the affected roster through the relation module (it owns every
@@ -335,7 +331,7 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 	}
 	a.resetLifecycleForStatusChange(channel.ID(chID))
 	a.pokeLifecycle(channel.ID(chID))
-	c.JSON(http.StatusOK, gin.H{"status": "retiring", "changed": true})
+	c.JSON(http.StatusOK, contract.ChannelDeletion{Status: "retiring", Changed: true})
 }
 
 type deleteOutcome uint8
@@ -403,19 +399,19 @@ func (a *App) handleListCandidates(c *gin.Context) {
 	}
 	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,email,display_name FROM users ORDER BY created_at,id`)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
 	defer rows.Close()
-	result := make([]gin.H, 0)
+	result := make([]contract.Candidate, 0)
 	for rows.Next() {
 		var id, email string
 		var display sql.NullString
 		if rows.Scan(&id, &email, &display) != nil {
-			c.JSON(500, gin.H{"error": "query failed"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 			return
 		}
-		result = append(result, gin.H{"user_id": id, "email": email, "display_name": display.String})
+		result = append(result, contract.Candidate{UserID: id, Email: email, DisplayName: display.String})
 	}
-	c.JSON(200, gin.H{"candidates": result})
+	c.JSON(http.StatusOK, contract.CandidateList{Candidates: result})
 }

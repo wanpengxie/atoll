@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
@@ -23,16 +24,6 @@ import (
 // one row = identity + class + config + owner + visibility, for agents and tools
 // alike. It writes realm current values directly, then pokes serving channels;
 // each Home pulls and applies the resolved snapshot during reconcile.
-
-type createDeclReq struct {
-	Name string `json:"name"`
-	// Class = the declaration's DEFAULT engine class (stored as
-	// actor_decls.default_class); a per-channel engine may override it at
-	// introduce time.
-	Class      string          `json:"class"`
-	Config     json.RawMessage `json:"config"`
-	Visibility string          `json:"visibility"`
-}
 
 // isJSONObject reports whether raw is a JSON object — the only shape a declared
 // instance's config (persona/skills + engine knobs) may take. null / array /
@@ -50,9 +41,12 @@ func isJSONObject(raw json.RawMessage) bool {
 // current user.
 func (a *App) handleCreateDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
-	var req createDeclReq
-	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+	var req contract.DeclarationCreateRequest
+	if !decodeRequest(c, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "name required")
 		return
 	}
 	class := strings.TrimSpace(req.Class)
@@ -65,7 +59,7 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 	// would smuggle a membrane entry past the "remove realm-tool = close it"
 	// sovereignty switch. The default "go-kimi" is a registered class and passes.
 	if _, ok, err := a.declarationClassKind(c.Request.Context(), class); err != nil || !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeUnknownClass, "unknown or reserved class")
 		return
 	}
 	visibility := strings.TrimSpace(req.Visibility)
@@ -73,7 +67,7 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 		visibility = "private"
 	}
 	if visibility != "public" && visibility != "private" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "visibility must be public or private"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "visibility must be public or private")
 		return
 	}
 	id := uuid.NewString()
@@ -81,25 +75,25 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 	cfg := ""
 	if len(req.Config) > 0 {
 		if !isJSONObject(req.Config) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "config must be a JSON object"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "config must be a JSON object")
 			return
 		}
 		cfg = string(req.Config)
 	}
 	if err := registry.ValidateConfig(class, req.Config); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "config_invalid"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "invalid config")
 		return
 	}
 	if _, err := a.db.ExecContext(c.Request.Context(),
 		`INSERT INTO actor_decls (id, name, owner, default_class, config_json, created_at, updated_at, visibility) VALUES (?,?,?,?,?,?,?,?)`,
 		id, strings.TrimSpace(req.Name), userID, class, cfg, now, now, visibility); err != nil {
 		a.logger.Error("create decl", "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{
-		"id": id, "name": strings.TrimSpace(req.Name), "class": class,
-		"owner": userID, "visibility": visibility, "created_at": now,
+	c.JSON(http.StatusCreated, contract.Declaration{
+		ID: id, Name: strings.TrimSpace(req.Name), Class: class, Owner: userID,
+		Visibility: visibility, CreatedAt: now, Instances: []contract.DeclarationInstance{},
 	})
 }
 
@@ -112,54 +106,50 @@ func (a *App) handleListDecls(c *gin.Context) {
 		`SELECT id, name, owner, default_class, visibility, created_at, updated_at FROM actor_decls WHERE (visibility = 'public' OR owner = ?) AND deleted_at IS NULL ORDER BY created_at`,
 		userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	defer rows.Close()
-	out := []gin.H{}
+	out := []contract.Declaration{}
 	for rows.Next() {
 		var id, name, owner, class, visibility string
 		var ca, ua int64
 		if err := rows.Scan(&id, &name, &owner, &class, &visibility, &ca, &ua); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 			return
 		}
-		out = append(out, gin.H{"id": id, "name": name, "owner": owner, "class": class, "visibility": visibility, "created_at": ca, "updated_at": ua})
+		out = append(out, contract.Declaration{
+			ID: id, Name: name, Owner: owner, Class: class, Visibility: visibility,
+			CreatedAt: ca, UpdatedAt: ua, Instances: []contract.DeclarationInstance{},
+		})
 	}
 	if err := rows.Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	if err := rows.Close(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 
 	// Project instance identity only. A channel's declaration version is a local
 	// history/order fence, not realm value identity and not part of this API DTO.
-	for _, decl := range out {
-		declID := decl["id"].(string)
-		instances := make([]gin.H, 0)
+	for i := range out {
+		declID := out[i].ID
+		instances := make([]contract.DeclarationInstance, 0)
 		indexed, err := a.relations.InstancesOf(c.Request.Context(), declID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "declaration instances unavailable"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "declaration instances unavailable")
 			return
 		}
 		for _, instance := range indexed {
-			instances = append(instances, gin.H{
-				"channel_id": string(instance.ChannelID), "instance_id": string(instance.ActorID),
+			instances = append(instances, contract.DeclarationInstance{
+				ChannelID: string(instance.ChannelID), InstanceID: string(instance.ActorID),
 			})
 		}
-		decl["instances"] = instances
+		out[i].Instances = instances
 	}
-	c.JSON(http.StatusOK, gin.H{"decls": out})
-}
-
-type updateDeclReq struct {
-	Name       *string         `json:"name"`
-	Class      *string         `json:"class"`
-	Config     json.RawMessage `json:"config"`
-	Visibility *string         `json:"visibility"`
+	c.JSON(http.StatusOK, contract.DeclarationList{Declarations: out})
 }
 
 // handleUpdateDecl writes the global declaration value. Channel Homes pull the
@@ -167,15 +157,14 @@ type updateDeclReq struct {
 func (a *App) handleUpdateDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
 	declID := c.Param("declID")
-	var req updateDeclReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
+	var req contract.DeclarationUpdateRequest
+	if !decodeRequest(c, &req) {
 		return
 	}
 	now := time.Now().UnixMilli()
 	tx, err := a.db.BeginTx(c.Request.Context(), nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	defer tx.Rollback()
@@ -183,9 +172,9 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 	var currentConfig sql.NullString
 	if err := tx.QueryRowContext(c.Request.Context(), `SELECT default_class,config_json FROM actor_decls WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, declID, userID).Scan(&currentClass, &currentConfig); err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
+			writeAPIError(c, http.StatusNotFound, contract.CodeDeclNotFound, "declaration not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		}
 		return
 	}
@@ -202,26 +191,26 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 	}
 	if err := registry.ValidateConfig(finalClass, finalConfig); err != nil {
 		if errors.Is(err, registry.ErrUnknownClass) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeUnknownClass, "unknown or reserved class")
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "config_invalid"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "invalid config")
 		return
 	}
 	if req.Class != nil {
 		sameKind, classErr := a.declarationClassTransition(c.Request.Context(), currentClass, finalClass)
 		if classErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "class registry unavailable"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "class registry unavailable")
 			return
 		}
 		if !sameKind {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "class must remain within the declaration kind"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "class must remain within the declaration kind")
 			return
 		}
 		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET default_class=?,updated_at=? WHERE `+ownedDeclarationWhere,
 			finalClass, now, declID, userID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 			return
 		}
 	}
@@ -229,46 +218,46 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET name = ?, updated_at = ? WHERE `+ownedDeclarationWhere,
 			strings.TrimSpace(*req.Name), now, declID, userID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 			return
 		}
 	}
 	if req.Visibility != nil {
 		visibility := strings.TrimSpace(*req.Visibility)
 		if visibility != "public" && visibility != "private" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "visibility must be public or private"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "visibility must be public or private")
 			return
 		}
 		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET visibility = ?, updated_at = ? WHERE `+ownedDeclarationWhere,
 			visibility, now, declID, userID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 			return
 		}
 	}
 	if len(req.Config) > 0 {
 		if !isJSONObject(req.Config) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "config must be a JSON object"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "config must be a JSON object")
 			return
 		}
 		canonical, err := channel.CanonicalJSON(req.Config)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "invalid config")
 			return
 		}
 		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET config_json = ?, updated_at = ? WHERE `+ownedDeclarationWhere,
 			string(canonical), now, declID, userID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	a.pokeAllChannels(c.Request.Context())
-	c.JSON(http.StatusOK, gin.H{"updated": declID})
+	c.JSON(http.StatusOK, contract.DeclarationMutation{Updated: declID})
 }
 
 // handleDeleteDecl marks supply stopped. Existing channel instances retain
@@ -280,7 +269,7 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	now := time.Now().UnixMilli()
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	defer tx.Rollback()
@@ -288,16 +277,16 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 		`UPDATE actor_decls SET deleted_at = ?, updated_at = ? WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`,
 		now, now, declID, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
+		writeAPIError(c, http.StatusNotFound, contract.CodeDeclNotFound, "declaration not found")
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"deleted": declID})
+	c.JSON(http.StatusOK, contract.DeclarationMutation{Deleted: declID})
 }

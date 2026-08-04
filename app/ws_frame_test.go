@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -73,12 +74,19 @@ func dialWS(t *testing.T, srv *httptest.Server, cookies []*http.Cookie, chID str
 	if sinceSeq > 0 {
 		attach = map[string]any{"since": map[string]int64{chID: sinceSeq}}
 	}
-	c.writeFrame("attach", "", attach)
-	// Read the attach receipt synchronously (报到 ack — an EMPTY payload now; attach is
-	// no longer a binding grant) so a test's first nextAck is its own frame's receipt.
+	c.writeFrame("attach", "attach-1", attach)
+	// Read the attach receipt synchronously so a test's first nextAck is its own
+	// frame's receipt. This pins attach → receipt(ref, contract_version).
 	var wf wireFrame
 	if err := conn.ReadJSON(&wf); err != nil {
 		t.Fatalf("attach receipt read: %v", err)
+	}
+	var receipt contract.Meta
+	if err := json.Unmarshal(wf.Payload, &receipt); err != nil {
+		t.Fatalf("attach receipt payload: %v", err)
+	}
+	if wf.Type != "receipt" || wf.Ref != "attach-1" || receipt.ContractVersion != contract.Version {
+		t.Fatalf("attach receipt=%+v payload=%+v", wf, receipt)
 	}
 	go c.readLoop()
 	return c
@@ -139,7 +147,7 @@ func (c *wsClient) readLoop() {
 		case "receipt":
 			var pm map[string]any
 			_ = json.Unmarshal(wf.Payload, &pm)
-			// The opening attach receipt (empty payload) is consumed synchronously in
+			// The opening attach receipt is consumed synchronously in
 			// dialWS before this loop starts, so every receipt here is a business ack.
 			ack := map[string]any{"type": "ack"}
 			for k, v := range pm {
@@ -228,6 +236,38 @@ func (c *wsClient) waitTail(pred func(env map[string]any) bool, timeout time.Dur
 }
 
 func (c *wsClient) close() { _ = c.conn.Close() }
+
+func TestAttachValidationErrorEchoesReadableRef(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "attach-ref@example.com", "secret123", "Attach Ref")
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+
+	hdr := http.Header{}
+	var parts []string
+	for _, cookie := range cookies {
+		parts = append(parts, cookie.Name+"="+cookie.Value)
+	}
+	hdr.Set("Cookie", strings.Join(parts, "; "))
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/ws", hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{
+		"v": 2, "frame_type": "attach", "ref": "bad-attach-ref",
+		"payload": map[string]any{"since": map[string]int64{}, "misspelled": true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got wireFrame
+	if err := conn.ReadJSON(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "error" || got.Ref != "bad-attach-ref" {
+		t.Fatalf("validation error did not echo ref: %+v", got)
+	}
+}
 
 // setBoostDefault performs the backend half of the client creation
 // orchestration through only public wire surfaces.

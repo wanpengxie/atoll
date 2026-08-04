@@ -10,24 +10,24 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
-type declarationOverlayRequest struct {
-	Config json.RawMessage `json:"config"`
-}
-
 func (a *App) handlePutDeclarationOverlay(c *gin.Context) {
-	var req declarationOverlayRequest
-	if err := c.ShouldBindJSON(&req); err != nil || !isJSONObject(req.Config) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "config must be a JSON object"})
+	var req contract.DeclarationOverlayRequest
+	if !decodeRequest(c, &req) {
+		return
+	}
+	if !isJSONObject(req.Config) {
+		writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "config must be a JSON object")
 		return
 	}
 	canonical, err := channel.CanonicalJSON(req.Config)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "invalid config")
 		return
 	}
 	a.writeDeclarationOverlay(c, canonical, false)
@@ -49,7 +49,7 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 	principal := middleware.UserID(c)
 	tx, err := a.db.BeginTx(c.Request.Context(), nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	defer tx.Rollback()
@@ -61,18 +61,18 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 		`SELECT owner,visibility,default_class,config_json,deleted_at FROM actor_decls WHERE id=?`, declID).
 		Scan(&owner, &visibility, &class, &global, &deletedAt); err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "declaration not found"})
+			writeAPIError(c, http.StatusNotFound, contract.CodeDeclNotFound, "declaration not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		}
 		return
 	}
 	if deletedAt.Valid {
-		c.JSON(http.StatusConflict, gin.H{"error": "declaration is deleted"})
+		writeAPIError(c, http.StatusConflict, contract.CodeConflict, "declaration is deleted")
 		return
 	}
 	if !declarationVisibleTo(visibility, owner, principal) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "declaration owner required"})
+		writeAPIError(c, http.StatusForbidden, contract.CodeForbidden, "declaration owner required")
 		return
 	}
 	validated := config
@@ -83,16 +83,16 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 		if errors.Is(err, registry.ErrUnknownClass) {
 			// The decl's persisted class no longer exists in this binary —
 			// a different ailment from an invalid config value.
-			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeUnknownClass, "unknown or reserved class")
 			return
 		}
 		status := http.StatusBadRequest
-		code := "config_invalid"
+		message := "invalid config"
 		if clear {
 			status = http.StatusConflict
-			code = "config_invalid_on_clear"
+			message = "stored config is invalid; overlay cannot be cleared"
 		}
-		c.JSON(status, gin.H{"error": code})
+		writeAPIError(c, status, contract.CodeConfigInvalid, message)
 		return
 	}
 	if clear {
@@ -104,15 +104,15 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 			chID, declID, string(config), time.Now().UnixMilli())
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
 		return
 	}
 	a.host.Poke(channel.ID(chID))
-	c.JSON(http.StatusOK, gin.H{"updated": declID})
+	c.JSON(http.StatusOK, contract.DeclarationOverlay{Updated: declID})
 }
 
 func (a *App) pokeAllChannels(ctx context.Context) {

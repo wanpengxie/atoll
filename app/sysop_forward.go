@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -137,22 +138,20 @@ func sysopErrorHTTP(code string) int {
 func writeSysopError(c *gin.Context, err error) {
 	var unknown *sysopUnknownError
 	if errors.As(err, &unknown) {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "result unknown", "retry": "safe"})
+		writeRetryingAPIError(c, http.StatusServiceUnavailable, contract.CodeResultUnknown, "result unknown")
 		return
 	}
 	var gate *sysopGateError
 	if errors.As(err, &gate) {
-		c.JSON(gate.Status, gin.H{"error": gate.Code})
+		writeAPIErrorDetails(c, gate.Status, contract.ErrorCode(gate.Code), gate.Error(), nil)
 		return
 	}
 	var operationErr *channelspec.OperationError
 	if errors.As(err, &operationErr) {
-		c.JSON(sysopErrorHTTP(string(operationErr.Code)), gin.H{
-			"error": operationErr.Detail, "error_code": operationErr.Code,
-		})
+		writeAPIError(c, sysopErrorHTTP(string(operationErr.Code)), contract.ErrorCode(operationErr.Code), operationErr.Detail)
 		return
 	}
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "result unknown", "retry": "safe"})
+	writeRetryingAPIError(c, http.StatusServiceUnavailable, contract.CodeResultUnknown, "result unknown")
 }
 
 func sysopRealmErrorCode(code string) channelspec.RealmErrorCode {

@@ -261,7 +261,7 @@ func (h *testChannel) Gateway() channelhost.GatewayHitch {
 	return testGatewayHitch{base: h.Bundle.Gateway(), extras: h.extras}
 }
 
-func (h *testChannel) Close() error { return h.host.Close() }
+func (h *testChannel) Close() error { return h.host.Close(context.Background()) }
 
 func (h *testChannel) EnsureSubjectSlot(id actor.ActorID) *subjectgate.Slot {
 	return h.extras.EnsureSlot(id)
@@ -562,7 +562,7 @@ func observeFeed(s *Session, onFeed ...func(channel.ID, int)) (*feedObserver, fu
 				if !ok {
 					return
 				}
-				f, err := subjectgate.ParseFrame(b)
+				f, err := subjectgate.ParseEnvelope(b)
 				if err == nil && f.Type == subjectgate.FrameFeed {
 					var payload subjectgate.FeedPayload
 					if f.DecodePayload(&payload) != nil {

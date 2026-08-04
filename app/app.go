@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	relationstore "github.com/wanpengxie/atoll/app/internal/relation"
 	"github.com/wanpengxie/atoll/platform/channelhost"
@@ -145,7 +146,10 @@ func New(cfg Config) (*App, error) {
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
-	engine.Use(gin.Recovery())
+	engine.Use(gin.CustomRecovery(func(c *gin.Context, _ any) {
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
+		c.Abort()
+	}))
 	engine.Use(middleware.CORS())
 
 	a.engine = engine
@@ -229,51 +233,67 @@ func (a *App) Close(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 
 func (a *App) registerRoutes() {
-	// Identity (no auth required).
-	identity := a.engine.Group("/api/identity")
-	{
-		identity.POST("/register", a.handleRegister)
-		identity.POST("/login", a.handleLogin)
-		identity.POST("/logout", a.handleLogout)
-		// /me is the frontend's "am I logged in?" probe — it requires a valid
-		// session, so it carries the Auth guard directly (logout above stays
-		// public: it must clear the cookie even for an already-expired session).
-		identity.GET("/me", middleware.Auth(a.db), a.handleMe)
-		identity.POST("/verification/issue", a.handleVerificationIssue)
+	handlers := map[string]gin.HandlerFunc{
+		"GET /api/meta": func(c *gin.Context) {
+			c.JSON(http.StatusOK, contract.Meta{ContractVersion: contract.Version})
+		},
+		"POST /api/identity/register":                     a.handleRegister,
+		"POST /api/identity/login":                        a.handleLogin,
+		"POST /api/identity/logout":                       a.handleLogout,
+		"GET /api/identity/me":                            a.handleMe,
+		"POST /api/identity/verification/issue":           a.handleVerificationIssue,
+		"GET /api/channels":                               a.handleListChannels,
+		"POST /api/channels":                              a.handleCreateChannel,
+		"GET /api/channels/:chID":                         a.handleGetChannel,
+		"DELETE /api/channels/:chID":                      a.handleDeleteChannel,
+		"POST /api/channels/:chID/join":                   a.handleJoinChannel,
+		"GET /api/channels/:chID/observe":                 a.handleObserveChannel,
+		"GET /api/channels/:chID/messages":                a.handleListMessages,
+		"GET /api/channels/:chID/resources":               a.handleListResources,
+		"GET /api/channels/:chID/resources/:rid":          a.handleStatResource,
+		"GET /api/channels/:chID/resources/:rid/bytes":    a.handleFetchResource,
+		"POST /api/channels/:chID/actors":                 a.handleIntroduceActor,
+		"DELETE /api/channels/:chID/actors/:actorID":      a.handleRemoveChannelActor,
+		"PUT /api/channels/:chID/decls/:declID/config":    a.handlePutDeclarationOverlay,
+		"DELETE /api/channels/:chID/decls/:declID/config": a.handleDeleteDeclarationOverlay,
+		"GET /api/channels/:chID/candidates":              a.handleListCandidates,
+		"GET /api/actor-decls":                            a.handleListDecls,
+		"POST /api/actor-decls":                           a.handleCreateDecl,
+		"PATCH /api/actor-decls/:declID":                  a.handleUpdateDecl,
+		"DELETE /api/actor-decls/:declID":                 a.handleDeleteDecl,
+		"GET /api/daemons":                                a.handleListDaemons,
+		"POST /api/daemons":                               a.handleCreateDaemon,
+		"DELETE /api/daemons/:id":                         a.handleDeleteDaemon,
+		"GET /api/channels/:chID/daemons":                 a.handleListChannelDaemons,
+		"POST /api/channels/:chID/daemons":                a.handleAttachDaemon,
+		"DELETE /api/channels/:chID/daemons/:id":          a.handleDetachDaemon,
+		"GET /ws":                                         a.handleWS,
 	}
-
-	// Authenticated API routes.
-	api := a.engine.Group("/api")
-	api.Use(middleware.Auth(a.db))
-	{
-		api.GET("/channels", a.handleListChannels)
-		api.POST("/channels", a.handleCreateChannel)
-		api.GET("/channels/:chID", a.handleGetChannel)
-		api.GET("/channels/:chID/observe", a.handleObserveChannel)
-		api.GET("/channels/:chID/messages", a.handleListMessages)
-		api.GET("/channels/:chID/resources", a.handleListResources)
-		api.GET("/channels/:chID/resources/:rid", a.handleStatResource)
-		api.GET("/channels/:chID/resources/:rid/bytes", a.handleFetchResource)
-		api.DELETE("/channels/:chID", a.handleDeleteChannel)
-		api.POST("/channels/:chID/join", a.handleJoinChannel)
-		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
-		api.DELETE("/channels/:chID/actors/:actorID", a.handleRemoveChannelActor)
-		api.PUT("/channels/:chID/decls/:declID/config", a.handlePutDeclarationOverlay)
-		api.DELETE("/channels/:chID/decls/:declID/config", a.handleDeleteDeclarationOverlay)
-		api.GET("/channels/:chID/candidates", a.handleListCandidates)
-		// A user's actor-instance declarations (world layer, kind-neutral).
-		api.GET("/actor-decls", a.handleListDecls)
-		api.POST("/actor-decls", a.handleCreateDecl)
-		api.PATCH("/actor-decls/:declID", a.handleUpdateDecl)
-		api.DELETE("/actor-decls/:declID", a.handleDeleteDecl)
-
-		api.GET("/daemons", a.handleListDaemons)
-		api.POST("/daemons", a.handleCreateDaemon)
-		api.DELETE("/daemons/:id", a.handleDeleteDaemon)
-
-		api.GET("/channels/:chID/daemons", a.handleListChannelDaemons)
-		api.POST("/channels/:chID/daemons", a.handleAttachDaemon)
-		api.DELETE("/channels/:chID/daemons/:id", a.handleDetachDaemon)
+	for _, method := range contract.Methods() {
+		key := method.Method + " " + method.Path
+		handler, ok := handlers[key]
+		if !ok {
+			panic("contract method has no handler: " + key)
+		}
+		delete(handlers, key)
+		if method.Path == "/ws" {
+			a.engine.Handle(method.Method, method.Path, handler)
+			continue
+		}
+		chain := make([]gin.HandlerFunc, 0, 3)
+		if method.Auth == contract.AuthSession {
+			chain = append(chain, middleware.Auth(a.db))
+		} else if method.Auth != contract.AuthNone {
+			panic("contract method has unknown auth: " + key)
+		}
+		if method.Method != http.MethodGet && method.Method != http.MethodHead && !method.HasBody() {
+			chain = append(chain, rejectRequestBody)
+		}
+		chain = append(chain, handler)
+		a.engine.Handle(method.Method, method.Path, chain...)
+	}
+	if len(handlers) != 0 {
+		panic("handler missing from contract method registry")
 	}
 
 	// Health check (no auth).
@@ -281,8 +301,7 @@ func (a *App) registerRoutes() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// WebSocket endpoints.
-	a.engine.GET("/ws", a.handleWS)
+	// Internal compute carrier is deliberately outside the shell contract.
 	a.engine.GET("/compute", a.handleCompute)
 	// Static files — only when a built UI is supplied (the UI lives in its
 	// own repository, atoll-web; empty UIDist = API-only server).
@@ -299,7 +318,7 @@ func (a *App) registerRoutes() {
 			c.File(filepath.Join(a.uiDist, "index.html"))
 			return
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		writeAPIError(c, http.StatusNotFound, contract.CodeNotFound, "not found")
 	})
 }
 

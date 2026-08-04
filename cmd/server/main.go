@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
@@ -137,7 +138,7 @@ func main() {
 		log.Fatalf("server: %v", err)
 	}
 	gw.Start()
-	a.SetGateway(web.New(gw))
+	a.SetGateway(web.New(gw, contract.Version))
 	a.SetMembershipPoke(gw.Poke)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

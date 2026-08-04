@@ -1,9 +1,12 @@
 package subjectgate
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"sort"
 	"strings"
 )
 
@@ -74,12 +77,38 @@ const (
 //     connection has no身份色 — eligibility is a per-frame/per-batch fact, and
 //     an eligibility refusal is uniformly forbidden (表①).
 
-// knownFrameTypes is the closed set enforced at Unmarshal. A frame_type outside
-// it is refused (unknown-frame rejection, DoD-12).
-var knownFrameTypes = map[FrameType]struct{}{
-	FrameAttach: {}, FrameSubmit: {}, FrameResolve: {},
-	FrameCancel: {}, FrameAfter: {}, FrameCancelTimer: {}, FrameResource: {},
-	FrameFeed: {}, FrameReceipt: {}, FrameError: {},
+// FrameDirection labels which side of the link may produce a frame type.
+type FrameDirection string
+
+const (
+	DirUpstream   FrameDirection = "upstream"
+	DirDownstream FrameDirection = "downstream"
+)
+
+// knownFrameTypes is the SINGLE machine registry of the frame table: every
+// wire frame type and the direction that owns it. Schema generation
+// (app/contract) derives its frame lists from FrameTypesByDirection — never a
+// second hand-written copy (codegen has one source). Envelope parsing
+// deliberately does not reject values outside it: downstream growth must
+// remain readable by older clients.
+var knownFrameTypes = map[FrameType]FrameDirection{
+	FrameAttach: DirUpstream, FrameSubmit: DirUpstream, FrameResolve: DirUpstream,
+	FrameCancel: DirUpstream, FrameAfter: DirUpstream, FrameCancelTimer: DirUpstream,
+	FrameResource: DirUpstream,
+	FrameFeed: DirDownstream, FrameReceipt: DirDownstream, FrameError: DirDownstream,
+}
+
+// FrameTypesByDirection returns the sorted frame-type names owned by dir — the
+// one source the schema generator consumes.
+func FrameTypesByDirection(dir FrameDirection) []string {
+	var out []string
+	for t, d := range knownFrameTypes {
+		if d == dir {
+			out = append(out, string(t))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Error-code closed set (build spec 表①; 裁决8 平面词律): an error frame's `code`
@@ -102,11 +131,14 @@ const (
 	// refusal is uniformly CodeForbidden.)
 )
 
-// ErrUnknownFrameType is Unmarshal's verdict for a frame_type outside the closed
-// set. Typed so a binding can map it to its own error surface with errors.As/Is.
+// ErrUnknownFrameType is ParseUpstreamFrame's verdict for a frame_type outside
+// the closed upstream set. The lenient ParseEnvelope/ParseDownstream never
+// produce it (downstream growth is must-ignore). Typed so a binding can map it
+// to its own error surface with errors.As/Is.
 var ErrUnknownFrameType = errors.New("subjectgate: unknown frame_type")
 
-// ErrFrameVersion is Unmarshal's verdict for a `v` other than FrameVersion.
+// ErrFrameVersion is ParseEnvelope's verdict (shared by both directions) for a
+// `v` other than FrameVersion.
 var ErrFrameVersion = errors.New("subjectgate: unsupported frame version")
 
 // ErrFrameTooBig is Marshal/Unmarshal's verdict for a serialized frame over
@@ -161,7 +193,10 @@ func (f Frame) Marshal() ([]byte, error) {
 	return b, nil
 }
 
-// DecodePayload unmarshals the frame payload into out.
+// DecodePayload is the lenient, direction-neutral payload decoder: it ignores
+// unknown fields. Clients rely on that for downstream must-ignore; server-side
+// upstream paths may call it only AFTER ParseUpstreamFrame has already done the
+// strict unknown-field-rejecting validation.
 func (f Frame) DecodePayload(out any) error {
 	if len(f.Payload) == 0 {
 		return nil
@@ -169,23 +204,115 @@ func (f Frame) DecodePayload(out any) error {
 	return json.Unmarshal(f.Payload, out)
 }
 
-// ParseFrame decodes and validates one wire frame: size cap, version, closed
-// frame_type set. It is fail-closed on every axis.
-func ParseFrame(b []byte) (Frame, error) {
+// ParseEnvelope performs direction-neutral, tolerant envelope parsing. It
+// validates physical limits and envelope version, but preserves unknown
+// frame_type values and ignores unknown fields for downstream clients.
+func ParseEnvelope(b []byte) (Frame, error) {
 	if len(b) > MaxFrameBytes {
 		return Frame{}, ErrFrameTooBig
 	}
 	var f Frame
 	if err := json.Unmarshal(b, &f); err != nil {
-		return Frame{}, err
+		return f, err
 	}
 	if f.V != FrameVersion {
-		return Frame{}, fmt.Errorf("%w: got %d want %d", ErrFrameVersion, f.V, FrameVersion)
-	}
-	if _, ok := knownFrameTypes[f.Type]; !ok {
-		return Frame{}, fmt.Errorf("%w: %q", ErrUnknownFrameType, f.Type)
+		return f, fmt.Errorf("%w: got %d want %d", ErrFrameVersion, f.V, FrameVersion)
 	}
 	return f, nil
+}
+
+// ParseUpstreamFrame is the server-entry decoder. Unlike ParseEnvelope it is
+// fail-closed for the envelope, frame kind, and typed payload. A partially
+// decoded frame is returned with validation errors so a readable ref can still
+// be echoed in the structured error response.
+func ParseUpstreamFrame(b []byte) (Frame, error) {
+	f, err := ParseEnvelope(b)
+	if err != nil {
+		return f, err
+	}
+	var strict Frame
+	if err := decodeStrictJSON(b, &strict); err != nil {
+		return f, fmt.Errorf("subjectgate: strict envelope: %w", err)
+	}
+	switch f.Type {
+	case FrameAttach:
+		err = validatePayloadStrict[AttachPayload](f.Payload)
+	case FrameSubmit:
+		err = validatePayloadStrict[SubmitPayload](f.Payload)
+	case FrameResolve:
+		err = validatePayloadStrict[ResolvePayload](f.Payload)
+	case FrameCancel:
+		err = validatePayloadStrict[CancelPayload](f.Payload)
+	case FrameAfter:
+		err = validatePayloadStrict[AfterPayload](f.Payload)
+	case FrameCancelTimer:
+		err = validatePayloadStrict[CancelTimerPayload](f.Payload)
+	case FrameResource:
+		err = validatePayloadStrict[ResourcePayload](f.Payload)
+	default:
+		return f, fmt.Errorf("%w: %q", ErrUnknownFrameType, f.Type)
+	}
+	if err != nil {
+		return f, fmt.Errorf("subjectgate: strict %s payload: %w", f.Type, err)
+	}
+	return f, nil
+}
+
+func validatePayloadStrict[T any](raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var payload T
+	return decodeStrictJSON(raw, &payload)
+}
+
+func decodeStrictJSON(raw []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+// Downstream is the client-side known union. UnknownFrame is a deliberate
+// fallback rather than a decode error, implementing downstream must-ignore.
+type Downstream interface{ downstreamFrame() }
+
+type FeedFrame struct{ Frame }
+type ReceiptFrame struct{ Frame }
+type ErrorFrame struct{ Frame }
+type UnknownFrame struct{ Frame }
+
+func (FeedFrame) downstreamFrame()    {}
+func (ReceiptFrame) downstreamFrame() {}
+func (ErrorFrame) downstreamFrame()   {}
+func (UnknownFrame) downstreamFrame() {}
+
+// ParseDownstream decodes a server frame into the known union or the unknown
+// fallback without rejecting future frame kinds.
+func ParseDownstream(b []byte) (Downstream, error) {
+	f, err := ParseEnvelope(b)
+	if err != nil {
+		return nil, err
+	}
+	switch f.Type {
+	case FrameFeed:
+		return FeedFrame{Frame: f}, nil
+	case FrameReceipt:
+		return ReceiptFrame{Frame: f}, nil
+	case FrameError:
+		return ErrorFrame{Frame: f}, nil
+	default:
+		return UnknownFrame{Frame: f}, nil
+	}
 }
 
 // --- Upstream payloads (build spec §S2 逐帧字段表) -------------------------------
@@ -194,7 +321,8 @@ func ParseFrame(b []byte) (Frame, error) {
 // since is a multi-key游标表 keyed by any channel id (channel_id is gone — a
 // connection is channel-blind). A key with no eligibility is silently dropped
 // (a harmless read位置 — the client may hold a stale cursor for a channel it已
-// left). The receipt is empty (报到 ack).
+// left). The receipt echoes the attach ref and carries the server contract
+// version (see AttachReceipt — the websocket half of version discovery).
 type AttachPayload struct {
 	Since map[string]int64 `json:"since,omitempty"`
 }
@@ -289,9 +417,11 @@ type FeedPayload struct {
 	Envelope  json.RawMessage `json:"envelope"`
 }
 
-// AttachReceipt is the report-in ack (连接模型勘误期 v2): an empty载荷. attach is
-// no longer a binding grant — it just hands over the游标表 and acks receipt.
-type AttachReceipt struct{}
+// AttachReceipt is the report-in ack. ContractVersion is the websocket side of
+// version discovery; the transport envelope version remains FrameVersion.
+type AttachReceipt struct {
+	ContractVersion string `json:"contract_version"`
+}
 
 // SubmitReceipt acks a write: it says the write was accepted, and names WHAT was
 // written. That identity is the message.ID — nothing else belongs here. A row

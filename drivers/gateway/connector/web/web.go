@@ -32,14 +32,19 @@ const (
 // root constructs it with the gateway and the app injects ServeWeb behind an
 // app-defined interface (app → drivers is forbidden, so cmd/server bridges).
 type Connector struct {
-	gw       *gateway.Gateway
-	upgrader websocket.Upgrader
+	gw              *gateway.Gateway
+	contractVersion string
+	upgrader        websocket.Upgrader
 }
 
-// New builds a web connector over gw.
-func New(gw *gateway.Gateway) *Connector {
+// New builds a web connector over gw. The app-owned contract version is
+// supplied by the assembly root so drivers never import the app layer.
+func New(gw *gateway.Gateway, contractVersion string) *Connector {
+	if contractVersion == "" {
+		panic("web connector: contract version is required")
+	}
 	return &Connector{
-		gw: gw,
+		gw: gw, contractVersion: contractVersion,
 		upgrader: websocket.Upgrader{
 			// Same-origin ws (cross-site hijacking defense): /ws authenticates by
 			// cookie, so an absent Origin (non-browser client) is allowed but a
@@ -83,20 +88,20 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 	if err != nil {
 		return
 	}
-	f, perr := subjectgate.ParseFrame(data)
+	f, perr := subjectgate.ParseUpstreamFrame(data)
 	if perr != nil || f.Type != subjectgate.FrameAttach {
-		writeErr(ws, "attach", subjectgate.CodeBadPayload, "opening frame must be a valid attach")
+		writeErr(ws, f.Ref, "attach", subjectgate.CodeBadPayload, "opening frame must be a valid attach")
 		return
 	}
 	var ap subjectgate.AttachPayload
 	if err := f.DecodePayload(&ap); err != nil {
-		writeErr(ws, "attach", subjectgate.CodeBadPayload, err.Error())
+		writeErr(ws, f.Ref, "attach", subjectgate.CodeBadPayload, err.Error())
 		return
 	}
 
 	sess, aerr := c.gw.Attach(principal, parseSince(ap))
 	if aerr != nil {
-		writeErr(ws, "attach", subjectgate.CodeUnavailable, "gateway unavailable")
+		writeErr(ws, f.Ref, "attach", subjectgate.CodeUnavailable, "gateway unavailable")
 		return
 	}
 	defer sess.Close()
@@ -110,9 +115,9 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		_ = ws.SetReadDeadline(time.Now())
 	}()
 
-	// Attach receipt (报到 ack, empty payload — attach is no longer a binding grant).
+	// Attach receipt carries version discovery and is sent before feed backfill.
 	// Sent before the feed backfill so it is not interleaved behind it.
-	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{})
+	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{ContractVersion: c.contractVersion})
 	sess.Send(receipt)
 	sess.StartFeed()
 
@@ -123,9 +128,9 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		if err != nil {
 			return
 		}
-		fr, perr := subjectgate.ParseFrame(data)
+		fr, perr := subjectgate.ParseUpstreamFrame(data)
 		if perr != nil {
-			sess.Send(errFrame("", subjectgate.CodeBadPayload, perr.Error()))
+			sess.Send(errFrame(fr.Ref, string(fr.Type), subjectgate.CodeBadPayload, perr.Error()))
 			continue
 		}
 		sess.Send(sess.Upstream(fr))
@@ -171,13 +176,13 @@ func parseSince(ap subjectgate.AttachPayload) map[channel.ID]int64 {
 	return out
 }
 
-func errFrame(frameType, code, detail string) subjectgate.Frame {
-	return subjectgate.NewErrorFrame("", frameType, code, detail)
+func errFrame(ref, frameType, code, detail string) subjectgate.Frame {
+	return subjectgate.NewErrorFrame(ref, frameType, code, detail)
 }
 
 // writeErr writes one error frame directly to the ws (pre-session teardown paths).
-func writeErr(ws *websocket.Conn, frameType, code, detail string) {
-	b, err := errFrame(frameType, code, detail).Marshal()
+func writeErr(ws *websocket.Conn, ref, frameType, code, detail string) {
+	b, err := errFrame(ref, frameType, code, detail).Marshal()
 	if err != nil {
 		return
 	}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/wanpengxie/atoll/app/contract"
 )
 
 // SessionCookie is the canonical session cookie name. It is the contract between
@@ -59,7 +60,7 @@ func Auth(db *sql.DB) gin.HandlerFunc {
 		token, _ := c.Cookie(SessionCookie)
 		userID, ok := VerifySession(c.Request.Context(), db, token)
 		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, contract.Error{Code: contract.CodeNotAuthenticated, Message: "not authenticated"})
 			return
 		}
 		c.Set(ctxKeyUserID, userID)

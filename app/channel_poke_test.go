@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform/channelhost"
@@ -50,7 +51,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 		t.Fatalf("gateway.New: %v", err)
 	}
 	gw.Start()
-	a.SetGateway(web.New(gw))
+	a.SetGateway(web.New(gw, contract.Version))
 	a.SetMembershipPoke(gw.Poke)
 	t.Cleanup(func() {
 		gw.Close()

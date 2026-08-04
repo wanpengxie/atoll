@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -93,16 +94,16 @@ func (a *App) readerForPrincipal(ctx context.Context, bundle channelhost.Bundle,
 func writeReadFailure(c *gin.Context, reason observeReason, err error) {
 	switch reason {
 	case observeChannelAbsent:
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		writeAPIError(c, http.StatusNotFound, contract.CodeChannelNotFound, "channel not found")
 	case observeNowMember:
-		c.JSON(http.StatusConflict, gin.H{"code": string(observeNowMember)})
+		writeAPIError(c, http.StatusConflict, contract.CodeNowMember, "principal is already a channel member")
 	case observeHostUnavailable:
-		c.JSON(http.StatusServiceUnavailable, gin.H{"code": string(observeHostUnavailable)})
+		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel unavailable")
 	default:
 		if err != nil {
 			c.Error(err) // keep the outward contract closed while retaining diagnostics
 		}
-		c.JSON(http.StatusConflict, gin.H{"code": string(observeUnavailable)})
+		writeAPIError(c, http.StatusConflict, contract.CodeCapabilityUnavailable, "observation unavailable")
 	}
 }
 
@@ -111,7 +112,7 @@ func parsePage(c *gin.Context) (int64, int, bool) {
 	if raw := c.Query("after_seq"); raw != "" {
 		value, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || value < 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid after_seq"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "invalid after_seq")
 			return 0, 0, false
 		}
 		after = value
@@ -120,7 +121,7 @@ func parsePage(c *gin.Context) (int64, int, bool) {
 	if raw := c.Query("limit"); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil || value <= 0 || value > 500 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "invalid limit")
 			return 0, 0, false
 		}
 		limit = value
@@ -140,10 +141,19 @@ func (a *App) handleListMessages(c *gin.Context) {
 	}
 	rows, scanned, err := bundle.View().ReadVisibleAfterSeq(c.Request.Context(), reader, after, limit)
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel unavailable")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"messages": rows, "scanned_through_seq": scanned})
+	messages := make([]contract.MessageRow, 0, len(rows))
+	for _, row := range rows {
+		envelope, err := json.Marshal(row.Envelope)
+		if err != nil {
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "message encoding failed")
+			return
+		}
+		messages = append(messages, contract.MessageRow{Envelope: envelope, Seq: row.Seq, IsTerminal: row.IsTerminal})
+	}
+	c.JSON(http.StatusOK, contract.MessagePage{Messages: messages, ScannedThroughSeq: scanned})
 }
 
 func writeSSE(w http.ResponseWriter, event string, value any) error {
@@ -238,7 +248,7 @@ func resourceListQuery(c *gin.Context) (channel.ResourceListQuery, bool) {
 	if raw := c.Query("limit"); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil || limit <= 0 || limit > 200 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "invalid limit")
 			return q, false
 		}
 		q.Limit = limit
@@ -260,19 +270,19 @@ func writeRealmFailure(c *gin.Context, err error) {
 	if errors.As(err, &realmErr) {
 		switch realmErr.Code {
 		case channelspec.RealmResourceNotFound:
-			c.JSON(http.StatusNotFound, gin.H{"error": string(realmErr.Code)})
+			writeAPIError(c, http.StatusNotFound, contract.ErrorCode(realmErr.Code), realmErr.Error())
 		case channelspec.RealmForbidden:
-			c.JSON(http.StatusForbidden, gin.H{"error": string(realmErr.Code)})
+			writeAPIError(c, http.StatusForbidden, contract.ErrorCode(realmErr.Code), realmErr.Error())
 		case channelspec.RealmInvalidRequest:
-			c.JSON(http.StatusBadRequest, gin.H{"error": string(realmErr.Code)})
+			writeAPIError(c, http.StatusBadRequest, contract.ErrorCode(realmErr.Code), realmErr.Error())
 		case channelspec.RealmCapabilityUnavailable:
-			c.JSON(http.StatusConflict, gin.H{"code": string(realmErr.Code)})
+			writeAPIError(c, http.StatusConflict, contract.ErrorCode(realmErr.Code), realmErr.Error())
 		default:
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": string(realmErr.Code)})
+			writeAPIError(c, http.StatusServiceUnavailable, contract.ErrorCode(realmErr.Code), realmErr.Error())
 		}
 		return
 	}
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+	writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel unavailable")
 }
 
 func (a *App) handleListResources(c *gin.Context) {

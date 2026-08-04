@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -27,37 +28,31 @@ func (a *App) handleListDaemons(c *gin.Context) {
 		`SELECT id, name, api_key, created_at FROM daemons WHERE owner_id = ? AND deleted_at IS NULL`, userID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
 	defer rows.Close()
 
-	var result []gin.H
+	result := make([]contract.Daemon, 0)
 	for rows.Next() {
 		var id, name, apiKey string
 		var createdAt int64
 		if err := rows.Scan(&id, &name, &apiKey, &createdAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 			return
 		}
 		online, err := a.daemonOnline(c.Request.Context(), id)
 		if err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "daemon status unavailable"})
+			writeAPIError(c, http.StatusServiceUnavailable, contract.CodeUnavailable, "daemon status unavailable")
 			return
 		}
-		result = append(result, gin.H{
-			"id": id, "name": name, "api_key": apiKey, "created_at": createdAt,
-			"online": online,
-		})
+		result = append(result, contract.Daemon{ID: id, Name: name, APIKey: apiKey, CreatedAt: createdAt, Online: &online})
 	}
 	if err := rows.Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
-	if result == nil {
-		result = []gin.H{}
-	}
-	c.JSON(http.StatusOK, gin.H{"daemons": result})
+	c.JSON(http.StatusOK, contract.DaemonList{Daemons: result})
 }
 
 func (a *App) daemonOnline(_ context.Context, stringID string) (bool, error) {
@@ -83,11 +78,12 @@ func (a *App) directoryChannelIDs(ctx context.Context) ([]channel.ID, error) {
 
 func (a *App) handleCreateDaemon(c *gin.Context) {
 	userID := middleware.UserID(c)
-	var req struct {
-		Name string `json:"name"`
+	var req contract.CreateDaemonRequest
+	if !decodeRequest(c, &req) {
+		return
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+	if req.Name == "" {
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "name required")
 		return
 	}
 
@@ -102,15 +98,11 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 		daemonID, userID, req.Name, apiKey, now,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "create daemon failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "create daemon failed")
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"id":      daemonID,
-		"name":    req.Name,
-		"api_key": apiKey,
-	})
+	c.JSON(http.StatusCreated, contract.Daemon{ID: daemonID, Name: req.Name, APIKey: apiKey})
 }
 
 // handleDeleteDaemon commits the realm tombstone and immediately revokes the
@@ -131,27 +123,27 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	var deletedAt sql.NullInt64
 	err := a.db.QueryRowContext(ctx, `SELECT owner_id,deleted_at FROM daemons WHERE id = ?`, daemonID).Scan(&owner, &deletedAt)
 	if err == sql.ErrNoRows || (err == nil && owner != userID) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "daemon not found"})
+		writeAPIError(c, http.StatusNotFound, contract.CodeDaemonNotFound, "daemon not found")
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "delete failed")
 		return
 	}
 
 	if !deletedAt.Valid {
 		if _, err := a.db.ExecContext(ctx,
 			`UPDATE daemons SET deleted_at=? WHERE id=? AND owner_id=? AND deleted_at IS NULL`, time.Now().UnixMilli(), daemonID, userID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "delete failed")
 			return
 		}
 	}
 	release()
 	locked = false
 	a.daemonHost.RevokeDaemon(daemonID)
-	c.JSON(http.StatusOK, gin.H{
-		"ok": true, "authority_committed": true, "convergence": "revoked",
-		"diagnostics": a.daemonHost.Diagnostics(daemonID),
+	c.JSON(http.StatusOK, contract.DaemonDeletion{
+		OK: true, AuthorityCommitted: true, Convergence: "revoked",
+		Diagnostics: a.daemonHost.Diagnostics(daemonID),
 	})
 }
 
@@ -162,7 +154,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 	}
 	bundle, available := a.host.Acquire(channel.ID(chID))
 	if !available {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel unavailable")
 		return
 	}
 	// A channel roster is channel-scoped, not viewer-owned. Any member who can
@@ -170,49 +162,45 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 	// which member registered that daemon in the realm.
 	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,name,created_at FROM daemons WHERE deleted_at IS NULL ORDER BY id`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
 	defer rows.Close()
 
-	var result []gin.H
+	result := make([]contract.Daemon, 0)
 	for rows.Next() {
 		var id, name string
 		var createdAt int64
 		if err := rows.Scan(&id, &name, &createdAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 			return
 		}
 		bound, err := bundle.View().IsBound(c.Request.Context(), id)
 		if err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel bindings unavailable"})
+			writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel bindings unavailable")
 			return
 		}
 		if !bound {
 			continue
 		}
-		result = append(result, gin.H{
-			"id": id, "name": name, "created_at": createdAt,
-			"online": a.daemonHost.LaneAttached(id, string(chID)),
-		})
+		online := a.daemonHost.LaneAttached(id, string(chID))
+		result = append(result, contract.Daemon{ID: id, Name: name, CreatedAt: createdAt, Online: &online})
 	}
 	if err := rows.Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")
 		return
 	}
-	if result == nil {
-		result = []gin.H{}
-	}
-	c.JSON(http.StatusOK, gin.H{"daemons": result})
+	c.JSON(http.StatusOK, contract.DaemonList{Daemons: result})
 }
 
 func (a *App) handleAttachDaemon(c *gin.Context) {
 	chID := channel.ID(c.Param("chID"))
-	var req struct {
-		DaemonID string `json:"daemon_id"`
+	var req contract.AttachDaemonRequest
+	if !decodeRequest(c, &req) {
+		return
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.DaemonID) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "daemon_id required"})
+	if strings.TrimSpace(req.DaemonID) == "" {
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "daemon_id required")
 		return
 	}
 	req.DaemonID = strings.TrimSpace(req.DaemonID)
@@ -262,7 +250,7 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 		writeSysopError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"bound": outcome.Value.Bound, "changed": outcome.Changed})
+	c.JSON(http.StatusOK, contract.DaemonBinding{Bound: outcome.Value.Bound, Changed: outcome.Changed})
 }
 
 // handleDetachDaemon records one exact channel operation. The membrane commits
@@ -300,9 +288,9 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 		writeSysopError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"bound": outcome.Value.Bound, "changed": outcome.Changed,
-		"cleared_instances": outcome.Value.ClearedInstances,
+	c.JSON(http.StatusOK, contract.DaemonBinding{
+		Bound: outcome.Value.Bound, Changed: outcome.Changed,
+		ClearedInstances: actorIDStrings(outcome.Value.ClearedInstances),
 	})
 }
 

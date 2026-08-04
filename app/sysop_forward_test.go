@@ -133,7 +133,7 @@ func TestSysopUnknownReturnsSafeRetryWithoutOperation(t *testing.T) {
 	response := env.do(t, http.MethodPost, "/api/channels/"+chID+"/join", nil, cookies)
 	assertStatus(t, response, http.StatusServiceUnavailable)
 	body := respJSON(t, response)
-	if body["retry"] != "safe" {
+	if body["will_retry"] != true || body["code"] != "result_unknown" {
 		t.Fatalf("unknown response=%v", body)
 	}
 	if _, exists := body["operation_id"]; exists {
