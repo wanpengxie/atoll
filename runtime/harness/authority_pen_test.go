@@ -36,7 +36,7 @@ type authorityAppendBarrier struct {
 	once    sync.Once
 }
 
-func (l *authorityAppendBarrier) Append(ctx context.Context, env *message.Envelope, terminal bool) (storespec.AppendResult, error) {
+func (l *authorityAppendBarrier) Append(ctx context.Context, env *message.Envelope, terminal bool, metadata storespec.AppendMetadata) (storespec.AppendResult, error) {
 	blocked := false
 	l.once.Do(func() {
 		blocked = true
@@ -49,7 +49,7 @@ func (l *authorityAppendBarrier) Append(ctx context.Context, env *message.Envelo
 			return storespec.AppendResult{}, ctx.Err()
 		}
 	}
-	return l.inner.Append(ctx, env, terminal)
+	return l.inner.Append(ctx, env, terminal, metadata)
 }
 
 func (l *authorityAppendBarrier) FindByID(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error) {

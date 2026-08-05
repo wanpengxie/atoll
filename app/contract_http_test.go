@@ -62,3 +62,23 @@ func TestBodylessWritesRejectPayloadBeforeSideEffects(t *testing.T) {
 	stillLoggedIn := env.do(t, http.MethodGet, "/api/identity/me", nil, setup.cookies)
 	assertStatus(t, stillLoggedIn, http.StatusOK)
 }
+
+func TestExperimentalObserveAliasIsRegisteredAndReachable(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	response := env.do(t, http.MethodGet, "/api/experimental/channels/missing/observe", nil, setup.cookies)
+	assertStatus(t, response, http.StatusNotFound)
+	if got := respJSON(t, response)["code"]; got != string(contract.CodeChannelNotFound) {
+		t.Fatalf("experimental alias reached wrong handler: code=%v", got)
+	}
+
+	for _, method := range contract.Methods() {
+		if method.Path == "/api/experimental/channels/:chID/observe" {
+			if !method.Experimental {
+				t.Fatal("experimental alias is not marked experimental")
+			}
+			return
+		}
+	}
+	t.Fatal("experimental alias missing from registry")
+}

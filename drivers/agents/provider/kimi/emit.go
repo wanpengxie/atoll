@@ -19,27 +19,8 @@ import (
 // missing-TurnEnd (surface as a failed terminal, stay alive).
 var errSinkWrite = errors.New("kimi: sink emit failed")
 
-// emitTurnProgress writes one intermediate progress Output summarising a
-// completed step (Final=false — the base's intermediate output PORT). The old
-// bridge rode this on visibility=system; the base surfaces no per-output
-// visibility, so it emits public (base.go procSink申报: the visibility nuance
-// is the migration's accepted cost, F7 minimal union). Payload: step_index +
-// tool_calls (the base stamps turn_index).
-func (e *engine) emitTurnProgress(sink base.Sink, stepIndex int, tools []wireToolCall) error {
-	extra := map[string]any{"step_index": stepIndex}
-	if summary := summariseToolCalls(tools, 240); len(summary) > 0 {
-		extra["tool_calls"] = summary
-	}
-	if err := sink.Emit(base.Output{Final: false, Extra: extra}); err != nil {
-		return fmt.Errorf("%w: %v", errSinkWrite, err)
-	}
-	return nil
-}
-
-// emitTurnEnd writes the single terminal Output for one completed Agent.Run
-// (Final=true). accumulated is the full TextDelta-buffered string; the
-// TurnEnd's own Output text is preferred, falling back to the buffered stream.
-func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd, accumulated string) error {
+// emitTurnEnd writes the single full terminal value for one Agent.Run.
+func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd) error {
 	stop := strings.ToLower(strings.TrimSpace(end.StopReason))
 	text := extractTurnEndText(end.Output)
 
@@ -55,11 +36,7 @@ func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd, accumulated strin
 		// the LLM was still yielding — close cleanly as done.
 		nextAction = "done"
 	}
-	if text == "" {
-		text = accumulated
-	}
-	if err := sink.Emit(base.Output{
-		Final:      true,
+	if err := sink.Complete(base.FinalValue{
 		Text:       text,
 		NextAction: nextAction,
 		Extra:      map[string]any{"stop_reason": end.StopReason},
@@ -69,18 +46,16 @@ func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd, accumulated strin
 	return nil
 }
 
-// emitTerminalLLMError surfaces an LLM/plumbing error as a failed terminal
-// Output and returns nil on success (actor stays alive); a Sink write failure
+// emitTerminalLLMError surfaces an LLM error as a failed terminal and returns
+// nil on success (actor stays alive); a Sink write failure
 // is propagated as errSinkWrite (loud死). err == nil short-circuits to no-op.
 func (e *engine) emitTerminalLLMError(sink base.Sink, err error) error {
 	if err == nil {
 		return nil
 	}
-	if emitErr := sink.Emit(base.Output{
-		Final:      true,
-		Text:       fmt.Sprintf("llm bridge failed: %v", err),
-		NextAction: "failed",
-		Reason:     classifyLLMError(err),
+	if emitErr := sink.Fail(base.Failure{
+		ErrorCode: classifyLLMError(err),
+		Detail:    fmt.Sprintf("llm bridge failed: %v", err),
 	}); emitErr != nil {
 		return fmt.Errorf("%w: %v", errSinkWrite, emitErr)
 	}

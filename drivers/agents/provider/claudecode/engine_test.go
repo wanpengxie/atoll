@@ -8,6 +8,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	claude "github.com/wanpengxie/go-claude-agent-sdk"
@@ -18,19 +19,30 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// recordSink captures the Outputs a turn emits.
-type recordSink struct{ outputs []base.Output }
+type recordSink struct {
+	started  []base.ToolActivity
+	ended    []base.ToolActivity
+	complete []base.FinalValue
+	failures []base.Failure
+}
 
-func (s *recordSink) Emit(o base.Output) error {
-	s.outputs = append(s.outputs, o)
+func (s *recordSink) ToolStarted(a base.ToolActivity) error {
+	s.started = append(s.started, a)
 	return nil
 }
+func (s *recordSink) ToolEnded(a base.ToolActivity) error { s.ended = append(s.ended, a); return nil }
+func (s *recordSink) Complete(v base.FinalValue) error {
+	s.complete = append(s.complete, v)
+	return nil
+}
+func (s *recordSink) Fail(f base.Failure) error { s.failures = append(s.failures, f); return nil }
 
 // scriptedClient replays a canned message sequence (ending in *ResultMessage)
 // with no `claude` CLI process.
 type scriptedClient struct {
 	msgs      []claude.Message
 	queryErr  error
+	streamErr error
 	lastInput string
 }
 
@@ -39,13 +51,18 @@ func (c *scriptedClient) Query(_ context.Context, prompt string) error {
 	c.lastInput = prompt
 	return c.queryErr
 }
-func (c *scriptedClient) ReceiveResponse(context.Context) <-chan claude.Message {
+func (c *scriptedClient) ReceiveResponseWithErrors(context.Context) (<-chan claude.Message, <-chan error) {
 	ch := make(chan claude.Message, len(c.msgs))
+	errCh := make(chan error, 1)
 	for _, m := range c.msgs {
 		ch <- m
 	}
+	if c.streamErr != nil {
+		errCh <- c.streamErr
+	}
 	close(ch)
-	return ch
+	close(errCh)
+	return ch, errCh
 }
 func (c *scriptedClient) Close() error { return nil }
 
@@ -69,7 +86,11 @@ func TestClaudeTurn_EmitsFinal(t *testing.T) {
 	e.client = &scriptedClient{msgs: []claude.Message{
 		&claude.AssistantMessage{Content: []claude.ContentBlock{
 			&claude.TextBlock{Text: "hello "},
+			&claude.ToolUseBlock{ID: "tool-1", Name: "call_actor"},
 			&claude.TextBlock{Text: "world"},
+		}},
+		&claude.UserMessage{Content: []claude.ContentBlock{
+			&claude.ToolResultBlock{ToolUseID: "tool-1"},
 		}},
 		&claude.ResultMessage{SessionID: "sess-123", Result: "hello world"},
 	}}
@@ -78,12 +99,16 @@ func TestClaudeTurn_EmitsFinal(t *testing.T) {
 	if err := e.Turn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
-	if len(sink.outputs) != 1 {
-		t.Fatalf("want 1 output, got %d", len(sink.outputs))
+	if len(sink.complete) != 1 {
+		t.Fatalf("want 1 output, got %d", len(sink.complete))
 	}
-	o := sink.outputs[0]
-	if !o.Final || o.Text != "hello world" || o.NextAction != "done" {
+	o := sink.complete[0]
+	if o.Text != "hello world" || o.NextAction != "done" {
 		t.Fatalf("output = %+v", o)
+	}
+	if len(sink.started) != 1 || len(sink.ended) != 1 ||
+		sink.started[0].CallID != "tool-1" || sink.ended[0].CallID != "tool-1" {
+		t.Fatalf("tool phases started=%v ended=%v", sink.started, sink.ended)
 	}
 	// Session id captured → Checkpoint returns it EVERY turn the session is set
 	// (no dirty micro-opt: re-returning the unchanged seed is an idempotent
@@ -108,8 +133,24 @@ func TestClaudeTurn_ResultErrorSurfacesFailed(t *testing.T) {
 	if err := e.Turn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn should not return an error for an engine failure: %v", err)
 	}
-	if len(sink.outputs) != 1 || !sink.outputs[0].Final || sink.outputs[0].NextAction != "failed" {
-		t.Fatalf("expected a failed terminal, got %+v", sink.outputs)
+	if len(sink.failures) != 1 || sink.failures[0].ErrorCode != "claude_result" {
+		t.Fatalf("expected a failed terminal, got %+v", sink.failures)
+	}
+}
+
+func TestClaudeTurn_StreamErrorPreservesProviderDetail(t *testing.T) {
+	e := &engine{cfg: Config{Model: "m"}}
+	e.client = &scriptedClient{streamErr: errors.New("CLI transport disconnected")}
+	sink := &recordSink{}
+	tr := base.Trigger{Envelope: triggerEnv("e-stream"), Index: 1}
+	if err := e.Turn(context.Background(), tr, sink); err != nil {
+		t.Fatalf("Turn should surface a stream failure through Sink.Fail: %v", err)
+	}
+	if len(sink.failures) != 1 {
+		t.Fatalf("failures=%+v want one", sink.failures)
+	}
+	if got := sink.failures[0]; got.ErrorCode != "claude_stream" || !contains(got.Detail, "CLI transport disconnected") {
+		t.Fatalf("stream failure lost provider detail: %+v", got)
 	}
 }
 

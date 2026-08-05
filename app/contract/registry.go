@@ -1,5 +1,7 @@
 package contract
 
+import "strings"
+
 // Auth describes the credential requirement of a method.
 type Auth string
 
@@ -11,19 +13,19 @@ const (
 // Method is one endpoint in the shell contract registry. Path, Query and Body
 // are independent because absence of a body is itself a fail-closed rule.
 type Method struct {
-	Method       string   `json:"method"`
-	Path         string   `json:"path"`
-	Auth         Auth     `json:"auth"`
-	PathSchema   string   `json:"path_schema"`
-	QuerySchema  string   `json:"query_schema"`
-	BodySchema   string   `json:"body_schema"`
-	Response     string   `json:"response_schema"`
-	Errors       []string `json:"error_schemas"`
+	Method      string   `json:"method"`
+	Path        string   `json:"path"`
+	Auth        Auth     `json:"auth"`
+	PathSchema  string   `json:"path_schema"`
+	QuerySchema string   `json:"query_schema"`
+	BodySchema  string   `json:"body_schema"`
+	Response    string   `json:"response_schema"`
+	Errors      []string `json:"error_schemas"`
 	// Since is the contract version that INTRODUCED the endpoint — a
 	// write-time literal snapshot, never a reference to the live Version
 	// constant (that would rewrite every entry's history on a version bump).
-	Since        string   `json:"since"`
-	Experimental bool     `json:"experimental"`
+	Since        string `json:"since"`
+	Experimental bool   `json:"experimental"`
 }
 
 const (
@@ -42,6 +44,15 @@ func method(verb, path string, auth Auth, pathSchema, querySchema, bodySchema, r
 		Errors: []string{errorSchema}, Since: since10}
 }
 
+func experimentalMethod(verb, path string, auth Auth, pathSchema, querySchema, bodySchema, response string) Method {
+	if !strings.HasPrefix(path, "/api/experimental/") {
+		panic("experimental contract method must use /api/experimental prefix: " + path)
+	}
+	value := method(verb, path, auth, pathSchema, querySchema, bodySchema, response)
+	value.Experimental = true
+	return value
+}
+
 var methods = [...]Method{
 	method("GET", "/ws", AuthSession, NoSchema, NoSchema, NoSchema, "SubjectgateFrameStream"),
 	method("GET", "/api/meta", AuthNone, NoSchema, NoSchema, NoSchema, "Meta"),
@@ -56,6 +67,7 @@ var methods = [...]Method{
 	method("DELETE", "/api/channels/:chID", AuthSession, "ChannelPath", NoSchema, NoSchema, "ChannelDeletion"),
 	method("POST", "/api/channels/:chID/join", AuthSession, "ChannelPath", NoSchema, NoSchema, "Membership"),
 	method("GET", "/api/channels/:chID/observe", AuthSession, "ChannelPath", "MessagePageQuery", NoSchema, "EventStream"),
+	experimentalMethod("GET", "/api/experimental/channels/:chID/observe", AuthSession, "ChannelPath", "MessagePageQuery", NoSchema, "EventStream"),
 	method("GET", "/api/channels/:chID/messages", AuthSession, "ChannelPath", "MessagePageQuery", NoSchema, "MessagePage"),
 	method("GET", "/api/channels/:chID/resources", AuthSession, "ChannelPath", "ResourceListQuery", NoSchema, "ResourcePage"),
 	method("GET", "/api/channels/:chID/resources/:rid", AuthSession, "ChannelResourcePath", NoSchema, NoSchema, "ResourceMeta"),

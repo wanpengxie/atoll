@@ -166,6 +166,9 @@ type EventSpec struct {
 	Audience      message.Audience
 	ParentID      message.ID
 	CorrelationID message.ID
+	// ClientFingerprint is shell-ingress persistence metadata and never a
+	// protocol envelope field.
+	ClientFingerprint string
 }
 
 // BuildEvent assembles a kind=event envelope — the ONE home for event

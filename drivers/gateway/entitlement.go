@@ -14,12 +14,9 @@ import (
 // completes on its own clock.
 //
 // A route is a MEMBERSHIP route, and that is the whole of it — there is no access
-// class to read. Observer traffic rides the per-channel SSE/HTTP read plane and
-// never enters this route set, which is what the resolver's own contract says
-// (app.EntitlementRoute). A gateway-level observer would be a different thing
-// than a member with a narrower field: it has no subject id, so it can hold no
-// presence slot and drive no business frame, and every consumer here would have
-// to be told about it. Give it its own shape when something actually needs one.
+// class to read. Connection-local observation uses ObserverRoute instead of this
+// membership set: it has no subject id, holds no presence slot, and cannot drive
+// business frames.
 type Route struct {
 	Channel   channel.ID
 	Bundle    channelhost.Bundle
@@ -28,9 +25,9 @@ type Route struct {
 
 // EntitlementResolver is the app-domain seam (injected by the assembly root, spec
 // §3.2 EntitlementResolver 注入缝): given a principal it returns the full set of
-// channels that principal holds MEMBERSHIP in — observer traffic rides the
-// per-channel SSE/HTTP read plane and never enters this route set (see Route) —
-// plus the per-channel failures, and an err for a whole-snapshot failure. The interface is
+// channels that principal holds MEMBERSHIP in. Temporary observations resolve
+// independently through ObserverResolver. This method also returns per-channel
+// failures and an err for a whole-snapshot failure. The interface is
 // defined HERE (drivers/gateway) and implemented app-side, bridged through
 // cmd/server — so drivers never imports app (archtest 围栏), mirroring the WSGateway/
 // Routing seam shape.
@@ -51,4 +48,24 @@ type ResolverFunc func(ctx context.Context, principal string) ([]Route, []channe
 // Snapshot implements EntitlementResolver.
 func (f ResolverFunc) Snapshot(ctx context.Context, principal string) ([]Route, []channel.ID, error) {
 	return f(ctx, principal)
+}
+
+// ObserverRoute is a connection-local read entitlement. Unlike Route it has
+// no subject slot and can never drive upstream business frames.
+type ObserverRoute struct {
+	Channel channel.ID
+	Bundle  channelhost.Bundle
+	Reader  channel.Reader
+}
+
+// ObserverResolver evaluates app-owned public-observation policy without
+// making gateway import app. reason is a stable wire reason when denied.
+type ObserverResolver interface {
+	ResolveObservation(ctx context.Context, principal string, channelID channel.ID) (route ObserverRoute, reason string, err error)
+}
+
+type ObserverResolverFunc func(context.Context, string, channel.ID) (ObserverRoute, string, error)
+
+func (f ObserverResolverFunc) ResolveObservation(ctx context.Context, principal string, channelID channel.ID) (ObserverRoute, string, error) {
+	return f(ctx, principal, channelID)
 }

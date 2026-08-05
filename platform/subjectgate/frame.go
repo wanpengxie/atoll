@@ -37,10 +37,13 @@ const (
 	FrameAfter       FrameType = "after"
 	FrameCancelTimer FrameType = "cancel_timer"
 	FrameResource    FrameType = "resource"
+	FrameObserve     FrameType = "observe"
+	FrameUnobserve   FrameType = "unobserve"
 	// Downstream.
-	FrameFeed    FrameType = "feed"
-	FrameReceipt FrameType = "receipt"
-	FrameError   FrameType = "error"
+	FrameFeed         FrameType = "feed"
+	FrameReceipt      FrameType = "receipt"
+	FrameError        FrameType = "error"
+	FrameObserveEnded FrameType = "observe_ended"
 )
 
 // Retired words (purity v3 C1/C2 — minted by the spec's frame table for
@@ -57,8 +60,9 @@ const (
 //     dispatch tables land as one slice with the feature, not ahead of it.
 //
 // Retired words (连接模型勘误期 — the client-visible binding axis was proven a
-// false axis: "连接即人", a connection is an authenticated person + one pipe,
-// with NO client-controllable channel binding/subscription state):
+// false axis: "连接即人", a connection is an authenticated person + one pipe.
+// Temporary observe/unobserve is a read-only connection-local set, not a channel
+// identity/binding and never a write-authority grant):
 //   - "detach" frame (+DetachPayload{ChannelID}): the "撤绑定" verb has no
 //     ontology — not-listening is the client's own business, leaving a channel
 //     is a 户籍 verb, being revoked is server internal务. It was the残余 of the
@@ -94,8 +98,9 @@ const (
 var knownFrameTypes = map[FrameType]FrameDirection{
 	FrameAttach: DirUpstream, FrameSubmit: DirUpstream, FrameResolve: DirUpstream,
 	FrameCancel: DirUpstream, FrameAfter: DirUpstream, FrameCancelTimer: DirUpstream,
-	FrameResource: DirUpstream,
+	FrameResource: DirUpstream, FrameObserve: DirUpstream, FrameUnobserve: DirUpstream,
 	FrameFeed: DirDownstream, FrameReceipt: DirDownstream, FrameError: DirDownstream,
+	FrameObserveEnded: DirDownstream,
 }
 
 // FrameTypesByDirection returns the sorted frame-type names owned by dir — the
@@ -116,20 +121,42 @@ func FrameTypesByDirection(dir FrameDirection) []string {
 // WriteRejected surfaces its harness reason verbatim as the code, so this set is
 // the door's OWN vocabulary, not exhaustive of every harness reason.
 const (
-	CodeBadPayload         = "bad_payload"
-	CodeNotInAudience      = "not_in_audience"
-	CodeUnauthorizedSender = "unauthorized_sender"
-	CodeAlreadyClosed      = "already_closed"
-	CodeRequestNotFound    = "request_not_found"
-	CodeInvalidDecision    = "invalid_decision"
-	CodeUnavailable        = "unavailable"
-	CodeRoutingUnavailable = "routing_unavailable"
-	CodeForbidden          = "forbidden"
-	CodeClosed             = "closed"
+	CodeBadPayload            = "bad_payload"
+	CodeNotInAudience         = "not_in_audience"
+	CodeUnauthorizedSender    = "unauthorized_sender"
+	CodeAlreadyClosed         = "already_closed"
+	CodeRequestNotFound       = "request_not_found"
+	CodeInvalidDecision       = "invalid_decision"
+	CodeUnavailable           = "unavailable"
+	CodeRoutingUnavailable    = "routing_unavailable"
+	CodeIdempotencyConflict   = "idempotency_conflict"
+	CodeNowMember             = "now_member"
+	CodeChannelNotFound       = "channel_not_found"
+	CodeChannelUnavailable    = "channel_unavailable"
+	CodeCapabilityUnavailable = "capability_unavailable"
+	CodeForbidden             = "forbidden"
+	CodeClosed                = "closed"
 	// (CodeNotMember / CodeStaleBinding retired with the client-visible binding
 	// axis — see the retired-words note by the FrameType consts. Eligibility
 	// refusal is uniformly CodeForbidden.)
 )
+
+var errorCodes = [...]string{
+	CodeBadPayload, CodeNotInAudience, CodeUnauthorizedSender,
+	CodeAlreadyClosed, CodeRequestNotFound, CodeInvalidDecision,
+	CodeUnavailable, CodeRoutingUnavailable, CodeIdempotencyConflict,
+	CodeNowMember, CodeChannelNotFound, CodeChannelUnavailable, CodeCapabilityUnavailable,
+	CodeForbidden, CodeClosed,
+}
+
+// ErrorCodes returns the websocket error vocabulary in stable declaration
+// order. Downstream schemas expose it as known values, never as an enum, so
+// older clients retain their unknown-code fallback as the set grows.
+func ErrorCodes() []string {
+	out := make([]string, len(errorCodes))
+	copy(out, errorCodes[:])
+	return out
+}
 
 // ErrUnknownFrameType is ParseUpstreamFrame's verdict for a frame_type outside
 // the closed upstream set. The lenient ParseEnvelope/ParseDownstream never
@@ -249,6 +276,10 @@ func ParseUpstreamFrame(b []byte) (Frame, error) {
 		err = validatePayloadStrict[CancelTimerPayload](f.Payload)
 	case FrameResource:
 		err = validatePayloadStrict[ResourcePayload](f.Payload)
+	case FrameObserve:
+		err = validatePayloadStrict[ObservePayload](f.Payload)
+	case FrameUnobserve:
+		err = validatePayloadStrict[UnobservePayload](f.Payload)
 	default:
 		return f, fmt.Errorf("%w: %q", ErrUnknownFrameType, f.Type)
 	}
@@ -289,12 +320,14 @@ type Downstream interface{ downstreamFrame() }
 type FeedFrame struct{ Frame }
 type ReceiptFrame struct{ Frame }
 type ErrorFrame struct{ Frame }
+type ObserveEndedFrame struct{ Frame }
 type UnknownFrame struct{ Frame }
 
-func (FeedFrame) downstreamFrame()    {}
-func (ReceiptFrame) downstreamFrame() {}
-func (ErrorFrame) downstreamFrame()   {}
-func (UnknownFrame) downstreamFrame() {}
+func (FeedFrame) downstreamFrame()         {}
+func (ReceiptFrame) downstreamFrame()      {}
+func (ErrorFrame) downstreamFrame()        {}
+func (ObserveEndedFrame) downstreamFrame() {}
+func (UnknownFrame) downstreamFrame()      {}
 
 // ParseDownstream decodes a server frame into the known union or the unknown
 // fallback without rejecting future frame kinds.
@@ -310,6 +343,8 @@ func ParseDownstream(b []byte) (Downstream, error) {
 		return ReceiptFrame{Frame: f}, nil
 	case FrameError:
 		return ErrorFrame{Frame: f}, nil
+	case FrameObserveEnded:
+		return ObserveEndedFrame{Frame: f}, nil
 	default:
 		return UnknownFrame{Frame: f}, nil
 	}
@@ -376,6 +411,14 @@ type AfterPayload struct {
 type CancelTimerPayload struct {
 	ChannelID string `json:"channel_id"`
 	TimerID   string `json:"timer_id"`
+}
+
+type ObservePayload struct {
+	ChannelID string `json:"channel_id"`
+}
+
+type UnobservePayload struct {
+	ChannelID string `json:"channel_id"`
 }
 
 // ResourceOp is the closed resource-verb enum (build spec §S2 resource row).
@@ -449,6 +492,35 @@ type AfterReceipt struct {
 
 type CancelTimerReceipt struct {
 	TimerID string `json:"timer_id"`
+}
+
+type ObserveReceipt struct {
+	ChannelID string `json:"channel_id"`
+}
+
+type UnobserveReceipt struct {
+	ChannelID string `json:"channel_id"`
+}
+
+type ObserveEndedReason string
+
+const (
+	ObserveEndedNowMember             ObserveEndedReason = "now_member"
+	ObserveEndedChannelRetired        ObserveEndedReason = "channel_retired"
+	ObserveEndedChannelUnavailable    ObserveEndedReason = "channel_unavailable"
+	ObserveEndedCapabilityUnavailable ObserveEndedReason = "capability_unavailable"
+)
+
+func ObserveEndedReasons() []ObserveEndedReason {
+	return []ObserveEndedReason{
+		ObserveEndedNowMember, ObserveEndedChannelRetired,
+		ObserveEndedChannelUnavailable, ObserveEndedCapabilityUnavailable,
+	}
+}
+
+type ObserveEndedPayload struct {
+	ChannelID string             `json:"channel_id"`
+	Reason    ObserveEndedReason `json:"reason"`
 }
 
 // ResourceOutcome is the resource-result form for create/read/write/delete/share.

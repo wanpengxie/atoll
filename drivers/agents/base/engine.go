@@ -19,17 +19,16 @@ import (
 //	                (BuildMCPCatalog); how an engine ingests it (native MCP vs
 //	                翻译成 AdditionalTools) is适配件内政, done inside the provider's
 //	                Engine construction — NOT a method here.
-//	③ output map  — the engine writes 0..n intermediate + 1 terminal Output to
-//	                the Sink; the base maps each onto sys.Emit (§1 输出形).
+//	③ output map  — the engine reports typed tool phases and exactly one
+//	                terminal value/failure; the base selects Emit/Reply/Fail.
 //
 // Describe/Checkpoint are the会话记忆 + 自答 data the provider fills; the base
 // owns their persistence/dispatch姿势.
 type Engine interface {
 	// Turn drives one round of reasoning over trigger, resolving any tool
 	// calls internally, and writes its outputs to sink. It returns a non-nil
-	// error ONLY for an unrecoverable plumbing failure (the base propagates it
-	// as loud死); an engine/LLM error is surfaced as a terminal Output (Final,
-	// NextAction="failed") and returns nil so the actor stays alive.
+	// error ONLY for an unrecoverable plumbing failure. An engine/LLM error is
+	// surfaced through Sink.Fail and returns nil so the actor stays alive.
 	Turn(ctx context.Context, trigger Trigger, sink Sink) error
 
 	// Describe returns the provider's actor.describe self-answer data. ActorID
@@ -64,34 +63,37 @@ type Trigger struct {
 	Index int
 }
 
-// Output is one unit an engine produces during a turn — the unified输出形 the
-// base maps onto sys.Emit. An engine may push 0..n intermediate outputs
-// (Final=false) followed by exactly one terminal (Final=true). This is the
-// MINIMAL UNION of the two providers' current behaviour (双线审 F7): claudecode
-// emits zero intermediate (天然 no-op), go-kimi's per-tool-step progress rides
-// the intermediate port. NOT an M4预留 — M4零预留红线不破.
-type Output struct {
-	// Final marks the turn's terminal output (vs an intermediate progress).
-	Final bool
-	// Text is the human-facing body.
+// FinalValue is the full terminal value of one request-backed turn.
+type FinalValue struct {
 	Text string
 	// NextAction is the turn-control hint ("done"/"failed"/"max_tokens"/
 	// "continue"/…). Empty = omitted.
 	NextAction string
-	// Reason is the failure bucket for a failed terminal ("llm_rate_limit"等).
-	// Empty = omitted.
-	Reason string
-	// Extra carries provider-specific payload fields (step_index, tool_calls,
-	// stop_reason, …) merged into the emitted payload.
+	// Extra carries provider-specific full-value fields merged into the reply.
 	Extra map[string]any
 }
 
-// Sink is the base-supplied output port an engine writes a turn's outputs to.
-// The one implementation is procSink (maps onto sys.Emit); a stub Engine's
-// tests supply their own.
+// Failure is a business failure. ErrorCode and Detail are written by Sys.Fail;
+// substrate terminal reason remains owned by the response machinery.
+type Failure struct {
+	ErrorCode string
+	Detail    string
+}
+
+// ToolActivity is a complete provider-reported tool phase identity.
+type ToolActivity struct {
+	CallID string
+	Tool   string
+	Status string
+	Detail string
+}
+
+// Sink is the typed base-supplied output port. Providers never choose envelope
+// kinds: tool phases become activity events, terminal values become Reply, and
+// failures become Fail.
 type Sink interface {
-	// Emit writes one Output as an agent.text envelope addressed to the
-	// trigger sender. A non-nil error is a plumbing failure (emit rejected /
-	// write error) the engine SHOULD propagate out of Turn as loud死.
-	Emit(o Output) error
+	ToolStarted(ToolActivity) error
+	ToolEnded(ToolActivity) error
+	Complete(FinalValue) error
+	Fail(Failure) error
 }

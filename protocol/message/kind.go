@@ -40,8 +40,8 @@ func ParseKind(raw string) (Kind, bool) {
 // Declared intent (what each value MEANS):
 //   - public  — intended for every channel member.
 //   - private — intended only for the sender + actors in audience.
-//   - system  — protocol-internal metadata / intermediate output (agent.text
-//     progress bubbles, placement notices, bootstrap events), intended to be
+//   - system  — protocol-internal metadata (placement notices, bootstrap
+//     events), intended to be
 //     suppressed from the default UI view (still persisted as audit trail).
 //
 // ReadVisibleAfterSeq enforces this value before LIMIT: public is channel-wide,

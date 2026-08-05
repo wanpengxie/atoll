@@ -21,13 +21,23 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// recordSink captures the Outputs a turn emits.
-type recordSink struct{ outputs []base.Output }
+type recordSink struct {
+	started  []base.ToolActivity
+	ended    []base.ToolActivity
+	complete []base.FinalValue
+	failures []base.Failure
+}
 
-func (s *recordSink) Emit(o base.Output) error {
-	s.outputs = append(s.outputs, o)
+func (s *recordSink) ToolStarted(a base.ToolActivity) error {
+	s.started = append(s.started, a)
 	return nil
 }
+func (s *recordSink) ToolEnded(a base.ToolActivity) error { s.ended = append(s.ended, a); return nil }
+func (s *recordSink) Complete(v base.FinalValue) error {
+	s.complete = append(s.complete, v)
+	return nil
+}
+func (s *recordSink) Fail(f base.Failure) error { s.failures = append(s.failures, f); return nil }
 
 // scriptedAgent is the kimiAgent test double: on Run it emits a canned wire
 // sequence into the engine's wire channel, then returns runErr.
@@ -72,53 +82,48 @@ func triggerEnv(id string) message.Envelope {
 // TestKimiTurn_EmitsTerminal pins a text turn → one terminal Output (done).
 func TestKimiTurn_EmitsTerminal(t *testing.T) {
 	e, _ := newTestEngine([]wire.WireMessage{
-		wire.TextDelta{Delta: "hello there"},
-		wire.TurnEnd{StopReason: "end_turn"},
+		wire.TextDelta{Delta: "must be discarded"},
+		wire.TurnEnd{StopReason: "end_turn", Output: types.ContentParts{types.TextPart{Text: "hello there"}}},
 	}, nil)
 	sink := &recordSink{}
 	tr := base.Trigger{Envelope: triggerEnv("req-1"), CorrelationID: "corr-1", Index: 1}
 	if err := e.Turn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
-	if len(sink.outputs) != 1 {
-		t.Fatalf("want 1 terminal output, got %d: %+v", len(sink.outputs), sink.outputs)
+	if len(sink.complete) != 1 {
+		t.Fatalf("want 1 terminal value, got %d: %+v", len(sink.complete), sink.complete)
 	}
-	o := sink.outputs[0]
-	if !o.Final || o.Text != "hello there" || o.NextAction != "done" {
+	o := sink.complete[0]
+	if o.Text != "hello there" || o.NextAction != "done" {
 		t.Fatalf("terminal = %+v", o)
 	}
 }
 
-// TestKimiTurn_ProgressPerToolStep pins 2 intermediate progress Outputs
-// (Final=false, step_index 1/2) + 1 terminal.
-func TestKimiTurn_ProgressPerToolStep(t *testing.T) {
+func TestKimiTurn_TypedToolPhases(t *testing.T) {
 	e, _ := newTestEngine([]wire.WireMessage{
 		wire.ToolCallRequest{ToolCall: types.ToolCall{ID: "t1", Name: "call_actor", Arguments: map[string]any{"cmd": "ls"}}},
-		wire.ToolCallResult{},
+		wire.ToolCallResult{Result: types.ToolResult{ToolCallID: "t1", Name: "call_actor"}},
 		wire.ToolCallRequest{ToolCall: types.ToolCall{ID: "t2", Name: "call_actor"}},
-		wire.ToolCallResult{},
-		wire.TextDelta{Delta: "final answer"},
-		wire.TurnEnd{StopReason: "end_turn"},
+		wire.ToolCallResult{Result: types.ToolResult{ToolCallID: "t2", Name: "call_actor"}},
+		wire.TextDelta{Delta: "discarded delta"},
+		wire.TurnEnd{StopReason: "end_turn", Output: types.ContentParts{types.TextPart{Text: "final answer"}}},
 	}, nil)
 	sink := &recordSink{}
 	tr := base.Trigger{Envelope: triggerEnv("req-p"), Index: 1}
 	if err := e.Turn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
-	if len(sink.outputs) != 3 {
-		t.Fatalf("want 2 progress + 1 terminal, got %d", len(sink.outputs))
+	if len(sink.started) != 2 || len(sink.ended) != 2 || len(sink.complete) != 1 {
+		t.Fatalf("phases started=%v ended=%v complete=%v", sink.started, sink.ended, sink.complete)
 	}
 	for i := 0; i < 2; i++ {
-		o := sink.outputs[i]
-		if o.Final {
-			t.Fatalf("progress %d should be intermediate (Final=false)", i)
-		}
-		if o.Extra["step_index"] != i+1 {
-			t.Fatalf("progress %d step_index = %v", i, o.Extra["step_index"])
+		wantID := []string{"t1", "t2"}[i]
+		if sink.started[i].CallID != wantID || sink.ended[i].CallID != wantID {
+			t.Fatalf("tool phase %d ids = %q/%q", i, sink.started[i].CallID, sink.ended[i].CallID)
 		}
 	}
-	if !sink.outputs[2].Final {
-		t.Fatalf("last output should be terminal")
+	if sink.complete[0].Text != "final answer" {
+		t.Fatalf("terminal value = %+v", sink.complete[0])
 	}
 }
 
@@ -132,12 +137,11 @@ func TestKimiTurn_LLMErrorFailedTerminal(t *testing.T) {
 	if err := e.Turn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn should stay alive on an LLM error: %v", err)
 	}
-	if len(sink.outputs) != 1 {
-		t.Fatalf("want 1 failed terminal, got %d", len(sink.outputs))
+	if len(sink.failures) != 1 {
+		t.Fatalf("want 1 failed terminal, got %d", len(sink.failures))
 	}
-	o := sink.outputs[0]
-	if !o.Final || o.NextAction != "failed" || o.Reason != "llm_rate_limit" {
-		t.Fatalf("failed terminal = %+v", o)
+	if sink.failures[0].ErrorCode != "llm_rate_limit" {
+		t.Fatalf("failed terminal = %+v", sink.failures[0])
 	}
 }
 
@@ -229,9 +233,9 @@ func TestBuildSystemPrompt_SituationDrivesBehaviour(t *testing.T) {
 
 func TestClassifyLLMError_NetworkBuckets(t *testing.T) {
 	cases := map[error]string{
-		&kimierrors.LLMError{StatusCode: 429}:            "llm_rate_limit",
-		&kimierrors.LLMError{StatusCode: 401}:            "llm_auth",
-		&kimierrors.LLMError{StatusCode: 500}:            "llm_server",
+		&kimierrors.LLMError{StatusCode: 429}:             "llm_rate_limit",
+		&kimierrors.LLMError{StatusCode: 401}:             "llm_auth",
+		&kimierrors.LLMError{StatusCode: 500}:             "llm_server",
 		&url.Error{Op: "Get", Err: errors.New("refused")}: "llm_network",
 		context.DeadlineExceeded:                          "llm_network",
 		errors.New("mystery"):                             "llm_unknown",

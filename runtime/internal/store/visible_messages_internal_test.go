@@ -44,15 +44,15 @@ func TestReadVisibleAfterSeqFiltersBeforeLimitAndHonorsPerspectives(t *testing.T
 
 	const batch = 8
 	for i := 0; i < 2*batch+1; i++ {
-		if _, err := messages.Append(ctx, visibleEnvelope("system-"+string(rune('a'+i)), "alice", message.VisibilitySystem), false); err != nil {
+		if _, err := messages.Append(ctx, visibleEnvelope("system-"+string(rune('a'+i)), "alice", message.VisibilitySystem), false, storespec.AppendMetadata{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	privateSeq, err := messages.Append(ctx, visibleEnvelope("private", "alice", message.VisibilityPrivate, "bob"), false)
+	privateSeq, err := messages.Append(ctx, visibleEnvelope("private", "alice", message.VisibilityPrivate, "bob"), false, storespec.AppendMetadata{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicSeq, err := messages.Append(ctx, visibleEnvelope("public", "alice", message.VisibilityPublic), false)
+	publicSeq, err := messages.Append(ctx, visibleEnvelope("public", "alice", message.VisibilityPublic), false, storespec.AppendMetadata{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,14 +90,14 @@ func TestReadVisibleAfterSeqSnapshotCursorDoesNotSkipLaterInsert(t *testing.T) {
 	messages, register := openVisibleMessages(t)
 	register("alice", "principal-a")
 	reader := channel.Reader{ActorID: "alice", Mode: channel.ReaderMember}
-	if _, err := messages.Append(ctx, visibleEnvelope("first", "alice", message.VisibilityPublic), false); err != nil {
+	if _, err := messages.Append(ctx, visibleEnvelope("first", "alice", message.VisibilityPublic), false, storespec.AppendMetadata{}); err != nil {
 		t.Fatal(err)
 	}
 	rows, scanned, err := messages.ReadVisibleAfterSeq(ctx, reader, 0, 100)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("first read rows=%v scanned=%d err=%v", rowSeqs(rows), scanned, err)
 	}
-	second, err := messages.Append(ctx, visibleEnvelope("concurrent-boundary", "alice", message.VisibilityPublic), false)
+	second, err := messages.Append(ctx, visibleEnvelope("concurrent-boundary", "alice", message.VisibilityPublic), false, storespec.AppendMetadata{})
 	if err != nil {
 		t.Fatal(err)
 	}

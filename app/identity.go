@@ -155,8 +155,8 @@ func (a *App) handleLogin(c *gin.Context) {
 }
 
 func (a *App) handleLogout(c *gin.Context) {
-	token, err := c.Cookie(middleware.SessionCookie)
-	if err == nil && token != "" {
+	token := middleware.RequestToken(c)
+	if token != "" {
 		_, _ = a.db.ExecContext(c.Request.Context(),
 			`DELETE FROM sessions WHERE token = ?`, token,
 		)

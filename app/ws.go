@@ -27,8 +27,8 @@ func (a *App) handleWS(c *gin.Context) {
 		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeUnavailable, "gateway unavailable")
 		return
 	}
-	token, err := c.Cookie(middleware.SessionCookie)
-	if err != nil || token == "" {
+	token := middleware.RequestToken(c)
+	if token == "" {
 		writeAPIError(c, http.StatusUnauthorized, contract.CodeNotAuthenticated, "not authenticated")
 		return
 	}

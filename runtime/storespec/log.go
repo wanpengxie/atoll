@@ -28,6 +28,17 @@ type StoredRow struct {
 type AppendResult struct {
 	// Seq is the store-allocated monotonic position (messages.seq).
 	Seq int64
+	// Replayed means no row was appended: a client idempotency key matched an
+	// existing row carrying the same canonical submission fingerprint.
+	Replayed bool
+}
+
+// AppendMetadata carries persistence-only material alongside an envelope.
+// It never enters protocol/message.Envelope. ClientFingerprint is computed at
+// the shell ingress from the raw client submission before harness defaults are
+// applied, then stored atomically with the message row.
+type AppendMetadata struct {
+	ClientFingerprint string
 }
 
 // AppendError is the typed error returned for protocol-level rejects inside
@@ -86,7 +97,7 @@ const (
 //     because it depends on message-kind semantics the store does not interpret;
 //     the store persists it verbatim (it stays the dumb persister).
 type MessageLog interface {
-	Append(ctx context.Context, env *message.Envelope, isTerminal bool) (AppendResult, error)
+	Append(ctx context.Context, env *message.Envelope, isTerminal bool, metadata AppendMetadata) (AppendResult, error)
 
 	// FindByID returns the stored row for id (seq / is_terminal / envelope).
 	// No channelID parameter: the store is bound to one channel at OpenChannel,

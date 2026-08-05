@@ -25,6 +25,8 @@ func TestFrameCarriesNoIdentity(t *testing.T) {
 		reflect.TypeOf(AfterPayload{}),
 		reflect.TypeOf(CancelTimerPayload{}),
 		reflect.TypeOf(ResourcePayload{}),
+		reflect.TypeOf(ObservePayload{}),
+		reflect.TypeOf(UnobservePayload{}),
 	}
 	for _, ty := range types {
 		for i := 0; i < ty.NumField(); i++ {
@@ -70,9 +72,12 @@ func TestFrameRoundTrip(t *testing.T) {
 		{"after", FrameAfter, AfterPayload{ChannelID: "c1", DurationMs: 1000, MsgType: "wake"}},
 		{"cancel_timer", FrameCancelTimer, CancelTimerPayload{ChannelID: "c1", TimerID: "t1"}},
 		{"resource", FrameResource, ResourcePayload{ChannelID: "c1", Op: ResRead, ResourceID: "res:1"}},
+		{"observe", FrameObserve, ObservePayload{ChannelID: "c1"}},
+		{"unobserve", FrameUnobserve, UnobservePayload{ChannelID: "c1"}},
 		{"feed", FrameFeed, FeedPayload{ChannelID: "c1", Seq: 5, Envelope: json.RawMessage(`{}`)}},
 		{"receipt", FrameReceipt, SubmitReceipt{MessageID: "m1"}},
 		{"error", FrameError, ErrorPayload{Frame: "submit", Code: CodeBadPayload, Detail: "bad"}},
+		{"observe_ended", FrameObserveEnded, ObserveEndedPayload{ChannelID: "c1", Reason: ObserveEndedNowMember}},
 	}
 	if len(cases) != len(knownFrameTypes) {
 		t.Fatalf("round-trip covers %d frames but %d are known", len(cases), len(knownFrameTypes))
@@ -125,6 +130,8 @@ func TestUpstreamUnknownFieldsRejected(t *testing.T) {
 		`{"v":2,"frame_type":"after","ref":"r1","payload":{"channel_id":"c1","duration_ms":1,"msg_type":"m","unexpected":true}}`,
 		`{"v":2,"frame_type":"cancel_timer","ref":"r1","payload":{"channel_id":"c1","timer_id":"t1","unexpected":true}}`,
 		`{"v":2,"frame_type":"resource","ref":"r1","payload":{"channel_id":"c1","op":"read","resource_id":"r1","unexpected":true}}`,
+		`{"v":2,"frame_type":"observe","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":2,"frame_type":"unobserve","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
 	} {
 		f, err := ParseUpstreamFrame([]byte(b))
 		if err == nil {

@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,10 +14,31 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/app/contract"
+	"github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type activityAcceptanceEngine struct{}
+
+func (activityAcceptanceEngine) Turn(_ context.Context, _ base.Trigger, sink base.Sink) error {
+	if err := sink.ToolStarted(base.ToolActivity{CallID: "acceptance-tool-1", Tool: "acceptance_tool"}); err != nil {
+		return err
+	}
+	if err := sink.ToolEnded(base.ToolActivity{CallID: "acceptance-tool-1", Tool: "acceptance_tool", Status: "completed"}); err != nil {
+		return err
+	}
+	return sink.Complete(base.FinalValue{Text: "activity-ok", NextAction: "done"})
+}
+func (activityAcceptanceEngine) Describe() introspect.Describe {
+	return introspect.Describe{Description: "activity acceptance"}
+}
+func (activityAcceptanceEngine) Checkpoint() []byte { return nil }
+func (activityAcceptanceEngine) Close() error       { return nil }
 
 // ---------------------------------------------------------------------------
 // wsClient — a black-box gateway ws driver for the standard frame protocol
@@ -173,6 +195,16 @@ func (c *wsClient) readLoop() {
 			case c.acks <- map[string]any{"type": "error", "error": ep.Code, "detail": ep.Detail, "frame": ep.Frame}:
 			default:
 			}
+		case "observe_ended":
+			var ended struct {
+				ChannelID string `json:"channel_id"`
+				Reason    string `json:"reason"`
+			}
+			_ = json.Unmarshal(wf.Payload, &ended)
+			select {
+			case c.acks <- map[string]any{"type": "observe_ended", "channel_id": ended.ChannelID, "reason": ended.Reason}:
+			default:
+			}
 		}
 	}
 }
@@ -235,7 +267,227 @@ func (c *wsClient) waitTail(pred func(env map[string]any) bool, timeout time.Dur
 	}
 }
 
+func (c *wsClient) assertNoTail(pred func(env map[string]any) bool, timeout time.Duration) {
+	c.t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case m := <-c.tail:
+			env, _ := m["envelope"].(map[string]any)
+			if env != nil && pred(env) {
+				c.t.Fatalf("unexpected tail frame: %v", m)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
 func (c *wsClient) close() { _ = c.conn.Close() }
+
+func TestSubmitIdempotencySurvivesReconnect(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+
+	submit := func(client *wsClient, ref string, payload map[string]any) map[string]any {
+		return client.sendMessage(map[string]any{
+			"ref": ref, "id": "client-stable-id", "msg_type": "human.message",
+			"kind": "request", "audience": []string{string(setup.actorID)},
+			"payload": payload,
+		})
+	}
+
+	firstClient := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	first := submit(firstClient, "attempt-1", map[string]any{"text": "hello", "intent": "steer"})
+	if first["type"] != "ack" || first["message_id"] != "client-stable-id" {
+		t.Fatalf("first submit=%v", first)
+	}
+	firstClient.close()
+
+	secondClient := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer secondClient.close()
+	replay := submit(secondClient, "attempt-2", map[string]any{"intent": "steer", "text": "hello"})
+	if replay["type"] != "ack" || replay["message_id"] != "client-stable-id" {
+		t.Fatalf("same-content reconnect replay=%v", replay)
+	}
+	conflict := submit(secondClient, "attempt-3", map[string]any{"text": "different", "intent": "steer"})
+	if conflict["type"] != "error" || conflict["error"] != "idempotency_conflict" {
+		t.Fatalf("different-content replay=%v", conflict)
+	}
+
+	rows, err := env.app.MessagesForTest(channel.ID(setup.chID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matches int
+	for _, row := range rows {
+		if row.Envelope.ID == "client-stable-id" {
+			matches++
+			if string(row.Envelope.Payload) != `{"text":"hello","intent":"steer"}` &&
+				string(row.Envelope.Payload) != `{"intent":"steer","text":"hello"}` {
+				t.Fatalf("intent payload changed in log: %s", row.Envelope.Payload)
+			}
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("physical rows for idempotency key=%d want 1", matches)
+	}
+}
+
+func TestWebSocketObservationStateMachine(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	_, observerCookies := register(t, env, "observer@example.com", "secret123", "Observer")
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+
+	owner := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer owner.close()
+	observer := dialWS(t, srv, observerCookies, setup.chID, 0)
+
+	observe := func(client *wsClient, ref string) map[string]any {
+		client.send(map[string]any{"type": "observe", "ref": ref, "channel_id": setup.chID})
+		return client.nextAck(3 * time.Second)
+	}
+	unobserve := func(client *wsClient, ref string) map[string]any {
+		client.send(map[string]any{"type": "unobserve", "ref": ref, "channel_id": setup.chID})
+		return client.nextAck(3 * time.Second)
+	}
+	post := func(id string) {
+		ack := owner.sendMessage(map[string]any{
+			"ref": "post-" + id, "id": id, "msg_type": "chat.text", "kind": "event",
+			"audience": []string{string(setup.actorID)}, "payload": map[string]any{"text": id},
+		})
+		if ack["type"] != "ack" {
+			t.Fatalf("post %s=%v", id, ack)
+		}
+	}
+	matches := func(id string) func(map[string]any) bool {
+		return func(envelope map[string]any) bool { return envelope["id"] == id }
+	}
+
+	for _, ref := range []string{"observe-1", "observe-duplicate"} {
+		if got := observe(observer, ref); got["type"] != "ack" || got["channel_id"] != setup.chID {
+			t.Fatalf("%s=%v", ref, got)
+		}
+	}
+	post("observed-message")
+	observer.waitTail(matches("observed-message"), 3*time.Second)
+
+	for _, ref := range []string{"unobserve-1", "unobserve-noop"} {
+		if got := unobserve(observer, ref); got["type"] != "ack" || got["channel_id"] != setup.chID {
+			t.Fatalf("%s=%v", ref, got)
+		}
+	}
+	post("after-unobserve")
+	observer.assertNoTail(matches("after-unobserve"), 250*time.Millisecond)
+
+	if got := observe(observer, "observe-before-disconnect"); got["type"] != "ack" {
+		t.Fatalf("observe before disconnect=%v", got)
+	}
+	observer.close()
+	observer = dialWS(t, srv, observerCookies, setup.chID, 0)
+	defer observer.close()
+	post("after-reconnect")
+	observer.assertNoTail(matches("after-reconnect"), 250*time.Millisecond)
+
+	if got := observe(observer, "observe-before-join"); got["type"] != "ack" {
+		t.Fatalf("observe before join=%v", got)
+	}
+	joined := env.do(t, http.MethodPost, "/api/channels/"+setup.chID+"/join", nil, observerCookies)
+	assertStatus(t, joined, http.StatusCreated)
+	ended := observer.nextAck(3 * time.Second)
+	if ended["type"] != "observe_ended" || ended["channel_id"] != setup.chID || ended["reason"] != "now_member" {
+		t.Fatalf("observation invalidation=%v", ended)
+	}
+	if got := observe(observer, "member-observe"); got["type"] != "error" || got["error"] != "now_member" {
+		t.Fatalf("member observe=%v", got)
+	}
+}
+
+func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
+	env := setupTestApp(t)
+	testAgentBuilder = func(_ channel.ID, _ actor.ActorID) (actorbase.Proc, error) {
+		def, err := base.Def("activity acceptance", base.Config{NewEngine: func(actorbase.Sys, []byte) (base.Engine, error) {
+			return activityAcceptanceEngine{}, nil
+		}})
+		if err != nil {
+			return nil, err
+		}
+		return def.New()
+	}
+	setup := fullSetup(t, env)
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer client.close()
+
+	const requestID = "activity-acceptance-request"
+	ack := client.sendMessage(map[string]any{
+		"id": requestID, "msg_type": "agent.activity.acceptance", "kind": "request",
+		"audience": []string{string(setup.boostID)}, "visibility": "private",
+		"payload": map[string]any{"text": "run"},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("submit=%v", ack)
+	}
+
+	wantTypes := []string{
+		"agent.activity.acceptance",
+		"activity.turn.started",
+		"activity.tool.started",
+		"activity.tool.ended",
+		"agent.activity.acceptance",
+		"activity.turn.ended",
+	}
+	var matched []storespec.StoredRow
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := env.app.MessagesForTest(channel.ID(setup.chID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		matched = matched[:0]
+		for _, row := range rows {
+			if strings.Contains(row.Envelope.Type, "delta") || row.Envelope.Type == "agent.text" {
+				t.Fatalf("retired/chunk output reached log: type=%q", row.Envelope.Type)
+			}
+			if row.Envelope.ID == requestID || row.Envelope.CorrelationID == requestID {
+				matched = append(matched, row)
+			}
+		}
+		if len(matched) == len(wantTypes) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(matched) != len(wantTypes) {
+		t.Fatalf("correlated log rows=%d want %d", len(matched), len(wantTypes))
+	}
+	for i, row := range matched {
+		if row.Envelope.Type != wantTypes[i] {
+			t.Fatalf("row %d type=%q want %q", i, row.Envelope.Type, wantTypes[i])
+		}
+		if strings.HasPrefix(row.Envelope.Type, "activity.") {
+			if row.Envelope.Sender.ID != setup.boostID || row.Envelope.CorrelationID != requestID || row.Envelope.Visibility != message.VisibilityPrivate {
+				t.Fatalf("activity row %d routing=%+v", i, row.Envelope)
+			}
+		}
+	}
+	if matched[4].Envelope.Kind != message.KindResponse {
+		t.Fatalf("terminal kind=%q want response", matched[4].Envelope.Kind)
+	}
+
+	page := env.do(t, http.MethodGet, "/api/channels/"+setup.chID+"/messages?after_seq="+fmt.Sprint(matched[0].Seq-1)+"&limit=20", nil, setup.cookies)
+	assertStatus(t, page, http.StatusOK)
+	for _, activityType := range wantTypes[1:4] {
+		if !strings.Contains(page.Body.String(), `"type":"`+activityType+`"`) {
+			t.Fatalf("paginated replay omitted %q: %s", activityType, page.Body.String())
+		}
+	}
+}
 
 func TestAttachValidationErrorEchoesReadableRef(t *testing.T) {
 	env := setupTestApp(t)

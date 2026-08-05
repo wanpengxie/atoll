@@ -156,6 +156,28 @@ func TestInterpretSubmit(t *testing.T) {
 	}
 }
 
+func TestInterpretSubmitKeepsAgentIntentInsideOpaquePayload(t *testing.T) {
+	const payload = `{"text":"stop and reconsider","intent":"interrupt","expected_turn_id":"turn-7","provider_field":{"x":1}}`
+	fs := &fakeSys{self: "human:alice", writeID: "m-intent"}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "intent-ref", subjectgate.SubmitPayload{
+		ChannelID: "c1", ID: "client-id", MsgType: "human.message",
+		Audience: []string{"agent:a"}, Payload: json.RawMessage(payload),
+	})
+	got := interpretFrame(fs, newDeps("human:alice", nil, false), f)
+	if got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("intent submit failed: %+v", decodeErr(t, got))
+	}
+	if !fs.posted || fs.emitted {
+		t.Fatalf("agent message must remain an ordinary request")
+	}
+	if string(fs.postSpec.Payload) != payload {
+		t.Fatalf("agent payload changed in transit: got %s want %s", fs.postSpec.Payload, payload)
+	}
+	if fs.postSpec.ID != "client-id" || fs.postSpec.Type != "human.message" {
+		t.Fatalf("intent leaked into standard message fields: %+v", fs.postSpec)
+	}
+}
+
 // The submit frame's kind is a CLIENT-supplied string. Post/Emit make a
 // kind=response unconstructible at the verb, so the whitelist that used to live
 // on the deleted SubmitEnvelope now lives here — and answers bad_payload,
@@ -240,10 +262,9 @@ func TestInterpretSubmitCarriesTheFullSurfaceOnBothArms(t *testing.T) {
 	}
 }
 
-// A harness rejection must reach the wire as its OWN reason word, not as a
-// shrugging "unavailable" — on BOTH write arms (§4.2a). WriteRejected is the
-// typed carrier that makes that possible.
-func TestSubmitSurfacesHarnessRejectVerbatimOnBothArms(t *testing.T) {
+// A client id collision is a websocket idempotency concern, never a leaked
+// harness implementation word — on both write arms.
+func TestSubmitMapsDuplicateRejectToIdempotencyConflictOnBothArms(t *testing.T) {
 	for _, kind := range []string{"request", "event"} {
 		fs := &fakeSys{
 			self:     "human:alice",
@@ -253,9 +274,46 @@ func TestSubmitSurfacesHarnessRejectVerbatimOnBothArms(t *testing.T) {
 			ChannelID: "c1", MsgType: "x", Kind: kind, Audience: []string{"tool:kimi"},
 		})
 		e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, false), f))
-		if e.Code != "harness_id_duplicate_conflict" || e.Detail != "already exists" {
-			t.Fatalf("kind=%s: harness verdict must ride through verbatim, got %+v", kind, e)
+		if e.Code != subjectgate.CodeIdempotencyConflict || e.Detail != "already exists" {
+			t.Fatalf("kind=%s: duplicate must map to idempotency_conflict, got %+v", kind, e)
 		}
+	}
+}
+
+func TestSubmitFingerprintUsesCanonicalClientSemantics(t *testing.T) {
+	request := func(id, kind, visibility, payload string) subjectgate.SubmitPayload {
+		return subjectgate.SubmitPayload{
+			ChannelID: "c1", ID: id, MsgType: "human.message", Kind: kind,
+			Visibility: visibility, Audience: []string{"agent:a"}, Payload: json.RawMessage(payload),
+		}
+	}
+	base, err := submitFingerprint(request("id-1", "", "", `{"z":1.0,"a":{"y":2,"x":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivalent, err := submitFingerprint(request("id-2", "request", "public", `{"a":{"x":1,"y":2.0},"z":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != equivalent {
+		t.Fatalf("JSON key order/default spelling changed fingerprint:\n%s\n%s", base, equivalent)
+	}
+
+	changed := request("id-3", "request", "public", `{"a":{"x":1,"y":2},"z":1,"intent":"interrupt"}`)
+	changedFingerprint, err := submitFingerprint(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedFingerprint == base {
+		t.Fatal("payload intent must participate in the fingerprint")
+	}
+
+	// Frame ref never reaches SubmitPayload, and client id is the idempotency
+	// key rather than fingerprint material.
+	otherID := request("entirely-different-id", "", "", `{"z":1,"a":{"y":2,"x":1}}`)
+	otherFingerprint, err := submitFingerprint(otherID)
+	if err != nil || otherFingerprint != base {
+		t.Fatalf("message id leaked into fingerprint: got %s err=%v want %s", otherFingerprint, err, base)
 	}
 }
 

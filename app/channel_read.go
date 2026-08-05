@@ -31,6 +31,25 @@ const (
 	observeChannelRetired  observeReason = "channel_retired"
 )
 
+// ObservationRoute is the app-owned policy result bridged into gateway by the
+// assembly root. It carries read capability only; there is no subject slot and
+// therefore no write path for an observer.
+type ObservationRoute struct {
+	Channel channel.ID
+	Bundle  channelhost.Bundle
+	Reader  channel.Reader
+}
+
+// ResolveObservation exposes canObserve as an injected policy seam without
+// making drivers/gateway import app.
+func (a *App) ResolveObservation(ctx context.Context, principal string, chID channel.ID) (ObservationRoute, string, error) {
+	bundle, reader, reason, err := a.canObserve(ctx, chID, principal)
+	if reason != observeAllowed || err != nil {
+		return ObservationRoute{}, string(reason), err
+	}
+	return ObservationRoute{Channel: chID, Bundle: bundle, Reader: reader}, "", nil
+}
+
 // canObserve is the single realm policy gate for observer Readers. P1 is
 // realm-public: authentication is established by the HTTP membrane or by a
 // trusted in-channel requester before this method is called. The source

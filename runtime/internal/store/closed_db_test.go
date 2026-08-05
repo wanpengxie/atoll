@@ -87,7 +87,7 @@ func TestClosedDB_AppendError(t *testing.T) {
 	ctx := context.Background()
 	h := closedChannel(t)
 	env := newEnv("m1", message.KindEvent, message.Audience{"x"})
-	if _, err := h.Log.Append(ctx, env, false); err == nil {
+	if _, err := h.Log.Append(ctx, env, false, storespec.AppendMetadata{}); err == nil {
 		t.Error("Append on closed DB must error (BeginTx fails)")
 	}
 }

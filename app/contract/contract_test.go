@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/registry"
 )
 
 func TestGoldenSchemaIsCurrent(t *testing.T) {
@@ -27,6 +31,20 @@ func TestRegistryMethodsCarrySince(t *testing.T) {
 		if method.Since == "" {
 			t.Errorf("%s %s has no since version", method.Method, method.Path)
 		}
+	}
+}
+
+func TestExperimentalMethodsAreNamespaced(t *testing.T) {
+	var found bool
+	for _, method := range Methods() {
+		prefixed := strings.HasPrefix(method.Path, "/api/experimental/")
+		if method.Experimental != prefixed {
+			t.Errorf("%s %s experimental=%v", method.Method, method.Path, method.Experimental)
+		}
+		found = found || method.Experimental
+	}
+	if !found {
+		t.Fatal("experimental mechanism has no reachable vertical slice")
 	}
 }
 
@@ -101,5 +119,75 @@ func TestSchemaKeepsConsumerUnknownValueFallback(t *testing.T) {
 	}
 	if _, ok := downstream["x-known-values"]; !ok {
 		t.Fatalf("downstream frame type lost its known-value hints: %#v", downstream)
+	}
+}
+
+func TestAgentMessagePayloadSchemaIsOpenAndProviderFacing(t *testing.T) {
+	def := schemaDefinitions()["AgentMessagePayload"].(map[string]any)
+	if def["additionalProperties"] != true {
+		t.Fatalf("agent payload content vocabulary must stay open: %#v", def)
+	}
+	props := def["properties"].(map[string]any)
+	for _, name := range []string{"intent", "expected_turn_id", "text"} {
+		if _, ok := props[name]; !ok {
+			t.Fatalf("agent payload schema missing %q", name)
+		}
+	}
+	intent := props["intent"].(map[string]any)
+	if _, closed := intent["enum"]; closed {
+		t.Fatalf("intent vocabulary must grow additively: %#v", intent)
+	}
+	want := []AgentIntent{AgentIntentSteer, AgentIntentInterrupt}
+	if !reflect.DeepEqual(intent["x-known-values"], want) {
+		t.Fatalf("intent known values=%#v want %#v", intent["x-known-values"], want)
+	}
+}
+
+func TestSubmitSchemaDocumentsFrozenIdempotencyFingerprint(t *testing.T) {
+	description, _ := schemaDefinitions()["SubmitPayload"].(map[string]any)["description"].(string)
+	for _, term := range []string{"(channel_id,id)", "msg_type", "payload", "audience", "expires_at_ms", "excludes ref"} {
+		if !strings.Contains(description, term) {
+			t.Fatalf("SubmitPayload fingerprint description omits %q: %s", term, description)
+		}
+	}
+}
+
+func TestWebSocketErrorSchemaExposesIdempotencyAsKnownValue(t *testing.T) {
+	props := schemaDefinitions()["ErrorPayload"].(map[string]any)["properties"].(map[string]any)
+	code := props["code"].(map[string]any)
+	if _, closed := code["enum"]; closed {
+		t.Fatalf("downstream websocket codes must allow unknown values: %#v", code)
+	}
+	known := code["x-known-values"].([]string)
+	for _, value := range known {
+		if value == subjectgate.CodeIdempotencyConflict {
+			return
+		}
+	}
+	t.Fatalf("websocket code hints omit %q: %v", subjectgate.CodeIdempotencyConflict, known)
+}
+
+func TestActivityRegistryDrivesContractSchemas(t *testing.T) {
+	table := activityTable()
+	defs := schemaDefinitions()
+	decls := registry.ActivityTypes()
+	// 1:1 mapping is the invariant; the vocabulary COUNT is deliberately not
+	// pinned (activity types are append-only — a literal count would redden on
+	// every legitimate addition, archtest 纪律"红=改错了恒非改了").
+	if len(table) != len(decls) {
+		t.Fatalf("activity table=%d registry=%d", len(table), len(decls))
+	}
+	for _, decl := range decls {
+		wireType := string(decl.Type)
+		if !strings.HasPrefix(wireType, "activity.") {
+			t.Fatalf("activity type is not fully qualified: %q", wireType)
+		}
+		entry, ok := table[wireType]
+		if !ok || entry.Payload != decl.SchemaName {
+			t.Fatalf("activity %q mapping=%+v", wireType, entry)
+		}
+		if _, ok := defs[decl.SchemaName]; !ok {
+			t.Fatalf("activity %q schema %q missing", wireType, decl.SchemaName)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
 )
 
 type frameSchema struct {
@@ -16,16 +17,21 @@ type frameSchema struct {
 	Payload   string `json:"payload_schema"`
 }
 
+type activitySchema struct {
+	Payload string `json:"payload_schema"`
+}
+
 type goldenSchema struct {
-	Schema          string                 `json:"$schema"`
-	ID              string                 `json:"$id"`
-	Title           string                 `json:"title"`
-	ContractVersion string                 `json:"x-contract-version"`
-	EnvelopeVersion int                    `json:"x-envelope-version"`
-	REST            []Method               `json:"x-rest-methods"`
-	ErrorCodes      []ErrorCode            `json:"x-error-codes"`
-	Frames          map[string]frameSchema `json:"x-websocket-frames"`
-	Defs            map[string]any         `json:"$defs"`
+	Schema          string                    `json:"$schema"`
+	ID              string                    `json:"$id"`
+	Title           string                    `json:"title"`
+	ContractVersion string                    `json:"x-contract-version"`
+	EnvelopeVersion int                       `json:"x-envelope-version"`
+	REST            []Method                  `json:"x-rest-methods"`
+	ErrorCodes      []ErrorCode               `json:"x-error-codes"`
+	Frames          map[string]frameSchema    `json:"x-websocket-frames"`
+	Activities      map[string]activitySchema `json:"x-activity-types"`
+	Defs            map[string]any            `json:"$defs"`
 }
 
 // GenerateSchema aggregates the app-owned REST contract and the
@@ -50,6 +56,10 @@ func GenerateSchema() ([]byte, error) {
 			return nil, fmt.Errorf("contract registry: duplicate method %s", key)
 		}
 		seen[key] = struct{}{}
+		isExperimentalPath := strings.HasPrefix(method.Path, "/api/experimental/")
+		if method.Experimental != isExperimentalPath {
+			return nil, fmt.Errorf("contract registry: %s experimental=%v does not match its namespace", key, method.Experimental)
+		}
 		references := []string{method.PathSchema, method.QuerySchema, method.BodySchema, method.Response}
 		for _, name := range append(references, method.Errors...) {
 			if _, ok := defs[name]; !ok {
@@ -72,9 +82,18 @@ func GenerateSchema() ([]byte, error) {
 		REST:            methods,
 		ErrorCodes:      ErrorCodes(),
 		Frames:          frames,
+		Activities:      activityTable(),
 		Defs:            defs,
 	}
 	return json.MarshalIndent(doc, "", "  ")
+}
+
+func activityTable() map[string]activitySchema {
+	out := make(map[string]activitySchema, len(registry.ActivityTypes()))
+	for _, decl := range registry.ActivityTypes() {
+		out[string(decl.Type)] = activitySchema{Payload: decl.SchemaName}
+	}
+	return out
 }
 
 // framePayloads maps each frame type to its payload schema name. The frame
@@ -85,8 +104,9 @@ func GenerateSchema() ([]byte, error) {
 var framePayloads = map[string]string{
 	"attach": "AttachPayload", "submit": "SubmitPayload", "resolve": "ResolvePayload",
 	"cancel": "CancelPayload", "after": "AfterPayload", "cancel_timer": "CancelTimerPayload",
-	"resource": "ResourcePayload",
+	"resource": "ResourcePayload", "observe": "ObservePayload", "unobserve": "UnobservePayload",
 	"feed": "FeedPayload", "receipt": "ReceiptPayload", "error": "ErrorPayload",
+	"observe_ended": "ObserveEndedPayload",
 }
 
 func frameTable() (map[string]frameSchema, error) {
@@ -130,7 +150,6 @@ func schemaDefinitions() map[string]any {
 	} {
 		defs[name] = schemaForType(reflect.TypeOf(value), false)
 	}
-
 	// REST outputs are open to additive fields but retain all known field types.
 	for name, value := range map[string]any{
 		"Error": Error{}, "Meta": Meta{}, "Principal": Principal{}, "OK": OK{},
@@ -148,6 +167,27 @@ func schemaDefinitions() map[string]any {
 	errorDef := defs["Error"].(map[string]any)
 	errorProperties := errorDef["properties"].(map[string]any)
 	errorProperties["code"] = map[string]any{"type": "string", "x-known-values": ErrorCodes()}
+	agentPayload := schemaForType(reflect.TypeOf(AgentMessagePayload{}), true)
+	agentPayload["description"] = "Open payload convention for messages addressed to agents; absent intent means steer. Intent and expected_turn_id stay inside payload and are opaque to the substrate."
+	agentPayloadProperties := agentPayload["properties"].(map[string]any)
+	agentPayloadProperties["intent"] = map[string]any{
+		"type": "string", "x-known-values": []AgentIntent{AgentIntentSteer, AgentIntentInterrupt},
+		"description": "Provider delivery intent. Omitted means steer; the vocabulary grows additively.",
+	}
+	defs["AgentMessagePayload"] = agentPayload
+
+	for _, decl := range registry.ActivityTypes() {
+		defs[decl.SchemaName] = schemaForType(reflect.TypeOf(decl.Payload), false)
+		props := defs[decl.SchemaName].(map[string]any)["properties"].(map[string]any)
+		switch decl.Type {
+		case registry.ActivityTurnStarted, registry.ActivityToolStarted:
+			props["status"] = map[string]any{"type": "string", "const": registry.ActivityStatusStarted}
+		case registry.ActivityTurnEnded, registry.ActivityToolEnded:
+			props["status"] = map[string]any{"type": "string", "enum": []string{
+				registry.ActivityStatusCompleted, registry.ActivityStatusFailed,
+			}}
+		}
+	}
 
 	// Chain-link schemas retain their substrate source. Upstream definitions are
 	// closed; downstream definitions are open for must-ignore evolution.
@@ -155,24 +195,38 @@ func schemaDefinitions() map[string]any {
 		"AttachPayload": subjectgate.AttachPayload{}, "SubmitPayload": subjectgate.SubmitPayload{},
 		"ResolvePayload": subjectgate.ResolvePayload{}, "CancelPayload": subjectgate.CancelPayload{},
 		"AfterPayload": subjectgate.AfterPayload{}, "CancelTimerPayload": subjectgate.CancelTimerPayload{},
-		"ResourcePayload": subjectgate.ResourcePayload{},
+		"ResourcePayload": subjectgate.ResourcePayload{}, "ObservePayload": subjectgate.ObservePayload{},
+		"UnobservePayload": subjectgate.UnobservePayload{},
 	} {
 		defs[name] = schemaForType(reflect.TypeOf(value), false)
 	}
+	defs["SubmitPayload"].(map[string]any)["description"] = "Idempotency key is (channel_id,id). The canonical client fingerprint covers msg_type, normalized kind, JSON-semantic payload, explicit audience, normalized visibility, parent_id, and explicit expires_at_ms; it excludes ref, id, generated deadlines, and default-audience completion. Omitted kind/visibility/payload and their explicit default values are equivalent."
 	for name, value := range map[string]any{
 		"FeedPayload": subjectgate.FeedPayload{}, "ErrorPayload": subjectgate.ErrorPayload{},
 		"AttachReceipt": subjectgate.AttachReceipt{}, "SubmitReceipt": subjectgate.SubmitReceipt{},
 		"ResolveReceipt": subjectgate.ResolveReceipt{}, "CancelReceipt": subjectgate.CancelReceipt{},
 		"AfterReceipt": subjectgate.AfterReceipt{}, "CancelTimerReceipt": subjectgate.CancelTimerReceipt{},
+		"ObserveReceipt": subjectgate.ObserveReceipt{}, "UnobserveReceipt": subjectgate.UnobserveReceipt{},
 		"ResourceOutcome": subjectgate.ResourceOutcome{}, "ResourceStat": subjectgate.ResourceStat{},
-		"SubjectResourcePage": subjectgate.ResourcePage{},
+		"SubjectResourcePage": subjectgate.ResourcePage{}, "ObserveEndedPayload": subjectgate.ObserveEndedPayload{},
 	} {
 		defs[name] = schemaForType(reflect.TypeOf(value), true)
+	}
+	wsError := defs["ErrorPayload"].(map[string]any)
+	wsErrorProperties := wsError["properties"].(map[string]any)
+	wsErrorProperties["code"] = map[string]any{
+		"type": "string", "x-known-values": subjectgate.ErrorCodes(),
+	}
+	observeEnded := defs["ObserveEndedPayload"].(map[string]any)
+	observeEndedProperties := observeEnded["properties"].(map[string]any)
+	observeEndedProperties["reason"] = map[string]any{
+		"type": "string", "x-known-values": subjectgate.ObserveEndedReasons(),
 	}
 	defs["ReceiptPayload"] = map[string]any{"oneOf": []any{
 		map[string]any{"$ref": "#/$defs/AttachReceipt"}, map[string]any{"$ref": "#/$defs/SubmitReceipt"},
 		map[string]any{"$ref": "#/$defs/ResolveReceipt"}, map[string]any{"$ref": "#/$defs/CancelReceipt"},
 		map[string]any{"$ref": "#/$defs/AfterReceipt"}, map[string]any{"$ref": "#/$defs/CancelTimerReceipt"},
+		map[string]any{"$ref": "#/$defs/ObserveReceipt"}, map[string]any{"$ref": "#/$defs/UnobserveReceipt"},
 		map[string]any{"$ref": "#/$defs/ResourceOutcome"}, map[string]any{"$ref": "#/$defs/ResourceStat"},
 		map[string]any{"$ref": "#/$defs/SubjectResourcePage"},
 	}}

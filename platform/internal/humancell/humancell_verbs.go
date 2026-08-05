@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // humancell_verbs.go: the frame interpreter's small mapping helpers — Sys-verb
@@ -30,6 +31,9 @@ import (
 func mapVerbErr(err error, errFrame frameErr) subjectgate.Frame {
 	var wr *actorbase.WriteRejected
 	if errors.As(err, &wr) {
+		if wr.Reason == storespec.AppendRejectIDDuplicate {
+			return errFrame(subjectgate.CodeIdempotencyConflict, wr.Detail)
+		}
 		return errFrame(wr.Reason, wr.Detail)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

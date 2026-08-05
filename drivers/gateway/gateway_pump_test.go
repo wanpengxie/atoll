@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -189,6 +190,79 @@ func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 
 	s.Close()
 	stop()
+}
+
+func TestBusyLoopDrainsObserveControlsBeforeNextFeedBatch(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	const principal = "observe-during-busy-feed"
+	hot, memberID := openHome(t, channel.ID("hot"), principal)
+	admitRows(t, hot, 4*feedBatch)
+	observed, _ := openHome(t, channel.ID("observed"), "different-member")
+	res.set(principal, []Route{memberRoute("hot", hot, memberID, clk.now())}, nil, nil)
+	g := newTestGateway(t, Config{
+		Resolver: res,
+		Observer: ObserverResolverFunc(func(context.Context, string, channel.ID) (ObserverRoute, string, error) {
+			return ObserverRoute{
+				Channel: "observed", Bundle: observed,
+				Reader: channel.Reader{Principal: principal, Mode: channel.ReaderObserver},
+			}, "", nil
+		}),
+	}, settings{clock: clk})
+
+	firstBatch := make(chan struct{})
+	var once sync.Once
+	s, _ := g.Attach(principal, nil)
+	_, stop := observeFeed(s, func(ch channel.ID, count int) {
+		if ch == "hot" && count == 1 {
+			once.Do(func() { close(firstBatch) })
+		}
+	})
+	s.StartFeed()
+	select {
+	case <-firstBatch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("hot backlog never entered the busy pump path")
+	}
+
+	frame, err := subjectgate.NewFrame(subjectgate.FrameObserve, "observe-hot-loop", subjectgate.ObservePayload{ChannelID: "observed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan subjectgate.Frame, 1)
+	go func() { result <- s.Upstream(frame) }()
+	select {
+	case got := <-result:
+		if got.Type != subjectgate.FrameReceipt || got.Ref != "observe-hot-loop" {
+			t.Fatalf("observe result=%+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("observe control starved behind the sustained full-batch feed")
+	}
+
+	s.Close()
+	stop()
+}
+
+func TestObservationReasonsAreNormalizedAtGatewayBoundary(t *testing.T) {
+	tests := []struct {
+		code string
+		want subjectgate.ObserveEndedReason
+	}{
+		{subjectgate.CodeNowMember, subjectgate.ObserveEndedNowMember},
+		{subjectgate.CodeChannelNotFound, subjectgate.ObserveEndedChannelRetired},
+		{subjectgate.CodeChannelUnavailable, subjectgate.ObserveEndedChannelUnavailable},
+		{subjectgate.CodeCapabilityUnavailable, subjectgate.ObserveEndedCapabilityUnavailable},
+		{"future_policy_reason", subjectgate.ObserveEndedCapabilityUnavailable},
+	}
+	for _, test := range tests {
+		if got := observeEndedReason(test.code); got != test.want {
+			t.Errorf("observeEndedReason(%q)=%q want %q", test.code, got, test.want)
+		}
+	}
+	if got := normalizeObservationCode("future_policy_reason"); got != subjectgate.CodeCapabilityUnavailable {
+		t.Fatalf("unknown resolver reason escaped the gateway boundary: %q", got)
+	}
 }
 
 // TestAdmitWithoutPokeConvergesOnSweep (DoD-6/7③ timer backstop): the connection is

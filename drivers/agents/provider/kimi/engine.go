@@ -202,8 +202,8 @@ func (e *engine) buildProvider() (llm.ChatProvider, error) {
 
 // Turn drives one Agent.Run: compose the user input from the trigger, kick the
 // agent in a goroutine, and consume wire events until the turn completes. The
-// per-step progress + terminal reply are written to the base Sink (Final=false /
-// Final=true). An engine/LLM error becomes a failed terminal Output (actor stays
+// tool phases + terminal full value are written to the typed base Sink. An
+// engine/LLM error becomes a failed terminal response (actor stays
 // alive, Turn returns nil); only a Sink write failure (A1) propagates as loud死.
 func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink) error {
 	input := composeUserInput(trigger.Envelope)
@@ -274,6 +274,6 @@ const agentDescription = "LLM agent: the channel's conversational brain. Send it
 
 const agentSkillDoc = "# agent\n\n" +
 	"Conversational actor backed by an LLM. It accepts any kind=request as a " +
-	"turn trigger (no closed type set), replies with agent.text events " +
-	"(public terminal + system progress), and calls other actors through the " +
+	"turn trigger (no closed type set), replies with a terminal response, emits " +
+	"typed activity phases, and calls other actors through the " +
 	"channel's meta tools.\n"

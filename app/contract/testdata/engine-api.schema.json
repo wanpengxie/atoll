@@ -356,6 +356,20 @@
       "experimental": false
     },
     {
+      "method": "GET",
+      "path": "/api/experimental/channels/:chID/observe",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "MessagePageQuery",
+      "body_schema": "none",
+      "response_schema": "EventStream",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": true
+    },
+    {
       "method": "POST",
       "path": "/api/identity/login",
       "auth": "none",
@@ -509,6 +523,14 @@
       "direction": "downstream",
       "payload_schema": "FeedPayload"
     },
+    "observe": {
+      "direction": "upstream",
+      "payload_schema": "ObservePayload"
+    },
+    "observe_ended": {
+      "direction": "downstream",
+      "payload_schema": "ObserveEndedPayload"
+    },
     "receipt": {
       "direction": "downstream",
       "payload_schema": "ReceiptPayload"
@@ -524,9 +546,120 @@
     "submit": {
       "direction": "upstream",
       "payload_schema": "SubmitPayload"
+    },
+    "unobserve": {
+      "direction": "upstream",
+      "payload_schema": "UnobservePayload"
+    }
+  },
+  "x-activity-types": {
+    "activity.tool.ended": {
+      "payload_schema": "ActivityToolEndedPayload"
+    },
+    "activity.tool.started": {
+      "payload_schema": "ActivityToolStartedPayload"
+    },
+    "activity.turn.ended": {
+      "payload_schema": "ActivityTurnEndedPayload"
+    },
+    "activity.turn.started": {
+      "payload_schema": "ActivityTurnStartedPayload"
     }
   },
   "$defs": {
+    "ActivityToolEndedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "tool_call_id",
+        "tool",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ActivityToolStartedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "started",
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "tool_call_id",
+        "tool",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ActivityTurnEndedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "completed",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ActivityTurnStartedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "started",
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "status"
+      ],
+      "type": "object"
+    },
     "AfterPayload": {
       "additionalProperties": false,
       "properties": {
@@ -558,6 +691,27 @@
       "required": [
         "timer_id"
       ],
+      "type": "object"
+    },
+    "AgentMessagePayload": {
+      "additionalProperties": true,
+      "description": "Open payload convention for messages addressed to agents; absent intent means steer. Intent and expected_turn_id stay inside payload and are opaque to the substrate.",
+      "properties": {
+        "expected_turn_id": {
+          "type": "string"
+        },
+        "intent": {
+          "description": "Provider delivery intent. Omitted means steer; the vocabulary grows additively.",
+          "type": "string",
+          "x-known-values": [
+            "steer",
+            "interrupt"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "AttachDaemonRequest": {
@@ -1320,6 +1474,7 @@
           "x-known-values": [
             "error",
             "feed",
+            "observe_ended",
             "receipt"
           ]
         },
@@ -1399,7 +1554,24 @@
       "additionalProperties": true,
       "properties": {
         "code": {
-          "type": "string"
+          "type": "string",
+          "x-known-values": [
+            "bad_payload",
+            "not_in_audience",
+            "unauthorized_sender",
+            "already_closed",
+            "request_not_found",
+            "invalid_decision",
+            "unavailable",
+            "routing_unavailable",
+            "idempotency_conflict",
+            "now_member",
+            "channel_not_found",
+            "channel_unavailable",
+            "capability_unavailable",
+            "forbidden",
+            "closed"
+          ]
         },
         "detail": {
           "type": "string"
@@ -1586,6 +1758,52 @@
       ],
       "type": "object"
     },
+    "ObserveEndedPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "x-known-values": [
+            "now_member",
+            "channel_retired",
+            "channel_unavailable",
+            "capability_unavailable"
+          ]
+        }
+      },
+      "required": [
+        "channel_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ObservePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
+    "ObserveReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
     "Principal": {
       "additionalProperties": true,
       "properties": {
@@ -1625,6 +1843,12 @@
         },
         {
           "$ref": "#/$defs/CancelTimerReceipt"
+        },
+        {
+          "$ref": "#/$defs/ObserveReceipt"
+        },
+        {
+          "$ref": "#/$defs/UnobserveReceipt"
         },
         {
           "$ref": "#/$defs/ResourceOutcome"
@@ -1925,6 +2149,7 @@
     },
     "SubmitPayload": {
       "additionalProperties": false,
+      "description": "Idempotency key is (channel_id,id). The canonical client fingerprint covers msg_type, normalized kind, JSON-semantic payload, explicit audience, normalized visibility, parent_id, and explicit expires_at_ms; it excludes ref, id, generated deadlines, and default-audience completion. Omitted kind/visibility/payload and their explicit default values are equivalent.",
       "properties": {
         "audience": {
           "items": {
@@ -1980,6 +2205,30 @@
       ],
       "type": "object"
     },
+    "UnobservePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
+    "UnobserveReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
     "UpstreamEnvelope": {
       "additionalProperties": false,
       "properties": {
@@ -1989,9 +2238,11 @@
             "attach",
             "cancel",
             "cancel_timer",
+            "observe",
             "resolve",
             "resource",
-            "submit"
+            "submit",
+            "unobserve"
           ],
           "type": "string"
         },

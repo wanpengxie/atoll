@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -86,6 +87,16 @@ func gatewayResolver(a *app.App) gateway.EntitlementResolver {
 	})
 }
 
+func gatewayObserverResolver(a *app.App) gateway.ObserverResolver {
+	return gateway.ObserverResolverFunc(func(ctx context.Context, principal string, chID channel.ID) (gateway.ObserverRoute, string, error) {
+		route, reason, err := a.ResolveObservation(ctx, principal, chID)
+		if err != nil || reason != "" {
+			return gateway.ObserverRoute{}, reason, err
+		}
+		return gateway.ObserverRoute{Channel: route.Channel, Bundle: route.Bundle, Reader: route.Reader}, "", nil
+	})
+}
+
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "atoll.db", "app database path")
@@ -112,6 +123,23 @@ func main() {
 	defer processDB.Close()
 	appDB := processDB.DB
 
+	// Bootstrap the local automation principal (contract D3 / 交接包①): --init
+	// mints the owner user + a bearer token and drops it next to the app db, so
+	// shells/scripts read one file and have identity. Path is a release detail,
+	// not contract.
+	if *initDB {
+		tokenPath := filepath.Join(filepath.Dir(*dbPath), "atoll-token")
+		if _, err := app.BootstrapOwnerToken(context.Background(), appDB, tokenPath); err != nil {
+			// --init refuses an existing database, so a half-initialized install
+			// must not survive this failure: drop the fresh db to keep --init
+			// retryable. (log.Fatalf skips defers — close explicitly first.)
+			processDB.Close()
+			_ = os.Remove(*dbPath)
+			log.Fatalf("server: %v", err)
+		}
+		logger.Info("server: bootstrap owner token written", "path", tokenPath)
+	}
+
 	a, err := app.New(app.Config{
 		DB:     appDB,
 		Logger: logger,
@@ -132,6 +160,7 @@ func main() {
 	// (app → drivers is fenced, so the assembly root does the DTO→DTO map here).
 	gw, err := gateway.New(gateway.Config{
 		Resolver: gatewayResolver(a),
+		Observer: gatewayObserverResolver(a),
 		Logger:   logger,
 	})
 	if err != nil {

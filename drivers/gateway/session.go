@@ -24,11 +24,31 @@ const feedBatch = 100
 // runFeed goroutine, so no lock. lastOK anchors the T_stale lease; paused = lease
 // expired (streaming stopped, awaiting resume).
 type subscription struct {
-	route  Route
-	notify <-chan struct{}
-	cancel func()
-	lastOK time.Time
-	paused bool
+	route     Route
+	reader    channel.Reader
+	temporary bool
+	notify    <-chan struct{}
+	cancel    func()
+	lastOK    time.Time
+	paused    bool
+}
+
+type controlKind uint8
+
+const (
+	controlObserve controlKind = iota + 1
+	controlUnobserve
+)
+
+type controlCommand struct {
+	kind    controlKind
+	channel channel.ID
+	reply   chan controlResult
+}
+
+type controlResult struct {
+	code   string
+	detail string
 }
 
 // eligState is the session's资格账 snapshot (spec §3.2 v0.8, 六轮 P1-2 修形): the pump
@@ -81,8 +101,9 @@ type Session struct {
 
 	// subs is the订阅集 (PUMP-OWNED, no lock). elig is the資格账 the pump publishes
 	// for Upstream (atomic single-writer).
-	subs map[channel.ID]*subscription
-	elig atomic.Pointer[eligState]
+	subs     map[channel.ID]*subscription
+	elig     atomic.Pointer[eligState]
+	controls chan controlCommand
 
 	onceClose sync.Once
 }
@@ -98,6 +119,7 @@ func (g *Gateway) Attach(principal string, since map[channel.ID]int64) (*Session
 		lane:      newLane(newCursor(since)),
 		wake:      make(chan struct{}, 1),
 		subs:      map[channel.ID]*subscription{},
+		controls:  make(chan controlCommand, 32),
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.elig.Store(&eligState{routes: map[channel.ID]Route{}, paused: map[channel.ID]struct{}{}, failed: map[channel.ID]struct{}{}})
@@ -257,6 +279,18 @@ func (s *Session) runFeed() {
 			return
 		default:
 		}
+		// Control commands are drained at every loop head, including the hot
+		// full-batch path that never reaches wait. This prevents observe receipts
+		// from starving behind an indefinitely busy member feed.
+		for {
+			select {
+			case command := <-s.controls:
+				s.handleControl(command)
+			default:
+				goto controlsDrained
+			}
+		}
+	controlsDrained:
 		// 每批资格窄窗复核 (spec §2.1 #18/§3.2, P0-1): a poke or the periodic sweep must
 		// still be OBSERVED even while the busy→continue path below keeps this loop
 		// runnable indefinitely (a hot channel that returns a full feedBatch every poll
@@ -328,12 +362,13 @@ func (s *Session) wait(sweep timer) bool {
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.ctx.Done())},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.wake)},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(sweep.C())},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.controls)},
 	}
 	subs := s.activeChannels()
 	for _, ch := range subs {
 		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.subs[ch].notify)})
 	}
-	chosen, _, _ := reflect.Select(cases)
+	chosen, received, _ := reflect.Select(cases)
 	switch chosen {
 	case 0:
 		return false // ctx done
@@ -341,6 +376,10 @@ func (s *Session) wait(sweep timer) bool {
 		s.dirty.Store(true) // poke
 	case 2:
 		s.dirty.Store(true) // periodic sweep → re-resolve
+	case 3:
+		// reflect.Select consumed the command, so execute it here; commands
+		// arriving on a hot loop are handled by the loop-head drain above.
+		s.handleControl(received.Interface().(controlCommand))
 	default:
 		// a Home commit signal → pump (dirty untouched)
 	}
@@ -389,7 +428,11 @@ func (s *Session) reconcile() {
 		// past T_stale from its lastOK is paused. Never退订 on a transient blip. globalErr
 		// = true tells Upstream that an UNKNOWN channel_id (never subscribed) must also
 		// map to unavailable, not forbidden — we have confirmed nothing this round.
-		for _, sub := range s.subs {
+		for ch, sub := range s.subs {
+			if sub.temporary {
+				s.refreshObservation(ch, sub, now)
+				continue
+			}
 			s.leaseOrPause(sub, now)
 		}
 		s.publishElig(true, nil)
@@ -410,11 +453,14 @@ func (s *Session) reconcile() {
 		sub := s.subs[ch]
 		switch {
 		case sub == nil:
-			s.subscribe(ch, r, now)
+			s.subscribeMember(ch, r, now)
+		case sub.temporary:
+			s.endObservation(ch, subjectgate.ObserveEndedNowMember)
+			s.subscribeMember(ch, r, now)
 		case sub.route.Bundle.Generation() != r.Bundle.Generation():
 			// Home 换代 (频道删后重开): 退旧订新 (do not assume the old notify chan closes).
 			sub.cancel()
-			s.subscribe(ch, r, now)
+			s.subscribeMember(ch, r, now)
 		default:
 			if sub.paused {
 				s.gw.logger.Info("gateway.entitlement.resumed", "channel", string(ch))
@@ -426,6 +472,9 @@ func (s *Session) reconcile() {
 	}
 	// removals: subscribed but not desired.
 	for ch, sub := range s.subs {
+		if sub.temporary {
+			continue
+		}
 		if _, ok := desired[ch]; ok {
 			continue
 		}
@@ -436,6 +485,15 @@ func (s *Session) reconcile() {
 		// confirmed no eligibility (absent from BOTH routes and failed) → 立即退订.
 		sub.cancel()
 		delete(s.subs, ch)
+	}
+	// Temporary observations use the same periodic/poke reconcile discipline
+	// as membership subscriptions, but are re-evaluated through the app-owned
+	// observer policy and never published into upstream write eligibility.
+	for ch, sub := range s.subs {
+		if !sub.temporary {
+			continue
+		}
+		s.refreshObservation(ch, sub, now)
 	}
 	s.publishElig(false, failedSet)
 }
@@ -455,9 +513,121 @@ func (s *Session) leaseOrPause(sub *subscription, now time.Time) {
 
 // subscribe registers a Home commit subscription for ch and records the sub. Backfill
 // happens in the pump loop (cursor at ch, default 0).
-func (s *Session) subscribe(ch channel.ID, r Route, now time.Time) {
+func (s *Session) subscribeMember(ch channel.ID, r Route, now time.Time) {
 	notify, cancel := r.Bundle.Gateway().Subscribe()
-	s.subs[ch] = &subscription{route: r, notify: notify, cancel: cancel, lastOK: now}
+	s.subs[ch] = &subscription{
+		route: r, reader: channel.Reader{ActorID: r.SubjectID, Mode: channel.ReaderMember},
+		notify: notify, cancel: cancel, lastOK: now,
+	}
+}
+
+func (s *Session) handleControl(command controlCommand) {
+	result := controlResult{}
+	switch command.kind {
+	case controlObserve:
+		if sub := s.subs[command.channel]; sub != nil {
+			if !sub.temporary {
+				result.code = subjectgate.CodeNowMember
+				result.detail = "members already receive this channel"
+			}
+			break
+		}
+		route, code, detail := s.resolveObservation(command.channel)
+		if code != "" {
+			result.code, result.detail = code, detail
+			break
+		}
+		notify, cancel := route.Bundle.Gateway().Subscribe()
+		s.subs[command.channel] = &subscription{
+			route: Route{Channel: route.Channel, Bundle: route.Bundle}, reader: route.Reader,
+			temporary: true, notify: notify, cancel: cancel, lastOK: s.gw.clock.Now(),
+		}
+	case controlUnobserve:
+		if sub := s.subs[command.channel]; sub != nil && sub.temporary {
+			sub.cancel()
+			delete(s.subs, command.channel)
+		}
+	default:
+		result.code, result.detail = subjectgate.CodeBadPayload, "unknown session control command"
+	}
+	select {
+	case command.reply <- result:
+	case <-s.ctx.Done():
+	}
+}
+
+func (s *Session) resolveObservation(ch channel.ID) (ObserverRoute, string, string) {
+	if s.gw.observer == nil {
+		return ObserverRoute{}, subjectgate.CodeCapabilityUnavailable, "observation resolver unavailable"
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
+	defer cancel()
+	route, reason, err := s.gw.observer.ResolveObservation(ctx, s.principal, ch)
+	if err != nil {
+		return ObserverRoute{}, subjectgate.CodeChannelUnavailable, err.Error()
+	}
+	if reason != "" {
+		code := normalizeObservationCode(reason)
+		return ObserverRoute{}, code, "observation refused: " + code
+	}
+	if route.Channel != ch || route.Bundle == nil || route.Reader.Mode != channel.ReaderObserver {
+		return ObserverRoute{}, subjectgate.CodeCapabilityUnavailable, "invalid observation route"
+	}
+	return route, "", ""
+}
+
+func (s *Session) refreshObservation(ch channel.ID, sub *subscription, now time.Time) {
+	route, code, _ := s.resolveObservation(ch)
+	if code != "" {
+		s.endObservation(ch, observeEndedReason(code))
+		return
+	}
+	if sub.route.Bundle.Generation() != route.Bundle.Generation() {
+		sub.cancel()
+		notify, cancel := route.Bundle.Gateway().Subscribe()
+		sub.notify, sub.cancel = notify, cancel
+	}
+	sub.route = Route{Channel: ch, Bundle: route.Bundle}
+	sub.reader = route.Reader
+	sub.lastOK = now
+}
+
+func normalizeObservationCode(code string) string {
+	switch code {
+	case subjectgate.CodeNowMember, subjectgate.CodeChannelNotFound,
+		subjectgate.CodeChannelUnavailable, subjectgate.CodeCapabilityUnavailable:
+		return code
+	default:
+		return subjectgate.CodeCapabilityUnavailable
+	}
+}
+
+func observeEndedReason(code string) subjectgate.ObserveEndedReason {
+	switch normalizeObservationCode(code) {
+	case subjectgate.CodeNowMember:
+		return subjectgate.ObserveEndedNowMember
+	case subjectgate.CodeChannelNotFound:
+		return subjectgate.ObserveEndedChannelRetired
+	case subjectgate.CodeChannelUnavailable:
+		return subjectgate.ObserveEndedChannelUnavailable
+	default:
+		return subjectgate.ObserveEndedCapabilityUnavailable
+	}
+}
+
+func (s *Session) endObservation(ch channel.ID, reason subjectgate.ObserveEndedReason) {
+	sub := s.subs[ch]
+	if sub == nil || !sub.temporary {
+		return
+	}
+	sub.cancel()
+	delete(s.subs, ch)
+	frame, err := subjectgate.NewFrame(subjectgate.FrameObserveEnded, "", subjectgate.ObserveEndedPayload{
+		ChannelID: string(ch), Reason: reason,
+	})
+	if err == nil {
+		s.Send(frame)
+	}
 }
 
 // publishElig snapshots the资格账 for Upstream (atomic single-write). Non-paused subs
@@ -470,6 +640,9 @@ func (s *Session) publishElig(globalErr bool, failedThisRound map[channel.ID]str
 	routes := make(map[channel.ID]Route, len(s.subs))
 	paused := map[channel.ID]struct{}{}
 	for ch, sub := range s.subs {
+		if sub.temporary {
+			continue
+		}
 		if sub.paused {
 			paused[ch] = struct{}{}
 			continue
@@ -484,10 +657,18 @@ func (s *Session) publishElig(globalErr bool, failedThisRound map[channel.ID]str
 // ok=false = lane closed. Only a feed frame's own seq (a READ position) moves
 // the cursor; a submit receipt carries no seq to confuse it with.
 func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) {
+	if sub.temporary {
+		s.refreshObservation(ch, sub, s.gw.clock.Now())
+		current := s.subs[ch]
+		if current == nil || !current.temporary {
+			return false, true
+		}
+		sub = current
+	}
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
 	at := s.lane.cursor.at(ch)
-	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, channel.Reader{ActorID: sub.route.SubjectID, Mode: channel.ReaderMember}, at, feedBatch)
+	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, sub.reader, at, feedBatch)
 	if err != nil || (len(rows) == 0 && scanned == at) {
 		return false, true
 	}
@@ -532,6 +713,36 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 	switch f.Type {
 	case subjectgate.FrameAttach:
 		return errFrame(subjectgate.CodeBadPayload, "attach is the opening frame, not a mid-stream verb")
+	case subjectgate.FrameObserve, subjectgate.FrameUnobserve:
+		chID, derr := channelIDOf(f)
+		if derr != nil || subjectgate.RequireChannelID(chID) != nil {
+			return errFrame(subjectgate.CodeBadPayload, "missing required channel_id")
+		}
+		kind := controlObserve
+		if f.Type == subjectgate.FrameUnobserve {
+			kind = controlUnobserve
+		}
+		reply := make(chan controlResult, 1)
+		command := controlCommand{kind: kind, channel: channel.ID(chID), reply: reply}
+		select {
+		case s.controls <- command:
+		case <-s.ctx.Done():
+			return errFrame(subjectgate.CodeClosed, "session closed")
+		}
+		select {
+		case result := <-reply:
+			if result.code != "" {
+				return errFrame(result.code, result.detail)
+			}
+			if f.Type == subjectgate.FrameObserve {
+				frame, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.ObserveReceipt{ChannelID: chID})
+				return frame
+			}
+			frame, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.UnobserveReceipt{ChannelID: chID})
+			return frame
+		case <-s.ctx.Done():
+			return errFrame(subjectgate.CodeClosed, "session closed")
+		}
 	case subjectgate.FrameSubmit, subjectgate.FrameResolve, subjectgate.FrameCancel,
 		subjectgate.FrameAfter, subjectgate.FrameCancelTimer, subjectgate.FrameResource:
 		// channel_id is required on every business frame (连接模型勘误期 v2).

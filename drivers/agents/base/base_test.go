@@ -4,18 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -57,9 +59,12 @@ func (s *fakeState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 // therefore land as float64, which is what the payload genuinely is once it
 // has crossed the verb.
 type emitRecord struct {
-	typ      string
-	payload  map[string]any
-	audience message.Audience
+	typ         string
+	payload     map[string]any
+	audience    message.Audience
+	parent      message.ID
+	correlation message.ID
+	visibility  message.Visibility
 }
 
 type failRecord struct{ code, detail string }
@@ -73,10 +78,11 @@ type fakeSys struct {
 	inbox chan actorbase.Msg
 	state *fakeState
 
-	emits   []emitRecord
-	replies []any
-	fails   []failRecord
-	obs     []actorrt.ObsKind
+	emits    []emitRecord
+	replies  []any
+	fails    []failRecord
+	obs      []actorrt.ObsKind
+	timeline []string
 }
 
 func newFakeSys(self actor.ActorID, msgs ...actorbase.Msg) *fakeSys {
@@ -90,17 +96,21 @@ func newFakeSys(self actor.ActorID, msgs ...actorbase.Msg) *fakeSys {
 
 func (s *fakeSys) Reply(_ actorbase.Msg, v any) (message.ID, error) {
 	s.replies = append(s.replies, v)
+	s.timeline = append(s.timeline, "reply")
 	return "reply", nil
 }
 func (s *fakeSys) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
 	s.fails = append(s.fails, failRecord{code: code, detail: detail})
+	s.timeline = append(s.timeline, "fail")
 	return "fail", nil
 }
 func (s *fakeSys) Progress(_ actorbase.Msg, _ any) (message.ID, error) { return "", nil }
 func (s *fakeSys) Emit(spec behavior.EventSpec) (message.ID, error) {
 	var m map[string]any
 	_ = json.Unmarshal(spec.Payload, &m)
-	s.emits = append(s.emits, emitRecord{typ: spec.Type, payload: m, audience: spec.Audience})
+	s.emits = append(s.emits, emitRecord{typ: spec.Type, payload: m, audience: spec.Audience,
+		parent: spec.ParentID, correlation: spec.CorrelationID, visibility: spec.Visibility})
+	s.timeline = append(s.timeline, spec.Type)
 	return "emit", nil
 }
 func (s *fakeSys) Post(behavior.RequestSpec) (message.ID, error)              { return "", nil }
@@ -131,14 +141,17 @@ func (s *fakeSys) Recv() (actorbase.Msg, error) {
 
 var _ actorbase.Sys = (*fakeSys)(nil)
 
-// stubEngine records Turn calls and emits scripted Outputs — the §1 skeleton's
+// stubEngine records Turn calls and reports scripted typed outputs — the skeleton's
 // unit-test seam (the base is engine-agnostic; the stub never touches an SDK).
 type stubEngine struct {
 	seed       []byte
 	describe   introspect.Describe
 	checkpoint []byte
 	turnErr    error
-	outputs    []Output
+	complete   *FinalValue
+	failure    *Failure
+	started    []ToolActivity
+	ended      []ToolActivity
 
 	turns  []Trigger
 	closed bool
@@ -146,8 +159,23 @@ type stubEngine struct {
 
 func (e *stubEngine) Turn(_ context.Context, tr Trigger, sink Sink) error {
 	e.turns = append(e.turns, tr)
-	for _, o := range e.outputs {
-		if err := sink.Emit(o); err != nil {
+	for _, a := range e.started {
+		if err := sink.ToolStarted(a); err != nil {
+			return err
+		}
+	}
+	for _, a := range e.ended {
+		if err := sink.ToolEnded(a); err != nil {
+			return err
+		}
+	}
+	if e.complete != nil {
+		if err := sink.Complete(*e.complete); err != nil {
+			return err
+		}
+	}
+	if e.failure != nil {
+		if err := sink.Fail(*e.failure); err != nil {
 			return err
 		}
 	}
@@ -159,14 +187,35 @@ func (e *stubEngine) Close() error                  { e.closed = true; return ni
 
 // --- helpers -----------------------------------------------------------------
 
-func eventMsg(sender actor.ActorID, text string) actorbase.Msg {
+func requestMsg(sender actor.ActorID, text string) actorbase.Msg {
 	payload, _ := json.Marshal(map[string]any{"text": text})
 	var env message.Envelope
 	env.ID = "trigger-1"
-	env.Kind = message.KindEvent
+	env.Kind = message.KindRequest
 	env.Type = "user.text"
 	env.Sender = message.Sender{ID: sender}
+	env.Visibility = message.VisibilityPrivate
+	env.CorrelationID = "corr-root"
 	env.Payload = payload
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)
+}
+
+func eventMsg(sender actor.ActorID, typ string) actorbase.Msg {
+	var env message.Envelope
+	env.ID = "context-event"
+	env.Kind = message.KindEvent
+	env.Type = typ
+	env.Sender = message.Sender{ID: sender}
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)
+}
+
+func responseMsg(sender actor.ActorID, typ string) actorbase.Msg {
+	var env message.Envelope
+	env.ID = "context-response"
+	env.Kind = message.KindResponse
+	env.Type = typ
+	env.Sender = message.Sender{ID: sender}
+	env.ParentID = "other-agent-request"
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)
 }
 
@@ -206,8 +255,8 @@ func runProc(t *testing.T, self actor.ActorID, eng *stubEngine, seedState map[re
 // --- tests -------------------------------------------------------------------
 
 func TestTurnEmitsTerminalOutput(t *testing.T) {
-	eng := &stubEngine{outputs: []Output{{Final: true, Text: "hi back", NextAction: "done"}}}
-	sys, err := runProc(t, "agent:me", eng, nil, eventMsg("user:alice", "hello"))
+	eng := &stubEngine{complete: &FinalValue{Text: "hi back", NextAction: "done"}}
+	sys, err := runProc(t, "agent:me", eng, nil, requestMsg("user:alice", "hello"))
 	if err != nil {
 		t.Fatalf("proc: %v", err)
 	}
@@ -217,44 +266,54 @@ func TestTurnEmitsTerminalOutput(t *testing.T) {
 	if got := eng.turns[0].Index; got != 1 {
 		t.Fatalf("turn index = %d, want 1", got)
 	}
-	if len(sys.emits) != 1 {
-		t.Fatalf("want 1 emit, got %d", len(sys.emits))
+	if len(sys.emits) != 2 {
+		t.Fatalf("want turn start/end emits, got %d", len(sys.emits))
 	}
-	e := sys.emits[0]
-	if e.typ != eventType {
-		t.Fatalf("emit type = %q, want %q", e.typ, eventType)
+	if sys.emits[0].typ != "activity.turn.started" || sys.emits[1].typ != "activity.turn.ended" {
+		t.Fatalf("activity order = %q, %q", sys.emits[0].typ, sys.emits[1].typ)
 	}
-	if e.payload["text"] != "hi back" || e.payload["next_action"] != "done" {
-		t.Fatalf("emit payload = %v", e.payload)
+	for _, e := range sys.emits {
+		if e.parent != "trigger-1" || e.correlation != "corr-root" || e.visibility != message.VisibilityPrivate {
+			t.Fatalf("activity routing = parent:%q correlation:%q visibility:%q", e.parent, e.correlation, e.visibility)
+		}
 	}
-	if e.payload["turn_index"] != float64(1) {
-		t.Fatalf("turn_index = %v, want 1", e.payload["turn_index"])
+	if len(sys.replies) != 1 {
+		t.Fatalf("want one terminal reply, got %d", len(sys.replies))
 	}
-	if len(e.audience) != 1 || e.audience[0] != actor.ActorID("user:alice") {
-		t.Fatalf("audience = %v, want [user:alice]", e.audience)
+	reply := sys.replies[0].(map[string]any)
+	if reply["text"] != "hi back" || reply["next_action"] != "done" {
+		t.Fatalf("reply payload = %v", reply)
 	}
 	if !eng.closed {
 		t.Fatalf("engine not closed on teardown")
 	}
 }
 
-func TestIntermediateThenTerminal(t *testing.T) {
-	eng := &stubEngine{outputs: []Output{
-		{Final: false, NextAction: "continue", Extra: map[string]any{"step_index": 1}},
-		{Final: true, Text: "done text", NextAction: "done"},
-	}}
-	sys, err := runProc(t, "agent:me", eng, nil, eventMsg("user:bob", "go"))
+func TestToolPhasesThenTerminal(t *testing.T) {
+	eng := &stubEngine{
+		started:  []ToolActivity{{CallID: "call-1", Tool: "call_actor"}},
+		ended:    []ToolActivity{{CallID: "call-1", Tool: "call_actor", Status: "completed"}},
+		complete: &FinalValue{Text: "done text", NextAction: "done"},
+	}
+	sys, err := runProc(t, "agent:me", eng, nil, requestMsg("user:bob", "go"))
 	if err != nil {
 		t.Fatalf("proc: %v", err)
 	}
-	if len(sys.emits) != 2 {
-		t.Fatalf("want 2 emits (intermediate + terminal), got %d", len(sys.emits))
+	if len(sys.emits) != 4 {
+		t.Fatalf("want start/tool start/tool end/end, got %d", len(sys.emits))
 	}
-	if sys.emits[0].payload["step_index"] != float64(1) {
-		t.Fatalf("intermediate extra not merged: %v", sys.emits[0].payload)
+	want := []string{"activity.turn.started", "activity.tool.started", "activity.tool.ended", "activity.turn.ended"}
+	for i := range want {
+		if sys.emits[i].typ != want[i] {
+			t.Fatalf("emit %d = %q, want %q", i, sys.emits[i].typ, want[i])
+		}
 	}
-	if sys.emits[1].payload["text"] != "done text" {
-		t.Fatalf("terminal text wrong: %v", sys.emits[1].payload)
+	if sys.emits[2].payload["status"] != "completed" {
+		t.Fatalf("tool end = %v", sys.emits[2].payload)
+	}
+	wantTimeline := []string{"activity.turn.started", "activity.tool.started", "activity.tool.ended", "reply", "activity.turn.ended"}
+	if !reflect.DeepEqual(sys.timeline, wantTimeline) {
+		t.Fatalf("timeline = %v, want %v", sys.timeline, wantTimeline)
 	}
 }
 
@@ -298,8 +357,8 @@ func TestDescribeUnknownTypeFails(t *testing.T) {
 }
 
 func TestSelfEmissionIgnored(t *testing.T) {
-	eng := &stubEngine{outputs: []Output{{Final: true, Text: "x"}}}
-	sys, err := runProc(t, "agent:me", eng, nil, eventMsg("agent:me", "my own echo"))
+	eng := &stubEngine{complete: &FinalValue{Text: "x"}}
+	sys, err := runProc(t, "agent:me", eng, nil, requestMsg("agent:me", "my own request"))
 	if err != nil {
 		t.Fatalf("proc: %v", err)
 	}
@@ -311,9 +370,27 @@ func TestSelfEmissionIgnored(t *testing.T) {
 	}
 }
 
+func TestOtherAgentActivityAndFinalResponseAreContextOnly(t *testing.T) {
+	eng := &stubEngine{complete: &FinalValue{Text: "x"}}
+	sys, err := runProc(t, "agent:A", eng, nil,
+		eventMsg("agent:B", "activity.tool.started"),
+		responseMsg("agent:B", "agent.answer"),
+		eventMsg("user:c", "user.text"),
+	)
+	if err != nil {
+		t.Fatalf("proc: %v", err)
+	}
+	if len(eng.turns) != 0 {
+		t.Fatalf("events must be context-only, got %d turns", len(eng.turns))
+	}
+	if len(sys.emits) != 0 || len(sys.replies) != 0 {
+		t.Fatalf("context events produced output")
+	}
+}
+
 func TestCheckpointPersistedPerTurn(t *testing.T) {
-	eng := &stubEngine{checkpoint: []byte(`{"session":"s1"}`), outputs: []Output{{Final: true, Text: "x"}}}
-	sys, err := runProc(t, "agent:me", eng, nil, eventMsg("user:c", "one"))
+	eng := &stubEngine{checkpoint: []byte(`{"session":"s1"}`), complete: &FinalValue{Text: "x"}}
+	sys, err := runProc(t, "agent:me", eng, nil, requestMsg("user:c", "one"))
 	if err != nil {
 		t.Fatalf("proc: %v", err)
 	}
@@ -324,8 +401,8 @@ func TestCheckpointPersistedPerTurn(t *testing.T) {
 }
 
 func TestNoCheckpointWhenNil(t *testing.T) {
-	eng := &stubEngine{checkpoint: nil, outputs: []Output{{Final: true, Text: "x"}}}
-	sys, err := runProc(t, "agent:me", eng, nil, eventMsg("user:c", "one"))
+	eng := &stubEngine{checkpoint: nil, complete: &FinalValue{Text: "x"}}
+	sys, err := runProc(t, "agent:me", eng, nil, requestMsg("user:c", "one"))
 	if err != nil {
 		t.Fatalf("proc: %v", err)
 	}
@@ -340,8 +417,8 @@ func TestNoCheckpointWhenNil(t *testing.T) {
 // NEXT turn re-writes the same value, self-healing. The actor stays alive across
 // both failed persists. (Pre-fix: `_, _ = Put(...)` swallowed the fault silently.)
 func TestCheckpointPersistFailureSurfacedAndRetried(t *testing.T) {
-	eng := &stubEngine{checkpoint: []byte(`{"session":"s1"}`), outputs: []Output{{Final: true, Text: "x"}}}
-	sys := newFakeSys("agent:me", eventMsg("user:c", "one"), eventMsg("user:c", "two"))
+	eng := &stubEngine{checkpoint: []byte(`{"session":"s1"}`), complete: &FinalValue{Text: "x"}}
+	sys := newFakeSys("agent:me", requestMsg("user:c", "one"), requestMsg("user:c", "two"))
 	sys.state.putRej = access.ResourceNotFound // every persist rejected
 	cfg := Config{NewEngine: func(_ actorbase.Sys, seed []byte) (Engine, error) {
 		eng.seed = seed
@@ -375,7 +452,7 @@ func TestCheckpointPersistFailureSurfacedAndRetried(t *testing.T) {
 func TestResumeSeedReadAtBoot(t *testing.T) {
 	eng := &stubEngine{}
 	seed := map[resource.ResourceID][]byte{resumeSeedKey: []byte(`{"session":"prev"}`)}
-	_, err := runProc(t, "agent:me", eng, seed, eventMsg("user:c", "one"))
+	_, err := runProc(t, "agent:me", eng, seed, requestMsg("user:c", "one"))
 	if err != nil {
 		t.Fatalf("proc: %v", err)
 	}
@@ -385,7 +462,7 @@ func TestResumeSeedReadAtBoot(t *testing.T) {
 }
 
 func TestBootFailureIsLoudDeath(t *testing.T) {
-	sys := newFakeSys("agent:me", eventMsg("user:c", "one"))
+	sys := newFakeSys("agent:me", requestMsg("user:c", "one"))
 	bootErr := errors.New("no api key")
 	proc := newProc(Config{NewEngine: func(actorbase.Sys, []byte) (Engine, error) { return nil, bootErr }})
 	err := proc(sys)
@@ -397,17 +474,43 @@ func TestBootFailureIsLoudDeath(t *testing.T) {
 func TestTurnPlumbingErrorPropagates(t *testing.T) {
 	plumb := errors.New("emit rejected")
 	eng := &stubEngine{turnErr: plumb}
-	_, err := runProc(t, "agent:me", eng, nil, eventMsg("user:c", "one"))
+	_, err := runProc(t, "agent:me", eng, nil, requestMsg("user:c", "one"))
 	if !errors.Is(err, plumb) {
 		t.Fatalf("plumbing error must propagate as loud death, got %v", err)
 	}
 }
 
-func TestTurnCanceledIsQuiet(t *testing.T) {
+// Quiet寿终 is TEARDOWN-scoped: only when the incarnation's life ctx is already
+// done. A provider surfacing Canceled while the life is alive is a plumbing
+// failure and must stay loud — the quiet path would otherwise silently end the
+// whole actor with an orphaned request and an unpaired turn.started.
+func TestTurnCanceledIsQuietOnTeardown(t *testing.T) {
 	eng := &stubEngine{turnErr: context.Canceled}
-	_, err := runProc(t, "agent:me", eng, nil, eventMsg("user:c", "one"))
-	if err != nil {
-		t.Fatalf("context.Canceled from Turn must be quiet寿终, got %v", err)
+	sys := newFakeSys("agent:me", requestMsg("user:c", "one"))
+	life, cancel := context.WithCancel(context.Background())
+	cancel()
+	sys.life = life
+	proc := newProc(Config{NewEngine: func(_ actorbase.Sys, seed []byte) (Engine, error) {
+		eng.seed = seed
+		return eng, nil
+	}})
+	if err := proc(sys); err != nil {
+		t.Fatalf("context.Canceled during teardown must be quiet寿终, got %v", err)
+	}
+}
+
+func TestTurnCanceledWhileAliveIsLoudAndPaired(t *testing.T) {
+	eng := &stubEngine{turnErr: context.Canceled}
+	sys, err := runProc(t, "agent:me", eng, nil, requestMsg("user:c", "one"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Canceled while life is alive must stay loud, got %v", err)
+	}
+	if len(sys.fails) != 1 || sys.fails[0].code != "provider_internal_error" {
+		t.Fatalf("loud cancel must still close the request via Fail, got %+v", sys.fails)
+	}
+	last := sys.timeline[len(sys.timeline)-1]
+	if last != string(registry.ActivityTurnEnded) {
+		t.Fatalf("turn.started must be paired by a final %s, timeline=%v", registry.ActivityTurnEnded, sys.timeline)
 	}
 }
 

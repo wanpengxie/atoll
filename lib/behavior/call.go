@@ -39,6 +39,10 @@ type RequestSpec struct {
 	// ExpiresAt is the request's declared deadline — durable truth the
 	// substrate reaper enforces (a live caller's own timer merely races it).
 	ExpiresAt *int64
+	// ClientFingerprint is shell-ingress persistence metadata. Builders never
+	// copy it into the protocol envelope; actorbase carries it only on the
+	// harness write context.
+	ClientFingerprint string
 }
 
 // BuildRequest assembles a kind=request envelope — the ONE home for request

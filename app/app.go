@@ -248,6 +248,7 @@ func (a *App) registerRoutes() {
 		"DELETE /api/channels/:chID":                      a.handleDeleteChannel,
 		"POST /api/channels/:chID/join":                   a.handleJoinChannel,
 		"GET /api/channels/:chID/observe":                 a.handleObserveChannel,
+		"GET /api/experimental/channels/:chID/observe":    a.handleObserveChannel,
 		"GET /api/channels/:chID/messages":                a.handleListMessages,
 		"GET /api/channels/:chID/resources":               a.handleListResources,
 		"GET /api/channels/:chID/resources/:rid":          a.handleStatResource,
@@ -269,6 +270,7 @@ func (a *App) registerRoutes() {
 		"DELETE /api/channels/:chID/daemons/:id":          a.handleDetachDaemon,
 		"GET /ws":                                         a.handleWS,
 	}
+	experimental := a.engine.Group("/api/experimental")
 	for _, method := range contract.Methods() {
 		key := method.Method + " " + method.Path
 		handler, ok := handlers[key]
@@ -290,7 +292,12 @@ func (a *App) registerRoutes() {
 			chain = append(chain, rejectRequestBody)
 		}
 		chain = append(chain, handler)
-		a.engine.Handle(method.Method, method.Path, chain...)
+		if method.Experimental {
+			path := strings.TrimPrefix(method.Path, "/api/experimental")
+			experimental.Handle(method.Method, path, chain...)
+		} else {
+			a.engine.Handle(method.Method, method.Path, chain...)
+		}
 	}
 	if len(handlers) != 0 {
 		panic("handler missing from contract method registry")

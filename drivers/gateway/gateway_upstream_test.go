@@ -75,12 +75,9 @@ func TestUpstreamSixFramesFourCodes(t *testing.T) {
 	}
 }
 
-// The observer half of 表① used to be pinned here: a Route carried an access
-// class, and an observer route was refused a business frame. The route set no
-// longer has that shape — a route IS a membership route, and observer traffic
-// never enters it (app.EntitlementRoute says so). The absent half of 表①, a
-// channel with no confirmed eligibility, is still refused forbidden and is
-// covered above and in gateway_entitlement_test.go.
+// Route is membership-only. A temporary ObserverRoute never enters the
+// upstream eligibility ledger, so it cannot deliver a business frame. The
+// absent half of 表① is covered above and in gateway_entitlement_test.go.
 
 // TestUpstreamNoOccupantUnavailable: a member route whose subject cell has NO attached
 // interpreter → Deliver returns ErrNoOccupant → the gate maps it to unavailable

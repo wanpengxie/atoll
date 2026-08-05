@@ -117,7 +117,9 @@ func (c *chain) write(ctx context.Context, env *message.Envelope) (res WriteResu
 	// StepEngineAppend — canonical sink. is_terminal (StepResponsePairing)
 	// was captured above; the store allocates seq.
 	env.TSReceived = c.deps.NowMs()
-	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal)
+	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal, storespec.AppendMetadata{
+		ClientFingerprint: clientFingerprintFromContext(ctx),
+	})
 	if err != nil {
 		// Map the typed AppendError to a closed-set reject when possible.
 		// storespec.AppendError.Reason is the wire string (storespec must

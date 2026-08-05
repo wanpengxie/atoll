@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-release test lint check-gateway-retired check-link-seam-retired check-engine-contract check-engine-contract-legacy dev dev-init dev-reopen dev-server clean e2e-loop
+.PHONY: install build build-go build-release test lint check-gateway-retired check-link-seam-retired check-engine-contract check-engine-contract-legacy check-activity-types dev dev-init dev-reopen dev-server clean e2e-loop
 
 GO_BINARIES := server daemon
 
@@ -58,7 +58,7 @@ e2e-loop: build-go
 	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run '^(TestDaemonOneCarrierServesTwoChannels|TestDaemonDetachOneChannelDoesNotAffectOther|TestDaemonCarrierReconnectRestoresCompartments|TestDaemonQueryCredentialRejectedWithoutLoggingSecret)$$' -v -timeout 600s
 
 # lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
-lint: check-gateway-retired check-link-seam-retired check-engine-contract check-engine-contract-legacy
+lint: check-gateway-retired check-link-seam-retired check-engine-contract check-engine-contract-legacy check-activity-types
 	go vet ./...
 	go test ./archtest/
 
@@ -75,6 +75,10 @@ check-engine-contract:
 
 check-engine-contract-legacy:
 	./scripts/check-engine-contract-legacy.sh
+
+check-activity-types:
+	./scripts/check-activity-types.sh
+	./scripts/check-activity-types.sh --self-test
 
 # ----------------------------------------------------------------------------
 # dev — 起 server(API-only)。web UI 在独立仓库 atoll-web:

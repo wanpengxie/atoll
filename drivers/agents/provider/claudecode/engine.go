@@ -48,7 +48,7 @@ var _ base.Engine = (*engine)(nil)
 type claudeClient interface {
 	Connect(ctx context.Context) error
 	Query(ctx context.Context, prompt string) error
-	ReceiveResponse(ctx context.Context) <-chan claude.Message
+	ReceiveResponseWithErrors(ctx context.Context) (<-chan claude.Message, <-chan error)
 	Close() error
 }
 
@@ -101,8 +101,8 @@ func defaultClientFactory(e *engine, resumeSeed []byte) (claudeClient, error) {
 	return claude.NewClient(opts...), nil
 }
 
-// setCurrentRC / currentRC thread the in-flight turn's RuntimeContext to the MCP
-// tool handlers (which run on the SDK's ctx, not the base loop's).
+// setCurrentRC/currentRC thread the in-flight runtime context to MCP handlers
+// (which run on the SDK's ctx, not the base loop's).
 func (e *engine) setCurrentRC(rc metatool.RuntimeContext) {
 	e.curMu.Lock()
 	e.curRC = rc
@@ -116,10 +116,10 @@ func (e *engine) currentRC() metatool.RuntimeContext {
 }
 
 // Turn drives one claude exchange: Query the composed input, drain
-// ReceiveResponse (ending at the ResultMessage), and emit the terminal reply
-// through the base Sink. Tool calls resolve through the atoll MCP server (→ the
-// held Exec) mid-drain. An engine/LLM error is surfaced as a terminal Output
-// (Final, NextAction="failed") and returns nil so the actor stays alive; only a
+// ReceiveResponse (ending at the ResultMessage), and report the full terminal
+// value through the base Sink. Tool calls resolve through the atoll MCP server
+// and report typed phases there. An engine/LLM error uses Sink.Fail and returns
+// nil so the actor stays alive; only a
 // Sink write failure (A1: never swallowed) propagates as loud死.
 func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink) error {
 	e.setCurrentRC(metatool.RuntimeContext{
@@ -137,46 +137,104 @@ func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink)
 		return emitFailed(sink, err, "claude_query")
 	}
 
-	var acc strings.Builder
-	for msg := range e.client.ReceiveResponse(ctx) {
+	pendingTools := map[string]string{}
+	var toolOrder []string
+	endPendingTools := func() error {
+		for _, callID := range toolOrder {
+			tool, found := pendingTools[callID]
+			if !found {
+				continue
+			}
+			if err := sink.ToolEnded(base.ToolActivity{CallID: callID, Tool: tool, Status: "failed", Detail: "turn ended before tool result"}); err != nil {
+				return err
+			}
+			delete(pendingTools, callID)
+		}
+		return nil
+	}
+	messages, streamErrors := e.client.ReceiveResponseWithErrors(ctx)
+	for msg := range messages {
 		switch m := msg.(type) {
 		case *claude.AssistantMessage:
 			if m.Error != "" {
+				if err := endPendingTools(); err != nil {
+					return err
+				}
 				return emitFailed(sink, fmt.Errorf("assistant error: %s", m.Error), classifyAssistantError(m.Error))
 			}
 			for _, block := range m.Content {
-				if tb, ok := block.(*claude.TextBlock); ok && tb.Text != "" {
-					acc.WriteString(tb.Text)
+				switch b := block.(type) {
+				case *claude.ToolUseBlock:
+					pendingTools[b.ID] = b.Name
+					toolOrder = append(toolOrder, b.ID)
+					if err := sink.ToolStarted(base.ToolActivity{CallID: b.ID, Tool: b.Name}); err != nil {
+						return err
+					}
+					// Text/thinking blocks are streaming/provider narration. The full
+					// ResultMessage.Result is the sole terminal value crossing the adapter.
 				}
+			}
+		case *claude.UserMessage:
+			blocks, ok := m.Content.([]claude.ContentBlock)
+			if !ok {
+				continue
+			}
+			for _, block := range blocks {
+				result, ok := block.(*claude.ToolResultBlock)
+				if !ok {
+					continue
+				}
+				tool, found := pendingTools[result.ToolUseID]
+				if !found {
+					continue
+				}
+				status := "completed"
+				if result.IsError != nil && *result.IsError {
+					status = "failed"
+				}
+				if err := sink.ToolEnded(base.ToolActivity{CallID: result.ToolUseID, Tool: tool, Status: status}); err != nil {
+					return err
+				}
+				delete(pendingTools, result.ToolUseID)
 			}
 		case *claude.ResultMessage:
 			if m.SessionID != "" && m.SessionID != e.session {
 				e.session = m.SessionID
 			}
 			text := strings.TrimSpace(m.Result)
-			if text == "" {
-				text = acc.String()
-			}
 			if m.IsError {
+				if err := endPendingTools(); err != nil {
+					return err
+				}
 				return emitFailed(sink, fmt.Errorf("result error: %s", text), "claude_result")
 			}
-			if err := sink.Emit(base.Output{Final: true, Text: text, NextAction: "done"}); err != nil {
+			if err := endPendingTools(); err != nil {
+				return err
+			}
+			if err := sink.Complete(base.FinalValue{Text: text, NextAction: "done"}); err != nil {
 				return err // plumbing failure: propagate → loud死 (A1)
 			}
 		}
 	}
-	return nil
+	if streamErr, ok := <-streamErrors; ok && streamErr != nil {
+		if err := endPendingTools(); err != nil {
+			return err
+		}
+		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
+			return streamErr
+		}
+		return emitFailed(sink, streamErr, "claude_stream")
+	}
+	return endPendingTools()
 }
 
-// emitFailed surfaces an engine/LLM failure as a terminal failed Output and
+// emitFailed surfaces an engine/LLM failure as a terminal failed response and
 // returns nil — the failure is now in the channel log, the turn ends, the actor
 // stays alive. A Sink write error is propagated (A1: never swallowed).
 func emitFailed(sink base.Sink, cause error, reason string) error {
-	if err := sink.Emit(base.Output{
-		Final:      true,
-		Text:       fmt.Sprintf("claude bridge failed: %v", cause),
-		NextAction: "failed",
-		Reason:     reason,
+	if err := sink.Fail(base.Failure{
+		ErrorCode: reason,
+		Detail:    fmt.Sprintf("claude bridge failed: %v", cause),
 	}); err != nil {
 		return err
 	}
@@ -259,5 +317,5 @@ const agentDescription = "Claude Code agent: the channel's conversational brain 
 
 const agentSkillDoc = "# agent (claude looper)\n\n" +
 	"Conversational actor backed by the Claude Code engine. Accepts any kind=request " +
-	"as a turn trigger (no closed type set), replies with agent.text events, and calls " +
+	"as a turn trigger (no closed type set), replies with a terminal response, and calls " +
 	"other actors through the channel's meta tools.\n"

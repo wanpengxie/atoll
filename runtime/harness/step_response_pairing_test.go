@@ -25,7 +25,7 @@ func seedRequest(t *testing.T, cs *store.ChannelStores, id message.ID, caller, r
 		Visibility: message.VisibilityPublic,
 		Payload:    json.RawMessage(`{}`),
 	}
-	if _, err := cs.Log.Append(context.Background(), parent, false); err != nil {
+	if _, err := cs.Log.Append(context.Background(), parent, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed request %q: %v", id, err)
 	}
 }
@@ -41,7 +41,7 @@ func seedEvent(t *testing.T, cs *store.ChannelStores, id message.ID) {
 		Visibility: message.VisibilityPublic,
 		Payload:    json.RawMessage(`{}`),
 	}
-	if _, err := cs.Log.Append(context.Background(), ev, false); err != nil {
+	if _, err := cs.Log.Append(context.Background(), ev, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed event %q: %v", id, err)
 	}
 }
@@ -268,7 +268,7 @@ func TestStepResponsePairing_TerminalUniqueness(t *testing.T) {
 	// Append a real final response so HasFinalResponse(parent) is true.
 	final := response("req1", "tool:xhs", "agent:caller", `{"status":"completed"}`)
 	final.ID = "final-1"
-	if _, err := cs.Log.Append(context.Background(), final, true); err != nil {
+	if _, err := cs.Log.Append(context.Background(), final, true, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed final response: %v", err)
 	}
 

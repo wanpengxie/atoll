@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS messages (
   visibility           TEXT NOT NULL,
   audience             TEXT NOT NULL,
   expires_at           INTEGER,
+  client_fingerprint   TEXT,
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
 );
 

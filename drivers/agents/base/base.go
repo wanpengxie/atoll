@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
@@ -13,6 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
@@ -21,13 +21,6 @@ import (
 // (sys.State — actor-scoped, per-incarnation persistence). checkpoint挂架 (spec
 // §1 10.0改性质半的兑现位): the provider gives bytes, the base owns where/when.
 const resumeSeedKey resource.ResourceID = "agent.resume-seed"
-
-// eventType is the one envelope type an agent emits for turn output. Agents
-// serve no closed request-type set — every trigger becomes a turn — and reply
-// with agent.text EVENTS (progress + terminal), never a kind=response (the
-// trigger's own account closes by its author#2 deadline; an agent's product is
-// its emitted narration, not a request reply).
-const eventType = "agent.text"
 
 // NewEngine builds this incarnation's Engine, given the welded Sys and the
 // durable resume value the base read from sys.State (nil = cold start). It runs
@@ -43,9 +36,6 @@ type NewEngine func(sys actorbase.Sys, resumeSeed []byte) (Engine, error)
 type Config struct {
 	// NewEngine mints the per-incarnation Engine. Required.
 	NewEngine NewEngine
-	// NowFn returns unix-ms; defaults to time.Now.UnixMilli. Only used for the
-	// emitted envelopes' clock via behavior (the engine owns its own clock).
-	NowFn func() int64
 }
 
 // Def wraps the base Proc into the actorbase.Def a provider registers under.
@@ -55,15 +45,12 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 	if cfg.NewEngine == nil {
 		return actorbase.Def{}, errors.New("agent/base: Config.NewEngine required")
 	}
-	if cfg.NowFn == nil {
-		cfg.NowFn = func() int64 { return time.Now().UnixMilli() }
-	}
 	proc := newProc(cfg)
 	return actorbase.Def{Doc: doc, New: func() (actorbase.Proc, error) { return proc, nil }}, nil
 }
 
 // newProc is the base skeleton Proc: read the resume seed, mint the engine,
-// then loop Recv — describe机械答 / else a turn — checkpoint挂账 per turn. The
+// then loop Recv — describe机械答 / request turn — checkpoint挂账 per turn. The
 // queue + worker + response分拣 are the actorbase engine's (§1: 零自建).
 func newProc(cfg Config) actorbase.Proc {
 	return func(sys actorbase.Sys) error {
@@ -87,8 +74,11 @@ func newProc(cfg Config) actorbase.Proc {
 				answerDescribe(sys, eng, self, msg)
 				continue
 			}
-			// An actor never reacts to its OWN emissions (agent.text echoes).
-			if msg.Sender.ID == self {
+			// Events and responses are context only. A turn is request-backed so its
+			// terminal can always close the exact request through Reply/Fail. This
+			// also enforces the activity reading law: another agent's activity never
+			// wakes this agent (nor does any event).
+			if msg.Kind != message.KindRequest || msg.Sender.ID == self {
 				continue
 			}
 
@@ -98,14 +88,46 @@ func newProc(cfg Config) actorbase.Proc {
 				CorrelationID: behavior.CorrelationID(msg.CorrelationID, msg.ID),
 				Index:         turns,
 			}
-			sink := &procSink{sys: sys, trigger: trigger}
-			// 命长的活传 sys.Life(): a turn is long-lived reasoning, not bounded by
-			// the trigger request's own account deadline (agents emit, don't reply).
+			sink := &procSink{sys: sys, request: msg, trigger: trigger}
+			if err := sink.emitTurnStarted(); err != nil {
+				return err
+			}
+			// 命长的活传 sys.Life(): reasoning is incarnation-lived; its terminal
+			// nevertheless closes this request through the typed sink.
 			if err := eng.Turn(sys.Life(), trigger, sink); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return nil // teardown-quiet寿终, not横死
+				if errors.Is(err, context.Canceled) && sys.Life().Err() != nil {
+					// Teardown-quiet寿终 ONLY when the incarnation itself is dying
+					// (writes below would fail against a closing cell anyway). A
+					// provider surfacing a wrapped Canceled while the life ctx is
+					// alive is a plumbing failure and falls through to the loud
+					// path — otherwise it would silently end the whole actor with
+					// an orphaned request and an unpaired turn.started.
+					return nil
 				}
-				return err // plumbing failure → loud死 (matches old fatal-flag path)
+				// Best-effort terminal + pairing even when the recovery writes
+				// themselves fail: turn.started was already durably emitted, so
+				// emitTurnEnded is ALWAYS attempted (join, never early-return).
+				if !sink.terminal {
+					if failErr := sink.Fail(Failure{ErrorCode: "provider_internal_error", Detail: err.Error()}); failErr != nil {
+						err = errors.Join(err, failErr)
+					}
+				}
+				if endErr := sink.emitTurnEnded(); endErr != nil {
+					err = errors.Join(err, endErr)
+				}
+				return err // unrecoverable provider plumbing failure remains loud
+			}
+			var terminalErr error
+			if !sink.terminal {
+				if failErr := sink.Fail(Failure{ErrorCode: "provider_no_terminal", Detail: "provider completed without a terminal value"}); failErr != nil {
+					terminalErr = failErr
+				}
+			}
+			if endErr := sink.emitTurnEnded(); endErr != nil {
+				terminalErr = errors.Join(terminalErr, endErr)
+			}
+			if terminalErr != nil {
+				return terminalErr
 			}
 
 			if cp := eng.Checkpoint(); cp != nil {
@@ -173,40 +195,102 @@ func answerDescribe(sys actorbase.Sys, eng Engine, self actor.ActorID, msg actor
 	_, _ = sys.Reply(msg, answer)
 }
 
-// procSink maps each turn Output onto sys.Emit — the base's output形 (§1 输出映射).
-//
-// VISIBILITY申报: sys.Emit commits kind=event with visibility=public only (the
-// verb table exposes no system-visibility event to a Proc). go-kimi's current
-// per-tool-step progress rides visibility=system; when the go-kimi provider
-// migrates onto this skeleton (S3), that visibility nuance is the provider
-// migration's concern — the base faithfully provides the intermediate output
-// PORT (Final=false) but not per-output visibility control, which the substrate
-// verb table does not surface. Not changed here (红线7: 改动以切片账为限).
+// procSink is the only provider-output mapper. Phase changes use Emit; the full
+// value and business failure close the triggering request through Reply/Fail.
 type procSink struct {
-	sys     actorbase.Sys
-	trigger Trigger
+	sys      actorbase.Sys
+	request  actorbase.Msg
+	trigger  Trigger
+	terminal bool
+	status   string
 }
 
 var _ Sink = (*procSink)(nil)
 
-func (s *procSink) Emit(o Output) error {
+func (s *procSink) ToolStarted(a ToolActivity) error {
+	if a.CallID == "" || a.Tool == "" {
+		return errors.New("agent/base: tool activity requires call id and tool")
+	}
+	return s.emitActivity(registry.ActivityToolStarted, registry.ActivityToolStartedPayload{
+		TurnIndex: s.trigger.Index, ToolCallID: a.CallID, Tool: a.Tool,
+		Status: registry.ActivityStatusStarted,
+	})
+}
+
+func (s *procSink) ToolEnded(a ToolActivity) error {
+	if a.CallID == "" || a.Tool == "" {
+		return errors.New("agent/base: tool activity requires call id and tool")
+	}
+	status := a.Status
+	if status == "" {
+		status = registry.ActivityStatusCompleted
+	}
+	if status != registry.ActivityStatusCompleted && status != registry.ActivityStatusFailed {
+		return fmt.Errorf("agent/base: invalid tool activity status %q", status)
+	}
+	return s.emitActivity(registry.ActivityToolEnded, registry.ActivityToolEndedPayload{
+		TurnIndex: s.trigger.Index, ToolCallID: a.CallID, Tool: a.Tool,
+		Status: status, Detail: a.Detail,
+	})
+}
+
+func (s *procSink) Complete(value FinalValue) error {
+	if s.terminal {
+		return errors.New("agent/base: provider wrote more than one terminal")
+	}
 	payload := map[string]any{"turn_index": s.trigger.Index}
-	if o.Text != "" {
-		payload["text"] = o.Text
+	if value.Text != "" {
+		payload["text"] = value.Text
 	}
-	if o.NextAction != "" {
-		payload["next_action"] = o.NextAction
+	if value.NextAction != "" {
+		payload["next_action"] = value.NextAction
 	}
-	if o.Reason != "" {
-		payload["reason"] = o.Reason
-	}
-	for k, v := range o.Extra {
+	for k, v := range value.Extra {
 		payload[k] = v
 	}
-	spec, err := behavior.EventSpecJSON(eventType, payload, s.audience())
+	if _, err := s.sys.Reply(s.request, payload); err != nil {
+		return err
+	}
+	s.terminal = true
+	s.status = registry.ActivityStatusCompleted
+	return nil
+}
+
+func (s *procSink) Fail(f Failure) error {
+	if s.terminal {
+		return errors.New("agent/base: provider wrote more than one terminal")
+	}
+	if f.ErrorCode == "" {
+		f.ErrorCode = "provider_failed"
+	}
+	if _, err := s.sys.Fail(s.request, f.ErrorCode, f.Detail); err != nil {
+		return err
+	}
+	s.terminal = true
+	s.status = registry.ActivityStatusFailed
+	return nil
+}
+
+func (s *procSink) emitTurnStarted() error {
+	return s.emitActivity(registry.ActivityTurnStarted, registry.ActivityTurnStartedPayload{
+		TurnIndex: s.trigger.Index, Status: registry.ActivityStatusStarted,
+	})
+}
+
+func (s *procSink) emitTurnEnded() error {
+	return s.emitActivity(registry.ActivityTurnEnded, registry.ActivityTurnEndedPayload{
+		TurnIndex: s.trigger.Index, Status: s.status,
+	})
+}
+
+func (s *procSink) emitActivity(activityType registry.ActivityType, payload any) error {
+	spec, err := behavior.EventSpecJSON(string(activityType), payload, s.audience())
 	if err != nil {
 		return err
 	}
+	spec.ParentID = s.request.ID
+	spec.CorrelationID = s.trigger.CorrelationID
+	spec.Visibility = s.trigger.Envelope.Visibility
 	_, err = s.sys.Emit(spec)
 	return err
 }

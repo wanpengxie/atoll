@@ -1,6 +1,7 @@
 package humancell
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -228,6 +230,10 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	if err := f.DecodePayload(&p); err != nil {
 		return errFrame(f, subjectgate.CodeBadPayload, err.Error())
 	}
+	fingerprint, err := submitFingerprint(p)
+	if err != nil {
+		return errFrame(f, subjectgate.CodeBadPayload, "invalid submit payload: "+err.Error())
+	}
 	kind := message.Kind(p.Kind)
 	if kind == "" {
 		kind = message.KindRequest
@@ -263,9 +269,9 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 			deps.IsActive == nil || deps.Present == nil {
 			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
 		}
-		active, err := deps.IsActive(context.Background(), snapshot.Target)
-		if err != nil {
-			return errFrame(f, subjectgate.CodeUnavailable, err.Error())
+		active, activeErr := deps.IsActive(context.Background(), snapshot.Target)
+		if activeErr != nil {
+			return errFrame(f, subjectgate.CodeUnavailable, activeErr.Error())
 		}
 		if !active || !deps.Present(snapshot.Target) {
 			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
@@ -276,15 +282,15 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	// hide behind one call. An event carries no deadline (nothing waits on it),
 	// which is why ExpiresAt rides only the request arm.
 	var msgID message.ID
-	var err error
 	if kind == message.KindEvent {
 		msgID, err = sys.Emit(behavior.EventSpec{
-			ID:         id,
-			Type:       p.MsgType,
-			Payload:    p.Payload,
-			Audience:   aud,
-			Visibility: message.Visibility(p.Visibility),
-			ParentID:   message.ID(p.ParentID),
+			ID:                id,
+			Type:              p.MsgType,
+			Payload:           p.Payload,
+			Audience:          aud,
+			Visibility:        message.Visibility(p.Visibility),
+			ParentID:          message.ID(p.ParentID),
+			ClientFingerprint: fingerprint,
 		})
 	} else {
 		// Post, not Call/Submit: the person is not waiting on this goroutine,
@@ -292,19 +298,57 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 		// ExpiresAt must stay absent so the substrate stamps its own long TTL
 		// (additive透传 v0.4.1), never a short caller-side default.
 		msgID, err = sys.Post(behavior.RequestSpec{
-			ID:         id,
-			Type:       p.MsgType,
-			Payload:    p.Payload,
-			Audience:   aud,
-			Visibility: message.Visibility(p.Visibility),
-			ParentID:   message.ID(p.ParentID),
-			ExpiresAt:  p.ExpiresAt,
+			ID:                id,
+			Type:              p.MsgType,
+			Payload:           p.Payload,
+			Audience:          aud,
+			Visibility:        message.Visibility(p.Visibility),
+			ParentID:          message.ID(p.ParentID),
+			ExpiresAt:         p.ExpiresAt,
+			ClientFingerprint: fingerprint,
 		})
 	}
 	if err != nil {
 		return mapVerbErrFrame(err, f)
 	}
 	return receipt(f, subjectgate.SubmitReceipt{MessageID: string(msgID)})
+}
+
+// submitFingerprint freezes exactly the client-owned semantic surface before
+// harness normalization. Frame ref and message id are deliberately absent;
+// channel_id is the other half of the store-scoped (channel_id,id) key. JSON
+// is digested through RFC-8785/JCS so object key order and numeric spelling do
+// not manufacture conflicts.
+func submitFingerprint(p subjectgate.SubmitPayload) (string, error) {
+	kind := p.Kind
+	if kind == "" {
+		kind = string(message.KindRequest)
+	}
+	visibility := p.Visibility
+	if visibility == "" {
+		visibility = string(message.VisibilityPublic)
+	}
+	var payload any = map[string]any{}
+	if len(p.Payload) != 0 {
+		dec := json.NewDecoder(bytes.NewReader(p.Payload))
+		dec.UseNumber()
+		if err := dec.Decode(&payload); err != nil {
+			return "", err
+		}
+	}
+	semantic := map[string]any{
+		"msg_type": p.MsgType, "kind": kind, "payload": payload,
+		"visibility": visibility, "parent_id": p.ParentID,
+	}
+	// A missing audience is completed by the human membrane's live routing
+	// policy and therefore is not client fingerprint material.
+	if len(p.Audience) != 0 {
+		semantic["audience"] = p.Audience
+	}
+	if p.ExpiresAt != nil {
+		semantic["expires_at_ms"] = *p.ExpiresAt
+	}
+	return channel.Digest(semantic)
 }
 
 func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {

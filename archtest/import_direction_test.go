@@ -132,6 +132,10 @@ var layerAllowlist = map[string][]string{
 	"app":      {"protocol", "platform", "registry"},
 	"cmd":      {"protocol", "runtime", "lib", "platform", "registry", "app", "drivers"},
 	"e2e":      {}, // 纯测试目录，无生产文件；占位使其入表
+	// scripts = demo/工具脚本层，恒零内部依赖：demo 就是"第一个第三方壳"，
+	// 只许说契约语言（HTTP/ws + 生成 schema）——它 import 不到内部包这件事
+	// 本身就是"契约面足以封壳"的结构证明。
+	"scripts": {},
 }
 
 // TestLayerGraphIsExactlyTheDeclaredArrows —— 一级包依赖图恒等于 layerAllowlist

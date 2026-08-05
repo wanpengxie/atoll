@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -19,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -580,8 +580,9 @@ func actorFacingVisibility(v message.Visibility) (message.Visibility, error) {
 // outcome into the typed carrier. It is the WHOLE of what those two verbs
 // share — everything else about them (which envelope, which builder) differs,
 // and the differences are the point, so there is no shared body with a flag.
-func (e *engine) writeUnregistered(env *message.Envelope) (message.ID, error) {
-	out, err := e.pen.Write(e.lifeCtx, env)
+func (e *engine) writeUnregistered(env *message.Envelope, clientFingerprint string) (message.ID, error) {
+	ctx := harness.WithClientFingerprint(e.lifeCtx, clientFingerprint)
+	out, err := e.pen.Write(ctx, env)
 	if err != nil {
 		return "", err
 	}
@@ -601,7 +602,7 @@ func (e *engine) Emit(spec behavior.EventSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	return e.writeUnregistered(env)
+	return e.writeUnregistered(env, spec.ClientFingerprint)
 }
 
 // Post writes a kind=request and stops there — no out-station entry, no
@@ -628,7 +629,7 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	return e.writeUnregistered(env)
+	return e.writeUnregistered(env, spec.ClientFingerprint)
 }
 
 // --- Sys: request write + caller closure ---------------------------------

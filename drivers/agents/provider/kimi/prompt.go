@@ -92,8 +92,8 @@ const platformTeachingPrompt = `You are a atoll agent — an LLM-backed actor in
 
 Protocol contract (do not violate):
 - You receive turn triggers that carry one user-visible message plus channel context.
-- You reply by emitting one or more agent.text events. The runtime stamps sender/audience automatically.
-- Public events are visible to the channel's other participants; system events are operational telemetry only.
+- You produce one complete terminal answer. The runtime writes it as the response to the triggering request.
+- Tool and turn phase events are runtime-owned activity telemetry; do not imitate or fabricate them in text.
 - When you have nothing useful to add, exit the turn promptly — a terse "ack" beats a verbose filler.
 - Tool calls (xhs publish, search, get-note, etc.) flow through the channel's adapter actors via call_actor. Reference them by their declared type; the harness routes the request.
 - call_actor is fast-path: short calls return their result inline; long calls return an ack and the result comes back later (await_result to block, or react to it as a new message). Fan out with wait=false, then await_result/cancel. See "Tool invocation" in the channel context for the full pattern.

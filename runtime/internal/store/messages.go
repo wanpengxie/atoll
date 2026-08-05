@@ -23,12 +23,11 @@ import (
 // escape hatch that bypasses normalize, sender_kind overwrite, type /
 // schema validation, and the uniqueness contract.
 //
-// Append INSERTs the messages row in one transaction (raises *AppendError
-// on the messages.id UNIQUE violation or the terminal-duplicate UNIQUE
-// INDEX violation). envelope.id is a caller-generated random uuid
-// correlation anchor — uniqueness is a pure integrity guarantee, NOT a
-// dedup/idempotency seam. There are no same-transaction side-row observers
-// (see newMessages).
+// Append INSERTs the messages row and optional shell-submission fingerprint in
+// one transaction. A repeated id with the same non-empty fingerprint is an
+// idempotent replay and returns the original row position; a different (or
+// absent) fingerprint remains a typed duplicate conflict. Internal producers
+// that do not supply a fingerprint therefore retain strict unique-id behavior.
 //
 // IsTerminal is NOT computed here: the harness step 8 derives it from the
 // response's final status and hands it to Append.
@@ -62,7 +61,7 @@ func newMessages(db *sql.DB, onCommit func()) *messages {
 // Append implements storespec.MessageLog. The harness supplies the
 // pre-computed is_terminal (step 8) since the pure envelope no longer
 // carries that store-derived column.
-func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
+func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool, metadata storespec.AppendMetadata) (storespec.AppendResult, error) {
 	if env == nil {
 		return storespec.AppendResult{}, errors.New("store: append nil envelope")
 	}
@@ -86,7 +85,7 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := appendTx(ctx, tx, env, isTerminal)
+	res, err := appendTxWithMetadata(ctx, tx, env, isTerminal, metadata)
 	if err != nil {
 		return storespec.AppendResult{}, err
 	}
@@ -96,7 +95,7 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	// Truth advanced durably — fire the substrate commit signal so any tap
 	// (delivery pump / client tail) wakes and reads forward. Both write paths
 	// reach a commit; this is the harness path's chokepoint.
-	if m.onCommit != nil {
+	if m.onCommit != nil && !res.Replayed {
 		m.onCommit()
 	}
 	return res, nil
@@ -111,6 +110,10 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 // No receiver is taken — it touches only tx, so it can never be a capability
 // someone obtains by constructing a *messages.
 func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
+	return appendTxWithMetadata(ctx, tx, env, isTerminal, storespec.AppendMetadata{})
+}
+
+func appendTxWithMetadata(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool, metadata storespec.AppendMetadata) (storespec.AppendResult, error) {
 	if tx == nil {
 		return storespec.AppendResult{}, errors.New("store: append tx nil")
 	}
@@ -149,8 +152,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		}
 	}
 
-	// INSERT row. env.id is a caller-generated random uuid: uniqueness is a
-	// pure integrity constraint, so a collision is an error (no dedup path).
+	// INSERT row. Shell submissions may carry a canonical fingerprint; it is
+	// persistence metadata and never enters the protocol envelope.
 	audJSON, _ := json.Marshal(env.Audience)
 
 	const ins = `INSERT INTO messages (
@@ -159,8 +162,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	   kind, type, payload,
 	   parent_id, correlation_id,
 	   visibility, audience, expires_at,
-	   is_terminal
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	   client_fingerprint, is_terminal
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if isTerminal {
@@ -173,13 +176,31 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)),
 		env.Visibility, string(audJSON),
 		nullableInt(env.ExpiresAt),
+		nullableString(metadata.ClientFingerprint),
 		terminalInt,
 	)
 	if err != nil {
+		if metadata.ClientFingerprint != "" && isMessageIDUniqueError(err) {
+			var existingFingerprint sql.NullString
+			var seq int64
+			lookupErr := tx.QueryRowContext(ctx,
+				`SELECT client_fingerprint,seq FROM messages WHERE id=?`, env.ID,
+			).Scan(&existingFingerprint, &seq)
+			if lookupErr != nil {
+				return storespec.AppendResult{}, fmt.Errorf("store: idempotency lookup: %w", lookupErr)
+			}
+			if existingFingerprint.Valid && existingFingerprint.String == metadata.ClientFingerprint {
+				return storespec.AppendResult{Seq: seq, Replayed: true}, nil
+			}
+		}
 		return storespec.AppendResult{}, classifyAppendErr(err, string(env.ID))
 	}
 	seq, _ := res.LastInsertId()
 	return storespec.AppendResult{Seq: seq}, nil
+}
+
+func isMessageIDUniqueError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: messages.id")
 }
 
 // MaxSeq returns the highest committed seq in this channel's message log

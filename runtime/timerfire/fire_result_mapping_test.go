@@ -305,7 +305,7 @@ func TestNewFailsFastOnMissingOrgan(t *testing.T) {
 // above; no Append ever reaches it.
 type nopMessageLog struct{}
 
-func (nopMessageLog) Append(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+func (nopMessageLog) Append(context.Context, *message.Envelope, bool, storespec.AppendMetadata) (storespec.AppendResult, error) {
 	return storespec.AppendResult{}, errors.New("timerfire-test: log not wired")
 }
 

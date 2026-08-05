@@ -7,13 +7,11 @@
 // channel's per-identity slot); the pen never leaves the wall.
 //
 // 连接即人 (spec §0/§1): a connection = an authenticated person + one pipe. The
-// server records for one connection only three things — who you are (principal),
-// where each channel's cursor sits (device-carried), and whether the pipe is alive.
-// A connection subscribes to the实时动态 of ALL the person's合法频道 (户籍 ∪ 读资格,
-// resolved live by the injected EntitlementResolver); "which window is open" is
-// client内政 — the server has no such concept. There is NO client-controllable
-// channel binding/subscription state (the臂/binding-generation axis was proven a
-// false axis and整删).
+// server records who you are (principal), where each channel's cursor sits
+// (device-carried), whether the pipe is alive, and connection-local temporary
+// observations. Membership channels subscribe automatically from live entitlement;
+// observe/unobserve controls only the separate read-only temporary set. Neither
+// mechanism creates a client-visible channel binding or write authority.
 //
 // Two reconcile drivers (spec §3.2), each converging one object off the SAME truth
 // (this person's channel set changed):
@@ -104,6 +102,7 @@ func (t systemTimer) Stop() bool          { return t.timer.Stop() }
 type Config struct {
 	// Resolver is the required app-domain entitlement面 (principal → 合法频道集).
 	Resolver EntitlementResolver
+	Observer ObserverResolver
 	Logger   *slog.Logger
 }
 
@@ -138,6 +137,7 @@ type covEntry struct {
 type Gateway struct {
 	epoch    int64
 	resolver EntitlementResolver
+	observer ObserverResolver
 	clock    clockSource
 	logger   *slog.Logger
 
@@ -227,6 +227,7 @@ func newGateway(cfg Config, set settings) (*Gateway, error) {
 	g := &Gateway{
 		epoch:           epoch,
 		resolver:        cfg.Resolver,
+		observer:        cfg.Observer,
 		clock:           clock,
 		logger:          logger,
 		tStale:          durOr(set.staleLease, defaultStale),

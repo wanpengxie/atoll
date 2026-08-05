@@ -107,6 +107,16 @@ func testGatewayResolver(a *app.App) gateway.EntitlementResolver {
 	})
 }
 
+func testGatewayObserverResolver(a *app.App) gateway.ObserverResolver {
+	return gateway.ObserverResolverFunc(func(ctx context.Context, principal string, chID channel.ID) (gateway.ObserverRoute, string, error) {
+		route, reason, err := a.ResolveObservation(ctx, principal, chID)
+		if err != nil || reason != "" {
+			return gateway.ObserverRoute{}, reason, err
+		}
+		return gateway.ObserverRoute{Channel: route.Channel, Bundle: route.Bundle, Reader: route.Reader}, "", nil
+	})
+}
+
 func setupTestApp(t *testing.T) *testEnv {
 	t.Helper()
 
@@ -142,6 +152,7 @@ func setupTestApp(t *testing.T) *testEnv {
 	// fenced — so the assembly-root wiring is reproduced here in the harness).
 	gw, err := gateway.New(gateway.Config{
 		Resolver: testGatewayResolver(a),
+		Observer: testGatewayObserverResolver(a),
 	})
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)

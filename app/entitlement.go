@@ -8,8 +8,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// EntitlementRoute is a durable human membership route. Observer traffic uses
-// the per-channel SSE/HTTP read plane and never appears in the gateway route set.
+// EntitlementRoute is a durable human membership route. Connection-local
+// observations are evaluated separately by ResolveObservation and never appear
+// in this membership snapshot.
 type EntitlementRoute struct {
 	Channel   channel.ID
 	Bundle    channelhost.Bundle

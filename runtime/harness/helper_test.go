@@ -132,7 +132,7 @@ type stubLog struct {
 	hasFinalFn func(ctx context.Context, parentID message.ID) (bool, error)
 }
 
-func (s stubLog) Append(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
+func (s stubLog) Append(ctx context.Context, env *message.Envelope, isTerminal bool, _ storespec.AppendMetadata) (storespec.AppendResult, error) {
 	return s.appendFn(ctx, env, isTerminal)
 }
 func (s stubLog) FindByID(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error) {
