@@ -87,22 +87,31 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 		return
 	}
 
-	daemonID := uuid.NewString()
-	release := a.daemonLocks.lock(daemonID)
-	defer release()
-	apiKey := uuid.NewString()
-	now := time.Now().UnixMilli()
-
-	_, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO daemons (id, owner_id, name, api_key, created_at) VALUES (?,?,?,?,?)`,
-		daemonID, userID, req.Name, apiKey, now,
-	)
+	daemonID, apiKey, err := a.createDaemonRow(c.Request.Context(), userID, req.Name)
 	if err != nil {
 		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "create daemon failed")
 		return
 	}
 
 	c.JSON(http.StatusCreated, contract.Daemon{ID: daemonID, Name: req.Name, APIKey: apiKey})
+}
+
+// createDaemonRow is the transport-free daemon-mint core shared by the HTTP
+// handler and ProvisionHome (app 代 mint key —— daemon 仪式内化的机制半).
+func (a *App) createDaemonRow(ctx context.Context, ownerID, name string) (string, string, error) {
+	daemonID := uuid.NewString()
+	release := a.daemonLocks.lock(daemonID)
+	defer release()
+	apiKey := uuid.NewString()
+	now := time.Now().UnixMilli()
+	_, err := a.db.ExecContext(ctx,
+		`INSERT INTO daemons (id, owner_id, name, api_key, created_at) VALUES (?,?,?,?,?)`,
+		daemonID, ownerID, name, apiKey, now,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	return daemonID, apiKey, nil
 }
 
 // handleDeleteDaemon commits the realm tombstone and immediately revokes the
@@ -205,15 +214,27 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 	}
 	req.DaemonID = strings.TrimSpace(req.DaemonID)
 	userID := middleware.UserID(c)
-	outcome, err := forwardSysop(c.Request.Context(), a, chID, sysopForward[channelspec.BindingResult]{
+	outcome, err := a.attachDaemonCore(c.Request.Context(), userID, chID, req.DaemonID)
+	if err != nil {
+		writeSysopError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, contract.DaemonBinding{Bound: outcome.Value.Bound, Changed: outcome.Changed})
+}
+
+// attachDaemonCore is the transport-free attach verb shared by the HTTP handler
+// and ProvisionHome. Same gates, same sysop forward — provisioning never gets a
+// side door around the membrane.
+func (a *App) attachDaemonCore(ctx context.Context, principal string, chID channel.ID, daemonID string) (sysopOutcome[channelspec.BindingResult], error) {
+	return forwardSysop(ctx, a, chID, sysopForward[channelspec.BindingResult]{
 		Predicate: func(bundle channelhost.Bundle) (channelspec.BindingResult, bool, error) {
-			bound, err := bundle.View().IsBound(c.Request.Context(), req.DaemonID)
+			bound, err := bundle.View().IsBound(ctx, daemonID)
 			if err != nil || !bound {
 				return channelspec.BindingResult{}, false, err
 			}
 			var deleted sql.NullInt64
-			err = a.db.QueryRowContext(c.Request.Context(),
-				`SELECT deleted_at FROM daemons WHERE id=?`, req.DaemonID).Scan(&deleted)
+			err = a.db.QueryRowContext(ctx,
+				`SELECT deleted_at FROM daemons WHERE id=?`, daemonID).Scan(&deleted)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return channelspec.BindingResult{}, false, err
 			}
@@ -223,15 +244,15 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 			// Same in-gate order as detach: membership first, then the daemon
 			// checks — the two verbs are one family and order differences read
 			// as intent.
-			if err := memberGate(c.Request.Context(), bundle, userID); err != nil {
+			if err := memberGate(ctx, bundle, principal); err != nil {
 				return err
 			}
 			var owner string
 			var deleted sql.NullInt64
-			err := a.db.QueryRowContext(c.Request.Context(),
-				`SELECT owner_id,deleted_at FROM daemons WHERE id=?`, req.DaemonID).
+			err := a.db.QueryRowContext(ctx,
+				`SELECT owner_id,deleted_at FROM daemons WHERE id=?`, daemonID).
 				Scan(&owner, &deleted)
-			if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != userID) {
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != principal) {
 				return &sysopGateError{Status: http.StatusForbidden, Code: "forbidden"}
 			}
 			if err != nil {
@@ -243,14 +264,9 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 			return nil
 		},
 		Invoke: func(sys channelhost.SysOp, ref string) (channelspec.BindingResult, error) {
-			return sys.AttachDaemon(c.Request.Context(), channelspec.DaemonRequest{Ref: ref, DaemonID: req.DaemonID})
+			return sys.AttachDaemon(ctx, channelspec.DaemonRequest{Ref: ref, DaemonID: daemonID})
 		},
 	})
-	if err != nil {
-		writeSysopError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, contract.DaemonBinding{Bound: outcome.Value.Bound, Changed: outcome.Changed})
 }
 
 // handleDetachDaemon records one exact channel operation. The membrane commits

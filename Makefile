@@ -2,7 +2,9 @@ SHELL := /usr/bin/env bash
 
 .PHONY: install build build-go build-release test lint check-gateway-retired check-link-seam-retired check-engine-contract check-engine-contract-legacy check-activity-types dev dev-init dev-reopen dev-server clean e2e-loop
 
-GO_BINARIES := server daemon
+# server/daemon ship namespaced (atoll-server / atoll-daemon); the entry
+# command itself is plain `atoll` — its own name IS the namespace.
+GO_BINARIES := server daemon atoll
 
 # ----------------------------------------------------------------------------
 # install — 拉全部依赖
@@ -20,15 +22,17 @@ LDFLAGS_RELEASE := -s -w
 build-go:
 	@mkdir -p bin
 	@for b in $(GO_BINARIES); do \
-	  echo "[build] cmd/$$b -> bin/atoll-$$b"; \
-	  go build -o bin/atoll-$$b ./cmd/$$b || exit 1; \
+	  out=$$([ "$$b" = atoll ] && echo atoll || echo atoll-$$b); \
+	  echo "[build] cmd/$$b -> bin/$$out"; \
+	  go build -o bin/$$out ./cmd/$$b || exit 1; \
 	done
 
 build-release:
 	@mkdir -p bin
 	@for b in $(GO_BINARIES); do \
-	  echo "[build-release] cmd/$$b -> bin/atoll-$$b (stripped)"; \
-	  go build -ldflags="$(LDFLAGS_RELEASE)" -o bin/atoll-$$b ./cmd/$$b || exit 1; \
+	  out=$$([ "$$b" = atoll ] && echo atoll || echo atoll-$$b); \
+	  echo "[build-release] cmd/$$b -> bin/$$out (stripped)"; \
+	  go build -ldflags="$(LDFLAGS_RELEASE)" -o bin/$$out ./cmd/$$b || exit 1; \
 	done
 
 # ----------------------------------------------------------------------------

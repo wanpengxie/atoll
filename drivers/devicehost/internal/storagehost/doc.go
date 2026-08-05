@@ -1,10 +1,13 @@
-// Package storagehost is the daemon's storage host (期11 spec §4): the
-// physical, disk-touching half of the resource axis's file kind. It exists
-// ONLY here — Go's own internal/ visibility rule confines every importer to
-// the cmd/daemon subtree, mechanically enforcing §8.2's red line
-// ("server=纯协调组件...file落盘代码只存在于daemon运行时包") stronger than an
-// archtest scan could: cmd/server physically cannot import this package,
-// full stop, not merely "does not currently".
+// Package storagehost is the device carrier's storage host (期11 spec §4):
+// the physical, disk-touching half of the resource axis's file kind. It
+// exists ONLY here — Go's own internal/ visibility rule confines every
+// importer to the drivers/devicehost subtree (the device-carrier driver both
+// packagings — cmd/daemon and cmd/atoll's in-process device — run through;
+// the human-ingress peer is drivers/gateway), mechanically enforcing §8.2's
+// red line ("server=纯协调组件...file落盘代码只存在于daemon运行时包")
+// stronger than an archtest scan could: the server assembly (engineboot)
+// never imports devicehost, and no package outside devicehost can import
+// this one — full stop, not merely "does not currently".
 //
 // Four components (§4.1), all daemon-runtime, all daemon-same-shape:
 //
@@ -12,7 +15,7 @@
 //     home's door authorizes a create (AllocRequest, §4.7's first frame).
 //   - Streamer — the daemon half of the symmetric data path: local os.Root
 //     handles for a same-machine consumer, and (§5's lane, now landed) bytes
-//     forwarded through the server for a cross-daemon consumer. cmd/daemon's
+//     forwarded through the server for a cross-daemon consumer. devicehost's
 //     storageadapter.go wraps this Host as compute.LocalFileOpener, which
 //     platform/internal/link's lane.go consults on both call sites §5 wires:
 //     a same-daemon caller's Local route and this daemon acting as a lane

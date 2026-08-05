@@ -314,8 +314,9 @@ func TestKernelContractLeavesConfined(t *testing.T) {
 		"经 accessdoor/harness.Pen/契约叶走，恒不直连底座；白名单确需扩时在本表登记并说明谁批的。")
 }
 
-// TestDriversUsePlatformExportFaceOnly —— drivers 消费 platform 恒经四个出口
-// 脸（正向枚举）：platform 根、subjectgate、channelhost、channelspec。
+// TestDriversUsePlatformExportFaceOnly —— drivers 消费 platform 恒经五个出口
+// 脸（正向枚举）：platform 根、subjectgate、channelhost、channelspec、compute
+// （设备载体出口脸，与 subjectgate 之于人对称，2026-08-05 登记）。
 // platform/internal 树外本由编译器拦，此处防的是出口脸清单被悄悄扩大。
 func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 	platformFace := map[string]bool{
@@ -323,6 +324,10 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		"platform/subjectgate": true,
 		"platform/channelhost": true,
 		"platform/channelspec": true,
+		// compute = 设备载体的出口脸（/compute 链的 daemon 侧运行时）。登记于
+		// 2026-08-05 devicehost 入 drivers 层（此前同一 import 住 cmd/daemon，
+		// 墙不覆盖 cmd）：消费者轴是"设备"，与 subjectgate 之于"人"对称。
+		"platform/compute": true,
 	}
 	var bad []string
 	for _, f := range productionFiles(t) {
@@ -340,7 +345,7 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		}
 	}
 	failWall(t, bad,
-		"drivers 只许经 platform 四出口脸（platform 根 / subjectgate / channelhost / channelspec）。",
+		"drivers 只许经 platform 五出口脸（platform 根 / subjectgate / channelhost / channelspec / compute）。",
 		"要新的 platform 能力就在出口脸上加导出方法；确需扩脸时在本表登记。")
 }
 

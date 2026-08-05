@@ -100,7 +100,7 @@ func (h *deviceE2EHarness) startDaemon(t *testing.T, generation int) *proc {
 		"-server", strings.Replace(h.base, "http://", "ws://", 1) + "/compute",
 		"-key", h.apiKey,
 		"-name", "device-box",
-		"-workspace", h.dirs["daemon-ws"],
+		"-home", h.dirs["daemon-ws"],
 	}, h.dirs["daemonwd"], logPath, scrubbedEnv(h.dirs["home"]))
 }
 
@@ -230,7 +230,7 @@ func TestDaemonCarrierReconnectRestoresCompartments(t *testing.T) {
 			"-server", fmt.Sprintf("ws://127.0.0.1:%d/compute", port),
 			"-key", apiKey,
 			"-name", "canonical-box",
-			"-workspace", dirs["daemon-ws"],
+			"-home", dirs["daemon-ws"],
 		}, dirs["daemonwd"], daemonLog, env)
 	}
 	daemon := startDaemon(1)

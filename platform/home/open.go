@@ -257,14 +257,20 @@ func Open(cfg Config) (_ *Home, retErr error) {
 				logger.Warn("platform.actor_caps_mint_failed", "actor", input.ActorID, "err", err)
 				return nil
 			}
-			def, ok := h.factories.LookupByClass(
-				input.ActorID,
-				input.ExecutionSpec.Class,
-				input.ExecutionSpec.Config,
-			)
+			// Humans are the platform's built-in body — never a registry class,
+			// so they must not reach the ordinary resolver at all (its miss is a
+			// logged build failure, which would fire on every human activation).
+			var def platform.ActorFactory
+			var ok bool
 			if input.ExecutionSpec.Kind == actor.KindHuman {
 				h.ensureSubjectSlot(input.ActorID)
 				def, ok = humanCellFactory(h, input.ActorID), true
+			} else {
+				def, ok = h.factories.LookupByClass(
+					input.ActorID,
+					input.ExecutionSpec.Class,
+					input.ExecutionSpec.Config,
+				)
 			}
 			if !ok {
 				logger.Warn("platform.actor_factory_missing",

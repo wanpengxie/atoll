@@ -238,7 +238,7 @@ func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonI
 	// Touch AFTER sweep, BEFORE listing (期11 S1's "在途登记" liveness bump —
 	// resourcespec.Registry.TouchReservationsByCoords's own doc), NARROWED
 	// by 期11 review to the caller-supplied activeCoords: this daemon just
-	// proved ITS OWN currently-open WriteHandles (cmd/daemon/internal/
+	// proved ITS OWN currently-open WriteHandles (drivers/devicehost/internal/
 	// storagehost.Host.ActiveWriteCoords, forwarded through the
 	// ReconcilePull frame) reachable, so ONLY the reservations whose coord
 	// is in that set are stamped alive as of now — not every reservation

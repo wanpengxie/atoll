@@ -43,6 +43,13 @@ type Config struct {
 	Logger           *slog.Logger
 	BuildCompartment CompartmentBuilder
 	ScrubberInterval time.Duration
+	// OnAttached, when set, is called with the server-assigned daemon id after
+	// every ACCEPTED carrier attach (initial and reconnect alike, same id).
+	// This is the one moment the daemon learns which daemons row it IS — the
+	// assembly root uses it to complete the device home's persisted identity
+	// triple {daemon_id, api_key, server_ws}. Called from the carrier
+	// goroutine; implementations must be safe for that.
+	OnAttached func(daemonID string)
 }
 
 type daemonHostEvents struct{ outbound *DaemonOutbound }
@@ -172,6 +179,9 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 			}
 			backoff = nextRedialBackoff(backoff)
 			continue
+		}
+		if cfg.OnAttached != nil {
+			cfg.OnAttached(accepted.DaemonID)
 		}
 		root, err := coordinatePath(filepath.Join(cfg.AtollHome, "daemons"), accepted.DaemonID)
 		if err != nil {

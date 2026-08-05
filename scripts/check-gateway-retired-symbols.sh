@@ -107,7 +107,7 @@ check_live cs "channel-bound websocket URL" \
   drivers/ app/ cmd/ e2e/
 
 strict_hits=""
-if ! strict_hits=$(scan_strict drivers/gateway/ app/ cmd/server/ platform/home/); then
+if ! strict_hits=$(scan_strict drivers/gateway/ app/ cmd/server/ cmd/internal/ platform/home/); then
 	while IFS= read -r hit; do
 		[[ -z "$hit" ]] && continue
 		echo "[gateway-retired] demolition residue: ${hit}" >&2

@@ -14,7 +14,7 @@ import (
 // lives in platform/internal/link's lane.go, not here — this type stays the
 // pure local-handle primitive, self-contained and independently testable
 // (mkdir/touch, staging→commit/abort) regardless of who calls it. Its
-// consumer is cmd/daemon's storageadapter.go, which wraps *Host (this type's
+// consumer is devicehost's storageadapter.go, which wraps *Host (this type's
 // owner) as compute.LocalFileOpener for lane.go to consult.
 type Streamer struct{}
 

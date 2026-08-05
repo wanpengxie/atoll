@@ -46,8 +46,9 @@ type FileRoute struct {
 // os.* call lands IMMEDIATELY in the real subtree (the design's "无 Commit
 // 边界——每个 os 操作立即生效"), because a directory is not staged-then-renamed
 // as one atomic blob. Deliberately spelled in os.File / os.FileMode /
-// os.FileInfo (NOT os.Root): the os.Root TYPE token is confined to cmd/daemon
-// by the server-zero-storage archtest, so the interface a同信任域 caller holds
+// os.FileInfo (NOT os.Root): the os.Root TYPE token is confined to
+// drivers/devicehost by the server-zero-storage archtest, so the interface
+// a同信任域 caller holds
 // must not name it — only its methods, satisfied structurally.
 type LocalDirHandle interface {
 	Create(name string) (*os.File, error)

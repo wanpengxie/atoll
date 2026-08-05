@@ -12,9 +12,9 @@ import (
 // ResourceLanded / ReservationPending / TombstoneToReclaim are Pass's inputs
 // — plain mirrors of platform/internal/link's ReconcileResource/
 // ReconcileReservation/ReconcileTombstone wire shapes. This package cannot
-// import platform/internal/link (cmd/daemon sits outside Go's internal/
+// import platform/internal/link (devicehost sits outside Go's internal/
 // visibility boundary for it) — compute.Run's own bridge code
-// (cmd/daemon-side compute.Run, which CAN see both type universes)
+// (devicehost-side compute.Run, which CAN see both type universes)
 // does the field-by-field translation at the one seam that needs it, the
 // SAME boundary-crossing shape resourcespec/store and accessdoor/resourcespec
 // already draw elsewhere in this build.

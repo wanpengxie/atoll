@@ -47,7 +47,7 @@ type CompartmentBuilder func(
 
 // LocalFileOpener mirrors platform/internal/link.LocalFileOpener's exact
 // method set (期11 spec §5/§3.4's "daemon 本地颁 os.Root 子句柄") — a
-// SEPARATE named interface (not an alias) purely so cmd/daemon/main.go's
+// SEPARATE named interface (not an alias) purely so drivers/devicehost's
 // wiring code reads against platform's own public vocabulary rather than
 // reaching into platform/internal/link (which it cannot import); Go's
 // structural interface typing makes the two directly interchangeable at
@@ -57,8 +57,8 @@ type LocalFileOpener interface {
 	OpenWrite(coord string) (accessdoor.LocalWriteHandle, error)
 	// OpenDir opens coord as a directory-shaped resource's SUBTREE lease (期11
 	// 丁12) — an os.Root confined to live/<coord>, surfaced behind
-	// accessdoor.LocalDirHandle (the os.Root TYPE stays inside cmd/daemon per
-	// the server-zero-storage archtest; this interface names only its method
+	// accessdoor.LocalDirHandle (the os.Root TYPE stays inside drivers/devicehost
+	// per the server-zero-storage archtest; this interface names only its method
 	// set). Redeemed for Open(dir资源) on the same-daemon Local route only.
 	OpenDir(coord string) (accessdoor.LocalDirHandle, error)
 	// ReclaimCoord mirrors platform/internal/link.LocalFileOpener's own
@@ -69,7 +69,7 @@ type LocalFileOpener interface {
 // StorageResourceCoord / StorageReservationCoord / StorageTombstoneCoord are
 // StorageHost.Reconcile's injection-point shapes — plain data, deliberately
 // NOT aliases of platform/internal/link's own wire types: the implementor
-// (cmd/daemon/internal/storagehost.Host) lives OUTSIDE platform/internal's
+// (drivers/devicehost/internal/storagehost.Host) lives OUTSIDE platform/internal's
 // Go-enforced visibility boundary and cannot reference those types even by
 // alias-name. This mirrors the CONCEPTUAL layering resourcespec/store and
 // accessdoor/resourcespec already draw — a fresh mirror type at a boundary a
@@ -90,8 +90,8 @@ type (
 type StorageReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, err error)
 
 // StorageHost is the daemon storage host's injection-point contract (期11
-// §4): implemented by cmd/daemon/internal/storagehost.Host (via a thin
-// cmd/daemon-side adapter — Host's own method shapes already match this
+// §4): implemented by drivers/devicehost/internal/storagehost.Host (via a thin
+// devicehost-side adapter — Host's own method shapes already match this
 // exactly, see its doc). Every method uses only the plain types above, never
 // platform/internal/link's wire types, because the implementor cannot
 // import that package (outside its Go-enforced internal/ visibility).
@@ -103,7 +103,7 @@ type StorageHost interface {
 	Reconcile(ctx context.Context, resources []StorageResourceCoord, pendingReservations []StorageReservationCoord, pendingTombstones []StorageTombstoneCoord, ack StorageReclaimAckFunc)
 	// ActiveWriteCoords snapshots every coord this daemon currently has an
 	// OPEN local WriteHandle for (期11 review's own narrowing addition,
-	// cmd/daemon/internal/storagehost.Host.ActiveWriteCoords's plain-typed
+	// drivers/devicehost/internal/storagehost.Host.ActiveWriteCoords's plain-typed
 	// mirror) — storageHostForwarder.pass reads this BEFORE every
 	// ReconcilePull round trip and forwards it as link.ReconcilePull.
 	// ActiveCoords, so the home's liveness touch bumps ONLY reservations

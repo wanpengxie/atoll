@@ -59,7 +59,7 @@ DKEY="$(echo "$DAEMON_JSON" | jq -r .api_key)"
 WS_BASE="${BASE/http/ws}"
 DWORK="$(mktemp -d)"
 go run ./cmd/daemon --server "$WS_BASE/compute" --key "$DKEY" \
-  --name demo-device --workspace "$DWORK" >/dev/null 2>&1 &
+  --name demo-device --home "$DWORK" >/dev/null 2>&1 &
 DPID=$!
 trap 'kill $DPID 2>/dev/null; rm -rf "$JAR" "$DWORK"' EXIT
 sleep 2

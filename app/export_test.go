@@ -244,6 +244,13 @@ func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string
 	return chID, nil
 }
 
+// CreateDaemonRowForTest mints an ordinary daemon row through the same core
+// the API handler uses — provisioning tests use it to plant a name-colliding
+// decoy device.
+func (a *App) CreateDaemonRowForTest(ctx context.Context, ownerID, name string) (string, string, error) {
+	return a.createDaemonRow(ctx, ownerID, name)
+}
+
 // SetBcryptCostForTest drops the password work factor for test fixtures —
 // under -race a DefaultCost hash+compare burns ~1.7s of pure CPU per
 // register+login, which was the app suite's dominant cost. Returns a restore

@@ -83,40 +83,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "invalid channel type")
 		return
 	}
-	now := time.Now().UnixMilli()
-	chID := channel.ID(uuid.NewString())
-	snapshot, err := (channelspec.RenderedSnapshot{Class: defaultBoostClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
-	if err != nil {
-		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
-		return
-	}
-	realmSnapshot, err := (channelspec.RenderedSnapshot{Class: realmToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
-	if err != nil {
-		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
-		return
-	}
-	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: req.Type, OwnerPrincipal: caller, CreatedAt: now,
-		GenesisDeclarations: []channelhost.GenesisDeclaration{
-			{DeclID: "sys:boost", Kind: actor.KindAgent, Rendered: snapshot},
-			{DeclID: realmToolDeclID, Kind: actor.KindTool, Rendered: realmSnapshot},
-		}}
-	if req.ParentID != nil {
-		spec.Origin = &channelhost.Origin{ParentChannelID: channel.ID(*req.ParentID), InitiatorPrincipal: caller}
-	}
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
-		return
-	}
-	a.createMu.Lock()
-	accepted, changed, conflict, parentMissing, err := a.acceptCreateChannel(
-		c.Request.Context(), desiredChannel{
-			ID: chID, Name: req.Name, Type: req.Type, Status: "present",
-			Owner: caller, SpecJSON: string(raw), Created: now,
-			Parent: nullableParent(req.ParentID),
-		},
-	)
-	a.createMu.Unlock()
+	accepted, changed, conflict, parentMissing, err := a.createGroupChannel(
+		c.Request.Context(), caller, req.Name, req.ParentID)
 	if err != nil {
 		writeRetryingAPIError(c, http.StatusServiceUnavailable, contract.CodeUnavailable, "create unavailable")
 		return
@@ -137,17 +105,61 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	status := http.StatusOK
 	if changed {
 		status = http.StatusCreated
+	}
+	c.JSON(status, row)
+}
+
+// createGroupChannel is the transport-free channel-creation core shared by the
+// HTTP handler and ProvisionHome. Same-owner/same-name/same-parent re-submits
+// are idempotent (accept returns the present row, changed=false), which is
+// exactly what makes home-channel provisioning safe to repeat.
+func (a *App) createGroupChannel(ctx context.Context, caller, name string, parentID *string) (desiredChannel, bool, bool, bool, error) {
+	now := time.Now().UnixMilli()
+	chID := channel.ID(uuid.NewString())
+	snapshot, err := (channelspec.RenderedSnapshot{Class: defaultBoostClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
+	if err != nil {
+		return desiredChannel{}, false, false, false, err
+	}
+	realmSnapshot, err := (channelspec.RenderedSnapshot{Class: realmToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
+	if err != nil {
+		return desiredChannel{}, false, false, false, err
+	}
+	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: "group", OwnerPrincipal: caller, CreatedAt: now,
+		GenesisDeclarations: []channelhost.GenesisDeclaration{
+			{DeclID: "sys:boost", Kind: actor.KindAgent, Rendered: snapshot},
+			{DeclID: realmToolDeclID, Kind: actor.KindTool, Rendered: realmSnapshot},
+		}}
+	if parentID != nil {
+		spec.Origin = &channelhost.Origin{ParentChannelID: channel.ID(*parentID), InitiatorPrincipal: caller}
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return desiredChannel{}, false, false, false, err
+	}
+	a.createMu.Lock()
+	accepted, changed, conflict, parentMissing, err := a.acceptCreateChannel(
+		ctx, desiredChannel{
+			ID: chID, Name: name, Type: "group", Status: "present",
+			Owner: caller, SpecJSON: string(raw), Created: now,
+			Parent: nullableParent(parentID),
+		},
+	)
+	a.createMu.Unlock()
+	if err != nil || conflict || parentMissing {
+		return accepted, changed, conflict, parentMissing, err
+	}
+	if changed {
 		// A freshly accepted row must not inherit lifecycle state from any
 		// earlier life of this ID (stale permanent marks would silently block
 		// convergence forever).
 		a.resetLifecycleForStatusChange(accepted.ID)
-		a.convergeChannel(c.Request.Context(), accepted.ID)
+		a.convergeChannel(ctx, accepted.ID)
 	}
 	// Poke on replays too: an idempotent re-submit is the caller's strongest
 	// "hurry up" signal for a channel whose physical side may still be
 	// converging, and a poke only buys timeliness.
 	a.pokeLifecycle(accepted.ID)
-	c.JSON(status, row)
+	return accepted, changed, conflict, parentMissing, nil
 }
 
 func nullableParent(parent *string) sql.NullString {

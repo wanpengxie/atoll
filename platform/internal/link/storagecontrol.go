@@ -92,8 +92,9 @@ type ReclaimAckReply struct {
 // reconcile its directory against comes back in the reply.
 //
 // ActiveCoords is 期11 review's own narrowing addition: every coord this
-// daemon currently has an OPEN local WriteHandle for (cmd/daemon/internal/
-// storagehost.Host.ActiveWriteCoords), snapshotted fresh on every pull. The
+// daemon currently has an OPEN local WriteHandle for (drivers/devicehost/
+// internal/storagehost.Host.ActiveWriteCoords), snapshotted fresh on every
+// pull. The
 // home's TouchReservationsByCoords liveness bump reads ONLY this list —
 // "this daemon is still polling" is deliberately NOT treated as "every
 // reservation this daemon owns is alive" (that blanket form let an abandoned

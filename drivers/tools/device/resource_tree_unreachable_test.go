@@ -13,7 +13,7 @@ import (
 // layout guarantee at the device actor's own boundary — spec §9 DoD#5's
 // "device 文件词表对资源树不可达回归测试". Resource-axis object bytes live at
 // <daemonRoot>/resources/<channelID>/live/<coord> (the exact layout
-// cmd/daemon/internal/storagehost's doc.go names), a SIBLING of the device
+// drivers/devicehost/internal/storagehost's doc.go names), a SIBLING of the device
 // workspace tree <daemonRoot>/<channelID>/ — not nested under it, sharing
 // only the common ancestor <daemonRoot>. §4.2's own words: "分树=盘层/客体层
 // 各有其树的误铲防护...不是机密性执法" — but that misc-cast protection only

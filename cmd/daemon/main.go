@@ -9,14 +9,20 @@
 // decides). NOTHING auto-runs. tool / looper / device are uniform — all just
 // rows in the assignment; claude runs here with the user's LOCAL login.
 //
-// Adding an in-tree actor/engine = a new package with an init() + one blank
-// import in actors/all (tools/devices) or agent/all (engines); this file is
-// NEVER edited.
+// Identity is the home's, not the run's (home 模型: 身份=持有凭据): --server and
+// --key are FIRST-RUN registration (or an explicit rebind) and persist into the
+// device home's identity file; every later run starts bare — the home is the
+// logical device, so `atoll-daemon` with no flags resumes being exactly the
+// device it was. One home, one live process (homelock).
+//
+// The carrier body itself lives in drivers/devicehost (shared with
+// `atoll up`'s in-process local device). Adding an in-tree actor/engine = a new
+// package with an init() + one blank import in actors/all (tools/devices) or
+// agent/all (engines); this file is NEVER edited.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"log"
 	"log/slog"
@@ -26,12 +32,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
-	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/compute"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/cmd/internal/homelock"
+	"github.com/wanpengxie/atoll/drivers/devicehost"
 
 	// Availability (NOT auto-run): blank-import every in-tree actor + engine so the
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
@@ -46,58 +48,66 @@ import (
 // is not finishing, it is wedged on something cancellation cannot reach.
 const shutdownGrace = 60 * time.Second
 
-// classFactories resolves one body's factory at BUILD time from the class and
-// config that body's own desired carries — the daemon-side mirror of the server
-// host's registry lookup. There is no plan snapshot here and no state at all:
-// the desired the Host serves is the one plan ledger, and the registry is
-// compiled-in code. A class this daemon cannot build fails that body alone
-// (logged by the caller, retried on the Host's backoff) instead of holding the
-// whole plan hostage.
-type classFactories struct {
-	chID, wsRoot, deviceName string
-	logger                   *slog.Logger
-}
-
-func (f classFactories) BuildClass(
-	id actor.ActorID,
-	class string,
-	config json.RawMessage,
-) (platform.ActorFactory, bool) {
-	decl, err := registry.Build(class, registry.InstanceSpec{
-		ID:     id,
-		Config: config,
-	}, registry.Deps{
-		ChannelID:    channel.ID(f.chID),
-		WorkspaceDir: f.wsRoot,
-		DeviceName:   f.deviceName,
-		Logger:       f.logger,
-	})
-	if err != nil {
-		f.logger.Error("daemon: build class failed",
-			"channel", f.chID, "actor", id, "class", class, "err", err)
-		return platform.ActorFactory{}, false
-	}
-	// A constructor that rewrites the id (device derives its own id from the
-	// device identity) would produce a body claiming an identity the plan never
-	// named. Refuse the build outright — there is no table to file it under, so
-	// the only way it could leak is by being built, and it is not.
-	if decl.ID != id {
-		f.logger.Warn("daemon: class derived a different id",
-			"actor", id, "class", class, "derived", decl.ID)
-		return platform.ActorFactory{}, false
-	}
-	return decl.Factory, true
-}
+// defaultServerWS is the fallback when neither --server nor the home's
+// identity names one.
+const defaultServerWS = "ws://localhost:8080/compute"
 
 func main() {
-	ws := flag.String("server", "ws://localhost:8080/compute", "server WS url")
-	key := flag.String("key", "", "api key")
-	name := flag.String("name", "", "device name; default: hostname")
-	workspace := flag.String("workspace", "", "atoll home; default: ~/.atoll")
+	ws := flag.String("server", "", "server WS url; first run / rebind — persisted in home (default: the home's registered server)")
+	key := flag.String("key", "", "api key; first run / rebind — persisted in home (default: the home's registered key)")
+	name := flag.String("name", "", "device display name; default: hostname")
+	home := flag.String("home", defaultDeviceHome(), "device home: identity + channel workspaces + resource trees (home 模型: 一个 home=一个逻辑设备)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	// One home, one live process — a second carrier presenting the same
+	// identity is the double-device accident, refused at the door.
+	release, err := homelock.Acquire(*home, "device")
+	if err != nil {
+		log.Fatalf("daemon: %v", err)
+	}
+	defer release()
+
+	// Resolve identity: explicit flags register/rebind and persist; a bare
+	// start resumes the home's persisted identity.
+	ident, _, err := devicehost.LoadIdentity(*home)
+	if err != nil {
+		log.Fatalf("daemon: %v", err)
+	}
+	// server and key are an INSEPARABLE pair: a key is a credential minted BY
+	// one server, so pointing --server somewhere new while silently reusing
+	// the stored key would send the old server's bearer credential to an
+	// arbitrary new origin. Changing servers therefore requires the new
+	// server's --key in the same run (or a fresh --home).
+	if *ws != "" && *ws != ident.ServerWS && *key == "" && ident.APIKey != "" {
+		log.Fatalf("daemon: --server points this device somewhere new (%q; home %s is registered to %q) — a key is bound to the server that minted it, so pass the new server's --key alongside --server (or use a different --home)",
+			*ws, *home, ident.ServerWS)
+	}
+	serverWS := *ws
+	if serverWS == "" {
+		serverWS = ident.ServerWS
+	}
+	if serverWS == "" {
+		serverWS = defaultServerWS
+	}
+	credential := *key
+	if credential == "" {
+		credential = ident.APIKey
+	}
+	if credential == "" {
+		log.Fatalf("daemon: home %s holds no identity yet — first run needs --key (mint one via POST /api/daemons, or let `atoll up` provision the local device)", *home)
+	}
+	if serverWS != ident.ServerWS || credential != ident.APIKey {
+		// A rebind invalidates the remembered row id along with the old pair —
+		// the new server's attach verdict (OnAttached below) fills in the id
+		// this credential actually IS.
+		ident.ServerWS, ident.APIKey, ident.DaemonID = serverWS, credential, ""
+		if err := devicehost.SaveIdentity(*home, ident); err != nil {
+			log.Fatalf("daemon: %v", err)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -117,9 +127,8 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// Device identity + atoll home resolve first — an assigned device actor
-	// derives its id from DeviceName; loopers' situation facts derive from the
-	// workspace.
+	// Display name resolves last — an assigned device actor derives its id
+	// from DeviceName; loopers' situation facts derive from the home.
 	deviceName := *name
 	if deviceName == "" {
 		host, err := os.Hostname()
@@ -128,36 +137,38 @@ func main() {
 		}
 		deviceName = host
 	}
-	atollHome := *workspace
-	if atollHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Fatalf("daemon: home dir: %v", err)
-		}
-		atollHome = filepath.Join(home, ".atoll")
-	}
 
-	if err := compute.Run(ctx, compute.Config{
-		ServerWS:   *ws,
-		Credential: *key,
-		AtollHome:  atollHome,
+	if err := devicehost.Run(ctx, devicehost.Config{
+		ServerWS:   serverWS,
+		Credential: credential,
+		DeviceName: deviceName,
+		AtollHome:  *home,
 		Logger:     logger,
-		BuildCompartment: func(chID, workspaceDir string) (compute.CompartmentResources, error) {
-			daemonRoot := filepath.Dir(filepath.Dir(workspaceDir))
-			sh, err := storagehost.Open(daemonRoot, chID, logger.With("channel", chID))
-			if err != nil {
-				return compute.CompartmentResources{}, err
+		// The attach verdict is the moment this home learns which daemons row
+		// it IS — persist it so the identity triple {daemon_id, api_key,
+		// server_ws} is complete and a later `atoll up` on this home claims
+		// the SAME row instead of minting a double.
+		OnAttached: func(daemonID string) {
+			if ident.DaemonID == daemonID {
+				return
 			}
-			adapter := storageHostAdapter{host: sh}
-			return compute.CompartmentResources{
-				Factories: classFactories{
-					chID: chID, wsRoot: workspaceDir, deviceName: deviceName,
-					logger: logger.With("channel", chID),
-				},
-				StorageHost: adapter, LocalFileOpener: adapter, Close: sh.Close,
-			}, nil
+			persisted := ident
+			persisted.DaemonID = daemonID
+			if err := devicehost.SaveIdentity(*home, persisted); err != nil {
+				logger.Error("daemon: persisting attach identity", "err", err.Error())
+				return
+			}
+			ident = persisted
 		},
 	}); err != nil {
 		log.Fatalf("daemon: %v", err)
 	}
+}
+
+func defaultDeviceHome() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".atoll-device"
+	}
+	return filepath.Join(home, ".atoll", "device")
 }

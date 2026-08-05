@@ -1,20 +1,20 @@
-package main
+package devicehost
 
-// storageadapter.go is cmd/daemon's own boundary-crossing adapter (期11
-// §4): compute.StorageHost's method shapes and
-// cmd/daemon/internal/storagehost.Host's method shapes are structurally
-// identical (same field names/types throughout) but nominally distinct Go
-// types — cmd/daemon can import BOTH platform/compute and its own internal
-// storagehost package (the only place that is simultaneously true), so this
-// is the one seam that translates between them, the exact mirror of
-// platform's OWN storageHostForwarder translating platform/internal/link's
-// wire types into compute.StorageHost's plain shapes.
+// storageadapter.go is devicehost's own boundary-crossing adapter (期11 §4):
+// compute.StorageHost's method shapes and internal/storagehost.Host's method
+// shapes are structurally identical (same field names/types throughout) but
+// nominally distinct Go types — devicehost can import BOTH platform/compute
+// and its own internal storagehost package (the only place that is
+// simultaneously true), so this is the one seam that translates between
+// them, the exact mirror of platform's OWN storageHostForwarder translating
+// platform/internal/link's wire types into compute.StorageHost's plain
+// shapes.
 
 import (
 	"context"
 	"io"
 
-	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
+	"github.com/wanpengxie/atoll/drivers/devicehost/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
@@ -79,7 +79,7 @@ func (a storageHostAdapter) OpenWrite(coord string) (accessdoor.LocalWriteHandle
 // *storagehost.Host's Streamer facet hands out an *os.Root confined to
 // live/<coord>, which structurally satisfies accessdoor.LocalDirHandle (its
 // method set is a subset of *os.Root's) with no further wrapping — the os.Root
-// TYPE stays inside cmd/daemon, only its method surface crosses to platform.
+// TYPE stays inside drivers/devicehost, only its method surface crosses to platform.
 func (a storageHostAdapter) OpenDir(coord string) (accessdoor.LocalDirHandle, error) {
 	return a.host.OpenDir(coord)
 }

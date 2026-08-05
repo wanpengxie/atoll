@@ -116,16 +116,26 @@ docs/        architecture and dev walkthroughs
 
 ```bash
 # 1. build
-make build          # -> bin/atoll-server, bin/atoll-daemon
+make build          # -> bin/atoll, bin/atoll-server, bin/atoll-daemon
 
-# 2. run the server (holds truth for all channels; --init creates the database on first run)
-bin/atoll-server --init --db /tmp/atoll-dev/app.db --channel-db-dir /tmp/atoll-dev/channels
+# 2. one-command personal node: engine + owner + home channel + local device,
+#    all provisioned and converging on every run (default home: ~/.atoll)
+bin/atoll up
+```
 
-# 3. run a daemon (compute host; echo actor needs no external credentials)
-#    create a daemon in the UI/CLI to get an api-key, bind it to a channel
-bin/atoll-daemon --server "ws://localhost:8080/compute" --key <api-key>
+Or run the roles as separate processes on the SAME homes `atoll up` uses —
+the disk layout is identical, so a node started with `atoll up` can be split
+later with zero migration:
 
-# 4. tests
+```bash
+# server (holds truth for all channels; --init creates the database on first run)
+bin/atoll-server --init --home ~/.atoll/server --addr 127.0.0.1:8832
+
+# daemon (compute host) — first run registers: mint an api-key via the API
+# (POST /api/daemons), later runs start bare (identity persists in the home)
+bin/atoll-daemon --home ~/.atoll/device --server "ws://127.0.0.1:8832/compute" --key <api-key>
+
+# tests
 make test
 ```
 

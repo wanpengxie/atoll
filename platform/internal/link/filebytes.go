@@ -17,7 +17,7 @@ import (
 // LocalFileOpener is the daemon-side same-machine byte-access capability
 // (期11 spec §3.4's "daemon 本地颁 os.Root 子句柄") — the injection-point
 // contract implemented (via a platform-layer bridge mirroring StorageHost)
-// by cmd/daemon/internal/storagehost.Host, consulted from the one call site
+// by drivers/devicehost/internal/storagehost.Host, consulted from the one call site
 // that redeems a file route (remoteResourceHandle.Redeem → redeemFileRoute,
 // dial.go). It resolves coord via the ResolveCoord control-RPC round trip
 // first — this interface itself never sees a coord it did not already receive
@@ -28,7 +28,7 @@ type LocalFileOpener interface {
 	// OpenWrite's return type reuses accessdoor.LocalWriteHandle directly —
 	// this package already imports accessdoor (relaywire.go's pre-existing
 	// edge), so unlike platform/compute.go's StorageHost (whose implementor,
-	// cmd/daemon/internal/storagehost, sits OUTSIDE what platform can
+	// drivers/devicehost/internal/storagehost, sits OUTSIDE what platform can
 	// import, forcing a mirror type) there is no visibility boundary here
 	// to mirror across.
 	OpenWrite(coord string) (accessdoor.LocalWriteHandle, error)
@@ -43,7 +43,7 @@ type LocalFileOpener interface {
 	// won LOCALLY (§3.5) but lost the same-resource_id race at the home, so
 	// its bytes at coord are now orphaned and must be collected, never
 	// retried. Idempotent — a coord with nothing there is a clean no-op
-	// (cmd/daemon/internal/storagehost.Host.ReclaimCoord's own doc, which
+	// (drivers/devicehost/internal/storagehost.Host.ReclaimCoord's own doc, which
 	// reuses the SAME Reclaimer a tombstone's delete already collects
 	// through).
 	ReclaimCoord(coord string) error

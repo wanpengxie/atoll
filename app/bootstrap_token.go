@@ -18,20 +18,23 @@ import (
 // out of scope).
 const bootstrapOwnerEmail = "owner@atoll.local"
 
-// bootstrapTokenTTL is deliberately longer than the interactive
-// sessionDuration: the token backs local automation (shells/scripts reading
-// the token file), and its revocation path is deleting the sessions row, not
-// expiry. The file is data-directory local and 0600.
+// bootstrapTokenTTL is a backstop ceiling, not the credential's real
+// lifetime: every boot ROTATES the token (see BootstrapOwnerToken), so in
+// steady state a session lives only until the next restart. The TTL merely
+// bounds a node that never restarts. The file is data-directory local and 0600.
 const bootstrapTokenTTL = 365 * 24 * time.Hour
 
-// BootstrapOwnerToken makes the engine usable by automation right after
-// `--init` (contract D3 / 交接包①): it ensures the local owner principal
-// exists, mints a session for it, and writes the bearer token to tokenPath
-// (0600). Idempotent-ish by construction: a pre-existing owner user is reused;
-// a fresh session is minted on every call (old sessions stay valid until
-// expiry or deletion). The password is random and unrecorded — the token file
-// IS the credential; login-by-password for this principal is not a supported
-// path.
+// BootstrapOwnerToken rotates the local automation credential (contract D3 /
+// 交接包①): it ensures the local owner principal exists, then — in one
+// transaction — mints a fresh session and revokes every other session of that
+// principal, and finally publishes the new bearer token to tokenPath (0600).
+//
+// Restart IS the rotation: at any moment the bootstrap owner has EXACTLY ONE
+// live session (a pinned invariant), so the whole response to a suspected
+// token leak is "restart the node". Consumers must read the token file per
+// use, never copy the value out. The password is random and unrecorded — the
+// token file IS the credential; login-by-password for this principal is not a
+// supported path.
 func BootstrapOwnerToken(ctx context.Context, db *sql.DB, tokenPath string) (string, error) {
 	var userID string
 	err := db.QueryRowContext(ctx,
@@ -53,21 +56,37 @@ func BootstrapOwnerToken(ctx context.Context, db *sql.DB, tokenPath string) (str
 		return "", fmt.Errorf("bootstrap owner: lookup: %w", err)
 	}
 
+	// Mint + revoke in one transaction so no interleaving can observe two live
+	// sessions (or zero) for the owner.
 	token := uuid.NewString()
 	now := time.Now().UnixMilli()
-	if _, err := db.ExecContext(ctx,
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("bootstrap owner: rotate: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)`,
 		token, userID, now, now+bootstrapTokenTTL.Milliseconds(),
 	); err != nil {
+		_ = tx.Rollback()
 		return "", fmt.Errorf("bootstrap owner: mint session: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM sessions WHERE user_id = ? AND token <> ?`, userID, token,
+	); err != nil {
+		_ = tx.Rollback()
+		return "", fmt.Errorf("bootstrap owner: revoke old sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("bootstrap owner: rotate: %w", err)
 	}
 
 	// Atomic 0600 publish: write a same-directory temp file then rename. Rename
 	// replaces whatever sits at tokenPath (stale file, wrong perms, even a
 	// symlink — the link itself is replaced, never followed), and a failed write
-	// never leaves a corrupt/partial token. On any failure the just-minted
-	// session is deleted best-effort so a retry (the function is reusable — it
-	// reuses an existing owner row) starts clean.
+	// never leaves a corrupt/partial token. On failure the fresh session is
+	// deleted best-effort; the old ones are already revoked, so the node holds
+	// ZERO live tokens until a retry succeeds — fail-closed, never two-live.
 	if err := writeTokenAtomically(tokenPath, token); err != nil {
 		_, _ = db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
 		return "", fmt.Errorf("bootstrap owner: publish token file: %w", err)

@@ -3,6 +3,7 @@ package link
 import (
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -68,9 +69,17 @@ func (s *wsByteStream) Read(p []byte) (int, error) {
 			_, r, err := s.ws.NextReader()
 			if err != nil {
 				// Connection-level: closed, reset, or a control-frame-only
-				// read loop giving up. Propagate as-is (yamux treats any
-				// Read error as carrier-dead, the same contract gorilla's
-				// ReadMessage error semantics give).
+				// read loop giving up. A DELIBERATE close (the peer's normal
+				// closure handshake, sent by Close below) is the byte stream's
+				// ordinary end — surface it as io.EOF so yamux ends the
+				// session quietly instead of logging every orderly device
+				// shutdown as a carrier failure. Everything else propagates
+				// as-is (yamux treats any other Read error as carrier-dead,
+				// the same contract gorilla's ReadMessage error semantics
+				// give).
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					return 0, io.EOF
+				}
 				return 0, err
 			}
 			s.rr = r
@@ -123,7 +132,19 @@ func (s *wsByteStream) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// Close closes the underlying WS connection.
-func (s *wsByteStream) Close() error { return s.ws.Close() }
+// Close performs the normal WebSocket closure handshake, then closes the
+// underlying connection. The close control frame is what lets the peer's Read
+// see a deliberate goodbye (mapped to io.EOF above) instead of a 1006
+// abnormal-closure — without it every orderly `atoll up` shutdown was logged
+// on the server as a carrier failure. Best-effort with a short deadline: a
+// peer that is already gone cannot make Close hang.
+func (s *wsByteStream) Close() error {
+	// WriteControl is documented concurrency-safe against NextWriter, so no
+	// wmu here — Close must never queue behind a wedged data Write.
+	_ = s.ws.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second))
+	return s.ws.Close()
+}
 
 var _ io.ReadWriteCloser = (*wsByteStream)(nil)

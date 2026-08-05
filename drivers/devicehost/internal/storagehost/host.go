@@ -8,7 +8,7 @@ import (
 )
 
 // Host ties the four storage components into one channel-scoped resource set.
-// cmd/daemon constructs one Host per compute compartment, rooted beneath the
+// devicehost constructs one Host per compute compartment, rooted beneath the
 // authenticated daemon root.
 type Host struct {
 	cr        *channelRoot
@@ -59,7 +59,7 @@ func (h *Host) Alloc(coord string, dir bool) error {
 
 // OpenRead / OpenWrite hand out this channel's local Streamer handles —
 // §3.4's "daemon 本地颁 os.Root 子句柄给 caller" for a same-machine consumer.
-// §5's lane has since landed: cmd/daemon's storageadapter.go wraps this Host
+// §5's lane has since landed: devicehost's storageadapter.go wraps this Host
 // as compute.LocalFileOpener, which platform/internal/link's lane.go
 // consults for both the same-daemon Local route and this daemon acting as a
 // lane transfer's target.
@@ -116,7 +116,7 @@ func (h *Host) markWriteDone(coord string) {
 // before every ReconcilePull round trip, to tell the home which reservations
 // are actually alive (see platform/storagehost.go's ReconcilePull doc — a
 // daemon merely staying online/polling is NOT liveness for a coord it has
-// abandoned). Exported for that cross-package (cmd/daemon's
+// abandoned). Exported for that cross-package (devicehost's
 // storageHostAdapter) read; a snapshot, not a live view — the Scrubber pass
 // this backs, like the ReconcilePull round trip, is a single point-in-time
 // cycle, matching every other Reconcile input (resources/

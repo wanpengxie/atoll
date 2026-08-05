@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -189,16 +190,38 @@ func (a *App) SetMembershipPoke(fn func(principal string)) { a.membershipPoke = 
 // holds an explicit http.Server so cmd can drain in-flight requests on signal;
 // a clean Shutdown returns nil (ErrServerClosed is not an error).
 func (a *App) Run(addr string) error {
-	a.Start()
-	a.mu.Lock()
-	a.srv = &http.Server{Addr: addr, Handler: a.engine}
-	srv := a.srv
-	a.mu.Unlock()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
 		return err
 	}
-	return nil
+	return a.Serve(ln)
 }
+
+// PrepareServe registers the HTTP server for ln SYNCHRONOUSLY — from the
+// moment it returns, Shutdown reaches this server — and hands back the
+// blocking serve loop. The split from Serve exists so an assembly root that
+// runs the loop in a goroutine can order things truthfully: register, THEN
+// announce ready, THEN serve. Registering inside the goroutine would leave a
+// window where a teardown's Shutdown sees no server while the loop starts
+// serving right after it (http.Server closes that residue itself: Serve after
+// Shutdown returns ErrServerClosed immediately).
+func (a *App) PrepareServe(ln net.Listener) func() error {
+	a.Start()
+	a.mu.Lock()
+	a.srv = &http.Server{Handler: a.engine}
+	srv := a.srv
+	a.mu.Unlock()
+	return func() error {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	}
+}
+
+// Serve serves the HTTP entry on an already-bound listener and blocks until
+// Shutdown (or error).
+func (a *App) Serve(ln net.Listener) error { return a.PrepareServe(ln)() }
 
 // Shutdown stops accepting new connections and drains in-flight requests within
 // ctx's deadline. It is step ① of the graceful teardown (before Close): stop the

@@ -346,7 +346,7 @@ type Registry interface {
 	// having a live WriteHandle, not merely "this daemon is still polling").
 	// coords is the caller's (ReconcilePull handler's) per-request
 	// activeCoords list — the daemon's own snapshot of coords with a
-	// currently-open local WriteHandle (cmd/daemon/internal/storagehost.
+	// currently-open local WriteHandle (drivers/devicehost/internal/storagehost.
 	// Host.ActiveWriteCoords). An EMPTY coords touches ZERO rows — this is
 	// the honest answer when the daemon has no active writes at all, not a
 	// no-filter fallback to "touch everything this daemon owns" (that
