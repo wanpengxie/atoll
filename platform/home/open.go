@@ -17,7 +17,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -464,9 +463,6 @@ func deliveryHandle(
 	return func(row storespec.StoredRow) error {
 		env := row.Envelope
 		for _, id := range env.Audience {
-			if !message.ShouldDeliver(id, &env) {
-				continue
-			}
 			err := h.actors.Deliver(id, &env)
 			if err != nil {
 				// Two very different findings share this line, so name which

@@ -41,9 +41,8 @@ func ParseKind(raw string) (Kind, bool) {
 //   - system  — protocol-internal metadata (placement notices, bootstrap
 //     events), suppressed from default reads but still persisted in the log.
 //
-// ReadVisibleAfterSeq suppresses system before LIMIT. Delivery remains a
-// separate question and follows explicit audience through ShouldDeliver,
-// including for system requests.
+// ReadVisibleAfterSeq suppresses system before LIMIT. Delivery is orthogonal:
+// the delivery fanout follows explicit audience, including for system requests.
 type Visibility string
 
 // Visibility enum — closed set.
