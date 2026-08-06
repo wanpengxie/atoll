@@ -66,7 +66,9 @@ const (
 	HarnessReservedTypeUnauthorizedSender HarnessRejectReason = "harness_reserved_type_unauthorized_sender"
 
 	// Step 7 — Kind + Audience Validate
-	HarnessKindNotAllowedForType   HarnessRejectReason = "harness_kind_not_allowed_for_type"
+	HarnessKindNotAllowedForType HarnessRejectReason = "harness_kind_not_allowed_for_type"
+	// HarnessAudienceEmpty applies to request/response empty arrays and empty
+	// actor-id elements. A kind=event empty array is valid.
 	HarnessAudienceEmpty           HarnessRejectReason = "harness_audience_empty"
 	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"
 	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"

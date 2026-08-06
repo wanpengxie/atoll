@@ -194,7 +194,7 @@ func requestMsg(sender actor.ActorID, text string) actorbase.Msg {
 	env.Kind = message.KindRequest
 	env.Type = "user.text"
 	env.Sender = message.Sender{ID: sender}
-	env.Visibility = message.VisibilityPrivate
+	env.Visibility = message.VisibilityPublic
 	env.CorrelationID = "corr-root"
 	env.Payload = payload
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)
@@ -273,7 +273,7 @@ func TestTurnEmitsTerminalOutput(t *testing.T) {
 		t.Fatalf("activity order = %q, %q", sys.emits[0].typ, sys.emits[1].typ)
 	}
 	for _, e := range sys.emits {
-		if e.parent != "trigger-1" || e.correlation != "corr-root" || e.visibility != message.VisibilityPrivate {
+		if e.parent != "trigger-1" || e.correlation != "corr-root" || e.visibility != message.VisibilityPublic {
 			t.Fatalf("activity routing = parent:%q correlation:%q visibility:%q", e.parent, e.correlation, e.visibility)
 		}
 	}
@@ -286,6 +286,17 @@ func TestTurnEmitsTerminalOutput(t *testing.T) {
 	}
 	if !eng.closed {
 		t.Fatalf("engine not closed on teardown")
+	}
+}
+
+func TestBootPathActivityHasNoSyntheticSystemAudience(t *testing.T) {
+	sys := newFakeSys("agent:me")
+	sink := procSink{sys: sys, trigger: Trigger{Envelope: message.Envelope{}}}
+	if err := sink.emitActivity(registry.ActivityTurnStarted, registry.ActivityTurnStartedPayload{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sys.emits) != 1 || sys.emits[0].audience != nil {
+		t.Fatalf("boot-path activity audience=%#v, want empty logger shape", sys.emits)
 	}
 }
 

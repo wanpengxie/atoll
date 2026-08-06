@@ -257,7 +257,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	for _, a := range p.Audience {
 		aud = append(aud, actor.ActorID(a))
 	}
-	if len(aud) == 0 {
+	if kind == message.KindRequest && len(aud) == 0 {
 		if deps.Routing == nil {
 			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
 		}
@@ -340,8 +340,9 @@ func submitFingerprint(p subjectgate.SubmitPayload) (string, error) {
 		"msg_type": p.MsgType, "kind": kind, "payload": payload,
 		"visibility": visibility, "parent_id": p.ParentID,
 	}
-	// A missing audience is completed by the human membrane's live routing
-	// policy and therefore is not client fingerprint material.
+	// A missing request audience is completed by the human membrane's live
+	// routing policy and therefore is not client fingerprint material. A missing
+	// event audience is the event's canonical pure-log shape.
 	if len(p.Audience) != 0 {
 		semantic["audience"] = p.Audience
 	}

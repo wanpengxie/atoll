@@ -8,7 +8,7 @@ import (
 
 func TestShouldDeliverKeepsAddressingSeparateFromReadableVisibility(t *testing.T) {
 	const human actor.ActorID = "human:a"
-	for _, visibility := range []Visibility{VisibilityPublic, VisibilityPrivate} {
+	for _, visibility := range []Visibility{VisibilityPublic} {
 		env := &Envelope{Visibility: visibility, Audience: Audience{human}}
 		if !ShouldDeliver(human, env) || ShouldDeliver("human:b", env) {
 			t.Fatalf("visibility=%s addressing verdict changed", visibility)

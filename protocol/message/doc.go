@@ -4,6 +4,7 @@
 // Key invariants:
 //
 //   - Kind is a closed set.
+//   - Visibility is the closed attention set {public, system}.
 //   - Terminal-failure reason is a closed set.
 //
 // The package depends on protocol/actor for sender identity primitives.

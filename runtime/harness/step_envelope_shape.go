@@ -17,7 +17,7 @@ import (
 //     stays legal here — Step Normalize fills the {} default)
 //  3. envelope.channel_id == the harness-bound channel (unconditional)
 //  4. kind ∈ {event, request, response}
-//  5. visibility (when non-empty) ∈ {public, private, system} — Step
+//  5. visibility (when non-empty) ∈ {public, system} — Step
 //     Normalize fills the default when caller leaves it empty.
 //  6. audience cardinality + wildcard ban
 //  7. response.parent_id non-null
@@ -96,7 +96,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		if _, ok := message.ParseVisibility(string(env.Visibility)); !ok {
 			return outcome{
 				RejectReason: HarnessVisibilityInvalid,
-				Detail:       "envelope.visibility not in {public, private, system}",
+				Detail:       "envelope.visibility not in {public, system}",
 			}, nil
 		}
 	}
@@ -108,8 +108,8 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 	// Audience EMPTINESS and request/response cardinality are NOT
 	// validated here: empty/cardinality checks all live in
 	// StepKindAndAudience (a single validation centre). The substrate does
-	// not resolve a default audience — the caller must supply a named
-	// audience; an empty one is rejected at the Kind+Audience step.
+	// does not resolve a default audience. Kind+Audience accepts an empty
+	// audience only for events and enforces request/response cardinality.
 	for _, id := range env.Audience {
 		if string(id) == "*" {
 			return outcome{

@@ -58,7 +58,7 @@ func TestRouting_DefaultAgentReady(t *testing.T) {
 		"msg_type":   "channel.remove_actor",
 		"kind":       "request",
 		"audience":   []string{string(actor.SystemActorID)},
-		"visibility": "private",
+		"visibility": "public",
 		"payload":    map[string]any{"instance_id": boost},
 	})
 	if remove["type"] != "ack" {
@@ -101,7 +101,7 @@ func TestRouting_DefaultAgentReady(t *testing.T) {
 		"msg_type":   "channel.set_default_agent",
 		"kind":       "request",
 		"audience":   []string{string(actor.SystemActorID)},
-		"visibility": "private",
+		"visibility": "public",
 		"payload":    map[string]any{"instance_id": human},
 	})
 	if reset["type"] != "ack" {

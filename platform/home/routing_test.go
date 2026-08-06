@@ -18,7 +18,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -290,7 +289,7 @@ func TestDecodeDefaultAgentEventStrictMatrix(t *testing.T) {
 	}
 }
 
-func TestHarnessNoLongerResolvesEmptyAudience(t *testing.T) {
+func TestHarnessAcceptsEmptyEventAudienceWithoutResolvingDefault(t *testing.T) {
 	h := openRoutingHomeAt(t, "routing-harness", filepath.Join(t.TempDir(), "channel.sqlite"), true,
 		routingDeclaration("decl:one", "routing-live"))
 	one := routingAgent(t, h, "decl:one")
@@ -304,7 +303,7 @@ func TestHarnessNoLongerResolvesEmptyAudience(t *testing.T) {
 	result, err := h.admittedWriter.WriteAdmitted(context.Background(), storespec.IdentityAdmission{
 		ID: one, Kind: actor.KindAgent,
 	}, env)
-	if err != nil || result.RejectReason != harness.HarnessAudienceEmpty ||
+	if err != nil || !result.Accepted() ||
 		len(env.Audience) != 0 || env.Kind != message.KindEvent {
 		t.Fatalf("result=%+v env=%+v err=%v", result, env, err)
 	}

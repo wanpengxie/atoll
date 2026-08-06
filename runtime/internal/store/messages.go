@@ -302,15 +302,8 @@ func (m *messages) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reade
                   is_terminal, seq
              FROM messages m
              WHERE m.seq > ? AND m.seq <= ? AND m.visibility <> 'system'
-               AND (m.visibility = 'public'
-                 OR (m.visibility = 'private' AND (
-                       m.sender_id = ?
-                    OR EXISTS (SELECT 1 FROM json_each(m.audience) WHERE value = ?)
-                    OR (? = 'observer' AND EXISTS (
-                         SELECT 1 FROM actor_registry ar
-                          WHERE ar.actor_id=m.sender_id AND ar.principal=?)))) )
              ORDER BY m.seq ASC LIMIT ?`
-	rows, err := tx.QueryContext(ctx, q, afterSeq, head, string(reader.ActorID), string(reader.ActorID), string(reader.Mode), reader.Principal, limit)
+	rows, err := tx.QueryContext(ctx, q, afterSeq, head, limit)
 	if err != nil {
 		return nil, afterSeq, fmt.Errorf("store: visible read: %w", err)
 	}

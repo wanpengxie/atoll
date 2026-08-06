@@ -2,8 +2,8 @@ package app_test
 
 // Message write path → truth: a gateway ws submit becomes a truth-log row, the
 // receipt hands back the message's IDENTITY (never a row position), empty/absent
-// audience is filled by the humancell default, and read-side ordering comes from
-// the store's own seq column.
+// event audience remains the canonical empty array, and read-side ordering comes
+// from the store's own seq column.
 
 import (
 	"encoding/json"
@@ -187,5 +187,29 @@ func TestSendMessageNoAudienceDefaultFill(t *testing.T) {
 	}
 	if seq2 <= seq {
 		t.Fatalf("second message seq %v should be > first seq %v", seq2, seq)
+	}
+	for _, id := range []string{msgID, msgID2} {
+		found := false
+		for _, raw := range msgs {
+			row, _ := raw.(map[string]any)
+			var envelope map[string]any
+			switch value := row["envelope"].(type) {
+			case map[string]any:
+				envelope = value
+			case string:
+				_ = json.Unmarshal([]byte(value), &envelope)
+			}
+			if envelope != nil && envelope["id"] == id {
+				found = true
+				audience, ok := envelope["audience"].([]any)
+				if !ok || len(audience) != 0 {
+					t.Fatalf("message %s audience=%#v, want []", id, envelope["audience"])
+				}
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("message %s not found while checking audience", id)
+		}
 	}
 }

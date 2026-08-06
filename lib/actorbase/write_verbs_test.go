@@ -138,15 +138,20 @@ func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
-	if _, err := e.Emit(behavior.EventSpec{Type: "human.note", Visibility: message.VisibilitySystem}); err == nil {
-		t.Fatal("Emit(visibility=system) was accepted; the actor-facing set is public/private")
-	}
-	if _, err := e.Post(behavior.RequestSpec{
-		Type:       "human.approve",
-		Audience:   message.Audience{actor.ActorID("agent:worker")},
-		Visibility: message.VisibilitySystem,
-	}); err == nil {
-		t.Fatal("Post(visibility=system) was accepted; the actor-facing set is public/private")
+	for _, visibility := range []message.Visibility{message.VisibilitySystem, message.Visibility("private")} {
+		_, err := e.Emit(behavior.EventSpec{Type: "human.note", Visibility: visibility})
+		var invalid *InvalidVisibilityError
+		if !errors.As(err, &invalid) {
+			t.Fatalf("Emit(visibility=%s) error = %v, want typed InvalidVisibilityError", visibility, err)
+		}
+		_, err = e.Post(behavior.RequestSpec{
+			Type:       "human.approve",
+			Audience:   message.Audience{actor.ActorID("agent:worker")},
+			Visibility: visibility,
+		})
+		if !errors.As(err, &invalid) {
+			t.Fatalf("Post(visibility=%s) error = %v, want typed InvalidVisibilityError", visibility, err)
+		}
 	}
 	if pen.count() != 0 {
 		t.Fatalf("a refused visibility still wrote %d envelopes", pen.count())
@@ -172,7 +177,7 @@ func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 
 // Both verbs take the FULL envelope surface, and every field of it must reach
 // truth as given — a caller-chosen id, a parent, a correlation, an explicit
-// private visibility, a declared deadline. This is what makes them a verb
+// public visibility, a declared deadline. This is what makes them a verb
 // table entry rather than sugar: nothing here is quietly overridden.
 func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	t.Parallel()
@@ -184,7 +189,7 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 		ID:            "ev-own-id",
 		Type:          "human.note",
 		Payload:       json.RawMessage(`{"text":"hi"}`),
-		Visibility:    message.VisibilityPrivate,
+		Visibility:    message.VisibilityPublic,
 		Audience:      message.Audience{actor.ActorID("agent:worker")},
 		ParentID:      "req-parent",
 		CorrelationID: "corr-1",
@@ -198,8 +203,8 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	if string(ev.Payload) != `{"text":"hi"}` {
 		t.Fatalf("event payload = %s, want the RawMessage verbatim", ev.Payload)
 	}
-	if ev.Visibility != message.VisibilityPrivate {
-		t.Fatalf("event visibility = %q, want private (an explicit choice is not overridden)", ev.Visibility)
+	if ev.Visibility != message.VisibilityPublic {
+		t.Fatalf("event visibility = %q, want public", ev.Visibility)
 	}
 	if ev.ParentID != "req-parent" || ev.CorrelationID != "corr-1" {
 		t.Fatalf("event parent/correlation = %q/%q", ev.ParentID, ev.CorrelationID)
@@ -211,7 +216,7 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 		Type:          "human.approve",
 		Payload:       json.RawMessage(`{"amount":10}`),
 		Audience:      message.Audience{actor.ActorID("agent:worker")},
-		Visibility:    message.VisibilityPrivate,
+		Visibility:    message.VisibilityPublic,
 		ParentID:      "ev-parent",
 		CorrelationID: "corr-2",
 		ExpiresAt:     &deadline,
@@ -225,8 +230,8 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	if string(req.Payload) != `{"amount":10}` {
 		t.Fatalf("request payload = %s, want the RawMessage verbatim", req.Payload)
 	}
-	if req.Visibility != message.VisibilityPrivate {
-		t.Fatalf("request visibility = %q, want private", req.Visibility)
+	if req.Visibility != message.VisibilityPublic {
+		t.Fatalf("request visibility = %q, want public", req.Visibility)
 	}
 	if req.ParentID != "ev-parent" || req.CorrelationID != "corr-2" {
 		t.Fatalf("request parent/correlation = %q/%q", req.ParentID, req.CorrelationID)

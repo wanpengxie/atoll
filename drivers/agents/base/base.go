@@ -284,7 +284,15 @@ func (s *procSink) emitTurnEnded() error {
 }
 
 func (s *procSink) emitActivity(activityType registry.ActivityType, payload any) error {
-	spec, err := behavior.EventSpecJSON(string(activityType), payload, s.audience())
+	var (
+		spec behavior.EventSpec
+		err  error
+	)
+	if audience := s.audience(); audience != "" {
+		spec, err = behavior.EventSpecJSON(string(activityType), payload, audience)
+	} else {
+		spec, err = behavior.EventSpecJSON(string(activityType), payload)
+	}
 	if err != nil {
 		return err
 	}
@@ -295,14 +303,10 @@ func (s *procSink) emitActivity(activityType registry.ActivityType, payload any)
 	return err
 }
 
-// audience routes the emitted event to whoever triggered the turn (Erlang From
-// routing). A boot-path trigger with an empty sender falls back to the system
-// actor (matches the two bridges' replyAudience).
+// audience wakes whoever triggered the turn. A boot-path trigger has no sender,
+// so its activity is a pure log event and intentionally names nobody.
 func (s *procSink) audience() actor.ActorID {
-	if id := s.trigger.Envelope.Sender.ID; id != "" {
-		return id
-	}
-	return actor.SystemActorID
+	return s.trigger.Envelope.Sender.ID
 }
 
 // envelopeFromMsg projects a delivered Msg back into the message.Envelope a

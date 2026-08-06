@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,7 +43,7 @@ func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: author}, Kind: message.KindEvent, Type: "agent.text",
-		Audience: message.Audience{"x"},
+		Audience: nil,
 	}
 	res, err := c.write(ctxCallerKind(author, actor.KindAgent), e)
 	if err != nil {
@@ -65,6 +66,13 @@ func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 	}
 	if row.Envelope.Visibility != message.VisibilityPublic {
 		t.Fatalf("visibility = %q, want public default", row.Envelope.Visibility)
+	}
+	if row.Envelope.Audience == nil || len(row.Envelope.Audience) != 0 {
+		t.Fatalf("durable audience = %#v, want non-nil []", row.Envelope.Audience)
+	}
+	wire, err := json.Marshal(row.Envelope)
+	if err != nil || !bytes.Contains(wire, []byte(`"audience":[]`)) {
+		t.Fatalf("durable wire audience must be []: %s err=%v", wire, err)
 	}
 }
 

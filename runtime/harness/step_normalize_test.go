@@ -35,6 +35,9 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	if string(e.Payload) != "{}" {
 		t.Fatalf("payload = %q, want {} baseline", e.Payload)
 	}
+	if e.Audience == nil || len(e.Audience) != 0 {
+		t.Fatalf("event audience = %#v, want non-nil empty slice", e.Audience)
+	}
 	// ts_received is engine-owned and filled at the append sink (Chain.Write),
 	// not by normalize — the full-Write contract is pinned in chain_test.go.
 }

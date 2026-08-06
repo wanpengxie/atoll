@@ -557,9 +557,20 @@ func (w *WriteRejected) Error() string {
 	return fmt.Sprintf("actorbase: write rejected: %s (%s)", w.Reason, w.Detail)
 }
 
+// InvalidVisibilityError is a permanent authoring-input validation error. It is
+// typed so bindings can map it to bad_payload instead of a retryable transport
+// failure.
+type InvalidVisibilityError struct {
+	Visibility message.Visibility
+}
+
+func (e *InvalidVisibilityError) Error() string {
+	return fmt.Sprintf("actorbase: visibility must be public; got %q", e.Visibility)
+}
+
 // actorFacingVisibility is the visibility whitelist for the verbs an actor (or
 // a subject driving one) authors with: empty normalises to public, and only
-// public/private may be named explicitly.
+// public may be named explicitly.
 //
 // The harness's own closed set is wider — it accepts system, because the
 // substrate itself writes system messages. That is precisely why the narrowing
@@ -570,8 +581,8 @@ func actorFacingVisibility(v message.Visibility) (message.Visibility, error) {
 	if v == "" {
 		return message.VisibilityPublic, nil
 	}
-	if v != message.VisibilityPublic && v != message.VisibilityPrivate {
-		return "", fmt.Errorf("actorbase: visibility must be public or private; got %q", v)
+	if v != message.VisibilityPublic {
+		return "", &InvalidVisibilityError{Visibility: v}
 	}
 	return v, nil
 }

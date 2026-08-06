@@ -76,6 +76,9 @@ durable log——消息 append 后不可变、不丢序，每条有频道内唯�
 - 提交帧字段：`channel_id`、`id`（**由你铸造**，uuid 即可）、`msg_type`、
   `kind`、`audience`、`payload`（内容；发给 agent 时可带 `intent` 与
   `expected_turn_id`）。
+- `kind=event` 的 `audience` 可省略或为 `[]`：两者都规范化为 wire/store 的
+  `[]`，表示只落账、不即时唤醒。`request` 省略 audience 时仅 human 接入口会按
+  默认应答者补齐；最终 request/response audience 恒恰为一个具名 actor。
 - **幂等**：幂等键 = `(channel_id, id)`，`id` 由你铸造。未收到回执恒重发即可：
   同键**同内容**重发 → 返回原回执（确认原 message id；receipt 恒不含 seq——
   位置由 feed/分页读到达）；同键**不同内容** → 错误码 `idempotency_conflict`

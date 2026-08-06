@@ -13,8 +13,9 @@
 // one SQLite transaction; runtime effects are post-commit hints and
 // reconciliation remains the correctness backstop.
 //
-// The package also resolves empty audiences after a write crosses the membrane,
-// pumps committed messages according to Audience, and exposes reader-scoped
-// visible history and resource projections through View. Realm policy and storage
-// shape never enter its requirement interfaces.
+// The package pumps committed messages according to Audience and exposes
+// member/observer history plus resource projections through View. Empty event
+// audiences are valid pure-log writes; request default routing is resolved at
+// the human membrane before the write. Realm policy and storage shape never
+// enter its requirement interfaces.
 package home

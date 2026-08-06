@@ -234,7 +234,7 @@ func TestInterpretSubmitCarriesTheFullSurfaceOnBothArms(t *testing.T) {
 	fs := &fakeSys{self: "human:alice", writeID: "m1"}
 	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
 		ChannelID: "c1", MsgType: "chat.text", Kind: "event", Audience: []string{"agent:a"},
-		ID: "own-id", ParentID: "parent-1", Visibility: "private", Payload: json.RawMessage(`{"t":"hi"}`),
+		ID: "own-id", ParentID: "parent-1", Visibility: "public", Payload: json.RawMessage(`{"t":"hi"}`),
 	})
 	if got := interpretFrame(fs, newDeps("human:alice", nil, false), f); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("event submit should receipt: %s", decodeErr(t, got).Code)
@@ -243,7 +243,7 @@ func TestInterpretSubmitCarriesTheFullSurfaceOnBothArms(t *testing.T) {
 		t.Fatalf("kind=event must Emit, not Post")
 	}
 	got := fs.emitSpec
-	if got.ID != "own-id" || got.ParentID != "parent-1" || got.Visibility != message.VisibilityPrivate ||
+	if got.ID != "own-id" || got.ParentID != "parent-1" || got.Visibility != message.VisibilityPublic ||
 		got.Type != "chat.text" || string(got.Payload) != `{"t":"hi"}` {
 		t.Fatalf("event spec lost a field: %+v", got)
 	}
@@ -251,13 +251,13 @@ func TestInterpretSubmitCarriesTheFullSurfaceOnBothArms(t *testing.T) {
 	fs2 := &fakeSys{self: "human:alice", writeID: "m2"}
 	f2, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
 		ChannelID: "c1", MsgType: "human.approve", Kind: "request", Audience: []string{"agent:a"},
-		ID: "own-id", ParentID: "parent-1", Visibility: "private",
+		ID: "own-id", ParentID: "parent-1", Visibility: "public",
 	})
 	if got := interpretFrame(fs2, newDeps("human:alice", nil, false), f2); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("request submit should receipt: %s", decodeErr(t, got).Code)
 	}
 	if fs2.postSpec.ID != "own-id" || fs2.postSpec.ParentID != "parent-1" ||
-		fs2.postSpec.Visibility != message.VisibilityPrivate {
+		fs2.postSpec.Visibility != message.VisibilityPublic {
 		t.Fatalf("request spec lost a field: %+v", fs2.postSpec)
 	}
 }
@@ -277,6 +277,20 @@ func TestSubmitMapsDuplicateRejectToIdempotencyConflictOnBothArms(t *testing.T) 
 		if e.Code != subjectgate.CodeIdempotencyConflict || e.Detail != "already exists" {
 			t.Fatalf("kind=%s: duplicate must map to idempotency_conflict, got %+v", kind, e)
 		}
+	}
+}
+
+func TestSubmitMapsInvalidVisibilityToPermanentBadPayload(t *testing.T) {
+	fs := &fakeSys{
+		self:     "human:alice",
+		writeErr: &actorbase.InvalidVisibilityError{Visibility: message.Visibility("private")},
+	}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
+		ChannelID: "c1", MsgType: "x", Kind: "event", Visibility: "private",
+	})
+	e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, false), f))
+	if e.Code != subjectgate.CodeBadPayload {
+		t.Fatalf("private visibility code=%q, want bad_payload", e.Code)
 	}
 }
 
@@ -348,7 +362,7 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 		return fs, deps
 	}
 
-	t.Run("configured preserves event kind", func(t *testing.T) {
+	t.Run("event stays empty and ignores default routing", func(t *testing.T) {
 		fs, deps := base(RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"})
 		got := interpretFrame(fs, deps, frame("event"))
 		if got.Type != subjectgate.FrameReceipt {
@@ -357,7 +371,7 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 		if !fs.emitted || fs.posted {
 			t.Fatalf("kind=event must go to Emit")
 		}
-		if len(fs.emitSpec.Audience) != 1 || fs.emitSpec.Audience[0] != "agent:default" {
+		if fs.emitSpec.Audience == nil || len(fs.emitSpec.Audience) != 0 {
 			t.Fatalf("emit=%+v", fs.emitSpec)
 		}
 	})

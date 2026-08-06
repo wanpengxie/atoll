@@ -22,6 +22,5 @@ func ShouldDeliver(target actor.ActorID, env *Envelope) bool {
 		return false
 	}
 	return env.Visibility == VisibilityPublic ||
-		env.Visibility == VisibilityPrivate ||
 		env.Visibility == VisibilitySystem
 }

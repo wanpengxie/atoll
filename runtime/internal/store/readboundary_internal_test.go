@@ -96,12 +96,16 @@ func TestMessages_ReadRejectsPoisonKind(t *testing.T) {
 }
 
 func TestMessages_ReadRejectsPoisonVisibility(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	insertRawMessage(t, db, "m1", "human", "event", "cosmic")
-	m := newMessages(db, nil)
-	if _, _, err := m.FindByID(ctx, "m1"); err == nil {
-		t.Error("FindByID must error on out-of-closed-set visibility")
+	for _, visibility := range []string{"private", "cosmic"} {
+		t.Run(visibility, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRelaxed(t)
+			insertRawMessage(t, db, "m1", "human", "event", visibility)
+			m := newMessages(db, nil)
+			if _, _, err := m.FindByID(ctx, "m1"); err == nil {
+				t.Error("FindByID must error on out-of-closed-set visibility")
+			}
+		})
 	}
 }
 

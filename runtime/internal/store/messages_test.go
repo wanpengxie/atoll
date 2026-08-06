@@ -78,7 +78,7 @@ func TestAppend_FindByID_RoundTrip(t *testing.T) {
 		withSender(actor.KindAgent, "planner"),
 		withType("xhs.publish"),
 		withPayload(`{"note":"hi"}`),
-		withVisibility(message.VisibilityPrivate),
+		withVisibility(message.VisibilityPublic),
 		withCorrelation("corr-7"),
 	)
 	in.ExpiresAt = &exp
@@ -105,7 +105,7 @@ func TestAppend_FindByID_RoundTrip(t *testing.T) {
 	if e.Sender.Kind != actor.KindAgent || e.Sender.ID != "planner" {
 		t.Errorf("sender=%+v", e.Sender)
 	}
-	if e.Visibility != message.VisibilityPrivate {
+	if e.Visibility != message.VisibilityPublic {
 		t.Errorf("visibility=%q", e.Visibility)
 	}
 	if e.CorrelationID != "corr-7" {

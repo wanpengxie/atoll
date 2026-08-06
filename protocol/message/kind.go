@@ -31,35 +31,30 @@ func ParseKind(raw string) (Kind, bool) {
 	return "", false
 }
 
-// Visibility is the envelope `visibility` field — a 3-value closed set recording
-// the sender's DECLARED intent for who in the channel should see this message.
-// It lives in the envelope (not the payload) because who-may-see is a
-// rule-managed ACL property of truth — the substrate's to enforce — not opaque
-// data an actor interprets. Once written, visibility is immutable.
+// Visibility is the envelope `visibility` field — a 2-value closed set recording
+// the message's attention level inside a channel. Channel membership is the
+// trust boundary; visibility is deliberately not a per-message ACL. Once
+// written, visibility is immutable.
 //
 // Declared intent (what each value MEANS):
-//   - public  — intended for every channel member.
-//   - private — intended only for the sender + actors in audience.
+//   - public  — ordinary collaboration truth shown to channel members.
 //   - system  — protocol-internal metadata (placement notices, bootstrap
-//     events), intended to be
-//     suppressed from the default UI view (still persisted as audit trail).
+//     events), suppressed from default reads but still persisted in the log.
 //
-// ReadVisibleAfterSeq enforces this value before LIMIT: public is channel-wide,
-// private is sender-or-audience, and system is absent from ordinary views.
-// Delivery remains a separate question and follows explicit audience through
-// ShouldDeliver, including for system requests.
+// ReadVisibleAfterSeq suppresses system before LIMIT. Delivery remains a
+// separate question and follows explicit audience through ShouldDeliver,
+// including for system requests.
 type Visibility string
 
 // Visibility enum — closed set.
 const (
-	VisibilityPublic  Visibility = "public"
-	VisibilityPrivate Visibility = "private"
-	VisibilitySystem  Visibility = "system"
+	VisibilityPublic Visibility = "public"
+	VisibilitySystem Visibility = "system"
 )
 
 // allVisibilities backs ParseVisibility. UNEXPORTED: the closed-set contract is
 // the predicate, not a mutable enumeration slice.
-var allVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, VisibilitySystem}
+var allVisibilities = []Visibility{VisibilityPublic, VisibilitySystem}
 
 // String returns the wire form.
 func (v Visibility) String() string { return string(v) }

@@ -17,10 +17,11 @@ import (
 // error → error frame (裁决8), duration/timer/list-query conversions, and the
 // resource Outcome → wire ResourceOutcome projection.
 
-// mapVerbErr folds a Sys write-verb error into an error frame. A typed
-// WriteRejected surfaces its harness reason VERBATIM as the flat code (裁决8 平面
-// 词律); every other error (membrane transient during teardown, infra) is the
-// retryable unavailable code — never a raw internal string on the wire.
+// mapVerbErr folds a Sys write-verb error into an error frame. A typed input
+// validation error maps to permanent bad_payload; a typed WriteRejected
+// surfaces its harness reason VERBATIM as the flat code (裁决8 平面词律). Other
+// errors (membrane transient during teardown, infra) become retryable
+// unavailable — never a raw internal string on the wire.
 //
 // The teardown arm is named explicitly. The interpreter is a goroutine beside
 // the serve loop and runs its verbs on the cell's life ctx, so once the cell
@@ -29,6 +30,10 @@ import (
 // unavailable either way; only the detail is replaced, with the fact that
 // actually happened.
 func mapVerbErr(err error, errFrame frameErr) subjectgate.Frame {
+	var invalidVisibility *actorbase.InvalidVisibilityError
+	if errors.As(err, &invalidVisibility) {
+		return errFrame(subjectgate.CodeBadPayload, invalidVisibility.Error())
+	}
 	var wr *actorbase.WriteRejected
 	if errors.As(err, &wr) {
 		if wr.Reason == storespec.AppendRejectIDDuplicate {

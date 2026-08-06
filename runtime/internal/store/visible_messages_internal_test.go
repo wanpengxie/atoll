@@ -35,7 +35,7 @@ func visibleEnvelope(id string, sender actor.ActorID, visibility message.Visibil
 	}
 }
 
-func TestReadVisibleAfterSeqFiltersBeforeLimitAndHonorsPerspectives(t *testing.T) {
+func TestReadVisibleAfterSeqFiltersSystemBeforeLimitAndSharesPublicTruth(t *testing.T) {
 	ctx := context.Background()
 	messages, register := openVisibleMessages(t)
 	register("alice", "principal-a")
@@ -48,7 +48,7 @@ func TestReadVisibleAfterSeqFiltersBeforeLimitAndHonorsPerspectives(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	privateSeq, err := messages.Append(ctx, visibleEnvelope("private", "alice", message.VisibilityPrivate, "bob"), false, storespec.AppendMetadata{})
+	firstPublicSeq, err := messages.Append(ctx, visibleEnvelope("public-empty-audience", "alice", message.VisibilityPublic), false, storespec.AppendMetadata{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,13 +62,13 @@ func TestReadVisibleAfterSeqFiltersBeforeLimitAndHonorsPerspectives(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0].Seq != int64(privateSeq.Seq) || rows[1].Seq != int64(publicSeq.Seq) || scanned != int64(publicSeq.Seq) {
+	if len(rows) != 2 || rows[0].Seq != int64(firstPublicSeq.Seq) || rows[1].Seq != int64(publicSeq.Seq) || scanned != int64(publicSeq.Seq) {
 		t.Fatalf("bob rows=%v scanned=%d", rowSeqs(rows), scanned)
 	}
 
 	carol := channel.Reader{ActorID: "carol", Mode: channel.ReaderMember}
 	rows, _, err = messages.ReadVisibleAfterSeq(ctx, carol, 0, batch)
-	if err != nil || len(rows) != 1 || rows[0].Envelope.ID != "public" {
+	if err != nil || len(rows) != 2 {
 		t.Fatalf("carol rows=%v err=%v", rowSeqs(rows), err)
 	}
 
@@ -80,7 +80,7 @@ func TestReadVisibleAfterSeqFiltersBeforeLimitAndHonorsPerspectives(t *testing.T
 
 	audienceObserver := channel.Reader{Principal: "principal-b", Mode: channel.ReaderObserver}
 	rows, _, err = messages.ReadVisibleAfterSeq(ctx, audienceObserver, 0, batch)
-	if err != nil || len(rows) != 1 || rows[0].Envelope.ID != "public" {
+	if err != nil || len(rows) != 2 {
 		t.Fatalf("audience observer rows=%v err=%v", rowSeqs(rows), err)
 	}
 }

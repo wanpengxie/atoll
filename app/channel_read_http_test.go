@@ -110,7 +110,7 @@ func TestObserverSSETerminatesOnCapabilityRemovalAndJoin(t *testing.T) {
 	})
 }
 
-func waitSSEMessage(t *testing.T, scanner *bufio.Scanner, id string) {
+func waitSSEMessage(t *testing.T, scanner *bufio.Scanner, id string) string {
 	t.Helper()
 	seenEvent := false
 	for scanner.Scan() {
@@ -119,10 +119,11 @@ func waitSSEMessage(t *testing.T, scanner *bufio.Scanner, id string) {
 			seenEvent = true
 		}
 		if seenEvent && strings.HasPrefix(line, "data: ") && strings.Contains(line, `"id":"`+id+`"`) {
-			return
+			return line
 		}
 	}
 	t.Fatalf("SSE closed before message %q: %v", id, scanner.Err())
+	return ""
 }
 
 func TestObserverSSEBackfillsThenStreamsLiveMessages(t *testing.T) {
@@ -174,7 +175,7 @@ func visibleMessageIDs(t *testing.T, response *httptest.ResponseRecorder) map[st
 	return ids
 }
 
-func TestVisibleMessageHTTPPerspectives(t *testing.T) {
+func TestPublicMessageHTTPIsSharedAndPrivateIsRejected(t *testing.T) {
 	env := setupTestApp(t)
 	owner := fullSetup(t, env)
 	bobCookies, bobID := addSecondMember(t, env, owner, "visible-bob@example.com")
@@ -184,35 +185,63 @@ func TestVisibleMessageHTTPPerspectives(t *testing.T) {
 	defer srv.Close()
 	ownerWS := dialWS(t, srv, owner.cookies, owner.chID, 0)
 	defer ownerWS.close()
+	_, scanner := openObserverStream(t, srv, owner.chID, observerCookies)
 	private := ownerWS.sendMessage(map[string]any{
 		"id": "visible-private", "channel_id": owner.chID, "msg_type": "visible.private",
 		"kind": "event", "audience": []string{string(bobID)}, "visibility": "private", "payload": map[string]any{},
 	})
-	if private["type"] != "ack" {
-		t.Fatalf("private submit=%v", private)
+	if private["type"] != "error" || private["error"] != "bad_payload" {
+		t.Fatalf("private submit must be permanent bad_payload: %v", private)
 	}
 	public := ownerWS.sendMessage(map[string]any{
-		"id": "visible-public", "channel_id": owner.chID, "msg_type": "visible.public",
-		"kind": "event", "audience": []string{string(owner.boostID)}, "visibility": "public", "payload": map[string]any{},
+		"id": "visible-public-empty-audience", "channel_id": owner.chID, "msg_type": "visible.public",
+		"kind": "event", "visibility": "public", "payload": map[string]any{},
 	})
 	if public["type"] != "ack" {
 		t.Fatalf("public submit=%v", public)
 	}
+	wsEnvelope := ownerWS.waitTail(func(env map[string]any) bool {
+		return env["id"] == "visible-public-empty-audience"
+	}, 3*time.Second)
+	if audience, ok := wsEnvelope["audience"].([]any); !ok || len(audience) != 0 {
+		t.Fatalf("ws audience=%#v, want []", wsEnvelope["audience"])
+	}
+	if line := waitSSEMessage(t, scanner, "visible-public-empty-audience"); !strings.Contains(line, `"audience":[]`) {
+		t.Fatalf("SSE audience is not canonical []: %s", line)
+	}
 
 	path := "/api/channels/" + owner.chID + "/messages?limit=500"
-	ownerIDs := visibleMessageIDs(t, env.do(t, http.MethodGet, path, nil, owner.cookies))
+	ownerPage := env.do(t, http.MethodGet, path, nil, owner.cookies)
+	ownerIDs := visibleMessageIDs(t, ownerPage)
 	bobIDs := visibleMessageIDs(t, env.do(t, http.MethodGet, path, nil, bobCookies))
 	carolIDs := visibleMessageIDs(t, env.do(t, http.MethodGet, path, nil, carolCookies))
 	observerIDs := visibleMessageIDs(t, env.do(t, http.MethodGet, path, nil, observerCookies))
-	if !ownerIDs["visible-private"] || !bobIDs["visible-private"] {
-		t.Fatalf("private missing for sender/audience: owner=%v bob=%v", ownerIDs, bobIDs)
-	}
-	if carolIDs["visible-private"] || observerIDs["visible-private"] {
-		t.Fatalf("private leaked: carol=%v observer=%v", carolIDs, observerIDs)
-	}
 	for who, ids := range map[string]map[string]bool{"owner": ownerIDs, "bob": bobIDs, "carol": carolIDs, "observer": observerIDs} {
-		if !ids["visible-public"] {
+		if !ids["visible-public-empty-audience"] {
 			t.Fatalf("public missing for %s: %v", who, ids)
 		}
 	}
+	if ownerIDs["visible-private"] || bobIDs["visible-private"] || carolIDs["visible-private"] || observerIDs["visible-private"] {
+		t.Fatal("rejected private message reached history")
+	}
+	var body struct {
+		Messages []struct {
+			Envelope struct {
+				ID       string          `json:"id"`
+				Audience json.RawMessage `json:"audience"`
+			} `json:"envelope"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(ownerPage.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range body.Messages {
+		if row.Envelope.ID == "visible-public-empty-audience" {
+			if string(row.Envelope.Audience) != "[]" {
+				t.Fatalf("HTTP audience=%s, want []", row.Envelope.Audience)
+			}
+			return
+		}
+	}
+	t.Fatal("empty-audience event missing from HTTP page")
 }

@@ -427,7 +427,7 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 	const requestID = "activity-acceptance-request"
 	ack := client.sendMessage(map[string]any{
 		"id": requestID, "msg_type": "agent.activity.acceptance", "kind": "request",
-		"audience": []string{string(setup.boostID)}, "visibility": "private",
+		"audience": []string{string(setup.boostID)}, "visibility": "public",
 		"payload": map[string]any{"text": "run"},
 	})
 	if ack["type"] != "ack" {
@@ -471,7 +471,7 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 			t.Fatalf("row %d type=%q want %q", i, row.Envelope.Type, wantTypes[i])
 		}
 		if strings.HasPrefix(row.Envelope.Type, "activity.") {
-			if row.Envelope.Sender.ID != setup.boostID || row.Envelope.CorrelationID != requestID || row.Envelope.Visibility != message.VisibilityPrivate {
+			if row.Envelope.Sender.ID != setup.boostID || row.Envelope.CorrelationID != requestID || row.Envelope.Visibility != message.VisibilityPublic {
 				t.Fatalf("activity row %d routing=%+v", i, row.Envelope)
 			}
 		}
@@ -529,7 +529,7 @@ func setBoostDefault(t *testing.T, env *testEnv, s setupResult, c *wsClient) act
 		"msg_type":   "channel.set_default_agent",
 		"kind":       "request",
 		"audience":   []string{string(actor.SystemActorID)},
-		"visibility": "private",
+		"visibility": "public",
 		"payload":    map[string]any{"source_decl_id": "sys:boost"},
 	})
 	if ack["type"] != "ack" {

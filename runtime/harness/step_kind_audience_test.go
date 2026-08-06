@@ -22,8 +22,22 @@ func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 		reason   HarnessRejectReason
 	}{
 		{
-			name:     "empty audience rejected",
+			name:     "event with nil audience accepted",
 			kind:     message.KindEvent,
+			typ:      "agent.text",
+			audience: nil,
+			reason:   "",
+		},
+		{
+			name:     "request with empty audience rejected",
+			kind:     message.KindRequest,
+			typ:      "agent.text",
+			audience: nil,
+			reason:   HarnessAudienceEmpty,
+		},
+		{
+			name:     "response with empty audience rejected",
+			kind:     message.KindResponse,
 			typ:      "agent.text",
 			audience: nil,
 			reason:   HarnessAudienceEmpty,

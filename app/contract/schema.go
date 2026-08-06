@@ -200,7 +200,7 @@ func schemaDefinitions() map[string]any {
 	} {
 		defs[name] = schemaForType(reflect.TypeOf(value), false)
 	}
-	defs["SubmitPayload"].(map[string]any)["description"] = "Idempotency key is (channel_id,id). The canonical client fingerprint covers msg_type, normalized kind, JSON-semantic payload, explicit audience, normalized visibility, parent_id, and explicit expires_at_ms; it excludes ref, id, generated deadlines, and default-audience completion. Omitted kind/visibility/payload and their explicit default values are equivalent."
+	defs["SubmitPayload"].(map[string]any)["description"] = "Idempotency key is (channel_id,id). The canonical client fingerprint covers msg_type, normalized kind, JSON-semantic payload, explicit audience, normalized visibility, parent_id, and explicit expires_at_ms; it excludes ref, id, generated deadlines, and default request-audience completion. Omitted kind/visibility/payload and their explicit default values are equivalent; an omitted event audience is the canonical empty array."
 	for name, value := range map[string]any{
 		"FeedPayload": subjectgate.FeedPayload{}, "ErrorPayload": subjectgate.ErrorPayload{},
 		"AttachReceipt": subjectgate.AttachReceipt{}, "SubmitReceipt": subjectgate.SubmitReceipt{},

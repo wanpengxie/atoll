@@ -225,6 +225,9 @@ func TestRun_CountdownHoldsAccountUntilFireSettlesIt(t *testing.T) {
 	if len(sys.events) != 1 || sys.events[0].CorrelationID != start.ID {
 		t.Fatalf("events = %+v, want one correlated to %q", sys.events, start.ID)
 	}
+	if sys.events[0].Audience != nil {
+		t.Fatalf("countdown-armed audience=%#v, want pure-log event", sys.events[0].Audience)
+	}
 	if len(sys.replies) != 1 || sys.replies[0].msg.ID != start.ID {
 		t.Fatalf("replies = %+v, want the fire to settle %q", sys.replies, start.ID)
 	}

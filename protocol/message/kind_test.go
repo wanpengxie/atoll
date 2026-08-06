@@ -44,11 +44,11 @@ func TestParseKind(t *testing.T) {
 }
 
 // TestParseVisibility pins the Visibility closed set
-// {public,private,system}: in-set resolves and round-trips, out-of-set
+// {public,system}: in-set resolves and round-trips, out-of-set
 // rejects with empty Visibility.
 func TestParseVisibility(t *testing.T) {
 	t.Parallel()
-	valid := []Visibility{VisibilityPublic, VisibilityPrivate, VisibilitySystem}
+	valid := []Visibility{VisibilityPublic, VisibilitySystem}
 	for _, v := range valid {
 		got, ok := ParseVisibility(string(v))
 		if !ok {
@@ -64,6 +64,7 @@ func TestParseVisibility(t *testing.T) {
 
 	invalid := []string{
 		"",
+		"private", // trust boundaries are channels, not per-message ACLs
 		"Public",
 		"PUBLIC",
 		"protected", // not in set

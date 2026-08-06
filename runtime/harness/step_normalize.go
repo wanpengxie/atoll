@@ -7,7 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// stepNormalize default-fills audience / visibility / kind / correlation_id /
+// stepNormalize canonicalizes audience and default-fills visibility / correlation_id /
 // payload baseline, plus a time-relation guard run AFTER the default-fill
 // phase:
 //
@@ -33,8 +33,12 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 	// — Chain.Write right before Log.Append — so normalize does not touch it;
 	// any caller-supplied value is overwritten there.
 
-	// audience is caller-owned. nil ≠ empty for downstream step 5 audience
-	// cardinality check: nil treated as "empty" → harness_audience_empty.
+	// Event audience is optional but has exactly one wire/storage representation:
+	// [] rather than null. Request/response nil remains empty for the downstream
+	// cardinality rejection.
+	if env.Kind == message.KindEvent && env.Audience == nil {
+		env.Audience = message.Audience{}
+	}
 
 	// visibility default → public.
 	if env.Visibility == "" {

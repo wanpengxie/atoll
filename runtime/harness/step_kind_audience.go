@@ -20,6 +20,7 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 //
 //   - reserved-namespace types: kind must match their kernel-defined rule
 //   - every audience entry names a non-empty actor id
+//   - kind=event: audience cardinality zero-or-more
 //   - kind=request / kind=response: audience cardinality exactly-one
 //   - a request without expires_at gets the global fallback closure deadline
 //
@@ -58,12 +59,8 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	// through. actor.* is type-agnostic to the substrate; its req/resp shape is
 	// an upper-layer convention, not a substrate gate.)
 
-	// (2) audience emptiness — single closure validation centre. The substrate
-	//     does not author routing; every audience entry must name a concrete
-	//     actor id supplied by the caller.
-	if len(env.Audience) == 0 {
-		return outcome{RejectReason: HarnessAudienceEmpty, Detail: "envelope.audience empty"}, nil
-	}
+	// (2) audience element grammar. An event may name nobody (pure log shape),
+	//     but every listed entry must still be a concrete actor id.
 	for _, receiver := range env.Audience {
 		if receiver == "" {
 			return outcome{
@@ -75,13 +72,16 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 
 	// (3) response — exactly-one concrete receiver.
 	if env.Kind == message.KindResponse {
+		if len(env.Audience) == 0 {
+			return outcome{RejectReason: HarnessAudienceEmpty, Detail: "kind=response requires a non-empty audience"}, nil
+		}
 		if len(env.Audience) != 1 || env.Audience[0] == "" {
 			return outcome{RejectReason: HarnessResponseAudienceInvalid, Detail: "kind=response requires audience cardinality 1"}, nil
 		}
 		return outcome{}, nil
 	}
 
-	// kind=event — no cardinality constraint beyond non-empty.
+	// kind=event — zero-or-more concrete receivers.
 	if env.Kind != message.KindRequest {
 		return outcome{}, nil
 	}
@@ -92,6 +92,9 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	//     delivery seam's job (NotHosted is an observation; durable closure and
 	//     caller deadline own terminal materialisation),
 	//     not the writer's. Do not re-add a registry liveness lookup.
+	if len(env.Audience) == 0 {
+		return outcome{RejectReason: HarnessAudienceEmpty, Detail: "kind=request requires a non-empty audience"}, nil
+	}
 	if len(env.Audience) != 1 || env.Audience[0] == "" {
 		return outcome{RejectReason: HarnessRequestAudienceInvalid, Detail: "kind=request requires audience=[<concrete-actor>]"}, nil
 	}

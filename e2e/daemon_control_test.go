@@ -235,6 +235,20 @@ func TestDaemonCarrierReconnectRestoresCompartments(t *testing.T) {
 	}
 	daemon := startDaemon(1)
 	waitDaemonOnline(t, api, channelID, daemonID)
+	countdownID := frameSubmit(t, ws, map[string]any{
+		"msg_type": "countdown.start", "kind": "request",
+		"audience": []string{echoID},
+		"payload":  json.RawMessage(`{"seconds":1,"note":"audience-optional"}`),
+	})
+	armed, ok := ws.awaitTail(func(env map[string]any) bool {
+		return env["type"] == "echo.countdown-armed" && env["correlation_id"] == countdownID
+	}, 30*time.Second)
+	if !ok {
+		t.Fatal("echo.countdown-armed did not land in channel truth")
+	}
+	if audience, ok := armed["audience"].([]any); !ok || len(audience) != 0 {
+		t.Fatalf("echo.countdown-armed audience=%#v, want []", armed["audience"])
+	}
 
 	payload1 := json.RawMessage(`{"text":"canonical one"}`)
 	_, terminal1 := submitAndAwaitTerminal(t, ws, "loop.chat", payload1, 120*time.Second)

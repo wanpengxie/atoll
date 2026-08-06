@@ -111,9 +111,9 @@ func TestStepEnvelopeShape_KindVisibilityAudienceResponse(t *testing.T) {
 			reason: "",
 		},
 		{
-			name:   "valid private visibility accepts",
-			mutate: func(e *message.Envelope) { e.Visibility = message.VisibilityPrivate },
-			reason: "",
+			name:   "private visibility rejected",
+			mutate: func(e *message.Envelope) { e.Visibility = message.Visibility("private") },
+			reason: HarnessVisibilityInvalid,
 		},
 		{
 			name:   "audience wildcard forbidden",
