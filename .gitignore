@@ -26,3 +26,4 @@ bin/
 ui/public/downloads/
 /.cache/
 *.err.log
+output/*
