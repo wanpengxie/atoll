@@ -22,20 +22,18 @@ const (
 	// credential. The host resolves it to an ActorID. This is the connection's
 	// one-time authentication.
 	KindHandshake Kind = "handshake"
-	// KindHandshakeAck (host→remote): the host returns the bound ActorID.
-	KindHandshakeAck Kind = "handshake_ack"
 	// KindDeliver (host→remote): one envelope into the bound actor's mailbox.
-	// Fire-and-forget — the transport's own flow control IS the backpressure
-	// (a full pipe/socket buffer surfaces as MailboxFull on the host's
-	// non-blocking enqueue).
+	// Fire-and-forget — the transport's own flow control IS the backpressure:
+	// the stream owner writes synchronously and its bounded write fails if the
+	// peer stops reading. There is no application delivery queue.
 	KindDeliver Kind = "deliver"
 	// KindEmit (remote→host): the bound actor emitted an envelope upward. The
-	// host (port embodiment) relays it to the harness — the single channel-log
+	// host route relays it to the harness — the single channel-log
 	// writer.
 	KindEmit Kind = "emit"
 	// KindEmitAck (host→remote): the host's authoritative verdict for one
 	// KindEmit. The harness Writer's WriteResult (MessageID + RejectReason) is
-	// part of a cell's PEN: a remote cell's Respond/EmitEvent MUST see the same
+	// part of a cell's PEN: a remote cell's Respond/Emit MUST see the same
 	// authoritative write verdict a local cell sees, so the writer contract may
 	// not be downgraded across the wire — that requires an upward ack, not a
 	// fire-and-forget emit.
@@ -67,7 +65,7 @@ const (
 	// KindObs (remote→host): the bound actor pushed an opaque obs snapshot about
 	// ITSELF (actor-source obs PUSH — operational/health state like device
 	// presence, NEVER business content, NEVER truth). The host relays it into the
-	// runtime's per-actor obs fanout (publishObs) so home-side WatchObs consumers
+	// runtime's population obs fanout (publishObs) so home-side consumers
 	// see it. Fire-and-forget, unidirectional, NO ack: obs is non-truth and
 	// best-effort (a lost snapshot is superseded by the next one / decayed by the
 	// lease) — so it cannot reuse the ack'd KindEmit path. The actor is implicit
@@ -96,23 +94,9 @@ const (
 	// KindScheduleAck (host→remote): the host's authoritative verdict for one
 	// KindSchedule (the opaque schedule response bytes + any host-side error).
 	KindScheduleAck Kind = "schedule_ack"
-	// KindDetach (remote→host): the remote actively removes ITS execution arm from
-	// this host. Sent on the actor's stream, after which the remote closes the
-	// stream; the host-side port dies QUIET (no down edge — a graceful detach is not
-	// an observed death, so it must not materialise receiver_unavailable). The
-	// canonical producer is a daemon's graceful ctx-cancel shutdown (one KindDetach
-	// per stream before close); it is also the remote's ack of a KindDespawn. Payload
-	// reuses DownPayload{Reason}. No ack — a lost KindDetach degrades to an EOF
-	// death (the conservative loud edge), never a silent leak.
+	// KindDetach (remote→host) is an optional graceful close for this exact
+	// physical route. It does not mutate actor lifecycle truth.
 	KindDetach Kind = "detach"
-	// KindDespawn (host→remote): the host ends the remote's execution arm (§10.5 —
-	// the by-name despawn crossing the wire). Sent on the target actor's stream; the
-	// remote despawns its local cell and replies KindDetach before closing the
-	// stream. Payload reuses DownPayload{Reason}. No ack — best-effort (a lost frame
-	// degrades to an EOF death). This is DISTINCT from a quiet close/replace teardown
-	// (which sends no frame): only the by-name despawn entries (Despawn / DespawnID /
-	// DespawnChild) end an arm with an explicit host→remote signal.
-	KindDespawn Kind = "despawn"
 	// KindDeliverResult (remote→host): a pure delivery-OBSERVATION frame. After the
 	// remote host's local Deliver produces a non-Delivered outcome (the addressed
 	// cell is not_hosted / mailbox_full / stopped), it reports that verdict UP the
@@ -124,7 +108,7 @@ const (
 	// KindCancelRequest (remote→host): a bound actor abandons one of ITS OWN
 	// in-flight OUTBOUND requests — the caller-side UPSTREAM twin of the host→remote
 	// KindCancel. The direction is the substrate reason it is a distinct kind (the
-	// pairing precedent = KindDetach/KindDespawn, KindEmit/KindDeliver): a
+	// pairing precedent = KindEmit/KindDeliver): a
 	// daemon-hosted caller cannot mint the host→remote cancel signal, so the
 	// substrate carries its "close my outstanding request" intent up its own stream.
 	// It carries ONLY the request id (reuses CancelPayload): the actor is implicit
@@ -138,6 +122,12 @@ const (
 	// closure already owns its own terminal. So it never rides the ack'd on-loop
 	// path.
 	KindCancelRequest Kind = "cancel_request"
+	// Lifecycle control is carried on the actor stream. Fork and End have
+	// operation results.
+	KindSpawn    Kind = "spawn"
+	KindSpawnAck Kind = "spawn_ack"
+	KindEnd      Kind = "end"
+	KindEndAck   Kind = "end_ack"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -154,12 +144,34 @@ type Frame struct {
 
 // HandshakePayload is sent remote → host on connect.
 type HandshakePayload struct {
-	LeaseID string `json:"lease_id"`
+	LeaseID    string `json:"lease_id"`
+	AttemptKey string `json:"attempt_key"`
 }
 
-// HandshakeAckPayload is the host's reply: the bound actor identity.
-type HandshakeAckPayload struct {
-	Actor actor.ActorID `json:"actor"`
+type SpawnPayload struct {
+	RequestID     message.ID      `json:"request_id"`
+	Kind          actor.Kind      `json:"kind"`
+	Class         string          `json:"class"`
+	NameHint      string          `json:"name_hint,omitempty"`
+	Config        json.RawMessage `json:"config,omitempty"`
+	PlacementKind string          `json:"placement_kind,omitempty"`
+	PlacementHost string          `json:"placement_host,omitempty"`
+}
+
+type SpawnAckPayload struct {
+	ChildID      actor.ActorID `json:"child_id,omitempty"`
+	ErrorCode    string        `json:"error_code,omitempty"`
+	ErrorMessage string        `json:"error_message,omitempty"`
+}
+
+type EndPayload struct {
+	Target actor.ActorID `json:"target,omitempty"`
+	Reason string        `json:"reason,omitempty"`
+}
+
+type EndAckPayload struct {
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // DeliverPayload carries one envelope into the bound actor's mailbox.
@@ -266,7 +278,6 @@ type Codec struct {
 	r   *bufio.Reader
 	w   io.Writer
 	wmu sync.Mutex
-	hdr [4]byte // Write's length-prefix scratch, reused under wmu.
 }
 
 // NewCodec wraps r/w as a frame Codec.
@@ -283,14 +294,17 @@ func (c *Codec) Write(f Frame) error {
 	if len(raw) > MaxFrameBytes {
 		return errors.New("ipc: frame too large")
 	}
+	wire := make([]byte, 4+len(raw))
+	binary.BigEndian.PutUint32(wire[:4], uint32(len(raw)))
+	copy(wire[4:], raw)
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	binary.BigEndian.PutUint32(c.hdr[:], uint32(len(raw)))
-	if _, err := c.w.Write(c.hdr[:]); err != nil {
+	n, err := c.w.Write(wire)
+	if err != nil {
 		return err
 	}
-	if _, err := c.w.Write(raw); err != nil {
-		return err
+	if n != len(wire) {
+		return io.ErrShortWrite
 	}
 	return nil
 }

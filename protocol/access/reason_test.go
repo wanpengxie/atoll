@@ -2,8 +2,8 @@ package access
 
 import "testing"
 
-// TestIsValidFailureReason pins the frozen 5-value access-failure closed set
-// (the resolve→authorize→execute→return pipeline): the five blessed
+// TestIsValidFailureReason pins the access-failure closed set
+// (the resolve→authorize→execute→return pipeline): the blessed
 // reasons validate and round-trip their string; everything else — empty string,
 // casing variants, partials, not-in-set words, a word from a different
 // vocabulary (a message terminal reason), and trailing whitespace — is rejected.
@@ -13,6 +13,7 @@ func TestIsValidFailureReason(t *testing.T) {
 	valid := []FailureReason{
 		ResourceNotFound,
 		AlreadyExists,
+		OwnerInactive,
 		AccessDenied,
 		DriverError,
 		OutcomeUnknown,
@@ -46,7 +47,7 @@ func TestIsValidFailureReason(t *testing.T) {
 	}
 }
 
-// TestFailureReasonSetSize pins the closed set at exactly 5 members. The set is
+// TestFailureReasonSetSize pins the closed set at exactly 6 members. The set is
 // frozen (it exhausts the access pipeline's failure stages): expanding it is a
 // protocol-level change, so this count is a deliberate drift tripwire. It asserts
 // on the unexported backing slice allFailureReasons directly (not a re-listed
@@ -54,8 +55,8 @@ func TestIsValidFailureReason(t *testing.T) {
 // trips this test.
 func TestFailureReasonSetSize(t *testing.T) {
 	t.Parallel()
-	if len(allFailureReasons) != 5 {
-		t.Fatalf("FailureReason closed set drifted: allFailureReasons has %d members, want 5 — expanding it is a protocol-level change; update this sentinel deliberately", len(allFailureReasons))
+	if len(allFailureReasons) != 6 {
+		t.Fatalf("FailureReason closed set drifted: allFailureReasons has %d members, want 6 — expanding it is a protocol-level change; update this sentinel deliberately", len(allFailureReasons))
 	}
 	for _, r := range allFailureReasons {
 		if !IsValidFailureReason(r) {

@@ -16,9 +16,6 @@ func FormatCatalog(catalog introspect.Catalog) map[string]any {
 			"kind":     a.Kind,
 			"present":  a.Present,
 		}
-		if a.Binding != "" {
-			entry["binding"] = a.Binding
-		}
 		if a.UptimeMs > 0 {
 			entry["uptime_ms"] = a.UptimeMs
 		}

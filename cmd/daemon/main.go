@@ -1,246 +1,134 @@
-// Command daemon runs a v2 attached compute (hosts actor cells; no truth).
-// Cloud daemon and user/proxy daemon are the same binary.
+// Command daemon runs one authenticated device carrier and a compartment for
+// every bound channel. Cloud and user/proxy daemons are the same binary.
 //
 // What the daemon RUNS is NOT "one of every compiled class" — it is exactly the
-// set the SERVER assigns this channel (channel_actors placement='daemon'),
-// PULLED at startup from GET /compute/plan. Two
+// sets the server assigns each channel (channel composition
+// placement='daemon'), pulled over that channel's lane. Two
 // orthogonal axes: compiled-in (availability — actors/all + agent/all are linked
 // so the daemon CAN build any tool/looper/device) vs run (the pulled assignment
 // decides). NOTHING auto-runs. tool / looper / device are uniform — all just
 // rows in the assignment; claude runs here with the user's LOCAL login.
 //
-// Adding an in-tree actor/engine = a new package with an init() + one blank
-// import in actors/all (tools/devices) or agent/all (engines); this file is
-// NEVER edited.
+// Identity is the home's, not the run's (home 模型: 身份=持有凭据): --server and
+// --key are FIRST-RUN registration (or an explicit rebind) and persist into the
+// device home's identity file; every later run starts bare — the home is the
+// logical device, so `atoll-daemon` with no flags resumes being exactly the
+// device it was. One home, one live process (homelock).
+//
+// The carrier body itself lives in drivers/devicehost (shared with
+// `atoll up`'s in-process local device). Adding an in-tree actor/engine = a new
+// package with an init() + one blank import in actors/all (tools/devices) or
+// agent/all (engines); this file is NEVER edited.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
-	"fmt"
-	"io"
 	"log"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
-	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/cmd/internal/homelock"
+	"github.com/wanpengxie/atoll/drivers/devicehost"
 
 	// Availability (NOT auto-run): blank-import every in-tree actor + engine so the
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
 	// agent/all = the LLM engine classes (claude / go-kimi). What actually runs is
 	// the pulled assignment, never "one of each".
-	_ "github.com/wanpengxie/atoll/actors/all"
-	_ "github.com/wanpengxie/atoll/agent/all"
+	_ "github.com/wanpengxie/atoll/drivers/agents/all"
+	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 )
 
-// channelFromServerURL extracts the ?channel= query from the server WS URL.
-func channelFromServerURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	return u.Query().Get("channel")
-}
+// shutdownGrace bounds the whole graceful teardown after the first signal.
+// Twice the single-compartment join budget: a teardown still running past that
+// is not finishing, it is wedged on something cancellation cannot reach.
+const shutdownGrace = 60 * time.Second
 
-// daemonAssignment mirrors the server's GET /compute/plan JSON. Decoded into
-// the daemon's OWN struct — a loose HTTP contract; the daemon must not import
-// the server app package.
-type daemonAssignment struct {
-	InstanceID string          `json:"instance_id"`
-	Class      string          `json:"class"`
-	Config     json.RawMessage `json:"config,omitempty"`
-}
-
-// planURLFromWS turns the server WS url (ws://h/compute) into the plan url
-// (http(s)://h/compute/plan?key=&channel=).
-func planURLFromWS(serverWS, key, chID string) (string, error) {
-	u, err := url.Parse(serverWS)
-	if err != nil {
-		return "", err
-	}
-	switch u.Scheme {
-	case "ws":
-		u.Scheme = "http"
-	case "wss":
-		u.Scheme = "https"
-	}
-	u.Path = "/compute/plan"
-	q := url.Values{}
-	q.Set("key", key)
-	q.Set("channel", chID)
-	u.RawQuery = q.Encode()
-	return u.String(), nil
-}
-
-// planHTTPClient bounds the plan pull — a long-running daemon must not hang
-// forever on a wedged server.
-var planHTTPClient = &http.Client{Timeout: 10 * time.Second}
-
-// fetchPlan pulls this daemon's assignment for the channel from the server (the
-// daemon builds EXACTLY this set — no blind-build).
-func fetchPlan(ctx context.Context, serverWS, key, chID string) ([]daemonAssignment, error) {
-	planURL, err := planURLFromWS(serverWS, key, chID)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, planURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := planHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var out struct {
-		Assignments []daemonAssignment `json:"assignments"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	return out.Assignments, nil
-}
-
-// planSource is the daemon's LIVE compute-plan source: it is BOTH the reconcile
-// ring's actorrt.DesiredSource (Members) and its platform.ComputeBuilder (Lookup),
-// sharing one fetched-plan snapshot. The reconcile ring calls Members every poll
-// tick (compute.runLink), so Members RE-FETCHES /compute/plan each tick and
-// rebuilds the desired set + the id→factory table together — a plan changed on the
-// server converges WITHOUT a daemon restart (SW-6). A fetch failure is NON-FATAL:
-// Members logs and returns the last-known-good set (empty until the first success),
-// so the daemon stays connected and keeps trying ("connect first, pull later" —
-// no 3-try-fatal startup gate). Members updates the builder table BEFORE returning,
-// so the ring's subsequent per-id Lookup sees a consistent snapshot.
-type planSource struct {
-	ws, key, chID, wsRoot, deviceName string
-	logger                            *slog.Logger
-
-	mu          sync.Mutex
-	lastDesired []actorrt.DesiredMember
-	builders    map[actor.ActorID]platform.ActorFactory
-	lastBuilt   int // -1 until the first successful fetch (to Info-log only on change)
-}
-
-func newPlanSource(ws, key, chID, wsRoot, deviceName string, logger *slog.Logger) *planSource {
-	return &planSource{
-		ws: ws, key: key, chID: chID, wsRoot: wsRoot, deviceName: deviceName,
-		logger:    logger,
-		builders:  map[actor.ActorID]platform.ActorFactory{},
-		lastBuilt: -1,
-	}
-}
-
-func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, error) {
-	plan, err := fetchPlan(ctx, p.ws, p.key, p.chID)
-	if err != nil {
-		p.logger.Warn("daemon: refetch plan failed, using last-known-good", "err", err.Error())
-		p.mu.Lock()
-		d := p.lastDesired
-		p.mu.Unlock()
-		return d, nil // never error the ring; last-known-good keeps hosted work alive
-	}
-	var desired []actorrt.DesiredMember
-	builders := map[actor.ActorID]platform.ActorFactory{}
-	for _, asg := range plan {
-		id := actor.ActorID(asg.InstanceID)
-		// Desired is generated from the plan row ALONE (ClassKind, a pure pre-Build
-		// table lookup), decoupled from Build. So a per-row Build failure (missing
-		// creds, transient) keeps the id IN desired — the ring finds no builder,
-		// records it infeasible, and retries next tick, while computeRing's削臂
-		// (prevCurrent−current) never culls a live cell that is still in the plan.
-		// Only a plan that genuinely drops the row removes it from desired. An
-		// unknown class has no derivable kind (unactivatable) — skipped, as the
-		// server-side compositionDesired does.
-		kind, ok := registry.ClassKind(asg.Class)
-		if !ok {
-			p.logger.Error("daemon: unknown class in plan, skipping",
-				"instance", asg.InstanceID, "class", asg.Class)
-			continue
-		}
-		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn})
-		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
-			ID:     id,
-			Config: asg.Config,
-		}, registry.Deps{
-			ChannelID:    channel.ID(p.chID),
-			WorkspaceDir: p.wsRoot,
-			DeviceName:   p.deviceName,
-			Logger:       p.logger,
-		})
-		if berr != nil {
-			p.logger.Error("daemon: build assigned instance",
-				"instance", asg.InstanceID, "class", asg.Class, "err", berr.Error())
-			continue
-		}
-		// The builder table is keyed on the PLAN's InstanceID (what desired carries
-		// and what the ring Lookups), NOT decl.ID. A constructor that rewrites the id
-		// (device derives its own id from the device identity, "ignores ID and derives
-		// it") would otherwise file the factory under the derived id — permanently
-		// unreachable by the ring's Lookup(InstanceID) → no_builder forever, yet Build
-		// reported success. Treat an id drift as a build failure: skip the row loud
-		// (desired keeps it, ring records no_builder, retries) rather than file a
-		// silently-dead entry. (痛感前哨 for a future ClassDecl.IDPolicy; 止血 here.)
-		if decl.ID != id {
-			p.logger.Warn("daemon: built instance id differs from plan instance id, skipping",
-				"instance", asg.InstanceID, "class", asg.Class, "built_id", string(decl.ID))
-			continue
-		}
-		builders[id] = decl.Factory
-	}
-	p.mu.Lock()
-	p.lastDesired = desired
-	p.builders = builders
-	changed := p.lastBuilt != len(desired)
-	p.lastBuilt = len(desired)
-	p.mu.Unlock()
-	if changed {
-		p.logger.Info("daemon: composition", "channel", p.chID,
-			"assigned", len(plan), "desired", len(desired), "built", len(builders))
-	}
-	return desired, nil
-}
-
-func (p *planSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	f, ok := p.builders[id]
-	return f, ok
-}
+// defaultServerWS is the fallback when neither --server nor the home's
+// identity names one.
+const defaultServerWS = "ws://localhost:8080/compute"
 
 func main() {
-	ws := flag.String("server", "ws://localhost:8080/compute", "server WS url")
-	key := flag.String("key", "", "api key")
-	name := flag.String("name", "", "device name; default: hostname")
-	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.atoll/workspace")
+	ws := flag.String("server", "", "server WS url; first run / rebind — persisted in home (default: the home's registered server)")
+	key := flag.String("key", "", "api key; first run / rebind — persisted in home (default: the home's registered key)")
+	name := flag.String("name", "", "device display name; default: hostname")
+	home := flag.String("home", defaultDeviceHome(), "device home: identity + channel workspaces + resource trees (home 模型: 一个 home=一个逻辑设备)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	// One home, one live process — a second carrier presenting the same
+	// identity is the double-device accident, refused at the door.
+	release, err := homelock.Acquire(*home, "device")
+	if err != nil {
+		log.Fatalf("daemon: %v", err)
+	}
+	defer release()
+
+	// Resolve identity: explicit flags register/rebind and persist; a bare
+	// start resumes the home's persisted identity.
+	ident, _, err := devicehost.LoadIdentity(*home)
+	if err != nil {
+		log.Fatalf("daemon: %v", err)
+	}
+	// server and key are an INSEPARABLE pair: a key is a credential minted BY
+	// one server, so pointing --server somewhere new while silently reusing
+	// the stored key would send the old server's bearer credential to an
+	// arbitrary new origin. Changing servers therefore requires the new
+	// server's --key in the same run (or a fresh --home).
+	if *ws != "" && *ws != ident.ServerWS && *key == "" && ident.APIKey != "" {
+		log.Fatalf("daemon: --server points this device somewhere new (%q; home %s is registered to %q) — a key is bound to the server that minted it, so pass the new server's --key alongside --server (or use a different --home)",
+			*ws, *home, ident.ServerWS)
+	}
+	serverWS := *ws
+	if serverWS == "" {
+		serverWS = ident.ServerWS
+	}
+	if serverWS == "" {
+		serverWS = defaultServerWS
+	}
+	credential := *key
+	if credential == "" {
+		credential = ident.APIKey
+	}
+	if credential == "" {
+		log.Fatalf("daemon: home %s holds no identity yet — first run needs --key (mint one via POST /api/daemons, or let `atoll up` provision the local device)", *home)
+	}
+	if serverWS != ident.ServerWS || credential != ident.APIKey {
+		// A rebind invalidates the remembered row id along with the old pair —
+		// the new server's attach verdict (OnAttached below) fills in the id
+		// this credential actually IS.
+		ident.ServerWS, ident.APIKey, ident.DaemonID = serverWS, credential, ""
+		if err := devicehost.SaveIdentity(*home, ident); err != nil {
+			log.Fatalf("daemon: %v", err)
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// A device daemon is a user-run process with no supervisor behind it, so
+	// both escape hatches a supervised server takes for granted are built here:
+	// the first signal starts the graceful teardown and immediately restores
+	// default signal handling, so a second Ctrl-C hard-kills a wedged teardown;
+	// and if the teardown itself exceeds the grace period — the shape is a lane
+	// answer parked inside an uncancellable storage syscall — the process exits
+	// on its own. Reconciliation is crash-safe, so exiting here is exactly one
+	// crash, not corruption.
+	go func() {
+		<-ctx.Done()
+		stop()
+		time.Sleep(shutdownGrace)
+		slog.Error("daemon: graceful shutdown exceeded its grace period; exiting")
+		os.Exit(1)
+	}()
 
-	// Device identity + workspace root resolve first — an assigned device actor
-	// derives its id from DeviceName; loopers' situation facts derive from the
-	// workspace.
+	// Display name resolves last — an assigned device actor derives its id
+	// from DeviceName; loopers' situation facts derive from the home.
 	deviceName := *name
 	if deviceName == "" {
 		host, err := os.Hostname()
@@ -249,67 +137,38 @@ func main() {
 		}
 		deviceName = host
 	}
-	wsRoot := *workspace
-	if wsRoot == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Fatalf("daemon: home dir: %v", err)
-		}
-		wsRoot = filepath.Join(home, ".atoll", "workspace")
-	}
 
-	chID := channelFromServerURL(*ws)
-	// Assembly-root check: a daemon hosts exactly ONE channel's assignment, named
-	// by the server WS url's ?channel=. Missing it means we cannot know what to
-	// build — fatal at the earliest point with a fix-it diagnostic (fetchPlan
-	// would otherwise surface a murky 400/403 far downstream).
-	if chID == "" {
-		log.Fatalf("daemon: -server %q has no ?channel= query; pass e.g. -server ws://host:8080/compute?channel=<channel-id>", *ws)
-	}
-
-	// The daemon's compute plan is pulled LIVE, not snapshotted: planSource re-fetches
-	// /compute/plan every reconcile tick and rebuilds the desired set + factory table
-	// together (a plan change on the server converges with no daemon restart — SW-6).
-	// Startup does NOT gate on a first fetch: RunCompute connects the link, then the
-	// ring calls Members, which tolerates a fetch failure (last-known-good, initially
-	// empty) — connect first, pull later, keep retrying.
-	source := newPlanSource(*ws, *key, chID, wsRoot, deviceName, logger)
-
-	// The link layer is auth-agnostic: the api key rides the server WS url's query
-	// string (?key=), which the app layer resolves on WS upgrade. There is no
-	// separate credential field on ComputeConfig.
-	serverWS := *ws
-	if *key != "" {
-		sep := "?"
-		if strings.Contains(serverWS, "?") {
-			sep = "&"
-		}
-		serverWS += sep + "key=" + url.QueryEscape(*key)
-	}
-
-	// Storage host (期11 §4): the file-kind resource axis's physical half —
-	// os.Root-confined, this channel's own resources/<channelID>/{live,
-	// staging} tree, a SIBLING of wsRoot/<channelID>'s device workspace tree
-	// (never nested under it, §4.2). Opened unconditionally: a daemon that
-	// never hosts a file-kind resource simply never receives an AllocRequest
-	// for it (RunCompute's bridge only calls into StorageHost when the home
-	// actually sends one), so there is no cost to always wiring it — and no
-	// silent gap the day a channel this daemon serves DOES need file
-	// placement.
-	sh, err := storagehost.Open(wsRoot, chID, logger)
-	if err != nil {
-		log.Fatalf("daemon: open storage host: %v", err)
-	}
-	defer func() { _ = sh.Close() }()
-
-	if err := platform.RunCompute(ctx, platform.ComputeConfig{
-		ServerWS:        serverWS,
-		Logger:          logger,
-		Desired:         source,
-		Builder:         source,
-		StorageHost:     storageHostAdapter{host: sh},
-		LocalFileOpener: storageHostAdapter{host: sh},
+	if err := devicehost.Run(ctx, devicehost.Config{
+		ServerWS:   serverWS,
+		Credential: credential,
+		DeviceName: deviceName,
+		AtollHome:  *home,
+		Logger:     logger,
+		// The attach verdict is the moment this home learns which daemons row
+		// it IS — persist it so the identity triple {daemon_id, api_key,
+		// server_ws} is complete and a later `atoll up` on this home claims
+		// the SAME row instead of minting a double.
+		OnAttached: func(daemonID string) {
+			if ident.DaemonID == daemonID {
+				return
+			}
+			persisted := ident
+			persisted.DaemonID = daemonID
+			if err := devicehost.SaveIdentity(*home, persisted); err != nil {
+				logger.Error("daemon: persisting attach identity", "err", err.Error())
+				return
+			}
+			ident = persisted
+		},
 	}); err != nil {
 		log.Fatalf("daemon: %v", err)
 	}
+}
+
+func defaultDeviceHome() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".atoll-device"
+	}
+	return filepath.Join(home, ".atoll", "device")
 }

@@ -2,14 +2,14 @@ package access
 
 import "testing"
 
-// TestParseOperation pins the Operation closed set {create,read,write,set,delete}:
+// TestParseOperation pins the Operation closed set {create,read,write,delete}:
 // every in-set wire form resolves and round-trips its string; every out-of-set
 // value (empty, casing variants, near-misses, not-in-set verbs, whitespace) is
 // rejected with ok=false AND an empty Operation, so an illegal value can never
 // enter the ADT via a bare cast.
 func TestParseOperation(t *testing.T) {
 	t.Parallel()
-	valid := []Operation{OpCreate, OpRead, OpWrite, OpSet, OpDelete}
+	valid := []Operation{OpCreate, OpRead, OpWrite, OpDelete}
 	for _, op := range valid {
 		got, ok := ParseOperation(string(op))
 		if !ok {
@@ -30,7 +30,8 @@ func TestParseOperation(t *testing.T) {
 		"creates",  // close-but-no
 		"updates",  // close-but-no
 		"use",      // known-additive but NOT in day-1 set
-		"transfer", // not an op (= set with control Ops)
+		"set",      // retired with the grants plane (PM-D1): no per-object grant verb
+		"transfer", // not an op
 		"list",     // registry/obs plane, not access
 		"create ",  // trailing space
 		" create",  // leading space
@@ -46,16 +47,16 @@ func TestParseOperation(t *testing.T) {
 	}
 }
 
-// TestOperationSetSize pins the closed set at exactly 5 members. The set falls
+// TestOperationSetSize pins the closed set at exactly 4 members. The set falls
 // out of the resource lifecycle and is frozen: adding a verb is a
 // protocol revision, so this count is a deliberate drift tripwire. It asserts on
 // the unexported backing slice allOperations directly (not a re-listed literal),
-// so a 6th constant wired into the const block + allOperations trips this test —
+// so a 5th constant wired into the const block + allOperations trips this test —
 // forcing the author to acknowledge a protocol change here.
 func TestOperationSetSize(t *testing.T) {
 	t.Parallel()
-	if len(allOperations) != 5 {
-		t.Fatalf("Operation closed set drifted: allOperations has %d members, want 5 — adding/removing a verb is a protocol revision; update this sentinel deliberately", len(allOperations))
+	if len(allOperations) != 4 {
+		t.Fatalf("Operation closed set drifted: allOperations has %d members, want 4 — adding/removing a verb is a protocol revision; update this sentinel deliberately", len(allOperations))
 	}
 	for _, o := range allOperations {
 		if _, ok := ParseOperation(string(o)); !ok {

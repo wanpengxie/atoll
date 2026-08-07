@@ -371,7 +371,7 @@ type upsertAccess struct {
 	ops  []access.Operation
 }
 
-func (u *upsertAccess) Invoke(_ context.Context, op access.Operation, id resource.ResourceID, args []byte, _ *access.Grant) (accessdoor.Outcome, error) {
+func (u *upsertAccess) Invoke(_ context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	u.ops = append(u.ops, op)
 	switch op {
 	case access.OpWrite:

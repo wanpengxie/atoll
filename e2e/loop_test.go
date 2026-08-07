@@ -20,9 +20,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -161,9 +158,10 @@ func freePort(t *testing.T) int {
 // ---------------------------------------------------------------------------
 
 type apiClient struct {
-	t    *testing.T
-	base string
-	hc   *http.Client
+	t      *testing.T
+	base   string
+	hc     *http.Client
+	bearer string
 }
 
 func newAPIClient(t *testing.T, base string) *apiClient {
@@ -191,6 +189,9 @@ func (a *apiClient) do(method, path string, body any) (int, map[string]any) {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if a.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+a.bearer)
 	}
 	resp, err := a.hc.Do(req)
 	if err != nil {
@@ -278,21 +279,56 @@ func waitHealthz(t *testing.T, base string, p *proc, timeout time.Duration) {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway ws client: single reader, ref-matched acks, buffered tail
+// Gateway ws client: single reader, ref-matched receipts, buffered feed tail
 // ---------------------------------------------------------------------------
 
-// wsClient follows the spec's ws discipline: ONE reader goroutine fans frames
-// by type into tail and ack/error channels; requests are matched by ref (never
-// "read the next frame and call it the ack" — subscribe backfills history and
-// tail shares the outbound pump with acks).
+// wsClient speaks the standard gateway frame protocol (连接模型勘误期 v2 — 连接即人):
+// every wire frame is {v(=2), frame_type, ref, payload}. There is NO binding_gen (the
+// client-visible binding axis is retired) and the /ws URL names NO channel (a
+// connection is an authenticated person + one pipe subscribing to ALL the person's合法
+// 频道). ONE reader goroutine fans frames by type — feed frames (each carrying its own
+// channel_id) into tail, receipt/error into acks — and requests are matched by
+// TOP-LEVEL ref. The opening frame is a channel-blind attach handing over a multi-key
+// 游标表 (since); its receipt is an empty报到 ack. Every UPSTREAM business frame carries
+// a required channel_id (send stamps the session's primary channel when the caller
+// doesn't name its own). Frames are hand-rolled maps: this package imports ZERO atoll
+// packages (red line 1) — the frame shape is part of the /ws contract it speaks.
 type wsClient struct {
 	t    *testing.T
 	conn *websocket.Conn
-	tail chan map[string]any
-	acks chan map[string]any
+	tail chan map[string]any // feed-frame payloads {channel_id, seq, envelope}
+	acks chan map[string]any // receipt/error frames (whole frame, ref at top)
+	done chan struct{}       // closed when the reader exits (server tore the session down)
+
+	chID string // primary channel: the default channel_id stamped onto business frames
 }
 
+const frameVersion = 2
+
+// frame builds one wire frame map (v2 envelope: no binding_gen).
+func frame(frameType, ref string, payload any) map[string]any {
+	m := map[string]any{"v": frameVersion, "frame_type": frameType}
+	if ref != "" {
+		m["ref"] = ref
+	}
+	if payload != nil {
+		m["payload"] = payload
+	}
+	return m
+}
+
+// dialWS opens ONE connection whose primary channel is chID, seeding its游标表 with a
+// single since key. Business frames sent through it default their channel_id to chID.
 func dialWS(t *testing.T, base, cookie, chID string, sinceSeq int64) *wsClient {
+	t.Helper()
+	return dialWSMulti(t, base, cookie, chID, map[string]int64{chID: sinceSeq})
+}
+
+// dialWSMulti opens ONE channel-blind connection (连接即人 v2): the /ws URL carries no
+// channel and the opening attach hands over a multi-key游标表 (since). primaryCh is the
+// default channel_id stamped onto business frames that don't name their own — the
+// multi-channel test passes channel_id explicitly per frame.
+func dialWSMulti(t *testing.T, base, cookie, primaryCh string, since map[string]int64) *wsClient {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws"
 	hdr := http.Header{}
@@ -301,38 +337,63 @@ func dialWS(t *testing.T, base, cookie, chID string, sinceSeq int64) *wsClient {
 	if err != nil {
 		t.Fatalf("dial ws: %v", err)
 	}
-	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "channel_id": chID, "since_seq": sinceSeq}); err != nil {
-		t.Fatalf("subscribe frame: %v", err)
-	}
-	c := &wsClient{t: t, conn: conn,
+	c := &wsClient{t: t, conn: conn, chID: primaryCh,
 		tail: make(chan map[string]any, 16384),
 		acks: make(chan map[string]any, 256),
+		done: make(chan struct{}),
 	}
 	t.Cleanup(c.close)
 	go c.readLoop()
+	// Opening attach: channel-blind report-in handing over the游标表 (since map). The
+	// receipt is an empty报到 ack (attach no longer grants a binding_gen).
+	ref := "attach-" + primaryCh
+	if err := conn.WriteJSON(frame("attach", ref, map[string]any{"since": since})); err != nil {
+		t.Fatalf("attach frame: %v", err)
+	}
+	rec, ok := c.awaitRef(ref, 10*time.Second)
+	if !ok {
+		t.Fatalf("no attach receipt within 10s")
+	}
+	if rec["frame_type"] != "receipt" {
+		t.Fatalf("attach not accepted: %v", rec)
+	}
 	return c
 }
 
 func (c *wsClient) close() { _ = c.conn.Close() }
 
 func (c *wsClient) readLoop() {
+	defer close(c.done)
 	for {
 		var m map[string]any
 		if err := c.conn.ReadJSON(&m); err != nil {
 			return
 		}
-		switch m["type"] {
-		case "message":
-			c.tail <- m
-		case "ack", "error":
+		switch m["frame_type"] {
+		case "feed":
+			if p, _ := m["payload"].(map[string]any); p != nil {
+				c.tail <- p
+			}
+		case "receipt", "error":
 			c.acks <- m
 		}
 	}
 }
 
-func (c *wsClient) send(m map[string]any) error { return c.conn.WriteJSON(m) }
+// send writes one upstream business frame (连接模型勘误期 v2). When the caller's payload
+// is a map that doesn't name its own channel_id, it is stamped with the session's
+// primary channel — every business frame carries a required channel_id.
+func (c *wsClient) send(frameType, ref string, payload any) error {
+	if m, ok := payload.(map[string]any); ok {
+		if _, has := m["channel_id"]; !has && c.chID != "" {
+			m["channel_id"] = c.chID
+		}
+	}
+	return c.conn.WriteJSON(frame(frameType, ref, payload))
+}
 
-// awaitRef returns the ack/error frame whose ref matches (skipping strays).
+// awaitRef returns the receipt/error/notify frame whose TOP-LEVEL ref matches
+// (skipping strays).
 func (c *wsClient) awaitRef(ref string, timeout time.Duration) (map[string]any, bool) {
 	deadline := time.After(timeout)
 	for {
@@ -347,13 +408,14 @@ func (c *wsClient) awaitRef(ref string, timeout time.Duration) (map[string]any, 
 	}
 }
 
-// awaitTail returns the first tail envelope matching pred.
+// awaitTail returns the first feed envelope matching pred (a feed frame's
+// payload.envelope).
 func (c *wsClient) awaitTail(pred func(env map[string]any) bool, timeout time.Duration) (map[string]any, bool) {
 	deadline := time.After(timeout)
 	for {
 		select {
-		case m := <-c.tail:
-			env, _ := m["envelope"].(map[string]any)
+		case fp := <-c.tail:
+			env, _ := fp["envelope"].(map[string]any)
 			if env != nil && pred(env) {
 				return env, true
 			}
@@ -361,6 +423,20 @@ func (c *wsClient) awaitTail(pred func(env map[string]any) bool, timeout time.Du
 			return nil, false
 		}
 	}
+}
+
+// frameErrCode / frameErrDetail extract an error frame's flat code + detail (表①,
+// 裁决8: code is always a single flat word).
+func frameErrCode(m map[string]any) string {
+	p, _ := m["payload"].(map[string]any)
+	code, _ := p["code"].(string)
+	return code
+}
+
+func frameErrDetail(m map[string]any) string {
+	p, _ := m["payload"].(map[string]any)
+	d, _ := p["detail"].(string)
+	return d
 }
 
 // ---------------------------------------------------------------------------
@@ -412,31 +488,36 @@ func submitAndAwaitTerminal(t *testing.T, ws *wsClient, msgType string, payload 
 		attemptEnd := time.Now().Add(28 * time.Second)
 		refCounter++
 		ref := fmt.Sprintf("%s-%d", msgType, refCounter)
-		if err := ws.send(map[string]any{
-			"type": "message", "ref": ref, "msg_type": msgType, "payload": payload,
-		}); err != nil {
+		// A submit frame's payload = {msg_type, payload:<message body>} (no audience
+		// → the gateway routing面 resolves the default_agent). The message body's
+		// bytes survive verbatim (json.RawMessage).
+		if err := ws.send("submit", ref, map[string]any{"msg_type": msgType, "payload": payload}); err != nil {
 			t.Fatalf("%s: ws send: %v", msgType, err)
 		}
-		ack, ok := ws.awaitRef(ref, 10*time.Second)
+		rec, ok := ws.awaitRef(ref, 10*time.Second)
 		if !ok {
-			t.Fatalf("%s: no ack/error frame for ref %s within 10s", msgType, ref)
+			t.Fatalf("%s: no receipt/error frame for ref %s within 10s", msgType, ref)
 		}
-		if ack["type"] == "error" {
-			code, _ := ack["error"].(string)
+		if rec["frame_type"] == "error" {
+			code := frameErrCode(rec)
 			if retryableFrameErr(code) {
 				time.Sleep(time.Second)
 				continue
 			}
-			t.Fatalf("%s: frame error %q (detail %v)", msgType, code, ack["detail"])
+			t.Fatalf("%s: frame error %q (detail %q)", msgType, code, frameErrDetail(rec))
 		}
-		id, _ := ack["message_id"].(string)
+		rp, _ := rec["payload"].(map[string]any)
+		id, _ := rp["message_id"].(string)
 		if id == "" {
-			t.Fatalf("%s: ack carries no message_id: %v", msgType, ack)
+			t.Fatalf("%s: receipt carries no message_id: %v", msgType, rec)
 		}
-		// The ack receipt is {message_id, seq} — the commit seq is part of the
-		// L2 acceptance shape, so its absence/zero is a contract break.
-		if seq, ok := ack["seq"].(float64); !ok || seq <= 0 {
-			t.Fatalf("%s: ack carries no positive seq: %v", msgType, ack)
+		// The submit receipt is {message_id} and nothing else. A receipt says
+		// "accepted, and this is its identity"; seq is the store's row position,
+		// which the wire contract already forbade a client from using as a feed
+		// cursor — leaving it the one field nobody could legally read. Its
+		// PRESENCE is now the contract break.
+		if _, leaked := rp["seq"]; leaked {
+			t.Fatalf("%s: receipt still carries seq: %v", msgType, rec)
 		}
 		// Await THIS request's terminal (a failed terminal carries
 		// payload.status=failed + reason).
@@ -490,296 +571,3 @@ func payloadField(env map[string]any, key string) string {
 // ---------------------------------------------------------------------------
 // The six-leg journey
 // ---------------------------------------------------------------------------
-
-func TestLoop(t *testing.T) {
-	binDir := os.Getenv("ATOLL_E2E_BIN")
-	if binDir == "" {
-		t.Skip("ATOLL_E2E_BIN not set; run via `make e2e-loop`")
-	}
-	serverBin := filepath.Join(binDir, "atoll-server")
-	daemonBin := filepath.Join(binDir, "atoll-daemon")
-	for _, b := range []string{serverBin, daemonBin} {
-		if _, err := os.Stat(b); err != nil {
-			t.Fatalf("binary missing: %v", err)
-		}
-	}
-
-	// Fully-isolated world: server cwd (no .env), app db, channel dbs, daemon
-	// workspace root, child HOME, logs.
-	root := t.TempDir()
-	dirs := map[string]string{}
-	for _, d := range []string{"serverwd", "daemonwd", "channels", "daemon-ws", "home", "logs"} {
-		dirs[d] = filepath.Join(root, d)
-		if err := os.MkdirAll(dirs[d], 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", d, err)
-		}
-	}
-	dbPath := filepath.Join(root, "app.db")
-	env := scrubbedEnv(dirs["home"])
-	var port int
-	var base string
-
-	// On failure, dump both process logs' tails so the broken leg is locatable
-	// from the output alone (requirement 验收线 5, agent-first).
-	var serverLog, daemonLog string
-	t.Cleanup(func() {
-		if t.Failed() {
-			if serverLog != "" {
-				t.Logf("server log tail:\n%s", tailLog(serverLog, 50))
-			}
-			if daemonLog != "" {
-				t.Logf("daemon log tail:\n%s", tailLog(daemonLog, 50))
-			}
-		}
-	})
-
-	serverGen := 0
-	startServerProc := func() *proc {
-		serverGen++
-		serverLog = filepath.Join(dirs["logs"], fmt.Sprintf("server-%d.log", serverGen))
-		return startProc(t, fmt.Sprintf("server#%d", serverGen), serverBin, []string{
-			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
-			"-db", dbPath,
-			"-channel-db-dir", dirs["channels"],
-		}, dirs["serverwd"], serverLog, env)
-	}
-
-	// ---- L1 起 -----------------------------------------------------------
-	// Initial start: the probe→listen window can lose the port to another
-	// process — an early exit before healthy retries on a FRESH port (spec §4:
-	// "bind 失败换口重试"). The restart leg below reuses the settled port (the
-	// daemon's -server URL is welded to it).
-	var server *proc
-	for attempt := 1; ; attempt++ {
-		port = freePort(t)
-		base = fmt.Sprintf("http://127.0.0.1:%d", port)
-		server = startServerProc()
-		err := waitHealthzErr(base, server, 30*time.Second)
-		if err == nil {
-			break
-		}
-		if server.exited() && attempt < 3 {
-			server.reclaim()
-			continue
-		}
-		t.Fatalf("%v; log tail:\n%s", err, tailLog(serverLog, 50))
-	}
-	api := newAPIClient(t, base)
-
-	reg := api.must("POST", "/api/identity/register",
-		map[string]any{"email": "loop@example.com", "password": "secret123", "display_name": "Loop"},
-		http.StatusCreated)
-	userID, _ := reg["id"].(string)
-
-	ws1 := api.must("POST", "/api/workspaces", map[string]any{"name": "loop-ws"}, http.StatusCreated)
-	wsID, _ := ws1["id"].(string)
-
-	ch := api.must("POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "home"}, http.StatusCreated)
-	chID, _ := ch["id"].(string)
-
-	// create-and-attach (MUST be this endpoint: bare POST /api/daemons issues a
-	// key but no daemon_channels binding — the daemon would 403 forever).
-	dm := api.must("POST", "/api/channels/"+chID+"/daemons", map[string]any{"name": "loop-box"}, http.StatusCreated)
-	daemonID, _ := dm["id"].(string)
-	apiKey, _ := dm["api_key"].(string)
-	if daemonID == "" || apiKey == "" {
-		t.Fatalf("create-and-attach daemon: %v", dm)
-	}
-
-	// Two declarations through the world layer: the echo tool + the scripted
-	// assistant configured to call it.
-	echoDecl := api.must("POST", "/api/actor-decls",
-		map[string]any{"name": "echo-tool", "class": "echo"}, http.StatusCreated)
-	echoDeclID, _ := echoDecl["id"].(string)
-	// Introduce the tool first so the assistant config receives its substrate-minted
-	// instance id rather than reconstructing one from the declaration principal.
-	echoIntro := api.mustRetry5xx("POST", "/api/channels/"+chID+"/actors",
-		map[string]any{"decl_id": echoDeclID, "placement": "server"},
-		60*time.Second, http.StatusCreated, http.StatusOK, http.StatusAccepted)
-	echoID, _ := echoIntro["instance_id"].(string)
-	asstDecl := api.must("POST", "/api/actor-decls",
-		map[string]any{"name": "assistant", "class": "script",
-			"config": map[string]any{"tool_id": echoID}},
-		http.StatusCreated)
-	asstDeclID, _ := asstDecl["id"].(string)
-	asstIntro := api.mustRetry5xx("POST", "/api/channels/"+chID+"/actors",
-		map[string]any{"decl_id": asstDeclID, "placement": "daemon",
-			"desired_host": daemonID, "make_default": true},
-		60*time.Second, http.StatusCreated, http.StatusOK, http.StatusAccepted)
-	assistantID, _ := asstIntro["instance_id"].(string)
-
-	startDaemon := func(gen int) *proc {
-		daemonLog = filepath.Join(dirs["logs"], fmt.Sprintf("daemon-%d.log", gen))
-		return startProc(t, fmt.Sprintf("daemon#%d", gen), daemonBin, []string{
-			"-server", fmt.Sprintf("ws://127.0.0.1:%d/compute?channel=%s", port, chID),
-			"-key", apiKey,
-			"-name", "loop-box",
-			"-workspace", dirs["daemon-ws"],
-		}, dirs["daemonwd"], daemonLog, env)
-	}
-	daemon := startDaemon(1)
-
-	// L1 assertion ①: default_agent converges to the assistant.
-	pollUntil(t, "default_agent points at assistant", 30*time.Second, func() bool {
-		_, m := api.do("GET", "/api/channels/"+chID, nil)
-		return m["default_agent"] == assistantID
-	})
-
-	// L1 assertion ②: 户籍 is EXACTLY five members — {system, creator,
-	// agent:boost, echo, assistant} (membrane law: nothing extra slipped in as a
-	// side effect, nothing missing).
-	boostID, _ := ch["default_agent"].(string)
-	var humanID string
-	pollUntil(t, "creator principal is represented by one active human", 30*time.Second, func() bool {
-		_, m := api.do("GET", "/api/channels/"+chID+"/actors", nil)
-		rows, _ := m["actors"].([]any)
-		for _, raw := range rows {
-			row, _ := raw.(map[string]any)
-			if row["kind"] == "human" && row["principal"] == userID {
-				humanID, _ = row["id"].(string)
-				return humanID != ""
-			}
-		}
-		return false
-	})
-	wantMembers := []string{"system", humanID, boostID, echoID, assistantID}
-	sort.Strings(wantMembers)
-	pollUntil(t, "membership is exactly the five expected", 60*time.Second, func() bool {
-		_, m := api.do("GET", "/api/channels/"+chID+"/actors", nil)
-		rows, _ := m["actors"].([]any)
-		var got []string
-		for _, r := range rows {
-			row, _ := r.(map[string]any)
-			id, _ := row["id"].(string)
-			got = append(got, id)
-		}
-		sort.Strings(got)
-		return reflect.DeepEqual(got, wantMembers)
-	})
-
-	// ---- L2 入 / L3 转 / L4 做 / L5 回 ------------------------------------
-	cookie := api.cookieHeader()
-	ws := dialWS(t, base, cookie, chID, 0)
-
-	// Payload discipline for the byte-exact legs: the frames marshal via
-	// encoding/json, which compacts and HTML-escapes — every payload here is
-	// pre-compacted pure ASCII (no spare whitespace, no <>&) so the RawMessage
-	// bytes survive the trip verbatim and content comparisons stay exact.
-	chatPayload1 := json.RawMessage(`{"text":"hello loop one"}`)
-	chat1ID, term1 := submitAndAwaitTerminal(t, ws, "loop.chat", chatPayload1, 120*time.Second)
-	rid1 := assertChatReply(t, term1, chatPayload1)
-
-	// L5 verify: the assistant reads the REAL bytes back off the daemon disk.
-	verifyResource(t, ws, rid1, chatPayload1)
-
-	// ---- L6 验① : kill -9 the daemon, restart on the same workspace root ---
-	daemon.kill9(t)
-	daemon = startDaemon(2)
-
-	chatPayload2 := json.RawMessage(`{"text":"hello loop two"}`)
-	_, term2 := submitAndAwaitTerminal(t, ws, "loop.chat", chatPayload2, 120*time.Second)
-	_ = assertChatReply(t, term2, chatPayload2)
-
-	// The PRE-crash file survives the daemon restart (storagehost rescans the
-	// real disk — incarnation换代 without truth loss).
-	verifyResource(t, ws, rid1, chatPayload1)
-
-	// ---- L6 验② : kill -9 the server, restart on the same db + channel dir --
-	ws.close()
-	server.kill9(t)
-	server = startServerProc()
-	waitHealthz(t, base, server, 30*time.Second)
-
-	// Fresh session (the old cookie row also survived in app.db, but re-login is
-	// the honest client behaviour after a server death).
-	api2 := newAPIClient(t, base)
-	api2.must("POST", "/api/identity/login",
-		map[string]any{"email": "loop@example.com", "password": "secret123"}, http.StatusOK)
-
-	ws2 := dialWS(t, base, api2.cookieHeader(), chID, 0)
-
-	// ①: the pre-crash conversation is STILL IN THE LOG — both the request and
-	// its response envelopes replay from seq 0 (requirement: "之前的会话还在" is
-	// proven by the old envelopes, not by a new chat succeeding).
-	if _, ok := ws2.awaitTail(func(env map[string]any) bool {
-		return env["id"] == chat1ID && env["kind"] == "request"
-	}, 30*time.Second); !ok {
-		t.Fatalf("server restart: pre-crash request envelope %s not replayed from seq 0", chat1ID)
-	}
-	if _, ok := ws2.awaitTail(func(env map[string]any) bool {
-		return env["kind"] == "response" && env["parent_id"] == chat1ID && terminalStatus(env) == "completed"
-	}, 30*time.Second); !ok {
-		t.Fatalf("server restart: pre-crash response for %s not replayed from seq 0", chat1ID)
-	}
-
-	// ②: a fresh chat walks the whole path again (daemon redials, reconcile
-	// revives, routing + call + resource all live).
-	chatPayload3 := json.RawMessage(`{"text":"hello loop three"}`)
-	_, term3 := submitAndAwaitTerminal(t, ws2, "loop.chat", chatPayload3, 180*time.Second)
-	_ = assertChatReply(t, term3, chatPayload3)
-
-	// ③: the ORIGINAL file still reads back byte-exact across BOTH restarts.
-	verifyResource(t, ws2, rid1, chatPayload1)
-
-	// Success path also reclaims both processes explicitly (t.Cleanup would too;
-	// doing it here keeps "进程收干净" an asserted step, not a teardown side
-	// effect).
-	daemon.kill9(t)
-	server.kill9(t)
-}
-
-// assertChatReply pins the loop.chat completed terminal: ok=true, echoed ==
-// the sent payload (protocol fields stripped), resource_id present. Returns the
-// resource id.
-func assertChatReply(t *testing.T, term map[string]any, sent json.RawMessage) string {
-	t.Helper()
-	p := envelopePayload(term)
-	if p["ok"] != true {
-		t.Fatalf("chat terminal not ok: %v", p)
-	}
-	var want map[string]any
-	if err := json.Unmarshal(sent, &want); err != nil {
-		t.Fatalf("unmarshal sent payload: %v", err)
-	}
-	echoed, _ := p["echoed"].(map[string]any)
-	if !reflect.DeepEqual(echoed, want) {
-		t.Fatalf("echoed = %v, want %v", echoed, want)
-	}
-	rid, _ := p["resource_id"].(string)
-	if rid == "" {
-		t.Fatalf("chat terminal carries no resource_id: %v", p)
-	}
-	return rid
-}
-
-// verifyResource drives loop.verify and asserts the daemon-disk bytes match the
-// original payload exactly (size + content).
-func verifyResource(t *testing.T, ws *wsClient, rid string, original json.RawMessage) {
-	t.Helper()
-	req, _ := json.Marshal(map[string]any{"resource_id": rid})
-	_, term := submitAndAwaitTerminal(t, ws, "loop.verify", req, 120*time.Second)
-	p := envelopePayload(term)
-	if p["exists"] != true {
-		t.Fatalf("verify %s: exists = %v (payload %v)", rid, p["exists"], p)
-	}
-	content, _ := p["content"].(string)
-	if content != string(original) {
-		t.Fatalf("verify %s: content = %q, want byte-exact %q", rid, content, string(original))
-	}
-	if size, _ := p["size"].(float64); int(size) != len(original) {
-		t.Fatalf("verify %s: size = %v, want %d", rid, p["size"], len(original))
-	}
-}
-
-// pollUntil polls cond until true or fails at deadline.
-func pollUntil(t *testing.T, what string, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	end := time.Now().Add(timeout)
-	for time.Now().Before(end) {
-		if cond() {
-			return
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for: %s", what)
-}

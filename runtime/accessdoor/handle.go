@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
@@ -40,10 +41,9 @@ const KindFile = resourcespec.KindFile
 // has any use for. It is welded to ONE caller/owner at construction and NEVER
 // self-reports identity. It is an INTERFACE: the cell implementation
 // (boundStateHandle) and the port implementation (remoteAccessHandle) are
-// twins of one contract, so a liveness wrapper can wrap it the way livePen
-// wraps Pen, zero friction.
+// twins of one contract, both minted behind the same authority-welding seam.
 type AccessHandle interface {
-	Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error)
+	Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error)
 }
 
 // ResourceAccessHandle is the RESOURCE-FACE capability (channel-scoped,
@@ -68,6 +68,7 @@ type AccessHandle interface {
 // slice the red line forbids outright (no ErrUnsupported intermediate state).
 type ResourceAccessHandle interface {
 	AccessHandle
+	FileOpener
 
 	// Create is the SOLE create entry point (§3.1's "create 单入口"): the
 	// resource face's Invoke no longer accepts a bare OpCreate at all (see
@@ -76,25 +77,51 @@ type ResourceAccessHandle interface {
 	// moment CreateSpec existed.
 	Create(ctx context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error)
 
-	// Stat projects id's any-grant-visible metadata + caller's effective ops
+	// Stat projects id's owner-root-or-any-grant-visible metadata + caller's effective ops
 	// (§3.6). Never Operation-gated (Stat is a Query method, not a grantable
 	// verb) and never carries PlacementCoord (StatMeta is a separate,
 	// coord-less projection type — see query.go).
 	Stat(ctx context.Context, id resource.ResourceID) (StatResult, error)
 
-	// List enumerates channel-scoped resources this caller can see (any-grant
-	// projection), paginated (§3.7). The actor-scoped locus has NO List — that
+	// List enumerates channel-scoped resources this caller can see (owner root
+	// or any-grant projection), paginated (§3.7). The actor-scoped locus has NO List — that
 	// absence IS the scope law (no kind column, no cross-owner enumeration
 	// makes sense there), so List belongs on this interface alone.
 	List(ctx context.Context, q ListQuery) (ListPage, error)
+}
+
+func (h boundHandle) Open(ctx context.Context, _ resource.ResourceID, _ access.Operation) (FileAccess, Outcome, error) {
+	if err := h.authorize(ctx); err != nil {
+		return FileAccess{}, Outcome{RejectReason: access.OwnerInactive}, nil
+	}
+	return FileAccess{}, Outcome{}, ErrFileCapabilityUnavailable
+}
+
+func (h boundHandle) Redeem(ctx context.Context, _ FileRoute) (FileAccess, error) {
+	if err := h.authorize(ctx); err != nil {
+		return FileAccess{}, ErrAuthorInactive
+	}
+	return FileAccess{}, ErrFileCapabilityUnavailable
 }
 
 // boundHandle is a ResourceAccessHandle welded to one caller (the cell
 // implementation, channel-scoped). The caller is a struct field, not a wire
 // field — structurally there is nowhere to self-report it.
 type boundHandle struct {
-	door   *door
-	caller actor.ActorID
+	door      *door
+	caller    actor.ActorID
+	authority capauth.Authority
+}
+
+var ErrAuthorInactive = errors.New("accessdoor: author inactive or stale")
+
+// authorize is the door's one complete verdict, run on every call. A handle
+// without an authority is not a trusted handle — it is a broken one.
+func (h boundHandle) authorize(ctx context.Context) error {
+	if h.authority == nil {
+		return ErrAuthorInactive
+	}
+	return h.authority.Admit()
 }
 
 // ErrCreateViaInvoke is the resource face's "create 单入口" enforcement
@@ -109,26 +136,28 @@ type boundHandle struct {
 var ErrCreateViaInvoke = fmt.Errorf("%w: op=create must use the Create method, not Invoke (资源面 create 单入口)", ErrMalformed)
 
 // Invoke runs ingress (structure → ErrMalformed), then the create单入口 gate,
-// then the day-1 Ops-overreach judgment (→ access_denied verdict), then the
-// decision tree under the welded caller. The rejection layers stay distinct:
-// a structural fault is a Go error before anything resolves; overreach is a
-// verdict.
-func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
-	if err := ingress(op, id, args, grant); err != nil {
+// then the decision tree under the welded caller. The rejection layers stay
+// distinct: a structural fault is a Go error before anything resolves; an
+// authorization failure is a verdict.
+func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
+	if err := h.authorize(ctx); err != nil {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
+	if err := ingress(op, id, args); err != nil {
 		return Outcome{}, err
 	}
 	if op == access.OpCreate {
 		return Outcome{}, ErrCreateViaInvoke
 	}
-	if over, ok := day1OpsOverreach(op, grant); ok && over {
-		return Outcome{RejectReason: access.AccessDenied}, nil
-	}
-	return h.door.invoke(ctx, h.caller, op, id, args, grant)
+	return h.door.invoke(ctx, h.caller, op, id, args)
 }
 
 // Create runs the create-specific ingress (structure → ErrMalformed), then
 // the create decision tree under the welded caller.
 func (h boundHandle) Create(ctx context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error) {
+	if err := h.authorize(ctx); err != nil {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
 	if err := ingressCreate(id, spec, initial); err != nil {
 		return Outcome{}, err
 	}
@@ -137,6 +166,9 @@ func (h boundHandle) Create(ctx context.Context, id resource.ResourceID, spec re
 
 // Stat runs the read-face projection under the welded caller.
 func (h boundHandle) Stat(ctx context.Context, id resource.ResourceID) (StatResult, error) {
+	if err := h.authorize(ctx); err != nil {
+		return StatResult{Reject: QueryNotFound}, nil
+	}
 	if err := checkResourceID(id); err != nil {
 		return StatResult{}, err
 	}
@@ -145,43 +177,92 @@ func (h boundHandle) Stat(ctx context.Context, id resource.ResourceID) (StatResu
 
 // List runs the read-face pagination under the welded caller.
 func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
+	if err := h.authorize(ctx); err != nil {
+		return ListPage{}, ErrAuthorInactive
+	}
 	return h.door.list(ctx, h.caller, q)
 }
 
 // AccessMinter is the door's ONE outward face (mirroring harness.Minter's
-// discipline: New hands out only a Minter, the bare door stays sealed). It has two
-// mint faces, one per scope:
-//   - Mint welds a caller for the channel-scoped tree — the door is already bound
-//     to its channel/Registry via Deps, and R authorization needs no kind, so one
-//     parameter suffices. Its return type is the WIDE resource face
-//     (ResourceAccessHandle, §3.1) — the channel-scoped locus is where
+// discipline: New hands out only a Minter, the bare door stays sealed). It has
+// two mint faces, one per scope:
+//   - MintAuthority welds a caller for the channel-scoped tree — the door is
+//     already bound to its channel/Registry via Deps, and R authorization needs
+//     no kind, so one parameter suffices. Its return type is the WIDE resource
+//     face (ResourceAccessHandle, §3.1) — the channel-scoped locus is where
 //     Create/Stat/List live;
-//   - MintState welds an owner for the actor-scoped (collapsed) branch. It is the
-//     injection-point contract handed to the downstream: platform draws an
-//     owner-welded handle from here when it wires caps — runtime defines the
-//     contract, WHEN/HOW the downstream wraps it (liveAccess) is the downstream's
-//     concern. Its return type stays the NARROW AccessHandle (Invoke only) — the
+//   - MintStateAuthority welds an owner for the actor-scoped (collapsed)
+//     branch. Its return type stays the NARROW AccessHandle (Invoke only) — the
 //     scope law itself: there is no kind/R/membership at this locus for
 //     Create/Stat/List to mean anything, so the interface does not offer them
-//     (§3.2's "不实现空方法" red line).
+//     (§3.2's "不实现空方法" red line). The state ORGAN (memstate.go) is its
+//     one caller: backing selection happens there, never at an injection point.
+//
+// The door mints against a LIVE authority and nothing else. The returned handle
+// runs that authority's one complete verdict at the door on every call, which
+// is what lets one shell serve a local body for its whole term and a remote
+// ingress for one operation. There is no admitted-snapshot mint here: the door
+// is the only place with a right to judge access, so it never accepts someone
+// else's verdict as input.
 type AccessMinter interface {
-	Mint(caller actor.ActorID) ResourceAccessHandle
-	MintState(owner actor.ActorID) AccessHandle
+	MintAuthority(capauth.Authority) ResourceAccessHandle
+	MintStateAuthority(capauth.Authority) AccessHandle
 }
 
 type minter struct{ door *door }
 
-// Mint welds caller onto the door and returns a resource-face handle.
-// Deterministic and cheap; admission points may Mint per-caller freely.
-func (m *minter) Mint(caller actor.ActorID) ResourceAccessHandle {
-	return boundHandle{door: m.door, caller: caller}
+func (m *minter) MintAuthority(authority capauth.Authority) ResourceAccessHandle {
+	if authority == nil || authority.ActorID() == "" {
+		return rejectedResourceHandle{err: ErrAuthorInactive}
+	}
+	return boundHandle{
+		door:      m.door,
+		caller:    authority.ActorID(),
+		authority: authority,
+	}
 }
 
-// MintState welds owner onto the door and returns an actor-scoped handle. Same
-// door, same AccessHandle contract as Mint — the owner is the namespace coordinate
-// (non-ambient: welded here, never read off the wire).
-func (m *minter) MintState(owner actor.ActorID) AccessHandle {
-	return boundStateHandle{door: m.door, owner: owner}
+func (m *minter) MintStateAuthority(authority capauth.Authority) AccessHandle {
+	if authority == nil || authority.ActorID() == "" {
+		return rejectedStateHandle{err: ErrAuthorInactive}
+	}
+	return boundStateHandle{
+		door:      m.door,
+		owner:     authority.ActorID(),
+		authority: authority,
+	}
+}
+
+type rejectedStateHandle struct{ err error }
+
+func (h rejectedStateHandle) Invoke(
+	context.Context,
+	access.Operation,
+	resource.ResourceID,
+	[]byte,
+) (Outcome, error) {
+	return Outcome{}, h.err
+}
+
+type rejectedResourceHandle struct{ err error }
+
+func (h rejectedResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
+	return Outcome{}, h.err
+}
+func (h rejectedResourceHandle) Create(context.Context, resource.ResourceID, CreateSpec, []byte) (Outcome, error) {
+	return Outcome{}, h.err
+}
+func (h rejectedResourceHandle) Stat(context.Context, resource.ResourceID) (StatResult, error) {
+	return StatResult{}, h.err
+}
+func (h rejectedResourceHandle) List(context.Context, ListQuery) (ListPage, error) {
+	return ListPage{}, h.err
+}
+func (h rejectedResourceHandle) Open(context.Context, resource.ResourceID, access.Operation) (FileAccess, Outcome, error) {
+	return FileAccess{}, Outcome{}, h.err
+}
+func (h rejectedResourceHandle) Redeem(context.Context, FileRoute) (FileAccess, error) {
+	return FileAccess{}, h.err
 }
 
 // New assembles the door from Deps and returns a Minter — never the bare door.
@@ -189,11 +270,19 @@ func (m *minter) MintState(owner actor.ActorID) AccessHandle {
 // day-1 KindKV driver must be present (op=create hardcodes KindKV, so a missing
 // one would otherwise surface only when someone first creates).
 func New(deps Deps) (AccessMinter, error) {
-	if deps.Registry == nil || deps.Drivers == nil || deps.Membership == nil || deps.State == nil {
-		return nil, errors.New("accessdoor: Deps incomplete")
+	minter, _, err := NewAssembly(deps)
+	return minter, err
+}
+
+// NewAssembly constructs the caller-facing minter and the asynchronous
+// completion face over the same door and therefore the same resource gate.
+func NewAssembly(deps Deps) (AccessMinter, ResourceCompletion, error) {
+	if deps.Registry == nil || deps.Drivers == nil || deps.Authority == nil || deps.State == nil {
+		return nil, nil, errors.New("accessdoor: Deps incomplete")
 	}
 	if deps.Drivers[resourcespec.KindKV] == nil {
-		return nil, errors.New("accessdoor: KindKV driver missing")
+		return nil, nil, errors.New("accessdoor: KindKV driver missing")
 	}
-	return &minter{door: &door{deps: deps}}, nil
+	d := &door{deps: deps}
+	return &minter{door: d}, resourceCompletion{door: d}, nil
 }

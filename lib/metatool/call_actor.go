@@ -23,11 +23,12 @@ Workflow:
   4. Call call_actor.
 
 Result shapes (fast-path, default):
-  - Short calls (the downstream finishes within ~15s): the response payload
-    arrives INLINE in your tool result, exactly as if it were synchronous.
+  - Short calls (the downstream finishes within the fast-path window, ~15s by
+    default): the response payload arrives INLINE in your tool result, exactly
+    as if it were synchronous.
     On failure the result is {ok:false,error:{code,message,recovery_hint,detail?}}
     where code is the actor-CLI closed set.
-  - Long calls (still running after ~15s): you get an ACK instead —
+  - Long calls (still running past the fast-path window): you get an ACK instead —
     {status:"accepted", request_id, est_wait_ms, guidance, to_wait, if_not_waiting}.
     The call keeps running. To collect it, call await_result(request_id) to block,
     or do other work — the result will return on its own as a NEW message
@@ -36,7 +37,7 @@ Result shapes (fast-path, default):
 
 wait parameter:
   - omit / true (default behaviour above is bounded; pass wait=true for sync):
-    wait=true waits up to the type's full timeout before degrading to an ack.
+    wait=true waits up to the request deadline before degrading to an ack.
   - wait=false: returns the ack IMMEDIATELY without waiting at all. Use this to
     FAN OUT several calls in parallel, then await_result / cancel each as needed.
 `),
@@ -46,7 +47,7 @@ wait parameter:
     "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs or agent:research-assistant. Look up via list_actors."},
     "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimi.command. MUST be a request-allowed type for the chosen actor."},
     "payload": {"type": "object", "description": "Type-specific payload. Shape is per-adapter convention; consult list_actors output for hints."},
-    "wait": {"type": "boolean", "description": "Optional. Omit for bounded fast-path (final inline within ~15s, else ack). true = wait up to the type timeout (sync). false = return ack immediately without waiting (fan-out)."}
+    "wait": {"type": "boolean", "description": "Optional. Omit for bounded fast-path (final inline within ~15s, else ack). true = wait up to the request deadline (sync). false = return ack immediately without waiting (fan-out)."}
   },
   "required": ["actor_id", "type"]
 }`),
@@ -104,10 +105,7 @@ func ExecuteCallActor(ctx context.Context, params json.RawMessage, x *Exec, rc R
 		EnvelopeType:   p.Type,
 		HandlerActorID: p.ActorID,
 		Payload:        payload,
-		// Timeout left unset: the call is the one path whose per-type deadline
-		// can vary (a real business round-trip, unlike the fixed introspection
-		// queries), so ExecuteRequest resolves it through the configured
-		// TimeoutResolver (nil = DefaultTimeout).
+		// Timeout left unset: call_actor uses the default request deadline.
 		WaitMode: mode,
 	})
 	return NormalizeCallActorResult(result, p.ActorID, p.Type)

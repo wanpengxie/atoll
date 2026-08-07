@@ -14,14 +14,46 @@ const (
 	// membership composed with volatile liveness); other sites reference it
 	// rather than restating it.
 	QueryList = "actor.list"
+	// QueryStatus returns the system actor's read-time presence view for one id.
+	QueryStatus = "actor.status"
 )
 
-// NOTE: "Is this actor serviceable for one request right now" is NOT a pull-side
-// query — it remains the OUTCOME of send→terminal (the substrate down edge
-// materialises receiver_unavailable when the actor is gone). Device liveness is
-// answered by the push-side obs axis below (ObsDevicePresence), the ONE
-// authoritative channel for that fact — a prior pull-side self-answer for the
-// same fact was retired (P14) rather than left standing as a second channel.
+// NOTE: actor.status is advisory presence, not a serviceability promise.
+// Serviceability remains the OUTCOME of send→terminal.
+
+type StatusRequest struct {
+	ActorID string `json:"actor_id"`
+}
+
+func ParseStatusRequest(payload []byte) (StatusRequest, error) {
+	var req StatusRequest
+	err := json.Unmarshal(payload, &req)
+	if err == nil && req.ActorID == "" {
+		err = errMissingActorID
+	}
+	return req, err
+}
+
+type statusRequestError string
+
+func (e statusRequestError) Error() string { return string(e) }
+
+const errMissingActorID statusRequestError = "actor_id required"
+
+type StatusTestimony struct {
+	ReceivedAt         int64           `json:"received_at"`
+	StaleFromPriorLife bool            `json:"stale_from_prior_life,omitempty"`
+	Device             *DevicePresence `json:"device,omitempty"`
+	ValueBase64        string          `json:"value_b64,omitempty"`
+}
+
+type Status struct {
+	ActorID  string                     `json:"actor_id"`
+	Member   bool                       `json:"member"`
+	Present  bool                       `json:"present"`
+	UptimeMs int64                      `json:"uptime_ms,omitempty"`
+	L3       map[string]StatusTestimony `json:"l3,omitempty"`
+}
 
 // DescribeRequest is the actor.describe request payload. Empty = the full
 // self-answer (Describe); Type set = the single-type answer (DescribeType).
@@ -123,7 +155,6 @@ func ParseDescribeRequest(payload []byte) (DescribeRequest, error) {
 type CatalogEntry struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
-	Binding string `json:"binding,omitempty"`
 	Present bool   `json:"present"`
 	// UptimeMs is the elapsed time since the substrate bound the live instance
 	// (now - StartedAt), derived by the system actor from the substrate's

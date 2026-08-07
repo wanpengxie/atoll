@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
@@ -27,6 +28,17 @@ type StoredRow struct {
 type AppendResult struct {
 	// Seq is the store-allocated monotonic position (messages.seq).
 	Seq int64
+	// Replayed means no row was appended: a client idempotency key matched an
+	// existing row carrying the same canonical submission fingerprint.
+	Replayed bool
+}
+
+// AppendMetadata carries persistence-only material alongside an envelope.
+// It never enters protocol/message.Envelope. ClientFingerprint is computed at
+// the shell ingress from the raw client submission before harness defaults are
+// applied, then stored atomically with the message row.
+type AppendMetadata struct {
+	ClientFingerprint string
 }
 
 // AppendError is the typed error returned for protocol-level rejects inside
@@ -85,7 +97,7 @@ const (
 //     because it depends on message-kind semantics the store does not interpret;
 //     the store persists it verbatim (it stays the dumb persister).
 type MessageLog interface {
-	Append(ctx context.Context, env *message.Envelope, isTerminal bool) (AppendResult, error)
+	Append(ctx context.Context, env *message.Envelope, isTerminal bool, metadata AppendMetadata) (AppendResult, error)
 
 	// FindByID returns the stored row for id (seq / is_terminal / envelope).
 	// No channelID parameter: the store is bound to one channel at OpenChannel,
@@ -110,6 +122,9 @@ type MessageLog interface {
 type MessageQuery interface {
 	// MaxSeq is the channel's highest committed seq.
 	MaxSeq(ctx context.Context) (int64, error)
+	// LatestBySenderAndType returns the latest row, ordered by the store's
+	// monotonic seq, for one welded sender and message type.
+	LatestBySenderAndType(ctx context.Context, sender actor.ActorID, typ string) (StoredRow, bool, error)
 	// ReadAfterSeq returns envelopes with seq > afterSeq, in ascending seq order.
 	ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]StoredRow, error)
 	// OpenRequestsForActor returns ALL open requests addressed to actorID.
@@ -128,6 +143,12 @@ type MessageQuery interface {
 	// this set with substrate liveness to find absent receivers, then drains each
 	// via OpenRequestsForActor. Unbounded by construction (same closure law).
 	DistinctOpenRequestReceivers(ctx context.Context) ([]actor.ActorID, error)
+}
+
+// VisibleMessageQuery is the reader-scoped history face. Raw MessageQuery is
+// retained for the delivery pump and audit internals.
+type VisibleMessageQuery interface {
+	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]StoredRow, int64, error)
 }
 
 // RequestLookup recovers an original request envelope by id.

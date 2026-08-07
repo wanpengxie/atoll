@@ -7,7 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// stepNormalize default-fills audience / visibility / kind / correlation_id /
+// stepNormalize canonicalizes audience and default-fills visibility / correlation_id /
 // payload baseline, plus a time-relation guard run AFTER the default-fill
 // phase:
 //
@@ -33,8 +33,12 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 	// — Chain.Write right before Log.Append — so normalize does not touch it;
 	// any caller-supplied value is overwritten there.
 
-	// audience is caller-owned. nil ≠ empty for downstream step 5 audience
-	// cardinality check: nil treated as "empty" → harness_audience_empty.
+	// Event audience is optional but has exactly one wire/storage representation:
+	// [] rather than null. Request/response nil remains empty for the downstream
+	// cardinality rejection.
+	if env.Kind == message.KindEvent && env.Audience == nil {
+		env.Audience = message.Audience{}
+	}
 
 	// visibility default → public.
 	if env.Visibility == "" {
@@ -44,10 +48,8 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 	// There is deliberately NO "default kind" fill here. stepEnvelopeShape
 	// (runs BEFORE normalize, chain.go) rejects env.Kind == "" with
 	// field_missing and short-circuits, so a kind-fill branch would be dead
-	// code. kind is sender-required; the core-type table's kind field is NOT
-	// a fill-default but a CONSTRAINT enforced in stepKindAndAudience (a
-	// non-overridable core type's kind must equal its canonical kind). See
-	// CoreTypeRule + stepKindAndAudience.
+	// code. kind is sender-required and is a pure CONSTRAINT, not a normalize
+	// fill. See stepEnvelopeShape + stepKindAndAudience.
 
 	// correlation_id default: a self-rooted fallback — an envelope with no
 	// correlation_id roots a new correlation tree at its own id.

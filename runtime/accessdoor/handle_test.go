@@ -1,10 +1,12 @@
 package accessdoor
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
@@ -12,10 +14,10 @@ import (
 // missing day-1 KindKV driver — never deferring the failure to first op.
 func TestNewFailFast(t *testing.T) {
 	full := Deps{
-		Registry:   &fakeRegistry{},
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Membership: &fakeMembership{},
-		State:      &fakeStateStore{},
+		Registry:  &fakeRegistry{},
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: &fakeMembership{},
+		State:     &fakeStateStore{},
 	}
 
 	t.Run("complete Deps assembles", func(t *testing.T) {
@@ -32,9 +34,9 @@ func TestNewFailFast(t *testing.T) {
 		}
 	})
 
-	t.Run("missing Membership", func(t *testing.T) {
+	t.Run("missing Authority", func(t *testing.T) {
 		d := full
-		d.Membership = nil
+		d.Authority = nil
 		if _, err := New(d); err == nil {
 			t.Fatalf("expected error for nil Membership")
 		}
@@ -65,21 +67,34 @@ func TestNewFailFast(t *testing.T) {
 	})
 }
 
+func TestAccessRejectsInvalidAdmission(t *testing.T) {
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
+	authority := &fakeMembership{isMember: true}
+	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: authority, State: &fakeStateStore{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := m.MintAuthority(nil).Invoke(context.Background(), access.OpRead, "r", nil)
+	if !errors.Is(err, ErrAuthorInactive) {
+		t.Fatalf("inactive author outcome=(%+v,%v)", out, err)
+	}
+}
+
 // TestMintedHandleRunsFullPath: a handle from the sealed Minter runs ingress +
-// overreach + tree, and welds its caller into the create/authorization checks.
+// tree, and welds its caller into the create/authorization checks.
 func TestMintedHandleRunsFullPath(t *testing.T) {
 	reg := &fakeRegistry{}
 	drv := &fakeDriver{}
 	mem := &fakeMembership{isMember: true}
-	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Membership: mem, State: &fakeStateStore{}})
+	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Authority: mem, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h := m.Mint("a")
+	h := m.MintAuthority(accessAuthority("a"))
 
-	// malformed (set without grant) → Go error, tree never reached.
-	if _, err := h.Invoke(t.Context(), access.OpSet, "r1", nil, nil); err == nil {
-		t.Fatalf("expected ErrMalformed for set with nil grant")
+	// malformed (out-of-set op) → Go error, tree never reached.
+	if _, err := h.Invoke(t.Context(), access.Operation("bogus"), "r1", nil); err == nil {
+		t.Fatalf("expected ErrMalformed for an out-of-set op")
 	}
 	if len(reg.createCalls) != 0 {
 		t.Fatalf("no store call should occur on a malformed request")
@@ -88,7 +103,7 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	// a bare op=create through Invoke is rejected outright (期11 §3.1 "create
 	// 单入口") — the resource face has exactly one create locus, the Create
 	// method below.
-	if _, err := h.Invoke(t.Context(), access.OpCreate, "r1", []byte("v"), nil); !errors.Is(err, ErrCreateViaInvoke) {
+	if _, err := h.Invoke(t.Context(), access.OpCreate, "r1", []byte("v")); !errors.Is(err, ErrCreateViaInvoke) {
 		t.Fatalf("expected ErrCreateViaInvoke for a bare op=create through Invoke, got %v", err)
 	}
 	if len(reg.createCalls) != 0 {
@@ -101,5 +116,8 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	mustAccept(t, out, err)
 	if len(reg.createCalls) != 1 || reg.createCalls[0].creator != "a" {
 		t.Fatalf("create call = %+v", reg.createCalls)
+	}
+	if _, _, err := h.Open(t.Context(), resource.ResourceID("file:server"), access.OpRead); !errors.Is(err, ErrFileCapabilityUnavailable) {
+		t.Fatalf("server file face err=%v, want capability unavailable", err)
 	}
 }

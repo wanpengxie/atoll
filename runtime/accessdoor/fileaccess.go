@@ -2,6 +2,7 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 
@@ -10,35 +11,27 @@ import (
 )
 
 // FileRoute is the file-kind byte-access authorization PRODUCT (期11 spec §5
-// item 0: "门单方裁决产物即'本地句柄 or lane stream 坐标'") carried on an
-// accepted Outcome for OpRead/OpWrite(file) and Create(file,
-// with_content=true) — NEVER bytes, NEVER a coord (§8.1/§8.9 red lines: the
-// door hands out an authorization, not a storage handle). Local: the caller
-// is same-daemon as the file's placement — it must resolve Token into its
-// own local handle via the daemon-side control-RPC (ResolveCoord, never the
-// lane). !Local: the caller redeems Token by opening a stream on ITS OWN
-// lane session (§5 item 0's "consumer 拿到的是字节流,不是可离线兑现的票据"
-// — Token is scoped to the requesting connection: a DIFFERENT daemon
-// presenting the same Token is rejected, see platform/internal/link's
-// sender-auth check). Mode echoes the requested direction so a generic
-// caller need not re-derive it. ReservationID is set ONLY for
-// Create(with_content=true)'s write route — the daemon side must fire
-// Committed(ReservationID) after its local fsync+rename (§1.7), never for a
-// plain OpWrite on an already-existing row (§3.5: "不走create-outbox、不发
+// item 0: "门单方裁决产物") carried on an accepted Outcome for
+// OpRead/OpWrite(file) and Create(file, with_content=true) — NEVER bytes,
+// NEVER a coord (§8.1/§8.9 red lines: the door hands out an authorization, not
+// a storage handle). Every route is same-daemon: the caller redeems Token into
+// a local handle via the daemon-side control-RPC (ResolveCoord). A caller whose
+// storage host is not the file's placement daemon gets no route at all — the
+// door refuses with ErrFileCapabilityUnavailable (see resolveFileRoute), since
+// this deployment has no daemon-to-daemon byte transport. Mode echoes the
+// requested direction so a generic caller need not re-derive it. ReservationID
+// is set ONLY for Create(with_content=true)'s write route — the daemon side
+// must fire Committed(ReservationID) after its local fsync+rename (§1.7), never
+// for a plain OpWrite on an already-existing row (§3.5: "不走create-outbox、不发
 // Committed").
 type FileRoute struct {
-	Local         bool
 	Token         string
 	Mode          access.Operation
 	ReservationID string
 	// Dir is the byte-shape bit the door lifts off ResourceMeta.Dir (期11
 	// 丁12): the resource being opened is directory-shaped (a workspace), so
 	// its redemption hands out an os.Root SUBTREE lease (LocalDirHandle), NOT
-	// the single-file staging→rename write handle (§3.9'). The door only ever
-	// sets Dir on a Local route — a cross-host directory lease is deferred
-	// (债② federation, resolveFileRoute rejects dir && !Local outright): a dir
-	// lease is a whole-tree os.Root capability that does not serialize onto the
-	// lane's single byte-pipe.
+	// the single-file staging→rename write handle (§3.9').
 	Dir bool
 }
 
@@ -53,8 +46,9 @@ type FileRoute struct {
 // os.* call lands IMMEDIATELY in the real subtree (the design's "无 Commit
 // 边界——每个 os 操作立即生效"), because a directory is not staged-then-renamed
 // as one atomic blob. Deliberately spelled in os.File / os.FileMode /
-// os.FileInfo (NOT os.Root): the os.Root TYPE token is confined to cmd/daemon
-// by the server-zero-storage archtest, so the interface a同信任域 caller holds
+// os.FileInfo (NOT os.Root): the os.Root TYPE token is confined to
+// drivers/devicehost by the server-zero-storage archtest, so the interface
+// a同信任域 caller holds
 // must not name it — only its methods, satisfied structurally.
 type LocalDirHandle interface {
 	Create(name string) (*os.File, error)
@@ -112,33 +106,34 @@ type LocalFile struct {
 	Dir   LocalDirHandle
 }
 
-// FileAccess is the file byte-access ADT (期11 spec §3.9': "Open(ctx, id,
-// mode) (FileAccess, error) — FileAccess 是 ADT {LocalHandle | Stream}").
-// Exactly one of Local/Stream is populated on a successfully-redeemed route;
-// both nil means the redemption itself failed (see the error return
-// alongside it). Stream is a plain io.ReadWriteCloser riding the lane —
-// reading it drains bytes (target daemon → consumer, EOF = done); writing it
-// sends bytes (consumer → target daemon staging); Close ends the transfer
-// either way. It is NEVER a bearer token — it is a live, per-connection
-// byte-pipe, unusable once this connection or the request context ends.
+// FileAccess is the file byte-access product of a successfully-redeemed route
+// (期11 spec §3.9'). Local is populated on success; nil means the redemption
+// itself failed (see the error return alongside it). It stays a struct rather
+// than a bare *LocalFile so a second arm — a remote byte pipe, if a
+// multi-daemon deployment ever needs one — is an additive field, not a
+// signature change across every Proc author's call site.
 type FileAccess struct {
-	Local  *LocalFile
-	Stream io.ReadWriteCloser
+	Local *LocalFile
 }
 
 // FileOpener is the file byte-access capability's OWN interface — deliberately
 // SEPARATE from ResourceAccessHandle's pinned four methods (期11 spec §3.1:
 // "Open…" is 词表层糖名, not a fifth resource-face method; growing the four-
 // method table would violate §3.1's own closed-set pin and the three-avatar-
-// parity red line those four specifically bind). Only avatars that can
-// actually redeem a FileRoute into live bytes implement it — day-1 that is
-// the daemon-hosted wire proxy (platform/internal/link's remoteResourceHandle)
-// alone: a home-hosted caller (boundHandle/liveResourceAccess, i.e. human/
-// sysactor day-1) has no daemon-local redemption path of its own and is
-// explicitly deferred alongside the rest of the human resource face (债②,
-// §3.9 item 9) — lib/actorbase's Open sugar type-asserts for this interface
-// and answers ErrUnsupported when the underlying avatar lacks it, the same
-// nil-arm discipline the engine already applies elsewhere.
+// parity red line those four specifically bind), but EMBEDDED into
+// ResourceAccessHandle unconditionally (see that interface, above) — every
+// avatar structurally implements it, day-1 included. There is no optional
+// type-assertion double-wrap (a "does this avatar have a file face" runtime
+// check) anywhere on the call path: S10's "能力随放置、调用面无条件统一"
+// decision made the FACE universal and pushed the day-1 gap onto CAPABILITY
+// instead — boundHandle (a home-hosted caller: human/sysactor day-1, no
+// daemon-local redemption path) implements both methods honestly by
+// returning ErrFileCapabilityUnavailable (below boundHandle.Open/Redeem in
+// handle.go), while the daemon-hosted wire proxy
+// (platform/internal/link's remoteResourceHandle) actually redeems bytes.
+// lib/actorbase's Open/CreateFile sugar therefore calls straight through
+// (no assertion, no nil-arm dance beyond "is there a resource handle at
+// all") — see lib/actorbase/engine.go's resourceAdapter.Open/CreateFile.
 type FileOpener interface {
 	// Open runs OpRead/OpWrite(file) via Invoke and redeems the resulting
 	// accepted Outcome's Route into a live FileAccess in one call — the
@@ -151,20 +146,18 @@ type FileOpener interface {
 	Redeem(ctx context.Context, route FileRoute) (FileAccess, error)
 }
 
-// LaneControl is the door's file-byte-route minting Dep (期11 spec §5 item
-// 0's "门单方裁决产物"): having decided a file OpRead/OpWrite or
-// with_content create's byte access is either same-daemon (Local) or
-// cross-host (lane), the door mints an opaque, single-use, per-connection
-// Token — never a coord, never bound into any wire-visible struct beyond
-// FileRoute's own opaque field — and hands the REDEMPTION mechanics to
-// whichever party owns the live connections (platform assembly, mirroring
-// StorageControl's own "this package has no notion of a link/wire" doc).
-// requesterDaemonID is the caller's OWN daemon host ("" for a home-hosted
-// caller — day-1 unreachable, see FileOpener's doc) — the redeeming
-// connection's identity the platform-side lane-redeem handler checks the
-// Token's issuer against (Local's own control-RPC resolve step checks
-// senderDaemonID == targetDaemonID instead, the same single mechanical
-// assertion covering both branches, see platform/internal/link's doc).
-type LaneControl interface {
-	OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (token string, err error)
+// ErrFileCapabilityUnavailable means the file call face exists on this host,
+// but no byte-plane implementation is installed there.
+var ErrFileCapabilityUnavailable = errors.New("accessdoor: capability_unavailable")
+
+// TransferControl is the door's file-byte-route minting Dep (期11 spec §5 item
+// 0's "门单方裁决产物"): having authorized a file OpRead/OpWrite or
+// with_content create, the door mints one opaque ticket — never a coord — and
+// hands the transport mechanics to whichever party owns the live connections
+// (platform assembly, mirroring StorageControl's own "this package has no
+// notion of a link/wire" doc). The ticket is read-only until expiry, so the
+// target daemon can retry a lost ResolveCoord reply; only the daemon the
+// transfer targets may resolve it (the platform-side sender-auth check).
+type TransferControl interface {
+	OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error)
 }

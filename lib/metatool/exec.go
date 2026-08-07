@@ -46,14 +46,6 @@ type Exec struct {
 	// the VOLATILE half平移 from Shell.Await's window: a per-call UX bound, NOT
 	// the durable closure deadline. Zero means metatool's 15s default.
 	FastPathWindow time.Duration
-
-	// TimeoutResolver supplies the per-(target, request-type) closure deadline
-	// when a RequestSpec leaves Timeout unset (the injection-point contract vs
-	// implementation-fill split — the consumer holding a describe cache fills
-	// it). nil, or a false ok, falls back to DefaultTimeout. The fast-path
-	// window is DERIVED from the resolved deadline (min(FastPathWindow,
-	// deadline)), never a separate per-type knob.
-	TimeoutResolver func(target actor.ActorID, reqType string) (time.Duration, bool)
 }
 
 // CallFunc is the synchronous request+await-final face the introspection
@@ -73,14 +65,15 @@ func (x *Exec) now() time.Time {
 
 // buildRequestSpec is the ONE adapter (复审 P2-2) from a metatool RequestSpec +
 // the turn's RuntimeContext to a behavior.RequestSpec — the four elements the
-// seven tools share (parent request id, the resolved closure deadline via the
-// timeout resolver, and — returned alongside for the ack/window — the deadline
-// the wait mode and fast-path window are derived from) are resolved here once,
-// never re-拼 per tool. It returns the behavior spec plus the resolved deadline.
+// seven tools share (parent request id, the closure deadline resolved from
+// spec.Timeout or DefaultTimeout, and — returned alongside for the ack/window —
+// the deadline the wait mode and fast-path window are derived from) are resolved
+// here once, never re-拼 per tool. It returns the behavior spec plus the resolved
+// deadline.
 func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.RequestSpec, time.Duration) {
 	deadline := spec.Timeout
 	if deadline <= 0 {
-		deadline = x.resolveTimeout(actor.ActorID(spec.HandlerActorID), spec.EnvelopeType)
+		deadline = DefaultTimeout
 	}
 	expiresAt := x.now().Add(deadline).UnixMilli()
 	return behavior.RequestSpec{
@@ -95,18 +88,6 @@ func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.R
 		CorrelationID: behavior.CorrelationID(rc.Trigger.CorrelationID, rc.Trigger.Envelope.ID),
 		ExpiresAt:     &expiresAt,
 	}, deadline
-}
-
-// resolveTimeout answers the closure deadline for a request whose spec left
-// Timeout unset: the configured TimeoutResolver's per-(target, type) value, or
-// DefaultTimeout when unconfigured / it declines.
-func (x *Exec) resolveTimeout(target actor.ActorID, reqType string) time.Duration {
-	if x.TimeoutResolver != nil {
-		if d, ok := x.TimeoutResolver(target, reqType); ok && d > 0 {
-			return d
-		}
-	}
-	return DefaultTimeout
 }
 
 // resolveWindow computes the inline wait window from the wait mode + the
@@ -168,41 +149,73 @@ func (x *Exec) ExecuteRequest(ctx context.Context, rc RuntimeContext, spec Reque
 	return x.ackResult(spec.ToolName, ack)
 }
 
-// CallSyncResult drives a synchronous introspection query through the Call face
-// (transient sys.Call, never a cross-turn job) and renders its FINAL response as a
-// ResultValue. Used by describe_actor / describe_type.
-func (x *Exec) CallSyncResult(ctx context.Context, rc RuntimeContext, spec RequestSpec) ResultValue {
+// callSyncFinal is the shared head of the two CallSync* faces: drive a
+// synchronous query through the Call face (transient sys.Call, never a
+// cross-turn job) and hand back the FINAL envelope, or the machinery failure
+// already rendered in the actor-CLI closed error shape. timeoutHint is
+// caller-supplied because it is CONTEXT, not drift: describe-class tools
+// point the LLM at list_actors, while list_actors itself cannot
+// self-reference and points at the system actor instead.
+func (x *Exec) callSyncFinal(ctx context.Context, rc RuntimeContext, spec RequestSpec, timeoutHint string) (*message.Envelope, *ResultValue) {
 	bspec, deadline := x.buildRequestSpec(rc, spec)
 	window := ResolveFastPathWindow(deadline, DefaultTimeout, true)
 	finalEnv, ok, err := x.Call(ctx, bspec, window)
 	if err != nil {
-		return NewError(spec.ToolName, InternalError,
+		rv := NewError(spec.ToolName, InternalError,
 			"channel request "+spec.EnvelopeType+" failed: "+err.Error(),
 			"Inspect adapter/link status and retry", nil)
+		return nil, &rv
 	}
 	if !ok || finalEnv == nil {
-		return NewError(spec.ToolName, Timeout,
+		rv := NewError(spec.ToolName, Timeout,
 			spec.EnvelopeType+" did not return a result in time",
-			"Retry, or call list_actors to confirm the actor is present", nil)
+			timeoutHint, nil)
+		return nil, &rv
+	}
+	return finalEnv, nil
+}
+
+// CallSyncResult drives a synchronous introspection query and renders its
+// FINAL response as a ResultValue. Used by describe_actor / describe_type
+// (both wrap the result in NormalizeCallActorResult — stage two of the
+// render→normalize pipeline).
+func (x *Exec) CallSyncResult(ctx context.Context, rc RuntimeContext, spec RequestSpec) ResultValue {
+	finalEnv, failure := x.callSyncFinal(ctx, rc, spec,
+		"Retry, or call list_actors to confirm the actor is present")
+	if failure != nil {
+		return *failure
 	}
 	rv, _ := ResultFromResponse(spec.ToolName, *finalEnv)
 	return rv
 }
 
 // CallSyncRaw drives a synchronous introspection query and returns the FINAL
-// response payload as raw JSON (list_actors' live-catalog path). A failed /
-// missing final yields ok=false.
-func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestSpec) (rawPayload []byte, ok bool) {
-	bspec, deadline := x.buildRequestSpec(rc, spec)
-	window := ResolveFastPathWindow(deadline, DefaultTimeout, true)
-	finalEnv, ok, err := x.Call(ctx, bspec, window)
-	if err != nil || !ok || finalEnv == nil || finalEnv.Kind != message.KindResponse {
-		return nil, false
+// response payload as raw JSON (list_actors' live-catalog path). On failure it
+// returns a ready actor-CLI closed-set error carrying the failure's REAL
+// category (CallSyncResult's own distinctions, never one collapsed bucket): a
+// call/wire error or an illegal non-response final → internal_error; no final
+// within the window → timeout; an actor-returned failure → the terminal-reason
+// mapping (NormalizeCallActorResult's law). nil failure = rawPayload is the
+// live final payload.
+func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestSpec) (rawPayload []byte, failure *ResultValue) {
+	// Timeout hint deliberately differs from CallSyncResult's: this face's one
+	// caller IS list_actors, which cannot tell the LLM to call list_actors.
+	finalEnv, headFailure := x.callSyncFinal(ctx, rc, spec,
+		"Retry, or check that the system actor is present")
+	if headFailure != nil {
+		return nil, headFailure
 	}
-	if ResponseFailureReason(finalEnv.Payload) != "" {
-		return nil, false
+	if finalEnv.Kind != message.KindResponse {
+		rv := NewError(spec.ToolName, InternalError,
+			spec.EnvelopeType+" final envelope is not a response (kind="+string(finalEnv.Kind)+")",
+			"Inspect adapter logs and retry", nil)
+		return nil, &rv
 	}
-	return finalEnv.Payload, true
+	if reason := ResponseFailureReason(finalEnv.Payload); reason != "" {
+		rv := TerminalFailureToActorCLI(spec.ToolName, spec.HandlerActorID, spec.EnvelopeType, reason, nil)
+		return nil, &rv
+	}
+	return finalEnv.Payload, nil
 }
 
 // ackResult renders the immediate ack with the standard collect-it guidance.
@@ -210,10 +223,6 @@ func (x *Exec) ackResult(toolName string, ack AckDescriptor) ResultValue {
 	id := ack.RequestID.String()
 	ack.Guidance = "Accepted. To wait, call await_result(request_id=" + id +
 		"). If you do not wait, the result returns as a new message (parent_id=" + id + ")."
-	ack.ToWait = ToWaitHint{
-		Tool:   "await_result",
-		Params: map[string]any{"request_id": id},
-	}
-	ack.NotWaiting = "result returns as kind=response, parent_id=" + id + " new turn trigger"
+	ack.ToWait, ack.NotWaiting = newCollectHint(id)
 	return AckResult(toolName, ack)
 }

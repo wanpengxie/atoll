@@ -7,20 +7,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
-
-// ErrOpNotInScope is the CATEGORY-ERROR class: a well-formed op that
-// does not exist in this handle's locus (op=set on an actor-scoped handle — there
-// is no R to write, and that absence IS the scope law). It is a PROTOCOL error,
-// NOT a verdict: there is no possible world in which it is authorized — even the
-// owner, the sole full-rights party, is refused — so access_denied would lie
-// about the law (it invites the caller to seek a grant that can never exist), and
-// ErrMalformed would stretch "bad wire shape" (EINVAL) over "op×locus not
-// applicable" (ENOTSUP). Three distinct caller reactions, three distinct signals:
-// fix-your-request (ErrMalformed) vs seek-grant-or-give-up (access_denied) vs
-// never-retry-never-seek-grant (ErrOpNotInScope).
-var ErrOpNotInScope = errors.New("accessdoor: operation not in this handle's scope")
 
 // boundStateHandle is an AccessHandle welded to ONE owner — the actor-scoped
 // (collapsed) implementation. It is the access-plane twin of boundHandle: same
@@ -31,50 +20,40 @@ var ErrOpNotInScope = errors.New("accessdoor: operation not in this handle's sco
 // no R query, no membership check, no DriverTable routing — the owner is the
 // namespace coordinate, welded at mint, never read off the wire.
 type boundStateHandle struct {
-	door  *door
-	owner actor.ActorID
+	door      *door
+	owner     actor.ActorID
+	authority capauth.Authority
 }
 
-// Invoke runs the actor-scoped ingress (structure → ErrMalformed / set →
-// ErrOpNotInScope), then the collapsed decision tree under the welded owner.
-// There is no day1OpsOverreach step: that narrows an op=set grant, and set does
-// not exist in this locus (ingressState rejects it before the tree).
-func (h boundStateHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
-	if err := ingressState(op, id, args, grant); err != nil {
+// Invoke runs the actor-scoped ingress (structure → ErrMalformed), then the
+// collapsed decision tree under the welded owner.
+func (h boundStateHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
+	if h.authority == nil {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
+	if err := h.authority.Admit(); err != nil {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
+	if err := ingressState(op, id, args); err != nil {
 		return Outcome{}, err
 	}
 	return h.door.invokeActorScoped(ctx, h.owner, op, id, args)
 }
 
-// ingressState is the actor-scoped ingress — the four-step decision order,
-// order pinned. It mirrors the channel-scoped ingress's structural cluster
-// but diverges on set, which is a category error here rather than a grant-bearing
-// op:
+// ingressState is the actor-scoped ingress — the SAME named checks the
+// channel-scoped ingress runs (one rule, one wording, no drift):
 //
-//	① closed set (mirror checkOperation): out of set = wire-shape fault → ErrMalformed;
-//	② ResourceID non-empty (mirror checkResourceID): → ErrMalformed;
-//	③ op=set → ErrOpNotInScope (in the closed set, but this locus has no R to
-//	   write = category error; decided BEFORE the op×shape rule and regardless of
-//	   grant shape, so a set carrying a bogus grant still reads as "not in scope",
-//	   never ErrMalformed);
-//	④ op×shape (the SAME named checks the channel-scoped ingress runs — one
-//	   rule, one wording, no drift): with set already gone, checkGrant rejects a
-//	   Grant on any remaining op, and checkArgs rejects Args on delete (by-id).
-//	   Violation → ErrMalformed.
-func ingressState(op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) error {
+//	① closed set (checkOperation): out of set = wire-shape fault → ErrMalformed;
+//	② ResourceID non-empty (checkResourceID): → ErrMalformed;
+//	③ op×shape (checkArgs): delete is by-id, carries no Args. → ErrMalformed.
+func ingressState(op access.Operation, id resource.ResourceID, args []byte) error {
 	if err := checkOperation(op); err != nil { // ①
 		return err
 	}
 	if err := checkResourceID(id); err != nil { // ②
 		return err
 	}
-	if op == access.OpSet { // ③
-		return ErrOpNotInScope
-	}
-	if err := checkGrant(op, grant); err != nil { // ④ — set unreachable here, so this is the "no grant on this op" half
-		return err
-	}
-	return checkArgs(op, args) // ④ — delete is by-id
+	return checkArgs(op, args) // ③ — delete is by-id
 }
 
 // executeFailure maps an EXECUTE-stage failure to the right error channel —
@@ -99,6 +78,9 @@ func executeFailure(ctx context.Context, err error) (Outcome, error) {
 func createVerdict(ctx context.Context, err error) (Outcome, error) {
 	if errors.Is(err, resourcespec.ErrAlreadyExists) {
 		return Outcome{RejectReason: access.AlreadyExists}, nil // race collision decided atomically
+	}
+	if errors.Is(err, resourcespec.ErrOwnerInactive) {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
 	}
 	return executeFailure(ctx, err)
 }

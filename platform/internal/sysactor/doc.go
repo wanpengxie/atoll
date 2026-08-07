@@ -30,15 +30,17 @@
 // SPECIAL Proc — a lib/actorbase Proc whose Caps are hand-built raw by the
 // platform assembly root (no live/incarnation membrane on any arm — the
 // anchor posture the system pen already wears, authority itself sets no gate
-// on itself) rather than welded through buildCaps. All four arms are real
-// (期10 S6): Access/State are wired EAGER (the access door is assembled by
-// storeopen, before channelkit); Schedule/Spawn are LATE-BOUND (their engines
-// assemble after this cell is born — see platform/sysanchorcaps.go),
-// captured through the same closure Hooks.Canceller uses. It still enters
-// through the SAME actorbase.New seam every other actor does. Its privilege
-// is entirely in WHERE its Caps come from (platform itself is the authority,
-// not a minted membrane) and in wearing no incarnation gate, never in a
-// missing arm.
+// on itself) rather than welded through buildCaps. Caps has FIVE arms, and the
+// system bundle fills three of them: systemcaps.Minter.Mint (runtime/systemcaps/
+// minter.go) is one synchronous call returning Pen, Access and Schedule, each
+// minted against the same root authority, all three assembled before the mint —
+// nothing here is late-bound or captured through a closure. State is a refusing
+// stub (unsupportedState) and Lifecycle is nil: the system cell forks nothing
+// and ends nothing, and lib/actorbase reads that nil as what it is, an honest
+// capability absence. It still enters through the SAME actorbase.New seam every
+// other actor does. Its privilege is entirely in WHERE its Caps come from
+// (platform itself is the authority, not a minted membrane) and in wearing no
+// incarnation gate.
 //
 // What it does today: the channel's LIVENESS projection. It answers the
 // channel-wide directory query (actor.list) as a composed, on-read view
@@ -55,7 +57,7 @@
 // read. DEVICE PRESENCE is a third, separate axis: an ADVISORY three-state
 // signal (device_presence events → DevicePresence fold) about an external
 // device's own reachability, orthogonal to whether the actor itself has an
-// embodiment — it never gates liveness and liveness never answers it. readiness
+// incarnation — it never gates liveness and liveness never answers it. readiness
 // is NOT a fourth axis — whether an actor can service a request is the OUTCOME
 // of send→terminal, not a stored state the system actor projects or composes.
 package sysactor

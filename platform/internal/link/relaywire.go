@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/ipc"
+	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -142,12 +142,115 @@ type accessListRespFields struct {
 	Reject  accessdoor.QueryReject `json:"reject,omitempty"`
 }
 
+// decode turns one decoded access frame into the ingress's operand. It is pure
+// translation — shape checks only, no judgment: a request that names no legal
+// arm is malformed (a Go error), never a denial. The Invocation arm's Caller
+// field MUST arrive empty; a non-empty one is a caller trying to self-report
+// identity, rejected the same way the pen rejects a pre-filled Sender.
+func (r accessRequest) decode() (remoteingress.AccessRequest, error) {
+	switch r.Kind {
+	case accessKindInvocation:
+		if r.Inv == nil || r.Inv.Caller != "" {
+			return remoteingress.AccessRequest{}, errors.New("link: invalid access invocation")
+		}
+		scope := remoteingress.ScopeChannel
+		switch r.Scope {
+		case accessScopeChannel:
+		case accessScopeState:
+			scope = remoteingress.ScopeState
+		default:
+			return remoteingress.AccessRequest{}, errors.New("link: invalid access scope")
+		}
+		return remoteingress.AccessRequest{
+			Kind: remoteingress.AccessInvoke, Scope: scope,
+			Operation: r.Inv.Operation, Resource: r.Inv.Resource,
+			Args: r.Inv.Args,
+		}, nil
+	case accessKindCreate:
+		if r.Create == nil {
+			return remoteingress.AccessRequest{}, errors.New("link: missing access create")
+		}
+		return remoteingress.AccessRequest{
+			Kind: remoteingress.AccessCreate, Resource: r.Create.Resource,
+			Spec: r.Create.Spec, Initial: r.Create.Initial,
+		}, nil
+	case accessKindQuery:
+		if r.Query == nil {
+			return remoteingress.AccessRequest{}, errors.New("link: missing access query")
+		}
+		switch r.Query.QueryKind {
+		case accessQueryStat:
+			return remoteingress.AccessRequest{
+				Kind: remoteingress.AccessStat, Resource: r.Query.Resource,
+			}, nil
+		case accessQueryList:
+			if r.Query.List == nil {
+				return remoteingress.AccessRequest{}, errors.New("link: missing access list")
+			}
+			return remoteingress.AccessRequest{
+				Kind: remoteingress.AccessList,
+				List: accessdoor.ListQuery{
+					Prefix: r.Query.List.Prefix,
+					Limit:  r.Query.List.Limit,
+					Cursor: r.Query.List.Cursor,
+				},
+			}, nil
+		default:
+			return remoteingress.AccessRequest{}, errors.New("link: invalid access query")
+		}
+	default:
+		return remoteingress.AccessRequest{}, errors.New("link: invalid access request")
+	}
+}
+
+// accessResponseOf encodes the ingress's product back onto the wire shape the
+// requesting arm expects — one field family per driven verb, exactly as the
+// daemon-side proxy reads it.
+func accessResponseOf(
+	kind remoteingress.AccessKind,
+	response remoteingress.AccessResponse,
+) accessResponse {
+	switch kind {
+	case remoteingress.AccessStat:
+		return accessResponse{
+			Kind: accessKindQuery,
+			Stat: &accessStatRespFields{
+				Meta:   response.Stat.Meta,
+				Ops:    response.Stat.Ops,
+				Reject: response.Stat.Reject,
+			},
+		}
+	case remoteingress.AccessList:
+		return accessResponse{
+			Kind: accessKindQuery,
+			List: &accessListRespFields{
+				Entries: response.List.Entries,
+				Next:    response.List.Next,
+				Reject:  response.List.Reject,
+			},
+		}
+	case remoteingress.AccessCreate:
+		return accessResponse{
+			Kind: accessKindCreate, Value: response.Outcome.Value,
+			Found: response.Outcome.Found, RejectReason: response.Outcome.RejectReason,
+			Route: response.Outcome.Route,
+		}
+	default:
+		return accessResponse{
+			Kind: accessKindInvocation, Value: response.Outcome.Value,
+			Found: response.Outcome.Found, RejectReason: response.Outcome.RejectReason,
+			Route: response.Outcome.Route,
+		}
+	}
+}
+
 // scheduleMethod names which ScheduleHandle call the frame carries.
 type scheduleMethod string
 
 const (
 	scheduleMethodSchedule scheduleMethod = "schedule"
 	scheduleMethodCancel   scheduleMethod = "cancel"
+	scheduleMethodAck      scheduleMethod = "ack"
 )
 
 // scheduleRequest is the daemon→home KindSchedule payload. The whole ScheduleReq
@@ -167,156 +270,95 @@ type scheduleResponse struct {
 	ID schedule.TimerID `json:"id,omitempty"`
 }
 
+// decode turns one decoded schedule frame into the ingress's operand. It
+// carries no author and no attempt key: a timer belongs to the identity, and
+// the identity is the endpoint's, not the frame's.
+func (r scheduleRequest) decode() (remoteingress.ScheduleRequest, error) {
+	switch r.Method {
+	case scheduleMethodSchedule:
+		return remoteingress.ScheduleRequest{
+			Method: remoteingress.ScheduleSet, Req: r.Req,
+		}, nil
+	case scheduleMethodCancel:
+		return remoteingress.ScheduleRequest{
+			Method: remoteingress.ScheduleCancel, ID: r.ID,
+		}, nil
+	case scheduleMethodAck:
+		return remoteingress.ScheduleRequest{
+			Method: remoteingress.ScheduleAck, ID: r.ID,
+		}, nil
+	default:
+		return remoteingress.ScheduleRequest{}, errors.New("link: invalid schedule method")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // relayClient — the daemon-side FIFO round-trip over one opaque capability arm.
 // ---------------------------------------------------------------------------
 
 // errRelayClosed is returned to a blocked or new round-trip once the arm is torn
-// down (the connection died with an invocation in flight).
+// down (the connection died with an invocation in flight). It is this dialect's
+// close sentinel (relayCore.closedErr).
 var errRelayClosed = errors.New("link: relay arm closed")
 
 // relayClient is the out-of-process end of one opaque capability arm (KindAccess
-// or KindSchedule) — the plane-agnostic twin of RemoteWriter. It sends a request
-// frame of its fixed kind and blocks until the matching ack returns (FIFO, no id,
-// receipt-order — the host acks on its single read loop). Concurrent round-trips
-// pipeline: emits are written in mutex order and waiters enqueued in the same
-// order, matching the order the host receives and acks them.
+// or KindSchedule) — the plane-agnostic twin of RemoteWriter. Both are dialects of
+// the SAME machine: relayClient is the OPAQUE-BYTES dialect of relayCore
+// (relaycore.go), which owns the FIFO no-id synchronous round-trip (six axioms
+// there, in one place). This type only translates the opaque dialect — request
+// bytes out, RelayAckPayload rebuilt into (payload, decoded error) back — and
+// maps core.roundTrip's outcome triple onto its own (ackPayload, ackErr,
+// transportErr) contract.
 type relayClient struct {
-	codec       *ipc.Codec
-	requestKind ipc.Kind
-
-	// writeMu serialises "enqueue waiter + write request" as one atomic step, so
-	// on-wire order == FIFO waiter order (same discipline as RemoteWriter.writeMu).
-	writeMu sync.Mutex
-
-	mu      sync.Mutex
-	pending []chan relayAck
-	closed  bool
+	core *relayCore[relayAck]
 }
 
 // relayAck carries one resolved ack back to the blocked round-trip: the opaque
-// response bytes and the host-side error reconstructed from coded ack fields.
-// transport marks the arm-closed sentinel — a teardown with the request in flight,
-// NOT a host verdict — so roundTrip surfaces it as transportErr (unconfirmed →
-// outcome_unknown on access) rather than as a definite ackErr.
+// response bytes and the host-side error reconstructed from coded ack fields. The
+// teardown/unconfirmed distinction is NOT carried here — it lives on the core's
+// coreResult.transport (axiom 5) and is surfaced through roundTrip's transportErr.
 type relayAck struct {
-	payload   json.RawMessage
-	err       error
-	transport bool
+	payload json.RawMessage
+	err     error
 }
 
 func newRelayClient(codec *ipc.Codec, requestKind ipc.Kind) *relayClient {
-	return &relayClient{codec: codec, requestKind: requestKind}
+	return &relayClient{core: newRelayCore[relayAck](codec, requestKind, errRelayClosed)}
 }
 
 // roundTrip sends payload as a request frame and blocks for the ack. It reports
-// three distinct outcomes:
-//   - transportErr != nil: the op GENUINELY crossed the wire and its result is now
-//     UNCONFIRMED (the ctx was cancelled AFTER the frame was sent, or the arm died
-//     with the request in flight) — the caller surfaces this as an in-flight
-//     unknown (access → outcome_unknown, schedule → error). A pre-send wire-write
-//     failure also lands here (nothing to confirm either way);
+// three distinct outcomes (a straight remap of relayCore.roundTrip's triple):
+//   - transportErr != nil: the op's result is UNCONFIRMED — the ctx was cancelled
+//     AFTER the frame was sent, the arm died with the request in flight
+//     (errRelayClosed), or a pre-send wire-write failed (nothing to confirm) — the
+//     caller surfaces this as an in-flight unknown (access → outcome_unknown,
+//     schedule → error);
 //   - transportErr == nil, ackErr != nil: a DEFINITE, op-did-not-produce-an-unknown
 //     failure — either the host returned a definite error verdict (structural /
 //     not-live), OR the ctx was ALREADY cancelled before the frame left (a pre-send
-//     abort: the op provably never reached the home). Both are relayed as a plain
-//     error on both arms — NEVER outcome_unknown, because the op verifiably did not
-//     execute-with-unknown-result;
+//     abort: the op provably never reached the home, core's definiteErr). Both are
+//     relayed as a plain error — NEVER outcome_unknown, because the op verifiably
+//     did not execute-with-unknown-result;
 //   - both nil: ackPayload is the host's opaque verdict bytes.
 func (c *relayClient) roundTrip(ctx context.Context, payload []byte) (ackPayload json.RawMessage, ackErr error, transportErr error) {
-	// Pre-send ctx check: an already-cancelled ctx means the frame never leaves the
-	// wire, so the op provably did not reach the home — a DEFINITE non-execution,
-	// surfaced through the ackErr slot (a plain error), never transportErr. This is
-	// the pre/post-send split: outcome_unknown is reserved for an op that actually
-	// crossed the wire (post-send cancel / in-flight arm death below), never one
-	// that never sent.
-	if err := ctx.Err(); err != nil {
-		return nil, err, nil
+	ack, txErr, definiteErr := c.core.roundTrip(ctx, payload)
+	if definiteErr != nil {
+		return nil, definiteErr, nil
 	}
-
-	waiter := make(chan relayAck, 1)
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, nil, errRelayClosed
+	if txErr != nil {
+		return nil, nil, txErr
 	}
-	c.pending = append(c.pending, waiter)
-	c.mu.Unlock()
-
-	if err := c.codec.Write(ipc.Frame{Kind: c.requestKind, Payload: json.RawMessage(payload)}); err != nil {
-		c.removeTailWaiter(waiter)
-		return nil, nil, err
-	}
-
-	select {
-	case <-ctx.Done():
-		// POST-SEND cancel: the frame is already on the wire, so the op is
-		// GENUINELY in flight and its result unconfirmed → transportErr (→
-		// outcome_unknown on access), NOT the pre-send definite-error path above.
-		// Waiter abandoned in place: the host still acks in receipt order and
-		// deliverAck consuming an abandoned waiter is harmless (buffered chan, no
-		// reader) — the FIFO head is still consumed, keeping the queue aligned.
-		return nil, nil, ctx.Err()
-	case r := <-waiter:
-		if r.transport {
-			// The arm was torn down with this request in flight (connection died):
-			// nothing was confirmed — surface it as transportErr, not a host verdict.
-			return nil, nil, r.err
-		}
-		return r.payload, r.err, nil
-	}
+	return ack.payload, ack.err, nil
 }
 
-// removeTailWaiter drops waiter after a failed wire write (it is the tail —
-// writeMu has been held since enqueue — but deliverAck may have popped the head
-// meanwhile, so it locates by identity).
-func (c *relayClient) removeTailWaiter(waiter chan relayAck) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for i := len(c.pending) - 1; i >= 0; i-- {
-		if c.pending[i] == waiter {
-			c.pending = append(c.pending[:i], c.pending[i+1:]...)
-			return
-		}
-	}
-}
-
-// deliverAck routes one inbound ack into the FIFO head waiter (the wire pins acks
-// to receipt order, so the head is always the correct target).
+// deliverAck reconstructs the opaque-dialect Ack from one inbound RelayAckPayload
+// and routes it into the core's FIFO head waiter.
 func (c *relayClient) deliverAck(ack ipc.RelayAckPayload) {
-	c.mu.Lock()
-	if len(c.pending) == 0 {
-		c.mu.Unlock()
-		return // stray ack with no waiter (upstream protocol violation); ignore
-	}
-	waiter := c.pending[0]
-	c.pending = c.pending[1:]
-	c.mu.Unlock()
-
-	var err error
-	err = decodeAckError(ack.ErrorCode, ack.ErrorMessage)
-	waiter <- relayAck{payload: ack.Payload, err: err}
+	c.core.deliverAck(relayAck{payload: ack.Payload, err: decodeAckError(ack.ErrorCode, ack.ErrorMessage)})
 }
 
 // close fails every pending round-trip with errRelayClosed and rejects new ones.
-func (c *relayClient) close() {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return
-	}
-	c.closed = true
-	pending := c.pending
-	c.pending = nil
-	c.mu.Unlock()
-	for _, waiter := range pending {
-		waiter <- relayAck{err: errRelayClosed, transport: true}
-	}
-}
+func (c *relayClient) close() { c.core.close() }
 
 // ---------------------------------------------------------------------------
 // remote handles — the daemon-side capability faces an out-of-process cell holds.
@@ -336,8 +378,8 @@ type remoteAccessHandle struct {
 // (unconfirmed in-flight) yields the outcome_unknown VERDICT — the one reason
 // only the wire path can produce (an in-proc invoke is synchronous and never
 // does). A definite host error (malformed / not-live) is returned as-is.
-func (h *remoteAccessHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
-	return invokeRoundTrip(ctx, h.relay, h.scope, op, id, args, grant)
+func (h *remoteAccessHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	return invokeRoundTrip(ctx, h.relay, h.scope, op, id, args)
 }
 
 // invokeRoundTrip is the Invocation arm's round-trip, shared by BOTH the
@@ -345,11 +387,11 @@ func (h *remoteAccessHandle) Invoke(ctx context.Context, op access.Operation, id
 // wire proxies — they carry byte-for-byte the same Invoke contract, so the
 // wire encoding must not drift between the two even though the two Go types
 // stay separate (§3.2's "膜层与 wire 层各拆两型").
-func invokeRoundTrip(ctx context.Context, relay *relayClient, scope accessScope, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
+func invokeRoundTrip(ctx context.Context, relay *relayClient, scope accessScope, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	payload, err := json.Marshal(accessRequest{
 		Kind:  accessKindInvocation,
 		Scope: scope,
-		Inv:   &access.Invocation{Resource: id, Operation: op, Args: args, Grant: grant},
+		Inv:   &access.Invocation{Resource: id, Operation: op, Args: args},
 	})
 	if err != nil {
 		return accessdoor.Outcome{}, err
@@ -377,20 +419,19 @@ func invokeRoundTrip(ctx context.Context, relay *relayClient, scope accessScope,
 // accessScopeChannel.
 type remoteResourceHandle struct {
 	relay *relayClient
-	// dialer backs FileOpener (§5, lane.go/dial.go): a daemon-hosted actor's
-	// resource face needs its OWN Dialer (not just the relay arm) to redeem
-	// a FileRoute — SendResolveCoord/lane-session access are Dialer methods,
-	// not relay round-trips (file bytes never ride the ipc access arm at
-	// all, §8.1). nil on any avatar this section does not wire as a
+	// dialer backs FileOpener (§5, filebytes.go/dial.go): a daemon-hosted
+	// actor's resource face needs its exact lane redeemer (not just the relay
+	// arm) to redeem a FileRoute (file bytes never ride the ipc
+	// access arm at all, §8.1). nil on any avatar this section does not wire as a
 	// FileOpener (day-1: none — every remoteResourceHandle is daemon-hosted
 	// and gets one, see OpenStream).
-	dialer *Dialer
+	redeemer fileRouteRedeemer
 }
 
 // Invoke satisfies accessdoor.AccessHandle (embedded in ResourceAccessHandle)
 // over the wire — always channel-scoped.
-func (h *remoteResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
-	return invokeRoundTrip(ctx, h.relay, accessScopeChannel, op, id, args, grant)
+func (h *remoteResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	return invokeRoundTrip(ctx, h.relay, accessScopeChannel, op, id, args)
 }
 
 // Create satisfies accessdoor.ResourceAccessHandle's create-arm over the
@@ -520,11 +561,23 @@ func (h *remoteScheduleHandle) Cancel(ctx context.Context, id schedule.TimerID) 
 	return ackErr
 }
 
+func (h *remoteScheduleHandle) Ack(ctx context.Context, id schedule.TimerID) error {
+	payload, err := json.Marshal(scheduleRequest{Method: scheduleMethodAck, ID: id})
+	if err != nil {
+		return err
+	}
+	_, ackErr, txErr := h.relay.roundTrip(ctx, payload)
+	if txErr != nil {
+		return txErr
+	}
+	return ackErr
+}
+
 // Open satisfies accessdoor.FileOpener (期11 spec §5/§3.9'): runs
 // OpRead/OpWrite(file) via Invoke, then redeems the accepted outcome's
 // Route into a live FileAccess in one call.
 func (h *remoteResourceHandle) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
-	out, err := h.Invoke(ctx, mode, id, nil, nil)
+	out, err := h.Invoke(ctx, mode, id, nil)
 	if err != nil {
 		return accessdoor.FileAccess{}, accessdoor.Outcome{}, err
 	}
@@ -538,15 +591,19 @@ func (h *remoteResourceHandle) Open(ctx context.Context, id resource.ResourceID,
 // Redeem satisfies accessdoor.FileOpener: turns an ALREADY-obtained
 // accepted FileRoute (e.g. from Create(with_content=true)'s own Outcome —
 // Open cannot re-derive it via Invoke since the row does not exist yet)
-// into a live FileAccess. The actual mechanics (ResolveCoord + local open,
-// or lane redeem) live on *Dialer — see dial.go's redeemFileRoute — since
-// they need Dialer state (the control-RPC arm, the lane session, the
-// injected LocalFileOpener) this thin wrapper does not itself hold.
+// into a live FileAccess. The actual mechanics (ResolveCoord + local open)
+// live on the exact client lane because they need its current-lane RPC
+// state (the control-RPC arm, the injected LocalFileOpener) this thin wrapper
+// does not itself hold.
 func (h *remoteResourceHandle) Redeem(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
-	if h.dialer == nil {
+	if h.redeemer == nil {
 		return accessdoor.FileAccess{}, errors.New("link: this resource handle has no dialer wired for file byte redemption")
 	}
-	return h.dialer.redeemFileRoute(ctx, route)
+	return h.redeemer.redeemFileRoute(ctx, route)
+}
+
+type fileRouteRedeemer interface {
+	redeemFileRoute(context.Context, accessdoor.FileRoute) (accessdoor.FileAccess, error)
 }
 
 // Compile-time proof the relay proxies satisfy the substrate capability contracts

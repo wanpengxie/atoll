@@ -19,9 +19,8 @@ func TestValidKind(t *testing.T) {
 }
 
 func TestValidPlacementKind(t *testing.T) {
-	// "" is legal — kv's non-membership, not an unknown value.
 	if !ValidPlacementKind("") {
-		t.Error(`ValidPlacementKind("") = false, want true (kv's non-membership)`)
+		t.Error(`ValidPlacementKind("") = false, want true (kv has no placement axis)`)
 	}
 	if !ValidPlacementKind(PlacementDaemonLocal) {
 		t.Errorf("ValidPlacementKind(%q) = false, want true", PlacementDaemonLocal)
@@ -29,20 +28,6 @@ func TestValidPlacementKind(t *testing.T) {
 	for _, raw := range []PlacementKind{"cloud", "daemon-local ", "DAEMON-LOCAL"} {
 		if ValidPlacementKind(raw) {
 			t.Errorf("ValidPlacementKind(%q) = true, want false (out of set)", raw)
-		}
-	}
-}
-
-func TestValidProvenance(t *testing.T) {
-	for _, p := range []Provenance{ProvenanceAxisAllocated, ProvenanceRegistered} {
-		if !ValidProvenance(p) {
-			t.Errorf("ValidProvenance(%q) = false, want true", p)
-		}
-	}
-	// Unlike PlacementKind, "" is NOT legal — every row is always stamped.
-	for _, raw := range []Provenance{"", "adopted", "AXIS-ALLOCATED"} {
-		if ValidProvenance(raw) {
-			t.Errorf("ValidProvenance(%q) = true, want false (out of set)", raw)
 		}
 	}
 }

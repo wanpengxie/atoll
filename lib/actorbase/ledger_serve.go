@@ -58,13 +58,21 @@ func newServeLedger(life func() context.Context, capacity int) *serveLedger {
 // blocking wait. A redelivery of an id already Admitted is a no-op success
 // (idempotent — the entry keeps its original scope).
 func (l *serveLedger) admit(env *message.Envelope) bool {
+	admitted, _ := l.admitOnce(env)
+	return admitted
+}
+
+// admitOnce also reports whether the id was already admitted. The delivery
+// pump uses this distinction to suppress duplicate work while preserving the
+// original request scope; tests and other account-only callers use admit.
+func (l *serveLedger) admitOnce(env *message.Envelope) (admitted, existed bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if _, exists := l.entries[env.ID]; exists {
-		return true
+		return true, true
 	}
 	if len(l.entries) >= l.cap {
-		return false
+		return false, false
 	}
 	ctx, cancel := context.WithCancel(l.life())
 	e := &serveEntry{ctx: ctx, cancel: cancel}
@@ -74,7 +82,7 @@ func (l *serveLedger) admit(env *message.Envelope) bool {
 		e.timer = time.AfterFunc(d, func() { l.close(id) })
 	}
 	l.entries[env.ID] = e
-	return true
+	return true, false
 }
 
 // ctxFor resolves the ctx an Admitted id's delivery should carry — the
@@ -140,12 +148,4 @@ func (l *serveLedger) stopTimers() {
 			e.timer = nil
 		}
 	}
-}
-
-// len reports the number of Admitted (not yet Closed) entries — the DoD's
-// "账 ≤ 未闭合请求数" invariant, directly testable, and "deadline 后必空".
-func (l *serveLedger) len() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.entries)
 }

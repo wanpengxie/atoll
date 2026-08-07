@@ -54,22 +54,31 @@ func MaterialiseReceiverUnavailable(
 	return nil
 }
 
-// LivenessProbe answers the substrate's authoritative "is a live instance for id
-// hosted right now" question — the `kill -0` / is_process_alive authority only
-// the substrate can answer. The reconciler uses it to decide which open-request
-// receivers are absent. present=false means closure is owed.
-type LivenessProbe interface {
-	Present(id actor.ActorID) bool
-}
+// ClosedForever is the MONOTONE closure predicate: it reports whether id has
+// reached a terminal, never-reversible absence from membership — deregistered,
+// or never a member. Only a monotone fact may author a terminal: a merely dead-
+// but-registered instance may yet gain a successor incarnation, so its callers
+// must wait for the request deadline, NEVER be closed on a reversible liveness
+// dip (a false close mis-kills a live member's callers). A non-nil error means
+// the lookup itself failed — the caller MUST skip this round and retry, treating
+// the failure as "unknown", never as "closed".
+type ClosedForever func(ctx context.Context, id actor.ActorID) (bool, error)
 
 // ReconcileReceiverUnavailable is the closure RECONCILER (the level-triggered
 // companion to the death edge). Closure is not edge-only: a death edge can be
 // lost (clean despawn, ctx-cancel, a home restart that predates the open
-// request), and an open request whose receiver is absent must STILL be closed.
-// So closure is a level scan over truth: enumerate every receiver that holds an
-// open request, and for each one the substrate reports ABSENT, drain it via
-// MaterialiseReceiverUnavailable. It is the same author#3 terminal, reached by a
-// scan instead of an edge.
+// request), and an open request whose receiver is CLOSED FOREVER must STILL be
+// closed. So closure is a level scan over truth: enumerate every receiver that
+// holds an open request, and for each one the predicate reports closed forever
+// (deregistered / never a member), drain it via MaterialiseReceiverUnavailable.
+// It is the same author#3 terminal, reached by a scan instead of an edge.
+//
+// The predicate is the MONOTONE fact, not liveness: a receiver merely absent
+// from liveness (crashed, not yet placed, mid-restart) is still a registered
+// member — it may get a successor, so its stranded requests are left to the
+// deadline reaper, not closed here. Only a deregistered / never-registered
+// receiver — one that can NEVER answer — is closed, so a false close is
+// impossible by construction.
 //
 // Idempotent by construction: receiver_unavailable is a final terminal, so a
 // re-scan re-writing one collides with the ux_terminal_response_per_request
@@ -78,14 +87,15 @@ type LivenessProbe interface {
 // number of times — startup, a low-frequency ticker, or a lossy-edge wakeup.
 //
 // receivers() is the truth-derived set of distinct open-request receivers (a
-// derived view over the log, not membership). present probes substrate liveness.
-// onFault receives both a drain-query failure (the loudest — that receiver's
-// callers are all black holes) and any per-request write fault.
+// derived view over the log, not membership). closed() answers the monotone
+// predicate. onFault receives a predicate-lookup failure (skip this round), a
+// drain-query failure (the loudest — that receiver's callers are all black
+// holes) and any per-request write fault.
 func ReconcileReceiverUnavailable(
 	ctx context.Context,
 	pen harness.Pen,
 	query storespec.MessageQuery,
-	present LivenessProbe,
+	closed ClosedForever,
 	clock func() time.Time,
 	onFault func(reqID message.ID, err error),
 ) error {
@@ -94,16 +104,27 @@ func ReconcileReceiverUnavailable(
 		return err
 	}
 	for _, id := range receivers {
-		if present.Present(id) {
-			continue // receiver is live — no closure owed, it can still answer.
+		gone, cerr := closed(ctx, id)
+		if cerr != nil {
+			// The closure predicate lookup failed for this receiver → skip it this
+			// round and retry next scan. A lookup failure is NEVER a dereg: closing
+			// on it would mis-kill a member merely unreachable right now. Per-receiver
+			// fault (reqID slot empty — the id rides in the error, never punned into
+			// the request-id position).
+			if onFault != nil {
+				onFault("", fmt.Errorf("reconcile closure predicate receiver %s: %w", id, cerr))
+			}
+			continue
+		}
+		if !gone {
+			continue // still a registered member — no closure owed; the request deadline closes it if it stays silent.
 		}
 		if derr := MaterialiseReceiverUnavailable(ctx, pen, query, clock, id, onFault); derr != nil {
 			// Per-receiver drain-query failure: surface it (every one of this
 			// receiver's callers is a black hole) and continue — one bad receiver
 			// must not strand the rest of the scan. This fault is per-RECEIVER, not
 			// per-request (the drain failed before any request was enumerated), so
-			// the reqID slot stays empty and the receiver id rides in the error —
-			// never pun an ActorID into the request-id position.
+			// the reqID slot stays empty and the receiver id rides in the error.
 			if onFault != nil {
 				onFault("", fmt.Errorf("reconcile drain receiver %s: %w", id, derr))
 			}

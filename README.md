@@ -4,11 +4,11 @@
 
 Atoll is a substrate where AI agents, humans, and tools work together as **actors** in
 shared **channels** — on top of an enforced, append-only **truth log** for everything
-they say, and capability-gated **access** for everything they touch.
+they say, and membership-gated **access** for everything they touch.
 
 It is built kernel-first: the guarantees are structural, not conventions. An actor
 cannot forge another actor's messages, cannot write around the log, and cannot reach
-data it was not granted — not because a prompt asked it nicely, but because the
+past its channel's membrane — not because a prompt asked it nicely, but because the
 geometry does not compile.
 
 ## Why a kernel
@@ -22,7 +22,7 @@ them *truthful*.
 Atoll's position is that this checklist is not application work — it is an operating
 system's work. Agents are the new processes; they need a kernel.
 
-## The minimal kernel: five elements, two planes
+## The minimal kernel: one boundary, five elements, two planes
 
 ```
                  channel (the boundary)
@@ -30,24 +30,28 @@ system's work. Agents are the new processes; they need a kernel.
    │   actor  ──── message ────▶  actor            │   horizontal plane:
    │  (subject)   (into the truth log)  (subject)  │   collaboration = truth
    │     │                                         │
-   │     └────── access ────▶  resource            │   vertical plane:
-   │        (capability-gated,  (object)           │   reaching data = authority
-   │         off-log)                              │
+   │     ├────── access ────▶  resource            │   vertical plane:
+   │     │  (membership-gated,  (object)           │   reaching data = authority
+   │     │   off-log)                              │
+   │     └────── timer ─────▶  future self         │   time as a cause:
+   │        (durable promise,   (wake)             │   wakes survive restarts
+   │         fires as delivery)                    │
    └──────────────────────────────────────────────┘
 ```
 
-| Element | What it is |
+| | What it is |
 |---|---|
-| **channel** | The boundary atom: one execution domain, one trust boundary, one data boundary. |
+| **channel** | The boundary: one execution domain, one trust boundary, one data boundary. The five elements live inside it. |
 | **actor** | A subject: agent, human, or tool. Addressed by identity; alive as an incarnation. |
 | **resource** | An object: passive owned data (state, files, secrets), opaque to the kernel. |
 | **message** | Subject ↔ subject. Appended to the channel's truth log, delivered from its tail. |
-| **access** | Subject ↔ object. Off-log, checked at a gate: caller + resource + operation + capability. |
+| **access** | Subject ↔ object. Off-log, checked at a gate: membership admits, ownership distinguishes. |
+| **timer** | Subject ↔ future time. A durable promise to wake an actor at a moment — it survives restarts, and firing is a delivery, not a poll. |
 
 Remove any element and the system stops working; anything more is domain. Messages
-are the IPC of this world; access is its syscall. A runtime with only the horizontal
-plane lets agents talk but not act — credentials, state, files, and timers all live
-on the vertical plane.
+are the IPC of this world; access is its syscall; timers are its cron — the one
+cause with no sending actor, which is exactly why it must be a kernel element
+rather than every agent's hand-rolled polling loop.
 
 ## What the kernel enforces
 
@@ -55,6 +59,10 @@ on the vertical plane.
   today) before delivery; delivery *is* the log tail. There is no side channel.
 - **Writes are welded to identity.** An actor writes through a *pen* minted at birth;
   sender identity is not a field it fills in, so it is not a field it can forge.
+- **The membrane is the permission.** Inside a channel, every member reads and writes
+  alike; the only distinctions are structural — who created a thing, who owns the
+  channel. There are no per-object grants or ACLs to administer, so there are none
+  to drift.
 - **Admission is a pipeline.** Every write passes a fixed chain of checks — caller
   authorization, envelope shape, sender consistency, kind/audience rules, response
   pairing, dedupe — before it becomes truth.
@@ -83,33 +91,51 @@ CLIs, coding-agent harnesses) attach as ordinary actors at the boundary.
 ```
 protocol/    protocol types (envelope, actor, channel, access, resource)
 runtime/     the kernel runtime (harness admission pipeline, actorrt cells/ports,
-             sqlite store, schedule/timers, access door)
-lib/         stdlib for actor authors (behavior, channelkit, metatool, introspect)
-platform/    channel assembly (server-side ChannelHome + daemon-side RunCompute)
-app/         HTTP API surface (identity, workspace, channel, daemon, WS)
-actors/      built-in actors (echo, device, kimi, xhs)
-agent/       agent looper providers (claudecode, kimi)
+             sqlite store, actor store, schedule/timers, access door)
+lib/         stdlib for actor authors: actorbase (the Proc + verb-table base every
+             actor stands on), behavior, metatool (tool catalog / call_actor
+             vocabulary), introspect
+platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word table);
+             channelhost/ (the channel contract surface the realm talks to),
+             realmtool/ (in-channel port for realm requests), home/ (server-side
+             channel-home assembly), daemonhost/ (realm device carriers),
+             compute/ (daemon-side multi-compartment assembly), subjectgate/
+app/         reference realm (identity, channel directory/lifecycle, declarations,
+             daemon tombstones, admission/lifecycle jobs, HTTP/WS)
+drivers/     external-world drivers: tools/ (echo, device, kimi, xhs),
+             agents/ (LLM engine providers: claudecode, kimi, script),
+             gateway/ (human ingress)
 registry/    actor class registry (config → running actor)
-cmd/         binaries (server, daemon, cli)
-sdk/         Go SDK
-archtest/    architecture enforcement tests
+cmd/         binaries (server, daemon) + devtools
+archtest/    architecture enforcement tests (layer graph + closed sets)
+e2e/         end-to-end tests over the real server + daemon binaries
+docs/        architecture and dev walkthroughs
 ```
 
 ## Quickstart
 
 ```bash
 # 1. build
-make build          # -> bin/atoll-server, bin/atoll-daemon
+make build          # -> bin/atoll, bin/atoll-server, bin/atoll-daemon
 
-# 2. run the server (holds truth for all channels)
-bin/atoll-server --db /tmp/atoll-dev/app.db --channel-db-dir /tmp/atoll-dev/channels
+# 2. one-command personal node: engine + owner + home channel + local device,
+#    all provisioned and converging on every run (default home: ~/.atoll)
+bin/atoll up
+```
 
-# 3. run a daemon (compute host; echo actor needs no external credentials)
-#    create a daemon in the UI/CLI to get an api-key, bind it to a channel
-bin/atoll-daemon --server "ws://localhost:8080/compute?key=<api-key>&channel=<chID>" \
-                 --key <api-key> --actors echo
+Or run the roles as separate processes on the SAME homes `atoll up` uses —
+the disk layout is identical, so a node started with `atoll up` can be split
+later with zero migration:
 
-# 4. tests
+```bash
+# server (holds truth for all channels; --init creates the database on first run)
+bin/atoll-server --init --home ~/.atoll/server --addr 127.0.0.1:8832
+
+# daemon (compute host) — first run registers: mint an api-key via the API
+# (POST /api/daemons), later runs start bare (identity persists in the home)
+bin/atoll-daemon --home ~/.atoll/device --server "ws://127.0.0.1:8832/compute" --key <api-key>
+
+# tests
 make test
 ```
 
@@ -117,29 +143,41 @@ The web UI lives in a separate repository and is served via `--ui-dist`.
 
 ## Writing an actor
 
-An actor implements `Receive` and registers a constructor. The capabilities it gets
-(`Caps`) are handed to it at birth — including the pen that welds its identity:
+An actor is a function over a small verb table. `Sys` is handed to it at birth and
+is its only way to touch the world — receiving is `Recv`, answering is `Reply` or
+`Fail`. Every write carries the actor's welded identity; sender is not a field it
+can set. This is the real echo actor, whole:
 
 ```go
-// actors/hello/hello.go
-func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
-    // handle the request, write the reply — the pen fills in identity;
-    // Sender/ChannelID are not yours to set.
-    _, err := a.pen.Write(ctx, responseEnvelope)
-    return err
+// drivers/tools/echo/echo.go
+func run(sys actorbase.Sys) error {
+    for {
+        msg, err := sys.Recv()
+        if err != nil {
+            return err
+        }
+        switch msg.Type {
+        case "echo.say":
+            _, _ = sys.Reply(msg, msg.Payload)
+        default:
+            _, _ = sys.Fail(msg, "type_unsupported", "echo does not handle "+msg.Type)
+        }
+    }
 }
 ```
 
 ```go
-// actors/hello/register.go
-func init() { registry.Register("hello", construct) }
+// drivers/tools/echo/register.go — one registry entry: config → running actor
+func init() { registry.Register("echo", registry.ClassDecl{Kind: actor.KindTool, New: construct}) }
 
 func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
     return platform.ActorDecl{
         ID:      spec.ID,
         Kind:    actor.KindTool,
-        Binding: actor.BindingRuntimeOutbound,
-        Factory: func(caps actorcaps.Caps) actorrt.Actor { return NewActor(caps.Pen) },
+        Factory: platform.ActorFactory{Proc: actorbase.Def{
+            Doc: "echoes echo.say back",
+            New: func() (actorbase.Proc, error) { return run, nil },
+        }},
     }, nil
 }
 ```
@@ -149,7 +187,8 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 Atoll is **v0.01 — a working minimal kernel, pre-release**. The five elements and
 both planes are in place and enforced; the developer shell around them (one-command
 setup, coding-agent connectors, scaffolding) is being built next. Known, deliberate
-boundaries at this stage: single trust domain per deployment, no read-path ACL yet,
+boundaries at this stage: single trust domain per deployment; observer read access is
+a revocable per-channel realm capability, while members retain intrinsic read access.
 APIs still move without deprecation cycles. Kernel first, polish second — watch the
 repo if you want to see the rest arrive.
 

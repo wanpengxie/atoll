@@ -41,7 +41,6 @@ const (
 	// Step 1 — Envelope Shape Validate
 	HarnessEnvelopeFieldMissing      HarnessRejectReason = "harness_envelope_field_missing"
 	HarnessPayloadInvalid            HarnessRejectReason = "harness_payload_invalid"
-	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
 	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
 	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
@@ -67,7 +66,9 @@ const (
 	HarnessReservedTypeUnauthorizedSender HarnessRejectReason = "harness_reserved_type_unauthorized_sender"
 
 	// Step 7 — Kind + Audience Validate
-	HarnessKindNotAllowedForType   HarnessRejectReason = "harness_kind_not_allowed_for_type"
+	HarnessKindNotAllowedForType HarnessRejectReason = "harness_kind_not_allowed_for_type"
+	// HarnessAudienceEmpty applies to request/response empty arrays and empty
+	// actor-id elements. A kind=event empty array is valid.
 	HarnessAudienceEmpty           HarnessRejectReason = "harness_audience_empty"
 	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"
 	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"
@@ -82,7 +83,9 @@ const (
 	HarnessResponseAudienceMismatch        HarnessRejectReason = "harness_response_audience_mismatch"
 	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
 
-	// Step 9 — Engine Append (store-produced, lifted from the storespec
+	HarnessReceiverNotMember HarnessRejectReason = "harness_receiver_not_member"
+
+	// Step 10 — Engine Append (store-produced, lifted from the storespec
 	// contract leaf so driver and vocabulary share ONE symbol; see the type
 	// doc above).
 	//

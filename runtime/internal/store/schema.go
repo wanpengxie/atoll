@@ -6,15 +6,15 @@ package store
 // The DDL string is split into multiple CREATE statements; the
 // modernc.org/sqlite driver accepts multi-statement input via Exec.
 //
-// Vocabulary closed sets (sender_kind / kind / visibility / actor_kind /
-// actor_binding) carry NO value-set `CHECK (... IN (...))` clause. Those sets
+// Vocabulary closed sets (sender_kind / kind / visibility / actor_kind)
+// carry NO value-set `CHECK (... IN (...))` clause. Those sets
 // are authoritatively enforced in Go — write path: harness stepEnvelopeShape
 // (kind, visibility) + stepSenderConsistent (sender.kind force-overwritten
 // from the pen-WELDED caller kind — the registry lookup was retired by the
-// incarnation rework, Mint is the single truth source) + the membership
-// control plane's validateMemberIdentity (actor_kind / actor_binding gated by
-// ParseKind / ParseBinding before insert); read path: store scan via ParseKind /
-// ParseVisibility / ParseBinding (out-of-set values fail loud). A DB CHECK
+// incarnation rework, Mint is the single truth source) + the actor record
+// store's validateDraft (actor_kind gated by ParseKind before insert); read
+// path: store scan via ParseKind / ParseVisibility (out-of-set values fail
+// loud). A DB CHECK
 // would be a redundant SECOND enforcer that also welds an append-only DB to a
 // frozen vocabulary: extending a pre-launch closed set (e.g. a new sender_kind)
 // would make every existing channel sqlite reject inserts AND forbid recreation
@@ -41,15 +41,21 @@ CREATE TABLE IF NOT EXISTS messages (
   visibility           TEXT NOT NULL,
   audience             TEXT NOT NULL,
   expires_at           INTEGER,
+  client_fingerprint   TEXT,
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
 );
 
 CREATE INDEX IF NOT EXISTS ix_messages_parent         ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';
+CREATE INDEX IF NOT EXISTS ix_messages_type_sender_seq ON messages(type, sender_id, seq);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
   ON messages(parent_id)
   WHERE kind = 'response' AND is_terminal = 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sysop_completed_correlation
+  ON messages(correlation_id)
+  WHERE kind = 'event' AND type = 'sysop_completed';
 
 -- (v2: actor_cursors table removed. A per-actor durable consumption offset is
 -- NOT substrate truth: only a log-PULL consumer that must resume gap-free needs
@@ -62,12 +68,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
 -- =============================================================
 -- 3) actor_registry
 -- =============================================================
+-- One row per managed actor record. The record answers "who is it / what is
+-- it"; the definition columns hold the CURRENT value only. There is no version
+-- history table and no current-version pointer: the registry stores what is,
+-- the audit narration stores what happened.
 CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
   actor_kind         TEXT NOT NULL,
-  principal          TEXT NOT NULL DEFAULT '', -- opaque continuing-subject anchor; actor_id remains an instance id
-  actor_binding      TEXT,
-  host               TEXT NOT NULL DEFAULT '',  -- placement locus: '' = home process, compute id = hosting daemon
+  principal          TEXT NOT NULL DEFAULT '', -- login identity only; declaration-backed actors normally leave it empty
+  source_decl_id     TEXT NOT NULL DEFAULT '', -- immutable declaration provenance; never an operation identity
+  class              TEXT NOT NULL,
+  config_json        TEXT,
+  placement          TEXT NOT NULL CHECK(placement IN ('server','daemon')),
+  desired_host       TEXT NOT NULL DEFAULT '' CHECK(placement='daemon' OR desired_host=''),
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER
 );
@@ -78,6 +91,26 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
   ON actor_registry(actor_kind, principal)
   WHERE deregistered_at IS NULL AND principal <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_source_decl
+  ON actor_registry(source_decl_id)
+  WHERE deregistered_at IS NULL AND source_decl_id <> '';
+
+-- Immutable self-truth written exactly once during ChannelHost provisioning.
+CREATE TABLE IF NOT EXISTS channel_genesis (
+  channel_id         TEXT PRIMARY KEY,
+  type               TEXT NOT NULL,
+  owner_principal    TEXT NOT NULL,
+  parent_channel_id  TEXT,
+  initiator_principal TEXT,
+  created_at         INTEGER NOT NULL
+);
+
+-- Channel-local daemon binding truth. Live link attachment is deliberately a
+-- separate observation maintained by the link acceptor.
+CREATE TABLE IF NOT EXISTS channel_daemon_bindings (
+  daemon_id   TEXT PRIMARY KEY,
+  attached_at INTEGER NOT NULL
+);
 
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
 -- write-path exclusivity is a structural invariant of the single write path,
@@ -91,46 +124,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
 -- exactly-once-external-effect use case demands it.)
 
 -- =============================================================
--- 4) resources + resource_grants  (access plane)
+-- 4) resources  (access plane)
 -- =============================================================
--- The plane-2 object-lifecycle truth: existence + inline bytes (resources) and
--- the authorization relation R (resource_grants). Same channel sqlite as the
--- message log — access is channel-scoped, so R and resource bytes
--- share the one DB as sibling tables, never a separate library.
+-- The plane-2 object-lifecycle truth: existence + inline bytes. Same channel
+-- sqlite as the message log — access is channel-scoped.
+--
+-- There is NO authorization relation table: the membrane is a uniform trust
+-- phase (PM-D1) — read/write authorization is channel membership itself
+-- (owner root ∪ active member), judged at the door from membership facts;
+-- delete additionally distinguishes the creator via created_by (PM-D3).
+-- Per-object grants structurally cannot exist.
 --
 -- No scope column on resources, ever (owner-pinned): actor-scoped objects
 -- live in a SEPARATE storage locus (the actor_state table below), so
 -- scope is expressed by the STRUCTURE an object lives in, not a column (Unix:
 -- an anonymous mapping is not a file tagged "anonymous"). This table holds only
 -- channel-scoped objects.
---
--- No CHECK on grantee_kind: it is a Go-enforced closed set (access.GranteeKind,
--- validated by the door's ValidateGrant on the write path), same discipline as
--- sender_kind / actor_kind above — a DB CHECK would weld an evolving vocabulary
--- to every existing channel file. Same discipline extends to the five columns
--- 期11 (resource 轴完备化) adds below: placement_kind / provenance are
--- Go-enforced closed sets (resourcespec.ValidPlacementKind / ValidProvenance,
--- read-path fail-fast, resourcespec/create.go), no DB CHECK.
 CREATE TABLE IF NOT EXISTS resources (
   resource_id           TEXT PRIMARY KEY,
   kind                  TEXT NOT NULL,
   bytes                 BLOB,                     -- KindKV driver's inline bytes; NULL for kv = resolved-but-empty, ALWAYS NULL for file (its bytes live at placement_coord, never inline)
-  placement_kind        TEXT NOT NULL DEFAULT '', -- resourcespec.PlacementKind closed set; '' for kv (no placement axis — non-NULL, structurally distinct from "unknown")
   placement_daemon_id   TEXT NOT NULL DEFAULT '', -- explicit routing column: which daemon's Streamer holds the bytes; '' for kv
   placement_coord       TEXT NOT NULL DEFAULT '', -- opaque storage handle, server-registry-generated (§1.6); '' for kv; NEVER crosses Stat/List to a caller (§3.6 red line, enforced one layer up)
-  provenance            TEXT NOT NULL DEFAULT '', -- resourcespec.Provenance closed set; day-1 always 'axis-allocated' for every kind (door-stamped at create)
-  created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; PURE AUDIT column, not the authorization predicate (the creator's full-rights grant in resource_grants is)
+  created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; AUTHORIZATION PREDICATE since PM-D3 (op=delete = creator ∨ channel owner root, judged at the door) and the audit record it always was; read/write never consult it (membrane-uniform, PM-D1)
+  source_channel_id     TEXT,
+  source_resource_id    TEXT,
   created_at            INTEGER NOT NULL,
   is_dir                INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- file BYTE-SHAPE bit (the inode's S_IFDIR analogue): 1 = directory-shaped file resource (workspace, bytes = a whole tree委托真fs, Open→os.Root lease句柄), 0 = regular blob (Open→single-file staging句柄) / kv (always 0). Structural boolean integrity, KEEPS its CHECK (same discipline as is_terminal); this is the door's Open ROUTING truth, read at resolve, never a leaf the daemon re-derives from disk
-);
-
-CREATE TABLE IF NOT EXISTS resource_grants (
-  resource_id  TEXT NOT NULL,
-  grantee_kind TEXT NOT NULL,             -- access.GranteeKind closed set
-  grantee      TEXT NOT NULL DEFAULT '',  -- actor id when kind=actor; '' when kind=members (sum form persisted in full)
-  ops          TEXT NOT NULL,             -- JSON array of access.Operation
-  PRIMARY KEY (resource_id, grantee_kind, grantee),
-  FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
 );
 
 -- =============================================================
@@ -153,6 +173,8 @@ CREATE TABLE IF NOT EXISTS resource_reservations (
   placement_daemon_id  TEXT NOT NULL DEFAULT '',
   placement_coord      TEXT NOT NULL DEFAULT '',
   created_by           TEXT NOT NULL,           -- door-authenticated creator (never daemon-reported)
+  source_channel_id    TEXT,
+  source_resource_id   TEXT,
   reserved_at          INTEGER NOT NULL,
   is_dir               INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)), -- carried write-ahead so CommitReservation lands the resources row with the correct byte-shape bit (a content-less dir create's shape must survive the ReserveCreate→AllocRequest→Committed round trip; daemon reports no truth, §1.3)
   last_progress_at     INTEGER NOT NULL DEFAULT 0 -- most-recent activity stamp for the in-flight transfer
@@ -166,7 +188,6 @@ CREATE TABLE IF NOT EXISTS resource_tombstones (
   resource_id     TEXT NOT NULL,          -- NON-unique index: same-name delete/recreate can leave multiple tombstones co-existing without colliding on the primary key
   daemon_id       TEXT NOT NULL DEFAULT '',
   placement_coord TEXT NOT NULL DEFAULT '',
-  provenance      TEXT NOT NULL,          -- the Reclaimer branches on this: axis-allocated bytes are rm -rf'd, registered bytes are left on disk
   kind            TEXT NOT NULL,
   deleted_at      INTEGER NOT NULL
 );
@@ -180,12 +201,14 @@ CREATE INDEX IF NOT EXISTS ix_resource_tombstones_daemon ON resource_tombstones(
 -- everything else — access is channel-scoped — but a SEPARATE table because scope is
 -- expressed by WHICH structure an object lives in, never by a column (Unix: an
 -- anonymous mapping is not a file tagged "anonymous", it simply is not in the fs
--- namespace). The collapsed authorization (reachable set ≡ {owner}) means there
--- is no R here — no resource_grants sibling: the byte row IS the whole object.
+-- namespace). The collapsed authorization (reachable set ≡ {owner}) means the
+-- byte row IS the whole object.
 -- Keyed (owner_id, resource_id) — the door welds owner at handle mint, so owner
--- is a coordinate, not a per-call arg. Cascade-cleared with actor_registry on
--- deregister (the scope law: owner dies ⟹ its state dies, Erlang ETS
--- private).
+-- is a coordinate, not a per-call arg. Rows of a dead owner are NOT cleared on
+-- deregister: ActorIDs are never reused and every belonging is keyed by
+-- ActorID, so a dead owner's rows are unreachable inert data. Correctness lives
+-- at the admission gate, never in a delete; reclaiming disk is an explicit
+-- batch management action, not lifecycle logic.
 CREATE TABLE IF NOT EXISTS actor_state (
   owner_id    TEXT NOT NULL,             -- identity level (ActorID); incarnation NEVER persisted
   resource_id TEXT NOT NULL,
@@ -203,17 +226,15 @@ CREATE TABLE IF NOT EXISTS actor_state (
 -- =============================================================
 -- 6) timers  (time axis)
 -- =============================================================
--- The IDENTITY-level pending-timer CONTROL PLANE: future intent keyed by a
--- durable name, mutable (cancellable), NEVER truth (pending in the
+-- The IDENTITY-level pending-timer CONTROL PLANE: future intent keyed by
+-- author ActorID, mutable (cancellable), NEVER truth (pending in the
 -- append-only log would be unretractable). Same channel sqlite as the
 -- messages/registry/state tables.
 --
--- This table holds ONLY identity-bind timers — the bind is expressed by WHICH
--- home the intent lives in, never by a column (same discipline as actor_state:
--- scope is expressed by structure): incarnation-bind timers are engine MEMORY,
--- welded to the live embodiment, and vanish with the process (BEAM in-VM /
--- Orleans in-activation / POSIX on-task_struct — ephemeral intent never gets a
--- durable account). So: no bind column, ever; incarnation NEVER persisted.
+-- This table is the Durable Scheduler home. Memory-home timers live only in
+-- the current Scheduler instance and vanish with it. Both homes are owned by
+-- ActorID and cross actor replacement; storage home is not an
+-- AttemptKey/Incarnation coordinate. So: no per-row home/generation column.
 -- No target column, ever (timers are always self-targeted). No recurrence
 -- column (one-shot is the complete primitive; recurrence is domain re-arm).
 CREATE TABLE IF NOT EXISTS timers (
@@ -223,7 +244,8 @@ CREATE TABLE IF NOT EXISTS timers (
   type           TEXT NOT NULL,
   payload        BLOB,
   correlation_id TEXT,              -- captured at schedule time; inherited by the fire envelope
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','fired'))
 );
 CREATE INDEX IF NOT EXISTS ix_timers_fire_at ON timers(fire_at);
 CREATE INDEX IF NOT EXISTS ix_timers_author  ON timers(author_id);
@@ -244,20 +266,23 @@ CREATE TABLE IF NOT EXISTS timer_dead (
 );
 `
 
-// ChannelLocalTables enumerates the channel-local table names in
-// initialization order. Tests assert that every name exists in
-// `sqlite_master` after OpenChannel.
+// ChannelLocalTables returns the channel-local table names in initialization
+// order — a fresh copy per call, so no caller can mutate the canonical list.
+// Tests assert that every name exists in `sqlite_master` after OpenChannel.
 //
-// ChannelLocalTables contains only channel-local truth tables. The former
+// The list contains only channel-local truth tables. The former
 // bootstrap_registry table was not channel-local truth and has been removed.
-var ChannelLocalTables = []string{
-	"messages",
-	"actor_registry",
-	"resources",
-	"resource_grants",
-	"resource_reservations",
-	"resource_tombstones",
-	"actor_state",
-	"timers",
-	"timer_dead",
+func ChannelLocalTables() []string {
+	return []string{
+		"messages",
+		"actor_registry",
+		"channel_genesis",
+		"channel_daemon_bindings",
+		"resources",
+		"resource_reservations",
+		"resource_tombstones",
+		"actor_state",
+		"timers",
+		"timer_dead",
+	}
 }

@@ -1,0 +1,2259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atoll.local/schema/engine-api-1.0.json",
+  "title": "Atoll engine API contract",
+  "x-contract-version": "1.0",
+  "x-envelope-version": 2,
+  "x-rest-methods": [
+    {
+      "method": "GET",
+      "path": "/api/actor-decls",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "DeclarationList",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/actor-decls",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "DeclarationCreateRequest",
+      "response_schema": "Declaration",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/actor-decls/:declID",
+      "auth": "session",
+      "path_schema": "DeclarationPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "DeclarationMutation",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/actor-decls/:declID",
+      "auth": "session",
+      "path_schema": "DeclarationPath",
+      "query_schema": "none",
+      "body_schema": "DeclarationUpdateRequest",
+      "response_schema": "DeclarationMutation",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "ChannelListQuery",
+      "body_schema": "none",
+      "response_schema": "ChannelList",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/channels",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "CreateChannelRequest",
+      "response_schema": "Channel",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/channels/:chID",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "ChannelDeletion",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "Channel",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/channels/:chID/actors",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "none",
+      "body_schema": "IntroduceActorRequest",
+      "response_schema": "IntroduceActorResponse",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/channels/:chID/actors/:actorID",
+      "auth": "session",
+      "path_schema": "ChannelActorPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "RemoveActorResponse",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID/candidates",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "CandidateList",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID/daemons",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "DaemonList",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/channels/:chID/daemons",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "none",
+      "body_schema": "AttachDaemonRequest",
+      "response_schema": "DaemonBinding",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/channels/:chID/daemons/:id",
+      "auth": "session",
+      "path_schema": "ChannelDaemonPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "DaemonBinding",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/channels/:chID/decls/:declID/config",
+      "auth": "session",
+      "path_schema": "ChannelDeclarationPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "DeclarationOverlay",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "PUT",
+      "path": "/api/channels/:chID/decls/:declID/config",
+      "auth": "session",
+      "path_schema": "ChannelDeclarationPath",
+      "query_schema": "none",
+      "body_schema": "DeclarationOverlayRequest",
+      "response_schema": "DeclarationOverlay",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/channels/:chID/join",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "Membership",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID/messages",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "MessagePageQuery",
+      "body_schema": "none",
+      "response_schema": "MessagePage",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID/observe",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "MessagePageQuery",
+      "body_schema": "none",
+      "response_schema": "EventStream",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID/resources",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "ResourceListQuery",
+      "body_schema": "none",
+      "response_schema": "ResourcePage",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID/resources/:rid",
+      "auth": "session",
+      "path_schema": "ChannelResourcePath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "ResourceMeta",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/channels/:chID/resources/:rid/bytes",
+      "auth": "session",
+      "path_schema": "ChannelResourcePath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "Binary",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/daemons",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "DaemonList",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/daemons",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "CreateDaemonRequest",
+      "response_schema": "Daemon",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/daemons/:id",
+      "auth": "session",
+      "path_schema": "DaemonPath",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "DaemonDeletion",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/experimental/channels/:chID/observe",
+      "auth": "session",
+      "path_schema": "ChannelPath",
+      "query_schema": "MessagePageQuery",
+      "body_schema": "none",
+      "response_schema": "EventStream",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/identity/login",
+      "auth": "none",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "LoginRequest",
+      "response_schema": "Principal",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/identity/logout",
+      "auth": "none",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "OK",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/identity/me",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "Principal",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/identity/register",
+      "auth": "none",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "RegisterRequest",
+      "response_schema": "Principal",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/identity/verification/issue",
+      "auth": "none",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "OK",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/meta",
+      "auth": "none",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "Meta",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    },
+    {
+      "method": "GET",
+      "path": "/ws",
+      "auth": "session",
+      "path_schema": "none",
+      "query_schema": "none",
+      "body_schema": "none",
+      "response_schema": "SubjectgateFrameStream",
+      "error_schemas": [
+        "Error"
+      ],
+      "since": "1.0",
+      "experimental": false
+    }
+  ],
+  "x-error-codes": [
+    "bad_payload",
+    "invalid_request",
+    "not_authenticated",
+    "invalid_credentials",
+    "forbidden",
+    "not_found",
+    "channel_not_found",
+    "daemon_not_found",
+    "decl_not_found",
+    "resource_not_found",
+    "already_exists",
+    "conflict",
+    "parent_not_present",
+    "now_member",
+    "config_invalid",
+    "unknown_class",
+    "channel_unavailable",
+    "invalid_desired_host",
+    "protected_actor",
+    "not_accepted_source",
+    "member_inactive",
+    "capability_unavailable",
+    "authority_unavailable",
+    "realm_unavailable",
+    "routing_unavailable",
+    "unavailable",
+    "result_unknown",
+    "internal_error"
+  ],
+  "x-websocket-frames": {
+    "after": {
+      "direction": "upstream",
+      "payload_schema": "AfterPayload"
+    },
+    "attach": {
+      "direction": "upstream",
+      "payload_schema": "AttachPayload"
+    },
+    "cancel": {
+      "direction": "upstream",
+      "payload_schema": "CancelPayload"
+    },
+    "cancel_timer": {
+      "direction": "upstream",
+      "payload_schema": "CancelTimerPayload"
+    },
+    "error": {
+      "direction": "downstream",
+      "payload_schema": "ErrorPayload"
+    },
+    "feed": {
+      "direction": "downstream",
+      "payload_schema": "FeedPayload"
+    },
+    "observe": {
+      "direction": "upstream",
+      "payload_schema": "ObservePayload"
+    },
+    "observe_ended": {
+      "direction": "downstream",
+      "payload_schema": "ObserveEndedPayload"
+    },
+    "receipt": {
+      "direction": "downstream",
+      "payload_schema": "ReceiptPayload"
+    },
+    "resolve": {
+      "direction": "upstream",
+      "payload_schema": "ResolvePayload"
+    },
+    "resource": {
+      "direction": "upstream",
+      "payload_schema": "ResourcePayload"
+    },
+    "submit": {
+      "direction": "upstream",
+      "payload_schema": "SubmitPayload"
+    },
+    "unobserve": {
+      "direction": "upstream",
+      "payload_schema": "UnobservePayload"
+    }
+  },
+  "x-activity-types": {
+    "activity.tool.ended": {
+      "payload_schema": "ActivityToolEndedPayload"
+    },
+    "activity.tool.started": {
+      "payload_schema": "ActivityToolStartedPayload"
+    },
+    "activity.turn.ended": {
+      "payload_schema": "ActivityTurnEndedPayload"
+    },
+    "activity.turn.started": {
+      "payload_schema": "ActivityTurnStartedPayload"
+    }
+  },
+  "$defs": {
+    "ActivityToolEndedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "tool_call_id",
+        "tool",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ActivityToolStartedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "started",
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "tool_call_id",
+        "tool",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ActivityTurnEndedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "failed",
+            "interrupted"
+          ],
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ActivityTurnStartedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "started",
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_index",
+        "status"
+      ],
+      "type": "object"
+    },
+    "AfterPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "msg_type": {
+          "type": "string"
+        },
+        "payload": {}
+      },
+      "required": [
+        "channel_id",
+        "duration_ms",
+        "msg_type"
+      ],
+      "type": "object"
+    },
+    "AfterReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "timer_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "timer_id"
+      ],
+      "type": "object"
+    },
+    "AgentMessagePayload": {
+      "additionalProperties": true,
+      "description": "Open content payload convention for messages addressed to agents. Agent actions are expressed by message type; expected_turn_id is the optional CAS field for agent.steer.",
+      "properties": {
+        "expected_turn_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "AttachDaemonRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "daemon_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "daemon_id"
+      ],
+      "type": "object"
+    },
+    "AttachPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "since": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "AttachReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "contract_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_version"
+      ],
+      "type": "object"
+    },
+    "Binary": {
+      "contentEncoding": "binary",
+      "type": "string"
+    },
+    "CancelPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        },
+        "req_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id",
+        "req_id"
+      ],
+      "type": "object"
+    },
+    "CancelReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "req_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "req_id"
+      ],
+      "type": "object"
+    },
+    "CancelTimerPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        },
+        "timer_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id",
+        "timer_id"
+      ],
+      "type": "object"
+    },
+    "CancelTimerReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "timer_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "timer_id"
+      ],
+      "type": "object"
+    },
+    "CandidateList": {
+      "additionalProperties": true,
+      "properties": {
+        "candidates": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "display_name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              },
+              "user_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "user_id",
+              "email",
+              "display_name"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "Channel": {
+      "additionalProperties": true,
+      "properties": {
+        "changed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "default_agent": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner_principal": {
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "type",
+        "status",
+        "owner_principal",
+        "created_at",
+        "parent_id"
+      ],
+      "type": "object"
+    },
+    "ChannelActorPath": {
+      "additionalProperties": false,
+      "properties": {
+        "actorID": {
+          "type": "string"
+        },
+        "chID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chID",
+        "actorID"
+      ],
+      "type": "object"
+    },
+    "ChannelDaemonPath": {
+      "additionalProperties": false,
+      "properties": {
+        "chID": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chID",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ChannelDeclarationPath": {
+      "additionalProperties": false,
+      "properties": {
+        "chID": {
+          "type": "string"
+        },
+        "declID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chID",
+        "declID"
+      ],
+      "type": "object"
+    },
+    "ChannelDeletion": {
+      "additionalProperties": true,
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "changed"
+      ],
+      "type": "object"
+    },
+    "ChannelList": {
+      "additionalProperties": true,
+      "properties": {
+        "channels": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "changed": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "created_at": {
+                "type": "integer"
+              },
+              "default_agent": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "owner_principal": {
+                "type": "string"
+              },
+              "parent_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "type",
+              "status",
+              "owner_principal",
+              "created_at",
+              "parent_id"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "channels"
+      ],
+      "type": "object"
+    },
+    "ChannelListQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ChannelPath": {
+      "additionalProperties": false,
+      "properties": {
+        "chID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chID"
+      ],
+      "type": "object"
+    },
+    "ChannelResourcePath": {
+      "additionalProperties": false,
+      "properties": {
+        "chID": {
+          "type": "string"
+        },
+        "rid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chID",
+        "rid"
+      ],
+      "type": "object"
+    },
+    "CreateChannelRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "CreateDaemonRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Daemon": {
+      "additionalProperties": true,
+      "properties": {
+        "api_key": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "online": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "DaemonBinding": {
+      "additionalProperties": true,
+      "properties": {
+        "bound": {
+          "type": "boolean"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "cleared_instances": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "bound",
+        "changed"
+      ],
+      "type": "object"
+    },
+    "DaemonDeletion": {
+      "additionalProperties": true,
+      "properties": {
+        "authority_committed": {
+          "type": "boolean"
+        },
+        "convergence": {
+          "type": "string"
+        },
+        "diagnostics": {},
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "authority_committed",
+        "convergence",
+        "diagnostics"
+      ],
+      "type": "object"
+    },
+    "DaemonList": {
+      "additionalProperties": true,
+      "properties": {
+        "daemons": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "api_key": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "integer"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "online": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "daemons"
+      ],
+      "type": "object"
+    },
+    "DaemonPath": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "Declaration": {
+      "additionalProperties": true,
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instances": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "channel_id",
+              "instance_id"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "integer"
+        },
+        "visibility": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "owner",
+        "class",
+        "visibility",
+        "created_at",
+        "instances"
+      ],
+      "type": "object"
+    },
+    "DeclarationCreateRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "config": {},
+        "name": {
+          "type": "string"
+        },
+        "visibility": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "DeclarationList": {
+      "additionalProperties": true,
+      "properties": {
+        "decls": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "class": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "integer"
+              },
+              "id": {
+                "type": "string"
+              },
+              "instances": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "channel_id": {
+                      "type": "string"
+                    },
+                    "instance_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "channel_id",
+                    "instance_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "integer"
+              },
+              "visibility": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "owner",
+              "class",
+              "visibility",
+              "created_at",
+              "instances"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "decls"
+      ],
+      "type": "object"
+    },
+    "DeclarationMutation": {
+      "additionalProperties": true,
+      "properties": {
+        "deleted": {
+          "type": "string"
+        },
+        "updated": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "DeclarationOverlay": {
+      "additionalProperties": true,
+      "properties": {
+        "updated": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "updated"
+      ],
+      "type": "object"
+    },
+    "DeclarationOverlayRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {}
+      },
+      "required": [
+        "config"
+      ],
+      "type": "object"
+    },
+    "DeclarationPath": {
+      "additionalProperties": false,
+      "properties": {
+        "declID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "declID"
+      ],
+      "type": "object"
+    },
+    "DeclarationUpdateRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {},
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visibility": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DownstreamEnvelope": {
+      "additionalProperties": true,
+      "properties": {
+        "frame_type": {
+          "type": "string",
+          "x-known-values": [
+            "error",
+            "feed",
+            "observe_ended",
+            "receipt"
+          ]
+        },
+        "payload": {},
+        "ref": {
+          "type": "string"
+        },
+        "v": {
+          "const": 2,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "frame_type"
+      ],
+      "type": "object"
+    },
+    "Error": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "type": "string",
+          "x-known-values": [
+            "bad_payload",
+            "invalid_request",
+            "not_authenticated",
+            "invalid_credentials",
+            "forbidden",
+            "not_found",
+            "channel_not_found",
+            "daemon_not_found",
+            "decl_not_found",
+            "resource_not_found",
+            "already_exists",
+            "conflict",
+            "parent_not_present",
+            "now_member",
+            "config_invalid",
+            "unknown_class",
+            "channel_unavailable",
+            "invalid_desired_host",
+            "protected_actor",
+            "not_accepted_source",
+            "member_inactive",
+            "capability_unavailable",
+            "authority_unavailable",
+            "realm_unavailable",
+            "routing_unavailable",
+            "unavailable",
+            "result_unknown",
+            "internal_error"
+          ]
+        },
+        "details": {},
+        "message": {
+          "type": "string"
+        },
+        "will_retry": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "type": "string",
+          "x-known-values": [
+            "bad_payload",
+            "not_in_audience",
+            "unauthorized_sender",
+            "already_closed",
+            "request_not_found",
+            "invalid_decision",
+            "unavailable",
+            "routing_unavailable",
+            "idempotency_conflict",
+            "now_member",
+            "channel_not_found",
+            "channel_unavailable",
+            "capability_unavailable",
+            "forbidden",
+            "closed"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        },
+        "frame": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "frame",
+        "code"
+      ],
+      "type": "object"
+    },
+    "EventStream": {
+      "contentMediaType": "text/event-stream",
+      "type": "string"
+    },
+    "FeedPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        },
+        "envelope": {},
+        "seq": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel_id",
+        "seq",
+        "envelope"
+      ],
+      "type": "object"
+    },
+    "IntroduceActorRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "decl_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "decl_id"
+      ],
+      "type": "object"
+    },
+    "IntroduceActorResponse": {
+      "additionalProperties": true,
+      "properties": {
+        "actor_id": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "instances": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "changed",
+        "instances"
+      ],
+      "type": "object"
+    },
+    "LoginRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "password"
+      ],
+      "type": "object"
+    },
+    "Membership": {
+      "additionalProperties": true,
+      "properties": {
+        "actor_id": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "actor_id",
+        "changed"
+      ],
+      "type": "object"
+    },
+    "MessagePage": {
+      "additionalProperties": true,
+      "properties": {
+        "messages": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "envelope": {},
+              "is_terminal": {
+                "type": "boolean"
+              },
+              "seq": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "envelope",
+              "seq",
+              "is_terminal"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scanned_through_seq": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messages",
+        "scanned_through_seq"
+      ],
+      "type": "object"
+    },
+    "MessagePageQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "after_seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Meta": {
+      "additionalProperties": true,
+      "properties": {
+        "contract_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_version"
+      ],
+      "type": "object"
+    },
+    "OK": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "type": "object"
+    },
+    "ObserveEndedPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "x-known-values": [
+            "now_member",
+            "channel_retired",
+            "channel_unavailable",
+            "capability_unavailable"
+          ]
+        }
+      },
+      "required": [
+        "channel_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ObservePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
+    "ObserveReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
+    "Principal": {
+      "additionalProperties": true,
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "email",
+        "display_name"
+      ],
+      "type": "object"
+    },
+    "ReceiptPayload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AttachReceipt"
+        },
+        {
+          "$ref": "#/$defs/SubmitReceipt"
+        },
+        {
+          "$ref": "#/$defs/ResolveReceipt"
+        },
+        {
+          "$ref": "#/$defs/CancelReceipt"
+        },
+        {
+          "$ref": "#/$defs/AfterReceipt"
+        },
+        {
+          "$ref": "#/$defs/CancelTimerReceipt"
+        },
+        {
+          "$ref": "#/$defs/ObserveReceipt"
+        },
+        {
+          "$ref": "#/$defs/UnobserveReceipt"
+        },
+        {
+          "$ref": "#/$defs/ResourceOutcome"
+        },
+        {
+          "$ref": "#/$defs/ResourceStat"
+        },
+        {
+          "$ref": "#/$defs/SubjectResourcePage"
+        }
+      ]
+    },
+    "RegisterRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "password"
+      ],
+      "type": "object"
+    },
+    "RemoveActorResponse": {
+      "additionalProperties": true,
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "changed",
+        "removed"
+      ],
+      "type": "object"
+    },
+    "ResolvePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "payload": {},
+        "req_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id",
+        "req_id",
+        "decision"
+      ],
+      "type": "object"
+    },
+    "ResolveReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "req_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "req_id"
+      ],
+      "type": "object"
+    },
+    "ResourceListQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefix": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ResourceMeta": {
+      "additionalProperties": true,
+      "properties": {
+        "created_at": {
+          "type": "integer"
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "dir": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "placement_daemon_id": {
+          "type": "string"
+        },
+        "placement_kind": {
+          "type": "string"
+        },
+        "source_channel_id": {
+          "type": "string"
+        },
+        "source_resource_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "created_by",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "ResourceOutcome": {
+      "additionalProperties": true,
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "value": {}
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "ResourcePage": {
+      "additionalProperties": true,
+      "properties": {
+        "items": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "created_at": {
+                "type": "integer"
+              },
+              "created_by": {
+                "type": "string"
+              },
+              "dir": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "placement_daemon_id": {
+                "type": "string"
+              },
+              "placement_kind": {
+                "type": "string"
+              },
+              "source_channel_id": {
+                "type": "string"
+              },
+              "source_resource_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "created_by",
+              "created_at"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "next": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "ResourcePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {},
+        "channel_id": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string"
+        },
+        "ops": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer"
+                },
+                "prefix": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resource_id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id",
+        "op",
+        "resource_id"
+      ],
+      "type": "object"
+    },
+    "ResourceStat": {
+      "additionalProperties": true,
+      "properties": {
+        "exists": {
+          "type": "boolean"
+        },
+        "meta": {}
+      },
+      "required": [
+        "exists"
+      ],
+      "type": "object"
+    },
+    "SubjectResourcePage": {
+      "additionalProperties": true,
+      "properties": {
+        "items": {
+          "items": {},
+          "type": "array"
+        },
+        "next": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "SubjectgateFrameStream": {
+      "$ref": "#/$defs/DownstreamEnvelope"
+    },
+    "SubmitPayload": {
+      "additionalProperties": false,
+      "description": "Idempotency key is (channel_id,id). The canonical client fingerprint covers msg_type, normalized kind, JSON-semantic payload, explicit audience, normalized visibility, parent_id, and explicit expires_at_ms; it excludes ref, id, generated deadlines, and default request-audience completion. Omitted kind/visibility/payload and their explicit default values are equivalent; an omitted event audience is the canonical empty array.",
+      "properties": {
+        "audience": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "channel_id": {
+          "type": "string"
+        },
+        "expires_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "msg_type": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        },
+        "payload": {},
+        "visibility": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id",
+        "msg_type"
+      ],
+      "type": "object"
+    },
+    "SubmitReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id"
+      ],
+      "type": "object"
+    },
+    "UnobservePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
+    "UnobserveReceipt": {
+      "additionalProperties": true,
+      "properties": {
+        "channel_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_id"
+      ],
+      "type": "object"
+    },
+    "UpstreamEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "frame_type": {
+          "enum": [
+            "after",
+            "attach",
+            "cancel",
+            "cancel_timer",
+            "observe",
+            "resolve",
+            "resource",
+            "submit",
+            "unobserve"
+          ],
+          "type": "string"
+        },
+        "payload": {},
+        "ref": {
+          "type": "string"
+        },
+        "v": {
+          "const": 2,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "frame_type"
+      ],
+      "type": "object"
+    },
+    "none": false
+  }
+}

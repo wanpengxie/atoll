@@ -14,9 +14,10 @@
 //     reason.go deliberately omits a "malformed" value.
 //   - the decision tree (door.invoke / door.create / door.stat / door.list) —
 //     RESOLVE, then the two-locus authorization (create via channel
-//     membership; object ops via R, unioning the actor entry with a members
-//     entry gated by a check-time membership lookup; Stat/List via the SAME
-//     union as an any-grant visibility projection), then EXECUTE. One tree,
+//     membership; object ops via the channel-owner root or R, unioning the
+//     actor entry with a members entry gated by a check-time membership lookup;
+//     Stat/List via the SAME union plus the owner root as a visibility
+//     projection), then EXECUTE. One tree,
 //     several entry methods — the scope split below is a vocabulary split,
 //     not a second tree (期11 spec §3.1).
 //   - the welded-caller capability, split into TWO faces along the scope axis
@@ -46,16 +47,17 @@
 //     remoteResourceHandle, liveAccess/liveResourceAccess) — same two
 //     interfaces, second implementations, one layer up.
 //   - file kind's byte route (Open/FileAccess) — the door DECIDES it
-//     (Outcome.Route: FileRoute{Local, Token, Mode, ReservationID}, minted
-//     via Deps.LaneControl) but never REDEEMS it: FileOpener (fileaccess.go)
+//     (Outcome.Route: FileRoute{Token, Mode, ReservationID}, minted
+//     via Deps.TransferControl) but never REDEEMS it: FileOpener (fileaccess.go)
 //     is the redemption capability, implemented one layer up by whichever
 //     avatar can actually reach live bytes (platform/internal/link's
 //     remoteResourceHandle, the daemon-hosted wire proxy — day-1's only
 //     implementor; a home-hosted caller has no local redemption path and is
 //     deferred alongside the rest of the human resource face, 债②). Invoke's
 //     file read/write branch and Create's with_content=true branch both
-//     funnel through door.resolveFileRoute (door.go) — the ONE decision
-//     point (same-daemon vs cross-host, via Membership.Lookup) both share.
-//     No file BYTE ever touches this package — Deps.LaneControl mints an
-//     opaque per-connection Token, never a coord, never a live handle.
+//     funnel through door.resolveFileRoute (door.go) — the ONE decision point
+//     both share, which also refuses any caller not on the file's own daemon
+//     (byte access is same-daemon only).
+//     No file BYTE ever touches this package — Deps.TransferControl mints an
+//     opaque Token, never a coord, never a live handle.
 package accessdoor

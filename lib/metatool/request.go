@@ -5,10 +5,9 @@ import (
 	"time"
 )
 
-// DefaultTimeout is the closure deadline (RequestSpec.Timeout) used when a
-// spec leaves Timeout unset and no Exec.TimeoutResolver overrides it
-// (P13). The fast-path Await window is DERIVED from whatever deadline is in
-// force (min(FastPathWindow, deadline)), never a separate knob.
+// DefaultTimeout is the closure deadline used when a RequestSpec leaves
+// Timeout unset. The fast-path Await window is derived from whatever deadline
+// is in force (min(FastPathWindow, deadline)), never a separate knob.
 const DefaultTimeout = 30 * time.Second
 
 // WaitMode selects the caller-side wait policy for one channel request.
@@ -17,7 +16,7 @@ type WaitMode int
 const (
 	// WaitFastPath is the default: Submit + Await(window~15s).
 	WaitFastPath WaitMode = iota
-	// WaitUnbounded is call_actor(wait=true): Await to the type timeout.
+	// WaitUnbounded is call_actor(wait=true): Await to the request deadline.
 	WaitUnbounded
 	// WaitNone is call_actor(wait=false): window 0, immediate ack.
 	WaitNone
@@ -30,10 +29,9 @@ type RequestSpec struct {
 	EnvelopeType   string
 	HandlerActorID string
 	Payload        json.RawMessage
-	// Timeout is the closure deadline (author#2's ExpiresAt), per request type.
-	// Zero = let the Exec resolve it (Exec.TimeoutResolver, else
-	// DefaultTimeout). It is NOT a wait-window knob — the fast-path Await
-	// window is always min(FastPathWindow, Timeout), derived, never per-type.
+	// Timeout is the closure deadline (author#2's ExpiresAt). Zero uses
+	// DefaultTimeout. It is not a wait-window knob — the fast-path Await window
+	// is always min(FastPathWindow, Timeout).
 	Timeout  time.Duration
 	WaitMode WaitMode
 }

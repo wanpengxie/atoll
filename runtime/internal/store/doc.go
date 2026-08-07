@@ -19,7 +19,7 @@
 //   - sqlite.go            — sql.DB factory (channel-local; per-connection
 //     pragmas ride the DSN, pool pinned to 1).
 //   - schema.go            — DDL constants (messages / actor_registry /
-//     resources / resource_grants / actor_state / timers). v2: no
+//     resources / actor_state / timers). v2: no
 //     worker_locks (the channel has a single write path by construction — a
 //     structural invariant, not a per-row lease), no
 //     action_ledger (turn-replay idempotency is an application concern, not
@@ -28,7 +28,7 @@
 //   - channel.go           — OpenChannel assembly of every seam over one db.
 //   - messages.go          — storespec.MessageLog impl.
 //   - request_lookup.go    — storespec.RequestLookup impl.
-//   - actors.go            — storespec.Registry + membership control plane.
+//   - actors.go            — segregated declaration/principal/history read faces + membership control plane.
 //   - resources.go         — resourcespec.Registry + KindKV driver impl.
 //   - state.go             — resourcespec.StateStore impl (actor-scoped locus).
 //   - timers.go            — timerspec.TimerStore impl.

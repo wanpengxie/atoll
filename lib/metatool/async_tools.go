@@ -87,6 +87,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 	}
 	if !ok {
 		// Still pending after the window — hand control back with an ack.
+		toWait, notWaiting := newCollectHint(reqID.String())
 		return AckResult("await_result", AckDescriptor{
 			RequestID: reqID,
 			Accepted:  true,
@@ -94,12 +95,19 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 			EstWaitMs: int64(timeout / time.Millisecond),
 			Guidance: "Still running after the wait window. The call keeps running; try await_result again, " +
 				"or do other work and react to the result when it returns as a new message.",
-			ToWait:     ToWaitHint{Tool: "await_result", Params: map[string]any{"request_id": reqID.String()}},
-			NotWaiting: "result returns as kind=response, parent_id=" + reqID.String() + " new turn trigger",
+			ToWait:     toWait,
+			NotWaiting: notWaiting,
 		})
 	}
 	rv, _ := ResultFromResponse("await_result", *finalEnv)
-	return rv
+	// Stage two of the render→normalize pipeline (the same law every other
+	// collector applies — call_actor:114, describe.go:61/122): await_result is
+	// call_actor's second half, and the SAME actor-returned failure must reach
+	// the LLM in the SAME closed-set error shape whichever half collected it.
+	// This mount was the pipeline's one missing outlet (purity 手动档 B3).
+	// The answering actor's identity and the response type ride on the final
+	// envelope itself.
+	return NormalizeCallActorResult(rv, string(finalEnv.Sender.ID), finalEnv.Type)
 }
 
 // CancelSpec is the protocol-layer definition of cancel.

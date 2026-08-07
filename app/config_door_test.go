@@ -12,21 +12,18 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // config_door_test.go is the S8 DoD (spec §7 DoD 10): ctx.Config is the read-only
 // per-instance snapshot that reaches an actor via registry.InstanceSpec.Config in
-// BOTH forms (Legacy / Proc), never through actorcaps.Caps (that half is the
-// TestConfigNotInCaps archtest), and 改配置 flows door → Spawn-replace → a fresh
+// the Proc model, never through actorcaps.Caps (that half is the
+// TestConfigNotInCaps archtest), and 改配置 flows door → Controller replacement → a fresh
 // incarnation over the new snapshot.
 
 // configSink records the "model" each incarnation of an id was BUILT with — the
 // live proof of which snapshot the constructor closure captured. Keyed by id;
-// overwritten on every (re)build, so a post-Spawn-replace read sees the new value.
+// overwritten on every (re)build, so a post-reconcile-replace read sees the new value.
 var configSink = struct {
 	mu sync.Mutex
 	m  map[actor.ActorID]string
@@ -46,7 +43,7 @@ func readConfig(id actor.ActorID) (string, bool) {
 }
 
 // waitConfig polls configSink until id's recorded model == want (a rebuild is
-// async in the ring path; Spawn-replace builds the closure synchronously but the
+// async in the ring path; reconcile-replace builds the closure synchronously but the
 // cell start is scheduled).
 func waitConfig(t *testing.T, id actor.ActorID, want string, timeout time.Duration) {
 	t.Helper()
@@ -74,23 +71,7 @@ func configModel(raw json.RawMessage) string {
 }
 
 func init() {
-	// Legacy form: the constructor parses spec.Config and closes over the result in
-	// the func(pen) factory closure — config rides the constructor, not caps.
-	legacy := func(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
-		model := configModel(spec.Config)
-		id := spec.ID
-		return platform.ActorDecl{
-			ID:   id,
-			Kind: actor.KindAgent,
-			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
-				recordConfig(id, model) // runs when THIS incarnation is built
-				return &cfgLegacyActor{pen: pen}
-			}},
-		}, nil
-	}
-	registry.Register("s8cfg-legacy", registry.ClassDecl{Kind: actor.KindAgent, New: legacy})
-
-	// Proc form: the same constructor closure captures spec.Config into the Def
+	// The constructor closure captures spec.Config into the Def
 	// (Constructor(spec,deps) → Def → New() per incarnation), never into caps.
 	proc := func(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
 		model := configModel(spec.Config)
@@ -102,7 +83,13 @@ func init() {
 				Doc: "s8 config snapshot proc",
 				New: func() (actorbase.Proc, error) {
 					recordConfig(id, model) // Def carries the snapshot into the incarnation
-					return func(sys actorbase.Sys) error { return nil }, nil
+					return func(sys actorbase.Sys) error {
+						for {
+							if _, err := sys.Recv(); err != nil {
+								return err
+							}
+						}
+					}, nil
 				},
 			}},
 		}, nil
@@ -110,64 +97,57 @@ func init() {
 	registry.Register("s8cfg-proc", registry.ClassDecl{Kind: actor.KindAgent, New: proc})
 }
 
-type cfgLegacyActor struct{ pen harness.Pen }
-
-func (a *cfgLegacyActor) Receive(context.Context, *message.Envelope) error { return nil }
-
-// TestConfigDoor_LegacyEndToEnd is the end-to-end DoD: introduce a server-placed
-// agent (snapshot v1 from its global config), then change config through the door
-// (introduce upsert carrying config) and observe the new snapshot v2 embodied via
-// Spawn-replace.
-func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
+func TestConfigDoor_ProcEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
-
-	// Global agent declaration carries snapshot v1 (looper = the s8cfg-legacy class).
 	w := env.do(t, "POST", "/api/actor-decls",
-		map[string]any{"name": "cfgbot", "class": "s8cfg-legacy", "config": map[string]any{"model": "v1"}},
+		map[string]any{"name": "cfgbot", "class": "s8cfg-proc", "config": map[string]any{"model": "v1"}},
 		s.cookies)
 	assertStatus(t, w, http.StatusCreated)
-	var ag map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &ag); err != nil {
-		t.Fatalf("decode agent: %v", err)
+	var declaration map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &declaration); err != nil {
+		t.Fatalf("decode declaration: %v", err)
 	}
-	agentID := ag["id"].(string)
-	var instanceID actor.ActorID
+	declID := declaration["id"].(string)
+	daemonID := createAndBindDaemon(t, env, s.chID, "config-host", s.cookies)["id"].(string)
 
-	face := env.app.OperateFaceForTest()
-	sender := s.actorID
+	introducedResp := env.do(t, "POST", "/api/channels/"+s.chID+"/actors", map[string]any{"decl_id": declID}, s.cookies)
+	assertStatus(t, introducedResp, http.StatusCreated)
+	introduced := respJSON(t, introducedResp)
+	instanceID := actor.ActorID(introduced["actor_id"].(string))
+	_ = daemonID
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, instanceID, "v1")
 
-	// Introduce server-placed (no per-channel config → global v1 is the snapshot).
-	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "server"})
-	introduced, err := face.Introduce(context.Background(), platform.OperateRequest{
-		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p1,
-	})
-	if err != nil {
-		t.Fatalf("introduce v1: %v", err)
-	}
-	instanceID = actor.ActorID(introduced.(map[string]any)["instance_id"].(string))
-	if !env.app.WaitLiveForTest(s.chID, instanceID, 2*time.Second) {
-		t.Fatalf("instance %s never embodied after introduce", instanceID)
-	}
-	waitConfig(t, instanceID, "v1", 2*time.Second)
+	updated := env.do(t, "PATCH", "/api/actor-decls/"+declID, map[string]any{"config": map[string]any{"model": "v2"}}, s.cookies)
+	assertStatus(t, updated, http.StatusOK)
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, instanceID, "v2")
+}
 
-	// 改配置门: re-introduce carrying config v2 → UPDATE composition row's config
-	// field → Spawn-replace → new snapshot embodied.
-	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"model": "v2"}})
-	res, err := face.Introduce(context.Background(), platform.OperateRequest{
-		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p2,
-	})
-	if err != nil {
-		t.Fatalf("introduce v2 (config change): %v", err)
+// waitDeclaredConfig is the app-level half of declaration convergence: the
+// resolved declaration the runtime pull loop reads reaches `want`, and the
+// declaration still has exactly the one instance (a config change is a new term
+// on the SAME record, never a second instance). What the Controller then does
+// with that definition — mint a new term on change, no-op on an equal value —
+// is proven in platform/home, where the projection lives; the business membrane
+// deliberately exposes no definition.
+func waitDeclaredConfig(t *testing.T, env *testEnv, chID channel.ID, declID string, instanceID actor.ActorID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		facts, err := env.app.ResolvedDeclarationForTest(context.Background(), chID, declID)
+		if err == nil && configModel(facts.Config) == want {
+			ids, instErr := env.app.DeclaredInstancesForTest(chID, declID)
+			if instErr != nil {
+				t.Fatalf("declared instances: %v", instErr)
+			}
+			if len(ids) != 1 || ids[0] != instanceID {
+				t.Fatalf("declaration instances=%v, want exactly [%s]", ids, instanceID)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	m, _ := res.(map[string]any)
-	if created, _ := m["created"].(bool); created {
-		t.Fatalf("config-change introduce reported created=true (should update existing row)")
-	}
-	if updated, _ := m["config_updated"].(bool); !updated {
-		t.Fatalf("config-change introduce did not report config_updated")
-	}
-	waitConfig(t, instanceID, "v2", 2*time.Second)
+	t.Fatalf("actor %s did not converge to model %q", instanceID, want)
 }
 
 // TestConfigSnapshot_ProcForm proves the Proc form reads the snapshot too: a Proc

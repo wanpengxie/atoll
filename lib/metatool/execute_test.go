@@ -109,10 +109,6 @@ func assertIsError(t *testing.T, rv metatool.ResultValue, code string) {
 	}
 	errObj, ok := rv.Value["error"].(map[string]any)
 	if !ok {
-		// list_actors uses a plain {"error": "..."} shape.
-		if _, ok := rv.Value["error"].(string); ok {
-			return
-		}
 		t.Fatalf("no error object in %+v", rv.Value)
 	}
 	if code != "" && errObj["code"] != code {
@@ -191,27 +187,6 @@ func TestExecuteCallActor_FanOutSubmitsRequest(t *testing.T) {
 	// wait=false → immediate ack.
 	if rv.Value["status"] != "accepted" {
 		t.Fatalf("wait=false should ack; got %+v", rv.Value)
-	}
-}
-
-// TestExecuteCallActor_TimeoutResolverOverridesDefault pins P13: a resolver
-// answer is the deadline actually used (ExpiresAt reflects it).
-func TestExecuteCallActor_TimeoutResolverOverridesDefault(t *testing.T) {
-	jobs := &fakeJobs{}
-	now := time.Now()
-	x := &metatool.Exec{
-		Jobs:  jobs,
-		Clock: func() time.Time { return now },
-		TimeoutResolver: func(target actor.ActorID, reqType string) (time.Duration, bool) {
-			return 3 * time.Second, true
-		},
-	}
-	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","wait":false}`)
-	metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
-	got := jobs.submitted[0]
-	wantExpiry := now.Add(3 * time.Second).UnixMilli()
-	if got.ExpiresAt == nil || *got.ExpiresAt != wantExpiry {
-		t.Fatalf("ExpiresAt = %v, want %d (now+3s)", got.ExpiresAt, wantExpiry)
 	}
 }
 
@@ -315,6 +290,27 @@ func TestExecuteAwaitResult_ResolvesFinal(t *testing.T) {
 	}
 }
 
+// TestExecuteAwaitResult_FailedFinalNormalized pins the render→normalize
+// pipeline's await_result outlet (purity 手动档 B3): an actor-returned
+// failure collected via await_result must reach the LLM in the SAME
+// closed-set error shape call_actor produces — {ok:false, error:{code,...}}
+// via NormalizeCallActorResult — never the raw {error: reason} render.
+func TestExecuteAwaitResult_FailedFinalNormalized(t *testing.T) {
+	jobs := &fakeJobs{}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return finalResp(id, map[string]any{
+			"status": "failed", "reason": "receiver_unavailable",
+		}), true, nil
+	}
+	x := newExec(jobs, nil)
+	rv := metatool.ExecuteAwaitResult(context.Background(),
+		json.RawMessage(`{"request_id":"req-1"}`), x, defaultRC())
+	assertIsError(t, rv, "actor_unreachable")
+	if rv.Value["ok"] != false {
+		t.Fatalf("normalized closed-set shape must carry ok:false, got %+v", rv.Value)
+	}
+}
+
 // --- cancel ----------------------------------------------------------------
 
 func TestExecuteCancel_NilExec(t *testing.T) {
@@ -379,6 +375,38 @@ func TestExecuteDescribeActor_UsesCallFace(t *testing.T) {
 	}
 }
 
+// TestExecuteDescribeActor_TerminalFailureNormalized pins that describe_actor
+// now routes its final through the SAME actor-CLI normalization as call_actor
+// (#11): a failed describe response renders as the closed error set, not the
+// raw透传 {error:reason} shape it did before.
+func TestExecuteDescribeActor_TerminalFailureNormalized(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return finalResp("d", map[string]any{
+			"status": "failed",
+			"reason": string(message.TerminalReceiverUnavailable),
+		}), true, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteDescribeActor(context.Background(),
+		json.RawMessage(`{"actor_id":"tool:xhs"}`), x, defaultRC())
+	assertIsError(t, rv, "actor_unreachable")
+}
+
+// TestExecuteDescribeType_TerminalFailureNormalized: same normalization for the
+// per-type query (#11).
+func TestExecuteDescribeType_TerminalFailureNormalized(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return finalResp("d", map[string]any{
+			"status": "failed",
+			"reason": string(message.TerminalUnansweredTimeout),
+		}), true, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteDescribeType(context.Background(),
+		json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search"}`), x, defaultRC())
+	assertIsError(t, rv, "timeout")
+}
+
 func TestExecuteDescribeType_MissingType(t *testing.T) {
 	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
 		return nil, false, nil
@@ -419,6 +447,58 @@ func TestExecuteListActors_RendersCatalog(t *testing.T) {
 	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
 	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
 	assertNotError(t, rv)
+}
+
+// CallSyncRaw failure categories must surface as their REAL closed-set codes
+// (not one collapsed timeout bucket): wire error → internal_error.
+func TestExecuteListActors_CallErrorIsInternalError(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return nil, false, context.DeadlineExceeded
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
+	assertIsError(t, rv, "internal_error")
+}
+
+// No final within the window → timeout.
+func TestExecuteListActors_NoFinalIsTimeout(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return nil, false, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
+	assertIsError(t, rv, "timeout")
+	// Anchor the hint too: this transient sys.Call path never enters the
+	// JobTable, so the hint must not regress to suggesting list_pending.
+	errObj := rv.Value["error"].(map[string]any)
+	if hint := errObj["recovery_hint"]; hint != "Retry, or check that the system actor is present" {
+		t.Fatalf("recovery_hint = %v, want the retry/system-actor hint", hint)
+	}
+}
+
+// A non-response final envelope → internal_error.
+func TestExecuteListActors_NonResponseFinalIsInternalError(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return &message.Envelope{Kind: message.KindEvent, Payload: json.RawMessage(`{}`)}, true, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
+	assertIsError(t, rv, "internal_error")
+}
+
+// An actor-returned failure maps through the terminal-reason law
+// (receiver_unavailable → actor_unreachable).
+func TestExecuteListActors_ActorFailureMapsTerminalReason(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		body, _ := json.Marshal(map[string]any{
+			"status": "failed",
+			"reason": string(message.TerminalReceiverUnavailable),
+		})
+		return &message.Envelope{Kind: message.KindResponse, Payload: body}, true, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
+	assertIsError(t, rv, "actor_unreachable")
 }
 
 func containsStr(s, sub string) bool {

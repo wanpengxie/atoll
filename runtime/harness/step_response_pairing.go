@@ -182,7 +182,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	// and receiver and may write either of its two words. A sender that is
 	// none of the authorized arms rejects as unauthorized; an authorized
 	// author writing ANOTHER author's word rejects the same way.
-	isReceiver := audienceContains(parent.Envelope.Audience, env.Sender.ID)
+	isReceiver := parent.Envelope.Audience.Contains(env.Sender.ID)
 	receiverAuthored := isReceiver &&
 		(!reasonCheck.failed || reasonCheck.reason == string(message.TerminalReceiverInternalError))
 
@@ -256,15 +256,6 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	return outcome{IsTerminal: statusCls.isFinal}, nil
 }
 
-func audienceContains(audience message.Audience, want actor.ActorID) bool {
-	for _, id := range audience {
-		if id == want {
-			return true
-		}
-	}
-	return false
-}
-
 func audienceExactlySender(audience message.Audience, sender actor.ActorID) bool {
 	return len(audience) == 1 && audience[0] == sender
 }
@@ -316,15 +307,12 @@ func terminalFailureReasonAllowed(reason string) bool {
 	return message.IsValidTerminalFailureReason(message.TerminalFailureReason(reason))
 }
 
-// layer2ProvisionalStatuses is the Layer 2 provisional core closed set.
-// Expansion is a protocol-level revision.
-var layer2ProvisionalStatuses = map[string]struct{}{
-	"received":    {},
-	"queued":      {},
-	"processing":  {},
-	"deferred":    {},
-	"unavailable": {},
-}
+// The Layer 2 provisional core closed set's vocabulary home is
+// protocol/message (Status* consts + IsProvisionalCoreStatus predicate) —
+// this step is the ENFORCEMENT site and references the predicate, the same
+// vocabulary/judgment split Layer 1 already had via IsFinalStatus (purity v3
+// C8: the five words used to live here as bare strings, a closed set homed
+// in its consumer instead of the protocol that owns the wire words).
 
 // layer3StatusRegex enforces the Layer 3 provisional business extension
 // grammar:
@@ -364,12 +352,12 @@ func classifyResponseStatus(payload []byte, senderID actor.ActorID) statusClassi
 	if message.IsFinalStatus(status) {
 		return statusClassification{isFinal: true}
 	}
-	if _, ok := layer2ProvisionalStatuses[status]; ok {
+	if message.IsProvisionalCoreStatus(status) {
 		return statusClassification{isFinal: false}
 	}
 	if layer3StatusRegex.MatchString(status) {
 		namespace := status[:strings.IndexByte(status, '.')]
-		if _, ok := layer2ProvisionalStatuses[namespace]; ok {
+		if message.IsProvisionalCoreStatus(namespace) {
 			return statusClassification{
 				reject: HarnessResponseStatusInvalid,
 				detail: fmt.Sprintf("payload.status namespace %q collides with Layer 2 provisional name", namespace),
@@ -422,7 +410,7 @@ func extractPayloadStatus(payload []byte) (string, bool) {
 // namespace ownership rule: everything after the last `:`, falling back
 // to the full id when no `:` is present.
 //
-//	"tool:xhs"       → "xhs"
+//	"tool:demo"      → "demo"
 //	"agent:planner"  → "planner"
 //	"daemon"         → "daemon"
 //	"a:b:c"          → "c"

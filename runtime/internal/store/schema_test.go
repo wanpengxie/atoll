@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -45,45 +46,112 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 	}
 	_ = rows.Close()
 
-	for _, name := range store.ChannelLocalTables {
+	for _, name := range store.ChannelLocalTables() {
 		if !present[name] {
 			t.Errorf("expected channel-local table %q missing after OpenChannel", name)
-		}
-	}
-	// Retired epoch: the type_registry tables must NOT exist.
-	for _, gone := range []string{"type_registry", "type_registry_schemas", "action_ledger", "worker_locks"} {
-		if present[gone] {
-			t.Errorf("retired table %q must not be created", gone)
 		}
 	}
 }
 
 // ChannelLocalTables enumerates exactly the surviving channel-local tables:
 // the message log, the actor registry, the access plane's channel-scoped
-// resources + resource_grants + the create/delete outbox's two server-side
+// resources + the create/delete outbox's two server-side
 // durable halves (resource_reservations + resource_tombstones, 期11 spec
 // §1.3), the actor-scoped state locus actor_state, and the identity-level
-// pending-timer control plane timers (type_registry's two tables +
-// actor_cursors are deleted).
+// pending-timer control plane timers. There is no resource_grants table:
+// authorization is membrane-uniform (PM-D1), judged from membership facts +
+// created_by — per-object grants structurally cannot exist.
 func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{
-		"messages":              true,
-		"actor_registry":        true,
-		"resources":             true,
-		"resource_grants":       true,
-		"resource_reservations": true,
-		"resource_tombstones":   true,
-		"actor_state":           true,
-		"timers":                true,
-		"timer_dead":            true,
+		"messages":       true,
+		"actor_registry": true,
+
+		"channel_genesis":         true,
+		"channel_daemon_bindings": true,
+		"resources":               true,
+		"resource_reservations":   true,
+		"resource_tombstones":     true,
+		"actor_state":             true,
+		"timers":                  true,
+		"timer_dead":              true,
 	}
-	if len(store.ChannelLocalTables) != len(want) {
-		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables, want)
+	if len(store.ChannelLocalTables()) != len(want) {
+		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables(), want)
 	}
-	for _, n := range store.ChannelLocalTables {
+	for _, n := range store.ChannelLocalTables() {
 		if !want[n] {
 			t.Errorf("unexpected table %q in ChannelLocalTables", n)
 		}
+	}
+}
+
+func TestOpenChannel_FreshSchemaReopensWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
+	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close create: %v", err)
+	}
+	cs, err = store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil)
+	if err != nil {
+		t.Fatalf("reopen current schema: %v", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close reopen: %v", err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var rows int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry`).Scan(&rows); err != nil {
+		t.Fatalf("registry count: %v", err)
+	}
+}
+
+func TestOpenChannel_MustExistDoesNotCreateMissingPath(t *testing.T) {
+	ctx := context.Background()
+	missingDir := filepath.Join(t.TempDir(), "missing")
+	dbPath := filepath.Join(missingDir, "channel.sqlite")
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist open of a missing path succeeded")
+	}
+	if _, err := os.Stat(missingDir); !os.IsNotExist(err) {
+		t.Fatalf("MustExist created parent directory: stat err=%v", err)
+	}
+}
+
+func TestOpenChannel_MustExistRejectsEmptyDBBeforeDDL(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "empty.sqlite")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist accepted an empty DB and installed schema")
+	}
+	raw, err = sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var tables int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatalf("MustExist mutated empty DB: tables=%d", tables)
 	}
 }
 
@@ -120,9 +188,9 @@ func TestOpenChannel_WriteCreatesParentDir(t *testing.T) {
 	}
 }
 
-// Reopening an existing valid channel DB with SkipDDL=true succeeds and the
-// schema verification passes.
-func TestOpenChannel_SkipDDLReopenValid(t *testing.T) {
+// Reopening an existing valid channel DB in MustExist mode succeeds and the
+// exact schema verification passes.
+func TestOpenChannel_MustExistReopenValid(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
 	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
@@ -131,16 +199,16 @@ func TestOpenChannel_SkipDDLReopenValid(t *testing.T) {
 	}
 	_ = cs.Close()
 
-	cs2, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true}, nil)
+	cs2, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil)
 	if err != nil {
-		t.Fatalf("SkipDDL reopen of valid DB: %v", err)
+		t.Fatalf("MustExist reopen of valid DB: %v", err)
 	}
 	_ = cs2.Close()
 }
 
-// Opening a non-empty file that lacks the baseline schema (SkipDDL, no tables)
+// Opening a non-empty file that lacks the baseline schema (MustExist, no tables)
 // fails fast with a stale-DB error rather than silently migrating.
-func TestOpenChannel_SkipDDLStaleSchemaFailsFast(t *testing.T) {
+func TestOpenChannel_MustExistStaleSchemaFailsFast(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "empty.sqlite")
 
@@ -154,7 +222,102 @@ func TestOpenChannel_SkipDDLStaleSchemaFailsFast(t *testing.T) {
 	}
 	_ = raw.Close()
 
-	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true}, nil); err == nil {
-		t.Fatal("SkipDDL open of a DB missing the baseline schema must fail fast")
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist open of a DB missing the baseline schema must fail fast")
 	}
+}
+
+func TestOpenChannel_MustExistRejectsEverySchemaMismatchWithoutMutation(t *testing.T) {
+	replaceOne := func(old, replacement string) func(string) string {
+		return func(ddl string) string {
+			if strings.Count(ddl, old) != 1 {
+				t.Fatalf("schema test fixture expected one occurrence of %q", old)
+			}
+			return strings.Replace(ddl, old, replacement, 1)
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(string) string
+	}{
+		{"missing-message-column", replaceOne("  payload              TEXT NOT NULL,\n", "")},
+		{"wrong-message-column-type", replaceOne("  payload              TEXT NOT NULL,\n", "  payload              BLOB NOT NULL,\n")},
+		{"missing-message-unique-constraint", replaceOne("  id                   TEXT NOT NULL UNIQUE,\n", "  id                   TEXT NOT NULL,\n")},
+		{"missing-partial-index", replaceOne("CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';\n", "")},
+		{"extra-table", func(ddl string) string { return ddl + `CREATE TABLE retired_shadow (x INTEGER);` }},
+		// The definition-version sequence was removed outright and there is no
+		// migration: a database still carrying it must be rejected, not repaired.
+		{"retired-decl-versions-table", func(ddl string) string {
+			return ddl + `CREATE TABLE actor_decl_versions (actor_id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (actor_id, version));`
+		}},
+		{"retired-role-column", replaceOne(
+			"  principal          TEXT NOT NULL DEFAULT '', -- login identity only; declaration-backed actors normally leave it empty\n",
+			"  principal          TEXT NOT NULL DEFAULT '',\n  role               TEXT NOT NULL DEFAULT '',\n")},
+		{"retired-binding-column", replaceOne(
+			"  class              TEXT NOT NULL,\n",
+			"  class              TEXT NOT NULL,\n  actor_binding      TEXT,\n")},
+		{"extra-index", func(ddl string) string { return ddl + `CREATE INDEX retired_index ON messages(type);` }},
+		{"extra-view", func(ddl string) string { return ddl + `CREATE VIEW retired_view AS SELECT id FROM messages;` }},
+		{"extra-trigger", func(ddl string) string {
+			return ddl + `CREATE TRIGGER retired_trigger AFTER INSERT ON messages BEGIN SELECT 1; END;`
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "channel.sqlite")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, tc.mutate(store.ChannelLocalDDL)); err != nil {
+				_ = db.Close()
+				t.Fatalf("seed mismatched schema: %v", err)
+			}
+			before := schemaCatalog(t, db)
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if cs, err := store.OpenChannel(ctx, "C-test", path, store.OpenOptions{MustExist: true}, nil); err == nil {
+				_ = cs.Close()
+				t.Fatal("strict reopen accepted a mismatched channel schema")
+			}
+
+			db, err = sql.Open("sqlite", "file:"+path+"?mode=ro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if after := schemaCatalog(t, db); after != before {
+				t.Fatalf("failed strict reopen mutated schema:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
+func schemaCatalog(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.Query(`SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out strings.Builder
+	for rows.Next() {
+		var typ, name, ddl string
+		if err := rows.Scan(&typ, &name, &ddl); err != nil {
+			t.Fatal(err)
+		}
+		out.WriteString(typ)
+		out.WriteByte('\x00')
+		out.WriteString(name)
+		out.WriteByte('\x00')
+		out.WriteString(ddl)
+		out.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
 }

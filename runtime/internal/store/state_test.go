@@ -1,8 +1,9 @@
 package store
 
 // White-box tests for the actor-scoped state locus: stateStore (byte realizer
-// over actor_state) and the deregister cascade (clearActorScopedTx hung on both
-// Deregister and applyMemberRemoveTx). Both stateStore and the registry are
+// over actor_state). There is no deregister cascade to test — terminal touches
+// actor_registry alone and leaves a dead owner's rows as inert, unreachable
+// data. Both stateStore and the registry are
 // unexported and reachable only from inside the package — the same
 // package-private confinement the rest of the store relies on. They run over
 // a real channel sqlite (ChannelLocalDDL), no fakes.
@@ -16,7 +17,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // stateTestChannelID is the channel every state fixture is bound to (this
@@ -25,8 +25,8 @@ import (
 const stateTestChannelID channel.ID = "C-test"
 
 // stateFixture bundles the three plane collaborators over one shared channel
-// sqlite so a test can exercise state CRUD, the deregister cascade, and the
-// channel-scoped-resources non-cascade contrast against the same db.
+// sqlite so a test can exercise state CRUD, owner deregistration (which touches
+// the registry row alone) and channel-scoped resources against the same db.
 type stateFixture struct {
 	state *stateStore
 	reg   *actorRegistry
@@ -53,11 +53,12 @@ func openStateFixture(t *testing.T) stateFixture {
 func TestState_CRUDLifecycle(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	a := mustInsertActor(t, f.reg, "a")
 
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
+	if err := f.state.Create(ctx, a, "cursor", []byte("v1")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	val, exists, err := f.state.Read(ctx, "actor:a", "cursor")
+	val, exists, err := f.state.Read(ctx, a, "cursor")
 	if err != nil || !exists {
 		t.Fatalf("Read after create: exists=%v err=%v", exists, err)
 	}
@@ -66,20 +67,20 @@ func TestState_CRUDLifecycle(t *testing.T) {
 	}
 
 	// Write overwrites an existing row (exists=true).
-	exists, err = f.state.Write(ctx, "actor:a", "cursor", []byte("v2"))
+	exists, err = f.state.Write(ctx, a, "cursor", []byte("v2"))
 	if err != nil || !exists {
 		t.Fatalf("Write existing: exists=%v err=%v", exists, err)
 	}
-	if val, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(val) != "v2" {
+	if val, _, _ := f.state.Read(ctx, a, "cursor"); string(val) != "v2" {
 		t.Errorf("value after write=%q want v2", val)
 	}
 
 	// Delete removes the row (exists=true), then it is gone.
-	exists, err = f.state.Delete(ctx, "actor:a", "cursor")
+	exists, err = f.state.Delete(ctx, a, "cursor")
 	if err != nil || !exists {
 		t.Fatalf("Delete existing: exists=%v err=%v", exists, err)
 	}
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
+	if _, exists, _ := f.state.Read(ctx, a, "cursor"); exists {
 		t.Error("row must be gone after delete")
 	}
 }
@@ -89,17 +90,18 @@ func TestState_CRUDLifecycle(t *testing.T) {
 func TestState_CreateCollisionSentinel(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	a := mustInsertActor(t, f.reg, "a")
 
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
+	if err := f.state.Create(ctx, a, "cursor", []byte("v1")); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
-	err := f.state.Create(ctx, "actor:a", "cursor", []byte("v2"))
+	err := f.state.Create(ctx, a, "cursor", []byte("v2"))
 	if !errors.Is(err, resourcespec.ErrAlreadyExists) {
 		t.Fatalf("second Create err=%v want ErrAlreadyExists", err)
 	}
 	// The colliding create left the original bytes untouched (test-and-set, no
 	// clobber).
-	if val, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(val) != "v1" {
+	if val, _, _ := f.state.Read(ctx, a, "cursor"); string(val) != "v1" {
 		t.Errorf("value after collision=%q want v1 (unchanged)", val)
 	}
 }
@@ -136,13 +138,14 @@ func TestState_PresentFalseOnAbsent(t *testing.T) {
 func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	a := mustInsertActor(t, f.reg, "a")
 
 	// create(nil initial) → an existing row whose bytes are NULL = resolved-but-
 	// empty: exists=true, value=nil (door maps to Found=false).
-	if err := f.state.Create(ctx, "actor:a", "empty", nil); err != nil {
+	if err := f.state.Create(ctx, a, "empty", nil); err != nil {
 		t.Fatalf("Create nil: %v", err)
 	}
-	val, exists, err := f.state.Read(ctx, "actor:a", "empty")
+	val, exists, err := f.state.Read(ctx, a, "empty")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -155,10 +158,10 @@ func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 
 	// An empty non-nil blob is a VALUE, not resolved-but-empty: exists=true,
 	// value=[]byte{} (non-nil, len 0) — must not collapse into the NULL case.
-	if err := f.state.Create(ctx, "actor:a", "blank", []byte{}); err != nil {
+	if err := f.state.Create(ctx, a, "blank", []byte{}); err != nil {
 		t.Fatalf("Create blank: %v", err)
 	}
-	val, exists, err = f.state.Read(ctx, "actor:a", "blank")
+	val, exists, err = f.state.Read(ctx, a, "blank")
 	if err != nil {
 		t.Fatalf("Read blank: %v", err)
 	}
@@ -172,148 +175,99 @@ func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 func TestState_OwnerScopedIsolation(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	a := mustInsertActor(t, f.reg, "a")
+	b := mustInsertActor(t, f.reg, "b")
 
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("A")); err != nil {
+	if err := f.state.Create(ctx, a, "cursor", []byte("A")); err != nil {
 		t.Fatalf("Create a: %v", err)
 	}
 	// Same resource_id under a different owner is a distinct row (no collision).
-	if err := f.state.Create(ctx, "actor:b", "cursor", []byte("B")); err != nil {
+	if err := f.state.Create(ctx, b, "cursor", []byte("B")); err != nil {
 		t.Fatalf("Create b (same id, other owner) must not collide: %v", err)
 	}
-	if val, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(val) != "A" {
+	if val, _, _ := f.state.Read(ctx, a, "cursor"); string(val) != "A" {
 		t.Errorf("owner a value=%q want A", val)
 	}
-	if val, _, _ := f.state.Read(ctx, "actor:b", "cursor"); string(val) != "B" {
+	if val, _, _ := f.state.Read(ctx, b, "cursor"); string(val) != "B" {
 		t.Errorf("owner b value=%q want B", val)
 	}
 }
 
-// --- deregister cascade: entry point #1 (Deregister) -------------------------
-
-func TestState_CascadeClearedOnDeregister(t *testing.T) {
+// The store is mechanical: it does not re-judge membership. An owner that the
+// door never admitted simply gets its row — correctness for "may this actor
+// write state" lives at the door's admission, and a second EXISTS check here
+// would be a second authority (and would let a racing End veto an
+// already-admitted call twice).
+func TestState_CreateDoesNotReJudgeMembership(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
 
-	// The owner must exist and be active for Deregister to transition (n==1).
-	mustInsertActor(t, f.reg, "actor:a")
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
+	if err := f.state.Create(ctx, "actor:missing", "cursor", []byte("x")); err != nil {
+		t.Fatalf("Create for an unadmitted owner must be mechanical, got %v", err)
+	}
+	if _, exists, err := f.state.Read(ctx, "actor:missing", "cursor"); err != nil || !exists {
+		t.Fatalf("row must exist: exists=%v err=%v", exists, err)
+	}
+	// A collision is still a collision.
+	if err := f.state.Create(ctx, "actor:missing", "cursor", []byte("y")); !errors.Is(err, resourcespec.ErrAlreadyExists) {
+		t.Fatalf("Create collision err=%v want ErrAlreadyExists", err)
+	}
+	if got, _, _ := f.state.Read(ctx, "actor:missing", "cursor"); string(got) != "x" {
+		t.Fatalf("colliding bytes changed to %q", got)
+	}
+}
+
+// --- deregister touches records ONLY ----------------------------------------
+
+// ActorIDs are never reused and every belonging is keyed by ActorID, so a dead
+// owner's state rows are unreachable inert data. Deregister therefore clears
+// nothing: reclaiming them is an explicit batch management action, never
+// lifecycle logic.
+func TestState_DeregisterLeavesOwnerStateInert(t *testing.T) {
+	ctx := context.Background()
+	f := openStateFixture(t)
+
+	a := mustInsertActor(t, f.reg, "a")
+	if err := f.state.Create(ctx, a, "cursor", []byte("v1")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := f.state.Create(ctx, "actor:a", "checkpoint", []byte("v2")); err != nil {
-		t.Fatalf("Create 2: %v", err)
-	}
-	// A second owner's state is a control: the cascade must be scoped to owner:a.
-	mustInsertActor(t, f.reg, "actor:b")
-	if err := f.state.Create(ctx, "actor:b", "cursor", []byte("keep")); err != nil {
+	b := mustInsertActor(t, f.reg, "b")
+	if err := f.state.Create(ctx, b, "cursor", []byte("keep")); err != nil {
 		t.Fatalf("Create b: %v", err)
 	}
 
-	if err := f.reg.Deregister(ctx, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, a, 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-
-	// owner:a state is gone (both keys).
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
-		t.Error("owner:a cursor must be cascade-cleared on deregister")
+	if _, exists, _ := f.state.Read(ctx, a, "cursor"); !exists {
+		t.Error("deregister must not clear the dead owner's state (inert data)")
 	}
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "checkpoint"); exists {
-		t.Error("owner:a checkpoint must be cascade-cleared on deregister")
+	if _, exists, _ := f.state.Read(ctx, b, "cursor"); !exists {
+		t.Error("owner:b state must be untouched")
 	}
-	// owner:b untouched.
-	if _, exists, _ := f.state.Read(ctx, "actor:b", "cursor"); !exists {
-		t.Error("owner:b state must NOT be cleared by owner:a deregister")
+	// Repeating the latch is a no-op, never an error.
+	if err := endActorForTest(ctx, f.reg, a, 1001); err != nil {
+		t.Fatalf("repeat deregister must be a no-op, got: %v", err)
 	}
-}
-
-// A no-op Deregister (missing / already deregistered) must NOT touch state — the
-// cascade only fires when the row actually transitions.
-func TestState_NoCascadeOnNoOpDeregister(t *testing.T) {
-	ctx := context.Background()
-	f := openStateFixture(t)
-
-	mustInsertActor(t, f.reg, "actor:a")
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Deregister a DIFFERENT, non-existent actor — a no-op that must not clear a.
-	if err := f.reg.Deregister(ctx, "actor:ghost", 1); err != nil {
-		t.Fatalf("Deregister ghost must be no-op: %v", err)
-	}
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); !exists {
-		t.Error("no-op deregister must not clear another actor's state")
-	}
-
-	// First real deregister clears a; the second (already-deregistered) is a
-	// no-op and must not error.
-	if err := f.reg.Deregister(ctx, "actor:a", 2); err != nil {
-		t.Fatalf("Deregister a: %v", err)
-	}
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
-		t.Error("owner:a state must be cleared by real deregister")
-	}
-	if err := f.reg.Deregister(ctx, "actor:a", 3); err != nil {
-		t.Fatalf("repeat Deregister must be a no-op, got: %v", err)
+	// Deregistering an id with no row is a no-op too.
+	if err := endActorForTest(ctx, f.reg, "actor:ghost", 1); err != nil {
+		t.Fatalf("deregister of a missing id must be a no-op: %v", err)
 	}
 }
 
-// --- deregister cascade: entry point #2 (applyMemberRemoveTx) ----------------
-
-func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
-	ctx := context.Background()
-	f := openStateFixture(t)
-
-	// Add the member, give it state, then remove it via ApplyMemberTransitions.
-	if err := f.reg.insertFixedID(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
-		t.Fatalf("add member: %v", err)
-	}
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 200}}); err != nil {
-		t.Fatalf("remove member: %v", err)
-	}
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
-		t.Error("member state must be cascade-cleared on member remove")
-	}
-
-	// A repeated remove (already-deregistered) is a no-op and must not error.
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 300}}); err != nil {
-		t.Fatalf("repeat remove must be no-op: %v", err)
-	}
-}
-
-// --- non-cascade contrast: channel-scoped resources survive deregister -------
-
-// The channel-scoped resources table is NON-LOSSY: an object outlives its
-// creator. Deregistering the creator clears its actor_state but MUST leave its
-// resources rows resolvable (they die only on explicit delete / channel
-// destroy). This is the structural difference between the two loci.
+// Channel-scoped resources are shared collaboration output: they outlive their
+// creator unconditionally.
 func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
 
-	mustInsertActor(t, f.reg, "actor:a")
-	// actor:a owns both an actor-scoped state row and a channel-scoped resource.
-	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("state")); err != nil {
-		t.Fatalf("Create state: %v", err)
-	}
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, []byte("resource")); err != nil {
+	a := mustInsertActor(t, f.reg, "a")
+	if err := f.res.Create(ctx, "kv:doc", "kv", a, "", "", []byte("resource"), resourcespec.ResourceBirthPlan{}); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
-
-	if err := f.reg.Deregister(ctx, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, a, 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-
-	// actor-scoped state gone...
-	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
-		t.Error("actor-scoped state must be cleared on deregister")
-	}
-	// ...but the channel-scoped resource survives (non-lossy).
 	if _, ok, _ := f.res.Resolve(ctx, "kv:doc"); !ok {
 		t.Error("channel-scoped resource must SURVIVE the creator's deregister (non-lossy)")
 	}
@@ -321,9 +275,14 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 
 // --- test helpers ------------------------------------------------------------
 
-func mustInsertActor(t *testing.T, reg *actorRegistry, id actor.ActorID) {
+// mustInsertActor admits one tool actor for the given declaration and returns
+// the id the registry minted. Tests name declarations, not actors: a birth id
+// comes out of the insert transaction and cannot be asked for.
+func mustInsertActor(t *testing.T, reg *actorRegistry, decl string) actor.ActorID {
 	t.Helper()
-	if err := reg.insertFixedID(context.Background(), storespec.Record{ID: id, Kind: actor.KindTool, CreatedAt: 1}); err != nil {
-		t.Fatalf("Insert %q: %v", id, err)
+	id, err := reg.insertTool(context.Background(), decl)
+	if err != nil {
+		t.Fatalf("Insert %q: %v", decl, err)
 	}
+	return id
 }

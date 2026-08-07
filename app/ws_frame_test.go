@@ -1,89 +1,244 @@
 package app_test
 
 import (
-	"errors"
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/atoll/app"
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/app/contract"
+	"github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+type activityAcceptanceEngine struct{ events base.EventPort }
+
+func (activityAcceptanceEngine) Boot(context.Context, base.BootPort) error { return nil }
+func (e activityAcceptanceEngine) StartTurn(op base.OpID, _ []base.Trigger, _ []base.ContextItem) error {
+	turnID := "acceptance-turn"
+	e.events.TurnStarted(op, turnID)
+	e.events.Tool(turnID, "acceptance-tool-1", "started", "acceptance_tool", "started", "")
+	e.events.Tool(turnID, "acceptance-tool-1", "ended", "acceptance_tool", "completed", "")
+	e.events.TurnEnded(turnID, base.TurnStatusOK, "activity-ok", "")
+	return nil
+}
+func (e activityAcceptanceEngine) Steer(op base.OpID, _ base.Trigger) error {
+	e.events.ControlDone(op, base.ControlNotSteerable, "", "")
+	return nil
+}
+func (e activityAcceptanceEngine) Interrupt(op base.OpID) error {
+	e.events.ControlDone(op, base.ControlNoActiveTurn, "", "")
+	return nil
+}
+func (activityAcceptanceEngine) Terminate() error { return nil }
+func (e activityAcceptanceEngine) EnsureAlive(op base.OpID) error {
+	e.events.ControlDone(op, base.ControlAccepted, "", "")
+	return nil
+}
+func (activityAcceptanceEngine) Describe() introspect.Describe {
+	return introspect.Describe{Description: "activity acceptance"}
+}
+func (activityAcceptanceEngine) Close() error { return nil }
+
 // ---------------------------------------------------------------------------
-// wsClient — a black-box gateway ws driver for the S4 frame族 (message / resolve
-// / cancel up, tail + ack/error down). One reader goroutine fans the two
-// downstream frame families into buffered channels so a test can await either.
+// wsClient — a black-box gateway ws driver for the standard frame protocol
+// (gateway 期 S3: attach opening / submit·resolve·cancel·after·cancel_timer up;
+// feed·receipt·error down). The client translates the old {"type":…} test-body maps
+// into standard frames and normalises the downstream frames back into the
+// {"type":"ack"/"error"/"message"} shape the assertions read.
 // ---------------------------------------------------------------------------
+
+type wireFrame struct {
+	V       int             `json:"v"`
+	Type    string          `json:"frame_type"`
+	Ref     string          `json:"ref"`
+	Payload json.RawMessage `json:"payload"`
+}
 
 type wsClient struct {
 	t    *testing.T
 	conn *websocket.Conn
 	tail chan map[string]any
 	acks chan map[string]any
+
+	chID string // the channel this test client drives (stamped as channel_id on every business frame — 连接模型勘误期 v2)
+
+	mu      sync.Mutex
+	refType map[string]string // ref → originating frame type (for ack["frame"])
 }
 
-// dialWS opens a gateway ws with the given session cookies and sends the opening
-// subscribe frame (channel + cursor).
+// dialWS opens a gateway ws (连接模型勘误期: 连接即人 — /ws is channel-blind, the app
+// membrane authenticates session→principal only) and sends the opening attach frame
+// (报到 + a 游标表 keyed by chID). chID is retained so every business frame this test
+// client sends carries it as the required channel_id (v2).
 func dialWS(t *testing.T, srv *httptest.Server, cookies []*http.Cookie, chID string, sinceSeq int64) *wsClient {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
 	hdr := http.Header{}
 	var parts []string
-	for _, c := range cookies {
-		parts = append(parts, c.Name+"="+c.Value)
+	for _, ck := range cookies {
+		parts = append(parts, ck.Name+"="+ck.Value)
 	}
 	hdr.Set("Cookie", strings.Join(parts, "; "))
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
 	if err != nil {
 		t.Fatalf("dial ws: %v", err)
 	}
-	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "channel_id": chID, "since_seq": sinceSeq}); err != nil {
-		t.Fatalf("subscribe frame: %v", err)
-	}
 	c := &wsClient{
-		t:    t,
-		conn: conn,
-		tail: make(chan map[string]any, 512),
-		acks: make(chan map[string]any, 64),
+		t:       t,
+		conn:    conn,
+		chID:    chID,
+		tail:    make(chan map[string]any, 512),
+		acks:    make(chan map[string]any, 64),
+		refType: map[string]string{},
+	}
+	var attach map[string]any
+	if sinceSeq > 0 {
+		attach = map[string]any{"since": map[string]int64{chID: sinceSeq}}
+	}
+	c.writeFrame("attach", "attach-1", attach)
+	// Read the attach receipt synchronously so a test's first nextAck is its own
+	// frame's receipt. This pins attach → receipt(ref, contract_version).
+	var wf wireFrame
+	if err := conn.ReadJSON(&wf); err != nil {
+		t.Fatalf("attach receipt read: %v", err)
+	}
+	var receipt contract.Meta
+	if err := json.Unmarshal(wf.Payload, &receipt); err != nil {
+		t.Fatalf("attach receipt payload: %v", err)
+	}
+	if wf.Type != "receipt" || wf.Ref != "attach-1" || receipt.ContractVersion != contract.Version {
+		t.Fatalf("attach receipt=%+v payload=%+v", wf, receipt)
 	}
 	go c.readLoop()
 	return c
 }
 
+// writeFrame builds one standard frame (frame_type + ref + payload) and writes it. For
+// every business frame (not attach) it injects the required channel_id (连接模型勘误期
+// v2: the connection is channel-blind, so each frame names its channel) unless the
+// caller已 set one explicitly (a test may set "" to exercise bad_payload).
+func (c *wsClient) writeFrame(frameType, ref string, payload map[string]any) {
+	c.t.Helper()
+	if ref != "" {
+		c.mu.Lock()
+		c.refType[ref] = frameType
+		c.mu.Unlock()
+	}
+	if frameType != "attach" {
+		if payload == nil {
+			payload = map[string]any{}
+		}
+		if _, ok := payload["channel_id"]; !ok {
+			payload["channel_id"] = c.chID
+		}
+	}
+	f := map[string]any{"v": 2, "frame_type": frameType}
+	if ref != "" {
+		f["ref"] = ref
+	}
+	if payload != nil {
+		f["payload"] = payload
+	}
+	if err := c.conn.WriteJSON(f); err != nil {
+		c.t.Fatalf("ws write: %v", err)
+	}
+}
+
 func (c *wsClient) readLoop() {
 	for {
-		var m map[string]any
-		if err := c.conn.ReadJSON(&m); err != nil {
+		var wf wireFrame
+		if err := c.conn.ReadJSON(&wf); err != nil {
 			return
 		}
-		switch m["type"] {
-		case "message":
+		switch wf.Type {
+		case "feed":
+			var fp struct {
+				ChannelID string          `json:"channel_id"`
+				Seq       int64           `json:"seq"`
+				Envelope  json.RawMessage `json:"envelope"`
+			}
+			_ = json.Unmarshal(wf.Payload, &fp)
+			var env map[string]any
+			_ = json.Unmarshal(fp.Envelope, &env)
+			m := map[string]any{"type": "message", "channel_id": fp.ChannelID, "seq": fp.Seq, "envelope": env}
 			select {
 			case c.tail <- m:
 			default:
 			}
-		case "ack", "error":
+		case "receipt":
+			var pm map[string]any
+			_ = json.Unmarshal(wf.Payload, &pm)
+			// The opening attach receipt is consumed synchronously in
+			// dialWS before this loop starts, so every receipt here is a business ack.
+			ack := map[string]any{"type": "ack"}
+			for k, v := range pm {
+				ack[k] = v
+			}
+			c.mu.Lock()
+			if ft, ok := c.refType[wf.Ref]; ok {
+				ack["frame"] = ft
+			}
+			c.mu.Unlock()
 			select {
-			case c.acks <- m:
+			case c.acks <- ack:
+			default:
+			}
+		case "error":
+			var ep struct {
+				Frame  string `json:"frame"`
+				Code   string `json:"code"`
+				Detail string `json:"detail"`
+			}
+			_ = json.Unmarshal(wf.Payload, &ep)
+			select {
+			case c.acks <- map[string]any{"type": "error", "error": ep.Code, "detail": ep.Detail, "frame": ep.Frame}:
+			default:
+			}
+		case "observe_ended":
+			var ended struct {
+				ChannelID string `json:"channel_id"`
+				Reason    string `json:"reason"`
+			}
+			_ = json.Unmarshal(wf.Payload, &ended)
+			select {
+			case c.acks <- map[string]any{"type": "observe_ended", "channel_id": ended.ChannelID, "reason": ended.Reason}:
 			default:
 			}
 		}
 	}
 }
 
+// send translates one old-style {"type":…} test map into a standard frame: "type"
+// is the frame kind, "ref" is the correlation id, and the remaining keys are the
+// frame payload (their names already match the payload struct json tags).
 func (c *wsClient) send(m map[string]any) {
 	c.t.Helper()
-	if err := c.conn.WriteJSON(m); err != nil {
-		c.t.Fatalf("ws write: %v", err)
+	frameType, _ := m["type"].(string)
+	ref, _ := m["ref"].(string)
+	payload := map[string]any{}
+	for k, v := range m {
+		if k == "type" || k == "ref" {
+			continue
+		}
+		payload[k] = v
 	}
+	if len(payload) == 0 {
+		payload = nil
+	}
+	c.writeFrame(frameType, ref, payload)
 }
 
 // nextAck returns the next ack OR error frame.
@@ -98,10 +253,10 @@ func (c *wsClient) nextAck(timeout time.Duration) map[string]any {
 	}
 }
 
-// sendMessage sends a write message frame and returns its ack/error frame.
+// sendMessage sends a submit frame and returns its receipt/error frame.
 func (c *wsClient) sendMessage(frame map[string]any) map[string]any {
 	c.t.Helper()
-	frame["type"] = "message"
+	frame["type"] = "submit"
 	c.send(frame)
 	return c.nextAck(3 * time.Second)
 }
@@ -124,64 +279,362 @@ func (c *wsClient) waitTail(pred func(env map[string]any) bool, timeout time.Dur
 	}
 }
 
+func (c *wsClient) assertNoTail(pred func(env map[string]any) bool, timeout time.Duration) {
+	c.t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case m := <-c.tail:
+			env, _ := m["envelope"].(map[string]any)
+			if env != nil && pred(env) {
+				c.t.Fatalf("unexpected tail frame: %v", m)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
 func (c *wsClient) close() { _ = c.conn.Close() }
 
-// addSecondMember registers a fresh user, joins it to A's workspace, admits it to
-// the channel as a human member, and waits for its cell to embody — a second live
+func TestSubmitIdempotencySurvivesReconnect(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+
+	submit := func(client *wsClient, ref string, payload map[string]any) map[string]any {
+		return client.sendMessage(map[string]any{
+			"ref": ref, "id": "client-stable-id", "msg_type": "human.message",
+			"kind": "request", "audience": []string{string(setup.actorID)},
+			"payload": payload,
+		})
+	}
+
+	firstClient := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	first := submit(firstClient, "attempt-1", map[string]any{"text": "hello", "provider_field": "alpha"})
+	if first["type"] != "ack" || first["message_id"] != "client-stable-id" {
+		t.Fatalf("first submit=%v", first)
+	}
+	firstClient.close()
+
+	secondClient := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer secondClient.close()
+	replay := submit(secondClient, "attempt-2", map[string]any{"provider_field": "alpha", "text": "hello"})
+	if replay["type"] != "ack" || replay["message_id"] != "client-stable-id" {
+		t.Fatalf("same-content reconnect replay=%v", replay)
+	}
+	conflict := submit(secondClient, "attempt-3", map[string]any{"text": "different", "provider_field": "alpha"})
+	if conflict["type"] != "error" || conflict["error"] != "idempotency_conflict" {
+		t.Fatalf("different-content replay=%v", conflict)
+	}
+
+	rows, err := env.app.MessagesForTest(channel.ID(setup.chID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matches int
+	for _, row := range rows {
+		if row.Envelope.ID == "client-stable-id" {
+			matches++
+			if string(row.Envelope.Payload) != `{"text":"hello","provider_field":"alpha"}` &&
+				string(row.Envelope.Payload) != `{"provider_field":"alpha","text":"hello"}` {
+				t.Fatalf("opaque payload changed in log: %s", row.Envelope.Payload)
+			}
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("physical rows for idempotency key=%d want 1", matches)
+	}
+}
+
+func TestWebSocketObservationStateMachine(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	_, observerCookies := register(t, env, "observer@example.com", "secret123", "Observer")
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+
+	owner := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer owner.close()
+	observer := dialWS(t, srv, observerCookies, setup.chID, 0)
+
+	observe := func(client *wsClient, ref string) map[string]any {
+		client.send(map[string]any{"type": "observe", "ref": ref, "channel_id": setup.chID})
+		return client.nextAck(3 * time.Second)
+	}
+	unobserve := func(client *wsClient, ref string) map[string]any {
+		client.send(map[string]any{"type": "unobserve", "ref": ref, "channel_id": setup.chID})
+		return client.nextAck(3 * time.Second)
+	}
+	post := func(id string) {
+		ack := owner.sendMessage(map[string]any{
+			"ref": "post-" + id, "id": id, "msg_type": "chat.text", "kind": "event",
+			"audience": []string{string(setup.actorID)}, "payload": map[string]any{"text": id},
+		})
+		if ack["type"] != "ack" {
+			t.Fatalf("post %s=%v", id, ack)
+		}
+	}
+	matches := func(id string) func(map[string]any) bool {
+		return func(envelope map[string]any) bool { return envelope["id"] == id }
+	}
+
+	for _, ref := range []string{"observe-1", "observe-duplicate"} {
+		if got := observe(observer, ref); got["type"] != "ack" || got["channel_id"] != setup.chID {
+			t.Fatalf("%s=%v", ref, got)
+		}
+	}
+	post("observed-message")
+	observer.waitTail(matches("observed-message"), 3*time.Second)
+
+	for _, ref := range []string{"unobserve-1", "unobserve-noop"} {
+		if got := unobserve(observer, ref); got["type"] != "ack" || got["channel_id"] != setup.chID {
+			t.Fatalf("%s=%v", ref, got)
+		}
+	}
+	post("after-unobserve")
+	observer.assertNoTail(matches("after-unobserve"), 250*time.Millisecond)
+
+	if got := observe(observer, "observe-before-disconnect"); got["type"] != "ack" {
+		t.Fatalf("observe before disconnect=%v", got)
+	}
+	observer.close()
+	observer = dialWS(t, srv, observerCookies, setup.chID, 0)
+	defer observer.close()
+	post("after-reconnect")
+	observer.assertNoTail(matches("after-reconnect"), 250*time.Millisecond)
+
+	if got := observe(observer, "observe-before-join"); got["type"] != "ack" {
+		t.Fatalf("observe before join=%v", got)
+	}
+	joined := env.do(t, http.MethodPost, "/api/channels/"+setup.chID+"/join", nil, observerCookies)
+	assertStatus(t, joined, http.StatusCreated)
+	ended := observer.nextAck(3 * time.Second)
+	if ended["type"] != "observe_ended" || ended["channel_id"] != setup.chID || ended["reason"] != "now_member" {
+		t.Fatalf("observation invalidation=%v", ended)
+	}
+	if got := observe(observer, "member-observe"); got["type"] != "error" || got["error"] != "now_member" {
+		t.Fatalf("member observe=%v", got)
+	}
+}
+
+func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
+	env := setupTestApp(t)
+	testAgentBuilder = func(_ channel.ID, _ actor.ActorID) (actorbase.Proc, error) {
+		def, err := base.Def("activity acceptance", base.Config{NewEngine: func(_ actorbase.Sys, _ []byte, events base.EventPort) (base.Engine, error) {
+			return activityAcceptanceEngine{events: events}, nil
+		}})
+		if err != nil {
+			return nil, err
+		}
+		return def.New()
+	}
+	setup := fullSetup(t, env)
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer client.close()
+
+	const requestID = "activity-acceptance-request"
+	ack := client.sendMessage(map[string]any{
+		"id": requestID, "msg_type": "user.activity.acceptance", "kind": "request",
+		"audience": []string{string(setup.boostID)}, "visibility": "public",
+		"payload": map[string]any{"text": "run"},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("submit=%v", ack)
+	}
+
+	wantTypes := []string{
+		"user.activity.acceptance",
+		"user.activity.acceptance", // processing provisional at commit
+		"activity.turn.started",
+		"activity.tool.started",
+		"activity.tool.ended",
+		"user.activity.acceptance",
+		"activity.turn.ended",
+	}
+	var matched []storespec.StoredRow
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := env.app.MessagesForTest(channel.ID(setup.chID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		matched = matched[:0]
+		for _, row := range rows {
+			if strings.Contains(row.Envelope.Type, "delta") || row.Envelope.Type == "agent.text" {
+				t.Fatalf("retired/chunk output reached log: type=%q", row.Envelope.Type)
+			}
+			if row.Envelope.ID == requestID || row.Envelope.CorrelationID == requestID {
+				matched = append(matched, row)
+			}
+		}
+		if len(matched) == len(wantTypes) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(matched) != len(wantTypes) {
+		got := make([]string, 0, len(matched))
+		for _, row := range matched {
+			got = append(got, row.Envelope.Type)
+		}
+		t.Fatalf("correlated log rows=%d want %d: %v", len(matched), len(wantTypes), got)
+	}
+	for i, row := range matched {
+		if row.Envelope.Type != wantTypes[i] {
+			t.Fatalf("row %d type=%q want %q", i, row.Envelope.Type, wantTypes[i])
+		}
+		if strings.HasPrefix(row.Envelope.Type, "activity.") {
+			if row.Envelope.Sender.ID != setup.boostID || row.Envelope.CorrelationID != requestID || row.Envelope.Visibility != message.VisibilityPublic {
+				t.Fatalf("activity row %d routing=%+v", i, row.Envelope)
+			}
+		}
+	}
+	if matched[5].Envelope.Kind != message.KindResponse {
+		t.Fatalf("terminal kind=%q want response", matched[5].Envelope.Kind)
+	}
+
+	page := env.do(t, http.MethodGet, "/api/channels/"+setup.chID+"/messages?after_seq="+fmt.Sprint(matched[0].Seq-1)+"&limit=20", nil, setup.cookies)
+	assertStatus(t, page, http.StatusOK)
+	for _, activityType := range wantTypes[2:5] {
+		if !strings.Contains(page.Body.String(), `"type":"`+activityType+`"`) {
+			t.Fatalf("paginated replay omitted %q: %s", activityType, page.Body.String())
+		}
+	}
+}
+
+func TestAttachValidationErrorEchoesReadableRef(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "attach-ref@example.com", "secret123", "Attach Ref")
+	srv := httptest.NewServer(env.handler)
+	defer srv.Close()
+
+	hdr := http.Header{}
+	var parts []string
+	for _, cookie := range cookies {
+		parts = append(parts, cookie.Name+"="+cookie.Value)
+	}
+	hdr.Set("Cookie", strings.Join(parts, "; "))
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/ws", hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{
+		"v": 2, "frame_type": "attach", "ref": "bad-attach-ref",
+		"payload": map[string]any{"since": map[string]int64{}, "misspelled": true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got wireFrame
+	if err := conn.ReadJSON(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "error" || got.Ref != "bad-attach-ref" {
+		t.Fatalf("validation error did not echo ref: %+v", got)
+	}
+}
+
+// setBoostDefault performs the backend half of the client creation
+// orchestration through only public wire surfaces.
+func setBoostDefault(t *testing.T, env *testEnv, s setupResult, c *wsClient) actor.ActorID {
+	t.Helper()
+	ack := c.sendMessage(map[string]any{
+		"msg_type":   "channel.set_default_agent",
+		"kind":       "request",
+		"audience":   []string{string(actor.SystemActorID)},
+		"visibility": "public",
+		"payload":    map[string]any{"source_decl_id": "sys:boost"},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("set default submit: want ack, got %v", ack)
+	}
+	raw := waitForResponse(t, env, s, ack["message_id"].(string), 3*time.Second)
+	var response struct {
+		Status       string        `json:"status"`
+		DefaultAgent actor.ActorID `json:"default_agent"`
+	}
+	err := json.Unmarshal(raw, &response)
+	if err != nil || response.Status != string(message.StatusCompleted) ||
+		response.DefaultAgent == "" {
+		t.Fatalf("set default response=%s decoded=%+v err=%v", raw, response, err)
+	}
+	return response.DefaultAgent
+}
+
+// addSecondMember registers a fresh user, admits it to the channel as a human
+// member, and waits for its cell to embody — a second live
 // subject the cross-sender door assertions need.
 func addSecondMember(t *testing.T, env *testEnv, s setupResult, email string) ([]*http.Cookie, actor.ActorID) {
 	t.Helper()
 	regBody, cookies := register(t, env, email, "secret123", "Second")
 	uid := regBody["id"].(string)
-	if err := env.app.AddWorkspaceMemberForTest(s.wsID, uid); err != nil {
-		t.Fatalf("add workspace member: %v", err)
-	}
 	aid := actor.ActorID("user:" + uid)
 	aid, err := env.app.AdmitForTest(s.chID, aid, actor.KindHuman)
 	if err != nil {
 		t.Fatalf("admit second member: %v", err)
 	}
-	if !env.app.WaitLiveForTest(s.chID, aid, 2*time.Second) {
-		t.Fatal("second member cell did not embody")
-	}
 	return cookies, aid
 }
 
-// pollPresence polls the actor-status endpoint until (known, online) matches, or
-// fatals. When wantKnown is false only known is checked.
-func pollPresence(t *testing.T, env *testEnv, s setupResult, actorID string, wantKnown, wantOnline bool, timeout time.Duration) {
+func queryActorStatus(t *testing.T, env *testEnv, s setupResult, client *wsClient, actorID actor.ActorID) introspect.Status {
+	t.Helper()
+	ack := client.sendMessage(map[string]any{
+		"channel_id": s.chID, "msg_type": introspect.QueryStatus, "kind": "request",
+		"audience": []string{string(actor.SystemActorID)}, "payload": map[string]any{"actor_id": actorID},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("actor.status submit=%v", ack)
+	}
+	raw := waitForResponse(t, env, s, ack["message_id"].(string), 3*time.Second)
+	var status introspect.Status
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("decode actor.status %s: %v", raw, err)
+	}
+	return status
+}
+
+func waitActorStatus(t *testing.T, env *testEnv, s setupResult, client *wsClient, actorID actor.ActorID, timeout time.Duration, accept func(introspect.Status) bool) introspect.Status {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	var last string
 	for {
-		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, actorID), nil, s.cookies)
-		last = w.Body.String()
-		if w.Code == http.StatusOK {
-			m := respJSON(t, w)
-			known, _ := m["known"].(bool)
-			if known == wantKnown {
-				if !wantKnown {
-					return
-				}
-				online, _ := m["online"].(bool)
-				if online == wantOnline {
-					return
-				}
-			}
+		status := queryActorStatus(t, env, s, client, actorID)
+		if accept(status) {
+			return status
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("presence %s: want known=%v online=%v; last: %s", actorID, wantKnown, wantOnline, last)
+			t.Fatalf("actor.status %s did not converge: %+v", actorID, status)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
 
+// pollPresence observes the canonical product read path: a member asks the
+// system actor for actor.status, which projects the membrane-internal presence
+// fold. No realm-side raw Snapshot capability is involved.
+func pollPresence(t *testing.T, env *testEnv, s setupResult, client *wsClient, actorID actor.ActorID, wantKnown, wantOnline bool, timeout time.Duration) introspect.Status {
+	t.Helper()
+	return waitActorStatus(t, env, s, client, actorID, timeout, func(status introspect.Status) bool {
+		testimony, known := status.L3[introspect.ObsDevicePresence]
+		if known != wantKnown {
+			return false
+		}
+		if !wantKnown {
+			return true
+		}
+		return testimony.Device != nil && testimony.Device.Online == wantOnline
+	})
+}
+
 // ---------------------------------------------------------------------------
-// DoD 5 (S4 wire): message / resolve / cancel frames + presence.
+// DoD 2 (wire): submit / resolve / cancel / after / cancel_timer frames + presence.
 // ---------------------------------------------------------------------------
 
-// TestWS_MessageFrameEndToEnd: a member's message frame commits truth through the
-// door (POST /messages is废) and comes back on the same ws's tail.
+// TestWS_MessageFrameEndToEnd: a member's submit frame commits truth through its own
+// cell (POST /messages is废) and comes back on the same ws's feed.
 func TestWS_MessageFrameEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -190,6 +643,7 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c.close()
+	setBoostDefault(t, env, s, c)
 
 	ack := c.sendMessage(map[string]any{
 		"msg_type": "chat.text",
@@ -197,7 +651,7 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 		"payload":  map[string]any{"text": "hello via frame"},
 	})
 	if ack["type"] != "ack" {
-		t.Fatalf("message frame: want ack, got %v", ack)
+		t.Fatalf("submit frame: want ack, got %v", ack)
 	}
 	msgID, _ := ack["message_id"].(string)
 	if msgID == "" {
@@ -206,7 +660,7 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 
 	env2 := c.waitTail(func(e map[string]any) bool { return e["id"] == msgID }, 3*time.Second)
 	if env2["type"] != "chat.text" {
-		t.Fatalf("tail envelope type = %v, want chat.text", env2["type"])
+		t.Fatalf("feed envelope type = %v, want chat.text", env2["type"])
 	}
 
 	// POST /messages is gone (write path is the frame): the route 404s.
@@ -217,19 +671,15 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 	}
 }
 
-// TestWS_NonMemberWriteRejected: a workspace member who is NOT a channel member may
-// tail but a message frame is refused (膜律 看得见≠在里面).
+// TestWS_NonMemberWriteRejected: a realm principal who is not a channel member
+// cannot submit a frame (膜律 看得见≠在里面).
 func TestWS_NonMemberWriteRejected(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	// A second user in the workspace but NOT admitted to the channel.
-	regBody, cookies := register(t, env, "outsider@test.com", "secret123", "Outsider")
-	if err := env.app.AddWorkspaceMemberForTest(s.wsID, regBody["id"].(string)); err != nil {
-		t.Fatalf("add workspace member: %v", err)
-	}
+	_, cookies := register(t, env, "outsider@test.com", "secret123", "Outsider")
 
 	c := dialWS(t, srv, cookies, s.chID, 0)
 	defer c.close()
@@ -237,13 +687,63 @@ func TestWS_NonMemberWriteRejected(t *testing.T) {
 		"msg_type": "chat.text", "kind": "event",
 		"payload": map[string]any{"text": "let me in"},
 	})
-	if ack["type"] != "error" || ack["error"] != "not_member" {
-		t.Fatalf("non-member write: want error not_member, got %v", ack)
+	// not_member retired (连接模型勘误期): a connection has no身份色 — an eligibility
+	// refusal is uniformly forbidden (observer may not drive business frames, 表①).
+	if ack["type"] != "error" || ack["error"] != "forbidden" {
+		t.Fatalf("non-member write: want error forbidden, got %v", ack)
+	}
+}
+
+// TestWS_PostedRequestGetsTheSubstrateWideDeadline: a person's submitted
+// request names no deadline, and the one it ends up with must be the
+// SUBSTRATE's day-long fallback — the request is a human approval that may sit
+// unanswered overnight.
+//
+// The two halves of this are each unit-tested against a double (the verb
+// leaves an absent expires_at absent; the harness stamps its global TTL on an
+// absent one), and both would stay green if the write ever went back through
+// the caller-closure path, which resolves an absent deadline against the
+// in-process default measured in SECONDS. Only the joined path can tell 24
+// hours from 30 seconds, so it is asserted here, once, end to end.
+func TestWS_PostedRequestGetsTheSubstrateWideDeadline(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+	_, bActor := addSecondMember(t, env, s, "ttl-approver@test.com")
+
+	ca := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer ca.close()
+
+	before := time.Now().UnixMilli()
+	ack := ca.sendMessage(map[string]any{
+		"msg_type": "human.approve",
+		"kind":     "request",
+		"audience": []string{string(bActor)},
+		"payload":  map[string]any{"q": "approve?"},
+		// no expires_at on purpose — that is the whole point.
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("request frame: want ack, got %v", ack)
+	}
+	after := time.Now().UnixMilli()
+	reqID, _ := ack["message_id"].(string)
+
+	entry := ca.waitTail(func(e map[string]any) bool { return e["id"] == reqID }, 3*time.Second)
+	raw, ok := entry["expires_at"].(float64)
+	if !ok {
+		t.Fatalf("posted request carries no expires_at at all (%v) — an open request with no deadline is never reaped", entry["expires_at"])
+	}
+	const dayMs = 24 * 60 * 60 * 1000
+	got := int64(raw)
+	if got < before+dayMs || got > after+dayMs {
+		t.Fatalf("posted request expires_at = %d, want the substrate's 24h fallback (between %d and %d) — a caller-side default would land seconds from now",
+			got, before+dayMs, after+dayMs)
 	}
 }
 
 // TestWS_ResolveFrameEndToEnd: A requests B (human.approve → left open); B resolves
-// via a resolve frame; A's tail sees the completed terminal with the decision.
+// via a resolve frame; A's feed sees the completed terminal with the decision.
 func TestWS_ResolveFrameEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -312,7 +812,7 @@ func TestWS_CancelFrameEndToEnd(t *testing.T) {
 		t.Fatalf("non-sender cancel: want error unauthorized_sender, got %v", be)
 	}
 
-	// Sender A cancels → ack, and the cancel terminal lands on the tail.
+	// Sender A cancels → ack, and the cancel terminal lands on the feed.
 	ca.send(map[string]any{"type": "cancel", "req_id": reqID})
 	cack := ca.nextAck(3 * time.Second)
 	if cack["type"] != "ack" {
@@ -342,71 +842,62 @@ func TestWS_Presence(t *testing.T) {
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
-	uid := s.actorID
+	targetCookies, uid := addSecondMember(t, env, s, "presence-target@example.com")
+	control := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer control.close()
+	initial := waitActorStatus(t, env, s, control, uid, 2*time.Second, func(status introspect.Status) bool { return status.Present })
 
-	startedAt0, live0 := env.app.StatForTest(channel.ID(s.chID), uid)
-	if !live0 {
-		t.Fatal("member cell should be live before any connection (常驻)")
+	c := dialWS(t, srv, targetCookies, s.chID, 0)
+	connected := pollPresence(t, env, s, control, uid, true, true, 2*time.Second)
+	if !connected.Present || connected.UptimeMs < initial.UptimeMs {
+		t.Fatalf("connect restarted L1: before=%+v after=%+v", initial, connected)
 	}
 
-	c := dialWS(t, srv, s.cookies, s.chID, 0)
-	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
-
-	// Stat stays live and unchanged while a device is connected.
-	startedAt1, live1 := env.app.StatForTest(channel.ID(s.chID), uid)
-	if !live1 || !startedAt1.Equal(startedAt0) {
-		t.Fatalf("Stat moved on connect: live=%v startedAt %v→%v (presence must not touch L1)", live1, startedAt0, startedAt1)
-	}
-
-	// Disconnect → explicit offline snapshot (known stays true, online false).
 	c.close()
-	pollPresence(t, env, s, string(uid), true, false, 2*time.Second)
+	pollPresence(t, env, s, control, uid, true, false, 2*time.Second)
 
-	// Reconnect → SAME cell (startedAt unchanged), still live.
-	c2 := dialWS(t, srv, s.cookies, s.chID, 0)
+	c2 := dialWS(t, srv, targetCookies, s.chID, 0)
 	defer c2.close()
-	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
-	startedAt2, live2 := env.app.StatForTest(channel.ID(s.chID), uid)
-	if !live2 || !startedAt2.Equal(startedAt0) {
-		t.Fatalf("reconnect changed the cell: live=%v startedAt %v→%v", live2, startedAt0, startedAt2)
+	reconnected := pollPresence(t, env, s, control, uid, true, true, 2*time.Second)
+	if !reconnected.Present || reconnected.UptimeMs < initial.UptimeMs {
+		t.Fatalf("reconnect restarted L1: before=%+v after=%+v", initial, reconnected)
 	}
 }
 
-// TestWS_PresenceMultiTab: two ws for one (channel, user) — closing one tab must
-// NOT flip the still-connected tab to offline; only the LAST disconnect does.
+// TestWS_PresenceMultiTab: two ws for one (channel, user) — closing one tab must NOT
+// flip the still-connected tab to offline; only the LAST disconnect does.
 func TestWS_PresenceMultiTab(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
-	uid := s.actorID
+	targetCookies, uid := addSecondMember(t, env, s, "multitab-target@example.com")
+	control := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer control.close()
+	waitActorStatus(t, env, s, control, uid, 2*time.Second, func(status introspect.Status) bool { return status.Present })
 
-	tab1 := dialWS(t, srv, s.cookies, s.chID, 0)
-	tab2 := dialWS(t, srv, s.cookies, s.chID, 0)
-	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
+	tab1 := dialWS(t, srv, targetCookies, s.chID, 0)
+	tab2 := dialWS(t, srv, targetCookies, s.chID, 0)
+	pollPresence(t, env, s, control, uid, true, true, 2*time.Second)
 
-	// Close tab1 — tab2 is still open, so presence must remain online.
 	tab1.close()
-	// Give the server time to process tab1's disconnect, then assert still online.
 	time.Sleep(200 * time.Millisecond)
-	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, string(uid)), nil, s.cookies)
-	assertStatus(t, w, http.StatusOK)
-	m := respJSON(t, w)
-	if m["known"] != true || m["online"] != true {
-		t.Fatalf("after one tab closed the other is still open: want online, got %v", m)
+	status := queryActorStatus(t, env, s, control, uid)
+	testimony, known := status.L3[introspect.ObsDevicePresence]
+	if !known || testimony.Device == nil || !testimony.Device.Online {
+		t.Fatalf("after one tab closed the other is still open: status=%+v", status)
 	}
 
-	// Close the last tab — now offline.
 	tab2.close()
-	pollPresence(t, env, s, string(uid), true, false, 2*time.Second)
+	pollPresence(t, env, s, control, uid, true, false, 2*time.Second)
 }
 
 // ---------------------------------------------------------------------------
-// 期12 S5: after / cancel_timer frames (提醒五路收口物).
+// after / cancel_timer frames (提醒五路收口物).
 // ---------------------------------------------------------------------------
 
 // TestWS_AfterFrameEndToEnd: a member arms a self-reminder over the ws; the
-// identity-bound timer fires and the reminder message lands on the same tail.
+// durable-home timer fires and the reminder message lands on the same feed.
 func TestWS_AfterFrameEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -429,8 +920,6 @@ func TestWS_AfterFrameEndToEnd(t *testing.T) {
 		t.Fatalf("after ack missing timer_id: %v", ack)
 	}
 
-	// The fire appends the reminder as the SUBJECT's own message (identity
-	// timer author = the subject; the fire survives cell churn by design).
 	fired := c.waitTail(func(e map[string]any) bool { return e["type"] == "reminder.note" }, 5*time.Second)
 	sender, _ := fired["sender"].(map[string]any)
 	if sender == nil || sender["id"] != string(s.actorID) {
@@ -438,8 +927,8 @@ func TestWS_AfterFrameEndToEnd(t *testing.T) {
 	}
 }
 
-// TestWS_CancelTimerFrame: arming then cancelling → no fire; and the input
-// bounds refuse a non-positive duration outright.
+// TestWS_CancelTimerFrame: arming then cancelling → no fire; and the input bounds
+// refuse a non-positive duration outright (bad_payload — the driver's error词表).
 func TestWS_CancelTimerFrame(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -449,16 +938,13 @@ func TestWS_CancelTimerFrame(t *testing.T) {
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c.close()
 
-	// Bounds: zero / negative duration is refused at the edge (a past FireAt
-	// would legally fire immediately — 期12 v0.4 P1-7).
+	// Bounds: zero / negative duration is refused at the driver (a past FireAt would
+	// legally fire immediately — 期12 v0.4 P1-7). Error code is the driver's平面词.
 	c.send(map[string]any{"type": "after", "ref": "b0", "duration_ms": 0, "msg_type": "reminder.note"})
-	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "invalid_argument" {
-		t.Fatalf("duration_ms=0: want invalid_argument, got %v", errFrame)
+	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "bad_payload" {
+		t.Fatalf("duration_ms=0: want bad_payload, got %v", errFrame)
 	}
 
-	// SHORT timer + wait PAST FireAt (修复批 P2-5: the old 60s-timer/300ms-wait
-	// form passed even with Cancel a no-op): if the cancel is ineffective the
-	// fire lands inside the observation window and the filter catches it.
 	c.send(map[string]any{
 		"type": "after", "ref": "b1", "duration_ms": 250,
 		"msg_type": "reminder.later", "payload": map[string]any{},
@@ -473,8 +959,6 @@ func TestWS_CancelTimerFrame(t *testing.T) {
 	if cAck["type"] != "ack" || cAck["frame"] != "cancel_timer" {
 		t.Fatalf("cancel_timer: want ack, got %v", cAck)
 	}
-	// Observe well past FireAt, CONTINUOUSLY filtering for the target type
-	// (an unrelated tail frame must not end the watch early).
 	watchEnd := time.After(1 * time.Second)
 	for {
 		select {
@@ -496,40 +980,62 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	// Second user: workspace member (may tail), NOT a channel member.
-	regBody, cookies2 := register(t, env, "visitor@example.com", "secret123", "Visitor")
-	if err := env.app.AddWorkspaceMemberForTest(s.wsID, regBody["id"].(string)); err != nil {
-		t.Fatalf("add workspace member: %v", err)
-	}
+	_, cookies2 := register(t, env, "visitor@example.com", "secret123", "Visitor")
 	c := dialWS(t, srv, cookies2, s.chID, 0)
 	defer c.close()
 
 	c.send(map[string]any{"type": "after", "ref": "n1", "duration_ms": 1000, "msg_type": "reminder.note"})
-	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "not_member" {
-		t.Fatalf("non-member after: want not_member, got %v", errFrame)
+	// not_member retired → uniformly forbidden (连接模型勘误期 表①).
+	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "forbidden" {
+		t.Fatalf("non-member after: want forbidden, got %v", errFrame)
 	}
 }
 
-// TestWSSubmitErrCode pins the message-frame error mapping (期12 修复批
-// P0-2 的直接测试): a killed cell is the retryable "unavailable", a closing
-// home "closed" — never "internal"; only a genuinely unknown error logs.
-func TestWSSubmitErrCode(t *testing.T) {
-	cases := []struct {
-		err      error
-		code     string
-		internal bool
-	}{
-		{platform.ErrCellUnavailable, "unavailable", false},
-		{platform.ErrClosed, "closed", false},
-		{platform.ErrNotMember, "not_member", false},
-		{&platform.WriteRejectedError{Reason: "write_denied", Detail: "d"}, "write_denied", false},
-		{fmt.Errorf("wrapped: %w", platform.ErrCellUnavailable), "unavailable", false},
-		{errors.New("boom"), "internal", true},
+// TestWS_OversizedFrameClosesConn pins the ws read-limit hardening: a write
+// frame past wsMaxFrameBytes (a few hundred KB) is a malformed / hostile client, so
+// SetReadLimit fails the read and the server closes the conn — the client's next
+// read errors within a short window instead of the server allocating unboundedly.
+// (The write-deadline + ping/pong keepalive on the same link are pure server-side
+// network behaviour, not black-box observable in a fast unit test; asserted by
+// construction, see ws.go.)
+func TestWS_OversizedFrameClosesConn(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	hdr := http.Header{}
+	var parts []string
+	for _, ck := range s.cookies {
+		parts = append(parts, ck.Name+"="+ck.Value)
 	}
-	for _, tc := range cases {
-		code, _, internal := app.WSSubmitErrCodeForTest(tc.err)
-		if code != tc.code || internal != tc.internal {
-			t.Fatalf("wsSubmitErrCode(%v) = (%q, internal=%v), want (%q, %v)", tc.err, code, internal, tc.code, tc.internal)
+	hdr.Set("Cookie", strings.Join(parts, "; "))
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	defer conn.Close()
+
+	// Opening attach frame (channel-blind, v2 — the connector's read limit is armed
+	// before this read).
+	if err := conn.WriteJSON(map[string]any{"v": 2, "frame_type": "attach"}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	// ~2 MB frame — well past the 512KB read limit (connector SetReadLimit).
+	big := strings.Repeat("x", 2*1024*1024)
+	if err := conn.WriteJSON(map[string]any{
+		"v": 2, "frame_type": "submit",
+		"payload": map[string]any{"channel_id": s.chID, "msg_type": "chat.text", "kind": "event", "payload": map[string]any{"text": big}},
+	}); err != nil {
+		return // a write error here already means the server closed — acceptable
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return // server closed the conn after the oversized frame — as required
 		}
 	}
 }

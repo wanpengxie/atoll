@@ -7,7 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -21,28 +21,19 @@ import (
 type TimerID = timerspec.TimerID
 
 var (
-	ErrAuthorInactive = errors.New("schedule: author inactive")
-	ErrScheduleQuota  = errors.New("schedule: schedule quota exceeded")
+	ErrScheduleQuota = errors.New("schedule: schedule quota exceeded")
 )
 
-// Bind is the closed set of lifecycle levels a timer's PRODUCT belongs to
-// (the routing question is: should this intent still exist after a crash
-// restart?). It is a ROUTING choice, not a persisted tag: identity routes to
-// the durable TimerStore row; incarnation routes to the engine's in-memory
-// due-set welded to the current embodiment. It names which level the intent
-// is welded to, NOT who scheduled it (author is always the welded handle's
-// identity — orthogonal).
-type Bind string
+// TimerHome chooses the Scheduler storage home. It is not an actor lifecycle
+// coordinate: both homes are owned by ActorID and cross actor replacements.
+type TimerHome string
 
 const (
-	// BindIdentity: the intent survives a restart, cleared only by explicit
-	// Cancel or by the author's deregister (cascading delete, same tx as the
-	// other actor-scoped loci).
-	BindIdentity Bind = "identity"
-	// BindIncarnation: the intent is welded to the CURRENT live embodiment —
-	// it dies the instant that embodiment dies (Despawn or process restart),
-	// never persisted.
-	BindIncarnation Bind = "incarnation"
+	// TimerHomeDurable stores the timer in Scheduler DB.
+	TimerHomeDurable TimerHome = "durable"
+	// TimerHomeMemory stores the timer in the current Channel/Scheduler
+	// instance's in-memory alarm set.
+	TimerHomeMemory TimerHome = "memory"
 )
 
 // reservedTypePrefix is the fire-time-poison-row guard's INGRESS half: a Type
@@ -58,10 +49,11 @@ const reservedTypePrefix = message.ReservedTypePrefix
 // No target (self-targeted — a timer can only ever produce a message
 // authored by the actor that scheduled it), no sender (welded by
 // ScheduleHandle at fire time), no fire-time choice of kind (kind=event is
-// welded): the only degrees of freedom are WHEN, WHICH lifecycle level, and
-// WHAT the self-message says.
+// welded): the only degrees of freedom are WHEN, WHICH Scheduler storage
+// home, and WHAT the self-message says. Home is unrelated to actor
+// AttemptKey or Incarnation.
 type ScheduleReq struct {
-	Bind    Bind
+	Home    TimerHome
 	FireAt  int64 // UnixMilli, absolute instant (delay→FireAt conversion lives downstream, lib)
 	Type    string
 	Payload []byte
@@ -87,15 +79,22 @@ type ScheduleHandle interface {
 	// engine.cancel doc), so "Cancel returned nil" is never a promise that
 	// the timer will not ring.
 	Cancel(ctx context.Context, id TimerID) error
+	Ack(ctx context.Context, id TimerID) error
 }
 
 // Minter is the engine's caps-injection mint surface (same pattern as
 // accessdoor/harness): the platform assembly root draws a per-author
-// ScheduleHandle from here when it wires caps. Mint is deterministic and
-// cheap (no per-handle state beyond the welded author), so admission points
-// may Mint per-caller freely.
+// ScheduleHandle from here when it wires caps. Mint is deterministic and cheap
+// (no per-handle state beyond the welded author), so admission points may Mint
+// per-caller freely.
+//
+// The engine mints against a LIVE identity authority and nothing else: the
+// returned handle runs that authority's one complete verdict at the door on
+// every call — the same shell a local body keeps for its whole term and a
+// remote ingress builds for one operation. TimerHome remains a Scheduler
+// storage choice and never a caller-visible distinction.
 type Minter interface {
-	Mint(author actor.ActorID) ScheduleHandle
+	MintAuthority(capauth.Authority) ScheduleHandle
 }
 
 // FireSink is the injection-point contract for fire's single action: append
@@ -129,11 +128,9 @@ type FireSink interface {
 var ErrDuplicateFire = errors.New("schedule: fire already appended")
 
 // ErrBadSchedule is returned by Schedule for a structurally invalid request:
-// Bind outside the closed set, FireAt<=0, an empty or reserved-prefixed
-// Type, or (bind=incarnation) an author with no live embodiment to weld to
-// right now. A PAST FireAt is legal (it fires immediately — refusing it would
-// make "a millisecond before vs after the deadline" two different
-// behaviours).
+// Home outside the closed set, FireAt<=0, or an empty/reserved-prefixed Type.
+// A PAST FireAt is legal (it fires immediately — refusing it would make "a
+// millisecond before vs after the deadline" two different behaviours).
 var ErrBadSchedule = errors.New("schedule: invalid schedule request")
 
 // FireRejected is the deterministic-reject class surfaced by a FireSink
@@ -151,93 +148,17 @@ func (e FireRejected) Error() string {
 	return "schedule: fire rejected by harness: " + e.Reason + " (" + e.Detail + ")"
 }
 
-// LivenessProbe is the engine's read-only window into actorrt's addressing
-// map — it serves the incarnation-bind home TWICE, at two different times,
-// for two different questions:
-//
-//   - CurrentIncarnation, at Schedule time: the ATTACH — weld the new
-//     in-memory entry to whichever embodiment is live for author RIGHT NOW
-//     (authority self-read — an incarnation is never caller-reported, never
-//     serialised). *actorrt.Runtime satisfies this directly.
-//   - IsLive, at fire time: the DROP check — a since-replaced or since-dead
-//     embodiment reads false by POINTER identity (ABA-safe), and the engine
-//     drops the entry instead of firing (a same-id successor being live does
-//     NOT rescue a predecessor's timer).
-type LivenessProbe interface {
-	CurrentIncarnation(id actor.ActorID) (actorrt.Incarnation, bool)
-	IsLive(inc actorrt.Incarnation) bool
-}
-
-// Reviver is the identity-fire activation seam: a wake with no live actor is
-// the NORMAL restart path (overdue fires run before the eager reconcile ring
-// re-mints the always-on set), and append has no backfill, so firing without
-// reviving first would silently lose the wake. EnsureLive MUST be idempotent
-// for an already-live author (SpawnIfAbsent semantics — the platform
-// implementation wraps actorrt.Runtime.SpawnIfAbsent + a builder factory, not
-// this package's concern).
-//
-// TWO-CLASS error contract (mirrors FireSink's tri-state, same rationale —
-// "a deterministic failure retried forever is a hot loop, not
-// at-least-once"). An implementation MUST distinguish:
-//   - permanently unrevivable (the author's class is gone from the Builder
-//     table, the id can never resolve to a build closure, …) →
-//     ReviveRejected{Reason, Detail} — the engine disposes the row (delete +
-//     loud log), because a row that can never revive is a poison row: left in
-//     place it retries hot forever and consumes the author's bounded due
-//     window ahead of later legitimate rows.
-//   - transient (host busy, momentary spawn failure, …) → any other error —
-//     the row stays, retried next tick (at-least-once, current semantics).
-type Reviver interface {
-	EnsureLive(ctx context.Context, id actor.ActorID) error
-}
-
-// ReviveRejected is the deterministic-failure class a Reviver surfaces from
-// EnsureLive: retrying can NEVER succeed. Typed error: test with errors.As.
-// Same shape as FireRejected.
-type ReviveRejected struct {
-	Reason string
-	Detail string
-}
-
-func (e ReviveRejected) Error() string {
-	return "schedule: revive rejected: " + e.Reason + " (" + e.Detail + ")"
-}
-
-// Deps bundles every collaborator the engine needs. New fail-fasts on any
-// missing (Store/Fire/Host/Revive/Clock ALL required — Revive is not an
-// increment, it is the reason a timer exists at all; Clock is required here
-// so tests can never accidentally fall back to the wall clock — OpenScheduler,
-// the runtime-root assembly seam, is the ONLY place that defaults a nil Clock
-// to the real one).
+// Deps bundles every collaborator the engine needs. New fail-fasts on every
+// required dependency; Clock is required here
+// so tests can never accidentally fall back to the wall clock. The Platform
+// composition root is the only place that supplies the real clock default.
 type Deps struct {
-	Store  timerspec.TimerStore
-	Fire   FireSink
-	Host   LivenessProbe
-	Revive Reviver
-	Clock  Clock
+	Store timerspec.TimerStore
+	Fire  FireSink
+	Clock Clock
 	// Logger receives obs-plane diagnostics — most notably the loud disposal
 	// log for a poison row/entry. nil → discard (same shape as
 	// harness.Deps.Logger — the substrate does not invent its own logging
 	// vocabulary).
-	Logger *slog.Logger
-}
-
-// AssemblyDeps is runtime.OpenScheduler's (the runtime-root assembly seam)
-// input — Deps minus Store: the durable TimerStore always comes from the
-// channel's own ChannelStores (an unexported field there), never from the
-// assembly-root caller (a raw TimerStore reachable downstream is a delayed
-// forged-author write path around the pen). Fire/Host/Revive are still
-// required (OpenScheduler forwards them into Deps unchanged and lets New's
-// existing fail-fast checks reject a nil one — no duplicate validation here).
-// Clock is the one field OpenScheduler DEFAULTS (nil → the real wall clock,
-// NewSystemClock()): New itself stays fail-fast on a nil Clock so a test that
-// constructs the engine directly (bypassing OpenScheduler) can never silently
-// fall back to real time. Logger nil→discard is already handled by New, so it
-// is simply forwarded.
-type AssemblyDeps struct {
-	Fire   FireSink
-	Host   LivenessProbe
-	Revive Reviver
-	Clock  Clock
 	Logger *slog.Logger
 }

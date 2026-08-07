@@ -20,6 +20,9 @@ type queryStub struct {
 }
 
 func (q *queryStub) MaxSeq(context.Context) (int64, error) { return 0, nil }
+func (q *queryStub) LatestBySenderAndType(context.Context, actor.ActorID, string) (storespec.StoredRow, bool, error) {
+	return storespec.StoredRow{}, false, nil
+}
 func (q *queryStub) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) {
 	return nil, nil
 }

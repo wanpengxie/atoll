@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
@@ -79,6 +80,67 @@ func RespondJSON(
 		ResponseSpec{Status: message.StatusCompleted, Payload: raw})
 }
 
+// Progress marshals result and commits a status=processing PROVISIONAL
+// response for the request held in hand — Reply/Fail's non-final sibling,
+// living at the same layer so the write discipline (build → pen → settle)
+// exists once (purity 手动档 B5: the engine used to hand-roll this whole
+// sequence because Respond's final-only gate — load-bearing, it means
+// "close the request" — could not carry a provisional). A provisional NEVER
+// closes the request: any number may precede the final.
+//
+// Settlement tolerance mirrors Respond's, but the harness hands a provisional
+// TWO distinct words for "the terminal already landed", so both must be
+// absorbed:
+//
+//   - HarnessTerminalDuplicate — the generic terminal-uniqueness verdict.
+//   - HarnessProvisionalAfterFinal — the verdict stepResponsePairing reserves
+//     for a PROVISIONAL arriving after the final. Absorbing only the former
+//     left this one surfacing as an error, contradicting this doc's own
+//     "benign race" promise.
+//
+// Both mean the same thing from this caller's seat: the request closed under
+// this write's feet and the caller's final won. Neither is an error.
+//
+// SCOPE: this tolerance is for a genuine RACE — the window between a live
+// 占用者's gate check and its pen write. It is NOT a licence to Progress a
+// request already known to be closed; that is misuse and the caller-side gate
+// is what rejects it.
+func Progress(
+	ctx context.Context,
+	pen harness.Pen,
+	clock func() time.Time,
+	request *message.Envelope,
+	status string,
+	result any,
+) (message.ID, error) {
+	if !message.IsProvisionalCoreStatus(status) {
+		return "", fmt.Errorf("behavior: invalid provisional status %q", status)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("behavior: progress marshal: %w", err)
+	}
+	env, err := BuildResponseFromRequest(request, clock, ResponseSpec{
+		Status:  status,
+		Payload: raw,
+	})
+	if err != nil {
+		return "", err
+	}
+	out, werr := pen.Write(ctx, env)
+	if werr != nil {
+		return "", fmt.Errorf("behavior: progress write: %w", werr)
+	}
+	if out.RejectReason == harness.HarnessTerminalDuplicate ||
+		out.RejectReason == harness.HarnessProvisionalAfterFinal {
+		return out.MessageID, nil
+	}
+	if out.RejectReason != "" {
+		return "", fmt.Errorf("behavior: progress rejected: %s (%s)", out.RejectReason, out.RejectDetail)
+	}
+	return out.MessageID, nil
+}
+
 // Fail commits a status=failed final carrying the conventional failure
 // payload {error_code, detail} — the ONE home of that shape. The terminal
 // reason is pinned to receiver_internal_error (the serve-side catch-all);
@@ -108,6 +170,9 @@ type EventSpec struct {
 	Audience      message.Audience
 	ParentID      message.ID
 	CorrelationID message.ID
+	// ClientFingerprint is shell-ingress persistence metadata and never a
+	// protocol envelope field.
+	ClientFingerprint string
 }
 
 // BuildEvent assembles a kind=event envelope — the ONE home for event
@@ -141,79 +206,27 @@ func BuildEvent(
 	}, nil
 }
 
-// SubjectWriteSpec is the caller-supplied shape of an off-process subject's
-// drive-write (期12 S2): the FULL envelope surface a subject may author —
-// kind=request/event, visibility, parent, own ID, deadline — deliberately
-// wider than the in-process Proc sugar (submit hardcodes KindRequest, Emit
-// hardcodes VisibilityPublic). Kind/visibility whitelisting is the engine's
-// job (the drive verb), not this builder's; this is only the ONE home for the
-// envelope literal (archtest envelope-construction confinement).
-type SubjectWriteSpec struct {
-	ID         message.ID
-	Type       string // required
-	Kind       message.Kind
-	Payload    json.RawMessage
-	Audience   message.Audience
-	Visibility message.Visibility
-	ParentID   message.ID
-	ExpiresAt  *int64
-}
-
-// BuildSubjectWrite assembles the subject-drive envelope by dispatching onto
-// the two existing kind builders (request → BuildRequest, event → BuildEvent
-// — no third envelope literal). ExpiresAt only rides a request (an event has
-// no closure to deadline); a non-request/event kind is the engine whitelist's
-// rejection, surfaced here too as a defensive floor.
-func BuildSubjectWrite(clock func() time.Time, spec SubjectWriteSpec) (*message.Envelope, error) {
-	switch spec.Kind {
-	case message.KindRequest:
-		return BuildRequest(clock, RequestSpec{
-			ID:         spec.ID,
-			Type:       spec.Type,
-			Payload:    spec.Payload,
-			Audience:   spec.Audience,
-			Visibility: spec.Visibility,
-			ParentID:   spec.ParentID,
-			ExpiresAt:  spec.ExpiresAt,
-		})
-	case message.KindEvent:
-		return BuildEvent(clock, EventSpec{
-			ID:         spec.ID,
-			Type:       spec.Type,
-			Payload:    spec.Payload,
-			Visibility: spec.Visibility,
-			Audience:   spec.Audience,
-			ParentID:   spec.ParentID,
-		})
-	default:
-		return nil, fmt.Errorf("behavior: BuildSubjectWrite kind must be request or event; got %q", spec.Kind)
-	}
-}
-
-// EmitEvent emits one kind=event message through the pen. kind-neutral: the
-// authoring actor's identity is welded onto the pen (sealed-pen), never a
-// parameter.
-func EmitEvent(
-	ctx context.Context,
-	pen harness.Pen,
-	clock func() time.Time,
-	eventType string,
-	payload json.RawMessage,
-	vis message.Visibility,
-	audience message.Audience,
-) (message.ID, error) {
-	env, err := BuildEvent(clock, EventSpec{
-		Type: eventType, Payload: payload, Visibility: vis, Audience: audience,
-	})
+// EventSpecJSON is the narrow "type + value + audience" sugar for EventSpec:
+// it marshals an ordinary Go value into the spec's json.RawMessage payload.
+//
+// The verb table carries the FULL event surface (own id, parent, correlation,
+// visibility) because that is what an event can be; the three-argument shape
+// most Proc bodies actually want is convenience, and convenience belongs in a
+// library rather than in a second verb.
+//
+// This function does NOT write. The pen-writing counterpart that used to live
+// here was deleted with the identity verbs: it flattened a harness rejection
+// into a formatted error, which a caller mapping verdicts to protocol codes
+// cannot tell apart from any other failure — so the write, and the typed
+// carrier it must produce, live at the verb.
+func EventSpecJSON(eventType string, payload any, audience ...actor.ActorID) (EventSpec, error) {
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return EventSpec{}, fmt.Errorf("behavior: event payload marshal: %w", err)
 	}
-	out, err := pen.Write(ctx, env)
-	if err != nil {
-		return "", fmt.Errorf("behavior: emit write: %w", err)
+	var aud message.Audience
+	if len(audience) > 0 {
+		aud = message.Audience(audience)
 	}
-	if !out.Accepted() {
-		return "", fmt.Errorf("behavior: emit rejected: %s (%s)", out.RejectReason, out.RejectDetail)
-	}
-	return out.MessageID, nil
+	return EventSpec{Type: eventType, Payload: raw, Audience: aud}, nil
 }

@@ -44,9 +44,14 @@ type chain struct {
 // be referenced by the platform tree (enforced by
 // archtest.TestHarnessConstructionConfinedToPlatform); downstream speaks the
 // harness.Pen / WriteResult seam, never builds the engine itself.
-func New(deps Deps) (Minter, error) {
+// New returns the two capabilities separately because they ARE separate: the
+// minter mints self-judging pens, the writer performs one write under a verdict
+// its caller already reached. They drive the same chain and share nothing else.
+// Handing back one object would put both in whatever field the caller stores it
+// in, which is how three consumers that only mint ended up holding a write.
+func New(deps Deps) (Minter, AdmittedWriter, error) {
 	if err := deps.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if deps.NowMs == nil {
 		deps.NowMs = func() int64 { return time.Now().UnixMilli() }
@@ -54,10 +59,6 @@ func New(deps Deps) (Minter, error) {
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
-	if deps.Metrics == nil {
-		deps.Metrics = NoopMetrics{}
-	}
-
 	steps := []step{
 		newStepCallerAuth(deps),
 		newStepEnvelopeShape(deps),
@@ -66,6 +67,7 @@ func New(deps Deps) (Minter, error) {
 		newStepTypeRegistered(deps),
 		newStepKindAndAudience(deps),
 		newStepResponsePairing(deps),
+		newStepReceiverGate(deps),
 		// StepEngineAppend (step 9) is fused into chain.write so the Step
 		// interface can stay pure (no side-effects beyond envelope
 		// mutation). Keeping engine append out of the Step slice also
@@ -73,7 +75,8 @@ func New(deps Deps) (Minter, error) {
 	}
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].ID() < steps[j].ID() })
 
-	return &minter{chain: &chain{deps: deps, steps: steps}}, nil
+	engine := &chain{deps: deps, steps: steps}
+	return &minter{chain: engine}, &admittedWriter{chain: engine}, nil
 }
 
 // write runs the chain against env. The envelope
@@ -114,7 +117,9 @@ func (c *chain) write(ctx context.Context, env *message.Envelope) (res WriteResu
 	// StepEngineAppend — canonical sink. is_terminal (StepResponsePairing)
 	// was captured above; the store allocates seq.
 	env.TSReceived = c.deps.NowMs()
-	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal)
+	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal, storespec.AppendMetadata{
+		ClientFingerprint: clientFingerprintFromContext(ctx),
+	})
 	if err != nil {
 		// Map the typed AppendError to a closed-set reject when possible.
 		// storespec.AppendError.Reason is the wire string (storespec must
@@ -156,7 +161,6 @@ func (c *chain) observeReject(ctx context.Context, env *message.Envelope, step s
 	if reason == "" {
 		return
 	}
-	c.deps.Metrics.IncCounter("harness.reject", "reason", string(reason), "step", stepName(step))
 	c.deps.Logger.Warn("harness.write.reject",
 		"step", int(step),
 		"step_name", stepName(step),
@@ -171,7 +175,6 @@ func (c *chain) observeReject(ctx context.Context, env *message.Envelope, step s
 }
 
 func (c *chain) observeError(ctx context.Context, env *message.Envelope, step stepID, err error) {
-	c.deps.Metrics.IncCounter("harness.error", "step", stepName(step))
 	c.deps.Logger.Error("harness.write.error",
 		"step", int(step),
 		"step_name", stepName(step),
@@ -200,6 +203,8 @@ func stepName(step stepID) string {
 		return "kind_and_audience"
 	case StepResponsePairing:
 		return "response_pairing"
+	case StepReceiverGate:
+		return "receiver_gate"
 	case StepEngineAppend:
 		return "engine_append"
 	default:

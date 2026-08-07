@@ -108,7 +108,7 @@ type ListEntry struct {
 
 // ListPage is List's return shape. Next=="" means the underlying scan
 // reached the end — NOT that Entries is non-empty: a page whose every raw
-// row was invisible to caller (any-grant projection) can legally return zero
+// row was invisible to caller (owner-root-or-any-grant projection) can legally return zero
 // Entries with a non-empty Next (期11 spec §3.7: caller must keep pulling
 // until Next is empty, not until Entries is empty).
 type ListPage struct {
@@ -119,7 +119,7 @@ type ListPage struct {
 
 // defaultListLimit / maxListLimit are List's scan-count bounds (期11 spec
 // §3.7): limit bounds rows SCANNED, not rows returned after the door's
-// any-grant filter — Entries may legitimately be shorter than limit, even
+// owner-root-or-any-grant filter — Entries may legitimately be shorter than limit, even
 // empty, while Next stays non-empty.
 const (
 	defaultListLimit = 50
@@ -151,6 +151,9 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 	if !resourcespec.ValidKind(spec.Kind) {
 		return fmt.Errorf("%w: create kind %q not in the closed set", ErrMalformed, spec.Kind)
 	}
+	if (spec.SourceChannelID == "") != (spec.SourceResourceID == "") {
+		return fmt.Errorf("%w: create source must include both channel_id and resource_id", ErrMalformed)
+	}
 	if spec.Dir && spec.WithContent {
 		// A directory carries no content — the combination is a conflicting
 		// declaration, not silently resolved either way (期11 spec §1.5:
@@ -171,10 +174,11 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 
 // create runs the create decision tree under caller: kv lands immediately
 // (unchanged from the pre-§3 Invoke(OpCreate) branch, now living on its own
-// method); file kind requires placement routing (§4.3's StorageMounts policy
-// chain + Membership.Lookup Host extension) that is NOT yet wired onto Deps
-// — S4's job — so it fails honestly rather than fabricating a placement.
+// method); file kind uses the fully-wired StorageMounts plus ActorAuthority
+// placement chain and fails honestly if no unambiguous target is available.
 func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	_, exists, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
 		return Outcome{}, err
@@ -182,17 +186,21 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	if exists {
 		return Outcome{RejectReason: access.AlreadyExists}, nil
 	}
-	member, err := d.deps.Membership.IsMember(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !member {
+	if !facts.Active {
 		return Outcome{RejectReason: access.AccessDenied}, nil
+	}
+	birth := resourcespec.ResourceBirthPlan{
+		SourceChannelID:  spec.SourceChannelID,
+		SourceResourceID: spec.SourceResourceID,
 	}
 
 	switch spec.Kind {
 	case resourcespec.KindKV:
-		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", resourcespec.ProvenanceAxisAllocated, initial); err != nil {
+		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial, birth); err != nil {
 			return createVerdict(ctx, err)
 		}
 		return Outcome{}, nil
@@ -211,7 +219,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		if cerr != nil {
 			return Outcome{}, cerr
 		}
-		reservationID, rerr := d.deps.Registry.ReserveCreate(ctx, id, resourcespec.KindFile, caller, daemonID, coord, spec.Dir)
+		reservationID, rerr := d.deps.Registry.ReserveCreate(ctx, id, resourcespec.KindFile, caller, daemonID, coord, spec.Dir, birth)
 		if rerr != nil {
 			return Outcome{}, rerr
 		}
@@ -249,12 +257,16 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		if aerr := d.deps.StorageControl.AllocRequest(ctx, daemonID, StorageAllocSpec{
 			ChannelID: d.deps.ChannelID, Coord: coord, Dir: spec.Dir,
 		}); aerr != nil {
-			// Alloc failed / daemon unreachable / timed out: the reservation
-			// is left standing — the Scrubber's §1.7 timeout sweep (server-
-			// side, by reserved_at) reclaims it. Nothing to undo here.
+			// Alloc failed / daemon unreachable / timed out / daemon not
+			// ready (ErrStorageNotReady, wrapped and passed through so the
+			// caller can tell "nothing was attempted, retry" from "the daemon
+			// refused"): the reservation is left standing — the Scrubber's
+			// §1.7 timeout sweep (server-side, by reserved_at) reclaims it.
+			// Nothing to undo here, and nothing is waited on: a compartment
+			// build retries with backoff, so the retry is the caller's.
 			return Outcome{}, aerr
 		}
-		found, cerr := d.deps.Registry.CommitReservation(ctx, reservationID)
+		_, found, cerr := d.deps.Registry.CommitReservation(ctx, reservationID)
 		if cerr != nil {
 			if errors.Is(cerr, resourcespec.ErrReservationLost) {
 				// This create lost the same-resource_id race (期11 S2,
@@ -275,12 +287,16 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 				// no byte stream / Committed round trip, so the door issues the
 				// reclaim synchronously here (the mirror signal on the same
 				// home→daemon channel). Best-effort — a failed reclaim is
-				// discarded (the door carries no logger, and the verdict must
-				// stay AlreadyExists regardless): a missed reclaim leaves at
-				// worst an empty live/<coord> directory, never a correctness
-				// fault, and the daemon's ReclaimCoord is idempotent so a later
-				// duplicate never double-frees.
-				_ = d.deps.StorageControl.ReclaimRequest(ctx, daemonID, coord)
+				// WARN-logged (nil-safe Deps.Logger) and otherwise swallowed —
+				// the verdict must stay AlreadyExists regardless: a missed
+				// reclaim leaves at worst an empty live/<coord> directory, never
+				// a correctness fault, and the daemon's ReclaimCoord is
+				// idempotent so a later duplicate never double-frees.
+				if rerr2 := d.deps.StorageControl.ReclaimRequest(ctx, daemonID, coord); rerr2 != nil && d.deps.Logger != nil {
+					d.deps.Logger.Warn("accessdoor.reclaim_failed",
+						"channel", string(d.deps.ChannelID), "daemon", daemonID,
+						"coord", coord, "err", rerr2)
+				}
 				return Outcome{RejectReason: access.AlreadyExists}, nil
 			}
 			return createVerdict(ctx, cerr)
@@ -307,12 +323,13 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	}
 }
 
-// stat runs the read-face projection: resolve, then any-grant visibility via
-// the SAME effectiveOps union set.go's decay law shares with the set arm
-// (期11 spec §2 item 2's three-loci contract — this is the second locus).
-// Zero rights masquerades as not_found (§3.6/design doc B1) — a deliberate,
-// documented choice, not a bug to "fix" back to access_denied.
+// stat runs the read-face projection: resolve, then membership visibility via
+// the SAME effectiveOps formula the invoke gate uses (one formula, all loci).
+// Zero rights (a non-member) masquerades as not_found (§3.6/design doc B1) —
+// a deliberate, documented choice, not a bug to "fix" back to access_denied.
 func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (StatResult, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	meta, exists, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
 		return StatResult{}, err
@@ -320,11 +337,11 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 	if !exists {
 		return StatResult{Reject: QueryNotFound}, nil
 	}
-	eff, err := d.effectiveOps(ctx, caller, id)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return StatResult{}, err
 	}
-	ops := opSetFromEffective(eff)
+	ops := opSetFromEffective(effectiveOps(caller, facts.Active, facts.Owner, meta.CreatedBy))
 	if len(ops) == 0 {
 		return StatResult{Reject: QueryNotFound}, nil
 	}
@@ -342,12 +359,14 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 
 // list runs the read-face pagination: decode/validate the door's own
 // (prefix-fingerprinted) cursor, delegate the raw range scan to
-// Registry.List, then any-grant-project each returned row using the grant
-// projection List ALREADY fetched (effectiveOpsFromGrants) — the whole point
-// of Registry.List returning full per-row grants is so a page of N
-// resources costs ONE membership check total, never N×(ActorAllows+
-// MembersAllow) round trips (期11 spec §1.9'⑤/§3.7).
+// Registry.List, then project each returned row through the SAME
+// effectiveOps formula every other locus uses — the caller's facts are
+// resolved ONCE for the whole page (membership does not change mid-scan), so
+// a page of N resources costs one facts lookup total. A non-member sees
+// zero entries (membrane-uniform: visibility is membership).
 func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (ListPage, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	limit := normalizeListLimit(q.Limit)
 
 	registryCursor, ok := decodeQueryCursor(q.Prefix, q.Cursor)
@@ -363,17 +382,16 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		return ListPage{}, err
 	}
 
-	isMember, err := d.deps.Membership.IsMember(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return ListPage{}, err
 	}
 
 	entries := make([]ListEntry, 0, len(rows))
 	for _, row := range rows {
-		eff := effectiveOpsFromGrants(caller, row.Grants, isMember)
-		ops := opSetFromEffective(eff)
+		ops := opSetFromEffective(effectiveOps(caller, facts.Active, facts.Owner, row.Meta.CreatedBy))
 		if len(ops) == 0 {
-			continue // any-grant projection: zero rights on this row = invisible
+			continue // non-member: zero rights on every row = invisible
 		}
 		entries = append(entries, ListEntry{ID: row.ID, Kind: row.Meta.Kind, Ops: ops})
 	}
@@ -383,32 +401,6 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		next = encodeQueryCursor(q.Prefix, nextRegistryCursor)
 	}
 	return ListPage{Entries: entries, Next: next}, nil
-}
-
-// effectiveOpsFromGrants computes the SAME union formula effectiveOps does
-// (ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller))) directly over an
-// ALREADY-FETCHED grant projection (a ResourceRow.Grants slice), rather than
-// re-querying the registry per op per row — List's row-level shortcut. isMember
-// is resolved ONCE for the whole page (membership does not change mid-scan),
-// mirroring effectiveOps' own single-resolve discipline.
-func effectiveOpsFromGrants(caller actor.ActorID, grants []access.Grant, isMember bool) map[access.Operation]bool {
-	eff := make(map[access.Operation]bool, len(objectOps))
-	for _, g := range grants {
-		var applies bool
-		switch g.GranteeKind {
-		case access.GranteeActor:
-			applies = g.Grantee == caller
-		case access.GranteeMembers:
-			applies = isMember
-		}
-		if !applies {
-			continue
-		}
-		for _, op := range g.Ops {
-			eff[op] = true
-		}
-	}
-	return eff
 }
 
 // --- Query-layer cursor: prefix-fingerprint + opaque wrap of Registry.List's

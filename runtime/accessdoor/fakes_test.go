@@ -8,7 +8,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // fakeRegistry is a configurable resourcespec.Registry stub. Every method reads a
@@ -22,31 +24,21 @@ type fakeRegistry struct {
 	createErr   error
 	createCalls []createCall
 
-	reserveCreateID        string
-	reserveCreateErr       error
-	reserveCreateCalls     []createCall
-	commitReservationFound bool
-	commitReservationErr   error
-	commitReservationCalls []string
-	clearTombstoneFound    bool
-	clearTombstoneErr      error
-
-	actorAllows    bool
-	actorAllowsErr error
-
-	membersAllow    bool
-	membersAllowErr error
-
-	setGrantErr error
-	setGrants   []access.Grant
+	reserveCreateID         string
+	reserveCreateErr        error
+	reserveCreateCalls      []createCall
+	commitReservationFound  bool
+	commitReservationLanded resourcespec.LandedResource
+	commitReservationErr    error
+	commitReservationCalls  []string
+	clearTombstoneFound     bool
+	clearTombstoneErr       error
 
 	deleteErr   error
 	deleteCalls []resource.ResourceID
 
 	// listRows/listNextCursor/listErr back List — canned per §3.7's door
-	// tests (Stat/List projection), which need MULTIPLE rows with distinct
-	// grant shapes at once (a single-bool fake cannot express that, same
-	// reasoning decay_test.go's real-store rig documents for the set arm).
+	// tests (Stat/List projection).
 	listRows       []resourcespec.ResourceRow
 	listNextCursor string
 	listErr        error
@@ -69,8 +61,8 @@ type createCall struct {
 	kind                              resourcespec.ResourceKind
 	creator                           actor.ActorID
 	placementDaemonID, placementCoord string
-	provenance                        resourcespec.Provenance
 	initial                           []byte
+	birth                             resourcespec.ResourceBirthPlan
 }
 
 func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
@@ -78,12 +70,12 @@ func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (res
 	return r.resolveMeta, r.resolveExists, r.resolveErr
 }
 
-func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance resourcespec.Provenance, initial []byte) error {
+func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth resourcespec.ResourceBirthPlan) error {
 	r.calls++
 	r.createCalls = append(r.createCalls, createCall{
 		id: id, kind: kind, creator: creator,
 		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
-		provenance: provenance, initial: initial,
+		initial: initial, birth: birth,
 	})
 	return r.createErr
 }
@@ -92,11 +84,11 @@ func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind 
 // routing (door.create's file-kind branch, query.go) — canned per-call so a
 // test can drive the reservation/commit sequence a content-less file create
 // runs through.
-func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
+func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth resourcespec.ResourceBirthPlan) (string, error) {
 	r.calls++
 	r.reserveCreateCalls = append(r.reserveCreateCalls, createCall{
 		id: id, kind: kind, creator: creator,
-		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
+		placementDaemonID: placementDaemonID, placementCoord: placementCoord, birth: birth,
 	})
 	if r.reserveCreateErr != nil {
 		return "", r.reserveCreateErr
@@ -108,10 +100,10 @@ func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID
 	return id2, nil
 }
 
-func (r *fakeRegistry) CommitReservation(ctx context.Context, reservationID string) (bool, error) {
+func (r *fakeRegistry) CommitReservation(ctx context.Context, reservationID string) (resourcespec.LandedResource, bool, error) {
 	r.calls++
 	r.commitReservationCalls = append(r.commitReservationCalls, reservationID)
-	return r.commitReservationFound, r.commitReservationErr
+	return r.commitReservationLanded, r.commitReservationFound, r.commitReservationErr
 }
 
 func (r *fakeRegistry) ClearTombstone(ctx context.Context, tombstoneID string) (bool, error) {
@@ -159,29 +151,12 @@ func (r *fakeRegistry) TouchReservationsByCoords(ctx context.Context, daemonID s
 }
 
 // List is §3.7's door-level consumer (door.list, query.go): canned rows +
-// nextCursor let a test drive the any-grant projection over MULTIPLE rows
-// with distinct grant shapes in one call — a single-bool fake cannot express
-// that.
+// nextCursor let a test drive the membership projection over MULTIPLE rows
+// in one call.
 func (r *fakeRegistry) List(ctx context.Context, prefix string, limit int, cursor string) ([]resourcespec.ResourceRow, string, error) {
 	r.calls++
 	r.listCalls = append(r.listCalls, listCall{prefix: prefix, limit: limit, cursor: cursor})
 	return r.listRows, r.listNextCursor, r.listErr
-}
-
-func (r *fakeRegistry) ActorAllows(ctx context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error) {
-	r.calls++
-	return r.actorAllows, r.actorAllowsErr
-}
-
-func (r *fakeRegistry) MembersAllow(ctx context.Context, id resource.ResourceID, op access.Operation) (bool, error) {
-	r.calls++
-	return r.membersAllow, r.membersAllowErr
-}
-
-func (r *fakeRegistry) SetGrant(ctx context.Context, id resource.ResourceID, g access.Grant) error {
-	r.calls++
-	r.setGrants = append(r.setGrants, g)
-	return r.setGrantErr
 }
 
 func (r *fakeRegistry) Delete(ctx context.Context, id resource.ResourceID) error {
@@ -217,22 +192,51 @@ func (d *fakeDriver) Delete(ctx context.Context, id resource.ResourceID) error {
 	return d.deleteErr
 }
 
-// fakeMembership is a configurable MembershipCheck stub. calls counts every
-// invocation — the actor-scoped negative assertion ("the collapsed branch checks
-// no membership") asserts it stays zero.
+// fakeMembership is a configurable resource-policy projection. calls counts
+// every invocation — the actor-scoped negative assertion ("the collapsed
+// branch checks no membership") asserts it stays zero.
 type fakeMembership struct {
 	isMember bool
+	isOwner  bool
 	err      error
 	calls    int
 
-	// lookupKind/lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement
-	// chain ①'s creator-affinity read). lookupCalls records every caller id
-	// Lookup was asked about.
-	lookupKind  actor.Kind
+	// lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement chain ①'s
+	// creator-affinity read). lookupCalls records every caller id Lookup was
+	// asked about.
 	lookupHost  string
 	lookupFound bool
 	lookupErr   error
 	lookupCalls []actor.ActorID
+}
+
+func (m *fakeMembership) ResourceActorFacts(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	m.calls++
+	m.lookupCalls = append(m.lookupCalls, id)
+	if m.err != nil {
+		return storespec.ResourceActorFacts{}, m.err
+	}
+	if m.lookupErr != nil {
+		return storespec.ResourceActorFacts{}, m.lookupErr
+	}
+	host := ""
+	if m.lookupFound {
+		host = m.lookupHost
+	}
+	return storespec.ResourceActorFacts{
+		Active:               m.isMember || m.lookupFound,
+		Owner:                m.isOwner,
+		PreferredStorageHost: host,
+	}, nil
+}
+
+// accessAuthority is the live A-level authority a door mints against. Tests
+// weld one per caller exactly as the assembly does.
+func accessAuthority(id actor.ActorID) capauth.Authority {
+	return liveAuthority{id: id}
 }
 
 func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {
@@ -240,10 +244,10 @@ func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, 
 	return m.isMember, m.err
 }
 
-func (m *fakeMembership) Lookup(ctx context.Context, id actor.ActorID) (actor.Kind, string, bool, error) {
+func (m *fakeMembership) Lookup(ctx context.Context, id actor.ActorID) (string, bool, error) {
 	m.calls++
 	m.lookupCalls = append(m.lookupCalls, id)
-	return m.lookupKind, m.lookupHost, m.lookupFound, m.lookupErr
+	return m.lookupHost, m.lookupFound, m.lookupErr
 }
 
 // fakeStorageMounts is a configurable StorageMounts stub (§4.3 placement
@@ -289,34 +293,29 @@ func (f *fakeStorageControl) ReclaimRequest(ctx context.Context, daemonID string
 	return f.reclaimErr
 }
 
-// fakeLaneControl is a configurable LaneControl stub (§5 item 0's file
-// byte-route Token mint) — records every OpenTransfer call so a test can
-// assert the exact (targetDaemonID, requesterDaemonID, coord, mode,
-// reservationID) the door routed.
-type fakeLaneControl struct {
-	token string
-	err   error
-	calls []openTransferCall
+// fakeTransferControl is a configurable TransferControl stub (§5 item 0's file
+// byte-route ticket mint) — records every OpenTransfer call so a test can
+// assert the exact (targetDaemonID, coord, mode, reservationID) the door
+// routed.
+type fakeTransferControl struct {
+	ticket string
+	err    error
+	calls  []openTransferCall
 }
 
 type openTransferCall struct {
-	targetDaemonID    string
-	requesterDaemonID string
-	coord             string
-	mode              access.Operation
-	reservationID     string
+	targetDaemonID string
+	coord          string
+	mode           access.Operation
+	reservationID  string
 }
 
-func (f *fakeLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
-	f.calls = append(f.calls, openTransferCall{targetDaemonID: targetDaemonID, requesterDaemonID: requesterDaemonID, coord: coord, mode: mode, reservationID: reservationID})
+func (f *fakeTransferControl) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
+	f.calls = append(f.calls, openTransferCall{targetDaemonID: targetDaemonID, coord: coord, mode: mode, reservationID: reservationID})
 	if f.err != nil {
 		return "", f.err
 	}
-	tok := f.token
-	if tok == "" {
-		tok = "fake-lane-token"
-	}
-	return tok, nil
+	return f.ticket, nil
 }
 
 // fakeStateStore is a configurable resourcespec.StateStore stub. Every method
@@ -371,15 +370,23 @@ func metaKV() resourcespec.ResourceMeta {
 	return resourcespec.ResourceMeta{Kind: resourcespec.KindKV, CreatedAt: 1}
 }
 
+// metaKVBy is metaKV with an explicit creator — the PM-D3 delete predicate
+// (CreatedBy) a delete-path test pins.
+func metaKVBy(creator actor.ActorID) resourcespec.ResourceMeta {
+	m := metaKV()
+	m.CreatedBy = creator
+	return m
+}
+
 // newDoor builds a bare door directly (the package's own test may reach past the
 // sealed Minter to drive invoke branch-by-branch). The driver is registered under
 // KindKV, the day-1 kind Resolve returns.
 func newDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership) *door {
 	return &door{deps: Deps{
-		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: drv},
-		Membership: mem,
-		State:      &fakeStateStore{},
+		Registry:  reg,
+		Drivers:   DriverTable{resourcespec.KindKV: drv},
+		Authority: mem,
+		State:     &fakeStateStore{},
 	}}
 }
 
@@ -391,7 +398,7 @@ func newFileDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership, mounts
 	d.deps.StorageMounts = mounts
 	d.deps.StorageControl = ctl
 	d.deps.ChannelID = chID
-	d.deps.LaneControl = &fakeLaneControl{}
+	d.deps.TransferControl = &fakeTransferControl{ticket: "fake-transfer-ticket"}
 	return d
 }
 
@@ -401,9 +408,9 @@ func newFileDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership, mounts
 // collaborator is the point of the assertion.
 func newStateDoor(st *fakeStateStore, reg *fakeRegistry, mem *fakeMembership) *door {
 	return &door{deps: Deps{
-		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Membership: mem,
-		State:      st,
+		Registry:  reg,
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: mem,
+		State:     st,
 	}}
 }

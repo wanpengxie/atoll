@@ -4,10 +4,51 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
+
+type blockingReadDriver struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d blockingReadDriver) Read(context.Context, resource.ResourceID) ([]byte, bool, error) {
+	close(d.entered)
+	<-d.release
+	return []byte("old"), true, nil
+}
+func (blockingReadDriver) Write(context.Context, resource.ResourceID, []byte) error { return nil }
+func (blockingReadDriver) Delete(context.Context, resource.ResourceID) error        { return nil }
+
+func TestResourceGateSpansAuthorizeThroughExecute(t *testing.T) {
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
+	drv := blockingReadDriver{entered: make(chan struct{}), release: make(chan struct{})}
+	d := newDoor(reg, nil, &fakeMembership{isMember: true})
+	d.deps.Drivers[resourcespec.KindKV] = drv
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		_, _ = d.invoke(context.Background(), "old-member", access.OpRead, "r1", nil)
+	}()
+	<-drv.entered
+	createDone := make(chan struct{})
+	go func() {
+		defer close(createDone)
+		_, _ = d.create(context.Background(), "creator", "r1", resourcespec.CreateSpec{Kind: resourcespec.KindKV}, nil)
+	}()
+	select {
+	case <-createDone:
+		t.Fatal("create crossed resource gate while an authorized read was executing")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(drv.release)
+	<-readDone
+	<-createDone
+}
 
 // --- create branch (期11 §3.1: create is its own method, door.create — no
 //     longer reachable through invoke at all) ---
@@ -83,6 +124,24 @@ func TestDoorCreate(t *testing.T) {
 			t.Fatalf("Registry.Create must not run when placement routing is unavailable")
 		}
 	})
+}
+
+func TestChannelOwnerRootAuthorizesEveryObjectOperation(t *testing.T) {
+	// The channel owner root covers all three object ops — including delete on
+	// a resource SOMEONE ELSE created (the PM-D3 兜底 half: creator ∨ owner).
+	owner := &fakeMembership{isMember: true, isOwner: true}
+	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
+		t.Run(string(op), func(t *testing.T) {
+			reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("someone-else")}
+			drv := &fakeDriver{readFound: true}
+			var args []byte
+			if op != access.OpDelete { // delete is by-id, carries no Args
+				args = []byte("v")
+			}
+			out, err := newDoor(reg, drv, owner).invoke(t.Context(), "owner", op, "r1", args)
+			mustAccept(t, out, err)
+		})
+	}
 }
 
 // --- file-kind create: placement chain wiring (期11 §4) ---
@@ -247,8 +306,8 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		if !out.Accepted() {
 			t.Fatalf("want accepted, got reject %q", out.RejectReason)
 		}
-		if out.Route == nil || !out.Route.Local || out.Route.Mode != access.OpWrite {
-			t.Fatalf("want a Local write Route (creator is daemon-1, same as placement), got %+v", out.Route)
+		if out.Route == nil || out.Route.Mode != access.OpWrite {
+			t.Fatalf("want a write Route (creator is daemon-1, same as placement), got %+v", out.Route)
 		}
 		if len(reg.reserveCreateCalls) != 1 {
 			t.Fatalf("ReserveCreate calls = %d, want 1 (placement+reservation ARE resolved for with_content)", len(reg.reserveCreateCalls))
@@ -271,73 +330,62 @@ func TestInvokeObjectOpNotFound(t *testing.T) {
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
 		reg := &fakeRegistry{resolveExists: false}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
-		out, err := d.invoke(t.Context(), "a", op, "r1", nil, nil)
+		out, err := d.invoke(t.Context(), "a", op, "r1", nil)
 		mustVerdict(t, out, err, access.ResourceNotFound)
 	}
-	// set too (needs a grant operand, but resolve happens first).
-	reg := &fakeRegistry{resolveExists: false}
-	d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
-	g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "b", Ops: []access.Operation{access.OpRead}}
-	out, err := d.invoke(t.Context(), "a", access.OpSet, "r1", nil, g)
-	mustVerdict(t, out, err, access.ResourceNotFound)
 }
 
-// --- A8 union authorization ---
+// --- membrane-uniform authorization (PM-D1) + creator-delete (PM-D3) ---
 
-func TestInvokeAuthorizationUnion(t *testing.T) {
-	t.Run("actor entry allows", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
-		d := newDoor(reg, &fakeDriver{readFound: true, readValue: []byte("v")}, &fakeMembership{})
-		out, err := d.invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
+func TestInvokeMembraneUniformAuthorization(t *testing.T) {
+	t.Run("any active member reads any resource", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("someone-else")}
+		d := newDoor(reg, &fakeDriver{readFound: true, readValue: []byte("v")}, &fakeMembership{isMember: true})
+		out, err := d.invoke(t.Context(), "a", access.OpRead, "r1", nil)
 		mustAccept(t, out, err)
 		if string(out.Value) != "v" {
 			t.Fatalf("value = %q", out.Value)
 		}
 	})
 
-	t.Run("members entry allows a current member", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: false, membersAllow: true}
-		d := newDoor(reg, &fakeDriver{readFound: true}, &fakeMembership{isMember: true})
-		out, err := d.invoke(t.Context(), "c", access.OpRead, "r1", nil, nil)
+	t.Run("any active member writes any resource", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("someone-else")}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
+		out, err := d.invoke(t.Context(), "a", access.OpWrite, "r1", []byte("v"))
 		mustAccept(t, out, err)
 	})
 
-	t.Run("members entry denies a non-member", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: false, membersAllow: true}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: false})
-		out, err := d.invoke(t.Context(), "c", access.OpRead, "r1", nil, nil)
-		mustVerdict(t, out, err, access.AccessDenied)
+	t.Run("a non-member is denied every op", func(t *testing.T) {
+		for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
+			reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("a")}
+			d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: false})
+			var args []byte
+			if op == access.OpWrite {
+				args = []byte("v")
+			}
+			out, err := d.invoke(t.Context(), "a", op, "r1", args)
+			mustVerdict(t, out, err, access.AccessDenied)
+		}
 	})
 
-	t.Run("no entry denies", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: false, membersAllow: false}
+	t.Run("delete by a member who is neither creator nor owner is denied (PM-D3)", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("someone-else")}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
-		out, err := d.invoke(t.Context(), "b", access.OpRead, "r1", nil, nil)
+		out, err := d.invoke(t.Context(), "b", access.OpDelete, "r1", nil)
 		mustVerdict(t, out, err, access.AccessDenied)
 	})
 
-	t.Run("ActorAllows error is a Go error", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllowsErr: errors.New("x")}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
-		_, err := d.invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
-		if err == nil {
-			t.Fatalf("expected Go error")
-		}
+	t.Run("delete by the creator is allowed (PM-D3)", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("a")}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
+		out, err := d.invoke(t.Context(), "a", access.OpDelete, "r1", nil)
+		mustAccept(t, out, err)
 	})
 
-	t.Run("MembersAllow error is a Go error", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), membersAllowErr: errors.New("x")}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
-		_, err := d.invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
-		if err == nil {
-			t.Fatalf("expected Go error")
-		}
-	})
-
-	t.Run("IsMember error during union is a Go error", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), membersAllow: true}
+	t.Run("facts error is a Go error", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{err: errors.New("x")})
-		_, err := d.invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
+		_, err := d.invoke(t.Context(), "a", access.OpRead, "r1", nil)
 		if err == nil {
 			t.Fatalf("expected Go error")
 		}
@@ -347,10 +395,12 @@ func TestInvokeAuthorizationUnion(t *testing.T) {
 // --- execute side-effects for each op ---
 
 func TestInvokeExecuteEffects(t *testing.T) {
+	member := func() *fakeMembership { return &fakeMembership{isMember: true} }
+
 	t.Run("read returns driver value and found", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
 		drv := &fakeDriver{readValue: []byte("payload"), readFound: true}
-		out, err := newDoor(reg, drv, &fakeMembership{}).invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
+		out, err := newDoor(reg, drv, member()).invoke(t.Context(), "a", access.OpRead, "r1", nil)
 		mustAccept(t, out, err)
 		if !out.Found || string(out.Value) != "payload" {
 			t.Fatalf("out = %+v", out)
@@ -358,9 +408,9 @@ func TestInvokeExecuteEffects(t *testing.T) {
 	})
 
 	t.Run("read resolved-but-empty is accepted with found=false", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
 		drv := &fakeDriver{readFound: false}
-		out, err := newDoor(reg, drv, &fakeMembership{}).invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
+		out, err := newDoor(reg, drv, member()).invoke(t.Context(), "a", access.OpRead, "r1", nil)
 		mustAccept(t, out, err)
 		if out.Found {
 			t.Fatalf("found should be false")
@@ -368,30 +418,19 @@ func TestInvokeExecuteEffects(t *testing.T) {
 	})
 
 	t.Run("write hits the driver", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
 		drv := &fakeDriver{}
-		out, err := newDoor(reg, drv, &fakeMembership{}).invoke(t.Context(), "a", access.OpWrite, "r1", []byte("new"), nil)
+		out, err := newDoor(reg, drv, member()).invoke(t.Context(), "a", access.OpWrite, "r1", []byte("new"))
 		mustAccept(t, out, err)
 		if len(drv.writeCalls) != 1 || string(drv.writeCalls[0]) != "new" {
 			t.Fatalf("write calls = %v", drv.writeCalls)
 		}
 	})
 
-	t.Run("set hits the registry not the driver", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
-		drv := &fakeDriver{}
-		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "b", Ops: []access.Operation{access.OpRead}}
-		out, err := newDoor(reg, drv, &fakeMembership{}).invoke(t.Context(), "a", access.OpSet, "r1", nil, g)
-		mustAccept(t, out, err)
-		if len(reg.setGrants) != 1 || reg.setGrants[0].Grantee != "b" {
-			t.Fatalf("set grants = %v", reg.setGrants)
-		}
-	})
-
 	t.Run("delete orders driver before registry", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("a")}
 		drv := &fakeDriver{}
-		out, err := newDoor(reg, drv, &fakeMembership{}).invoke(t.Context(), "a", access.OpDelete, "r1", nil, nil)
+		out, err := newDoor(reg, drv, member()).invoke(t.Context(), "a", access.OpDelete, "r1", nil)
 		mustAccept(t, out, err)
 		if drv.deleteCalls != 1 || len(reg.deleteCalls) != 1 {
 			t.Fatalf("driver deletes=%d registry deletes=%d", drv.deleteCalls, len(reg.deleteCalls))
@@ -403,23 +442,24 @@ func TestInvokeExecuteEffects(t *testing.T) {
 
 func TestInvokeDriverErrorVerdict(t *testing.T) {
 	base := func() *fakeRegistry {
-		return &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+		return &fakeRegistry{resolveExists: true, resolveMeta: metaKVBy("a")}
 	}
+	member := func() *fakeMembership { return &fakeMembership{isMember: true} }
 
 	t.Run("read error", func(t *testing.T) {
-		out, err := newDoor(base(), &fakeDriver{readErr: errors.New("io")}, &fakeMembership{}).
-			invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
+		out, err := newDoor(base(), &fakeDriver{readErr: errors.New("io")}, member()).
+			invoke(t.Context(), "a", access.OpRead, "r1", nil)
 		mustVerdict(t, out, err, access.DriverError)
 	})
 	t.Run("write error", func(t *testing.T) {
-		out, err := newDoor(base(), &fakeDriver{writeErr: errors.New("io")}, &fakeMembership{}).
-			invoke(t.Context(), "a", access.OpWrite, "r1", []byte("v"), nil)
+		out, err := newDoor(base(), &fakeDriver{writeErr: errors.New("io")}, member()).
+			invoke(t.Context(), "a", access.OpWrite, "r1", []byte("v"))
 		mustVerdict(t, out, err, access.DriverError)
 	})
 	t.Run("delete driver error", func(t *testing.T) {
 		reg := base()
-		out, err := newDoor(reg, &fakeDriver{deleteErr: errors.New("io")}, &fakeMembership{}).
-			invoke(t.Context(), "a", access.OpDelete, "r1", nil, nil)
+		out, err := newDoor(reg, &fakeDriver{deleteErr: errors.New("io")}, member()).
+			invoke(t.Context(), "a", access.OpDelete, "r1", nil)
 		mustVerdict(t, out, err, access.DriverError)
 		if len(reg.deleteCalls) != 0 {
 			t.Fatalf("registry Delete must not run after a driver Delete failure")
@@ -428,16 +468,8 @@ func TestInvokeDriverErrorVerdict(t *testing.T) {
 	t.Run("delete registry error", func(t *testing.T) {
 		reg := base()
 		reg.deleteErr = errors.New("db")
-		out, err := newDoor(reg, &fakeDriver{}, &fakeMembership{}).
-			invoke(t.Context(), "a", access.OpDelete, "r1", nil, nil)
-		mustVerdict(t, out, err, access.DriverError)
-	})
-	t.Run("set registry error", func(t *testing.T) {
-		reg := base()
-		reg.setGrantErr = errors.New("db")
-		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "b", Ops: []access.Operation{access.OpRead}}
-		out, err := newDoor(reg, &fakeDriver{}, &fakeMembership{}).
-			invoke(t.Context(), "a", access.OpSet, "r1", nil, g)
+		out, err := newDoor(reg, &fakeDriver{}, member()).
+			invoke(t.Context(), "a", access.OpDelete, "r1", nil)
 		mustVerdict(t, out, err, access.DriverError)
 	})
 }
@@ -446,7 +478,7 @@ func TestInvokeDriverErrorVerdict(t *testing.T) {
 
 func TestInvokeResolveErrorIsGoError(t *testing.T) {
 	reg := &fakeRegistry{resolveErr: errors.New("db down")}
-	_, err := newDoor(reg, &fakeDriver{}, &fakeMembership{}).invoke(t.Context(), "a", access.OpRead, "r1", nil, nil)
+	_, err := newDoor(reg, &fakeDriver{}, &fakeMembership{}).invoke(t.Context(), "a", access.OpRead, "r1", nil)
 	if err == nil {
 		t.Fatalf("resolve failure must be a Go error")
 	}
@@ -458,14 +490,14 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 	// gap — distinct from file, which structurally never gets a DriverTable
 	// entry at all, see TestInvokeFileReadWriteRedirectsToByteRoute below).
 	const bogusKind = resourcespec.ResourceKind("bogus-inline-kind")
-	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: bogusKind}, actorAllows: true}
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: bogusKind, CreatedBy: "a"}}
 	d := &door{deps: Deps{
-		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
-		Membership: &fakeMembership{},
+		Registry:  reg,
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
+		Authority: &fakeMembership{isMember: true},
 	}}
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
-		_, err := d.invoke(context.Background(), "a", op, "r1", nil, nil)
+		_, err := d.invoke(context.Background(), "a", op, "r1", nil)
 		if err == nil {
 			t.Fatalf("op %q with no driver must be a Go error", op)
 		}
@@ -476,20 +508,20 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 // kind branch: file read/write through Invoke never touches a Driver (file
 // structurally has none — its bytes are realized by the daemon-side
 // Allocator/Streamer, §4) and never carries bytes on Outcome.Value (§8.1) —
-// an accepted outcome carries a FileRoute instead, Local when the caller's
-// Membership.Lookup Host matches the resource's placement daemon, a minted
-// lane Token otherwise.
+// an accepted outcome carries a FileRoute instead. A route exists ONLY for a
+// caller on the file's own daemon; every other caller is refused, since this
+// deployment has no daemon-to-daemon byte transport.
 func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	meta := resourcespec.ResourceMeta{Kind: resourcespec.KindFile, PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"}
 
-	t.Run("same-daemon caller gets a Local route, no bytes on Value", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+	t.Run("same-daemon caller gets a route, no bytes on Value", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
 		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
-		lane := &fakeLaneControl{}
+		transfers := &fakeTransferControl{ticket: "ticket-local"}
 		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.LaneControl = lane
+		d.deps.TransferControl = transfers
 		for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
-			out, err := d.invoke(context.Background(), "a", op, "r1", nil, nil)
+			out, err := d.invoke(context.Background(), "a", op, "r1", nil)
 			if err != nil {
 				t.Fatalf("op %q: unexpected error %v", op, err)
 			}
@@ -499,62 +531,78 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 			if out.Value != nil {
 				t.Fatalf("op %q: file bytes must never ride Outcome.Value, got %v", op, out.Value)
 			}
-			if out.Route == nil || !out.Route.Local {
-				t.Fatalf("op %q: want Local route, got %+v", op, out.Route)
+			if out.Route == nil {
+				t.Fatalf("op %q: want a route, got none", op)
 			}
 			if out.Route.Mode != op {
 				t.Fatalf("op %q: route Mode = %q, want %q", op, out.Route.Mode, op)
 			}
+			if out.Route.Token != "ticket-local" {
+				t.Fatalf("op %q: route ticket = %q, want the minted ticket", op, out.Route.Token)
+			}
 		}
-		if len(lane.calls) != 2 {
-			t.Fatalf("OpenTransfer calls = %d, want 2 (one per op — a Token still mints for the Local branch's ResolveCoord step)", len(lane.calls))
+		if len(transfers.calls) != 2 {
+			t.Fatalf("OpenTransfer calls = %d, want 2 (one per op)", len(transfers.calls))
+		}
+		if transfers.calls[0].targetDaemonID != "daemon-1" || transfers.calls[0].coord != "coord-1" {
+			t.Fatalf("OpenTransfer call = %+v, want target=daemon-1 coord=coord-1", transfers.calls[0])
 		}
 	})
 
-	t.Run("cross-host caller gets a Stream route (minted Token)", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+	// Byte access is same-daemon only. A caller elsewhere is refused with
+	// capability_unavailable and NO route — never a route whose only possible
+	// redemption is a transport this deployment does not have.
+	t.Run("caller on another daemon is refused, no route minted", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
 		mem := &fakeMembership{lookupHost: "daemon-2", lookupFound: true}
-		lane := &fakeLaneControl{token: "tok-xyz"}
+		transfers := &fakeTransferControl{ticket: "never-minted"}
 		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.LaneControl = lane
+		d.deps.TransferControl = transfers
 
-		out, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil)
-		if err != nil {
-			t.Fatalf("unexpected error %v", err)
+		out, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil)
+		if !errors.Is(err, ErrFileCapabilityUnavailable) {
+			t.Fatalf("err = %v, want ErrFileCapabilityUnavailable", err)
 		}
-		if out.Route == nil || out.Route.Local {
-			t.Fatalf("want a non-Local route, got %+v", out.Route)
+		if out.Route != nil {
+			t.Fatalf("a refused caller must get no route, got %+v", out.Route)
 		}
-		if out.Route.Token != "tok-xyz" {
-			t.Fatalf("Token = %q, want %q", out.Route.Token, "tok-xyz")
-		}
-		if len(lane.calls) != 1 || lane.calls[0].targetDaemonID != "daemon-1" || lane.calls[0].requesterDaemonID != "daemon-2" || lane.calls[0].coord != "coord-1" {
-			t.Fatalf("OpenTransfer call = %+v, want target=daemon-1 requester=daemon-2 coord=coord-1", lane.calls)
+		if len(transfers.calls) != 0 {
+			t.Fatalf("a refused caller must mint nothing, got %+v", transfers.calls)
 		}
 	})
 
-	t.Run("no Membership.Lookup host (home-hosted caller) is honestly non-Local", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
-		mem := &fakeMembership{} // lookupFound: false
-		lane := &fakeLaneControl{}
+	t.Run("home-hosted caller (no storage host) is refused the same way", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
+		mem := &fakeMembership{isMember: true} // member, but lookupFound: false — no storage host
+		transfers := &fakeTransferControl{ticket: "never-minted"}
 		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.LaneControl = lane
+		d.deps.TransferControl = transfers
 
-		out, err := d.invoke(context.Background(), "a", access.OpWrite, "r1", nil, nil)
-		if err != nil {
-			t.Fatalf("unexpected error %v", err)
+		_, err := d.invoke(context.Background(), "a", access.OpWrite, "r1", nil)
+		if !errors.Is(err, ErrFileCapabilityUnavailable) {
+			t.Fatalf("err = %v, want ErrFileCapabilityUnavailable", err)
 		}
-		if out.Route == nil || out.Route.Local {
-			t.Fatalf("want a non-Local route for an unfound/home-hosted caller, got %+v", out.Route)
+		if len(transfers.calls) != 0 {
+			t.Fatalf("a refused caller must mint nothing, got %+v", transfers.calls)
 		}
 	})
 
-	t.Run("nil Deps.LaneControl is an honest Go error, never a fabricated route", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+	t.Run("an empty ticket fails closed", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
+		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
+		d := newDoor(reg, &fakeDriver{}, mem)
+		d.deps.TransferControl = &fakeTransferControl{}
+		if _, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil); err == nil {
+			t.Fatal("an empty ticket was accepted")
+		}
+	})
+
+	t.Run("nil Deps.TransferControl is an honest Go error, never a fabricated route", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{lookupHost: "daemon-1", lookupFound: true})
-		_, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil)
+		_, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil)
 		if err == nil {
-			t.Fatal("expected a Go error when Deps.LaneControl is nil")
+			t.Fatal("expected a Go error when Deps.TransferControl is nil")
 		}
 	})
 }
@@ -564,10 +612,10 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 // transaction inside Registry.Delete since S1) — no Driver.Delete call at
 // all, since file has no Driver.
 func TestInvokeFileDeleteRowFirstBytesLast(t *testing.T) {
-	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: resourcespec.KindFile}, actorAllows: true}
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: resourcespec.KindFile, CreatedBy: "a"}}
 	drv := &fakeDriver{}
-	d := newDoor(reg, drv, &fakeMembership{})
-	out, err := d.invoke(context.Background(), "a", access.OpDelete, "r1", nil, nil)
+	d := newDoor(reg, drv, &fakeMembership{isMember: true})
+	out, err := d.invoke(context.Background(), "a", access.OpDelete, "r1", nil)
 	mustAccept(t, out, err)
 	if drv.deleteCalls != 0 {
 		t.Fatalf("file delete must not call the Driver (file has none), got %d driver deletes", drv.deleteCalls)

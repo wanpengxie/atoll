@@ -2,13 +2,18 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -17,36 +22,71 @@ import (
 // live in the middleware package (the request guard).
 const sessionDuration = 30 * 24 * time.Hour
 
-func (a *App) isWorkspaceMember(ctx context.Context, wsID, userID string) bool {
-	var count int
-	err := a.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ? AND user_id = ?`,
-		wsID, userID,
-	).Scan(&count)
-	return err == nil && count > 0
-}
+// bcryptCost is the password-hash work factor. Production always runs
+// bcrypt.DefaultCost; it is a var ONLY so the test seam
+// (SetBcryptCostForTest) can drop it to MinCost — under the race detector a
+// single DefaultCost hash+compare costs ~1.7s of pure CPU, which multiplied
+// by every register+login fixture was the app test suite's single biggest
+// time sink (34 tests × ~1.7s). Nothing outside export_test may write it.
+var bcryptCost = bcrypt.DefaultCost
 
-func (a *App) channelWorkspaceID(ctx context.Context, chID string) (string, bool) {
-	var wsID string
+func (a *App) channelExists(ctx context.Context, chID string) (bool, error) {
+	var exists bool
 	err := a.db.QueryRowContext(ctx,
-		`SELECT workspace_id FROM channels WHERE id = ?`, chID,
-	).Scan(&wsID)
-	return wsID, err == nil
+		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = ? AND status='present')`, chID,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (a *App) requireChannelAccess(c *gin.Context) (string, bool) {
 	chID := c.Param("chID")
-	userID := middleware.UserID(c)
-	wsID, ok := a.channelWorkspaceID(c.Request.Context(), chID)
-	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+	exists, err := a.channelExists(c.Request.Context(), chID)
+	if err != nil {
+		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel directory unavailable")
 		return "", false
 	}
-	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
+	if !exists {
+		writeAPIError(c, http.StatusNotFound, contract.CodeChannelNotFound, "channel not found")
 		return "", false
 	}
 	return chID, true
+}
+
+func (a *App) requireChannelMember(c *gin.Context) (string, bool) {
+	chID, _, ok := a.requireChannelMemberActor(c)
+	return chID, ok
+}
+
+// resolveMember is the single carrier of the "active channel member" ruling:
+// membership is exactly the principal resolving in the membrane's roster.
+// Every consumer of that ruling — the gin guards, sysop_forward's memberGate,
+// the verb predicates/qualifiers, the observer classifier and the routing
+// grant — answers through this one function so the ruling can never fork.
+func resolveMember(ctx context.Context, bundle channelhost.Bundle, principal string) (actor.ActorID, bool, error) {
+	return bundle.View().ResolvePrincipal(ctx, principal)
+}
+
+func (a *App) requireChannelMemberActor(c *gin.Context) (string, actor.ActorID, bool) {
+	chID := c.Param("chID")
+	bundle, err := a.acquireBundle(c.Request.Context(), channel.ID(chID))
+	if errors.Is(err, errChannelNotFound) {
+		writeAPIError(c, http.StatusNotFound, contract.CodeChannelNotFound, "channel not found")
+		return "", "", false
+	}
+	if err != nil {
+		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel unavailable")
+		return "", "", false
+	}
+	id, found, err := resolveMember(c.Request.Context(), bundle, middleware.UserID(c))
+	if err != nil {
+		writeAPIError(c, http.StatusServiceUnavailable, contract.CodeChannelUnavailable, "channel unavailable")
+		return "", "", false
+	}
+	if !found {
+		writeAPIError(c, http.StatusForbidden, contract.CodeForbidden, "active channel membership required")
+		return "", "", false
+	}
+	return chID, id, true
 }
 
 // ---------------------------------------------------------------------------
@@ -54,23 +94,18 @@ func (a *App) requireChannelAccess(c *gin.Context) (string, bool) {
 // ---------------------------------------------------------------------------
 
 func (a *App) handleRegister(c *gin.Context) {
-	var req struct {
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		DisplayName string `json:"display_name"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+	var req contract.RegisterRequest
+	if !decodeRequest(c, &req) {
 		return
 	}
 	if req.Email == "" || req.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password required"})
+		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "email and password required")
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "password processing failed")
 		return
 	}
 
@@ -83,29 +118,21 @@ func (a *App) handleRegister(c *gin.Context) {
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
-			c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+			writeAPIError(c, http.StatusConflict, contract.CodeAlreadyExists, "email already registered")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "create user failed"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "create user failed")
 		return
 	}
 
 	// Auto-login.
 	a.setSession(c, userID)
-	c.JSON(http.StatusCreated, gin.H{
-		"id":           userID,
-		"email":        req.Email,
-		"display_name": req.DisplayName,
-	})
+	c.JSON(http.StatusCreated, contract.Principal{ID: userID, Email: req.Email, DisplayName: req.DisplayName})
 }
 
 func (a *App) handleLogin(c *gin.Context) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+	var req contract.LoginRequest
+	if !decodeRequest(c, &req) {
 		return
 	}
 
@@ -114,32 +141,28 @@ func (a *App) handleLogin(c *gin.Context) {
 		`SELECT id, password, display_name FROM users WHERE email = ?`, req.Email,
 	).Scan(&userID, &hash, &displayName)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		writeAPIError(c, http.StatusUnauthorized, contract.CodeInvalidCredentials, "invalid credentials")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		writeAPIError(c, http.StatusUnauthorized, contract.CodeInvalidCredentials, "invalid credentials")
 		return
 	}
 
 	a.setSession(c, userID)
-	c.JSON(http.StatusOK, gin.H{
-		"id":           userID,
-		"email":        req.Email,
-		"display_name": displayName,
-	})
+	c.JSON(http.StatusOK, contract.Principal{ID: userID, Email: req.Email, DisplayName: displayName})
 }
 
 func (a *App) handleLogout(c *gin.Context) {
-	token, err := c.Cookie(middleware.SessionCookie)
-	if err == nil && token != "" {
+	token := middleware.RequestToken(c)
+	if token != "" {
 		_, _ = a.db.ExecContext(c.Request.Context(),
 			`DELETE FROM sessions WHERE token = ?`, token,
 		)
 	}
 	c.SetCookie(middleware.SessionCookie, "", -1, "/", "", false, true)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, contract.OK{OK: true})
 }
 
 // handleMe returns the current user's profile. The route carries middleware.Auth,
@@ -153,20 +176,16 @@ func (a *App) handleMe(c *gin.Context) {
 		`SELECT email, display_name FROM users WHERE id = ?`, userID,
 	).Scan(&email, &displayName)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "user not found"})
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "user lookup failed")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"id":           userID,
-		"email":        email,
-		"display_name": displayName,
-	})
+	c.JSON(http.StatusOK, contract.Principal{ID: userID, Email: email, DisplayName: displayName})
 }
 
 func (a *App) handleVerificationIssue(c *gin.Context) {
 	// Stub: v1 skips email verification.
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, contract.OK{OK: true})
 }
 
 func (a *App) setSession(c *gin.Context, userID string) {

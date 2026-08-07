@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -9,11 +10,11 @@ import (
 )
 
 // StepSenderConsistent contract: the pen weld is the single identity
-// truth; there is no registry lookup in this step. Registry-backed rejection
-// (e.g. deregistered sender) is enforced one layer up, in livePen.IsLive()
-// (platform/internal/link/livepen.go, ErrWriterNotLive), which runs before
-// the chain and cannot be exercised from this package's step-isolation
-// harness. See livepen_test.go for its coverage.
+// truth; there is no registry lookup in this step. Liveness rejection (e.g. a
+// dead incarnation) is enforced one layer up — the pen holds the run authority
+// and calls Admit() on every Write — which runs before the chain and cannot be
+// exercised from this package's step-isolation harness. See
+// authority_pen_test.go for its coverage.
 func TestStepSenderConsistent(t *testing.T) {
 	deps := Deps{}
 
@@ -84,5 +85,20 @@ func TestStepSenderConsistent_ForcedKindOverwrite(t *testing.T) {
 	}
 	if e.Sender.Kind != actor.KindTool {
 		t.Fatalf("sender.kind = %q, want welded truth tool", e.Sender.Kind)
+	}
+}
+
+// ctx canceled before run → the final guard returns ctx.Err(). (The
+// Lookup-error seam this step used to have is gone: no registry lookup left —
+// identity is pen-welded, liveness gated one layer up by the pen's Admit();
+// that gate's coverage lives in authority_pen_test.go.)
+func TestStepSenderConsistent_CtxCanceled(t *testing.T) {
+	deps := Deps{ChannelID: testChannelID}
+	ctx, cancel := context.WithCancel(ctxCallerKind("agent:p", actor.KindAgent))
+	cancel() // canceled before run → final guard returns ctx.Err()
+	env := validEvent("m1", "agent:p")
+	_, err := runStep(t, newStepSenderConsistent, deps, ctx, env)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }

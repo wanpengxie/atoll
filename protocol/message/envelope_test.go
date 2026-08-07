@@ -1,8 +1,8 @@
 package message
 
 import (
-	"errors"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"sort"
 	"strings"
@@ -53,7 +53,7 @@ func TestEnvelopeRoundTripFullyPopulated(t *testing.T) {
 		Payload:       json.RawMessage(`{"body":{"title":"hi"}}`),
 		ParentID:      "msg-parent",
 		CorrelationID: "corr-1",
-		Visibility:    VisibilityPrivate,
+		Visibility:    VisibilityPublic,
 		Audience:      Audience{"tool:example", "agent:bob"},
 		ExpiresAt:     &expiresAt,
 	}

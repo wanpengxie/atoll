@@ -19,15 +19,22 @@ type recordingWriter struct {
 	mu        sync.Mutex
 	writes    []*message.Envelope
 	duplicate bool
-	err       error
-	signal    chan struct{} // closed-once notify on first write (nil = no notify)
-	once      sync.Once
+	// reject overrides the verdict when set, so a test can drive a specific
+	// harness word (e.g. HarnessProvisionalAfterFinal, which the harness
+	// reserves for a provisional landing after the final — a DIFFERENT word
+	// from HarnessTerminalDuplicate). `duplicate` stays as the shorthand for
+	// the terminal-uniqueness case.
+	reject harness.HarnessRejectReason
+	err    error
+	signal chan struct{} // closed-once notify on first write (nil = no notify)
+	once   sync.Once
 }
 
 func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	w.mu.Lock()
 	w.writes = append(w.writes, env)
 	dup := w.duplicate
+	reject := w.reject
 	err := w.err
 	w.mu.Unlock()
 	if w.signal != nil {
@@ -37,7 +44,10 @@ func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (harne
 		return harness.WriteResult{}, err
 	}
 	r := harness.WriteResult{MessageID: env.ID}
-	if dup {
+	switch {
+	case reject != "":
+		r.RejectReason = reject
+	case dup:
 		r.RejectReason = harness.HarnessTerminalDuplicate
 	}
 	return r, nil

@@ -1,0 +1,204 @@
+package home
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/systemkernel"
+)
+
+type closeTestActor struct{}
+
+func (closeTestActor) Receive(context.Context, *message.Envelope) error { return nil }
+
+// closeHomeWithin drives the ctx-budget close the way ShutdownWithin does,
+// with the budget the old duration-based tests were written against.
+func closeHomeWithin(h *Home, reason string, budget time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	return h.closeInternalUnder(reason, ctx)
+}
+
+// closeTestStore is a record port whose UpdateDefinition blocks until released,
+// so one admitted command can be held inside the Controller while Close runs.
+type closeTestStore struct {
+	agent   storespec.ActorRecord
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newCloseTestStore() *closeTestStore {
+	return &closeTestStore{
+		agent: storespec.ActorRecord{
+			ID: "agent", Kind: actor.KindAgent,
+			Definition: storespec.ActorDefinition{Class: "test"},
+			Placement:  storespec.NewServerPlacement(),
+		},
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+}
+
+func (s *closeTestStore) RestoreActive(context.Context) ([]storespec.ActorRecord, error) {
+	return []storespec.ActorRecord{s.agent}, nil
+}
+
+func (*closeTestStore) Insert(
+	context.Context,
+	storespec.ActorDraft,
+) (storespec.ActorRecord, error) {
+	return storespec.ActorRecord{}, errors.New("unused")
+}
+
+func (s *closeTestStore) UpdateDefinition(
+	ctx context.Context,
+	id actor.ActorID,
+	def storespec.ActorDefinition,
+) (storespec.ActorRecord, error) {
+	if id != s.agent.ID {
+		return storespec.ActorRecord{}, actorctl.ErrInactive
+	}
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-s.release:
+		updated := s.agent.Clone()
+		updated.Definition = def
+		return updated, nil
+	case <-ctx.Done():
+		return storespec.ActorRecord{}, ctx.Err()
+	}
+}
+
+func (*closeTestStore) Deregister(context.Context, []actor.ActorID) error {
+	return errors.New("unused")
+}
+
+func (*closeTestStore) InstallEntry(storespec.ActorRecord) {}
+
+// A store close that never returns must not hold the caller past its budget:
+// the wait is abandoned with its account in the error, the close keeps running
+// in the background, and whichever attempt finishes marks the level so a
+// retry after it converges to a clean nil.
+func TestWedgedStoreCloseIsAbandonedWithAccountAndRetryConverges(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h := &Home{
+		closeDone: make(chan struct{}),
+		logger:    slog.New(slog.DiscardHandler),
+		closeStore: func() error {
+			close(entered)
+			<-release
+			return nil
+		},
+	}
+
+	err := closeHomeWithin(h, "wedged-store", 200*time.Millisecond)
+	if err == nil {
+		t.Fatal("close returned nil while the store close was still running")
+	}
+	if !strings.Contains(err.Error(), "store close abandoned") {
+		t.Fatalf("close error carries no abandonment account: %v", err)
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("the store close was never even attempted")
+	}
+	if h.storeCloseDone.Load() {
+		t.Fatal("an abandoned store close marked itself done")
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for !h.storeCloseDone.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the background store close never marked the level after release")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := closeHomeWithin(h, "retry", time.Second); err != nil {
+		t.Fatalf("retry after the background close settled: %v", err)
+	}
+}
+
+func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T) {
+	store := newCloseTestStore()
+	controller, err := actorctl.New(store, func() int64 { return 1 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	host, err := actorhost.New(actorhost.Config{
+		Domain:       "server",
+		PollInterval: time.Millisecond,
+		BodyBuilder:  func(actorhost.BodyBuildInput) actorrt.Actor { return closeTestActor{} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := &Home{
+		controller:   controller,
+		serverHost:   host,
+		systemKernel: systemkernel.New(),
+		closeDone:    make(chan struct{}),
+		logger:       slog.New(slog.DiscardHandler),
+		nowMs:        func() int64 { return 1 },
+	}
+	home.actors = newActorSystem(home, home.logger)
+
+	applied := make(chan error, 1)
+	go func() {
+		applied <- home.actors.ApplyDeclaration(
+			context.Background(),
+			actorctl.DeclarationChange{
+				ActorID:    "agent",
+				Definition: storespec.ActorDefinition{Class: "test-v2"},
+			},
+		)
+	}()
+	<-store.entered
+
+	if err := closeHomeWithin(home, "timeout-test", time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close error=%v, want deadline exceeded", err)
+	}
+	select {
+	case <-home.closeDone:
+		t.Fatal("Home consumed runtime teardown while command owner was not drained")
+	default:
+	}
+	// The ledger lock covers the whole change (commit and publication), so the
+	// in-flight command owns it until it finishes; reads join afterwards.
+	close(store.release)
+	if err := <-applied; err != nil {
+		t.Fatal(err)
+	}
+	if active, err := controller.IsActive(context.Background(), "agent"); err != nil || !active {
+		t.Fatalf("Controller was torn down across failed Quiesce: active=%v err=%v", active, err)
+	}
+	if err := closeHomeWithin(home, "retry-test", time.Second); err != nil {
+		t.Fatalf("retry Close: %v", err)
+	}
+	select {
+	case <-home.closeDone:
+	default:
+		t.Fatal("retry Close did not complete runtime teardown")
+	}
+	if _, err := controller.IsActive(context.Background(), "agent"); !errors.Is(err, actorctl.ErrClosed) {
+		t.Fatalf("Controller remains live after retry Close: %v", err)
+	}
+}

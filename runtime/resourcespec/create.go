@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // CreateSpec is the CLIENT-DECLARED shape of one create call — the operand
@@ -41,77 +44,30 @@ type CreateSpec struct {
 	// Initial, never a byte stream). Dir && WithContent is a malformed
 	// combination — a directory carries no content — the door's ingress
 	// rejects outright, never silently resolved.
-	WithContent bool
+	WithContent      bool
+	SourceChannelID  channel.ID
+	SourceResourceID resource.ResourceID
 }
 
-// PlacementKind is the closed set of file-object storage placement
-// mechanisms — the door-back LOCUS a driver's bytes live at, dual to
-// ResourceKind's door-back BYTE FORMAT axis. kv carries no placement concept
-// at all: its persisted placement_kind column is the empty string, which is
-// NOT a member of this set — it is "the placement axis does not apply to
-// this row" (ValidPlacementKind treats "" as legal precisely to express
-// that non-membership, not to smuggle in a zero-value PlacementKind).
+// PlacementKind names the door-back storage locus mechanism projected for a
+// resource. It is not an independently persisted axis: with today's resource
+// kinds, KindFile derives PlacementDaemonLocal and KindKV derives the empty
+// value because the placement axis does not apply to inline bytes.
 type PlacementKind string
 
-// PlacementDaemonLocal is KindFile's day-1 (and so-far only) placement:
-// bytes live on one daemon's physical disk, addressed by an opaque
-// placement_coord that daemon's Streamer alone interprets. A cloud-backed
-// placement value is a future substrate driver addition — additive to this
-// set when a real driver demands it, never pre-reserved.
+// PlacementDaemonLocal is KindFile's current placement mechanism: the bytes
+// live on the daemon named by ResourceMeta.PlacementDaemonID.
 const PlacementDaemonLocal PlacementKind = "daemon-local"
 
 var allPlacementKinds = []PlacementKind{PlacementDaemonLocal}
 
-// ValidPlacementKind reports whether raw is a legal persisted placement_kind
-// column value: either "" (kv's non-membership) or a member of the closed
-// set. An unrecognized non-empty value is a fail-fast signal — a future
-// driver's placement landed in the column ahead of the Go closed set that
-// names it — never silently accepted (the same discipline schema.go's doc
-// describes for sender_kind/actor_kind: Go-enforced closed sets fail loud on
-// read, no DB CHECK).
+// ValidPlacementKind reports whether raw is a legal public projection. The
+// empty value is valid for KindKV, where no external placement exists.
 func ValidPlacementKind(raw PlacementKind) bool {
 	if raw == "" {
 		return true
 	}
 	for _, want := range allPlacementKinds {
-		if raw == want {
-			return true
-		}
-	}
-	return false
-}
-
-// Provenance is the closed set of how a resource's placement came to be
-// known to the registry. Day-1 every row (kv and file alike) is stamped
-// ProvenanceAxisAllocated by the door at create time (期11 spec §1 item 1:
-// "provenance 由门盖章，day-1 恒 axis-allocated") — ProvenanceRegistered
-// names the future "adopt an externally-created object" form (the登记式
-// create, deferred whole to coral, Q-D) and is declared here so its column
-// value has a home the day it lands, not pre-wired to any behavior now.
-type Provenance string
-
-const (
-	// ProvenanceAxisAllocated — the registry itself minted this resource's
-	// placement via create-outbox's coord generation (§1.6): day-1's only
-	// value, for every kind.
-	ProvenanceAxisAllocated Provenance = "axis-allocated"
-
-	// ProvenanceRegistered — an externally-created object was adopted into
-	// the registry after the fact. Declared, UNUSED day-1 (registration is
-	// deferred whole to coral): the Reclaimer (§4) branches on it once it
-	// exists — axis-allocated bytes are collected on delete (rm -rf),
-	// registered bytes are only unlinked from the registry, never touched on
-	// disk.
-	ProvenanceRegistered Provenance = "registered"
-)
-
-var allProvenances = []Provenance{ProvenanceAxisAllocated, ProvenanceRegistered}
-
-// ValidProvenance reports whether raw is a member of the closed set. Unlike
-// PlacementKind, Provenance has no "legal empty" case — every resources row
-// is stamped with one of the two values at create time.
-func ValidProvenance(raw Provenance) bool {
-	for _, want := range allProvenances {
 		if raw == want {
 			return true
 		}

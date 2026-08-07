@@ -1,9 +1,9 @@
 package store
 
 // White-box tests for the identity-level pending-timer locus: timerStore (the
-// timers table realizer, timerspec.TimerStore) and the deregister cascade
-// (clearTimersTx hung on both Deregister and applyMemberRemoveTx, parallel to
-// clearActorScopedTx). timerStore is unexported and reachable only from
+// timers table realizer, timerspec.TimerStore). There is no deregister cascade
+// to test — terminal touches actor_registry alone, and a dead author's rows die
+// at the fire path's admission gate. timerStore is unexported and reachable only from
 // inside the package — the same confinement the rest of the store relies on
 // (a raw TimerStore reachable downstream is a delayed forged-author write
 // path around the pen). They run over a real channel sqlite
@@ -18,8 +18,8 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -29,8 +29,8 @@ import (
 const timersTestChannelID channel.ID = "C-test"
 
 // timersFixture bundles the timer store with the actor registry (for the
-// dereg-cascade tests) and the channel-scoped resource registry (the
-// non-cascade contrast) over one shared channel sqlite.
+// author-admission tests) and the channel-scoped resource registry over one
+// shared channel sqlite.
 type timersFixture struct {
 	timers *timerStore
 	reg    *actorRegistry
@@ -60,6 +60,74 @@ func mustInsertTimer(t *testing.T, s *timerStore, row timerspec.TimerRow) {
 	if err := s.Insert(context.Background(), row); err != nil {
 		t.Fatalf("Insert %q: %v", row.ID, err)
 	}
+}
+
+func timerFireEnvelope(id timerspec.TimerID, author actor.ActorID) *message.Envelope {
+	return &message.Envelope{
+		ID: message.ID("timer:" + string(id)), TS: 10, TSReceived: 10,
+		ChannelID: timersTestChannelID,
+		Sender:    message.Sender{Kind: actor.KindAgent, ID: author},
+		Kind:      message.KindEvent, Type: "test.timer", Payload: []byte(`{}`),
+		Visibility: message.VisibilityPublic, Audience: message.Audience{author},
+	}
+}
+
+func TestTimerAppendThenMarkCancelOrdersAndAck(t *testing.T) {
+	ctx := context.Background()
+	t.Run("cancel wins", func(t *testing.T) {
+		f := openTimersFixture(t)
+		row := timerspec.TimerRow{ID: "cancel-first", AuthorID: "actor:a", FireAt: 2, Type: "test.timer", CreatedAt: 1}
+		mustInsertTimer(t, f.timers, row)
+		if existed, err := f.timers.CancelOwned(ctx, row.ID, row.AuthorID); err != nil || !existed {
+			t.Fatalf("CancelOwned = (%v,%v)", existed, err)
+		}
+		if err := f.timers.MarkFired(ctx, row.ID); err != nil {
+			t.Fatalf("MarkFired after cancel = %v", err)
+		}
+		var count int
+		if err := f.timers.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=?`, "timer:"+string(row.ID)).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("cancel-won fire rows=%d err=%v", count, err)
+		}
+	})
+
+	t.Run("fire wins and ack closes", func(t *testing.T) {
+		f := openTimersFixture(t)
+		row := timerspec.TimerRow{ID: "fire-first", AuthorID: "actor:a", FireAt: 2, Type: "test.timer", CreatedAt: 1}
+		mustInsertTimer(t, f.timers, row)
+		env := timerFireEnvelope(row.ID, row.AuthorID)
+		tx, err := f.timers.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := appendTx(ctx, tx, env, false); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("append fire message: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit fire message: %v", err)
+		}
+		if err := f.timers.MarkFired(ctx, row.ID); err != nil {
+			t.Fatalf("first MarkFired = %v", err)
+		}
+		if existed, err := f.timers.CancelOwned(ctx, row.ID, row.AuthorID); err != nil || existed {
+			t.Fatalf("Cancel after fire = (%v,%v)", existed, err)
+		}
+		if err := f.timers.MarkFired(ctx, row.ID); err != nil {
+			t.Fatalf("retry MarkFired = %v", err)
+		}
+		if due, err := f.timers.Due(ctx, 100); err != nil || len(due) != 0 {
+			t.Fatalf("Due includes fired row: %+v err=%v", due, err)
+		}
+		if acked, err := f.timers.AckOwned(ctx, row.ID, "actor:other"); err != nil || acked {
+			t.Fatalf("foreign Ack = (%v,%v)", acked, err)
+		}
+		if acked, err := f.timers.AckOwned(ctx, row.ID, row.AuthorID); err != nil || !acked {
+			t.Fatalf("owner Ack = (%v,%v)", acked, err)
+		}
+		if acked, err := f.timers.AckOwned(ctx, row.ID, row.AuthorID); err != nil || acked {
+			t.Fatalf("second Ack after deletion = (%v,%v)", acked, err)
+		}
+	})
 }
 
 // --- Insert + Due --------------------------------------------------------
@@ -106,6 +174,25 @@ func TestTimer_InsertAndDue(t *testing.T) {
 	if got.AuthorID != "actor:a" || got.Type != "wake" || string(got.Payload) != `{"n":1}` ||
 		got.CorrelationID != "corr-1" || got.CreatedAt != 100 || got.FireAt != 3000 {
 		t.Errorf("t1 round-trip=%+v", got)
+	}
+}
+
+func TestTimerInsertTrustsWeldedAuthorWithoutRegistryProjection(t *testing.T) {
+	ctx := context.Background()
+	f := openTimersFixture(t)
+	row := timerspec.TimerRow{
+		ID: "memory-author", AuthorID: "actor:memory-author",
+		FireAt: 2_000, Type: "wake", CreatedAt: 1,
+	}
+	if err := f.timers.Insert(ctx, row); err != nil {
+		t.Fatalf("Insert without actor_registry projection: %v", err)
+	}
+	due, err := f.timers.Due(ctx, row.FireAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].ID != row.ID || due[0].AuthorID != row.AuthorID {
+		t.Fatalf("Due = %+v, want exact timer", due)
 	}
 }
 
@@ -281,8 +368,8 @@ func TestTimer_MoveToDead_RelocatesEveryColumnFaithfully(t *testing.T) {
 }
 
 // TestTimer_MoveToDead_RejectsZeroDeathClass: the death_class column is a typed
-// closed set {fire_rejected, revive_rejected}; a zero/unknown class is refused
-// at the store boundary (never written as a blank forensic record).
+// closed set containing fire_rejected; a zero/unknown class is refused at the
+// store boundary.
 func TestTimer_MoveToDead_RejectsZeroDeathClass(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
@@ -304,6 +391,13 @@ func TestTimer_MoveToDead_RejectsZeroDeathClass(t *testing.T) {
 func TestTimer_MoveToDead_RingEviction(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
+	// Shrink the ring: the semantics under test (evict-oldest, count surfaced,
+	// row count capped) are size-independent, and at the production 4096 this
+	// test burned 34s in ~8200 fsync'd transactions. The production value is
+	// pinned by TestTimerCapsProductionValues.
+	prev := maxDeadTimers
+	maxDeadTimers = 8
+	t.Cleanup(func() { maxDeadTimers = prev })
 
 	// Register the shared author once; each iteration inserts one live row then
 	// immediately moves it dead (so pending never exceeds the per-author quota).
@@ -311,7 +405,7 @@ func TestTimer_MoveToDead_RingEviction(t *testing.T) {
 		t.Fatalf("register author: %v", err)
 	}
 
-	const overflow = maxDeadTimers + 1
+	overflow := maxDeadTimers + 1
 	totalEvicted := 0
 	firstEvictedByCall := -1
 	for i := 0; i < overflow; i++ {
@@ -366,6 +460,12 @@ func TestTimer_MoveToDead_RingEviction(t *testing.T) {
 func TestTimer_Insert_DurableQuota(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
+	// Shrink the quota: per-author admission semantics are size-independent
+	// (see the ring-eviction test's note); production value pinned by
+	// TestTimerCapsProductionValues.
+	prev := maxPendingTimersPerAuthor
+	maxPendingTimersPerAuthor = 8
+	t.Cleanup(func() { maxPendingTimersPerAuthor = prev })
 
 	if _, err := f.timers.db.Exec(`INSERT OR IGNORE INTO actor_registry (actor_id, actor_kind, created_at) VALUES ('actor:a', 'agent', 1)`); err != nil {
 		t.Fatalf("register author a: %v", err)
@@ -391,27 +491,25 @@ func TestTimer_Insert_DurableQuota(t *testing.T) {
 	}
 }
 
-// --- deregister cascade: entry point #1 (Deregister) -------------------------
+// --- deregister touches records ONLY ----------------------------------------
 
-func TestTimer_CascadeClearedOnDeregister(t *testing.T) {
+// A dead author's durable timers are inert data: nothing clears them, and the
+// fire-time author admission gate is what keeps them harmless. Deregister
+// touches actor_registry alone.
+func TestTimer_DeregisterLeavesAuthorTimersInert(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
 
 	mustInsertActor(t, f.reg, "actor:a")
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t2", AuthorID: "actor:a", FireAt: 2000, Type: "wake", CreatedAt: 1})
-
-	// A second owner's timer is a control: the cascade must be scoped to a.
 	mustInsertActor(t, f.reg, "actor:b")
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t3", AuthorID: "actor:b", FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	// A channel-scoped resource owned by a is a control for the OTHER locus:
-	// resources are non-lossy and must survive the creator's deregister.
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, []byte("resource")); err != nil {
+	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource"), resourcespec.ResourceBirthPlan{}); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 
-	if err := f.reg.Deregister(ctx, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 
@@ -419,141 +517,64 @@ func TestTimer_CascadeClearedOnDeregister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
-	if len(due) != 1 || due[0].ID != "t3" {
-		t.Fatalf("after deregister(a) timers=%+v want only t3 (owner b)", due)
+	if len(due) != 3 {
+		t.Fatalf("after deregister(a) timers=%+v want all three rows left inert", due)
 	}
 	if _, ok, _ := f.res.Resolve(ctx, "kv:doc"); !ok {
 		t.Error("channel-scoped resource must SURVIVE the creator's deregister (non-lossy, different locus)")
 	}
-}
 
-// A no-op Deregister (missing / already deregistered) must NOT touch timers —
-// the cascade only fires when the row actually transitions.
-func TestTimer_NoCascadeOnNoOpDeregister(t *testing.T) {
-	ctx := context.Background()
-	f := openTimersFixture(t)
-
-	mustInsertActor(t, f.reg, "actor:a")
-	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	if err := f.reg.Deregister(ctx, "actor:ghost", 1); err != nil {
-		t.Fatalf("Deregister ghost must be no-op: %v", err)
-	}
-	if due, _ := f.timers.Due(ctx, 999999); len(due) != 1 {
-		t.Errorf("no-op deregister must not clear another actor's timers, got %+v", due)
-	}
-
-	if err := f.reg.Deregister(ctx, "actor:a", 2); err != nil {
-		t.Fatalf("Deregister a: %v", err)
-	}
-	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
-		t.Errorf("real deregister must clear timers, got %+v", due)
-	}
-	// A repeat is a no-op and must not error.
-	if err := f.reg.Deregister(ctx, "actor:a", 3); err != nil {
+	// The latch is idempotent, and an id with no row is a plain no-op.
+	if err := endActorForTest(ctx, f.reg, "actor:a", 1001); err != nil {
 		t.Fatalf("repeat Deregister must be a no-op, got: %v", err)
 	}
-}
-
-// --- deregister cascade: entry point #2 (applyMemberRemoveTx) ----------------
-
-func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
-	ctx := context.Background()
-	f := openTimersFixture(t)
-
-	if err := f.reg.insertFixedID(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
-		t.Fatalf("add member: %v", err)
-	}
-	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 200}}); err != nil {
-		t.Fatalf("remove member: %v", err)
-	}
-	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
-		t.Errorf("member state must be cascade-cleared on member remove, got %+v", due)
-	}
-
-	// A repeated remove (already-deregistered) is a no-op and must not error.
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 300}}); err != nil {
-		t.Fatalf("repeat remove must be no-op: %v", err)
+	if err := endActorForTest(ctx, f.reg, "actor:ghost", 1); err != nil {
+		t.Fatalf("Deregister of a missing id must be a no-op: %v", err)
 	}
 }
 
-// --- attach-reconcile host guard (期7 review P1a) -----------------------------
+// --- registry schema shape ---------------------------------------------------
 
-// TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp pins the host-flip
-// TOCTOU closure on the attach-reconcile remove arm: daemon A snapshots its
-// owned rows, the actor re-homes to daemon B (host-only UPDATE), and A's stale
-// remove lands AFTER the flip. With ExpectedHost set the UPDATE carries
-// `AND host=?`, so the flipped row is a 0-rows-affected no-op — B's active row
-// AND its cascaded loci (state, identity timers) survive intact. The unguarded
-// (product-level) remove semantics are untouched: a remove guarded on the
-// CURRENT host — or carrying no guard at all — still deregisters and cascades.
-func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
+// TestActorRegistrySchemaHasNoHostColumn pins the absence of a `host` column on
+// actor_registry: where a body runs is a physical fact owned by actorhost, and
+// the record never carries it. With no host column there is no host-guarded
+// remove arm and no host-flip TOCTOU window to close in this table at all.
+func TestActorRegistrySchemaHasNoHostColumn(t *testing.T) {
 	ctx := context.Background()
-	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "hostguard.sqlite"), OpenOptions{}, ChannelLocalDDL)
+	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "nohost.sqlite"), OpenOptions{}, ChannelLocalDDL)
 	if err != nil {
-		t.Fatalf("openSqlite: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	reg := newActorRegistry(db, timersTestChannelID, nil)
-	timers := newTimerStore(db)
-	state := newStateStore(db)
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(actor_registry)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "host" {
+			t.Fatal("actor_registry.host must not exist")
+		}
+	}
+}
 
-	const id = actor.ActorID("tool:migrant")
-	// Registered on daemon A, with actor-scoped state and an identity timer.
-	if err := reg.insertFixedID(ctx, storespec.Record{ID: id, Kind: actor.KindTool, Host: "daemon-a", CreatedAt: 100}); err != nil {
-		t.Fatalf("add on daemon-a: %v", err)
+// TestTimerCapsProductionValues pins the production sizes of the two timer
+// caps that tests above temporarily shrink — the values themselves are拍定
+// constants (W3 S2: quota 千行级 / dead-letter ring 4096), and this pin is
+// what lets the semantic tests run at toy size without silently losing the
+// chosen production numbers.
+func TestTimerCapsProductionValues(t *testing.T) {
+	if maxPendingTimersPerAuthor != 1024 {
+		t.Fatalf("maxPendingTimersPerAuthor = %d, want the拍定 1024", maxPendingTimersPerAuthor)
 	}
-	if err := state.Create(ctx, id, "cursor", []byte("v1")); err != nil {
-		t.Fatalf("Create state: %v", err)
-	}
-	mustInsertTimer(t, timers, timerspec.TimerRow{ID: "t1", AuthorID: id, FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	// Migration: the row re-homes to daemon B before A's reconcile applies.
-	if err := reg.ApplyMemberTransitions(ctx,
-		[]storespec.MemberActorAdd{{ID: id, Kind: actor.KindTool, Host: "daemon-b", At: 200}}, nil); err != nil {
-		t.Fatalf("re-home to daemon-b: %v", err)
-	}
-
-	// Daemon A's stale reconcile remove, guarded on its own host: MUST no-op.
-	if err := reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: id, ExpectedHost: "daemon-a", At: 300}}); err != nil {
-		t.Fatalf("stale guarded remove must not error: %v", err)
-	}
-	rec, ok, err := reg.Lookup(ctx, id)
-	if err != nil || !ok {
-		t.Fatalf("Lookup after stale remove ok=%v err=%v", ok, err)
-	}
-	if !rec.IsActive() || rec.Host != "daemon-b" {
-		t.Fatalf("B's row damaged by A's stale remove: active=%v host=%q, want active on daemon-b", rec.IsActive(), rec.Host)
-	}
-	if _, exists, _ := state.Read(ctx, id, "cursor"); !exists {
-		t.Error("actor state was cascade-cleared by a no-op guarded remove")
-	}
-	if due, _ := timers.Due(ctx, 999999); len(due) != 1 || due[0].ID != "t1" {
-		t.Errorf("identity timers were cascade-cleared by a no-op guarded remove: %+v", due)
-	}
-
-	// A remove guarded on the row's CURRENT host still deregisters + cascades
-	// (B's own later reconcile) — the guard narrows, it never disables.
-	if err := reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: id, ExpectedHost: "daemon-b", At: 400}}); err != nil {
-		t.Fatalf("matching guarded remove: %v", err)
-	}
-	rec, ok, err = reg.Lookup(ctx, id)
-	if err != nil || !ok {
-		t.Fatalf("Lookup after matching remove ok=%v err=%v", ok, err)
-	}
-	if rec.IsActive() {
-		t.Fatal("matching guarded remove did not deregister the row")
-	}
-	if _, exists, _ := state.Read(ctx, id, "cursor"); exists {
-		t.Error("matching guarded remove did not cascade-clear state")
-	}
-	if due, _ := timers.Due(ctx, 999999); len(due) != 0 {
-		t.Errorf("matching guarded remove did not cascade-clear timers: %+v", due)
+	if maxDeadTimers != 4096 {
+		t.Fatalf("maxDeadTimers = %d, want the拍定 4096", maxDeadTimers)
 	}
 }

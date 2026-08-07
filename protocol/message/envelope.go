@@ -173,6 +173,33 @@ const (
 	StatusFailed    = "failed"
 )
 
+// Layer 2 provisional core status closed set (proto-layer0 §2.5) — the five
+// non-final wire words a receiver may answer with before its final response.
+// Same two-face rule as Layer 1: these consts are the ONE literal home (the
+// vocabulary lives HERE, with the protocol that owns the wire words — not in
+// its enforcement site, runtime/harness's response-pairing step, which
+// references this predicate); IsProvisionalCoreStatus is the membership
+// judgment. Expansion is a protocol-level revision; business extensions live
+// in the Layer 3 `<namespace>.<name>` grammar instead, and a Layer 3
+// namespace half must not collide with any word here.
+const (
+	StatusReceived    = "received"
+	StatusQueued      = "queued"
+	StatusProcessing  = "processing"
+	StatusDeferred    = "deferred"
+	StatusUnavailable = "unavailable"
+)
+
+// IsProvisionalCoreStatus reports membership in the Layer 2 provisional core
+// closed set above.
+func IsProvisionalCoreStatus(status string) bool {
+	switch status {
+	case StatusReceived, StatusQueued, StatusProcessing, StatusDeferred, StatusUnavailable:
+		return true
+	}
+	return false
+}
+
 // contentFields lists the envelope field names (with sender
 // flattened into the 2 dotted keys sender.{kind,id} — sender carries
 // structural identity only).

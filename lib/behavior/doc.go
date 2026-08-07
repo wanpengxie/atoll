@@ -18,8 +18,10 @@
 //     drains open requests for a dead actor and closes each with a
 //     receiver_unavailable terminal.
 //
-// Supporting files: respond.go also hosts BuildEvent/EmitEvent (kind=event
-// construction); correlation.go holds the derivation rule for correlation ids.
+// Supporting files: respond.go also hosts BuildEvent + its EventSpecJSON
+// sugar (kind=event construction — construction only: the event WRITE lives
+// at the Emit verb, which is where a harness rejection can be surfaced typed);
+// correlation.go holds the derivation rule for correlation ids.
 //
 // Position in the stack: behavior sits in lib/ (the stdlib layer). It imports
 // only protocol types (message, actor), runtime seams (harness, storespec),

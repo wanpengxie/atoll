@@ -3,6 +3,7 @@ package sysactor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -11,24 +12,20 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// memberRegistry answers Lookup from a fixed active/deregistered set (the gate's
-// permission axis) — the base fakeRegistry always answers not-found.
+// memberRegistry answers the membership boolean from a fixed active set (the
+// gate's permission axis) — the base fakeRegistry always answers not-found.
 type memberRegistry struct {
 	active    map[actor.ActorID]bool
 	lookupErr error
 }
 
-func (m memberRegistry) Lookup(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
+func (m memberRegistry) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
 	if m.lookupErr != nil {
-		return storespec.Record{}, false, m.lookupErr
+		return false, m.lookupErr
 	}
-	if !m.active[id] {
-		return storespec.Record{}, false, nil
-	}
-	return storespec.Record{ID: id, Kind: actor.KindAgent, DeregisteredAt: 0}, true, nil
+	return m.active[id], nil
 }
-func (m memberRegistry) Exists(context.Context, actor.ActorID) (bool, error) { return false, nil }
-func (m memberRegistry) ListActive(context.Context) ([]storespec.Record, error) {
+func (m memberRegistry) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	return nil, nil
 }
 
@@ -64,6 +61,21 @@ type stubExecutor struct {
 	result     any
 }
 
+func (s *stubExecutor) Execute(ctx context.Context, operation string, req OperateRequest) (any, error) {
+	switch operation {
+	case TypeIntroduceActor:
+		return s.Introduce(ctx, req)
+	case TypeRemoveActor:
+		return s.Remove(ctx, req)
+	case TypeRestartActor:
+		return s.Restart(ctx, req)
+	case TypeSetDefaultAgent:
+		return s.SetDefaultAgent(ctx, req)
+	default:
+		return nil, errors.New("unsupported operation")
+	}
+}
+
 func (s *stubExecutor) Introduce(context.Context, OperateRequest) (any, error) {
 	s.introduced++
 	return s.result, s.err
@@ -82,7 +94,7 @@ func (s *stubExecutor) SetDefaultAgent(context.Context, OperateRequest) (any, er
 }
 
 func operateMsg(typ string, sender actor.ActorID) actorbase.Msg {
-	return actorbase.NewMsg(context.Background(), message.Envelope{
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "op1", ChannelID: "ch", Kind: message.KindRequest, Type: typ,
 		Sender:   message.Sender{Kind: actor.KindAgent, ID: sender},
 		Audience: message.Audience{actor.SystemActorID},
@@ -95,8 +107,8 @@ func operateMsg(typ string, sender actor.ActorID) actorbase.Msg {
 func TestOperate_MemberAllowed(t *testing.T) {
 	ex := &stubExecutor{result: map[string]string{"ok": "true"}}
 	s := New(Deps{
-		Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
-		Operate:  ex,
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Operate:   ex,
 	})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeRemoveActor, "user:alice"))
@@ -108,13 +120,15 @@ func TestOperate_MemberAllowed(t *testing.T) {
 	}
 }
 
-// TestOperate_NonMemberRejected proves a sender with no active membership is
-// refused at the gate (unauthorized_sender), never reaching the executor.
+// TestOperate_NonMemberRejected pins the cheap-deny contract: a sender with no
+// active membership in the unified authority is refused at the gate as the
+// request's failed reply — it never reaches the executor and never touches any
+// durable operation ledger (rejections are noise, not truth).
 func TestOperate_NonMemberRejected(t *testing.T) {
 	ex := &stubExecutor{}
 	s := New(Deps{
-		Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
-		Operate:  ex,
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Operate:   ex,
 	})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeIntroduceActor, "user:mallory"))
@@ -130,8 +144,8 @@ func TestOperate_NonMemberRejected(t *testing.T) {
 func TestOperate_ExecutorErrorCoded(t *testing.T) {
 	ex := &stubExecutor{err: &OperateError{Code: "unknown_class", Detail: "no such class"}}
 	s := New(Deps{
-		Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
-		Operate:  ex,
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Operate:   ex,
 	})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeIntroduceActor, "user:alice"))
@@ -143,7 +157,7 @@ func TestOperate_ExecutorErrorCoded(t *testing.T) {
 // TestOperate_NilExecutorInert proves an unfilled injection point synthesizes
 // nothing (no reply, no fail) — the caller's closure reaps it.
 func TestOperate_NilExecutorInert(t *testing.T) {
-	s := New(Deps{Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}}})
+	s := New(Deps{Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}}})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeRestartActor, "user:alice"))
 	if len(sys.replies) != 0 || len(sys.fails) != 0 {

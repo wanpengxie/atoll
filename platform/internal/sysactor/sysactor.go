@@ -1,39 +1,39 @@
 package sysactor
 
 import (
+	"context"
+	"encoding/base64"
+	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// LivenessStat is the injected obs-read seam: the consumer-side narrow read of
-// the substrate's AUTHORITATIVE liveness + bind-instant for an actor (present =
-// the bool, uptime = now - startedAt). Defined consumer-side (Go idiom) as the
-// NARROW shape this actor needs, so the composition root supplies a thin reader
-// over the substrate's pull-stat obs seam. A nil seam (not yet wired) reports
-// everyone absent — advisory, never a dispatch gate.
-type LivenessStat interface {
-	Stat(id actor.ActorID) (startedAt time.Time, present bool)
+type PresenceStat interface {
+	Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error)
 }
 
-// DevicePresenceStat is the injected obs-read seam over the home device-presence fold:
-// the latest folded L3 device-presence snapshot for an actor (the actor-source
-// obs PUSH a device adapter published). known=false = UNKNOWN (not a device
-// adapter, no signal, or decayed) — NOT offline. Defined consumer-side (narrow);
-// a nil seam means no device column (everyone unknown). Advisory only —
-// authoritative reachability is send→terminal.
-type DevicePresenceStat interface {
-	Device(id actor.ActorID) (snapshot []byte, known bool)
+// Directory is the narrow actor-truth surface the system actor consults: the
+// membership roster it composes actor.list from, and the one membership boolean
+// its operate gate asks. It never receives an actor record — the directory row
+// carries identity and liveness only.
+type Directory interface {
+	storespec.IdentityRoster
+	storespec.IdentityPresence
 }
 
 // SystemActor holds one incarnation's process state: it answers channel-wide
-// directory queries (actor.list) by composing durable membership (Registry)
-// with volatile liveness (the injected seam). It is channel-agnostic at the
-// base — the composition root injects channel-scoped services (registry,
+// directory queries (actor.list) by composing the unified active-identity
+// authority with volatile liveness (the injected seam). It is channel-agnostic
+// at the base — the composition root injects channel-scoped services (authority,
 // liveness/device seams), so this actor holds no channel id of its own.
 //
 // It is an actorbase Proc (lib/actorbase, actorbase-spec-v1 §3's out-generation
@@ -42,27 +42,33 @@ type DevicePresenceStat interface {
 // actorbase.New seam every other actor does). Def mints a fresh SystemActor per
 // incarnation; run(sys) is the process body.
 type SystemActor struct {
-	registry storespec.Registry
-	clock    func() time.Time
-	stat     LivenessStat
-	device   DevicePresenceStat
-	operate  OperateExecutor
+	authority Directory
+	clock     func() time.Time
+	presence  PresenceStat
+	operate   OperateExecutor
+	logbook   interface {
+		MaxSeq(context.Context) (int64, error)
+		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
+	}
+	logger *slog.Logger
 }
 
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
-	Registry storespec.Registry
-	Clock    func() time.Time
-	// Stat is the obs-read seam over the substrate's authoritative liveness +
-	// bind-instant. Nil → actor.list reports everyone absent.
-	Stat LivenessStat
-	// Device is the obs-read seam over the home device-presence fold (L3 device presence).
-	// Nil → actor.list omits the device column (everyone unknown).
-	Device DevicePresenceStat
+	Authority Directory
+	Clock     func() time.Time
+	Presence  PresenceStat
+	Logger    *slog.Logger
 	// Operate is the injected channel-operate executor (the in-gate control plane's
 	// implementation half; the gate here does permission + routing). Nil → the four
 	// control types are inert (no synthesis) — the injection point is unfilled.
 	Operate OperateExecutor
+	// Logbook is the channel-scoped read face. It intentionally exposes no
+	// append capability to the system actor.
+	Logbook interface {
+		MaxSeq(context.Context) (int64, error)
+		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
+	}
 }
 
 // New constructs the channel system actor's process state (exported so a
@@ -73,12 +79,17 @@ func New(deps Deps) *SystemActor {
 	if clock == nil {
 		clock = time.Now
 	}
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &SystemActor{
-		registry: deps.Registry,
-		clock:    clock,
-		stat:     deps.Stat,
-		device:   deps.Device,
-		operate:  deps.Operate,
+		authority: deps.Authority,
+		clock:     clock,
+		presence:  deps.Presence,
+		operate:   deps.Operate,
+		logbook:   deps.Logbook,
+		logger:    logger,
 	}
 }
 
@@ -118,6 +129,12 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 			// out on a self-query).
 			s.respondDescribe(sys, msg)
 			return
+		case introspect.QueryStatus:
+			s.respondStatus(sys, msg)
+			return
+		case registry.TypeLogbookRecent:
+			s.respondLogbookRecent(sys, msg)
+			return
 		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor, TypeSetDefaultAgent:
 			// Channel operate face (NP-1=c): in-gate control plane. Permission +
 			// routing here; the injected executor does the intent write + Home call.
@@ -140,23 +157,52 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 // Readiness is deliberately absent: it is not a substrate axis — whether an actor can service a request
 // is the OUTCOME of send→terminal, never a stored field here.
 func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
-	rows, err := s.registry.ListActive(msg.Ctx())
+	identities, err := s.authority.ActiveIdentities()
 	if err != nil {
 		return
 	}
-	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(rows))}
-	for _, r := range rows {
-		present, uptimeMs := s.obs(r.ID)
+	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(identities))}
+	for _, identity := range identities {
+		snapshot, err := s.snapshot(msg.Ctx(), identity.ID)
+		if err != nil {
+			s.logger.Warn("sysactor.presence_snapshot_failed", "actor", string(identity.ID), "error", err)
+		}
+		present, uptimeMs := s.liveness(snapshot)
 		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
-			ID:       string(r.ID),
-			Kind:     string(r.Kind),
-			Binding:  string(r.Binding),
+			ID: string(identity.ID), Kind: string(identity.Kind),
 			Present:  present,
 			UptimeMs: uptimeMs,
-			Device:   s.deviceObs(r.ID),
+			Device:   deviceTestimony(snapshot),
 		})
 	}
+	// The kernel is a constant, not a member: it has no record to list. The
+	// directory entry is SYNTHESIZED here from the identity constant, never read
+	// from any row.
+	catalog.Actors = append(catalog.Actors, s.kernelEntry(msg))
+	slices.SortFunc(catalog.Actors, func(l, r introspect.CatalogEntry) int {
+		switch {
+		case l.ID < r.ID:
+			return -1
+		case l.ID > r.ID:
+			return 1
+		default:
+			return 0
+		}
+	})
 	_, _ = sys.Reply(msg, catalog)
+}
+
+func (s *SystemActor) kernelEntry(msg actorbase.Msg) introspect.CatalogEntry {
+	snapshot, err := s.snapshot(msg.Ctx(), actor.SystemActorID)
+	if err != nil {
+		s.logger.Warn("sysactor.presence_snapshot_failed",
+			"actor", string(actor.SystemActorID), "error", err)
+	}
+	present, uptimeMs := s.liveness(snapshot)
+	return introspect.CatalogEntry{
+		ID: string(actor.SystemActorID), Kind: string(actor.KindSystem),
+		Present: present, UptimeMs: uptimeMs,
+	}
 }
 
 // systemDescribe is the system actor's self-answer in the introspect contract
@@ -166,12 +212,22 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 func systemDescribe() introspect.Describe {
 	return introspect.Describe{
 		ActorID:     string(actor.SystemActorID),
-		Description: "Channel system actor: answers the reserved directory query actor.list (membership ∧ liveness).",
+		Description: "Channel system actor: answers reserved directory, presence, and bounded logbook queries.",
 		SkillDoc: "# system\n\nReserved channel directory.\n\n## Tool surface\n\n" +
-			"- `actor.list` — channel-wide actor directory: durable membership composed with liveness.\n",
+			"- `actor.list` — channel-wide active-identity directory composed with presence.\n" +
+			"- `actor.status` — read-time presence view for one actor id.\n" +
+			"- `logbook.recent` — last five filtered request/response rows for catch-up.\n",
 		Types: map[string]introspect.TypeMeta{
 			introspect.QueryList: {
 				Description:  "channel-wide actor directory: membership ∧ liveness",
+				AllowedKinds: []string{string(message.KindRequest)},
+			},
+			introspect.QueryStatus: {
+				Description:  "read-time presence view for one actor id",
+				AllowedKinds: []string{string(message.KindRequest)},
+			},
+			registry.TypeLogbookRecent: {
+				Description:  "last filtered request/response rows in ascending log order",
 				AllowedKinds: []string{string(message.KindRequest)},
 			},
 		},
@@ -195,37 +251,64 @@ func (s *SystemActor) respondDescribe(sys actorbase.Sys, msg actorbase.Msg) {
 	_, _ = sys.Reply(msg, answer)
 }
 
-// obs reads the substrate's authoritative obs for id (advisory; NOT a dispatch
-// gate): present, and uptime derived as now - startedAt. A nil seam (not yet
-// wired) reports absent / zero uptime.
-func (s *SystemActor) obs(id actor.ActorID) (present bool, uptimeMs int64) {
-	if s.stat == nil {
-		return false, 0
+func (s *SystemActor) snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
+	if s.presence == nil {
+		return presence.Snapshot{}, nil
 	}
-	startedAt, present := s.stat.Stat(id)
-	if !present {
-		return false, 0
-	}
-	if !startedAt.IsZero() {
-		uptimeMs = s.clock().Sub(startedAt).Milliseconds()
-	}
-	return true, uptimeMs
+	return s.presence.Snapshot(ctx, id)
 }
 
-// deviceObs reads the actor's L3 device presence from the injected fold seam
-// (advisory; NOT a dispatch gate). nil = UNKNOWN (no seam, never reported, or
-// decayed) — the actor.list omits the device column rather than asserting offline.
-func (s *SystemActor) deviceObs(id actor.ActorID) *introspect.DevicePresence {
-	if s.device == nil {
-		return nil
+func (s *SystemActor) liveness(snapshot presence.Snapshot) (bool, int64) {
+	if !snapshot.L1Present {
+		return false, 0
 	}
-	raw, known := s.device.Device(id)
+	uptime := int64(0)
+	if !snapshot.L1StartedAt.IsZero() {
+		uptime = s.clock().Sub(snapshot.L1StartedAt).Milliseconds()
+	}
+	return true, uptime
+}
+
+func deviceTestimony(snapshot presence.Snapshot) *introspect.DevicePresence {
+	row, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
 	if !known {
 		return nil
 	}
-	p, ok := introspect.ParseDevicePresence(raw)
+	p, ok := introspect.ParseDevicePresence(row.Val)
 	if !ok {
 		return nil
 	}
 	return &p
+}
+
+func (s *SystemActor) respondStatus(sys actorbase.Sys, msg actorbase.Msg) {
+	req, err := introspect.ParseStatusRequest(msg.Payload)
+	if err != nil {
+		s.logger.Warn("sysactor.status.bad_request", "error", err)
+		return
+	}
+	snapshot, err := s.snapshot(msg.Ctx(), actor.ActorID(req.ActorID))
+	if err != nil {
+		s.logger.Warn("sysactor.status.snapshot_failed", "actor", req.ActorID, "error", err)
+		return
+	}
+	present, uptime := s.liveness(snapshot)
+	answer := introspect.Status{ActorID: req.ActorID, Member: snapshot.Member, Present: present, UptimeMs: uptime}
+	if len(snapshot.L3) > 0 {
+		answer.L3 = make(map[string]introspect.StatusTestimony, len(snapshot.L3))
+	}
+	for kind, row := range snapshot.L3 {
+		out := introspect.StatusTestimony{ReceivedAt: row.ReceivedAt, StaleFromPriorLife: row.StaleFromPriorLife}
+		if string(kind) == introspect.ObsDevicePresence {
+			if value, ok := introspect.ParseDevicePresence(row.Val); ok {
+				out.Device = &value
+			} else {
+				out.ValueBase64 = base64.StdEncoding.EncodeToString(row.Val)
+			}
+		} else {
+			out.ValueBase64 = base64.StdEncoding.EncodeToString(row.Val)
+		}
+		answer.L3[string(kind)] = out
+	}
+	_, _ = sys.Reply(msg, answer)
 }

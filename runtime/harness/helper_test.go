@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // testChannelID is the channel every harness test binds its Deps to.
@@ -41,29 +42,50 @@ func testDeps(t *testing.T, cs *store.ChannelStores) Deps {
 	return Deps{
 		ChannelID: testChannelID,
 		Log:       cs.Log,
+		Presence:  testAuthority{durableRows: cs.Actors},
 		NowMs:     func() int64 { return fixedNowMs },
 	}
+}
+
+type testAuthority struct {
+	durableRows storespec.ActorRegistryStore
+}
+
+func (a testAuthority) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	if a.durableRows == nil {
+		return true, nil
+	}
+	_, ok, err := a.durableRows.LookupActive(ctx, id)
+	return ok, err
 }
 
 // registerActor seeds an active actor into the registry so sender/audience
 // checks resolve it.
 func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind actor.Kind) actor.ActorID {
 	t.Helper()
-	minted, err := cs.Membership.Admit(context.Background(), kind, strings.ReplaceAll(string(id), ":", "-"), fixedNowMs)
+	draft := storespec.ActorDraft{
+		Kind:       kind,
+		Definition: storespec.ActorDefinition{Class: string(kind)},
+		Placement:  storespec.NewServerPlacement(), CreatedAt: fixedNowMs,
+	}
+	identity := strings.ReplaceAll(string(id), ":", "-")
+	if kind == actor.KindHuman {
+		draft.Principal = identity
+	} else if kind == actor.KindAgent || kind == actor.KindTool {
+		draft.SourceDeclID = identity
+	}
+	record, err := cs.Actors.Insert(context.Background(), draft)
 	if err != nil {
 		t.Fatalf("register actor %q: %v", id, err)
 	}
-	return minted
+	return record.ID
 }
 
 // ctxCaller returns a context carrying a caller bound to the test channel.
 // Tests drive the internal chain directly (step-isolation), so they set the
 // caller via the package-internal ctxWithCaller rather than minting a pen.
 func ctxCaller(id actor.ActorID) context.Context {
-	return ctxWithCaller(context.Background(), caller{
-		actorID: id,
-		chID:    testChannelID,
-	})
+	return ctxWithCaller(context.Background(), caller{actorID: id})
 }
 
 // ctxCallerKind returns a context carrying a caller bound to the test channel
@@ -72,11 +94,7 @@ func ctxCaller(id actor.ActorID) context.Context {
 // registry lookup (stepSenderConsistent reads kind from the weld, not the
 // registry).
 func ctxCallerKind(id actor.ActorID, kind actor.Kind) context.Context {
-	return ctxWithCaller(context.Background(), caller{
-		actorID: id,
-		kind:    kind,
-		chID:    testChannelID,
-	})
+	return ctxWithCaller(context.Background(), caller{actorID: id, kind: kind})
 }
 
 // validEvent builds a minimally-valid kind=event envelope authored by sender.
@@ -102,8 +120,24 @@ func runStep(t *testing.T, mk func(Deps) step, deps Deps, ctx context.Context, e
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
-	if deps.Metrics == nil {
-		deps.Metrics = NoopMetrics{}
-	}
 	return mk(deps).Run(ctx, env)
+}
+
+// stubLog is a MessageLog whose method behaviour is supplied per-test — the
+// injectable seam for error / defensive branches the real store won't produce
+// on demand (append faults, lookup faults, panics).
+type stubLog struct {
+	appendFn   func(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error)
+	findByID   func(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error)
+	hasFinalFn func(ctx context.Context, parentID message.ID) (bool, error)
+}
+
+func (s stubLog) Append(ctx context.Context, env *message.Envelope, isTerminal bool, _ storespec.AppendMetadata) (storespec.AppendResult, error) {
+	return s.appendFn(ctx, env, isTerminal)
+}
+func (s stubLog) FindByID(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error) {
+	return s.findByID(ctx, id)
+}
+func (s stubLog) HasFinalResponse(ctx context.Context, parentID message.ID) (bool, error) {
+	return s.hasFinalFn(ctx, parentID)
 }

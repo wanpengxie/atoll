@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
@@ -14,6 +14,12 @@ import (
 // is decided INSIDE Registry.Create's transaction (within the race window) —
 // the door never resolves-then-creates in two steps.
 var ErrAlreadyExists = errors.New("resourcespec: resource already exists")
+
+// ErrOwnerInactive means an actor-scoped resource could not be born because
+// its owning actor was missing or already deregistered. StateStore.Create
+// decides this in the same transaction as its conditional insert, so callers
+// never observe a successful create that outlives an inactive owner.
+var ErrOwnerInactive = errors.New("resourcespec: actor-scoped resource owner inactive")
 
 // ErrReservationLost is CommitReservation's same-transaction race sentinel
 // (期11 spec §1.7's "并发败者"): landing lost the same-resource_id race
@@ -46,9 +52,10 @@ type ResourceMeta struct {
 	Kind      ResourceKind
 	CreatedAt int64
 
-	// PlacementKind names the door-back storage LOCUS mechanism this
-	// resource's bytes live at ("" for kv — no placement axis applies;
-	// PlacementDaemonLocal for file). Additive column (期11 spec §1 item 2).
+	// PlacementKind is the caller-visible storage-locus projection derived
+	// from Kind at the registry read boundary. It is deliberately not an
+	// independent storage column: KindFile maps to PlacementDaemonLocal and
+	// KindKV maps to "" because inline bytes have no placement axis.
 	PlacementKind PlacementKind
 
 	// PlacementDaemonID is the explicit routing column: which daemon's
@@ -66,17 +73,11 @@ type ResourceMeta struct {
 	// truth, not a caller-facing shape.
 	PlacementCoord string
 
-	// Provenance records how this resource's placement came to be known —
-	// day-1 always ProvenanceAxisAllocated for every kind (door-stamped at
-	// create time).
-	Provenance Provenance
-
-	// CreatedBy is the durable creator identity — a PURE AUDIT column, not
-	// an authorization predicate: the creator's authority is the full-rights
-	// grant Create writes into R (an actor entry via SetGrant's shape), and
-	// that grant — never a read of this field — is what "out-lives kind
-	// checks" as the ownership predicate (the design doc's "出生满权 grant
-	// 才是所有权谓词" — birth-time full grant is the ownership predicate).
+	// CreatedBy is the durable creator identity — an AUTHORIZATION PREDICATE
+	// since PM-D3: op=delete is allowed to the creator (caller == CreatedBy)
+	// or the channel owner root, judged at the door. It doubles as the audit
+	// record it always was; read/write never consult it (membrane-uniform,
+	// PM-D1).
 	CreatedBy actor.ActorID
 
 	// Dir is the file BYTE-SHAPE bit (the inode's S_IFDIR analogue, 期11 丁12):
@@ -89,7 +90,9 @@ type ResourceMeta struct {
 	// hands out the single-file staging→rename write句柄 (§3.9'). Declared by
 	// the creator at birth (CreateSpec.Dir), stored here, read at Resolve —
 	// NEVER re-derived by the daemon statting the disk (daemon holds no truth).
-	Dir bool
+	Dir              bool
+	SourceChannelID  channel.ID
+	SourceResourceID resource.ResourceID
 }
 
 // ReservationRow is one create-outbox reservation (期11 spec §1.3's
@@ -123,23 +126,35 @@ type TombstoneRow struct {
 	ResourceID     resource.ResourceID
 	DaemonID       string
 	PlacementCoord string
-	Provenance     Provenance
 	Kind           ResourceKind
 	DeletedAt      int64
 }
 
-// ResourceRow is one List row: an id + its full meta + its COMPLETE grant
-// projection (every persisted (grantee_kind, grantee) entry on it, with
-// ops). The full grant projection lets the door's effectiveOps(caller) — the
-// union ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller)) — be computed
-// per row from data ALREADY fetched here, not a second per-op round trip
-// back into the registry (期11 spec §1 item 9⑤: "避免 per-op N 次查询，一次
-// 返回整行 grant 投影"). List does NOT grant-filter — that projection is the
-// door's job (§3.7); List only scans and returns raw rows.
+// ResourceRow is one List row: an id + its full meta. Authorization is
+// membrane-uniform (PM-D1), so a row needs no per-row grant projection — the
+// door derives caller's ops from membership facts + Meta.CreatedBy alone.
+// List does NOT authorization-filter — that projection is the door's job
+// (§3.7); List only scans and returns raw rows.
 type ResourceRow struct {
-	ID     resource.ResourceID
-	Meta   ResourceMeta
-	Grants []access.Grant
+	ID   resource.ResourceID
+	Meta ResourceMeta
+}
+
+// ResourceBirthPlan carries only stable resource provenance. Authorization has
+// one shape for every actor identity: birth atomically installs the creator's
+// full-rights grant. Actor storage home is deliberately absent.
+type ResourceBirthPlan struct {
+	SourceChannelID  channel.ID
+	SourceResourceID resource.ResourceID
+}
+
+type LandedResource struct {
+	ID        resource.ResourceID
+	CreatedBy actor.ActorID
+}
+
+func (p ResourceBirthPlan) Valid() bool {
+	return (p.SourceChannelID == "") == (p.SourceResourceID == "")
 }
 
 // Registry is the R (authorization relation) + resource-existence contract —
@@ -152,12 +167,13 @@ type Registry interface {
 
 	// Create is op=create's ATOMIC birth event (the IMMEDIATE-landing half —
 	// kv, and empty/dir file creates that carry no byte stream, §1.5): the
-	// existence row (kind + all placement/provenance/audit columns) + the
-	// creator's full-rights grant (an actor entry, ops = read/write/set/delete)
-	// + the initial bytes, all in ONE transaction. The atomicity is a
+	// existence row (kind + routing + created_by columns) + the initial
+	// bytes, all in ONE transaction. There is NO grant write: authorization
+	// is membrane-uniform (PM-D1) and creator delete-right is the created_by
+	// column itself (PM-D3). The atomicity is a
 	// door-visible contract, not an implementation coincidence: create is the
-	// single event that spans existence, R, and bytes, so splitting it would
-	// open a half-built window (a visible row with no grant / no bytes). A
+	// single event that spans existence and bytes, so splitting it would
+	// open a half-built window (a visible row with no bytes). A
 	// colliding id returns ErrAlreadyExists. The byte realizer participates as
 	// store-internal collaboration (day-1: same DB, same transaction, free); a
 	// future external-byte driver orders its own internals as "bytes first,
@@ -166,12 +182,11 @@ type Registry interface {
 	//
 	// placementDaemonID/placementCoord are door-computed (§4 placement
 	// routing / §1.6 coord generation), NOT client input — "" for kv (no
-	// placement axis). provenance is door-stamped, day-1 always
-	// ProvenanceAxisAllocated for every kind. initial is per-kind (§1 item 4):
+	// placement axis). initial is per-kind (§1 item 4):
 	// kv's inline value; always nil for file (its bytes never ride this
 	// param — a with-content file create lands via ReserveCreate +
 	// CommitReservation instead, never this method).
-	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance Provenance, initial []byte) error
+	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth ResourceBirthPlan) error
 
 	// ReserveCreate is the create-outbox's SERVER-side write-ahead half
 	// (§1.3/§1.7, for a with-content file create ONLY — kv and
@@ -189,14 +204,14 @@ type Registry interface {
 	// so the landed resources row carries it (the door's later Open routing
 	// reads it, §丁12). Always false for a with-content create (dir+with_content
 	// is an ingress-rejected combination — a directory carries no byte stream).
-	ReserveCreate(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (reservationID string, err error)
+	ReserveCreate(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth ResourceBirthPlan) (reservationID string, err error)
 
 	// CommitReservation is create-outbox's landing half (driven by the
 	// daemon's Committed(reservation_id) RPC, §4.7): looks up reservationID,
 	// then performs the SAME atomic birth Create does — using the
 	// RESERVATION's door-authenticated creator/coord, never a daemon-
-	// reported value, with Provenance always ProvenanceAxisAllocated and
-	// Initial always nil (file bytes live at placementCoord, never inline)
+	// reported value, with Initial always nil (file bytes live at
+	// placementCoord, never inline)
 	// — then deletes the reservation row, all in ONE transaction (§1.7's
 	// "server 用 reservation_id 查表落户口行").
 	//
@@ -208,32 +223,12 @@ type Registry interface {
 	// deleted, but ANOTHER reservation already landed the same resource_id
 	// first (§1.7's "并发败者") — the caller (§4) signals the daemon to
 	// clean its staged bytes, never retries the write.
-	CommitReservation(ctx context.Context, reservationID string) (found bool, err error)
+	CommitReservation(ctx context.Context, reservationID string) (landed LandedResource, found bool, err error)
 
-	// ActorAllows is the actor-entry half of R.allows for OBJECT ops: whether
-	// caller's direct actor entry grants op. members late-binding is NOT here —
-	// that is the door's job: the door unions this with MembersAllow gated by a
-	// membership check, resolved at check time (grant.go: "resolved by the door
-	// AT CHECK TIME").
-	ActorAllows(ctx context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error)
-
-	// MembersAllow reports whether a members-kind entry on id grants op. It does
-	// NOT look at caller: whether caller is a current member is decided by the
-	// door's membership check, and the two halves are unioned at the door
-	// (allow-only, no precedence).
-	MembersAllow(ctx context.Context, id resource.ResourceID, op access.Operation) (bool, error)
-
-	// SetGrant implements op=set: REPLACE the grantee's entry with g (chmod/
-	// setfacl SET semantics; g.Ops == ∅ REVOKES = deletes the row). g has
-	// already passed the door's ingress ValidateGrant, so the Registry trusts
-	// the caller and only stores (mirrors storespec's store-not-validate
-	// discipline). The entry key is (id, g.GranteeKind, g.Grantee) — the sum
-	// form persisted in full.
-	SetGrant(ctx context.Context, id resource.ResourceID, g access.Grant) error
-
-	// Delete removes the resource row + ALL its grants in one transaction.
-	// Non-lossy is guaranteed by the door only reaching here after Allows
-	// passes. Delete is idempotent and retryable (a repeat delete on an
+	// Delete removes the resource row in one transaction.
+	// Non-lossy is guaranteed by the door only reaching here after its
+	// authorization gate (PM-D3: creator ∨ channel owner). Delete is
+	// idempotent and retryable (a repeat delete on an
 	// already-gone id is a clean no-op), needing no cross-call atomicity
 	// (only create does, for its controller-grab window).
 	//
@@ -243,15 +238,15 @@ type Registry interface {
 	//   - kv: bytes live INLINE in the row itself, so removing the row IS
 	//     removing the bytes — same as before, no tombstone.
 	//   - file: ROW-FIRST-BYTES-LAST — this call reads the row (kind,
-	//     placement_daemon_id, placement_coord, provenance) inside its own
+	//     placement_daemon_id, placement_coord) inside its own
 	//     transaction, writes a resource_tombstones row from those values,
-	//     THEN deletes the resource row + grants — all ONE transaction. The
+	//     THEN deletes the resource row — all ONE transaction. The
 	//     daemon-side Reclaimer (§4, a later addition) consumes the
 	//     tombstone asynchronously and only then removes the bytes,
 	//     confirming via ReclaimAck (§4.7) so the caller can ClearTombstone.
-	//     The invariant "a visible row always points at valid bytes" holds
-	//     throughout: the row goes invisible FIRST, so a stranded byte is
-	//     always invisible-but-present, never the reverse.
+	//     In the normal domain, "a visible row always points at valid bytes"
+	//     holds: the row goes invisible FIRST. A retired-daemon stranded row is
+	//     the explicit exception and remains owner-visible for manual deletion.
 	Delete(ctx context.Context, id resource.ResourceID) error
 
 	// ClearTombstone deletes one resource_tombstones row after the
@@ -263,7 +258,7 @@ type Registry interface {
 
 	// List enumerates channel-scoped resources in stable (created_at,
 	// resource_id) order — a RAW range scan: it projects rows, it does NOT
-	// grant-filter (§3.7's any-grant projection is the door's job, one layer
+	// grant-filter (§3.7's owner-root-or-any-grant projection is the door's job, one layer
 	// up). prefix is a plain string prefix over resource_id (no glob
 	// semantics); limit bounds the number of rows SCANNED (not the number
 	// returned after any later filtering — there is none here, so scanned ==
@@ -312,6 +307,10 @@ type Registry interface {
 	// orphan; a row here with no matching coord on disk is a lost-byte
 	// anomaly — both the Scrubber's concern, not this method's). Same
 	// per-daemon confinement as the two List*ByDaemon methods above.
+	// All three per-daemon lists are unpaginated full slices: reply size
+	// grows with the daemon's placement set, unbounded — fine at today's
+	// scale, but a very large reply also has to fit the wire's
+	// single-substream flow-control window.
 	ListByPlacementDaemon(ctx context.Context, daemonID string) ([]ResourceRow, error)
 
 	// SweepExpiredReservations deletes — and returns — every reservation
@@ -333,7 +332,10 @@ type Registry interface {
 	// one). This is the server-side mirror of Delete's tombstone reclaim:
 	// reservations never grow unbounded from an abandoned/lost create,
 	// matching §1.7's "三触发全在 server 侧收口" account (①success ②loser
-	// ③this one).
+	// ③this one). Since the ONLY caller is that per-daemon ReconcilePull
+	// handler, a daemon that never polls again leaves its rows unswept
+	// forever — dead weight in the table, not a correctness hole (nothing
+	// reads them but its own pull).
 	SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]ReservationRow, error)
 
 	// TouchReservationsByCoords bumps last_progress_at = atMs for every
@@ -344,7 +346,7 @@ type Registry interface {
 	// having a live WriteHandle, not merely "this daemon is still polling").
 	// coords is the caller's (ReconcilePull handler's) per-request
 	// activeCoords list — the daemon's own snapshot of coords with a
-	// currently-open local WriteHandle (cmd/daemon/internal/storagehost.
+	// currently-open local WriteHandle (drivers/devicehost/internal/storagehost.
 	// Host.ActiveWriteCoords). An EMPTY coords touches ZERO rows — this is
 	// the honest answer when the daemon has no active writes at all, not a
 	// no-filter fallback to "touch everything this daemon owns" (that
@@ -358,8 +360,8 @@ type Registry interface {
 
 // ResourceOutbox is the NARROW slice of Registry the home-side daemon
 // control-RPC handler needs (期11 spec §4.7's Committed/ReclaimAck/
-// ReconcilePull handlers) — deliberately excluding ActorAllows/MembersAllow/
-// SetGrant/Create/Delete/Resolve (the general authorization-relation surface
+// ReconcilePull handlers) — deliberately excluding
+// Create/Delete/Resolve (the general access surface
 // the access door alone may drive, the anti-bypass wall runtime.ChannelStores
 // already draws by not re-exporting the raw Registry). Outbox completion is a
 // DIFFERENT concern from a caller-facing access decision: the door already
@@ -369,7 +371,7 @@ type Registry interface {
 // automatically (Go structural typing) — runtime/storeopen.go re-exports the
 // SAME value under this narrower type, never a second implementation.
 type ResourceOutbox interface {
-	CommitReservation(ctx context.Context, reservationID string) (found bool, err error)
+	CommitReservation(ctx context.Context, reservationID string) (landed LandedResource, found bool, err error)
 	ClearTombstone(ctx context.Context, tombstoneID string) (found bool, err error)
 	ReservationDaemon(ctx context.Context, reservationID string) (daemonID string, found bool, err error)
 	TombstoneDaemon(ctx context.Context, tombstoneID string) (daemonID string, found bool, err error)

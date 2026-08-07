@@ -2,81 +2,128 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/app/contract"
+	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
-// SetControlShimTimeoutForTest overrides the channel-control HTTP shim's bounded
-// wait so a test can exercise the timeout branch (202+request_id) deterministically
-// (a near-zero timeout times out before the async door reply can commit). Test-only.
-func (a *App) SetControlShimTimeoutForTest(d time.Duration) {
-	a.controlShimTimeout = d
-}
-
-// OperateFaceForTest exposes the app's channel-operate executor so black-box
-// tests can drive the four control verbs directly (as the sysactor gate would
-// after authorising the sender), without the not-yet-built message senders
-// (S5b/shims). Test-only.
-func (a *App) OperateFaceForTest() platform.OperateExecutor {
-	return a.operateFace()
-}
-
-// errTestSeedAdmitFail / errTestRevokeFail are the forced failures the injected
-// seams raise in place of a real persist, to drive the rollback paths.
-var (
-	errTestSeedAdmitFail = errors.New("app: forced seed admit failure (test)")
-	errTestRevokeFail    = errors.New("app: forced revoke persist failure (test)")
-)
-
-// SetSeedAdmitFailForTest installs (v=true) or clears (v=false) the injected
-// seeding-Admit failure hook so a test can drive the create-channel transactional
-// rollback (close home + delete channel row + 5xx). Test-only.
-func (a *App) SetSeedAdmitFailForTest(v bool) {
-	if v {
-		a.seedAdmitFailHook = func() error { return errTestSeedAdmitFail }
-		return
+func (a *App) DefaultAgentForTest(chID channel.ID) (actor.ActorID, bool, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return "", false, errTestChannelNotLoaded
 	}
-	a.seedAdmitFailHook = nil
+	return bundle.View().DefaultAgent(context.Background())
 }
 
-// SetRevokeFailForTest installs (v=true) or clears (v=false) the injected
-// revocation-persist failure hook so a test can prove the daemon-delete handler
-// rolls back and returns 5xx (not a false ok) when revocation does not reach
-// durable storage. Test-only.
-func (a *App) SetRevokeFailForTest(v bool) {
-	if v {
-		a.revokeFailHook = func() error { return errTestRevokeFail }
-		return
+func (a *App) StableBootstrapCodexDeclarationForTest(owner string) (contract.Declaration, bool, error) {
+	id := stableBootstrapCodexDeclID(owner)
+	var d contract.Declaration
+	var config string
+	var deleted sql.NullInt64
+	err := a.db.QueryRow(`SELECT id,name,owner,default_class,config_json,visibility,created_at,deleted_at FROM actor_decls WHERE id=?`, id).
+		Scan(&d.ID, &d.Name, &d.Owner, &d.Class, &config, &d.Visibility, &d.CreatedAt, &deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return contract.Declaration{}, false, nil
 	}
-	a.revokeFailHook = nil
+	if err != nil {
+		return contract.Declaration{}, false, err
+	}
+	return d, !deleted.Valid, nil
 }
 
-// SeedIntentRowForTest inserts a raw channel_actors intent row WITHOUT admitting
-// its membership — reproducing the半失败 state (intent landed, Admit did not) an
-// Introduce retry must heal, so a test can assert the retry Admits under the
-// FROZEN row's class-kind, not the request's. Test-only.
-func (a *App) SeedIntentRowForTest(chID, instanceID, class, placement string) error {
-	principal := instanceID
-	if i := strings.IndexByte(principal, ':'); i >= 0 {
-		principal = principal[i+1:]
+func (a *App) BootstrapCodexDeclarationCountForTest(owner string) (int, error) {
+	var count int
+	err := a.db.QueryRow(`SELECT COUNT(*) FROM actor_decls WHERE owner=? AND default_class='codex' AND deleted_at IS NULL`, owner).Scan(&count)
+	return count, err
+}
+
+func declaredInstanceOneForTest(ctx context.Context, view channelhost.View, source string) (actor.ActorID, bool, error) {
+	ids, err := view.DeclaredInstances(ctx, source)
+	if err != nil || len(ids) == 0 {
+		return "", false, err
 	}
-	_, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES (?,?,?,?,?)`,
-		chID, instanceID, principal, class, placement)
-	return err
+	return ids[0], true, nil
+}
+
+// DeclaredInstancesForTest asks the membrane's declaration-instance question.
+func (a *App) DeclaredInstancesForTest(chID channel.ID, declID string) ([]actor.ActorID, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return nil, errTestChannelNotLoaded
+	}
+	return bundle.View().DeclaredInstances(context.Background(), declID)
+}
+
+// ActorFactsForTest asks the membrane's identity-fact question.
+func (a *App) ActorFactsForTest(chID channel.ID, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return channelspec.ActorFacts{}, false, errTestChannelNotLoaded
+	}
+	return bundle.View().ActorFacts(context.Background(), id)
+}
+
+func (a *App) DaemonBoundForTest(chID channel.ID, daemonID string) (bool, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return false, errTestChannelNotLoaded
+	}
+	return bundle.View().IsBound(context.Background(), daemonID)
+}
+
+// HumanRosterForTest asks the membrane's entitlement projection.
+func (a *App) HumanRosterForTest(chID channel.ID) ([]channelspec.HumanRosterEntry, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return nil, errTestChannelNotLoaded
+	}
+	return bundle.View().HumanRoster(context.Background())
+}
+
+// ResolvedDeclarationForTest is the app-side half of declaration convergence:
+// exactly what the runtime declaration pull loop reads for this channel and
+// declaration. The runtime-side half (apply / equal-value no-op) is proven in
+// platform/home, where the Controller projection lives.
+func (a *App) ResolvedDeclarationForTest(
+	ctx context.Context,
+	chID channel.ID,
+	declID string,
+) (channelspec.DeclarationFacts, error) {
+	return compositionResolver{app: a}.ResolveDeclaration(ctx, chID, declID)
+}
+
+func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return nil, errTestChannelNotLoaded
+	}
+	roster, err := bundle.View().HumanRoster(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range roster {
+		rows, _, err := bundle.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
+			ActorID: entry.ActorID, Mode: channel.ReaderMember,
+		}, 0, 1000)
+		return rows, err
+	}
+	return nil, errors.New("app: test channel has no active human reader")
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box
@@ -89,39 +136,69 @@ func (a *App) Handler() http.Handler {
 	return a.engine
 }
 
-// DropHomeForTest removes chID's open Home from the app's home map WITHOUT
-// deleting its channels-table directory row — reproducing the "present in the
-// directory but its universe is not open" state (getHome==nil) that homeOrError
-// answers with 503 (A-P8). Test-only.
+// DropHomeForTest closes the borrowed serving handle while retaining the realm
+// directory row, reproducing a channel-unavailable image.
 func (a *App) DropHomeForTest(chID channel.ID) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	delete(a.homes, chID)
+	_ = a.host.Destroy(context.Background(), chID)
 }
 
-// AdmitForTest admits id as a durable member of chID's home (the pure-membership
+// AdmitForTest admits id as a durable declared identity in chID's Home
 // primitive an introduce door writes). Since the membrane law (v1.8 问①) stopped
 // daemon attach from minting membership, a daemon-hosted actor must be admitted
 // BEFORE its daemon declares it — this test seam stands in for the introduce door
 // the daemon-attach live tests bypass. Test-only.
 func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) (actor.ActorID, error) {
-	home := a.getHome(channel.ID(chID))
-	if home == nil {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
 		return "", errTestChannelNotLoaded
 	}
 	principal := string(id)
 	if i := strings.IndexByte(principal, ':'); i >= 0 {
 		principal = principal[i+1:]
 	}
-	return home.Admit(context.Background(), kind, principal)
+	if kind != actor.KindHuman {
+		return "", fmt.Errorf("test admission supports human identities only")
+	}
+	result, err := bundle.SysOp().Admit(context.Background(), channelspec.AdmitRequest{Ref: "test-admit:" + uuid.NewString(), Principal: principal})
+	return result.ActorID, err
 }
 
-func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal string) (actor.ActorID, error) {
-	home := a.getHome(channel.ID(chID))
-	if home == nil {
+func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind actor.Kind) (actor.ActorID, error) {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
 		return "", errTestChannelNotLoaded
 	}
-	id, ok, err := home.ResolvePrincipal(context.Background(), kind, principal)
+	owner, found, err := bundle.View().OwnerPrincipal(context.Background())
+	if err != nil || !found {
+		return "", err
+	}
+	now := time.Now().UnixMilli()
+	_, err = a.db.ExecContext(context.Background(), `INSERT OR IGNORE INTO actor_decls(id,name,owner,default_class,created_at,updated_at,visibility) VALUES (?,?,?,?,?,?,?)`, principal, principal, owner, class, now, now, "public")
+	if err != nil {
+		return "", err
+	}
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), owner)
+	if err != nil || !found {
+		return "", fmt.Errorf("resolve owner actor: found=%v err=%v", found, err)
+	}
+	result, err := bundle.SysOp().Introduce(context.Background(), channelspec.IntroduceRequest{
+		Ref: "test-introduce:" + uuid.NewString(), DeclID: principal, InitiatorActorID: initiator,
+	})
+	if err == nil {
+		facts, found, factsErr := bundle.View().ActorFacts(context.Background(), result.ActorID)
+		if factsErr != nil || !found || facts.Kind != kind {
+			return "", fmt.Errorf("introduced kind mismatch: facts=%+v found=%v err=%v", facts, found, factsErr)
+		}
+	}
+	return result.ActorID, err
+}
+
+func (a *App) ResolvePrincipalForTest(chID string, principal string) (actor.ActorID, error) {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
+		return "", errTestChannelNotLoaded
+	}
+	id, ok, err := bundle.View().ResolvePrincipal(context.Background(), principal)
 	if err != nil {
 		return "", err
 	}
@@ -131,88 +208,87 @@ func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal st
 	return "", fmt.Errorf("principal not found")
 }
 
-// WaitLiveForTest polls chID's home until id has a live embodiment (View.Stat) or
-// the timeout elapses — the async-embodiment counterpart of the old synchronous
-// spawn: since composition is embodied by the reconcile ring (Admit + poke → sweep),
-// a test that needs a live default floor before sending must wait for the sweep.
-// Test-only.
-func (a *App) WaitLiveForTest(chID string, id actor.ActorID, timeout time.Duration) bool {
-	home := a.getHome(channel.ID(chID))
-	if home == nil {
-		return false
+func (a *App) ResolveSourceForTest(chID, source string) (actor.ActorID, error) {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
+		return "", errTestChannelNotLoaded
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		if _, live := home.View().Stat(id); live {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
+	id, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), source)
+	if err != nil {
+		return "", err
 	}
+	if found {
+		return id, nil
+	}
+	return "", fmt.Errorf("declaration source not found")
 }
 
-// KillCellForTest kills id's live embodiment on chID's home (despawn + dereg) —
-// the "brain went dead" event resolveRouting must answer with 503 when id is the
-// channel's default agent. Test-only.
-func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
-	home := a.getHome(chID)
-	if home == nil {
+// CloseHomeForTest leaves the closed handle published in the app map so a
+// post-commit daemon-obligation read deterministically returns ErrClosed.
+func (a *App) CloseHomeForTest(chID channel.ID) error {
+	if _, ok := a.host.Acquire(chID); !ok {
 		return errTestChannelNotLoaded
 	}
-	return home.Remove(context.Background(), id)
+	return a.host.Destroy(context.Background(), chID)
 }
 
-// CreateHalfBuiltChannelForTest reproduces the createChannel CRASH window: the
-// app-db channels row + its seeded channel_actors intent are committed and the home
-// is opened, but NO Admit ran — the creator + boost never became channel members
-// (the process died between tx.Commit and the seeding Admits). The result is a valid
-// directory entry over an EMPTY channel-db membership (only the intrinsic system
-// actor Open seeds). Returns the new channel id. Test-only — proves half-built
-// channels stay deletable and open with clear errors, never a panic. Test-only.
-func (a *App) CreateHalfBuiltChannelForTest(wsID, name string) (string, error) {
-	const legacyPlaceholderID = actor.ActorID("agent:boost")
+func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return errTestChannelNotLoaded
+	}
+	target, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
+	if err != nil || !found {
+		return err
+	}
+	owner, found, err := bundle.View().OwnerPrincipal(context.Background())
+	if err != nil || !found {
+		return err
+	}
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), owner)
+	if err != nil || !found {
+		return err
+	}
+	_, err = bundle.SysOp().Remove(context.Background(), channelspec.RemoveRequest{
+		Ref: "test-remove-realm-tool:" + uuid.NewString(), Target: target, InitiatorActorID: initiator,
+	})
+	return err
+}
+
+// CreateHalfBuiltChannelForTest accepts a desired row without converging its
+// local image, modelling the ordinary post-acceptance build window.
+func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string, error) {
 	chID := uuid.NewString()
-	dbPath := filepath.Join(a.channelDBDir, chID+".db")
 	now := time.Now().UnixMilli()
-	if _, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
-		chID, wsID, name, "group", dbPath, string(legacyPlaceholderID), now); err != nil {
+	spec, err := json.Marshal(channelhost.ProvisionSpec{
+		ChannelID: channel.ID(chID), Type: "group",
+		OwnerPrincipal: ownerPrincipal, CreatedAt: now,
+	})
+	if err != nil {
 		return "", err
 	}
 	if _, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, string(legacyPlaceholderID), defaultBoostClass, placementServer); err != nil {
-		return "", err
-	}
-	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {
+		`INSERT INTO channels (id,name,type,status,owner_principal,spec_json,created_at,parent_id)
+		VALUES (?,?,?,'present',?,?,?,NULL)`,
+		chID, name, "group", ownerPrincipal, string(spec), now); err != nil {
 		return "", err
 	}
 	return chID, nil
 }
 
-// AddWorkspaceMemberForTest inserts userID into wsID's workspace roster so a
-// second registered user can pass the ws/REST channel-access ACL (which gates on
-// workspace membership). Test-only — the production join path is the invite flow.
-func (a *App) AddWorkspaceMemberForTest(wsID, userID string) error {
-	_, err := a.db.ExecContext(context.Background(),
-		`INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?,?,?)`,
-		wsID, userID, "member")
-	return err
+// CreateDaemonRowForTest mints an ordinary daemon row through the same core
+// the API handler uses — provisioning tests use it to plant a name-colliding
+// decoy device.
+func (a *App) CreateDaemonRowForTest(ctx context.Context, ownerID, name string) (string, string, error) {
+	return a.createDaemonRow(ctx, ownerID, name)
 }
 
-// StatForTest reads id's L1 embodiment (View.Stat) on chID's home — the axis
-// presence must stay orthogonal to (层2 link来去不碰层1: startedAt stable across a
-// ws reconnect, live throughout). Test-only.
-func (a *App) StatForTest(chID channel.ID, id actor.ActorID) (startedAt time.Time, live bool) {
-	home := a.getHome(chID)
-	if home == nil {
-		return time.Time{}, false
-	}
-	return home.View().Stat(id)
+// SetBcryptCostForTest drops the password work factor for test fixtures —
+// under -race a DefaultCost hash+compare burns ~1.7s of pure CPU per
+// register+login, which was the app suite's dominant cost. Returns a restore
+// func for cleanup. Test-only seam; production always runs DefaultCost.
+func SetBcryptCostForTest(cost int) (restore func()) {
+	prev := bcryptCost
+	bcryptCost = cost
+	return func() { bcryptCost = prev }
 }
-
-// WSSubmitErrCodeForTest exposes the message-frame submit error mapping —
-// the 期12 P0-2 arm's direct test seam. Test-only.
-func WSSubmitErrCodeForTest(err error) (string, string, bool) { return wsSubmitErrCode(err) }

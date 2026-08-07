@@ -85,13 +85,13 @@ func TestBuildResponseFromRequest_VisibilityOverride(t *testing.T) {
 	req := newRequest("r1", nil) // visibility "channel"
 	env, err := BuildResponseFromRequest(req, fixedClock(1), ResponseSpec{
 		Status:     "completed",
-		Visibility: message.Visibility("private"),
+		Visibility: message.VisibilitySystem,
 	})
 	if err != nil {
 		t.Fatalf("build err: %v", err)
 	}
-	if env.Visibility != message.Visibility("private") {
-		t.Fatalf("visibility = %q, want override private", env.Visibility)
+	if env.Visibility != message.VisibilitySystem {
+		t.Fatalf("visibility = %q, want override system", env.Visibility)
 	}
 
 	env2, _ := BuildResponseFromRequest(req, fixedClock(1), ResponseSpec{Status: "completed"})

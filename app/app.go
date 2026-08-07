@@ -1,29 +1,40 @@
-// Package app is the product application layer: identity, workspace, channel
-// lifecycle, daemon management, and HTTP API. It sits above platform (which
-// owns per-channel truth) and below cmd (which wires concrete config).
+// Package app is the reference realm: principal identity, channel directory and
+// lifecycle, daemon registry, and HTTP API. Per-channel truth belongs to the
+// platform membrane.
 package app
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform"
+	relationstore "github.com/wanpengxie/atoll/app/internal/relation"
+	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+// WSGateway is the human-ingress serving面 the assembly root (cmd/server) injects:
+// the gateway 期 connector (drivers/gateway/connector/web) satisfies it. app → drivers
+// is fenced, so the app names only this interface and cmd/server bridges the concrete
+// connector in. The app membrane authenticates (session→principal ONLY — 连接即人, no
+// connection-level channel ACL; channel eligibility is the gateway's live per-frame
+// resolve) then hands the upgraded-pending request off. nil (unwired) → /ws answers 503.
+type WSGateway interface {
+	ServeWeb(w http.ResponseWriter, r *http.Request, principal string)
+}
 
 // App is the product application server.
 type App struct {
@@ -32,33 +43,33 @@ type App struct {
 	engine *gin.Engine
 	srv    *http.Server // set by Run; drained by Shutdown
 
-	mu    sync.RWMutex
-	homes map[channel.ID]*platform.Home
+	mu         sync.RWMutex
+	createMu   sync.Mutex
+	host       channelhost.LocalHost
+	daemonHost *daemonhost.Host
+	uiDist     string
 
-	channelDBDir string
-	uiDist       string
+	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
+	// is the injected direct Gateway.Poke callback that the platform emission
+	// points (home.Config.OnRelationChange, wired by ChannelHost) feed.
+	// Both are set by the assembly root via SetGateway/SetMembershipPoke after New (the
+	// gateway needs the app's routing/entitlement面, breaking the構造 cycle).
+	wsGateway      WSGateway
+	membershipPoke func(principal string)
 
-	// controlShimTimeout bounds how long a channel-control HTTP shim waits for the
-	// door's terminal reply before returning 202 + request_id (前端语义不变). A test
-	// seam sets it tiny to exercise the timeout branch deterministically.
-	controlShimTimeout time.Duration
-
-	// seedAdmitFailHook / revokeFailHook are test-only injected failure seams (nil
-	// in production — no if-bool branch survives in the production handlers, mirroring
-	// platform's reviverStraddleHook). When set (via export_test.go) they return a
-	// non-nil error to force a specific persist failure so a test can exercise the
-	// transactional rollback path: seedAdmitFailHook fails a create-channel seeding
-	// Admit (→ close home + delete channel row + 5xx); revokeFailHook aborts the
-	// daemon-delete revocation tx (→ rollback + 5xx, no Kick, no false ok).
-	seedAdmitFailHook func() error
-	revokeFailHook    func() error
+	daemonLocks  *keyedLockSet
+	channelLocks *keyedLockSet
+	lifecycle    *lifecycleWorker
+	relations    *relationstore.Store
 }
+
+type HostFactory func(channelhost.HomeDeps) (channelhost.LocalHost, error)
 
 // Config configures the App.
 type Config struct {
-	DB           *sql.DB
-	Logger       *slog.Logger
-	ChannelDBDir string // e.g. "/tmp/atoll-dev/channels"
+	DB          *sql.DB
+	Logger      *slog.Logger
+	HostFactory HostFactory
 
 	// UIDist is the on-disk path of the built web UI (the atoll-web repo's
 	// dist/ — the UI lives in its own repository since the open-source split).
@@ -66,59 +77,155 @@ type Config struct {
 	UIDist string
 }
 
-// New assembles the App: gin engine, routes, and loads existing channels.
+// New assembles the App: gin engine, routes, wiring — and nothing running.
+// Existing channels are loaded by the convergence arm, which starts in Start
+// (called by Run) after the assembly root finishes every setter injection.
 func New(cfg Config) (*App, error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 
-	if err := os.MkdirAll(cfg.ChannelDBDir, 0o755); err != nil {
-		return nil, fmt.Errorf("app: mkdir channel db dir: %w", err)
-	}
-
 	a := &App{
-		db:                 cfg.DB,
-		logger:             logger,
-		homes:              make(map[channel.ID]*platform.Home),
-		channelDBDir:       cfg.ChannelDBDir,
-		uiDist:             cfg.UIDist,
-		controlShimTimeout: defaultControlShimTimeout,
+		db: cfg.DB, logger: logger, uiDist: cfg.UIDist,
+		daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
 	}
+	a.relations = relationstore.New(a.db)
+	a.daemonHost = daemonhost.New(daemonhost.Config{
+		Logger: logger,
+		Present: func(ctx context.Context) ([]channel.ID, error) {
+			return a.directoryChannelIDs(ctx)
+		},
+		DaemonFact: func(ctx context.Context, daemonID string) daemonhost.DaemonFact {
+			var deleted sql.NullInt64
+			err := a.db.QueryRowContext(ctx, `SELECT deleted_at FROM daemons WHERE id=?`, daemonID).Scan(&deleted)
+			switch {
+			case errors.Is(err, sql.ErrNoRows), err == nil && deleted.Valid:
+				return daemonhost.DaemonDeleted
+			case err != nil:
+				return daemonhost.DaemonUnavailable
+			default:
+				return daemonhost.DaemonAlive
+			}
+		},
+	})
+	if cfg.HostFactory == nil {
+		return nil, errors.Join(
+			errors.New("app: HostFactory required"),
+			a.daemonHost.Close(context.Background()))
+	}
+	host, err := cfg.HostFactory(channelhost.HomeDeps{
+		CompositionResolver:  compositionResolver{app: a},
+		IntroductionResolver: compositionResolver{app: a},
+		Logger:               logger,
+		DaemonRoutes:         a.daemonHost,
+		OnMembraneOpen:       a.daemonHost.Register,
+		OnMembraneClose:      a.daemonHost.Unregister,
+		OnRelationChange: func(chID channel.ID, deltas []channelspec.RelationDelta) {
+			// Two independent consumers of one delivery: the relation index
+			// records, the gateway poke derives from the deltas themselves.
+			// A failed index write must not mute the poke — the re-resolve it
+			// triggers reads membrane truth and is itself the repair path.
+			if err := a.relations.Apply(context.Background(), chID, deltas); err != nil {
+				a.logger.Warn("relation event apply failed", "channel", chID, "err", err)
+			}
+			for _, delta := range deltas {
+				if (delta.Kind == channelspec.RelationJoined || delta.Kind == channelspec.RelationLeft) &&
+					delta.Principal != "" && a.membershipPoke != nil {
+					a.membershipPoke(delta.Principal)
+				}
+			}
+			a.daemonHost.Scan()
+		},
+	})
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("app: construct ChannelHost: %w", err),
+			a.daemonHost.Close(context.Background()))
+	}
+	a.host = host
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
-	engine.Use(gin.Recovery())
+	engine.Use(gin.CustomRecovery(func(c *gin.Context, _ any) {
+		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
+		c.Abort()
+	}))
 	engine.Use(middleware.CORS())
 
 	a.engine = engine
 	a.registerRoutes()
 
-	// Load existing channels from DB.
-	if err := a.loadChannels(); err != nil {
-		return nil, fmt.Errorf("app: load channels: %w", err)
-	}
+	a.lifecycle = newLifecycleWorker(a)
 
 	return a, nil
 }
+
+// Start begins background work (the convergence arm, including its boot full
+// scan). Construction and assembly must be complete before this point: New
+// only wires, Start runs. The assembly root calls every setter
+// (SetGateway/SetMembershipPoke) between New and Start, so no reader of those
+// fields exists until all writes are done — construction stays side-effect
+// free and a failed assembly exits cleanly with nothing running. Run calls
+// Start; call it directly only in harnesses that never Run. Idempotent.
+func (a *App) Start() {
+	if a.lifecycle != nil {
+		a.lifecycle.start()
+	}
+}
+
+// SetGateway injects the human-ingress connector (gateway 期 S3). The assembly
+// root calls it after New — the gateway is constructed with the app's routing面,
+// so the app cannot hold it at New time (construction cycle). /ws answers 503 until
+// it is set.
+func (a *App) SetGateway(g WSGateway) { a.wsGateway = g }
+
+// SetMembershipPoke injects Gateway.Poke directly. ChannelHost forwards relation
+// deltas from every channel through the HomeDeps callback.
+// nil means no live poke; reconnect re-auth and relation Snapshot/read-time
+// verification remain the correctness paths, so a lost poke only delays routing.
+func (a *App) SetMembershipPoke(fn func(principal string)) { a.membershipPoke = fn }
 
 // Run starts the HTTP server and blocks until it is Shutdown (or errors). It
 // holds an explicit http.Server so cmd can drain in-flight requests on signal;
 // a clean Shutdown returns nil (ErrServerClosed is not an error).
 func (a *App) Run(addr string) error {
-	a.mu.Lock()
-	a.srv = &http.Server{Addr: addr, Handler: a.engine}
-	srv := a.srv
-	a.mu.Unlock()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
 		return err
 	}
-	return nil
+	return a.Serve(ln)
 }
+
+// PrepareServe registers the HTTP server for ln SYNCHRONOUSLY — from the
+// moment it returns, Shutdown reaches this server — and hands back the
+// blocking serve loop. The split from Serve exists so an assembly root that
+// runs the loop in a goroutine can order things truthfully: register, THEN
+// announce ready, THEN serve. Registering inside the goroutine would leave a
+// window where a teardown's Shutdown sees no server while the loop starts
+// serving right after it (http.Server closes that residue itself: Serve after
+// Shutdown returns ErrServerClosed immediately).
+func (a *App) PrepareServe(ln net.Listener) func() error {
+	a.Start()
+	a.mu.Lock()
+	a.srv = &http.Server{Handler: a.engine}
+	srv := a.srv
+	a.mu.Unlock()
+	return func() error {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	}
+}
+
+// Serve serves the HTTP entry on an already-bound listener and blocks until
+// Shutdown (or error).
+func (a *App) Serve(ln net.Listener) error { return a.PrepareServe(ln)() }
 
 // Shutdown stops accepting new connections and drains in-flight requests within
 // ctx's deadline. It is step ① of the graceful teardown (before Close): stop the
-// entry before dismantling the homes behind it.
+// entry before dismantling the serving bundles behind it.
 func (a *App) Shutdown(ctx context.Context) error {
 	a.mu.RLock()
 	srv := a.srv
@@ -129,18 +236,19 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
-// Close tears down all channel homes.
-func (a *App) Close() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	var firstErr error
-	for id, home := range a.homes {
-		if err := home.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		delete(a.homes, id)
+// Close joins realm workers before transferring process teardown to ChannelHost,
+// the sole owner of serving Home instances and their physical stores. The
+// caller's budget bounds every join: whatever refuses to leave in time is
+// abandoned with its account in the returned error, because process death —
+// not this ordering — is what actually reclaims a worker that ignores
+// cancellation, and the stores' crash safety — not this ordering — is what
+// keeps their data intact.
+func (a *App) Close(ctx context.Context) error {
+	var lifecycleErr error
+	if a.lifecycle != nil {
+		lifecycleErr = a.lifecycle.close(ctx)
 	}
-	return firstErr
+	return errors.Join(lifecycleErr, a.daemonHost.Close(ctx), a.host.Close(ctx))
 }
 
 // ---------------------------------------------------------------------------
@@ -148,60 +256,74 @@ func (a *App) Close() error {
 // ---------------------------------------------------------------------------
 
 func (a *App) registerRoutes() {
-	// Identity (no auth required).
-	identity := a.engine.Group("/api/identity")
-	{
-		identity.POST("/register", a.handleRegister)
-		identity.POST("/login", a.handleLogin)
-		identity.POST("/logout", a.handleLogout)
-		// /me is the frontend's "am I logged in?" probe — it requires a valid
-		// session, so it carries the Auth guard directly (logout above stays
-		// public: it must clear the cookie even for an already-expired session).
-		identity.GET("/me", middleware.Auth(a.db), a.handleMe)
-		identity.POST("/verification/issue", a.handleVerificationIssue)
+	handlers := map[string]gin.HandlerFunc{
+		"GET /api/meta": func(c *gin.Context) {
+			c.JSON(http.StatusOK, contract.Meta{ContractVersion: contract.Version})
+		},
+		"POST /api/identity/register":                     a.handleRegister,
+		"POST /api/identity/login":                        a.handleLogin,
+		"POST /api/identity/logout":                       a.handleLogout,
+		"GET /api/identity/me":                            a.handleMe,
+		"POST /api/identity/verification/issue":           a.handleVerificationIssue,
+		"GET /api/channels":                               a.handleListChannels,
+		"POST /api/channels":                              a.handleCreateChannel,
+		"GET /api/channels/:chID":                         a.handleGetChannel,
+		"DELETE /api/channels/:chID":                      a.handleDeleteChannel,
+		"POST /api/channels/:chID/join":                   a.handleJoinChannel,
+		"GET /api/channels/:chID/observe":                 a.handleObserveChannel,
+		"GET /api/experimental/channels/:chID/observe":    a.handleObserveChannel,
+		"GET /api/channels/:chID/messages":                a.handleListMessages,
+		"GET /api/channels/:chID/resources":               a.handleListResources,
+		"GET /api/channels/:chID/resources/:rid":          a.handleStatResource,
+		"GET /api/channels/:chID/resources/:rid/bytes":    a.handleFetchResource,
+		"POST /api/channels/:chID/actors":                 a.handleIntroduceActor,
+		"DELETE /api/channels/:chID/actors/:actorID":      a.handleRemoveChannelActor,
+		"PUT /api/channels/:chID/decls/:declID/config":    a.handlePutDeclarationOverlay,
+		"DELETE /api/channels/:chID/decls/:declID/config": a.handleDeleteDeclarationOverlay,
+		"GET /api/channels/:chID/candidates":              a.handleListCandidates,
+		"GET /api/actor-decls":                            a.handleListDecls,
+		"POST /api/actor-decls":                           a.handleCreateDecl,
+		"PATCH /api/actor-decls/:declID":                  a.handleUpdateDecl,
+		"DELETE /api/actor-decls/:declID":                 a.handleDeleteDecl,
+		"GET /api/daemons":                                a.handleListDaemons,
+		"POST /api/daemons":                               a.handleCreateDaemon,
+		"DELETE /api/daemons/:id":                         a.handleDeleteDaemon,
+		"GET /api/channels/:chID/daemons":                 a.handleListChannelDaemons,
+		"POST /api/channels/:chID/daemons":                a.handleAttachDaemon,
+		"DELETE /api/channels/:chID/daemons/:id":          a.handleDetachDaemon,
+		"GET /ws":                                         a.handleWS,
 	}
-
-	// Authenticated API routes.
-	api := a.engine.Group("/api")
-	api.Use(middleware.Auth(a.db))
-	{
-		api.GET("/workspaces", a.handleListWorkspaces)
-		api.POST("/workspaces", a.handleCreateWorkspace)
-
-		api.GET("/workspaces/:wsID/channels", a.handleListChannels)
-		api.POST("/workspaces/:wsID/channels", a.handleCreateChannel)
-
-		api.GET("/channels/:chID", a.handleGetChannel)
-		api.DELETE("/channels/:chID", a.handleDeleteChannel)
-		api.GET("/channels/:chID/workspace-members", a.handleListWorkspaceMembers)
-		// DEPRECATED (第二链路, H2 defer): channel-internal reads move onto the
-		// gateway ws (roster/tail/cursor frames). Kept as read shims until帧化; no
-		// new consumers. The channel-internal WRITE path is already gone — the ws
-		// message frame replaced POST /messages (H1=a, zero backward-compat).
-		api.GET("/channels/:chID/actors", a.handleListActors)
-		api.GET("/channels/:chID/actors/:actorID/status", a.handleActorStatus)
-		api.GET("/channels/:chID/cursor", a.handleCursor)
-		api.GET("/channels/:chID/messages", a.handleListMessages)
-
-		// A user's actor-instance declarations (world layer, kind-neutral) +
-		// introduce-to-channel / restart.
-		api.GET("/actor-decls", a.handleListDecls)
-		api.POST("/actor-decls", a.handleCreateDecl)
-		api.PATCH("/actor-decls/:declID", a.handleUpdateDecl)
-		api.DELETE("/actor-decls/:declID", a.handleDeleteDecl)
-		api.POST("/actor-decls/:declID/restart", a.handleRestartDecl)
-		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
-		api.DELETE("/channels/:chID/actors/:instanceID", a.handleRemoveActor)
-		api.PUT("/channels/:chID/default_agent", a.handleSetDefaultAgent)
-
-		api.GET("/daemons", a.handleListDaemons)
-		api.POST("/daemons", a.handleCreateDaemon)
-		api.DELETE("/daemons/:id", a.handleDeleteDaemon)
-
-		api.GET("/channels/:chID/daemons", a.handleListChannelDaemons)
-		api.POST("/channels/:chID/daemons", a.handleCreateAndAttachDaemon)
-		api.POST("/channels/:chID/daemons/attach", a.handleAttachDaemons)
-		api.DELETE("/channels/:chID/daemons/:id/attach", a.handleDetachDaemon)
+	experimental := a.engine.Group("/api/experimental")
+	for _, method := range contract.Methods() {
+		key := method.Method + " " + method.Path
+		handler, ok := handlers[key]
+		if !ok {
+			panic("contract method has no handler: " + key)
+		}
+		delete(handlers, key)
+		if method.Path == "/ws" {
+			a.engine.Handle(method.Method, method.Path, handler)
+			continue
+		}
+		chain := make([]gin.HandlerFunc, 0, 3)
+		if method.Auth == contract.AuthSession {
+			chain = append(chain, middleware.Auth(a.db))
+		} else if method.Auth != contract.AuthNone {
+			panic("contract method has unknown auth: " + key)
+		}
+		if method.Method != http.MethodGet && method.Method != http.MethodHead && !method.HasBody() {
+			chain = append(chain, rejectRequestBody)
+		}
+		chain = append(chain, handler)
+		if method.Experimental {
+			path := strings.TrimPrefix(method.Path, "/api/experimental")
+			experimental.Handle(method.Method, path, chain...)
+		} else {
+			a.engine.Handle(method.Method, method.Path, chain...)
+		}
+	}
+	if len(handlers) != 0 {
+		panic("handler missing from contract method registry")
 	}
 
 	// Health check (no auth).
@@ -209,14 +331,8 @@ func (a *App) registerRoutes() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// WebSocket endpoints.
-	a.engine.GET("/ws", a.handleWS)
+	// Internal compute carrier is deliberately outside the shell contract.
 	a.engine.GET("/compute", a.handleCompute)
-	// Daemon composition pull: the daemon GETs its channel's placement='daemon'
-	// assignment, then builds exactly that set (no blind-build). Same
-	// ?key=+?channel= auth as /compute.
-	a.engine.GET("/compute/plan", a.handleComputePlan)
-
 	// Static files — only when a built UI is supplied (the UI lives in its
 	// own repository, atoll-web; empty UIDist = API-only server).
 	if a.uiDist != "" {
@@ -232,7 +348,7 @@ func (a *App) registerRoutes() {
 			c.File(filepath.Join(a.uiDist, "index.html"))
 			return
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		writeAPIError(c, http.StatusNotFound, contract.CodeNotFound, "not found")
 	})
 }
 
@@ -240,175 +356,42 @@ func (a *App) registerRoutes() {
 // Channel home management
 // ---------------------------------------------------------------------------
 
-func (a *App) getHome(chID channel.ID) *platform.Home {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.homes[chID]
-}
+var (
+	errChannelNotFound    = errors.New("app: channel not found")
+	errChannelUnavailable = errors.New("app: channel unavailable")
+)
 
-// homeOrError resolves the open Home for chID, or writes the honest two-state
-// error to c and returns nil (A-P8):
-//   - the directory (channels table) has NO such channel → 404 (permanent).
-//   - the directory HAS it but its universe is not open (getHome==nil) → 503
-//     "channel unavailable" (retryable, logged) — never the misleading 404 that
-//     conflated "gone" with "not up yet".
+// acquireBundle resolves the open Bundle for chID with the honest two-state
+// failure split (A-P8):
+//   - the directory (channels table) has NO such channel → errChannelNotFound
+//     (HTTP 404, permanent).
+//   - the directory HAS it but ChannelHost cannot acquire a serving Bundle →
+//     errChannelUnavailable (HTTP 503, retryable) — never the misleading 404
+//     that conflated "gone" with "not up yet".
 //
-// The two states must not collapse: a caller retrying a 503 is right to; a caller
-// retrying a 404 is not. Every handler that needs a live Home routes through here.
-func (a *App) homeOrError(c *gin.Context, chID channel.ID) *platform.Home {
-	if home := a.getHome(chID); home != nil {
-		return home
-	}
-	if _, ok := a.channelWorkspaceID(c.Request.Context(), string(chID)); !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
-		return nil
-	}
-	a.logger.Warn("channel unavailable: directory has channel but its home is not open",
-		"channel", string(chID))
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
-	return nil
-}
-
-func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error) {
-	home, err := platform.Open(platform.HomeConfig{
-		ChannelID: chID,
-		DBPath:    dbPath,
-		Logger:    a.logger,
-		// Fill the two eager-activation injection points with the组合域 supply:
-		// Desired = server-placed intent (the reconcile ring's desired half),
-		// Builder = the id→ActorFactory table (activation/reviver resolve). The
-		// user域 (per-channel human members) is derived by the platform ring itself
-		// (see Home.reconcileActivation) — the app cannot enumerate it. Both non-nil
-		// (double-nil灭: a nil pair leaves the ring inert).
-		Desired: compositionDesired{app: a, chID: chID},
-		Builder: compositionBuilder{app: a, chID: chID},
-		// Fill the operate-face injection point: the in-gate control plane's
-		// executor half (intent write + Home call). One instance, channel-resolved.
-		Operate: a.operateFace(),
-	})
+// The two states must not collapse: a caller retrying a 503 is right to; a
+// caller retrying a 404 is not. Every HTTP path maps exactly these two errors.
+func (a *App) acquireBundle(ctx context.Context, chID channel.ID) (channelhost.Bundle, error) {
+	exists, err := a.channelExists(ctx, string(chID))
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errChannelUnavailable, err)
 	}
-
-	a.mu.Lock()
-	a.homes[chID] = home
-	a.mu.Unlock()
-
-	// Composition embodiment is the reconcile ring's job now (compositionDesired ∩
-	// membership → SpawnIfAbsent), run by Open's synchronous startup sweep — the app
-	// no longer hand-spawns at open time (spawnComposition retired, A-P1=A′).
-	return home, nil
+	if !exists {
+		return nil, errChannelNotFound
+	}
+	if bundle, ok := a.host.Acquire(chID); ok {
+		return bundle, nil
+	}
+	return nil, errChannelUnavailable
 }
 
 const (
-	defaultAgentPrincipal = "boost"
-	// defaultBoostClass is the engine CLASS the always-there boost floor runs.
+	// defaultBoostClass is the engine class used by the ordinary boost agent
+	// declaration. A client may choose that member as the channel default via
+	// the normal set-default operation after joining.
 	// An agent's engine IS its actor class — claude/go-kimi are flat registry
 	// classes (kind=agent), there is NO umbrella "agent" class. boost has no
 	// actor_decls declaration row, so it can't carry a default_class; it runs
-	// this fixed fallback engine.
+	// this fixed engine.
 	defaultBoostClass = "go-kimi"
-	// placementServer marks a composition instance the SERVER hosts (embedded
-	// cell). The reconcile ring only embodies these; daemon-placed rows are pulled
-	// by the daemon's own plan.
-	placementServer = "server"
-	// placementDaemon marks a composition instance a connected DAEMON hosts. The
-	// server never spawns these; the daemon pulls them (GET /compute/plan) and
-	// builds them with its LOCAL creds.
-	placementDaemon = "daemon"
 )
-
-// mergeConfig layers the per-channel config_json OVER the global actor_decls
-// config (one config, two layers). Shallow object merge — channel keys
-// win. Empty / non-object inputs degrade gracefully (a raw per-channel blob is
-// preserved as-is so a non-agent class still gets its config_json).
-func mergeConfig(global, perChannel string) json.RawMessage {
-	gl := strings.TrimSpace(global)
-	pc := strings.TrimSpace(perChannel)
-	g := map[string]any{}
-	c := map[string]any{}
-	// Bounded-depth pre-check on BOTH layers before the map[string]any Unmarshal:
-	// a poison config persists in the actor_decls/channel_actors tables and is re-hit on
-	// EVERY startup (loadChannels → reconcile build → mergeConfig), so a deeply-
-	// nested blob would fatally overflow the stack every boot. An over-deep layer is
-	// treated as NOT an object (skips the merge); the raw bytes are never recursed
-	// into here — a two-poison case falls through to the verbatim raw return below,
-	// where the looper self-parses opaquely in its own subprocess.
-	gObj := gl != "" && boundedJSONDepth([]byte(gl)) == nil && json.Unmarshal([]byte(gl), &g) == nil
-	cObj := pc != "" && boundedJSONDepth([]byte(pc)) == nil && json.Unmarshal([]byte(pc), &c) == nil
-	// Two-layer shallow merge ONLY when both are JSON objects (channel keys win).
-	if gObj && cObj {
-		for k, v := range c {
-			g[k] = v
-		}
-		if out, err := json.Marshal(g); err == nil {
-			return out
-		}
-	}
-	// Otherwise the per-channel blob is the more-specific layer — preserve it
-	// verbatim (never silently drop a non-object per-channel config); fall back
-	// to the global blob.
-	if pc != "" {
-		return json.RawMessage(pc)
-	}
-	if gl != "" {
-		return json.RawMessage(gl)
-	}
-	return nil
-}
-
-// maxJSONDepth bounds the container nesting a client-supplied JSON config may carry
-// before it is decoded into an UNSTRUCTURED map[string]any. encoding/json's
-// Unmarshal recurses per nested container, so a deeply-nested blob overflows the
-// goroutine stack — a fatal, unrecoverable crash. A poison config persists and is
-// re-hit every startup, so the guard runs before every such decode. 64 levels is
-// far past any legitimate config.
-const maxJSONDepth = 64
-
-// boundedJSONDepth scans raw's structural tokens WITHOUT materialising any value
-// (json.Decoder.Token is iterative — a slice-backed scanner stack, never call-stack
-// recursion) and errors if container nesting exceeds maxJSONDepth. A malformed blob
-// is left to the caller's own decode to report (returns nil here); only over-deep
-// nesting is refused up front.
-func boundedJSONDepth(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	depth := 0
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return nil // malformed: the caller's own decode surfaces the parse error
-		}
-		switch tok {
-		case json.Delim('{'), json.Delim('['):
-			depth++
-			if depth > maxJSONDepth {
-				return fmt.Errorf("app: json nesting exceeds %d levels", maxJSONDepth)
-			}
-		case json.Delim('}'), json.Delim(']'):
-			depth--
-		}
-	}
-}
-
-func (a *App) loadChannels() error {
-	rows, err := a.db.Query(`SELECT id, db_path FROM channels`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id, dbPath string
-		if err := rows.Scan(&id, &dbPath); err != nil {
-			continue
-		}
-		if _, err := a.createHome(channel.ID(id), dbPath); err != nil {
-			a.logger.Warn("app: load channel failed", "channel", id, "err", err.Error())
-			// Continue loading other channels.
-		}
-	}
-	return nil
-}

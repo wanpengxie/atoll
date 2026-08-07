@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // kvSpec is the day-1 CreateSpec every integration test in this file creates
@@ -20,8 +21,8 @@ import (
 var kvSpec = resourcespec.CreateSpec{Kind: resourcespec.KindKV}
 
 // TestAccessDoorVerticalSlice drives the whole plane-2 door assembled by
-// OpenChannel over a real sqlite file — every branch (two loci, the
-// grantee-kind union, day-1 Ops narrowing, non-lossy delete, fresh re-birth,
+// OpenChannel over a real sqlite file — every branch (membrane-uniform
+// read/write, PM-D3 creator-delete, non-lossy delete, fresh re-birth,
 // and dynamic membership) against the actual resourceRegistry + kvDriver +
 // membership adapter, not fakes. It is the integration counterpart to
 // accessdoor's in-package unit tests: those exercise the tree with injected
@@ -37,16 +38,17 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 		B = actor.ActorID("B")
 		C = actor.ActorID("C")
 		E = actor.ActorID("E")
-		X = actor.ActorID("X")
 	)
 	A = seedMember(t, cs, A)
 	B = seedMember(t, cs, B)
 	C = seedMember(t, cs, C)
 
-	hA := cs.Access.Mint(A)
-	hB := cs.Access.Mint(B)
-	hC := cs.Access.Mint(C)
-	hX := cs.Access.Mint(X)
+	hA := cs.Access.MintAuthority(identityAuthority{id: A})
+	hB := cs.Access.MintAuthority(identityAuthority{id: B})
+	hC := cs.Access.MintAuthority(identityAuthority{id: C})
+	// Platform cannot obtain an admission for a non-member; model that failed
+	// source-boundary admission with the zero value.
+	hX := cs.Access.MintAuthority(nil)
 
 	const rid = resource.ResourceID("kv:doc")
 	const ridX = resource.ResourceID("kv:docX")
@@ -58,101 +60,139 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	expectAccepted(t, "A create", out, err)
 
 	out, err = hX.Create(ctx, ridX, kvSpec, nil)
-	expectReason(t, "non-member X create", out, err, access.AccessDenied)
+	if !errors.Is(err, accessdoor.ErrAuthorInactive) {
+		t.Fatalf("non-member X create = (%+v,%v)", out, err)
+	}
 
 	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectReason(t, "A re-create same id", out, err, access.AlreadyExists)
 
-	// ---- Step 2: object op via R (creator has full rights; B has none) ----
-	out, err = hA.Invoke(ctx, access.OpWrite, rid, v2, nil)
+	// ---- Step 2: membrane-uniform read/write (PM-D1) — membership IS the
+	// right; no grant ceremony exists anywhere in this slice ----
+	out, err = hA.Invoke(ctx, access.OpWrite, rid, v2)
 	expectAccepted(t, "A write", out, err)
 
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "B read (no grant)", out, err, access.AccessDenied)
-
-	// ---- Step 3: actor grant {read} to B ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B, access.OpRead))
-	expectAccepted(t, "A set(actor:B,{read})", out, err)
-
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectAccepted(t, "B read (granted)", out, err)
+	out, err = hB.Invoke(ctx, access.OpRead, rid, nil)
+	expectAccepted(t, "B read (membership is the right)", out, err)
 	expectBytes(t, "B read value", out, v2)
 
-	out, err = hB.Invoke(ctx, access.OpWrite, rid, v1, nil)
-	expectReason(t, "B write (read-only grant)", out, err, access.AccessDenied)
+	out, err = hC.Invoke(ctx, access.OpRead, rid, nil)
+	expectAccepted(t, "C read (uniform)", out, err)
 
-	// ---- Step 4: members grant + union visibility + revoke ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, membersGrant(access.OpRead))
-	expectAccepted(t, "A set(members,{read})", out, err)
+	out, err = hB.Invoke(ctx, access.OpWrite, rid, v1)
+	expectAccepted(t, "B write (uniform)", out, err)
 
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectAccepted(t, "C read (members late-binding)", out, err)
-	expectBytes(t, "C read value", out, v2)
+	// ---- Step 3: delete is the one creator-distinguished op (PM-D3) ----
+	out, err = hB.Invoke(ctx, access.OpDelete, rid, nil)
+	expectReason(t, "B delete (not creator, not owner)", out, err, access.AccessDenied)
 
-	// Revoke B's DIRECT entry — B stays readable via the members entry (union).
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B))
-	expectAccepted(t, "A set(actor:B,∅) revoke", out, err)
+	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil)
+	expectAccepted(t, "A delete (creator)", out, err)
 
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectAccepted(t, "B read (still visible via members union)", out, err)
-	expectBytes(t, "B read value via members", out, v2)
-
-	// Revoke the members entry — now neither B nor C can read.
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, membersGrant())
-	expectAccepted(t, "A set(members,∅) revoke", out, err)
-
-	out, err = hB.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "B read (all grants revoked)", out, err, access.AccessDenied)
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "C read (all grants revoked)", out, err, access.AccessDenied)
-
-	// ---- Step 5: day-1 Ops narrowing + ingress malformed ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B, access.OpRead, access.OpDelete))
-	expectReason(t, "A set(actor:B,{read,delete}) day-1 narrowing", out, err, access.AccessDenied)
-
-	_, err = hA.Invoke(ctx, access.OpSet, rid, nil, nil)
-	expectMalformed(t, "A set with nil grant", err)
-
-	// ---- Step 6: non-lossy delete + idempotency + fresh re-birth ----
-	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil, nil)
-	expectAccepted(t, "A delete", out, err)
-
-	out, err = hA.Invoke(ctx, access.OpRead, rid, nil, nil)
+	// ---- Step 4: non-lossy delete + idempotency + fresh re-birth ----
+	out, err = hA.Invoke(ctx, access.OpRead, rid, nil)
 	expectReason(t, "read after delete", out, err, access.ResourceNotFound)
-	out, err = hA.Invoke(ctx, access.OpWrite, rid, v1, nil)
+	out, err = hA.Invoke(ctx, access.OpWrite, rid, v1)
 	expectReason(t, "write after delete", out, err, access.ResourceNotFound)
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, actorGrant(B, access.OpRead))
-	expectReason(t, "set after delete", out, err, access.ResourceNotFound)
-	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil, nil)
+	out, err = hA.Invoke(ctx, access.OpDelete, rid, nil)
 	expectReason(t, "repeat delete (idempotent)", out, err, access.ResourceNotFound)
 
 	// Fresh birth: create has no memory of the deleted id.
 	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectAccepted(t, "A re-create after delete (fresh birth)", out, err)
 
-	// ---- Step 7: dynamic membership (exit loses, join gains) ----
-	out, err = hA.Invoke(ctx, access.OpSet, rid, nil, membersGrant(access.OpRead))
-	expectAccepted(t, "A set(members,{read}) on fresh resource", out, err)
-
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
+	// ---- Step 5: dynamic membership (exit loses everything, join gains) ----
+	out, err = hC.Invoke(ctx, access.OpRead, rid, nil)
 	expectAccepted(t, "C read before deregister", out, err)
 
-	if err := cs.Membership.Deregister(ctx, C, 100); err != nil {
+	if err := endDeclaredTest(ctx, cs.ChannelStores, C, 100); err != nil {
 		t.Fatalf("deregister C: %v", err)
 	}
-	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "C read after deregister (exit loses access)", out, err, access.AccessDenied)
+	out, err = hC.Invoke(ctx, access.OpRead, rid, nil)
+	expectReason(t, "C read after deregister (exit loses membership rights)", out, err, access.AccessDenied)
 
 	E = seedMember(t, cs, E)
-	hE := cs.Access.Mint(E)
-	out, err = hE.Invoke(ctx, access.OpRead, rid, nil, nil)
+	hE := cs.Access.MintAuthority(identityAuthority{id: E})
+	out, err = hE.Invoke(ctx, access.OpRead, rid, nil)
 	expectAccepted(t, "E read after joining (late join gains access)", out, err)
 	expectBytes(t, "E read value", out, v1)
 }
 
+func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
+	ctx := context.Background()
+	cs := openAccessChannel(t)
+	record, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
+		Kind: actor.KindHuman, Principal: "channel-owner",
+		Definition: storespec.ActorDefinition{Class: "human"},
+		Placement:  storespec.NewServerPlacement(), CreatedAt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Owner-ness is a door judgement over the genesis pointer, so the fixture
+	// names the owner explicitly rather than reading a bit off the record.
+	cs.markOwner(record.ID)
+	owner := cs.Access.MintAuthority(identityAuthority{id: record.ID})
+	const rid resource.ResourceID = "file:stranded"
+	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "orphan-coord"); err != nil {
+		t.Fatal(err)
+	}
+	// The stranded row was created by the system actor — the owner is NOT its
+	// creator, so this delete goes through PM-D3's owner-root 兜底 half, the
+	// exact authority that makes a stranded row a removable end state.
+	page, err := owner.List(ctx, accessdoor.ListQuery{})
+	if err != nil || len(page.Entries) != 1 || page.Entries[0].ID != rid {
+		t.Fatalf("owner List stranded = (%+v,%v)", page, err)
+	}
+	out, err := owner.Invoke(ctx, access.OpDelete, rid, nil)
+	expectAccepted(t, "owner deletes stranded resource", out, err)
+	page, err = owner.List(ctx, accessdoor.ListQuery{})
+	if err != nil || len(page.Entries) != 0 {
+		t.Fatalf("owner List after recovery = (%+v,%v)", page, err)
+	}
+	tombstones, err := cs.Outbox.ListTombstonesByDaemon(ctx, "retired-daemon")
+	if err != nil || len(tombstones) != 1 {
+		t.Fatalf("tombstones = (%+v,%v)", tombstones, err)
+	}
+	// The inert tombstone is an outbox obligation, not a namespace lock.
+	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "replacement-coord"); err != nil {
+		t.Fatalf("inert tombstone blocked fresh birth: %v", err)
+	}
+}
+
+func csResourcesCreateForTest(cs *testAccessChannel, id resource.ResourceID, daemonID, coord string) error {
+	return rawResourceRegistryForTest(cs).Create(context.Background(), id, resourcespec.KindFile, actor.SystemActorID, daemonID, coord, nil,
+		resourcespec.ResourceBirthPlan{})
+}
+
+func rawResourceRegistryForTest(cs *testAccessChannel) resourcespec.Registry {
+	return cs.Assembly.Resources
+}
+
 // ---- helpers ----
 
-func openAccessChannel(t *testing.T) *ChannelStores {
+type testAccessChannel struct {
+	*ChannelStores
+	Access accessdoor.AccessMinter
+	Outbox resourcespec.ResourceOutbox
+	owner  *actor.ActorID
+}
+
+func (c *testAccessChannel) markOwner(id actor.ActorID) { *c.owner = id }
+
+type testResourceOutbox struct {
+	resourcespec.ResourceOutbox
+	completion accessdoor.ResourceCompletion
+}
+
+func (o testResourceOutbox) CommitReservation(
+	ctx context.Context,
+	id string,
+) (resourcespec.LandedResource, bool, error) {
+	return o.completion.CommitReservation(ctx, id)
+}
+
+func openAccessChannel(t *testing.T) *testAccessChannel {
 	t.Helper()
 	dir := t.TempDir()
 	cs, err := OpenChannel(context.Background(), channel.ID("c-access"),
@@ -160,25 +200,83 @@ func openAccessChannel(t *testing.T) *ChannelStores {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
+	owner := new(actor.ActorID)
+	authority := testAccessAuthority{declared: cs.Actors, owner: owner}
+	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
+		Registry:  cs.Assembly.Resources,
+		Drivers:   accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
+		Authority: authority,
+		State:     cs.Assembly.State,
+		ChannelID: "c-access",
+	})
+	if err != nil {
+		t.Fatalf("assemble access: %v", err)
+	}
 	t.Cleanup(func() { _ = cs.Close() })
-	return cs
+	return &testAccessChannel{
+		ChannelStores: cs,
+		Access:        access,
+		Outbox: testResourceOutbox{
+			ResourceOutbox: cs.Assembly.Resources,
+			completion:     completion,
+		},
+		owner: owner,
+	}
 }
 
-func seedMember(t *testing.T, cs *ChannelStores, id actor.ActorID) actor.ActorID {
+type testAccessAuthority struct {
+	declared storespec.ActorRegistryStore
+	owner    *actor.ActorID
+}
+
+// record is the fixture's own durable read; the Controller's public face is
+// narrow question-shaped projections, and each of them is derived below.
+func (a testAccessAuthority) record(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
+	return a.declared.LookupActive(ctx, id)
+}
+
+func (a testAccessAuthority) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	_, ok, err := a.record(ctx, id)
+	return ok, err
+}
+
+func (a testAccessAuthority) AdmitIdentity(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	row, ok, err := a.record(ctx, id)
+	if err != nil || !ok {
+		return storespec.IdentityAdmission{}, false, err
+	}
+	return storespec.IdentityAdmission{ID: row.ID, Kind: row.Kind}, true, nil
+}
+
+func (a testAccessAuthority) ResourceActorFacts(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	row, ok, err := a.record(ctx, id)
+	if err != nil || !ok {
+		return storespec.ResourceActorFacts{}, err
+	}
+	host := ""
+	if row.Placement.Kind == storespec.PlacementDaemon {
+		host = row.Placement.Host
+	}
+	return storespec.ResourceActorFacts{
+		Active:               true,
+		Owner:                a.owner != nil && *a.owner == row.ID,
+		PreferredStorageHost: host,
+	}, nil
+}
+
+func seedMember(t *testing.T, cs *testAccessChannel, id actor.ActorID) actor.ActorID {
 	t.Helper()
-	minted, err := cs.Membership.Admit(context.Background(), actor.KindAgent, string(id), 1)
+	minted, err := admitDeclaredTest(context.Background(), cs.ChannelStores, actor.KindAgent, string(id), 1)
 	if err != nil {
 		t.Fatalf("seed member %s: %v", id, err)
 	}
 	return minted
-}
-
-func actorGrant(id actor.ActorID, ops ...access.Operation) *access.Grant {
-	return &access.Grant{GranteeKind: access.GranteeActor, Grantee: id, Ops: ops}
-}
-
-func membersGrant(ops ...access.Operation) *access.Grant {
-	return &access.Grant{GranteeKind: access.GranteeMembers, Ops: ops}
 }
 
 func expectAccepted(t *testing.T, label string, out accessdoor.Outcome, err error) {

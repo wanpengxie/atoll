@@ -14,9 +14,11 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/wanpengxie/atoll/app/contract"
 )
 
 // SessionCookie is the canonical session cookie name. It is the contract between
@@ -28,6 +30,21 @@ const SessionCookie = "atoll_session"
 // only this package can write it (via Auth) and read it (via UserID) — business
 // handlers cannot set it, so a handler cannot forge its caller's identity.
 const ctxKeyUserID = "user_id"
+
+// RequestToken extracts the session token from a request: the Authorization
+// Bearer header first (non-browser shells — CLI/agent/desktop), then the
+// session cookie (same-origin browser shells). One sessions table, two carrier
+// positions (contract D3). Query strings are never read (K6): a credential in a
+// URL is a credential in every log file.
+func RequestToken(c *gin.Context) string {
+	if auth := c.GetHeader("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")); tok != "" {
+			return tok
+		}
+	}
+	tok, _ := c.Cookie(SessionCookie)
+	return tok
+}
 
 // VerifySession is the single authoritative session check: it returns the owning
 // user id iff the token names a session that exists and has not expired. Auth
@@ -56,10 +73,10 @@ func VerifySession(ctx context.Context, db *sql.DB, token string) (userID string
 // missing or invalid session is rejected with 401 and the chain is aborted.
 func Auth(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token, _ := c.Cookie(SessionCookie)
+		token := RequestToken(c)
 		userID, ok := VerifySession(c.Request.Context(), db, token)
 		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, contract.Error{Code: contract.CodeNotAuthenticated, Message: "not authenticated"})
 			return
 		}
 		c.Set(ctxKeyUserID, userID)

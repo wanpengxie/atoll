@@ -7,17 +7,18 @@
 // byte payload some caller reads/writes, it is substrate's own future
 // intent to act. So this package is not a "door" (accessdoor's mint/decision-
 // tree shape) — it is an ENGINE that runs a continuous poll/wake loop
-// (tap.Pump structural twin) alongside its caps mint face. Two lifecycle
-// levels share the one engine and one fire path:
+// (tap.Pump structural twin) alongside its caps mint face. Two Scheduler
+// storage homes share the one engine and one fire path:
 //
-//   - bind=identity: durable intent, keyed by author identity, stored in
+//   - home=durable: intent keyed by author identity, stored in
 //     timerspec.TimerStore (runtime/internal/store's timers table) — survives
-//     restarts, cleared on deregister.
-//   - bind=incarnation: intent welded to the CURRENTLY LIVE embodiment, kept
-//     ONLY in this engine's memory (never a store row, never serialised) —
-//     dies with the embodiment, vanishes with the process (matching the
-//     precedent of BEAM in-VM timers / Orleans in-activation Timers / POSIX
-//     timers on task_struct: ephemeral intent lives in ephemeral memory).
+//     Scheduler restarts, cleared when its ActorID ends.
+//   - home=memory: intent kept only in this Channel/Scheduler instance's
+//     memory (never a store row, never serialised) and vanishes with that
+//     instance.
+//
+// Both homes are ActorID-owned and cross actor AttemptKey/Incarnation
+// replacement. The home is a storage choice, not an actor lifecycle axis.
 //
 // Firing does exactly one thing: append one envelope AS the row's author,
 // through the caller-injected FireSink (the harness pen, mirrored) — the
@@ -32,6 +33,6 @@
 // The package exports the caps surface (ScheduleHandle, Minter) and the
 // engine (Engine) that drives it; New returns both, never a bare handle to
 // the internal due-set. Assembly (wiring a real TimerStore/FireSink/
-// LivenessProbe/Reviver/Clock, and the engine's Start/Close lifecycle) is the
-// runtime root's job (runtime.OpenScheduler) — not this package's.
+// Authority/Clock, and the engine's Start/Close lifecycle) is the
+// Platform composition root's job — not this package's.
 package schedule

@@ -31,40 +31,29 @@ func ParseKind(raw string) (Kind, bool) {
 	return "", false
 }
 
-// Visibility is the envelope `visibility` field — a 3-value closed set recording
-// the sender's DECLARED intent for who in the channel should see this message.
-// It lives in the envelope (not the payload) because who-may-see is a
-// rule-managed ACL property of truth — the substrate's to enforce — not opaque
-// data an actor interprets. Once written, visibility is immutable.
+// Visibility is the envelope `visibility` field — a 2-value closed set recording
+// the message's attention level inside a channel. Channel membership is the
+// trust boundary; visibility is deliberately not a per-message ACL. Once
+// written, visibility is immutable.
 //
 // Declared intent (what each value MEANS):
-//   - public  — intended for every channel member.
-//   - private — intended only for the sender + actors in audience.
-//   - system  — protocol-internal metadata / intermediate output (agent.text
-//     progress bubbles, placement notices, bootstrap events), intended to be
-//     suppressed from the default UI view (still persisted as audit trail).
+//   - public  — ordinary collaboration truth shown to channel members.
+//   - system  — protocol-internal metadata (placement notices, bootstrap
+//     events), suppressed from default reads but still persisted in the log.
 //
-// NB: enforcement is NOT yet wired. The read seam (storespec queries / view
-// fanout) does NOT filter on visibility today — every committed message is
-// currently readable by any reader regardless of this field. So visibility is
-// presently ADVISORY: the value is recorded faithfully, but "private = only
-// sender+audience may see" / "system = suppressed from view" are the INTENDED
-// semantics, not current behaviour. Read-side enforcement (a query-see
-// chokepoint filtering by visibility ∧ audience) is deferred and will be added
-// additively when a real privacy / multi-tenant driver lands. Do NOT claim
-// enforcement in code or UX until that seam exists.
+// ReadVisibleAfterSeq suppresses system before LIMIT. Delivery is orthogonal:
+// the delivery fanout follows explicit audience, including for system requests.
 type Visibility string
 
 // Visibility enum — closed set.
 const (
-	VisibilityPublic  Visibility = "public"
-	VisibilityPrivate Visibility = "private"
-	VisibilitySystem  Visibility = "system"
+	VisibilityPublic Visibility = "public"
+	VisibilitySystem Visibility = "system"
 )
 
 // allVisibilities backs ParseVisibility. UNEXPORTED: the closed-set contract is
 // the predicate, not a mutable enumeration slice.
-var allVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, VisibilitySystem}
+var allVisibilities = []Visibility{VisibilityPublic, VisibilitySystem}
 
 // String returns the wire form.
 func (v Visibility) String() string { return string(v) }

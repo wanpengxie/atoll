@@ -6,17 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -40,15 +42,15 @@ import (
 //   - the REJECT LANE is a third goroutine writing the overloaded terminal
 //     for requests the serve ledger had no room to Admit.
 type engine struct {
-	pen      harness.Pen
-	access   accessdoor.ResourceAccessHandle
-	state    accessdoor.AccessHandle
-	sched    schedule.ScheduleHandle
-	spawn    actorrt.SpawnHandle
-	hooks    Hooks
-	def      Def
-	clockFn  func() time.Time
-	queueCap int
+	pen       harness.Pen
+	access    accessdoor.ResourceAccessHandle
+	state     accessdoor.AccessHandle
+	sched     schedule.ScheduleHandle
+	lifecycle actorcaps.LifecycleHandle
+	hooks     Hooks
+	def       Def
+	clockFn   func() time.Time
+	queueCap  int
 
 	serve *serveLedger
 	call  *callLedger
@@ -65,6 +67,10 @@ type engine struct {
 	rejectStop chan struct{}
 	rejectDone chan struct{}
 	stopOnce   sync.Once
+
+	// Worker-confined completion candidate. Raw Proc completes it by reaching
+	// the next Recv (or returning nil); Serve settles it at handler return.
+	pendingTimer message.ID
 }
 
 // occupantState is the occupant arc (spec §1.4's Draining note): Starting →
@@ -81,21 +87,6 @@ const (
 	occupantDead
 )
 
-// forkKind is the Kind a Sys.Fork-minted child is welded with. Sys.Fork's
-// verb table shape (spec §1.2: `sys.Fork(class,nameHint)`) carries no Kind
-// parameter — ForkSpec.Kind is caller-held by design everywhere else in the
-// spawn vocabulary (actorrt.ForkSpec doc), yet Sys itself never learns its
-// OWN Kind (Caps carries no Kind field; New's signature has none either).
-// KindTool is the honest default for "a Proc forked a worker of itself" —
-// documented here as a known v1 scope boundary, not a silent guess: a Proc
-// that needs a different child Kind cannot get one through this verb yet.
-const forkKind = actor.KindTool
-
-// progressStatus is Sys.Progress's non-final response status — the Layer-2
-// core "processing" word (protocol/message's provisional set; not yet a
-// named const there).
-const progressStatus = "processing"
-
 // ErrRecvDone is Sys.Recv()'s loop-termination signal (spec §1.2): the
 // occupant is being torn down (Start's lifeCtx is Done) and no further
 // delivery will ever be handed to this Proc.
@@ -109,17 +100,17 @@ var ErrRecvDone = errors.New("actorbase: recv done")
 // registration).
 func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
 	e := &engine{
-		pen:      caps.Pen,
-		access:   caps.Access,
-		state:    caps.State,
-		sched:    caps.Schedule,
-		spawn:    caps.Spawn,
-		hooks:    hooks,
-		def:      def,
-		clockFn:  time.Now,
-		queueCap: 256,
+		pen:       caps.Pen,
+		access:    caps.Access,
+		state:     caps.State,
+		sched:     caps.Schedule,
+		lifecycle: caps.Lifecycle,
+		hooks:     hooks,
+		def:       def,
+		clockFn:   time.Now,
+		queueCap:  256,
 	}
-	e.serve = newServeLedger(e.life, 256)
+	e.serve = newServeLedger(e.life, e.queueCap)
 	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
 	e.workQ = newWorkDeque(e.queueCap)
 	e.rejectQ = make(chan *message.Envelope, e.queueCap)
@@ -165,6 +156,9 @@ func (e *engine) Start(ctx context.Context, self actorrt.ActorContext) error {
 func (e *engine) runWorker(proc Proc) {
 	defer close(e.workerDone)
 	err := e.runProc(proc)
+	if err == nil {
+		e.completePendingTimer()
+	}
 	// F6: flip to Draining BEFORE announcing death, so a request arriving
 	// after the death announcement is rejected with an overloaded terminal
 	// rather than admitted into a work queue no one will ever drain. The
@@ -234,11 +228,32 @@ func (e *engine) Stop(ctx context.Context) error {
 		e.serve.stopTimers()
 		return nil
 	}
+	var abandoned bool
 	e.stopOnce.Do(func() {
 		e.occupant.Store(int32(occupantDraining))
-		<-e.workerDone
+		// Both joins consume ctx (法条 D / 审查两问: "卡住等多久、谁收尾" —
+		// this used to be an UNBOUNDED wait on the occupant's own drain, so a
+		// stuck Receive pinned the cell's unwind goroutine forever). On ctx
+		// expiry the join is ABANDONED, never the teardown ORDER: a background
+		// waiter finishes the rejectStop-after-worker sequence if the worker
+		// ever unblocks, so a late exit still tears down cleanly.
+		select {
+		case <-e.workerDone:
+		case <-ctx.Done():
+			abandoned = true
+			go func() {
+				<-e.workerDone
+				close(e.rejectStop)
+				<-e.rejectDone
+			}()
+			return
+		}
 		close(e.rejectStop)
-		<-e.rejectDone
+		select {
+		case <-e.rejectDone:
+		case <-ctx.Done():
+			abandoned = true
+		}
 	})
 	// D 族小账: reclaim the call ledger's dangling author#2 AfterFunc timers on
 	// teardown — they would otherwise outlive the incarnation and fire into a
@@ -246,6 +261,9 @@ func (e *engine) Stop(ctx context.Context) error {
 	e.call.stopTimers()
 	e.serve.stopTimers()
 	e.occupant.Store(int32(occupantDead))
+	if abandoned {
+		return fmt.Errorf("actorbase: engine stop abandoned join after budget (worker goroutine may be leaked): %w", ctx.Err())
+	}
 	return nil
 }
 
@@ -270,11 +288,23 @@ func (e *engine) CancelRequest(id message.ID) {
 func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 	switch env.Kind {
 	case message.KindResponse:
-		e.call.match(env)
+		if !e.call.match(env) {
+			e.recordDrop(env, ObsUnmatchedResponse)
+		}
 		return nil
 	case message.KindRequest:
-		if occupantState(e.occupant.Load()) != occupantRunning || !e.serve.admit(env) {
+		if occupantState(e.occupant.Load()) != occupantRunning {
 			e.offerReject(env)
+			return nil
+		}
+		admitted, existed := e.serve.admitOnce(env)
+		if !admitted {
+			e.offerReject(env)
+			return nil
+		}
+		if existed {
+			// Redelivery of an already-admitted request is an account
+			// no-op, not a second handler invocation.
 			return nil
 		}
 		// Admitted: seat the delivery. The work deque never evicts a seated
@@ -290,7 +320,7 @@ func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 				e.serve.close(env.ID)
 				e.offerReject(env)
 			} else {
-				e.recordDrop(dropped, actorrt.ObsKind("actorbase.queue_overflow"))
+				e.recordDrop(dropped, ObsQueueOverflow)
 			}
 		}
 		return nil
@@ -308,7 +338,7 @@ func (e *engine) offerReject(env *message.Envelope) {
 	select {
 	case e.rejectQ <- env:
 	default:
-		e.recordDrop(env, actorrt.ObsKind("actorbase.reject_lane_overflow"))
+		e.recordDrop(env, ObsRejectLaneOverflow)
 	}
 }
 
@@ -320,9 +350,25 @@ func (e *engine) offerReject(env *message.Envelope) {
 // legitimate degrade, never a liveness break (spec §1.3 + G0-4).
 func (e *engine) enqueueWork(env *message.Envelope) {
 	if dropped := e.workQ.push(env); dropped != nil {
-		e.recordDrop(dropped, actorrt.ObsKind("actorbase.queue_overflow"))
+		e.recordDrop(dropped, ObsQueueOverflow)
 	}
 }
+
+// The engine's diagnostic obs kinds — the vocabulary this Proc底座 PUSHes when
+// a bounded queue overflows or an author#2 closure write faults. actorbase owns
+// these words because the producer owns its diagnostic vocabulary.
+const (
+	ObsQueueOverflow      actorrt.ObsKind = "actorbase.queue_overflow"
+	ObsRejectLaneOverflow actorrt.ObsKind = "actorbase.reject_lane_overflow"
+	ObsClosureFault       actorrt.ObsKind = "actorbase.closure_fault"
+	ObsStaleDelivery      actorrt.ObsKind = "actorbase.stale_delivery"
+	ObsTimerAckFault      actorrt.ObsKind = "actorbase.timer_ack_fault"
+	// ObsUnmatchedResponse is the response-side mirror of ObsStaleDelivery: a
+	// KindResponse envelope whose ParentID resolves to no InFlight call ledger
+	// entry (already matched, timed out, or cancelled) — response-side
+	// counterpart to projectWork's request-side recordDrop.
+	ObsUnmatchedResponse actorrt.ObsKind = "actorbase.unmatched_response"
+)
 
 // recordDrop surfaces an engine-internal drop through the actor's own obs
 // PUSH (no watcher → no-op, per ActorContext.PublishObs's contract).
@@ -346,96 +392,258 @@ func (e *engine) closureFault(id message.ID, err error) {
 		return
 	}
 	val, _ := json.Marshal(map[string]any{"id": id, "error": err.Error()})
-	e.actorCtx.PublishObs(actorrt.ObsKind("actorbase.closure_fault"), val)
+	e.actorCtx.PublishObs(ObsClosureFault, val)
 }
 
 // --- Sys: response / terminal writes ------------------------------------
 
-// envelopeFromMsg reconstructs the "request held in hand" behavior's
-// response/call builders want, out of a Msg's own content fields (Msg IS a
-// 1:1 projection of an Envelope — NewMsg's mirror). Field-by-field
-// assignment onto a zero-value literal, not a populated composite literal:
-// archtest's envelope-construction contract confines a POPULATED
-// message.Envelope{...} to lib/behavior alone (this is a projection back,
-// not a second construction primitive).
+// envelopeFromMsg hands back the "request held in hand" behavior's
+// response/call builders want. Msg EMBEDS the envelope (a structural 1:1 —
+// no hand-copied field table in either direction since the purity 手动档
+// rework), so this is just a value copy of the embedded field: no composite
+// literal, so archtest's envelope-construction contract (which confines a
+// populated Envelope composite to the approved builder mouths) is not even
+// brushed. The copy keeps the old no-retention property: builders never
+// alias the delivered Msg's own envelope.
 func envelopeFromMsg(m Msg) *message.Envelope {
-	env := &message.Envelope{}
-	env.ID = m.ID
-	env.TS = m.TS
-	env.ChannelID = m.ChannelID
-	env.Sender = m.Sender
-	env.Kind = m.Kind
-	env.Type = m.Type
-	env.Payload = m.Payload
-	env.ParentID = m.ParentID
-	env.CorrelationID = m.CorrelationID
-	env.Visibility = m.Visibility
-	env.Audience = m.Audience
-	env.ExpiresAt = m.ExpiresAt
-	return env
+	env := m.Envelope
+	return &env
+}
+
+// terminalGate answers "may a terminal be written against this Msg, and who
+// says so" — the ONE place the two authorities are named (spec §3.2).
+//
+// It is a three-arm switch on purpose. Written as "log ? straight through :
+// check the ledger" it would fold the illegal zero origin into the mailbox
+// arm, and a Msg that never went through NewMsg would then be gated against a
+// serve ledger that has never heard of its id — passing, silently, precisely
+// because nothing knows anything about it.
+func (e *engine) terminalGate(msg Msg) error {
+	switch msg.origin {
+	case OriginMailbox:
+		// The serve ledger is this delivery's authority: it holds the entry the
+		// pump admitted, and closing it is what cancels msg.Ctx().
+		if e.serve.isClosed(msg.ID) {
+			return ErrRequestClosed
+		}
+		return nil
+	case OriginLog:
+		// The LOG is this handle's authority, and actorbase does not query it
+		// (no truth-store dependency grows here, §11). The real backstops are
+		// already downstream and cannot be forged: the harness's terminal-
+		// uniqueness index absorbs a duplicate, and its four-arm authorization
+		// table pins who may write which word — the sender is welded on by the
+		// pen. Not consulting the ledger is also what makes this handle CORRECT
+		// under overload: a request whose entry was refused (or closed by the
+		// reject lane) is still OPEN in truth, and must stay answerable.
+		return nil
+	default:
+		return ErrMsgOriginUnset
+	}
 }
 
 func (e *engine) Reply(msg Msg, v any) (message.ID, error) {
-	if e.serve.isClosed(msg.ID) {
-		return "", ErrRequestClosed
+	if err := e.terminalGate(msg); err != nil {
+		return "", err
 	}
 	id, err := behavior.RespondJSON(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), v)
 	if err != nil {
 		return "", err
 	}
+	// Close REGARDLESS of origin, and on the absorbed-duplicate path too
+	// (behavior.Respond folds a terminal duplicate into a nil error, so it
+	// arrives here). A deferred request reaches its answerer through the
+	// mailbox and is answered later from the log, so the local entry very much
+	// exists — skipping this would pin serve capacity until the deadline, leave
+	// the original delivery's Ctx() un-cancelled, and keep this incarnation
+	// believing a request is open that truth has already closed. close is
+	// idempotent and a no-op when there is no entry.
 	e.serve.close(msg.ID)
 	return id, nil
 }
 
 func (e *engine) Fail(msg Msg, code, detail string) (message.ID, error) {
-	if e.serve.isClosed(msg.ID) {
-		return "", ErrRequestClosed
+	if err := e.terminalGate(msg); err != nil {
+		return "", err
 	}
-	id, err := behavior.Fail(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), code, detail)
+	id, err := e.writeFailure(msg, code, detail)
 	if err != nil {
 		return "", err
 	}
-	e.serve.close(msg.ID)
+	e.serve.close(msg.ID) // same unconditional close as Reply
 	return id, nil
 }
 
-func (e *engine) Progress(msg Msg, v any) (message.ID, error) {
-	if e.serve.isClosed(msg.ID) {
-		return "", ErrRequestClosed
+// writeFailure derives the terminal REASON from who is writing, and produces
+// the matching payload in the SAME place (one decision, one shape).
+//
+// The harness authorises failure words by the fact their author holds. A
+// receiver holds its own exit reason and nothing else, so it may only write
+// receiver_internal_error. The deadline fact belongs to the caller (and the
+// substrate), so unanswered_timeout is the caller's word for closing its own
+// account — which is exactly what "fail a request I sent" is. The engine is
+// where this can be decided at all: it knows Self(); lib/behavior cannot, the
+// pen's principal being private to it.
+//
+// The self-close payload additionally carries cancelled:true. That is not a
+// cosmetic difference — it is the bit that distinguishes a deliberate close
+// from a deadline that merely passed, it is what callLedger.cancel already
+// stamps for the in-process twin of this act, and it is asserted end-to-end at
+// the WS frame layer. behavior.Fail is deliberately NOT changed to carry it:
+// that primitive is the {error_code, detail} receiver-failure shape's one
+// home, and the overload reject lane still uses it as such.
+//
+// KNOWN limit: on a self-addressed request the same identity is both caller and
+// receiver, both arms are authorised, and this derivation always picks
+// self-close — there is no way to say "I, the receiver, failed". Post admits
+// such a request (it has no worker to deadlock, so it does not refuse one), so
+// the shape is reachable; what no current product flow needs is the ability to
+// EXPRESS a receiver failure on it. An explicit reason入口 can be added
+// additively the day one does.
+func (e *engine) writeFailure(msg Msg, code, detail string) (message.ID, error) {
+	self := e.Self()
+	if self == "" || self != msg.Sender.ID {
+		return behavior.Fail(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), code, detail)
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	env, err := behavior.BuildResponseFromRequest(envelopeFromMsg(msg), e.clockFn, behavior.ResponseSpec{
-		Status:  progressStatus,
-		Payload: raw,
+	payload, _ := json.Marshal(map[string]any{
+		"error_code": code,
+		"detail":     detail,
+		"cancelled":  true,
 	})
+	return behavior.Respond(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), behavior.ResponseSpec{
+		Status:  message.StatusFailed,
+		Reason:  string(message.TerminalUnansweredTimeout),
+		Payload: payload,
+	})
+}
+
+func (e *engine) Progress(msg Msg, status string, v any) (message.ID, error) {
+	if !message.IsProvisionalCoreStatus(status) {
+		return "", fmt.Errorf("actorbase: invalid provisional status %q", status)
+	}
+	switch msg.origin {
+	case OriginMailbox:
+		if e.serve.isClosed(msg.ID) {
+			return "", ErrRequestClosed
+		}
+	case OriginLog:
+		// Terminal-only handle: refuse at the entry, before any write and
+		// without touching an account. See ErrLogOriginTerminalOnly.
+		return "", ErrLogOriginTerminalOnly
+	default:
+		return "", ErrMsgOriginUnset
+	}
+	// One-line delegate to behavior.Progress — Reply/Fail's non-final sibling
+	// at the same layer (purity 手动档 B5 collapsed the hand-rolled copy of
+	// the write discipline that used to live here). Deliberately NO
+	// serve.close: a provisional never closes the request — that asymmetry
+	// with Reply/Fail is THIS method's whole meaning and stays engine-side.
+	return behavior.Progress(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), status, v)
+}
+
+// --- Sys: unregistered writes (event / request-without-closure) ------------
+
+// WriteRejected is the typed harness-reject carrier: Reason/Detail cross the
+// verb boundary typed so a caller (the subjectgate frame interpreter, above
+// all) can surface the harness's reason as its own flat error code without
+// parsing strings. It is an error value, not a sentinel — match with errors.As.
+//
+// Emit and Post BOTH use it. A formatted error here would be flattened to a
+// generic "unavailable" at the frame boundary, turning a precise verdict
+// (harness_id_duplicate_conflict, say) into a shrug.
+type WriteRejected struct {
+	Reason string
+	Detail string
+}
+
+func (w *WriteRejected) Error() string {
+	return fmt.Sprintf("actorbase: write rejected: %s (%s)", w.Reason, w.Detail)
+}
+
+// InvalidVisibilityError is a permanent authoring-input validation error. It is
+// typed so bindings can map it to bad_payload instead of a retryable transport
+// failure.
+type InvalidVisibilityError struct {
+	Visibility message.Visibility
+}
+
+func (e *InvalidVisibilityError) Error() string {
+	return fmt.Sprintf("actorbase: visibility must be public; got %q", e.Visibility)
+}
+
+// actorFacingVisibility is the visibility whitelist for the verbs an actor (or
+// a subject driving one) authors with: empty normalises to public, and only
+// public may be named explicitly.
+//
+// The harness's own closed set is wider — it accepts system, because the
+// substrate itself writes system messages. That is precisely why the narrowing
+// lives here: system messages are hidden from ordinary history views, so an
+// actor-authored one would slip past the read side's enforcement. The
+// substrate keeps its word; the verb table does not lend it out.
+func actorFacingVisibility(v message.Visibility) (message.Visibility, error) {
+	if v == "" {
+		return message.VisibilityPublic, nil
+	}
+	if v != message.VisibilityPublic {
+		return "", &InvalidVisibilityError{Visibility: v}
+	}
+	return v, nil
+}
+
+// writeUnregistered is Emit/Post's shared tail: write, and turn a non-accepted
+// outcome into the typed carrier. It is the WHOLE of what those two verbs
+// share — everything else about them (which envelope, which builder) differs,
+// and the differences are the point, so there is no shared body with a flag.
+func (e *engine) writeUnregistered(env *message.Envelope, clientFingerprint string) (message.ID, error) {
+	ctx := harness.WithClientFingerprint(e.lifeCtx, clientFingerprint)
+	out, err := e.pen.Write(ctx, env)
 	if err != nil {
 		return "", err
 	}
-	out, err := e.pen.Write(e.lifeCtx, env)
-	if err != nil {
-		return "", err
-	}
-	if !out.Accepted() && out.RejectReason != harness.HarnessTerminalDuplicate {
-		return "", fmt.Errorf("actorbase: progress rejected: %s (%s)", out.RejectReason, out.RejectDetail)
+	if !out.Accepted() {
+		return "", &WriteRejected{Reason: string(out.RejectReason), Detail: out.RejectDetail}
 	}
 	return out.MessageID, nil
 }
 
-// --- Sys: event write ----------------------------------------------------
-
-func (e *engine) Emit(msgType string, payload any, audience ...actor.ActorID) (message.ID, error) {
-	raw, err := json.Marshal(payload)
+func (e *engine) Emit(spec behavior.EventSpec) (message.ID, error) {
+	vis, err := actorFacingVisibility(spec.Visibility)
 	if err != nil {
 		return "", err
 	}
-	var aud message.Audience
-	if len(audience) > 0 {
-		aud = message.Audience(audience)
+	spec.Visibility = vis
+	env, err := behavior.BuildEvent(e.clockFn, spec)
+	if err != nil {
+		return "", err
 	}
-	return behavior.EmitEvent(e.lifeCtx, e.pen, e.clockFn, msgType, raw, message.VisibilityPublic, aud)
+	return e.writeUnregistered(env, spec.ClientFingerprint)
+}
+
+// Post writes a kind=request and stops there — no out-station entry, no
+// author#2 timer, no ticket.
+//
+// It deliberately does NOT reuse submit's body. Everything submit does beyond
+// build-and-write exists to serve an obligation Post does not take on:
+// resolving a default timeout (Post leaves an absent ExpiresAt absent, so the
+// substrate stamps its own global TTL rather than this engine's short
+// caller-side default — a 24-hour approval must not silently become a 30-second
+// one), refusing a self-addressed request (that refusal exists because a single
+// worker calling Wait on itself deadlocks; nobody waits here), and registering
+// the entry that arms the timer (registering would leave every answered request
+// as an unconsumed buffered row, since there is no Await to come). Sharing a
+// body across those would mean a flag per difference, and the flags would BE
+// the specification of the difference.
+func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
+	vis, err := actorFacingVisibility(spec.Visibility)
+	if err != nil {
+		return "", err
+	}
+	spec.Visibility = vis
+	env, err := behavior.BuildRequest(e.clockFn, spec)
+	if err != nil {
+		return "", err
+	}
+	return e.writeUnregistered(env, spec.ClientFingerprint)
 }
 
 // --- Sys: request write + caller closure ---------------------------------
@@ -523,7 +731,9 @@ func (p *pendingTicket) Wait(ctx context.Context, d time.Duration) (Msg, error) 
 	if !ok {
 		return Msg{}, nil
 	}
-	return NewMsg(p.call.life(), *env), nil
+	// A matched response is a mailbox delivery like any other — the pump
+	// handed it to this ticket's ledger row.
+	return NewMsg(OriginMailbox, p.call.life(), *env), nil
 }
 
 func (p *pendingTicket) Cancel() error {
@@ -576,39 +786,29 @@ func (r resourceAdapter) Create(id resource.ResourceID, args []byte) (accessdoor
 	}
 	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindKV}, args)
 }
+func (r resourceAdapter) CreateFrom(id resource.ResourceID, args []byte, source channel.ResourceRef) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
+	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindKV, SourceChannelID: source.ChannelID, SourceResourceID: source.ResourceID}, args)
+}
 func (r resourceAdapter) Read(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Invoke(r.ctx(), access.OpRead, id, nil, nil)
+	return r.h.Invoke(r.ctx(), access.OpRead, id, nil)
 }
 func (r resourceAdapter) Write(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Invoke(r.ctx(), access.OpWrite, id, args, nil)
+	return r.h.Invoke(r.ctx(), access.OpWrite, id, args)
 }
 func (r resourceAdapter) Delete(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Invoke(r.ctx(), access.OpDelete, id, nil, nil)
-}
-
-// ShareActor/ShareMembers are OpSet sugar (期11 spec §3.9': "各拼 Grant 塞
-// Invocation{Op:OpSet} 调 Invoke — 与 Open/Write→Invoke 同构") — a Proc body
-// never hand-assembles an access.Grant.
-func (r resourceAdapter) ShareActor(id resource.ResourceID, actorID actor.ActorID, ops []access.Operation) (accessdoor.Outcome, error) {
-	if r.h == nil {
-		return accessdoor.Outcome{}, ErrUnsupported
-	}
-	return r.h.Invoke(r.ctx(), access.OpSet, id, nil, &access.Grant{GranteeKind: access.GranteeActor, Grantee: actorID, Ops: ops})
-}
-func (r resourceAdapter) ShareMembers(id resource.ResourceID, ops []access.Operation) (accessdoor.Outcome, error) {
-	if r.h == nil {
-		return accessdoor.Outcome{}, ErrUnsupported
-	}
-	return r.h.Invoke(r.ctx(), access.OpSet, id, nil, &access.Grant{GranteeKind: access.GranteeMembers, Ops: ops})
+	return r.h.Invoke(r.ctx(), access.OpDelete, id, nil)
 }
 
 // Stat/List are the read face's zero-reinterpretation pass-through.
@@ -625,23 +825,14 @@ func (r resourceAdapter) List(q accessdoor.ListQuery) (accessdoor.ListPage, erro
 	return r.h.List(r.ctx(), q)
 }
 
-// Open/CreateFile are file kind's own byte-access verbs (期11 spec §5/
-// §3.9') — see ResourceHandle's doc. Both type-assert r.h against
-// accessdoor.FileOpener (a SEPARATE, optional capability from the pinned
-// four-method ResourceAccessHandle, §3.1) rather than calling it directly:
-// only a daemon-hosted avatar (platform/internal/link's remoteResourceHandle)
-// implements it day-1 — a home-hosted caller (boundHandle/liveResourceAccess)
-// does not, and answers ErrUnsupported here rather than a nil-pointer panic,
-// the SAME nil-arm discipline the r.h==nil check above already applies.
+// Open/CreateFile are file kind's own byte-access verbs. File access is part of
+// the unified ResourceAccessHandle surface, so local and remote handles follow
+// the same call path; only the nil arm remains unsupported.
 func (r resourceAdapter) Open(id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
 	}
-	fo, ok := r.h.(accessdoor.FileOpener)
-	if !ok {
-		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
-	}
-	return fo.Open(r.ctx(), id, mode)
+	return r.h.Open(r.ctx(), id, mode)
 }
 
 func (r resourceAdapter) CreateFile(id resource.ResourceID, dir bool, withContent bool) (accessdoor.FileAccess, accessdoor.Outcome, error) {
@@ -652,11 +843,7 @@ func (r resourceAdapter) CreateFile(id resource.ResourceID, dir bool, withConten
 	if err != nil || !withContent || !out.Accepted() || out.Route == nil {
 		return accessdoor.FileAccess{}, out, err
 	}
-	fo, ok := r.h.(accessdoor.FileOpener)
-	if !ok {
-		return accessdoor.FileAccess{}, out, ErrUnsupported
-	}
-	fa, rerr := fo.Redeem(r.ctx(), *out.Route)
+	fa, rerr := r.h.Redeem(r.ctx(), *out.Route)
 	return fa, out, rerr
 }
 
@@ -669,7 +856,7 @@ func (s stateAdapter) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if s.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return s.h.Invoke(s.ctx(), access.OpRead, id, nil, nil)
+	return s.h.Invoke(s.ctx(), access.OpRead, id, nil)
 }
 
 // Put upserts key — the absorbed StateKV.Put semantics the verb table
@@ -682,12 +869,12 @@ func (s stateAdapter) Put(id resource.ResourceID, args []byte) (accessdoor.Outco
 	if s.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	out, err := s.h.Invoke(s.ctx(), access.OpWrite, id, args, nil)
+	out, err := s.h.Invoke(s.ctx(), access.OpWrite, id, args)
 	if err != nil {
 		return out, err
 	}
 	if out.RejectReason == access.ResourceNotFound {
-		return s.h.Invoke(s.ctx(), access.OpCreate, id, args, nil)
+		return s.h.Invoke(s.ctx(), access.OpCreate, id, args)
 	}
 	return out, nil
 }
@@ -695,7 +882,7 @@ func (s stateAdapter) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if s.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return s.h.Invoke(s.ctx(), access.OpDelete, id, nil, nil)
+	return s.h.Invoke(s.ctx(), access.OpDelete, id, nil)
 }
 
 func (e *engine) State() StateHandle       { return stateAdapter{h: e.state, ctx: e.life} }
@@ -703,22 +890,75 @@ func (e *engine) Resource() ResourceHandle { return resourceAdapter{h: e.access,
 
 // --- Sys: Schedule arm -----------------------------------------------------
 
-func (e *engine) After(d time.Duration, msgType string, payload any) (schedule.TimerID, error) {
+// normaliseTimerPayload folds an "absent payload" into the zero-length form the
+// Scheduler's fire path expects.
+//
+// json.Marshal(nil) — and json.Marshal of a nil json.RawMessage / nil slice —
+// produces the four bytes `null`, which is NON-empty. buildFireEnvelope only
+// substitutes the proto baseline `{}` when len(payload)==0, so a `null` sails
+// through to the harness, which rejects it (proto: payload={} legal,
+// payload=null is not). The Memory timer is then dropped and the Durable one
+// lands in a dead row — at FIRE time, long after Schedule returned nil.
+//
+// Folding `null`→nil here makes "no payload" fire as `{}` on both Homes.
+func normaliseTimerPayload(raw []byte) []byte {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return raw
+}
+
+// After arms a self-targeted timer in the named storage home.
+//
+// home is a parameter rather than two verbs because durability is not a
+// lifecycle axis: both homes are owned by the ActorID and both cross body
+// replacement, so "Memory vs Durable" says how long the reminder survives
+// SCHEDULER restarts and nothing about the actor. That made a second,
+// identity-flavoured timer verb a distinction without a difference.
+//
+// payload goes through timerPayloadBytes: a json.RawMessage is stored byte-for
+// byte (the absorbed verb promised that to off-process subjects and still
+// does), anything else is marshalled — which also catches invalid JSON at arm
+// time rather than at fire time, strictly better than passing bytes through
+// unexamined.
+func (e *engine) After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error) {
 	// nil-arm底线 (S6): a host with no Schedule arm answers ErrUnsupported, never
 	// nil-pointer-panics — the same kernel defense the Spawn arm carries.
 	if e.sched == nil {
 		return "", ErrUnsupported
 	}
-	raw, err := json.Marshal(payload)
+	raw, err := timerPayloadBytes(payload)
 	if err != nil {
 		return "", err
 	}
 	return e.sched.Schedule(e.lifeCtx, schedule.ScheduleReq{
-		Bind:    schedule.BindIncarnation,
+		Home:    home,
 		FireAt:  e.clockFn().Add(d).UnixMilli(),
 		Type:    msgType,
-		Payload: raw,
+		Payload: normaliseTimerPayload(raw),
 	})
+}
+
+// timerPayloadBytes turns an author's payload into the bytes the Scheduler
+// stores, WITHOUT rewriting bytes the author already chose.
+//
+// A json.RawMessage is a deliberate statement: "these exact bytes are the
+// payload". Running it through json.Marshal is safe from the []byte→base64 trap
+// (RawMessage.MarshalJSON hands its own bytes back) but NOT byte-preserving —
+// encoding/json compacts whitespace on the way out. The verb this one absorbed
+// (the deleted AfterIdentity) took RawMessage and passed it to the Scheduler
+// untouched, so folding that caller onto a marshalling path would have silently
+// rewritten a payload an off-process subject composed. Byte fidelity was an
+// explicit promise there; it stays one here.
+//
+// Everything else is a Go value with no chosen encoding, so Marshal is exactly
+// right — and doing it here also means invalid JSON is caught at arm time
+// rather than surfacing as a harness reject when the timer eventually fires.
+func timerPayloadBytes(payload any) ([]byte, error) {
+	if raw, ok := payload.(json.RawMessage); ok {
+		return raw, nil
+	}
+	return json.Marshal(payload)
 }
 
 func (e *engine) CancelTimer(id schedule.TimerID) error {
@@ -728,24 +968,45 @@ func (e *engine) CancelTimer(id schedule.TimerID) error {
 	return e.sched.Cancel(e.lifeCtx, id)
 }
 
-// --- Sys: Spawn arm --------------------------------------------------------
-
-func (e *engine) Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error) {
-	// A daemon-hosted incarnation is minted via link.NewLiveArms, which
-	// leaves Spawn zero (spec §3's known gap: fork does not cross the wire
-	// this period) — a nil e.spawn means "this host has no Spawn arm", which
-	// must answer ErrUnsupported (spec §1.2/§5 DoD④), not nil-pointer-panic.
-	if e.spawn == nil {
-		return "", ErrUnsupported
-	}
-	return e.spawn.Fork(actorrt.ForkSpec{Kind: forkKind, Class: class, NameHint: nameHint, Config: config})
-}
-
-func (e *engine) DespawnChild(id actor.ActorID) error {
-	if e.spawn == nil {
+// ackTimer settles one fired timer by MESSAGE ID, not by Msg: the id is all it
+// ever reads, and taking the id keeps the ack path from having to fabricate a
+// Msg it has no delivery for (completePendingTimer used to hand it a
+// hand-filled zero value — a second, partial construction path that made
+// NewMsg's "one constructor" claim untrue and would now carry an illegal
+// origin).
+func (e *engine) ackTimer(id message.ID) error {
+	if e.sched == nil {
 		return ErrUnsupported
 	}
-	return e.spawn.Despawn(id)
+	const prefix = "timer:"
+	s := string(id)
+	if !strings.HasPrefix(s, prefix) || len(s) == len(prefix) {
+		return ErrNotTimerMessage
+	}
+	return e.sched.Ack(e.lifeCtx, schedule.TimerID(strings.TrimPrefix(s, prefix)))
+}
+
+// --- Sys: Spawn arm --------------------------------------------------------
+
+func (e *engine) Fork(requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
+	// A nil lifecycle arm is an honest capability absence and must answer
+	// ErrUnsupported rather than nil-pointer-panic. Production server and daemon
+	// incarnations both receive a lifecycle arm; the latter relays over the wire.
+	if e.lifecycle == nil {
+		return "", ErrUnsupported
+	}
+	return e.lifecycle.Fork(e.lifeCtx, requestID, spec)
+}
+
+func (e *engine) End() error {
+	if e.lifecycle == nil {
+		return ErrUnsupported
+	}
+	err := e.lifecycle.EndSelf(e.lifeCtx, actorcaps.EndSelfRequest{})
+	if err == nil && e.lifeCtx != nil {
+		e.occupant.Store(int32(occupantDraining))
+	}
+	return err
 }
 
 // --- Sys: ActorContext -----------------------------------------------------
@@ -773,11 +1034,15 @@ func (e *engine) Self() actor.ActorID {
 // priority over returning ErrRecvDone, so a Draining occupant still finishes
 // everything already handed to it (spec's "worker 排空至 return").
 func (e *engine) Recv() (Msg, error) {
+	// A raw Proc asking for its next delivery has completed the previous one.
+	// Serve explicitly settles before looping back here.
+	e.completePendingTimer()
 	for {
 		// Drain the deque with priority over ErrRecvDone: a Draining occupant still
 		// finishes everything already handed to it (spec's "worker 排空至 return").
 		if env, ok := e.workQ.pop(); ok {
 			if msg, ok := e.projectWork(env); ok {
+				e.trackTimer(msg)
 				return msg, nil
 			}
 			continue
@@ -792,6 +1057,7 @@ func (e *engine) Recv() (Msg, error) {
 			// signalling the loop to end.
 			if env, ok := e.workQ.pop(); ok {
 				if msg, ok := e.projectWork(env); ok {
+					e.trackTimer(msg)
 					return msg, nil
 				}
 				continue
@@ -801,16 +1067,62 @@ func (e *engine) Recv() (Msg, error) {
 	}
 }
 
+func timerMessage(id message.ID) bool {
+	const prefix = "timer:"
+	s := string(id)
+	return strings.HasPrefix(s, prefix) && len(s) > len(prefix)
+}
+
+func (e *engine) trackTimer(msg Msg) {
+	if timerMessage(msg.ID) {
+		e.pendingTimer = msg.ID
+	}
+}
+
+// settleTimer is Serve's per-handler completion hook. A failed or unrouted
+// handler leaves durable fired truth intact for level-triggered redelivery.
+func (e *engine) settleTimer(msg Msg, handled bool) {
+	if e.pendingTimer != msg.ID || !timerMessage(msg.ID) {
+		return
+	}
+	e.pendingTimer = ""
+	if handled {
+		e.ackTimerObserved(msg.ID)
+	}
+}
+
+func (e *engine) completePendingTimer() {
+	if e.pendingTimer == "" {
+		return
+	}
+	id := e.pendingTimer
+	e.pendingTimer = ""
+	e.ackTimerObserved(id)
+}
+
+func (e *engine) ackTimerObserved(id message.ID) {
+	if err := e.ackTimer(id); err != nil && !errors.Is(err, ErrNotTimerMessage) && e.actorCtx != nil {
+		val, _ := json.Marshal(map[string]any{
+			"timer_id": string(id), "error": err.Error(),
+		})
+		e.actorCtx.PublishObs(ObsTimerAckFault, val)
+	}
+}
+
+// projectWork mints the MAILBOX-origin Msg — the delivery handle, whose
+// authority is the serve ledger. The kind=request arm's ctx MUST come from the
+// ledger entry (it carries the request's deadline and cancel); no entry means
+// no delivery at all, never a delivery with a substitute ctx.
 func (e *engine) projectWork(env *message.Envelope) (Msg, bool) {
 	if env.Kind == message.KindRequest {
 		ctx, ok := e.serve.ctxFor(env.ID)
 		if !ok {
-			e.recordDrop(env, actorrt.ObsKind("actorbase.stale_delivery"))
+			e.recordDrop(env, ObsStaleDelivery)
 			return Msg{}, false
 		}
-		return NewMsg(ctx, *env), true
+		return NewMsg(OriginMailbox, ctx, *env), true
 	}
-	return NewMsg(e.lifeCtx, *env), true
+	return NewMsg(OriginMailbox, e.lifeCtx, *env), true
 }
 
 // --- Sys: process life -----------------------------------------------------

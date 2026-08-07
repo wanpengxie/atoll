@@ -10,7 +10,7 @@ import (
 
 // StepTypeRegistered contract — substrate is TYPE-AGNOSTIC. It only guards the
 // reserved system.* namespace (anti-forgery: per-name authority). Everything
-// else — business, core, AND actor.* introspection — passes (actor.* is a
+// else — business AND actor.* introspection — passes (actor.* is a
 // lib/introspect convention, not substrate-gated).
 func TestStepTypeRegistered(t *testing.T) {
 	tests := []struct {
@@ -23,7 +23,7 @@ func TestStepTypeRegistered(t *testing.T) {
 		// Business types: any vocabulary passes (no registry lookup).
 		{"arbitrary business type passes", "xhs.publish", "tool:xhs", actor.KindTool, ""},
 		{"typo'd business type still passes", "totally.made.up.type", "agent:p", actor.KindAgent, ""},
-		{"core type passes", "agent.text", "agent:p", actor.KindAgent, ""},
+		{"non-system business type passes", "agent.text", "agent:p", actor.KindAgent, ""},
 
 		// system.* reserved bootstrap types: only the channel system actor.
 		{

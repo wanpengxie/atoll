@@ -17,7 +17,7 @@ import (
 //     stays legal here — Step Normalize fills the {} default)
 //  3. envelope.channel_id == the harness-bound channel (unconditional)
 //  4. kind ∈ {event, request, response}
-//  5. visibility (when non-empty) ∈ {public, private, system} — Step
+//  5. visibility (when non-empty) ∈ {public, system} — Step
 //     Normalize fills the default when caller leaves it empty.
 //  6. audience cardinality + wildcard ban
 //  7. response.parent_id non-null
@@ -74,22 +74,13 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}
 	}
 
-	// (3) channel_id pinned to the harness-bound channel — UNCONDITIONAL.
-	// This harness IS the single writer of deps.ChannelID's log, so a row
-	// whose channel_id names a different channel is truth corruption (a
-	// channel-A log holding a row that claims channel B). The guard is
-	// structural and must NOT depend on the caller-context being plumbed —
-	// substrate truth integrity cannot be left to downstream behaviour.
-	// (StepCallerAuth separately checks the caller was authenticated for this
-	// channel — an ACL concern, distinct from this content-vs-binding guard.)
-	if env.ChannelID != s.deps.ChannelID {
-		return outcome{
-			RejectReason: HarnessChannelMismatch,
-			Detail:       "envelope.channel_id does not match the harness-bound channel",
-		}, nil
-	}
-
-	// (4) kind closed set.
+	// (3) kind closed set.
+	//
+	// (There is no channel_id equality guard: env.ChannelID is not caller
+	// input. The pen stamps deps.ChannelID itself — this harness IS the single
+	// writer of that channel's log — and rejects a caller-supplied value
+	// outright, so comparing the stamp against its own source would be the
+	// harness checking itself.)
 	switch env.Kind {
 	case message.KindEvent, message.KindRequest, message.KindResponse:
 	default:
@@ -99,26 +90,26 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}, nil
 	}
 
-	// (5) visibility closed set.
+	// (4) visibility closed set.
 	// Empty visibility is legal here (Step Normalize defaults to public).
 	if env.Visibility != "" {
 		if _, ok := message.ParseVisibility(string(env.Visibility)); !ok {
 			return outcome{
 				RejectReason: HarnessVisibilityInvalid,
-				Detail:       "envelope.visibility not in {public, private, system}",
+				Detail:       "envelope.visibility not in {public, system}",
 			}, nil
 		}
 	}
 
-	// (6) audience wildcard ban (pure format, no channel truth).
+	// (5) audience wildcard ban (pure format, no channel truth).
 	// Addressing is Erlang-style explicit `pid ! msg`; every audience
 	// entry MUST be a literal actor_id.
 	//
 	// Audience EMPTINESS and request/response cardinality are NOT
 	// validated here: empty/cardinality checks all live in
 	// StepKindAndAudience (a single validation centre). The substrate does
-	// not resolve a default audience — the caller must supply a named
-	// audience; an empty one is rejected at the Kind+Audience step.
+	// does not resolve a default audience. Kind+Audience accepts an empty
+	// audience only for events and enforces request/response cardinality.
 	for _, id := range env.Audience {
 		if string(id) == "*" {
 			return outcome{
@@ -128,7 +119,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}
 	}
 
-	// (7) response.parent_id non-null — One Law extra-strong constraint.
+	// (6) response.parent_id non-null — One Law extra-strong constraint.
 	if env.Kind == message.KindResponse && env.ParentID == "" {
 		return outcome{
 			RejectReason: HarnessResponseMissingParent,

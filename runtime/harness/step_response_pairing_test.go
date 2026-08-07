@@ -3,11 +3,13 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // seedRequest appends a real kind=request parent row so response-pairing can
@@ -23,7 +25,7 @@ func seedRequest(t *testing.T, cs *store.ChannelStores, id message.ID, caller, r
 		Visibility: message.VisibilityPublic,
 		Payload:    json.RawMessage(`{}`),
 	}
-	if _, err := cs.Log.Append(context.Background(), parent, false); err != nil {
+	if _, err := cs.Log.Append(context.Background(), parent, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed request %q: %v", id, err)
 	}
 }
@@ -39,7 +41,7 @@ func seedEvent(t *testing.T, cs *store.ChannelStores, id message.ID) {
 		Visibility: message.VisibilityPublic,
 		Payload:    json.RawMessage(`{}`),
 	}
-	if _, err := cs.Log.Append(context.Background(), ev, false); err != nil {
+	if _, err := cs.Log.Append(context.Background(), ev, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed event %q: %v", id, err)
 	}
 }
@@ -266,7 +268,7 @@ func TestStepResponsePairing_TerminalUniqueness(t *testing.T) {
 	// Append a real final response so HasFinalResponse(parent) is true.
 	final := response("req1", "tool:xhs", "agent:caller", `{"status":"completed"}`)
 	final.ID = "final-1"
-	if _, err := cs.Log.Append(context.Background(), final, true); err != nil {
+	if _, err := cs.Log.Append(context.Background(), final, true, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed final response: %v", err)
 	}
 
@@ -293,4 +295,128 @@ func TestStepResponsePairing_TerminalUniqueness(t *testing.T) {
 			t.Fatalf("reason = %q, want provisional_after_final", out.RejectReason)
 		}
 	})
+}
+
+// responsePairingDeps builds Deps whose Log returns a request parent for the
+// given parentID and lets the test control HasFinalResponse — the stub seam for
+// the store-fault branches the real store won't produce on demand.
+func responsePairingDeps(parent *storespec.StoredRow, findErr error, hasFinal func(context.Context, message.ID) (bool, error)) Deps {
+	lg := stubLog{
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, nil
+		},
+		findByID: func(_ context.Context, id message.ID) (*storespec.StoredRow, bool, error) {
+			if findErr != nil {
+				return nil, false, findErr
+			}
+			if parent == nil {
+				return nil, false, nil
+			}
+			return parent, true, nil
+		},
+		hasFinalFn: hasFinal,
+	}
+	return Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}}
+}
+
+func requestParent() *storespec.StoredRow {
+	return &storespec.StoredRow{Envelope: message.Envelope{
+		ID: "req1", ChannelID: testChannelID,
+		Sender: message.Sender{ID: "agent:caller"}, Kind: message.KindRequest, Type: "xhs.publish",
+		Audience: message.Audience{"tool:xhs"},
+	}}
+}
+
+func TestStepResponsePairing_FindByIDError(t *testing.T) {
+	wantErr := errors.New("find down")
+	deps := responsePairingDeps(nil, wantErr, func(context.Context, message.ID) (bool, error) { return false, nil })
+	resp := response("req1", "tool:xhs", "agent:caller", `{"status":"completed"}`)
+	_, err := runStep(t, newStepResponsePairing, deps, ctxCaller("tool:xhs"), resp)
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("FindByID error = %v, want wrapping %v", err, wantErr)
+	}
+}
+
+func TestStepResponsePairing_HasFinalResponseError(t *testing.T) {
+	wantErr := errors.New("hasfinal down")
+	deps := responsePairingDeps(requestParent(), nil, func(context.Context, message.ID) (bool, error) {
+		return false, wantErr
+	})
+	resp := response("req1", "tool:xhs", "agent:caller", `{"status":"completed"}`)
+	_, err := runStep(t, newStepResponsePairing, deps, ctxCaller("tool:xhs"), resp)
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("HasFinalResponse error = %v, want wrapping %v", err, wantErr)
+	}
+}
+
+// checkFailedResponseReason branches: empty payload, malformed JSON, missing
+// status, non-failed status, failed without/with-invalid/with-valid reason.
+func TestCheckFailedResponseReason_Branches(t *testing.T) {
+	if c := checkFailedResponseReason(nil); c.failed {
+		t.Fatalf("nil payload should not be failed")
+	}
+	if c := checkFailedResponseReason([]byte("{bad")); c.failed {
+		t.Fatalf("malformed payload should not be failed")
+	}
+	if c := checkFailedResponseReason([]byte(`{}`)); c.failed {
+		t.Fatalf("no status should not be failed")
+	}
+	// status present but not failed (e.g. completed) → status unmarshal ok, !=failed.
+	if c := checkFailedResponseReason([]byte(`{"status":"completed"}`)); c.failed {
+		t.Fatalf("completed should not be failed")
+	}
+	// status non-string → unmarshal into string fails → not failed.
+	if c := checkFailedResponseReason([]byte(`{"status":123}`)); c.failed {
+		t.Fatalf("non-string status should not be failed")
+	}
+	// failed, no reason → failed=true, hasReason=false, invalid=false.
+	c := checkFailedResponseReason([]byte(`{"status":"failed"}`))
+	if !c.failed || c.hasReason || c.invalid {
+		t.Fatalf("failed-no-reason = %+v", c)
+	}
+	// failed, reason non-string → invalid=true.
+	c = checkFailedResponseReason([]byte(`{"status":"failed","reason":123}`))
+	if !c.invalid || c.detail == "" {
+		t.Fatalf("failed-nonstring-reason = %+v, want invalid", c)
+	}
+	// failed, reason out of closed set → invalid via terminalFailureReasonAllowed.
+	c = checkFailedResponseReason([]byte(`{"status":"failed","reason":"not_a_reason"}`))
+	if !c.invalid {
+		t.Fatalf("failed-bad-reason should be invalid: %+v", c)
+	}
+	// failed, valid reason → valid.
+	c = checkFailedResponseReason([]byte(`{"status":"failed","reason":"receiver_internal_error"}`))
+	if c.invalid || c.reason != "receiver_internal_error" {
+		t.Fatalf("failed-good-reason = %+v", c)
+	}
+}
+
+// extractPayloadStatus arms: empty, malformed, missing, non-string, present.
+func TestExtractPayloadStatus_Branches(t *testing.T) {
+	if _, ok := extractPayloadStatus(nil); ok {
+		t.Fatalf("empty payload should be ok=false")
+	}
+	if _, ok := extractPayloadStatus([]byte("{nope")); ok {
+		t.Fatalf("malformed payload should be ok=false")
+	}
+	if _, ok := extractPayloadStatus([]byte(`{}`)); ok {
+		t.Fatalf("missing status should be ok=false")
+	}
+	if _, ok := extractPayloadStatus([]byte(`{"status":5}`)); ok {
+		t.Fatalf("non-string status should be ok=false")
+	}
+	s, ok := extractPayloadStatus([]byte(`{"status":"processing"}`))
+	if !ok || s != "processing" {
+		t.Fatalf("extract = %q %v", s, ok)
+	}
+}
+
+// senderLocalName fallback when no ':' present.
+func TestSenderLocalName_NoColonFallback(t *testing.T) {
+	if got := senderLocalName(actor.ActorID("daemon")); got != "daemon" {
+		t.Fatalf("no-colon = %q, want daemon", got)
+	}
+	if got := senderLocalName(actor.ActorID("a:b:c")); got != "c" {
+		t.Fatalf("nested = %q, want c", got)
+	}
 }

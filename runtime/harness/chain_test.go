@@ -1,13 +1,16 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // newTestChain returns the package-internal bare chain. Tests drive the chain
@@ -17,7 +20,7 @@ import (
 // separately (platform emit-identity tests).
 func newTestChain(t *testing.T, cs *store.ChannelStores) *chain {
 	t.Helper()
-	m, err := New(testDeps(t, cs))
+	m, _, err := New(testDeps(t, cs))
 	if err != nil {
 		t.Fatalf("New chain: %v", err)
 	}
@@ -26,7 +29,7 @@ func newTestChain(t *testing.T, cs *store.ChannelStores) *chain {
 
 // New rejects incomplete Deps (substrate refuses to assemble half-wired).
 func TestChain_NewValidatesDeps(t *testing.T) {
-	if _, err := New(Deps{}); err == nil {
+	if _, _, err := New(Deps{}); err == nil {
 		t.Fatalf("New with empty Deps should error")
 	}
 }
@@ -40,7 +43,7 @@ func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: author}, Kind: message.KindEvent, Type: "agent.text",
-		Audience: message.Audience{"x"},
+		Audience: nil,
 	}
 	res, err := c.write(ctxCallerKind(author, actor.KindAgent), e)
 	if err != nil {
@@ -64,6 +67,13 @@ func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 	if row.Envelope.Visibility != message.VisibilityPublic {
 		t.Fatalf("visibility = %q, want public default", row.Envelope.Visibility)
 	}
+	if row.Envelope.Audience == nil || len(row.Envelope.Audience) != 0 {
+		t.Fatalf("durable audience = %#v, want non-nil []", row.Envelope.Audience)
+	}
+	wire, err := json.Marshal(row.Envelope)
+	if err != nil || !bytes.Contains(wire, []byte(`"audience":[]`)) {
+		t.Fatalf("durable wire audience must be []: %s err=%v", wire, err)
+	}
 }
 
 // Short-circuit: the FIRST failing step's reason is returned and no row lands.
@@ -82,12 +92,6 @@ func TestChain_WriteShortCircuitsOnFirstReject(t *testing.T) {
 			ctx:    context.Background(), // no caller
 			mutate: func(e *message.Envelope) { e.Kind = "" /* would also fail shape */ },
 			reason: HarnessEngineACLDenied,
-		},
-		{
-			name:   "step1 channel mismatch",
-			ctx:    ctxCaller("agent:p"),
-			mutate: func(e *message.Envelope) { e.ChannelID = "foreign" },
-			reason: HarnessChannelMismatch,
 		},
 		{
 			name:   "step4 sender mismatch",
@@ -207,5 +211,148 @@ func TestChain_DuplicateEnvelopeIDRejectsAtAppend(t *testing.T) {
 	}
 	if res.Accepted() {
 		t.Fatalf("duplicate id should not produce a second durable row")
+	}
+}
+
+// stepName falls back to a numbered label for ids outside the known table.
+func TestStepName_DefaultUnknownID(t *testing.T) {
+	if got := stepName(stepID(99)); got != "step_99" {
+		t.Fatalf("stepName(99) = %q, want step_99", got)
+	}
+}
+
+// chainWith builds the internal chain with stub deps.
+func chainWith(t *testing.T, lg storespec.MessageLog) *chain {
+	t.Helper()
+	m, _, err := New(Deps{
+		ChannelID: testChannelID,
+		Log:       lg,
+		Presence:  testAuthority{},
+		NowMs:     func() int64 { return fixedNowMs },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return m.(*minter).chain
+}
+
+// A step that returns a hard error (not a reject) → Write maps it through
+// observeError (chain.go step-error path) and returns the wrapped error. We
+// trigger this at StepResponsePairing by making Log.FindByID fail for the
+// parent lookup — StepSenderConsistent no longer has an error-producing seam
+// of its own (no registry lookup left: identity is pen-welded + Admit()-gated
+// by the pen-held authority, not registry-checked).
+func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
+	findErr := errors.New("boom-find")
+	lg := stubLog{
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, nil
+		},
+		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, findErr },
+		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
+	}
+	c := chainWith(t, lg)
+
+	resp := response("req1", "tool:xhs", "agent:caller", `{"status":"completed"}`)
+	res, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp)
+	if err == nil {
+		t.Fatalf("expected wrapped step error, got nil (res=%+v)", res)
+	}
+	if !errors.Is(err, findErr) {
+		t.Fatalf("error = %v, want wrapping %v", err, findErr)
+	}
+}
+
+// Append returns a typed *storespec.AppendError → mapped to a closed-set
+// reject via observeReject.
+func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
+	lg := stubLog{
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, &storespec.AppendError{
+				Reason:           string(HarnessTerminalDuplicate),
+				Detail:           "store says dup",
+				PartialMessageID: "m-partial",
+			}
+		},
+		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
+		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
+	}
+	c := chainWith(t, lg)
+
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-app", "agent:p"))
+	if err != nil {
+		t.Fatalf("typed AppendError should be a reject, not error: %v", err)
+	}
+	if res.Accepted() || res.RejectReason != HarnessTerminalDuplicate {
+		t.Fatalf("reject = %q accepted=%v, want terminal_duplicate", res.RejectReason, res.Accepted())
+	}
+	if res.MessageID != "m-partial" {
+		t.Fatalf("MessageID = %q, want m-partial", res.MessageID)
+	}
+}
+
+// Append returns a PLAIN error (not *AppendError) → Write wraps it and
+// observeError logs it.
+func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
+	appendErr := errors.New("disk on fire")
+	lg := stubLog{
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, appendErr
+		},
+		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
+		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
+	}
+	c := chainWith(t, lg)
+
+	_, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-plain", "agent:p"))
+	if err == nil || !errors.Is(err, appendErr) {
+		t.Fatalf("plain append error = %v, want wrapping %v", err, appendErr)
+	}
+}
+
+// A step that panics → Write's deferred recover converts it to an error. We
+// make Log.FindByID panic at StepResponsePairing (StepSenderConsistent no
+// longer has a seam to panic through — no registry lookup left).
+func TestWrite_PanicRecovered(t *testing.T) {
+	lg := stubLog{
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, nil
+		},
+		findByID: func(context.Context, message.ID) (*storespec.StoredRow, bool, error) {
+			panic("step blew up")
+		},
+		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
+	}
+	c := chainWith(t, lg)
+
+	resp := response("req1", "tool:xhs", "agent:caller", `{"status":"completed"}`)
+	_, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp)
+	if err == nil {
+		t.Fatalf("panic should be recovered into an error")
+	}
+}
+
+// observeReject's reason=="" early-return is reachable only through the
+// engine-append path: a typed *AppendError carrying an EMPTY Reason makes
+// Chain.Write call observeReject with reason "".
+func TestWrite_AppendEmptyReason_ObserveRejectNoOp(t *testing.T) {
+	lg := stubLog{
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, &storespec.AppendError{Reason: "", Detail: "no reason"}
+		},
+		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
+		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
+	}
+	c := chainWith(t, lg)
+
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-empty", "agent:p"))
+	if err != nil {
+		t.Fatalf("empty-reason AppendError should map to a WriteResult, got err=%v", err)
+	}
+	// An empty Reason produces a WriteResult with empty RejectReason, so
+	// Accepted() is degenerately true — but the partial message id is carried
+	// and observeReject returns immediately for an empty reason.
+	if res.MessageID != "" {
+		t.Fatalf("empty-reason result MessageID = %q, want empty (no PartialMessageID set)", res.MessageID)
 	}
 }

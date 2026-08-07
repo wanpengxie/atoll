@@ -2,58 +2,30 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
-
-// MembershipCheck is the door's narrow channel-membership seam. Two loci consult
-// it: op=create's container check (member ⟹ create-own) AND the members-grant
-// late-binding resolution for object ops (GranteeMembers = "resolved by the door
-// AT CHECK TIME"). The implementor adapts storespec.Registry.Lookup + Record.
-// IsActive (NOT Exists, which does not distinguish a deregistered actor).
-type MembershipCheck interface {
-	IsMember(ctx context.Context, id actor.ActorID) (bool, error)
-
-	// Lookup answers "who is this actor" for placement routing's creator-
-	// affinity locus (期11 spec §4.3 policy chain ①): kind and Host — the
-	// compute id currently hosting id if it is daemon-attached ("" for a
-	// home-placed cell, a human, or an id with no active membership at all).
-	// found=false when id has no active membership row (mirrors IsMember's
-	// own IsActive discipline, never Exists). Host is read-time (the SAME
-	// membership column Home.reconcileActivation's placement filter and
-	// link.Acceptor.reconcileHost already consult), never cached — a daemon
-	// attach/detach between two Lookup calls is not this seam's problem to
-	// paper over.
-	Lookup(ctx context.Context, id actor.ActorID) (kind actor.Kind, host string, found bool, err error)
-}
 
 // DriverTable resolves a ResourceKind to its Driver. Closed-but-additive: a plain
 // map, one entry per substrate driver, populated at assembly. A kind reaching the
 // tree with no entry is an assembly defect (a Go error), never a verdict.
 type DriverTable map[resourcespec.ResourceKind]resourcespec.Driver
 
-// StorageMount is one channel-attached daemon's storage-placement candidacy —
-// §4.3 policy chain ③④'s raw input. OwnerUserID is day-1 UNUSED (populated ""
-// by every current StorageMounts implementor): policy chain ② (owner-level
-// creator affinity) is deferred whole to the human-inbound debt this field's
-// consumer would need (§4.3's own text: "此数据流与human接线同源，day-1不实现"),
-// so the field exists for the day ② lands, not exercised now — declaring it
-// without a consumer is NOT the half-built-slice violation the project's
-// substrate-purity rule warns against, because ITS OWN CONSUMER (②) is
-// explicitly named and deferred by the spec text this type implements, not
-// invented ahead of a real use case.
+// StorageMount is one channel-ready daemon's storage-placement candidacy —
+// §4.3 policy chain ③④'s raw input.
 type StorageMount struct {
-	DaemonID    string
-	OwnerUserID string
-	Online      bool
+	DaemonID string
+	Online   bool
 }
 
 // StorageMounts is placement routing's mount-table Dep (期11 spec §4.3): "which
-// daemons are attached to this channel, and which of those are online right
-// now". The runtime tree DEFINES this contract; platform assembly FILLS it
-// (late-bound, closing over the link Acceptor's attach state — §4.3's own
+// daemons are bound to this channel and currently have a ready service lane".
+// The runtime tree DEFINES this contract; platform assembly FILLS it
+// (injected from the realm daemon host's positive-ready lane view —
 // injection-point discipline: "注入点契约 runtime 定,实现填充下游做"). This
 // package never imports platform/app to answer it itself.
 type StorageMounts interface {
@@ -75,7 +47,7 @@ type StorageAllocSpec struct {
 // ResourceOutbox / ReservationRow / TombstoneRow / ErrReservationLost
 // re-export resourcespec's create/delete-outbox completion contract for the
 // §4.7 daemon control-RPC handler platform assembly builds
-// (homeStorageHostControl over runtime.ChannelStores.Outbox) — the SAME
+// (homeStorageHostControl over the Platform-owned resource outbox) — the SAME
 // purity-wall pattern CreateSpec/KindKV already draw (handle.go): nothing
 // outside the runtime tree may import resourcespec directly
 // (archtest.TestResourcespecImportedOnlyWithinRuntime), so platform reaches
@@ -91,9 +63,27 @@ type (
 // §4.7 Committed handler must preserve.
 var ErrReservationLost = resourcespec.ErrReservationLost
 
+// ErrStorageNotReady is StorageControl's "nothing was attempted" answer: the
+// placement daemon holds a live lane but has not built the compartment behind
+// it yet. It is NOT a failure verdict — the daemon formed no opinion about
+// this coord, so the door must not report the create as refused, and the same
+// call may succeed once the daemon's compartment is up.
+//
+// It reaches the door's caller as a Go error rather than an Outcome verdict,
+// on the same footing as an unreachable daemon: the door's verdict set covers
+// what the resolve→authorize→execute pipeline DECIDED, and this is the case
+// where no decision was reached. The caller owns the retry — the door does not
+// wait on it, because a compartment build retries with backoff and can take
+// minutes, and burying that inside one synchronous create would turn a
+// distributed wait into an unbounded one.
+//
+// The reservation is left standing either way (the Scrubber's timeout sweep
+// owns it), so a retried create is safe.
+var ErrStorageNotReady = errors.New("accessdoor: storage daemon not ready for this channel")
+
 // StorageControl is the door's send-half of the daemon control-RPC plane
-// (期11 spec §4.7): having chosen a placement daemon (via StorageMounts +
-// Membership.Lookup) and generated a coord (resourcespec.GenerateCoord), the
+// (期11 spec §4.7): having chosen a placement daemon from StorageMounts plus
+// ActorAuthority placement and generated a coord (resourcespec.GenerateCoord), the
 // door hands the ALLOCATION intent to whichever party owns the live
 // connection to that daemon — platform assembly, never this package, which
 // has no notion of a link/wire. AllocRequest blocks until the daemon's
@@ -104,6 +94,9 @@ var ErrReservationLost = resourcespec.ErrReservationLost
 // injection point letting door.create actually ISSUE the chosen placement's
 // AllocRequest rather than stopping at "here is a daemon id".
 type StorageControl interface {
+	// AllocRequest returns ErrStorageNotReady when the placement daemon is
+	// reachable but has not built its compartment for this channel yet — see
+	// that sentinel's doc for why it is not a failure verdict.
 	AllocRequest(ctx context.Context, daemonID string, spec StorageAllocSpec) error
 	// ReclaimRequest collects an orphaned coord's already-allocated bytes on
 	// daemonID (期11 review §2.5 #B). It is the content-less create loser's
@@ -112,27 +105,28 @@ type StorageControl interface {
 	// Committed round trip on which the with-content path's
 	// CommittedReply.Lost→ReclaimCoord signal could ride — this is that signal
 	// for the synchronous path. Best-effort from the door's view: a returned
-	// error is logged, never propagated into the caller-facing verdict (the
-	// create already resolved AlreadyExists; a missed reclaim leaves at worst an
-	// empty directory, never a correctness fault).
+	// error is logged (query.go's reclaim-loser branch, nil-safe Deps.Logger),
+	// never propagated into the caller-facing verdict (the create already
+	// resolved AlreadyExists; a missed reclaim leaves at worst an empty
+	// directory, never a correctness fault).
 	ReclaimRequest(ctx context.Context, daemonID string, coord string) error
 }
 
 // Deps bundles the collaborators the door needs. The channel-scoped tree uses the
-// Registry (R + existence), the Drivers (bytes per kind), and the Membership seam
+// Registry (R + existence), the Drivers (bytes per kind), and ActorAuthority
 // (create locus + members late-binding). The actor-scoped (collapsed) branch uses
 // only State — the owner-keyed byte realizer for the second, structurally separate
 // storage locus (no R, no membership, no kind routing: that absence is the scope
-// law). Registry/Drivers/Membership/State are required — New fail-fasts on any
+// law). Registry/Drivers/Authority/State are required — New fail-fasts on any
 // missing. StorageMounts/StorageControl/ChannelID are file-kind placement's OWN
 // deps (期11 §4.3): nil-safe absent — a channel whose assembly never wires them
 // (or a kv-only test rig) simply cannot route a file-kind create, honestly
 // (ErrNoStoragePlacement-shaped Go error), never a silent kv-shaped placement.
 type Deps struct {
-	Registry   resourcespec.Registry
-	Drivers    DriverTable
-	Membership MembershipCheck
-	State      resourcespec.StateStore
+	Registry  resourcespec.Registry
+	Drivers   DriverTable
+	Authority storespec.ResourceActorAuthority
+	State     resourcespec.StateStore
 
 	// ChannelID is this door's own channel scope (§4.3: "门缺...Deps增ChannelID
 	// 字段, channel-scoped门绑单频道") — StorageMounts.ListStorageDaemons's
@@ -142,9 +136,16 @@ type Deps struct {
 	StorageMounts StorageMounts
 	// StorageControl issues the chosen placement's AllocRequest.
 	StorageControl StorageControl
-	// LaneControl mints the file byte-route Token for OpRead/OpWrite(file)
+	// TransferControl mints the file byte-route ticket for OpRead/OpWrite(file)
 	// and Create(file, with_content=true) — §5's own Dep, nil-safe absent
-	// (a kv-only test rig or an assembly that never wires the lane simply
-	// cannot route file bytes, honestly, never a silent kv-shaped route).
-	LaneControl LaneControl
+	// (a kv-only test rig or an assembly that never wires the byte plane
+	// simply cannot route file bytes, honestly, never a silent kv-shaped route).
+	TransferControl TransferControl
+
+	// Logger is the door's oplog seam (telemetry-completion spec A5/C4):
+	// purely a self-report channel, never a decision input — nil-safe
+	// absent (a test rig that never wires one simply gets no slog, never a
+	// panic). Currently used by the reclaim-loser Warn (query.go) and the
+	// OpDelete landed-Info (door.go).
+	Logger *slog.Logger
 }

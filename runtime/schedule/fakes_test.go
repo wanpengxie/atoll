@@ -9,9 +9,14 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
+
+// testAuthority is the live A-level authority the engine mints against.
+type testAuthority struct{ id actor.ActorID }
+
+func (a testAuthority) ActorID() actor.ActorID { return a.id }
+func (a testAuthority) Admit() error           { return nil }
 
 // ---------------------------------------------------------------------
 // fakeStore: an in-memory timerspec.TimerStore stub. Every method may be
@@ -21,18 +26,20 @@ import (
 // ---------------------------------------------------------------------
 
 type fakeStore struct {
-	mu   sync.Mutex
-	rows map[timerspec.TimerID]timerspec.TimerRow
+	mu    sync.Mutex
+	rows  map[timerspec.TimerID]timerspec.TimerRow
+	fired map[timerspec.TimerID]timerspec.TimerRow
 
 	insertErr error
 	deleteErr error
 	dueErr    error
 	nextErr   error
 	cancelErr error
+	markErr   error
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{rows: make(map[timerspec.TimerID]timerspec.TimerRow)}
+	return &fakeStore{rows: make(map[timerspec.TimerID]timerspec.TimerRow), fired: make(map[timerspec.TimerID]timerspec.TimerRow)}
 }
 
 func (s *fakeStore) Insert(ctx context.Context, row timerspec.TimerRow) error {
@@ -107,6 +114,35 @@ func (s *fakeStore) CancelOwned(ctx context.Context, id timerspec.TimerID, autho
 	return true, nil
 }
 
+func (s *fakeStore) MarkFired(_ context.Context, id timerspec.TimerID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.markErr != nil {
+		return s.markErr
+	}
+	if _, ok := s.fired[id]; ok {
+		return nil
+	}
+	row, ok := s.rows[id]
+	if !ok {
+		return nil
+	}
+	delete(s.rows, id)
+	s.fired[id] = row
+	return nil
+}
+
+func (s *fakeStore) AckOwned(_ context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.fired[id]
+	if !ok || row.AuthorID != author {
+		return false, nil
+	}
+	delete(s.fired, id)
+	return true, nil
+}
+
 func (s *fakeStore) rowCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -162,51 +198,6 @@ func (f *fakeFireSink) lastCall() fireCall {
 }
 
 var _ FireSink = (*fakeFireSink)(nil)
-
-// ---------------------------------------------------------------------
-// fakeReviver: records EnsureLive calls, answers with a scriptable error.
-// ---------------------------------------------------------------------
-
-type fakeReviver struct {
-	mu    sync.Mutex
-	calls []actor.ActorID
-	err   error
-}
-
-func (r *fakeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
-	r.mu.Lock()
-	r.calls = append(r.calls, id)
-	err := r.err
-	r.mu.Unlock()
-	return err
-}
-
-func (r *fakeReviver) callCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.calls)
-}
-
-var _ Reviver = (*fakeReviver)(nil)
-
-// stubActor is a minimal actorrt.Actor — never actually receives anything in
-// these tests (the engine never talks to the mailbox), it exists only
-// so a real *actorrt.Runtime has something live to weld an Incarnation to.
-type stubActor struct{}
-
-func (stubActor) Receive(ctx context.Context, env *message.Envelope) error { return nil }
-
-// newTestRuntime spins up a real *actorrt.Runtime as the engine's
-// LivenessProbe. actorrt.Incarnation's fields are unexported (by design —
-// pidfd-analogue, never externally constructible), so a real Runtime is the
-// only legitimate way to produce one outside actorrt itself; *actorrt.Runtime
-// already satisfies LivenessProbe (CurrentIncarnation + IsLive) directly.
-func newTestRuntime(t *testing.T) *actorrt.Runtime {
-	t.Helper()
-	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	t.Cleanup(rt.StopAll)
-	return rt
-}
 
 // ---------------------------------------------------------------------
 // fakeClock: a deterministic Clock — Now() reads a manually-advanced instant,

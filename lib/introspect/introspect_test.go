@@ -74,6 +74,21 @@ func TestReservedQueryNames(t *testing.T) {
 	if QueryList != "actor.list" {
 		t.Fatalf("QueryList drifted: %q", QueryList)
 	}
+	if QueryStatus != "actor.status" {
+		t.Fatalf("QueryStatus drifted: %q", QueryStatus)
+	}
+}
+
+func TestParseStatusRequest(t *testing.T) {
+	req, err := ParseStatusRequest([]byte(`{"actor_id":"agent:a"}`))
+	if err != nil || req.ActorID != "agent:a" {
+		t.Fatalf("req=%+v err=%v", req, err)
+	}
+	for _, raw := range [][]byte{nil, []byte(`{}`), []byte(`{`)} {
+		if _, err := ParseStatusRequest(raw); err == nil {
+			t.Fatalf("ParseStatusRequest(%q) accepted invalid input", raw)
+		}
+	}
 }
 
 // TestWireFieldNames pins the JSON contract — the exact keys the LLM-facing
@@ -102,7 +117,7 @@ func TestWireFieldNames(t *testing.T) {
 
 func TestCatalogRoundTrip(t *testing.T) {
 	c := Catalog{Actors: []CatalogEntry{
-		{ID: "a1", Kind: "agent", Binding: "b", Present: true, UptimeMs: 1500},
+		{ID: "a1", Kind: "agent", Present: true, UptimeMs: 1500},
 	}}
 	b, err := json.Marshal(c)
 	if err != nil {

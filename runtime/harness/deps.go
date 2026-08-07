@@ -22,23 +22,14 @@ import (
 // substrate does not define its own Logger vocabulary — that was a reinvention
 // of slog. nil → caller defaults to slog.New(slog.DiscardHandler).)
 
-// Metrics is the minimal counter seam used for harness reject accounting.
-type Metrics interface {
-	IncCounter(name string, tags ...string)
-}
-
-// NoopMetrics drops every metric call.
-type NoopMetrics struct{}
-
-func (NoopMetrics) IncCounter(string, ...string) {}
-
 // caller carries the principal + transport metadata the harness needs to
 // verify a write. It is plumbed through context.Context (see ctxWithCaller /
 // callerFromCtx) so step implementations do not need a per-step parameter; the
-// boundPen populates it once from the welded (actorID, chID) before driving the
-// chain. It is harness-internal (unexported): the substrate's pen-minting surface is Mint,
-// which takes the raw (actorID, chID) — there is no caller-constructible
-// identity context outside the package.
+// boundPen populates it once from the welded principal before driving the
+// chain. It is harness-internal (unexported): the substrate's pen-minting
+// surface is Mint, which takes an identity alone — the channel is the
+// harness's own binding constant, never a mint parameter — so there is no
+// caller-constructible identity context outside the package.
 type caller struct {
 	// actorID is the authenticated principal that issued the write.
 	// step 1 / step 3 compare it against envelope.sender.id.
@@ -49,33 +40,30 @@ type caller struct {
 	// callerFromCtx) instead of querying the registry: kind is welded truth,
 	// not a name-list lookup.
 	kind actor.Kind
-
-	// chID is the channel binding the caller is authenticated for.
-	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the
-	// harness-bound channel.
-	chID channel.ID
 }
 
 // Deps bundles every collaborator the runtime write engine needs. One
 // Deps instance is shared across all step implementations.
 type Deps struct {
-	// ChannelID identifies which channel this harness is bound to. The
-	// chain enforces envelope.channel_id matches. Caller-context channel
-	// mismatches reject as harness_engine_acl_denied at the entry gate;
-	// envelope.channel_id mismatches reject as harness_channel_mismatch in
-	// the envelope-shape step.
+	// ChannelID identifies which channel this harness is bound to. It is this
+	// harness's OWN binding constant and its only use is the stamp: the pen
+	// writes it onto every envelope (pen.go), and a caller-supplied value is
+	// rejected outright as not-caller-settable. No step compares it against
+	// anything — the producer of the field and the authority on it are the
+	// same object, so there is no second account to reconcile.
 	ChannelID channel.ID
 
 	// (There is NO ActorRegistry dep: the sender door trusts the pen weld —
-	// identity + kind are welded at Mint, liveness is gated one layer up by
-	// livePen.IsLive() — so no step reads the membership registry at write
+	// identity + kind are welded at Mint, liveness is gated one layer up by the
+	// pen-held authority's Admit() — so no step reads the membership registry at write
 	// time (the receiver/audience half was evicted earlier). The substrate is
 	// likewise type-agnostic — no TypeRegistry dep either: business-type
 	// vocabulary is a domain concern, not a substrate write-time check.)
 
 	// Log is the channel-local messages-table sink. Required — step 9
 	// engine append calls Log.Append. (v2: no fencing — single writer.)
-	Log storespec.MessageLog
+	Log      storespec.MessageLog
+	Presence storespec.IdentityPresence
 
 	// NowMs returns unix-ms (engine ts_received write source). Defaults
 	// to time.Now when nil.
@@ -83,9 +71,6 @@ type Deps struct {
 
 	// Logger receives per-step pass/reject diagnostics. nil → discard.
 	Logger *slog.Logger
-
-	// Metrics receives per-reject counters. nil → NoopMetrics.
-	Metrics Metrics
 }
 
 // Validate returns nil when Deps is wired enough to assemble the engine.
@@ -95,6 +80,9 @@ func (d Deps) Validate() error {
 	}
 	if d.Log == nil {
 		return errors.New("harness: Deps.Log required")
+	}
+	if d.Presence == nil {
+		return errors.New("harness: Deps.Presence required")
 	}
 	return nil
 }

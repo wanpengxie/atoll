@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,18 +12,21 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // resourceRegistry implements resourcespec.Registry over the channel-local
-// sqlite (resources + resource_grants + resource_reservations +
+// sqlite (resources + resource_reservations +
 // resource_tombstones), the plane-2 dual of actorRegistry: it is the
-// object-existence + authorization-relation (R) truth the door consults and
+// object-existence truth the door consults and
 // mutates, PLUS the create/delete outbox's server-side durable halves (期11
 // spec §1.3). Bound to one channel database (access is channel-scoped).
+// Authorization is NOT stored here: it is membrane-uniform (PM-D1), judged
+// at the door from membership facts + created_by (PM-D3).
 type resourceRegistry struct {
 	db *sql.DB
 	// nowMs stamps created_at/reserved_at/deleted_at. Injectable (tests pin
@@ -32,26 +34,13 @@ type resourceRegistry struct {
 	nowMs func() int64
 }
 
-// clearActorGrantsTx removes only grants whose grantee axis names the actor.
-// Resource ownership and members-scoped grants are orthogonal and survive.
-func clearActorGrantsTx(ctx context.Context, tx *sql.Tx, id actor.ActorID) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_grants WHERE grantee_kind='actor' AND grantee=?`, string(id)); err != nil {
-		return fmt.Errorf("store: actor grants cascade clear %q: %w", id, err)
-	}
-	return nil
-}
-
 func newResourceRegistry(db *sql.DB) *resourceRegistry {
 	return &resourceRegistry{db: db, nowMs: func() int64 { return time.Now().UnixMilli() }}
 }
 
-// placementKindFor derives ResourceMeta.PlacementKind from kind — it is NOT
-// an independent Create input (the Registry.Create/ReserveCreate signatures
-// carry no placementKind param, 期11 spec §1 item 9' ②): kv has no placement
-// axis ("", not a PlacementKind member); file's day-1 (and so-far only)
-// placement mechanism is daemon-local. A future second file placement (e.g.
-// cloud) would need this to become an explicit input — day-1 it is fully
-// determined by kind.
+// placementKindFor derives the public placement projection from the durable
+// resource kind. placement_kind is intentionally not persisted: there is no
+// independent placement choice in the current architecture.
 func placementKindFor(kind resourcespec.ResourceKind) resourcespec.PlacementKind {
 	if kind == resourcespec.KindFile {
 		return resourcespec.PlacementDaemonLocal
@@ -59,22 +48,19 @@ func placementKindFor(kind resourcespec.ResourceKind) resourcespec.PlacementKind
 	return ""
 }
 
-// Resolve reads back existence + full meta (all placement/provenance/audit
-// columns). kind is returned as the raw persisted value with NO closed-set
-// parse (unlike actor_kind): ResourceKind is a runtime routing key, and
+// Resolve reads back existence + full routing/audit meta. kind is returned as
+// the raw persisted value with NO closed-set parse (unlike actor_kind):
+// ResourceKind is a runtime routing key, and
 // whether a kind resolves to a registered driver is the door's question, not
-// a poison-row guard here. placement_kind/provenance ARE validated against
-// their Go closed sets (resourcespec.ValidPlacementKind/ValidProvenance) —
-// an out-of-set persisted value fails loud rather than silently handing the
-// door a value it cannot interpret (schema.go's read-path discipline).
+// a poison-row guard here.
 func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
-	const q = `SELECT kind, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at, is_dir
+	const q = `SELECT kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir, COALESCE(source_channel_id,''), COALESCE(source_resource_id,'')
 	             FROM resources WHERE resource_id=?`
-	var kind, placementKind, placementDaemonID, placementCoord, provenance, createdBy string
+	var kind, placementDaemonID, placementCoord, createdBy, sourceChannelID, sourceResourceID string
 	var createdAt int64
 	var isDir bool
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&kind, &placementKind, &placementDaemonID, &placementCoord, &provenance, &createdBy, &createdAt, &isDir,
+		&kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &isDir, &sourceChannelID, &sourceResourceID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return resourcespec.ResourceMeta{}, false, nil
@@ -82,33 +68,31 @@ func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) 
 	if err != nil {
 		return resourcespec.ResourceMeta{}, false, fmt.Errorf("store: resource resolve %q: %w", id, err)
 	}
-	if !resourcespec.ValidPlacementKind(resourcespec.PlacementKind(placementKind)) {
-		return resourcespec.ResourceMeta{}, false, fmt.Errorf("store: resource resolve %q: unknown placement_kind %q", id, placementKind)
-	}
-	if !resourcespec.ValidProvenance(resourcespec.Provenance(provenance)) {
-		return resourcespec.ResourceMeta{}, false, fmt.Errorf("store: resource resolve %q: unknown provenance %q", id, provenance)
-	}
 	return resourcespec.ResourceMeta{
 		Kind:              resourcespec.ResourceKind(kind),
 		CreatedAt:         createdAt,
-		PlacementKind:     resourcespec.PlacementKind(placementKind),
+		PlacementKind:     placementKindFor(resourcespec.ResourceKind(kind)),
 		PlacementDaemonID: placementDaemonID,
 		PlacementCoord:    placementCoord,
-		Provenance:        resourcespec.Provenance(provenance),
 		CreatedBy:         actor.ActorID(createdBy),
 		Dir:               isDir,
+		SourceChannelID:   channel.ID(sourceChannelID),
+		SourceResourceID:  resource.ResourceID(sourceResourceID),
 	}, true, nil
 }
 
 // Create is op=create's atomic birth event for the IMMEDIATE-landing path
 // (kv, and content-less file creates). See createResourceTx for the shared
 // atomic-insert half CommitReservation also drives.
-func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance resourcespec.Provenance, initial []byte) error {
+func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth resourcespec.ResourceBirthPlan) error {
 	if id == "" {
 		return errors.New("store: resource create: empty id")
 	}
 	if creator == "" {
 		return errors.New("store: resource create: empty creator")
+	}
+	if !birth.Valid() {
+		return errors.New("store: resource create: invalid source provenance")
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -121,7 +105,7 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 	// direct Create is day-1 only ever kv (a file always routes through
 	// ReserveCreate+CommitReservation), which is never directory-shaped —
 	// so dir is unconditionally false here.
-	if err := r.createResourceTx(ctx, tx, id, kind, creator, placementDaemonID, placementCoord, provenance, initial, false); err != nil {
+	if err := r.createResourceTx(ctx, tx, id, kind, creator, placementDaemonID, placementCoord, initial, false, birth); err != nil {
 		return err // resourcespec.ErrAlreadyExists or a wrapped infra error
 	}
 
@@ -132,28 +116,22 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 }
 
 // createResourceTx is Create's and CommitReservation's SHARED atomic-birth
-// half: the existence row (all columns) + the creator's full-rights grant,
+// half: the existence row (all columns),
 // inside the CALLER's transaction (Create starts+commits its own;
 // CommitReservation folds it into the reservation-consuming transaction so
 // landing and reservation-deletion stay one atomic event, 期11 spec §1.7).
+// No grant write: authorization is membrane-uniform (PM-D1); the creator's
+// delete-right is the created_by column itself (PM-D3).
 // Returns resourcespec.ErrAlreadyExists on collision, decided INSIDE this
 // INSERT ... ON CONFLICT DO NOTHING (the race window never has a
 // resolve-then-create gap) — the caller decides what the collision means (a
 // plain failure for direct Create; "lost the race" for CommitReservation).
-func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance resourcespec.Provenance, initial []byte, dir bool) error {
-	// The creator's grant is full object-rights: read/write/set/delete. set-right
-	// is what makes the creator the controller (control = a full grant in R, no
-	// separate owner column).
-	ops, err := json.Marshal([]access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete})
-	if err != nil {
-		return fmt.Errorf("store: resource create marshal ops: %w", err)
-	}
-
+func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, dir bool, birth resourcespec.ResourceBirthPlan) error {
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO resources (resource_id, kind, bytes, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at, is_dir)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO resources (resource_id, kind, bytes, placement_daemon_id, placement_coord, created_by, source_channel_id, source_resource_id, created_at, is_dir)
+		   VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?)
 		 ON CONFLICT(resource_id) DO NOTHING`,
-		string(id), string(kind), initial, string(placementKindFor(kind)), placementDaemonID, placementCoord, string(provenance), string(creator), r.nowMs(), dir,
+		string(id), string(kind), initial, placementDaemonID, placementCoord, string(creator), string(birth.SourceChannelID), string(birth.SourceResourceID), r.nowMs(), dir,
 	)
 	if err != nil {
 		return fmt.Errorf("store: resource create insert %q: %w", id, err)
@@ -168,26 +146,21 @@ func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id 
 	if n == 0 {
 		return resourcespec.ErrAlreadyExists
 	}
-
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO resource_grants (resource_id, grantee_kind, grantee, ops)
-		   VALUES (?, ?, ?, ?)`,
-		string(id), string(access.GranteeActor), string(creator), string(ops),
-	); err != nil {
-		return fmt.Errorf("store: resource create grant %q: %w", id, err)
-	}
 	return nil
 }
 
 // ReserveCreate is create-outbox's server-side write-ahead half (§1.7): a
 // fresh reservation_id per call (uuid, so no collision to arbitrate — unlike
 // resource_id, reservation identity is never client-proposed).
-func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
+func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth resourcespec.ResourceBirthPlan) (string, error) {
 	if id == "" {
 		return "", errors.New("store: resource reserve-create: empty id")
 	}
 	if creator == "" {
 		return "", errors.New("store: resource reserve-create: empty creator")
+	}
+	if !birth.Valid() {
+		return "", errors.New("store: resource reserve-create: invalid source provenance")
 	}
 	reservationID := uuid.NewString()
 	now := r.nowMs()
@@ -196,9 +169,9 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 	// to the pre-S1 reserved_at-only behavior until something bumps it —
 	// SweepExpiredReservations judging a never-touched row is unchanged.
 	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, is_dir, last_progress_at)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), now, dir, now,
+		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, source_channel_id, source_resource_id, reserved_at, is_dir, last_progress_at)
+		   VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?, ?)`,
+		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), string(birth.SourceChannelID), string(birth.SourceResourceID), now, dir, now,
 	); err != nil {
 		return "", fmt.Errorf("store: resource reserve-create %q: %w", id, err)
 	}
@@ -207,43 +180,48 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 
 // CommitReservation is create-outbox's landing half (§1.7). See the
 // resourcespec.Registry doc for the found/err contract.
-func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID string) (bool, error) {
+func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID string) (resourcespec.LandedResource, bool, error) {
 	if reservationID == "" {
-		return false, errors.New("store: commit reservation: empty reservation id")
+		return resourcespec.LandedResource{}, false, errors.New("store: commit reservation: empty reservation id")
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("store: commit reservation begin: %w", err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var resourceID, kind, placementDaemonID, placementCoord, createdBy string
+	var resourceID, kind, placementDaemonID, placementCoord, createdBy, sourceChannelID, sourceResourceID string
 	var isDir bool
 	err = tx.QueryRowContext(ctx,
-		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, is_dir
+		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by,
+		        COALESCE(source_channel_id,''), COALESCE(source_resource_id,''), is_dir
 		   FROM resource_reservations WHERE reservation_id=?`,
 		reservationID,
-	).Scan(&resourceID, &kind, &placementDaemonID, &placementCoord, &createdBy, &isDir)
+	).Scan(&resourceID, &kind, &placementDaemonID, &placementCoord, &createdBy, &sourceChannelID, &sourceResourceID, &isDir)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already committed (an earlier replay landed and deleted it) or never
 		// existed: Committed is level-triggered and MUST be replay-safe — a
 		// clean no-op, not an error.
 		if cerr := tx.Commit(); cerr != nil {
-			return false, fmt.Errorf("store: commit reservation no-op commit: %w", cerr)
+			return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation no-op commit: %w", cerr)
 		}
-		return false, nil
+		return resourcespec.LandedResource{}, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("store: commit reservation lookup %q: %w", reservationID, err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation lookup %q: %w", reservationID, err)
 	}
 
+	birth := resourcespec.ResourceBirthPlan{
+		SourceChannelID:  channel.ID(sourceChannelID),
+		SourceResourceID: resource.ResourceID(sourceResourceID),
+	}
 	createErr := r.createResourceTx(ctx, tx,
 		resource.ResourceID(resourceID), resourcespec.ResourceKind(kind), actor.ActorID(createdBy),
-		placementDaemonID, placementCoord, resourcespec.ProvenanceAxisAllocated, nil, isDir,
+		placementDaemonID, placementCoord, nil, isDir, birth,
 	)
 	if createErr != nil && !errors.Is(createErr, resourcespec.ErrAlreadyExists) {
-		return false, fmt.Errorf("store: commit reservation create %q: %w", resourceID, createErr)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation create %q: %w", resourceID, createErr)
 	}
 
 	// Either way (won or lost the race) THIS reservation is consumed — delete
@@ -251,17 +229,17 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 	// losing side of a same-resource_id race deletes too, never left
 	// dangling (§1.7's three-triggers account, trigger ①/②).
 	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_reservations WHERE reservation_id=?`, reservationID); err != nil {
-		return false, fmt.Errorf("store: commit reservation delete %q: %w", reservationID, err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation delete %q: %w", reservationID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("store: commit reservation commit: %w", err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation commit: %w", err)
 	}
 
 	if errors.Is(createErr, resourcespec.ErrAlreadyExists) {
-		return true, resourcespec.ErrReservationLost
+		return resourcespec.LandedResource{}, true, resourcespec.ErrReservationLost
 	}
-	return true, nil
+	return resourcespec.LandedResource{ID: resource.ResourceID(resourceID), CreatedBy: actor.ActorID(createdBy)}, true, nil
 }
 
 // ReservationDaemon reads back one reservation's placement_daemon_id only —
@@ -334,7 +312,7 @@ func (r *resourceRegistry) ListReservationsByDaemon(ctx context.Context, daemonI
 // §4.7 ReconcilePull's "待收 tombstone" answer.
 func (r *resourceRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID string) ([]resourcespec.TombstoneRow, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT tombstone_id, resource_id, daemon_id, placement_coord, provenance, kind, deleted_at
+		`SELECT tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at
 		   FROM resource_tombstones WHERE daemon_id=? ORDER BY deleted_at, tombstone_id`,
 		daemonID,
 	)
@@ -346,12 +324,11 @@ func (r *resourceRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID 
 	var out []resourcespec.TombstoneRow
 	for rows.Next() {
 		var row resourcespec.TombstoneRow
-		var resID, provenance, kind string
-		if err := rows.Scan(&row.TombstoneID, &resID, &row.DaemonID, &row.PlacementCoord, &provenance, &kind, &row.DeletedAt); err != nil {
+		var resID, kind string
+		if err := rows.Scan(&row.TombstoneID, &resID, &row.DaemonID, &row.PlacementCoord, &kind, &row.DeletedAt); err != nil {
 			return nil, fmt.Errorf("store: list tombstones by daemon scan %q: %w", daemonID, err)
 		}
 		row.ResourceID = resource.ResourceID(resID)
-		row.Provenance = resourcespec.Provenance(provenance)
 		row.Kind = resourcespec.ResourceKind(kind)
 		out = append(out, row)
 	}
@@ -364,66 +341,39 @@ func (r *resourceRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID 
 // ListByPlacementDaemon returns every LANDED resource row whose
 // placement_daemon_id == daemonID — §4.7 ReconcilePull's "应有资源清单"
 // answer (the Scrubber's registry-side half of registry↔directory
-// reconciliation). Grant projection is fetched per row exactly like List
-// (grantsFor), for the same reason: a page of N resources should cost the
-// caller no per-op round trip, even though the Scrubber does not currently
-// consume Grants — the shape stays uniform with every other row-returning
-// method rather than a bespoke narrower one.
+// reconciliation).
 func (r *resourceRegistry) ListByPlacementDaemon(ctx context.Context, daemonID string) ([]resourcespec.ResourceRow, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT resource_id, kind, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at
+		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at
 		   FROM resources WHERE placement_daemon_id=? ORDER BY created_at, resource_id`,
 		daemonID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list by placement daemon %q: %w", daemonID, err)
 	}
-	// Buffer + close before any nested grantsFor query — same single-connection
-	// deadlock avoidance as List (see its comment).
-	type baseRow struct {
-		id                                                                 resource.ResourceID
-		kind, placementKind, placementDaemonID, placementCoord, provenance string
-		createdBy                                                          string
-		createdAt                                                          int64
-	}
-	var base []baseRow
-	for rows.Next() {
-		var b baseRow
-		var id string
-		if err := rows.Scan(&id, &b.kind, &b.placementKind, &b.placementDaemonID, &b.placementCoord, &b.provenance, &b.createdBy, &b.createdAt); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("store: list by placement daemon scan %q: %w", daemonID, err)
-		}
-		b.id = resource.ResourceID(id)
-		base = append(base, b)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("store: list by placement daemon rows %q: %w", daemonID, err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("store: list by placement daemon close %q: %w", daemonID, err)
-	}
+	defer func() { _ = rows.Close() }()
 
 	var out []resourcespec.ResourceRow
-	for _, b := range base {
-		grants, err := r.grantsFor(ctx, b.id)
-		if err != nil {
-			return nil, err
+	for rows.Next() {
+		var id, kind, placementDaemonID, placementCoord, createdBy string
+		var createdAt int64
+		if err := rows.Scan(&id, &kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt); err != nil {
+			return nil, fmt.Errorf("store: list by placement daemon scan %q: %w", daemonID, err)
 		}
 		out = append(out, resourcespec.ResourceRow{
-			ID: b.id,
+			ID: resource.ResourceID(id),
 			Meta: resourcespec.ResourceMeta{
-				Kind:              resourcespec.ResourceKind(b.kind),
-				CreatedAt:         b.createdAt,
-				PlacementKind:     resourcespec.PlacementKind(b.placementKind),
-				PlacementDaemonID: b.placementDaemonID,
-				PlacementCoord:    b.placementCoord,
-				Provenance:        resourcespec.Provenance(b.provenance),
-				CreatedBy:         actor.ActorID(b.createdBy),
+				Kind:              resourcespec.ResourceKind(kind),
+				CreatedAt:         createdAt,
+				PlacementKind:     placementKindFor(resourcespec.ResourceKind(kind)),
+				PlacementDaemonID: placementDaemonID,
+				PlacementCoord:    placementCoord,
+				CreatedBy:         actor.ActorID(createdBy),
 			},
-			Grants: grants,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list by placement daemon rows %q: %w", daemonID, err)
 	}
 	return out, nil
 }
@@ -525,98 +475,18 @@ func (r *resourceRegistry) TouchReservationsByCoords(ctx context.Context, daemon
 	return nil
 }
 
-// ActorAllows queries caller's DIRECT actor entry only. members late-binding is
-// the door's job (it unions this with MembersAllow gated by a membership check),
-// so this half never resolves the members set.
-func (r *resourceRegistry) ActorAllows(ctx context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error) {
-	return r.entryAllows(ctx, id, access.GranteeActor, string(caller), op)
-}
-
-// MembersAllow reports whether the object carries a members-kind entry granting
-// op. It does NOT look at caller — whether caller is a current member is the
-// door's membership check; the two halves union at the door (allow-only).
-func (r *resourceRegistry) MembersAllow(ctx context.Context, id resource.ResourceID, op access.Operation) (bool, error) {
-	return r.entryAllows(ctx, id, access.GranteeMembers, "", op)
-}
-
-// entryAllows fetches one grant entry (by the sum-form key) and reports whether
-// its ops include op. An absent entry is a clean false, not an error.
-func (r *resourceRegistry) entryAllows(ctx context.Context, id resource.ResourceID, kind access.GranteeKind, grantee string, op access.Operation) (bool, error) {
-	const q = `SELECT ops FROM resource_grants WHERE resource_id=? AND grantee_kind=? AND grantee=?`
-	var opsJSON string
-	err := r.db.QueryRowContext(ctx, q, string(id), string(kind), grantee).Scan(&opsJSON)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("store: resource grant lookup %q/%s/%q: %w", id, kind, grantee, err)
-	}
-	ops, err := decodeOps(opsJSON)
-	if err != nil {
-		return false, fmt.Errorf("store: resource grant ops decode %q/%s/%q: %w", id, kind, grantee, err)
-	}
-	for _, o := range ops {
-		if o == op {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// SetGrant implements op=set with chmod/setfacl SET semantics: it REPLACES the
-// grantee's entry with g. g.Ops == ∅ REVOKES = deletes the row (an absent entry
-// and an empty-ops entry must not be two states). The entry key is the full sum
-// form (resource_id, grantee_kind, grantee). g has already passed the door's
-// ValidateGrant, so the registry only stores (mirrors storespec's
-// store-not-validate discipline).
-func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID, g access.Grant) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: resource set-grant begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if len(g.Ops) == 0 {
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM resource_grants WHERE resource_id=? AND grantee_kind=? AND grantee=?`,
-			string(id), string(g.GranteeKind), string(g.Grantee),
-		); err != nil {
-			return fmt.Errorf("store: resource revoke grant %q: %w", id, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("store: resource revoke grant commit: %w", err)
-		}
-		return nil
-	}
-
-	ops, err := json.Marshal(g.Ops)
-	if err != nil {
-		return fmt.Errorf("store: resource set-grant marshal ops: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO resource_grants (resource_id, grantee_kind, grantee, ops)
-		   VALUES (?, ?, ?, ?)
-		 ON CONFLICT(resource_id, grantee_kind, grantee) DO UPDATE SET ops=excluded.ops`,
-		string(id), string(g.GranteeKind), string(g.Grantee), string(ops),
-	); err != nil {
-		return fmt.Errorf("store: resource set-grant %q: %w", id, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: resource set-grant commit: %w", err)
-	}
-	return nil
-}
-
-// Delete removes the resource row + ALL its grants in one transaction. The
+// Delete removes the resource row in one transaction. The
 // byte-collection time-order is KIND-DEPENDENT (期11 spec §1 item 8):
 //   - kv: bytes live inline, so removing the row removes the bytes — no
 //     tombstone, same shape as before.
-//   - file: ROW-FIRST-BYTES-LAST — this reads the row (kind + placement +
-//     provenance) inside the SAME transaction, writes a resource_tombstones
-//     row from those values, then deletes the resource row + grants. The
+//   - file: ROW-FIRST-BYTES-LAST — this reads the row (kind + placement)
+//     inside the SAME transaction, writes a resource_tombstones
+//     row from those values, then deletes the resource row. The
 //     daemon-side Reclaimer (§4, a later addition) collects the bytes
-//     asynchronously afterward. The invariant "a visible row always points
-//     at valid bytes" holds throughout: the row disappears FIRST.
+//     asynchronously afterward. In the normal domain, "a visible row always
+//     points at valid bytes" holds: the row disappears FIRST. A retired-daemon
+//     stranded row is the explicit exception and remains owner-visible for
+//     manual deletion.
 //
 // supersedePendingReservationsTx is Delete's #C helper: inside the caller's
 // transaction, for every still-pending reservation on id, write a
@@ -624,8 +494,7 @@ func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID,
 // ReconcilePull Reclaimer collects the orphaned live/<coord> bytes — the SAME
 // delete-outbox reclaim path a resource delete already uses, no new
 // mechanism) then delete the reservation row. Reservations are always file
-// kind with axis-allocated placement (kv/registered never reserve), so the
-// tombstone's provenance/kind are those constants. A reservation whose write
+// kind, so the tombstone's kind is fixed. A reservation whose write
 // handle is still open when this runs will, on its eventual Commit, hit
 // CommitReservation's found=false no-op — the row is already gone here.
 func (r *resourceRegistry) supersedePendingReservationsTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID) error {
@@ -656,9 +525,9 @@ func (r *resourceRegistry) supersedePendingReservationsTx(ctx context.Context, t
 
 	for _, p := range supers {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, provenance, kind, deleted_at)
-			   VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.NewString(), string(id), p.daemonID, p.coord, string(resourcespec.ProvenanceAxisAllocated), string(resourcespec.KindFile), r.nowMs(),
+			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at)
+			   VALUES (?, ?, ?, ?, ?, ?)`,
+			uuid.NewString(), string(id), p.daemonID, p.coord, string(resourcespec.KindFile), r.nowMs(),
 		); err != nil {
 			return fmt.Errorf("store: supersede reservations tombstone %q: %w", p.reservationID, err)
 		}
@@ -692,11 +561,11 @@ func (r *resourceRegistry) Delete(ctx context.Context, id resource.ResourceID) e
 		return err
 	}
 
-	var kind, placementDaemonID, placementCoord, provenance string
+	var kind, placementDaemonID, placementCoord string
 	err = tx.QueryRowContext(ctx,
-		`SELECT kind, placement_daemon_id, placement_coord, provenance FROM resources WHERE resource_id=?`,
+		`SELECT kind, placement_daemon_id, placement_coord FROM resources WHERE resource_id=?`,
 		string(id),
-	).Scan(&kind, &placementDaemonID, &placementCoord, &provenance)
+	).Scan(&kind, &placementDaemonID, &placementCoord)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already gone: delete is idempotent, retryable, no cross-call
 		// atomicity needed (only create does, for its controller-grab window).
@@ -711,9 +580,9 @@ func (r *resourceRegistry) Delete(ctx context.Context, id resource.ResourceID) e
 
 	if kind == string(resourcespec.KindFile) {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, provenance, kind, deleted_at)
-			   VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.NewString(), string(id), placementDaemonID, placementCoord, provenance, kind, r.nowMs(),
+			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at)
+			   VALUES (?, ?, ?, ?, ?, ?)`,
+			uuid.NewString(), string(id), placementDaemonID, placementCoord, kind, r.nowMs(),
 		); err != nil {
 			return fmt.Errorf("store: resource delete tombstone %q: %w", id, err)
 		}
@@ -721,9 +590,6 @@ func (r *resourceRegistry) Delete(ctx context.Context, id resource.ResourceID) e
 	// kv: bytes live inline in the row itself — deleting the row IS deleting
 	// the bytes, no tombstone.
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_grants WHERE resource_id=?`, string(id)); err != nil {
-		return fmt.Errorf("store: resource delete grants %q: %w", id, err)
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM resources WHERE resource_id=?`, string(id)); err != nil {
 		return fmt.Errorf("store: resource delete row %q: %w", id, err)
 	}
@@ -752,7 +618,7 @@ func (r *resourceRegistry) ClearTombstone(ctx context.Context, tombstoneID strin
 }
 
 // List enumerates resources in stable (created_at, resource_id) order — a
-// raw range scan, no grant filtering (the door's job, §3.7). See the
+// raw range scan, no authorization filtering (the door's job, §3.7). See the
 // resourcespec.Registry doc for the prefix/limit/cursor contract.
 func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, cursor string) ([]resourcespec.ResourceRow, string, error) {
 	if limit <= 0 {
@@ -769,7 +635,8 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 		}
 	}
 
-	q := `SELECT resource_id, kind, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at
+	q := `SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir,
+	             COALESCE(source_channel_id,''), COALESCE(source_resource_id,'')
 	        FROM resources
 	       WHERE (created_at > ? OR (created_at = ? AND resource_id > ?))`
 	args := []any{afterCreatedAt, afterCreatedAt, afterID}
@@ -784,61 +651,39 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 	if err != nil {
 		return nil, "", fmt.Errorf("store: resource list query: %w", err)
 	}
-
-	// Buffer the base rows and CLOSE this cursor before firing any per-row
-	// grantsFor query: the channel db is pinned to a single connection
-	// (sqlite.go's SetMaxOpenConns(1), load-bearing for messages.go's in-tx
-	// re-check), so a nested QueryContext while this cursor still holds it
-	// would deadlock waiting for a connection the pool will never hand out.
-	type baseRow struct {
-		id                                                                 resource.ResourceID
-		kind, placementKind, placementDaemonID, placementCoord, provenance string
-		createdBy                                                          string
-		createdAt                                                          int64
-	}
-	var base []baseRow
-	for rows.Next() {
-		var b baseRow
-		var id string
-		if err := rows.Scan(&id, &b.kind, &b.placementKind, &b.placementDaemonID, &b.placementCoord, &b.provenance, &b.createdBy, &b.createdAt); err != nil {
-			_ = rows.Close()
-			return nil, "", fmt.Errorf("store: resource list scan: %w", err)
-		}
-		b.id = resource.ResourceID(id)
-		base = append(base, b)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, "", fmt.Errorf("store: resource list rows: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, "", fmt.Errorf("store: resource list close: %w", err)
-	}
+	defer func() { _ = rows.Close() }()
 
 	var out []resourcespec.ResourceRow
 	var lastCreatedAt int64
 	var lastID string
 	n := 0
-	for _, b := range base {
-		grants, err := r.grantsFor(ctx, b.id)
-		if err != nil {
-			return nil, "", err
+	for rows.Next() {
+		var id, kind, placementDaemonID, placementCoord, createdBy string
+		var sourceChannelID, sourceResourceID string
+		var createdAt int64
+		var dir bool
+		if err := rows.Scan(&id, &kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &dir, &sourceChannelID, &sourceResourceID); err != nil {
+			return nil, "", fmt.Errorf("store: resource list scan: %w", err)
 		}
 		out = append(out, resourcespec.ResourceRow{
-			ID: b.id,
+			ID: resource.ResourceID(id),
 			Meta: resourcespec.ResourceMeta{
-				Kind:              resourcespec.ResourceKind(b.kind),
-				CreatedAt:         b.createdAt,
-				PlacementKind:     resourcespec.PlacementKind(b.placementKind),
-				PlacementDaemonID: b.placementDaemonID,
-				PlacementCoord:    b.placementCoord,
-				Provenance:        resourcespec.Provenance(b.provenance),
-				CreatedBy:         actor.ActorID(b.createdBy),
+				Kind:              resourcespec.ResourceKind(kind),
+				CreatedAt:         createdAt,
+				PlacementKind:     placementKindFor(resourcespec.ResourceKind(kind)),
+				PlacementDaemonID: placementDaemonID,
+				PlacementCoord:    placementCoord,
+				CreatedBy:         actor.ActorID(createdBy),
+				Dir:               dir,
+				SourceChannelID:   channel.ID(sourceChannelID),
+				SourceResourceID:  resource.ResourceID(sourceResourceID),
 			},
-			Grants: grants,
 		})
-		lastCreatedAt, lastID = b.createdAt, string(b.id)
+		lastCreatedAt, lastID = createdAt, id
 		n++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("store: resource list rows: %w", err)
 	}
 
 	nextCursor := ""
@@ -846,52 +691,54 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 		// A full page was scanned — there MAY be more; the cursor encodes the
 		// last SCANNED row's key (== last returned row's key here, since this
 		// layer never filters), not "the last visible row" (that distinction
-		// matters one layer up, at the door's grant-filtered projection, §3.7).
+		// matters one layer up, at the door's membership-filtered projection, §3.7).
 		nextCursor = encodeListCursor(lastCreatedAt, lastID)
 	}
 	return out, nextCursor, nil
 }
 
-// grantsFor fetches the FULL grant projection for one resource id — every
-// persisted (grantee_kind, grantee) entry, ops included — so List's caller
-// (the door) can compute effectiveOps without a second per-op query.
-func (r *resourceRegistry) grantsFor(ctx context.Context, id resource.ResourceID) ([]access.Grant, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT grantee_kind, grantee, ops FROM resource_grants WHERE resource_id=?`, string(id))
-	if err != nil {
-		return nil, fmt.Errorf("store: resource list grants %q: %w", id, err)
+func publicResourceMeta(id resource.ResourceID, meta resourcespec.ResourceMeta) channel.ResourceMeta {
+	return channel.ResourceMeta{
+		ID: id, Kind: string(meta.Kind), CreatedBy: meta.CreatedBy, CreatedAt: meta.CreatedAt,
+		PlacementKind: string(meta.PlacementKind), PlacementDaemonID: meta.PlacementDaemonID, Dir: meta.Dir,
+		SourceChannelID: meta.SourceChannelID, SourceResourceID: meta.SourceResourceID,
 	}
-	defer func() { _ = rows.Close() }()
+}
 
-	var out []access.Grant
-	for rows.Next() {
-		var granteeKind, grantee, opsJSON string
-		if err := rows.Scan(&granteeKind, &grantee, &opsJSON); err != nil {
-			return nil, fmt.Errorf("store: resource list grants scan %q: %w", id, err)
-		}
-		ops, err := decodeOps(opsJSON)
-		if err != nil {
-			return nil, fmt.Errorf("store: resource list grants decode %q: %w", id, err)
-		}
-		out = append(out, access.Grant{
-			GranteeKind: access.GranteeKind(granteeKind),
-			Grantee:     actor.ActorID(grantee),
-			Ops:         ops,
-		})
+func (r *resourceRegistry) ListReadable(ctx context.Context, q channel.ResourceListQuery) (channel.ResourcePage, error) {
+	limit := q.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: resource list grants rows %q: %w", id, err)
+	rows, next, err := r.List(ctx, q.Prefix, limit, q.Cursor)
+	if err != nil {
+		return channel.ResourcePage{}, err
+	}
+	out := channel.ResourcePage{Items: make([]channel.ResourceMeta, 0, len(rows)), Next: next}
+	for _, row := range rows {
+		out.Items = append(out.Items, publicResourceMeta(row.ID, row.Meta))
 	}
 	return out, nil
 }
 
-// decodeOps unmarshals the JSON-array ops column shared by every grant read
-// path (entryAllows, grantsFor).
-func decodeOps(opsJSON string) ([]access.Operation, error) {
-	var ops []access.Operation
-	if err := json.Unmarshal([]byte(opsJSON), &ops); err != nil {
-		return nil, err
+func (r *resourceRegistry) StatReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, bool, error) {
+	meta, found, err := r.Resolve(ctx, id)
+	if err != nil || !found {
+		return channel.ResourceMeta{}, found, err
 	}
-	return ops, nil
+	return publicResourceMeta(id, meta), true, nil
+}
+
+func (r *resourceRegistry) FetchReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, []byte, bool, error) {
+	meta, found, err := r.Resolve(ctx, id)
+	if err != nil || !found {
+		return channel.ResourceMeta{}, nil, found, err
+	}
+	if meta.Kind != resourcespec.KindKV {
+		return publicResourceMeta(id, meta), nil, true, storespec.ErrResourceCapabilityUnavailable
+	}
+	value, _, err := newKVDriver(r.db).Read(ctx, id)
+	return publicResourceMeta(id, meta), value, true, err
 }
 
 // likePrefix turns a plain resource_id prefix into a LIKE pattern, escaping

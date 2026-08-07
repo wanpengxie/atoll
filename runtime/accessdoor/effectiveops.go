@@ -1,69 +1,40 @@
 package accessdoor
 
 import (
-	"context"
-
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
-// objectOps is the closed set of R-governed object verbs — the ops any
-// Grant.Ops structurally ranges over (create is container-locus, never an R
-// grant; ingress.ValidateGrant enforces the identical set on the wire side).
-// effectiveOps ranges its per-op union computation over exactly this set.
-var objectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}
+// objectOps is the closed set of object verbs an existing channel-scoped
+// resource answers to (create is container-locus and lives on the Create
+// method). effectiveOps ranges its computation over exactly this set, in this
+// FIXED order (opSetFromEffective's wire-stable enumeration depends on it).
+var objectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpDelete}
 
-// effectiveOps computes caller's UNION of grantable rights on an EXISTING
-// resource — the A8 formula (期11 spec §2 item 2): for each object op,
-// ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller)). Door-internal only:
-// it never crosses the wire and never appears in a public signature. THREE
-// loci are meant to share this ONE function (期11 build order — only the
-// first is wired as of this section):
-//   - the set arm's escalation check (door.go, THIS section): set(X, ops)
-//     requires ops ⊆ effectiveOps(caller);
-//   - Stat's echoed ops (§3, not yet built);
-//   - List's per-row projection (§3, not yet built).
+// effectiveOps is THE authorization formula of the channel-scoped access
+// plane (PM-D1/PM-D3), a PURE function of membership facts + the creation
+// fact — no registry round trip, because there is no per-object relation to
+// consult:
 //
-// Computing the union differently in even one of the three would let a
-// departed member's residual members-row rights leak through that ONE path
-// while the other two correctly deny it — the spec's explicit regression
-// ("actor 移出频道后 members 权利立即不再计入，三处同断言") is really a
-// demand that there be exactly one formula, not three copies of it.
+//	read/write : active            (membrane-uniform — membership IS the right)
+//	delete     : active ∧ (channel owner ∨ caller == createdBy)   (PM-D3)
 //
-// IsMember is resolved AT MOST ONCE per call (lazily, only if some op's
-// MembersAllow comes back true) — membership doesn't change between the four
-// per-op checks within one effectiveOps call, so there is nothing to gain by
-// re-resolving it, mirroring the door's existing single-op union block
-// (door.go's authorize step) which does the same lazy-single-resolve.
-func (d *door) effectiveOps(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (map[access.Operation]bool, error) {
+// Every locus that judges object rights uses this one function — the invoke
+// gate (door.go, asked for the one op the call carries), Stat's echoed ops
+// and List's per-row projection (query.go). Computing it differently in even
+// one locus would fork the model; the function's purity is what keeps the
+// three loci structurally identical.
+//
+// An inactive caller (departed member, dead identity) holds NO ops — the
+// membrane's trust phase covers exactly its current members plus the channel
+// owner root (whose facts also carry Active).
+func effectiveOps(caller actor.ActorID, active, owner bool, createdBy actor.ActorID) map[access.Operation]bool {
 	eff := make(map[access.Operation]bool, len(objectOps))
-	var isMember bool
-	var isMemberResolved bool
-
-	for _, op := range objectOps {
-		allowed, err := d.deps.Registry.ActorAllows(ctx, caller, id, op)
-		if err != nil {
-			return nil, err
-		}
-		if !allowed {
-			mAllow, err := d.deps.Registry.MembersAllow(ctx, id, op)
-			if err != nil {
-				return nil, err
-			}
-			if mAllow {
-				if !isMemberResolved {
-					isM, err := d.deps.Membership.IsMember(ctx, caller)
-					if err != nil {
-						return nil, err
-					}
-					isMember = isM
-					isMemberResolved = true
-				}
-				allowed = isMember
-			}
-		}
-		eff[op] = allowed
+	if !active {
+		return eff
 	}
-	return eff, nil
+	eff[access.OpRead] = true
+	eff[access.OpWrite] = true
+	eff[access.OpDelete] = owner || caller == createdBy
+	return eff
 }

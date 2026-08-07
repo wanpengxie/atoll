@@ -1,6 +1,6 @@
 // Package timerspec is the kernel-only leaf that declares the durable
 // pending-timer CONTRACT — the interface runtime/internal/store implements
-// over sqlite for the IDENTITY-level half of the time axis, dual to
+// over sqlite for the Durable Scheduler home, dual to
 // resourcespec on the object plane and storespec on the message plane.
 //
 // Why a dedicated leaf (mirrors resourcespec/storespec): this contract sits
@@ -16,13 +16,9 @@
 // convention.
 //
 // timerspec imports ONLY kernel (pure types) + context/errors. It holds ONLY
-// the durable half of the time axis: identity-bind pending intent, keyed by
-// a durable name (author identity). Incarnation-bind timers are NOT here and
-// never will be — they are the schedule engine's in-memory due-set, welded
-// to the live embodiment, vanishing with the process (matching the historical
-// precedent of BEAM in-VM timers / Orleans in-activation Timers / POSIX
-// timers on task_struct — ephemeral intent lives in ephemeral memory, never
-// gets a durable account). So this leaf has no Bind field and no Bind type
-// at all — Bind is a routing choice that lives in runtime/schedule, not a
-// persisted tag.
+// the Durable Scheduler home, keyed by author ActorID. Memory-home timers live
+// in the current runtime/schedule Engine instance and vanish with that
+// Channel/Scheduler instance. Both homes cross actor replacement; neither is
+// an actor AttemptKey/Incarnation binding. The storage home is not persisted
+// as a per-row tag: being in this table already means Durable.
 package timerspec

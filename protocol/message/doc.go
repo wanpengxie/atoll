@@ -1,10 +1,10 @@
 // Package message defines the v4 message envelope, message kind /
-// visibility enums, the core-type table, and the terminal-failure reason
-// closed set.
+// visibility enums, and the terminal-failure reason closed set.
 //
 // Key invariants:
 //
 //   - Kind is a closed set.
+//   - Visibility is the closed attention set {public, system}.
 //   - Terminal-failure reason is a closed set.
 //
 // The package depends on protocol/actor for sender identity primitives.

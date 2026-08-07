@@ -2,12 +2,13 @@ package actorbase
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -17,9 +18,13 @@ import (
 // line ever runs, and nothing in this interface lets the holder self-report a
 // different one. It is a SATISFYING MAP of the substrate's closed capability
 // face (spec §1.2): every internal-primitive column of the verb table has
-// exactly one Sys method, and Sys defines NOTHING beyond that table (additive
-// only — a capability-face addition earns a new method; nothing here exists
-// for a hypothetical future consumer).
+// exactly ONE Sys method — there is no parallel, suffixed twin of any column.
+// The off-process subject's drive face used to be exactly that (a set of
+// Identity-suffixed variants); it collapsed back into this one table once the
+// real distinction it carried was named where it belongs — on the Msg, as
+// MsgOrigin, "which ledger authorises this write". Sys defines NOTHING beyond
+// those tables (additive only — a capability-face addition earns a new method;
+// nothing here exists for a hypothetical future consumer).
 //
 // ctx PROVENANCE (the one rule every Proc author must internalise — owner
 // 2026-07-04, "只修 Wait 修不了生态" is why this is a rule and not a magic
@@ -40,20 +45,49 @@ import (
 type Sys interface {
 	// --- Pen: response / terminal writes -----------------------------
 	// Reply commits a final completed response for the request Msg in hand.
+	// The Msg's origin picks the gate: a mailbox Msg is checked against the
+	// serve ledger, a log Msg writes straight through (the log is its
+	// authority; the harness is the backstop). Either way a successful — or
+	// idempotently absorbed — write closes the serve ledger entry if one
+	// exists.
 	Reply(msg Msg, v any) (message.ID, error)
 	// Fail commits a final failed response, carrying the conventional
 	// {error_code,detail} payload. This is the PRECISE error tier (spec
 	// B-P2) — the counterpart to a bare `return err`, which Serve's sugar
 	// maps to the generic internal_error tier instead.
+	//
+	// The terminal REASON is derived here, not supplied: answering someone
+	// else's request is a receiver failure (receiver_internal_error), while
+	// failing a request this same identity SENT is the caller closing its own
+	// account (unanswered_timeout) — and the latter additionally stamps
+	// cancelled:true into the payload, the structured bit consumers use to
+	// tell a deliberate close from a deadline that simply passed.
 	Fail(msg Msg, code, detail string) (message.ID, error)
 	// Progress commits a non-final provisional response for the request Msg
 	// in hand — the request stays Admitted, awaiting its eventual terminal.
-	Progress(msg Msg, v any) (message.ID, error)
+	// A log-origin Msg is a TERMINAL-ONLY handle and is refused here.
+	Progress(msg Msg, status string, v any) (message.ID, error)
 
 	// --- Pen: event write ---------------------------------------------
 	// Emit writes a kind=event message. Events carry no closure obligation
-	// (spec §1.5) — nothing in the in-station account ever waits on one.
-	Emit(msgType string, payload any, audience ...actor.ActorID) (message.ID, error)
+	// (spec §1.5) — nothing in the in-station account ever waits on one. It
+	// takes the FULL event surface (own id, parent, correlation, visibility,
+	// audience); the narrow "type + value + audience" shape is sugar and
+	// lives in lib/behavior, not in the verb table.
+	Emit(spec behavior.EventSpec) (message.ID, error)
+
+	// --- Pen: request write, no caller closure -------------------------
+	// Post writes a kind=request message and returns its id — nothing more.
+	// It is Call's sibling on the OTHER side of the closure question: the
+	// author takes on NO caller obligation, so there is no out-station ledger
+	// entry, no author#2 timer, and no ticket to Wait on. Consequently it
+	// neither resolves a default timeout (an absent ExpiresAt rides through
+	// untouched, for the substrate to stamp its global TTL on) nor refuses a
+	// self-addressed request (nothing here can deadlock a worker).
+	//
+	// Closure of a Posted request is the substrate's: the declared deadline is
+	// truth and the expiry reaper enforces it.
+	Post(spec behavior.RequestSpec) (message.ID, error)
 
 	// --- Pen: request write + caller closure ---------------------------
 	// Call writes a kind=request message addressed to target and returns the
@@ -67,9 +101,14 @@ type Sys interface {
 	Resource() ResourceHandle
 
 	// --- Schedule arm ---------------------------------------------------
-	// After arms a self-targeted timer that wakes this incarnation with a
-	// self-authored message after d.
-	After(d time.Duration, msgType string, payload any) (schedule.TimerID, error)
+	// After arms a self-targeted timer, in the storage home the caller names.
+	// home is DURABILITY, not lifetime: both homes are ActorID-owned and both
+	// survive body replacement (schedule/types.go says so in as many words) —
+	// Memory lives in the current Channel/Scheduler instance's alarm set,
+	// Durable in the Scheduler DB and so across a Scheduler restart. There is
+	// no default: picking how long a reminder must survive is the caller's
+	// declaration, not something to inherit from a sugar.
+	After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error)
 	CancelTimer(id schedule.TimerID) error
 
 	// --- Spawn arm --------------------------------------------------
@@ -78,14 +117,15 @@ type Sys interface {
 	// config is the parent's opaque per-instance委托 for the child (the fork
 	// counterpart of admission's InstanceSpec.Config — the argv/Args a parent
 	// hands its child); substrate passes it through verbatim to the domain's
-	// build table, never interpreting it. A daemon-hosted incarnation returns
-	// ErrUnsupported (spec §3's known gap: fork is a cell-only capability in v1).
-	Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error)
-	DespawnChild(id actor.ActorID) error
+	// build table, never interpreting it. Server and daemon incarnations use the
+	// same lifecycle contract; the daemon arm relays this full spec over its port.
+	Fork(requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error)
+	// End commits this identity's lifecycle end and fences subsequent effects.
+	End() error
 
 	// --- ActorContext -----------------------------------------------
 	// PublishObs pushes one opaque obs snapshot on the actor-source push
-	// channel (actorrt.ObsWatcher's producer side). kind/val are opaque to
+	// channel. kind/val are opaque to
 	// the substrate by design (spec: "泛型签名不收窄") — the substrate
 	// forwards, it never interprets an actor's own operational vocabulary.
 	PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error
@@ -106,13 +146,14 @@ type Sys interface {
 	Life() context.Context
 }
 
-// ErrUnsupported is returned by a Sys verb that a given host cannot honour —
-// today only daemon-hosted Fork (spec §3's out-generation matrix: the daemon
-// host mints via NewLiveArms, which has no local Runtime.Fork to call
-// through). Not a typed-error constructor family (spec red line: zero typed
-// error constructors) — one sentinel for "this host does not have this verb",
-// tested with errors.Is.
-var ErrUnsupported = errors.New("actorbase: verb unsupported on this host")
+// ErrUnsupported is returned by a Sys verb whose concrete host lacks the
+// required capability (for example, server-hosted file-byte redemption). It is
+// one sentinel rather than a typed-error constructor family and is tested with
+// errors.Is.
+var (
+	ErrUnsupported     = errors.New("actorbase: verb unsupported on this host")
+	ErrNotTimerMessage = errors.New("actorbase: message is not a timer fire")
+)
 
 // ErrSelfCall is submit's fail-fast verdict for a Call/Submit addressed to the
 // caller's OWN id (spec §1.3: "自 Call 自 = 在写请求/登记之前 fail-fast 返错,
@@ -130,3 +171,23 @@ var ErrSelfCall = errors.New("actorbase: cannot Call self — single-worker dead
 // own terminal-uniqueness index underneath remains the final backstop
 // regardless. Tested with errors.Is.
 var ErrRequestClosed = errors.New("actorbase: request already closed")
+
+// ErrMsgOriginUnset is every write verb's verdict for a Msg carrying the zero
+// MsgOrigin — a Msg that never went through NewMsg (a zero-value discard that
+// escaped into a live path). It is deliberately an ERROR arm and not a silent
+// fallback: defaulting an unknown origin to the mailbox would let such a Msg
+// sail through the serve-ledger gate on an id the ledger has never heard of,
+// which is exactly the failure mode making origin mandatory was meant to kill.
+// Tested with errors.Is.
+var ErrMsgOriginUnset = errors.New("actorbase: msg origin unset — Msg was not built by NewMsg")
+
+// ErrLogOriginTerminalOnly is Progress's verdict for a log-origin Msg: that
+// handle exists to write ONE terminal and be dropped (see MsgOrigin), and a
+// provisional is not a terminal. Nothing is written and no account is closed.
+//
+// This is misuse, not a race: behavior.Progress's tolerance for "the terminal
+// already landed" serves a live occupant whose ledger gate passed a moment
+// before another author's final — a genuine window. A log holder calling
+// Progress has no such window to be caught in, so answering it with a fake
+// success would hide the mistake instead of reporting it. Tested with errors.Is.
+var ErrLogOriginTerminalOnly = errors.New("actorbase: log-origin Msg is a terminal-only write handle")

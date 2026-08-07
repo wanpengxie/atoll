@@ -8,7 +8,12 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
 )
+
+// unauthorizedSenderCode belongs to the sysactor transport gate. It is not an
+// OperationErrorCode: rejected senders create no value-operation account.
+const unauthorizedSenderCode = "unauthorized_sender"
 
 // The channel operate face — the in-gate control plane (owner 2026-07-05 拍
 // NP-1=c). Channel-scoped control actions (remove/restart/set-default/introduce
@@ -31,7 +36,7 @@ const (
 	TypeIntroduceActor  = "channel.introduce_actor"
 	TypeRemoveActor     = "channel.remove_actor"
 	TypeRestartActor    = "channel.restart_actor"
-	TypeSetDefaultAgent = "channel.set_default_agent"
+	TypeSetDefaultAgent = registry.TypeSetDefaultAgent
 )
 
 // OperateRequest is the decoded delivery an OperateExecutor acts on: the gate
@@ -42,6 +47,7 @@ const (
 type OperateRequest struct {
 	ChannelID channel.ID
 	Sender    actor.ActorID
+	Anchor    string
 	Payload   json.RawMessage
 }
 
@@ -62,16 +68,17 @@ func (e *OperateError) Error() string { return e.Code + ": " + e.Detail }
 // to pick the code, else mapped to internal_error). nil executor = the injection
 // point is unfilled; the gate does not synthesize (caller's closure reaps it).
 type OperateExecutor interface {
-	Introduce(ctx context.Context, req OperateRequest) (any, error)
-	Remove(ctx context.Context, req OperateRequest) (any, error)
-	Restart(ctx context.Context, req OperateRequest) (any, error)
-	SetDefaultAgent(ctx context.Context, req OperateRequest) (any, error)
+	Execute(ctx context.Context, operation string, req OperateRequest) (any, error)
 }
 
-// handleOperate is the gate: permission (NP-2=a — sender is an active member,
-// kind-blind, so an agent member may be delegated channel management) then route
-// to the injected executor, mapping its decision to Reply/Fail. Unfilled
-// executor = no synthesis (same posture as an unrouted type).
+// handleOperate is the gate: permission (NP-2=a — sender is an active member of
+// the unified authority, storage-home blind, so an agent member may be
+// delegated channel management) then route to the injected executor, mapping
+// its decision to Reply/Fail. Rejections are noise, not truth: they terminate
+// as the request's failed reply and never touch the operation ledger — the
+// cheapest deny point, so a rejected sender cannot grow any durable account by
+// repeating garbage. Unfilled executor = no synthesis (same posture as an
+// unrouted type).
 func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	if s.operate == nil {
 		return
@@ -82,26 +89,22 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if !authed {
-		_, _ = sys.Fail(msg, "unauthorized_sender", "sender is not an active channel member")
+		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
+			"sender", string(msg.Sender.ID), "code", unauthorizedSenderCode)
+		_, _ = sys.Fail(msg, unauthorizedSenderCode, "sender is not an active channel member")
 		return
 	}
-	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Payload: msg.Payload}
-	var result any
-	switch msg.Type {
-	case TypeIntroduceActor:
-		result, err = s.operate.Introduce(msg.Ctx(), req)
-	case TypeRemoveActor:
-		result, err = s.operate.Remove(msg.Ctx(), req)
-	case TypeRestartActor:
-		result, err = s.operate.Restart(msg.Ctx(), req)
-	case TypeSetDefaultAgent:
-		result, err = s.operate.SetDefaultAgent(msg.Ctx(), req)
-	default:
-		return
-	}
+	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Anchor: string(msg.ID), Payload: msg.Payload}
+	result, err := s.operate.Execute(msg.Ctx(), msg.Type, req)
 	if err != nil {
 		var oe *OperateError
 		if errors.As(err, &oe) {
+			// The refusal already lands in the channel log as this request's
+			// failed terminal (replayable truth); this line is the OPS-side trace
+			// — a storm of refused control actions must be visible in the server
+			// log too, not only inside per-channel sqlite.
+			s.logger.Info("sysactor.operate.refused", "type", msg.Type,
+				"sender", string(msg.Sender.ID), "code", oe.Code)
 			_, _ = sys.Fail(msg, oe.Code, oe.Detail)
 			return
 		}
@@ -111,20 +114,15 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	_, _ = sys.Reply(msg, result)
 }
 
-// senderIsActiveMember is the gate's permission predicate (NP-2=a): the request
-// sender must be an active membership row of this channel. kind-blind (an agent
-// member is a legitimate delegate). A registry error is surfaced (internal_error),
-// not silently read as unauthorized.
+// senderIsActiveMember is the gate's permission predicate (NP-2=a) over the
+// unified active-identity authority. Physical identity storage is unobservable
+// here. An authority error is surfaced (internal_error), not silently read as
+// unauthorized. The
+// window between this check and the value commit is the system's standard
+// in-flight tolerance (same doctrine as message delivery vs incarnation).
 func (s *SystemActor) senderIsActiveMember(msg actorbase.Msg) (bool, error) {
-	if s.registry == nil {
+	if s.authority == nil {
 		return false, nil
 	}
-	rec, ok, err := s.registry.Lookup(msg.Ctx(), msg.Sender.ID)
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		return false, nil
-	}
-	return rec.IsActive(), nil
+	return s.authority.IsActive(msg.Ctx(), msg.Sender.ID)
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -24,17 +23,19 @@ const (
 	backoffDuration       = 1 * time.Second
 	perFireTimeout        = 10 * time.Second
 	maxMemTimersPerAuthor = 1024
+
+	// storeErrLogPeriod paces the "still faulting" summary Warn while a
+	// store-backed query/delete stays broken across many ticks — the
+	// schedule-side twin of the no_factory soak finding: a 1s-tick backoff
+	// re-hitting a dead store must never re-log at tick cadence.
+	storeErrLogPeriod = 30 * time.Second
 )
 
-// memTimer is one incarnation-bind entry in the engine's in-memory due-set —
-// NEVER a store row, NEVER serialised. inc is the
-// attach reference captured at Schedule time; the drop check at fire time
-// compares it by POINTER identity via LivenessProbe.IsLive (ABA-safe: a
-// same-id successor being live does not rescue a predecessor's timer).
+// memTimer is one timer in the current Channel/Scheduler instance's in-memory
+// due-set. It is ActorID-owned and is not welded to an actor incarnation.
 type memTimer struct {
 	id            TimerID
 	author        actor.ActorID
-	inc           actorrt.Incarnation
 	fireAt        int64
 	typ           string
 	payload       []byte
@@ -42,10 +43,10 @@ type memTimer struct {
 }
 
 // Engine is the time axis's single poll/wake loop + fire path, driving BOTH
-// lifecycle families (durable identity rows via Deps.Store, in-memory
-// incarnation entries via mem) through one run goroutine (tap.Pump
-// structural twin). Schedule/Cancel run on the CALLER's goroutine (a
-// ScheduleHandle may be held by any actor cell); mem is the only state they
+// Scheduler homes (durable rows via Deps.Store and in-memory alarms via mem)
+// through one run goroutine (tap.Pump structural twin). Both homes are
+// ActorID-owned and cross actor AttemptKey/Incarnation replacement.
+// Schedule/Cancel run on the caller's goroutine; mem is the only state they
 // share with run, guarded by mu in short critical sections.
 type Engine struct {
 	deps Deps
@@ -59,12 +60,43 @@ type Engine struct {
 	ctx       context.Context
 	cancelRun context.CancelFunc
 	closeOnce sync.Once
+	closeDone chan struct{}
+	leaked    atomic.Int64
 
 	// started guards the Start/Close lifecycle pair: double Start panics
 	// loud, Close before Start returns without joining (done is only ever
 	// closed by a run loop that ran). Lifecycle misuse is an assembly bug —
 	// it must fail at the misuse site, not deadlock or double-fire later.
 	started atomic.Bool
+
+	// storeErr and transient are edge-dedup bookkeeping for the run loop's
+	// own slog cadence (P3): both are touched ONLY from the single run()
+	// goroutine (fireDue/nextFireAt never run concurrently with themselves),
+	// so neither needs mu.
+	storeErr  storeFault
+	transient map[transientKey]struct{}
+}
+
+// storeFault is the run loop's edge-dedup state for a store-backed query or
+// delete that starts failing: entering a NEW kind (or the very first fault)
+// logs loud once; the SAME kind persisting logs a periodic summary Warn
+// (storeErrLogPeriod cadence) instead of at tick cadence; clearing logs a
+// loud recovery edge. kind is the failing operation's name (e.g.
+// "due_query_failed") — the schedule-side twin of no_factory's per-actor
+// edge state, scoped to "one active store fault at a time" because a
+// down store degrades every query in the same tick together in practice.
+type storeFault struct {
+	kind         string
+	streak       int64
+	firstAt      time.Time
+	lastLoggedAt time.Time
+}
+
+// transientKey identifies one consecutive-transient-retry streak. kind
+// separates Memory-home and Durable-home fire attempts that may share IDs.
+type transientKey struct {
+	kind string
+	id   string
 }
 
 // New assembles the engine from deps and returns its two outward faces — a
@@ -79,10 +111,6 @@ func New(deps Deps) (Minter, *Engine, error) {
 		return nil, nil, errors.New("schedule: Deps.Store required")
 	case deps.Fire == nil:
 		return nil, nil, errors.New("schedule: Deps.Fire required")
-	case deps.Host == nil:
-		return nil, nil, errors.New("schedule: Deps.Host required")
-	case deps.Revive == nil:
-		return nil, nil, errors.New("schedule: Deps.Revive required")
 	case deps.Clock == nil:
 		return nil, nil, errors.New("schedule: Deps.Clock required")
 	}
@@ -90,11 +118,13 @@ func New(deps Deps) (Minter, *Engine, error) {
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
 	e := &Engine{
-		deps: deps,
-		mem:  make(map[TimerID]memTimer),
-		wake: make(chan struct{}, 1),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		deps:      deps,
+		mem:       make(map[TimerID]memTimer),
+		wake:      make(chan struct{}, 1),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		closeDone: make(chan struct{}),
+		transient: make(map[transientKey]struct{}),
 	}
 	e.ctx, e.cancelRun = context.WithCancel(context.Background())
 	return &minter{engine: e}, e, nil
@@ -112,8 +142,7 @@ func (e *Engine) Start() {
 }
 
 // Close stops the run loop and joins its goroutine, then never touches the
-// store again (mirrors tap.Pump.Close). Safe to call once; a second call
-// would panic on the closed stop channel, same discipline as Pump.
+// store again. Concurrent and repeated calls wait for the same bounded close.
 //
 // Close BEFORE Start (an assembly error-path `defer Close()` that fires when
 // a later wiring step failed) is legal and returns immediately: there is no
@@ -121,12 +150,32 @@ func (e *Engine) Start() {
 // The stop channel is still closed, so a Start that races/follows sees an
 // already-stopped engine and its run loop exits at once.
 func (e *Engine) Close() {
-	e.closeOnce.Do(func() { e.cancelRun(); close(e.stop) })
-	if !e.started.Load() {
-		return
-	}
-	<-e.done
+	e.closeWithin(5 * time.Second)
 }
+
+func (e *Engine) closeWithin(timeout time.Duration) {
+	e.closeOnce.Do(func() {
+		defer close(e.closeDone)
+		e.cancelRun()
+		close(e.stop)
+		if !e.started.Load() {
+			return
+		}
+		select {
+		case <-e.done:
+		case <-time.After(timeout):
+			// Bounded abandon proof: fire writes are replay-idempotent; its only
+			// production arm is Revive, which the owner's step-zero Runtime.Seal
+			// rejects before this join can be abandoned.
+			e.leaked.Add(1)
+			e.deps.Logger.Error("schedule.engine.join_timeout", "timeout", timeout,
+				"safety", "writes are idempotent; runtime admission is sealed by owner")
+		}
+	})
+	<-e.closeDone
+}
+
+func (e *Engine) Leaked() int64 { return e.leaked.Load() }
 
 // mintTimerID mints a fresh, never-reused TimerID: reusing a TimerID would
 // let an old fire's messages.id UNIQUE swallow a legitimate new fire. The
@@ -135,18 +184,22 @@ func (e *Engine) Close() {
 func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 
 // schedule validates req, mints a TimerID, and routes the intent to its
-// bind's home. Runs on the caller's goroutine — a short critical section
-// for the incarnation path, no I/O under the lock.
+// Scheduler home. It runs on the caller's goroutine; the Memory path uses a
+// short critical section and performs no I/O under the lock.
 //
 // Unexported: author is a free parameter here, so this is the UN-WELDED face
 // — the schedule-package twin of harness's bare chain, and it stays inside
 // the package for the same reason the chain does. Every consumption path
-// (caps-injected cell handle, host-side per-call mint at the port arm, the
-// platform's own system timers) closes over Minter.Mint(author), and Mint is
-// the one seam future per-author enforcement (liveSchedule membrane, storm
-// quotas, principal checks) attaches to — an exported free-author method
-// would be a standing structural bypass of that seam.
-func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req ScheduleReq) (TimerID, error) {
+// (the caps-injected cell handle and the remote ingress's per-call shell alike)
+// closes over Minter.MintAuthority(authority), which is the one seam the author
+// verdict — and any future per-author enforcement (storm quotas, principal
+// checks) — attaches to; an exported free-author method would be a standing
+// structural bypass of that seam.
+func (e *Engine) schedule(
+	ctx context.Context,
+	author actor.ActorID,
+	req ScheduleReq,
+) (TimerID, error) {
 	if err := validateScheduleReq(req); err != nil {
 		return "", err
 	}
@@ -154,8 +207,8 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 	id := mintTimerID()
 	now := e.deps.Clock.Now().UnixMilli()
 
-	switch req.Bind {
-	case BindIdentity:
+	switch req.Home {
+	case TimerHomeDurable:
 		row := timerspec.TimerRow{
 			ID:            id,
 			AuthorID:      author,
@@ -166,26 +219,12 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 			CreatedAt:     now,
 		}
 		if err := e.deps.Store.Insert(ctx, row); err != nil {
-			if errors.Is(err, timerspec.ErrAuthorInactive) {
-				return "", ErrAuthorInactive
-			}
 			if errors.Is(err, timerspec.ErrScheduleQuota) {
 				return "", ErrScheduleQuota
 			}
 			return "", err
 		}
-	case BindIncarnation:
-		// Attach: self-read whichever embodiment is live for
-		// author RIGHT NOW. No live embodiment → nothing to weld to, and an
-		// incarnation-bind timer with no incarnation is a contradiction —
-		// ErrBadSchedule (this only guards "no embodiment at all"; a racing
-		// caller's stale mental model of WHICH embodiment is live is fenced
-		// downstream at the platform link layer, actorrt.CurrentIncarnation
-		// doc).
-		inc, ok := e.deps.Host.CurrentIncarnation(author)
-		if !ok {
-			return "", ErrBadSchedule
-		}
+	case TimerHomeMemory:
 		e.mu.Lock()
 		count := 0
 		for _, existing := range e.mem {
@@ -200,7 +239,6 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 		e.mem[id] = memTimer{
 			id:            id,
 			author:        author,
-			inc:           inc,
 			fireAt:        req.FireAt,
 			typ:           req.Type,
 			payload:       req.Payload,
@@ -246,6 +284,32 @@ func (e *Engine) cancel(ctx context.Context, author actor.ActorID, id TimerID) e
 	return err
 }
 
+// ForgetActors is the narrow process-memory release port (§5.5). It drops the
+// memory-home timers of dead ids and NOTHING else — the durable rows of a dead
+// author stay put as inert data: the fire path's author admission gate already
+// refuses them (and deletes the row there), so correctness never depends on a
+// cleanup sweep.
+//
+// It is deliberately blind: idempotent, unclassified (it never asks whether an
+// id was a durable record or an entry), never retried, no tombstone. An id that
+// owns no memory timer is a plain no-op.
+func (e *Engine) ForgetActors(ids []actor.ActorID) {
+	if e == nil || len(ids) == 0 {
+		return
+	}
+	dead := make(map[actor.ActorID]struct{}, len(ids))
+	for _, id := range ids {
+		dead[id] = struct{}{}
+	}
+	e.mu.Lock()
+	for id, timer := range e.mem {
+		if _, ok := dead[timer.author]; ok {
+			delete(e.mem, id)
+		}
+	}
+	e.mu.Unlock()
+}
+
 // wakeUp posts a coalesced wake — non-blocking send into the capacity-1
 // channel (tap.Signal.Notify structural twin). A pending wake already
 // buffered absorbs this one; the run loop always recomputes the full due set
@@ -258,14 +322,14 @@ func (e *Engine) wakeUp() {
 }
 
 // validateScheduleReq is the Go-error ingress gate (protocol layer, not a
-// verdict — a timer is not a plane-2 concept): Bind outside the closed set,
+// verdict — a timer is not a plane-2 concept): Home outside the closed set,
 // FireAt<=0, or an empty/reserved-prefixed Type all reject before anything
 // is minted or stored. A PAST FireAt is legal — it fires
 // immediately; refusing it would make "a millisecond before vs after the
 // deadline" two different behaviours.
 func validateScheduleReq(req ScheduleReq) error {
-	switch req.Bind {
-	case BindIdentity, BindIncarnation:
+	switch req.Home {
+	case TimerHomeDurable, TimerHomeMemory:
 	default:
 		return ErrBadSchedule
 	}
@@ -366,7 +430,7 @@ func (e *Engine) nextFireAt(ctx context.Context) (int64, bool) {
 
 	storeNext, storeOK, err := e.deps.Store.NextFireAt(ctx)
 	if err != nil {
-		e.deps.Logger.Error("schedule.next_fire_at_query_failed", "err", err)
+		e.noteStoreErr(time.Now(), "next_fire_at_query_failed", err)
 		// Degrade to a backoff-paced RETRY, never a bare wait: folding this
 		// fault into "durable family has nothing due" would — on a tick where
 		// the mem family is also empty — park the run loop on wake alone, so a
@@ -374,6 +438,8 @@ func (e *Engine) nextFireAt(ctx context.Context) (int64, bool) {
 		// rows. Same posture the Due-fault path already has via
 		// progress=false; this is its NextFireAt twin.
 		storeNext, storeOK = e.deps.Clock.Now().Add(backoffDuration).UnixMilli(), true
+	} else {
+		e.noteStoreRecovered(time.Now(), "next_fire_at_query_failed")
 	}
 
 	switch {
@@ -410,16 +476,6 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 	e.mu.Unlock()
 
 	for _, t := range due {
-		if !e.deps.Host.IsLive(t.inc) {
-			// Dead (die'd or replaced) — drop, never fire. A same-id
-			// successor being live does not rescue this entry (pointer-level
-			// ABA guard).
-			e.mu.Lock()
-			delete(e.mem, t.id)
-			e.mu.Unlock()
-			progress = true
-			continue
-		}
 		env := buildFireEnvelope(t.id, t.author, t.typ, t.payload, message.ID(t.correlationID), nowTime)
 		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
 		err := e.deps.Fire.Append(callCtx, t.author, env)
@@ -430,79 +486,60 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 			delete(e.mem, t.id)
 			e.mu.Unlock()
 			progress = true
+			e.clearTransient("mem_fire", string(t.id))
 		case isFireRejected(err):
 			e.mu.Lock()
 			delete(e.mem, t.id)
 			e.mu.Unlock()
 			progress = true
 			e.loudLog(t.id, t.author, err)
+			e.clearTransient("mem_fire", string(t.id))
 		default:
 			// transient — leave the entry, retry next tick.
+			e.noteTransient("mem_fire", string(t.id), t.id, t.author, err)
 		}
 	}
 
 	rows, err := e.deps.Store.Due(ctx, now)
 	if err != nil {
-		e.deps.Logger.Error("schedule.due_query_failed", "err", err)
+		e.noteStoreErr(time.Now(), "due_query_failed", err)
 		return progress
 	}
-	blockedAuthor := make(map[actor.ActorID]bool)
+	e.noteStoreRecovered(time.Now(), "due_query_failed")
 	for _, row := range rows {
-		if blockedAuthor[row.AuthorID] {
-			continue
-		}
-		// Wake-first ordering, welded: the identity family's
-		// "no live actor" case is the NORMAL restart path, not an edge case
-		// — reviving before appending is what keeps the wake from being
-		// lost into a mailbox nobody is hosting yet.
-		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
-		reviveErr := e.deps.Revive.EnsureLive(callCtx, row.AuthorID)
-		cancel()
-		if reviveErr != nil {
-			err := reviveErr
-			if isReviveRejected(err) {
-				// Deterministic — this row can NEVER fire (its author is
-				// permanently unrevivable). Dispose it, same arm
-				// as a FireRejected poison row: left in place it would
-				// retry hot forever and repeatedly consume this author's
-				// per-author due window ahead of later legitimate rows.
-				reason, detail := rejectionDetails(err)
-				if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathReviveRejected, reason, detail, now); derr != nil {
-					e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)
-					continue
-				} else if evicted > 0 {
-					e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
-				}
-				progress = true
-				e.loudLog(row.ID, row.AuthorID, err)
-				continue
-			}
-			blockedAuthor[row.AuthorID] = true
-			continue // transient — leave the row, retry next tick.
-		}
 		env := buildFireEnvelope(row.ID, row.AuthorID, row.Type, row.Payload, message.ID(row.CorrelationID), nowTime)
-		callCtx, cancel = context.WithTimeout(ctx, perFireTimeout)
+		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
 		err := e.deps.Fire.Append(callCtx, row.AuthorID, env)
 		cancel()
 		switch {
 		case err == nil || errors.Is(err, ErrDuplicateFire):
-			if _, derr := e.deps.Store.Delete(ctx, row.ID); derr != nil {
-				e.deps.Logger.Error("schedule.completed_row_delete_failed", "timer_id", string(row.ID), "err", derr)
+			if markErr := e.deps.Store.MarkFired(ctx, row.ID); markErr != nil {
+				// The deterministic message already exists. Leave the pending
+				// row so the next pass observes the duplicate and retries only
+				// this control-state marker.
+				e.noteTransient("identity_mark_fired", string(row.ID), row.ID, row.AuthorID, markErr)
 				continue
 			}
 			progress = true
+			e.clearTransient("identity_fire", string(row.ID))
+			e.clearTransient("identity_mark_fired", string(row.ID))
 		case isFireRejected(err):
 			reason, detail := rejectionDetails(err)
 			if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathFireRejected, reason, detail, now); derr != nil {
-				e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)
+				e.noteStoreErr(time.Now(), "poison_row_delete_failed", derr, "timer_id", string(row.ID))
 				continue
-			} else if evicted > 0 {
-				e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
+			} else {
+				e.noteStoreRecovered(time.Now(), "poison_row_delete_failed")
+				if evicted > 0 {
+					e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
+				}
 			}
 			progress = true
 			e.loudLog(row.ID, row.AuthorID, err)
+			e.clearTransient("identity_fire", string(row.ID))
 		default:
 			// transient — leave the row, at-least-once.
+			e.noteTransient("identity_fire", string(row.ID), row.ID, row.AuthorID, err)
 		}
 	}
 	return progress
@@ -513,10 +550,6 @@ func rejectionDetails(err error) (string, string) {
 	if errors.As(err, &fire) {
 		return fire.Reason, fire.Detail
 	}
-	var revive ReviveRejected
-	if errors.As(err, &revive) {
-		return revive.Reason, revive.Detail
-	}
 	return "rejected", err.Error()
 }
 
@@ -524,13 +557,6 @@ func rejectionDetails(err error) (string, string) {
 // deterministic-reject class disposed as a poison row/entry.
 func isFireRejected(err error) bool {
 	var rejected FireRejected
-	return errors.As(err, &rejected)
-}
-
-// isReviveRejected reports whether err is (or wraps) a ReviveRejected — the
-// permanently-unrevivable class, disposed via the same poison-row arm.
-func isReviveRejected(err error) bool {
-	var rejected ReviveRejected
 	return errors.As(err, &rejected)
 }
 
@@ -552,6 +578,71 @@ func (e *Engine) loudLog(id TimerID, author actor.ActorID, err error) {
 		"reason", reason,
 		"detail", detail,
 	)
+}
+
+// noteStoreErr records one occurrence of a store-backed fault named kind
+// (P3 edge cadence, shared by nextFireAt's query and fireDue's query/delete
+// calls): entering a NEW kind — including the very first fault — logs Error
+// once; the SAME kind persisting logs a periodic Warn summary at
+// storeErrLogPeriod cadence instead of every tick; between periods it is
+// silent. fields are extra slog key/value pairs specific to the call site
+// (e.g. "timer_id").
+func (e *Engine) noteStoreErr(now time.Time, kind string, err error, fields ...any) {
+	if e.storeErr.kind != kind {
+		e.storeErr = storeFault{kind: kind, streak: 1, firstAt: now, lastLoggedAt: now}
+		args := append(append([]any{}, fields...), "err", err)
+		e.deps.Logger.Error("schedule."+kind, args...)
+		return
+	}
+	e.storeErr.streak++
+	if now.Sub(e.storeErr.lastLoggedAt) >= storeErrLogPeriod {
+		e.storeErr.lastLoggedAt = now
+		args := append(append([]any{}, fields...), "err", err, "streak", e.storeErr.streak, "since", e.storeErr.firstAt)
+		e.deps.Logger.Warn("schedule."+kind+"_ongoing", args...)
+	}
+}
+
+// noteStoreRecovered clears the active fault edge for kind if this call
+// site is the one currently holding it, logging a loud Info recovery edge
+// once (P3 loud-on-clear). A different kind's active streak is left alone —
+// this call site's own success says nothing about whether some OTHER
+// store operation is still faulting.
+func (e *Engine) noteStoreRecovered(now time.Time, kind string) {
+	if e.storeErr.kind != kind {
+		return
+	}
+	e.deps.Logger.Info("schedule."+kind+"_recovered",
+		"streak", e.storeErr.streak,
+		"duration_ms", now.Sub(e.storeErr.firstAt).Milliseconds(),
+	)
+	e.storeErr = storeFault{}
+}
+
+// noteTransient records one consecutive-transient occurrence for (kind,
+// id) — the run loop's other P3 edge state for transient FireSink branches: the
+// first occurrence for an id logs Warn loud; every subsequent consecutive
+// occurrence for the same id is remembered silently (no count, no log) until
+// clearTransient resets it on recovery, reject-disposal, or removal from
+// the due set.
+func (e *Engine) noteTransient(kind, id string, timerID TimerID, author actor.ActorID, err error) {
+	key := transientKey{kind: kind, id: id}
+	if _, seen := e.transient[key]; seen {
+		return
+	}
+	e.transient[key] = struct{}{}
+	e.deps.Logger.Warn("schedule."+kind+"_transient",
+		"timer_id", string(timerID),
+		"author", string(author),
+		"err", err,
+	)
+}
+
+// clearTransient resets the consecutive-transient marker for (kind, id) —
+// called whenever the id resolves (success, reject-disposal, or drop) so a
+// resolved condition never keeps counting toward a summary that will never
+// come.
+func (e *Engine) clearTransient(kind, id string) {
+	delete(e.transient, transientKey{kind: kind, id: id})
 }
 
 // buildFireEnvelope constructs the fire envelope per the field table:

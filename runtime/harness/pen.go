@@ -2,10 +2,12 @@ package harness
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/capauth"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // minter is the mint machine: it holds the bare chain and welds an identity onto it on
@@ -15,17 +17,17 @@ type minter struct {
 	chain *chain
 }
 
-// Mint produces a Pen welded to (actorID, kind, chID). The returned pen commits
-// every write under that identity and the holder cannot change it — the
-// substrate's "actorID and write capability are welded inseparably" invariant.
-// kind is welded here too (not backfilled from a registry lookup mid-chain):
-// stepSenderConsistent reads the welded kind, so Mint is the single source of
-// truth for both id and kind. Mint is deterministic and cheap (no per-pen state
-// beyond the welded principal), so admission points may Mint per-emit freely.
-func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen {
+func (m *minter) MintAuthority(authority capauth.Authority, kind actor.Kind) Pen {
+	if authority == nil || authority.ActorID() == "" {
+		return rejectedPen{}
+	}
 	return &boundPen{
-		chain:     m.chain,
-		principal: caller{actorID: actorID, kind: kind, chID: chID},
+		chain: m.chain,
+		principal: caller{
+			actorID: authority.ActorID(),
+			kind:    kind,
+		},
+		authority: authority,
 	}
 }
 
@@ -35,6 +37,7 @@ func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) P
 type boundPen struct {
 	chain     *chain
 	principal caller
+	authority capauth.Authority
 }
 
 // Write injects the welded identity into the envelope and drives the chain.
@@ -52,19 +55,71 @@ type boundPen struct {
 // truth source as env.Sender.ID. The welded caller is set on the outermost ctx
 // layer (shadow-proof against any pre-stuffed value) before the chain runs.
 func (p *boundPen) Write(ctx context.Context, env *message.Envelope) (WriteResult, error) {
+	if p.authority != nil {
+		if err := p.authority.Admit(); err != nil {
+			return WriteResult{}, err
+		}
+	}
 	if env == nil {
 		// Defer the nil check to the chain so the error vocabulary stays in one
 		// place; the chain returns a hard error for a nil envelope.
 		return p.chain.write(ctx, env)
 	}
 	if env.Sender.ID != "" || env.ChannelID != "" {
+		const detail = "sender.id/channel_id are substrate-injected, not caller-settable"
+		p.chain.observeReject(ctx, env, StepCallerAuth, HarnessIdentityNotCallerSettable, detail)
 		return WriteResult{
 			RejectReason: HarnessIdentityNotCallerSettable,
-			RejectDetail: "sender.id/channel_id are substrate-injected, not caller-settable",
+			RejectDetail: detail,
 		}, nil
 	}
 	env.Sender.ID = p.principal.actorID
-	env.ChannelID = p.principal.chID
+	// The channel stamp comes from the harness's own binding constant: this
+	// harness IS the single writer of that channel's log, so the producer of
+	// the field and the authority on it are the same object. No caller — local
+	// or remote — hands a channel id in, so no equality self-check is needed
+	// downstream.
+	env.ChannelID = p.chain.deps.ChannelID
 	ctx = ctxWithCaller(ctx, p.principal)
 	return p.chain.write(ctx, env)
+}
+
+type rejectedPen struct{}
+
+func (rejectedPen) Write(context.Context, *message.Envelope) (WriteResult, error) {
+	return WriteResult{}, errors.New("harness: invalid authority")
+}
+
+// admittedWriter is the one-write seam, a separate object from the minter. It
+// mints nothing and cannot: the two drive the same chain and share nothing else,
+// so a consumer handed one of them cannot reach the other.
+type admittedWriter struct {
+	chain *chain
+}
+
+// WriteAdmitted writes one envelope as the identity an already-completed
+// admission names. It hands back no pen, because there is no pen to hand: the
+// caller reached its own liveness verdict a moment ago and this write consumes
+// exactly that instant. A pen would outlive the verdict it was minted from,
+// and nothing in the type would say so — an identity that has since ended
+// would keep writing, silently.
+//
+// One admission, one write. The obligation is not enforced here; it is
+// unstatable.
+func (w *admittedWriter) WriteAdmitted(
+	ctx context.Context,
+	admission storespec.IdentityAdmission,
+	env *message.Envelope,
+) (WriteResult, error) {
+	if !admission.Valid() {
+		return WriteResult{}, errors.New("harness: invalid admission")
+	}
+	pen := &boundPen{
+		chain: w.chain,
+		principal: caller{
+			actorID: admission.ID,
+			kind:    admission.Kind,
+		},
+	}
+	return pen.Write(ctx, env)
 }

@@ -3,6 +3,7 @@ package link
 import (
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -10,21 +11,15 @@ import (
 // wsByteStream adapts a gorilla *websocket.Conn into a plain io.ReadWriteCloser
 // byte stream — the carrier shape yamux.Client/yamux.Server want. This is the
 // 期11 spec §5.2 "换底" seam: the link runs a single top-level yamux SESSION
-// directly over the raw WS connection (linksession.go), and yamux wants a byte
+// directly over the raw WS connection, and yamux wants a byte
 // stream, not WS's per-call binary-MESSAGE transport (ReadMessage/WriteMessage)
 // — so this type exists to bridge WS's message framing down to bytes.
 //
-// wsByteStream is the ONLY adapter that ever touches a link's *websocket.Conn:
-// gorilla's NextReader/NextWriter (used here) is not safe to mix with
-// ReadMessage/WriteMessage on the same conn (they share the same underlying
-// connection cursor), so nothing else may read/write the raw conn directly —
-// the retired wsConn (control.go, 期11 片② deleted it) used to be the other
-// half of that hazard; now there is only one adapter, so the hazard is gone
-// by construction rather than by discipline.
+// wsByteStream is the only adapter that touches the websocket connection.
+// Gorilla permits one reader and one writer, so this adapter serializes each
+// direction and no other layer accesses websocket message framing.
 //
-// This is the ONE carrier the top-level yamux session (linksession.go) rides on
-// (期11 片②): dial.go/accept.go build yamux.Client/yamux.Server directly over a
-// wsByteStream — the self-rolled mux (frame.go) is retired.
+// This is the one byte carrier the device's top-level yamux session rides on.
 type wsByteStream struct {
 	ws *websocket.Conn
 
@@ -55,11 +50,9 @@ type wsByteStream struct {
 
 // newWSByteStream wraps ws as a byte-stream io.ReadWriteCloser. This is the
 // RAW carrier yamux itself reads/writes — it carries yamux's own internal
-// keepalive ping/pong alongside every substream's bytes, indistinguishably,
-// so it carries NO liveness hook: the Lease (lease.go) refreshes from
-// application-frame receipt at linksession.go's dispatch (per-substream), one
-// layer above this adapter, specifically so yamux's keepalive traffic through
-// here never counts as liveness on its own.
+// keepalive ping/pong alongside every substream's bytes, indistinguishably.
+// It intentionally carries no session-liveness hook: spine traffic refreshes
+// the carrier lease.
 func newWSByteStream(ws *websocket.Conn) *wsByteStream {
 	return &wsByteStream{ws: ws}
 }
@@ -76,9 +69,17 @@ func (s *wsByteStream) Read(p []byte) (int, error) {
 			_, r, err := s.ws.NextReader()
 			if err != nil {
 				// Connection-level: closed, reset, or a control-frame-only
-				// read loop giving up. Propagate as-is (yamux treats any
-				// Read error as carrier-dead, the same contract gorilla's
-				// ReadMessage error semantics give).
+				// read loop giving up. A DELIBERATE close (the peer's normal
+				// closure handshake, sent by Close below) is the byte stream's
+				// ordinary end — surface it as io.EOF so yamux ends the
+				// session quietly instead of logging every orderly device
+				// shutdown as a carrier failure. Everything else propagates
+				// as-is (yamux treats any other Read error as carrier-dead,
+				// the same contract gorilla's ReadMessage error semantics
+				// give).
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					return 0, io.EOF
+				}
 				return 0, err
 			}
 			s.rr = r
@@ -131,7 +132,19 @@ func (s *wsByteStream) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// Close closes the underlying WS connection.
-func (s *wsByteStream) Close() error { return s.ws.Close() }
+// Close performs the normal WebSocket closure handshake, then closes the
+// underlying connection. The close control frame is what lets the peer's Read
+// see a deliberate goodbye (mapped to io.EOF above) instead of a 1006
+// abnormal-closure — without it every orderly `atoll up` shutdown was logged
+// on the server as a carrier failure. Best-effort with a short deadline: a
+// peer that is already gone cannot make Close hang.
+func (s *wsByteStream) Close() error {
+	// WriteControl is documented concurrency-safe against NextWriter, so no
+	// wmu here — Close must never queue behind a wedged data Write.
+	_ = s.ws.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second))
+	return s.ws.Close()
+}
 
 var _ io.ReadWriteCloser = (*wsByteStream)(nil)

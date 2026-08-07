@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -37,16 +38,13 @@ type InstanceSpec struct {
 	ID actor.ActorID
 	// Config is THE per-instance config injection point — the app-rewire spec's
 	// "ctx.Config" (K2=a/S8). It is NOT a new runtime surface; the constructor
-	// closure captures it and hands it to the actor in BOTH forms: a Legacy
-	// actor's constructor parses it and closes over the result in the
-	// func(pen) closure; a Proc actor's constructor closes it into its Def
-	// (Constructor(spec,deps) → Def → New() per incarnation; see
+	// closure captures it into its Proc Def (Constructor(spec,deps) → Def →
+	// New() per incarnation; see
 	// actorbase.Def's doc). Either way config rides the constructor, NOT the
 	// capability bundle: it is an independent PARAMETER, never welded into
 	// actorcaps.Caps (S-P16 红线; enforced by archtest.TestConfigNotInCaps).
-	// A config change is an intent write on the composition row (改配置门) that
-	// takes effect via Spawn-replace — a fresh incarnation over a fresh snapshot;
-	// there is no live hot-read of Config.
+	// A config change replaces Controller desired and therefore builds a fresh
+	// incarnation over a fresh snapshot; there is no live hot-read of Config.
 	Config json.RawMessage
 }
 
@@ -63,8 +61,38 @@ type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 // (unreachable pre-Build). Future class-level facts are additive fields here;
 // the Register signature no longer changes when they arrive.
 type ClassDecl struct {
-	Kind actor.Kind
-	New  Constructor
+	Kind           actor.Kind
+	New            Constructor
+	ValidateConfig func(json.RawMessage) error
+}
+
+// ErrUnknownClass distinguishes "no such class" from "config invalid": the
+// two ailments need opposite user action (fix the class name vs fix the
+// config), so callers must be able to tell them apart.
+var ErrUnknownClass = errors.New("registry: unknown class")
+
+// ValidateConfig performs every check a class voluntarily makes available at
+// acceptance time. The registry always owns the JSON-object shape check;
+// constructors remain fail-closed for host/environment-dependent conditions.
+func ValidateConfig(class string, config json.RawMessage) error {
+	mu.RLock()
+	d, found := reg[class]
+	mu.RUnlock()
+	if !found {
+		return fmt.Errorf("%w: %q", ErrUnknownClass, class)
+	}
+	if len(config) != 0 {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(config, &object); err != nil || object == nil {
+			return fmt.Errorf("registry: config for %q must be a JSON object", class)
+		}
+	}
+	if d.ValidateConfig != nil {
+		if err := d.ValidateConfig(config); err != nil {
+			return fmt.Errorf("registry: invalid config for %q: %w", class, err)
+		}
+	}
+	return nil
 }
 
 var (
@@ -119,7 +147,7 @@ func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error
 	d, found := reg[class]
 	mu.RUnlock()
 	if !found {
-		return platform.ActorDecl{}, fmt.Errorf("registry: unknown class %q (registered: %v)", class, classes())
+		return platform.ActorDecl{}, fmt.Errorf("%w: %q (registered: %v)", ErrUnknownClass, class, classes())
 	}
 	decl, err := d.New(spec, ctx)
 	if err != nil {

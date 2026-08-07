@@ -67,7 +67,7 @@ func TestAppendTx_GuardsEnvelope(t *testing.T) {
 func TestAppendTx_GenericInsertError(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "narrow.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "narrow.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -156,8 +156,8 @@ func TestListActive_PoisonKindOnRowsPath(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'wizard', NULL, 1, NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, created_at, deregistered_at)
+		 VALUES ('x', 'wizard', 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
@@ -166,56 +166,19 @@ func TestListActive_PoisonKindOnRowsPath(t *testing.T) {
 	}
 }
 
-// Binding read path is symmetric with kind: a non-empty out-of-closed-set
-// actor_binding column is a poisoned row and must fail loudly (ParseBinding),
-// not silently raw-cast into the Record. Both read paths (ListActive rows /
-// Lookup single-row) enforce it.
-func TestListActive_PoisonBindingOnRowsPath(t *testing.T) {
+// A poison placement column is the second closed-set on the record read path
+// and must fail loudly rather than raw-cast into the ActorRecord.
+func TestLookupActive_PoisonPlacement(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'agent', 'teleport', 1, NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, class, placement, created_at, deregistered_at)
+		 VALUES ('x', 'agent', 'agent', 'teleport', 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
-	if _, err := reg.ListActive(ctx); err == nil {
-		t.Error("ListActive must error on out-of-closed-set binding (rows path)")
-	}
-}
-
-func TestLookup_PoisonBinding(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'agent', 'teleport', 1, NULL)`); err != nil {
-		t.Fatalf("inject: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	if _, _, err := reg.Lookup(ctx, "x"); err == nil {
-		t.Error("Lookup must error on out-of-closed-set binding (single-row path)")
-	}
-}
-
-// Empty binding is a legitimate state (a cell-less member — e.g. a human —
-// carries no binding), so a NULL/empty actor_binding must read back cleanly as
-// "" — the validation rejects only NON-empty out-of-set values.
-func TestLookup_EmptyBindingAccepted(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('h', 'human', NULL, 1, NULL)`); err != nil {
-		t.Fatalf("inject: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	rec, ok, err := reg.Lookup(ctx, "h")
-	if err != nil || !ok {
-		t.Fatalf("Lookup empty-binding member: ok=%v err=%v", ok, err)
-	}
-	if rec.Binding != "" {
-		t.Errorf("empty binding must read back as \"\", got %q", rec.Binding)
+	if _, _, err := reg.LookupActive(ctx, "x"); err == nil {
+		t.Error("LookupActive must error on out-of-closed-set placement")
 	}
 }
 
@@ -226,7 +189,7 @@ func TestLookup_EmptyBindingAccepted(t *testing.T) {
 func TestListActive_RawScanError(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "txtcreated.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "txtcreated.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -234,13 +197,15 @@ func TestListActive_RawScanError(t *testing.T) {
 	// created_at typed TEXT so a non-numeric value survives insert, then fails
 	// the int64 scan in ListActive.
 	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, actor_binding TEXT,
-	   created_at TEXT, deregistered_at INTEGER, host TEXT)`); err != nil {
+	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, principal TEXT DEFAULT '',
+	   source_decl_id TEXT DEFAULT '', class TEXT DEFAULT '', config_json TEXT,
+	   placement TEXT DEFAULT 'server', desired_host TEXT DEFAULT '',
+	   created_at TEXT, deregistered_at INTEGER)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('a', 'agent', NULL, 'not-a-number', NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, created_at, deregistered_at)
+		 VALUES ('a', 'agent', 'not-a-number', NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
@@ -296,161 +261,25 @@ func TestReadAfterSeq_NonPositiveLimitDefaults(t *testing.T) {
 	}
 }
 
-// --- applyMemberAddTx / applyMemberRemoveTx failure paths ---------------------
+// --- LookupActivePrincipal: poison-row discipline (third machine over the
+// same table — purity v3 A2: it silently discarded ParseKind/ParseBinding
+// errors while Lookup/ListActive fail loudly; the three read machines must
+// share one discipline, and THIS one feeds the admission path
+// (census.ResolvePrincipal)). ---------------------------------------------
 
-// applyMemberAddTx's lookup default arm: a Scan failure that is neither nil nor
-// ErrNoRows. We force it by giving actor_registry a deregistered_at column that
-// holds a non-integer the NullInt64 scan rejects.
-func TestApplyMemberAddTx_LookupScanError(t *testing.T) {
+// Kind poison is unreachable through parsed callers (the WHERE clause echoes
+// the caller's kind back), but the guard is kept symmetric with the other two
+// machines — this whitebox probe passes the poison kind straight through.
+func TestLookupActivePrincipal_PoisonKind(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "poison.sqlite"), OpenOptions{SkipDDL: true}, "")
-	if err != nil {
-		t.Fatalf("openSqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, actor_binding TEXT,
-	   created_at INTEGER, deregistered_at TEXT, host TEXT)`); err != nil {
-		t.Fatalf("DDL: %v", err)
-	}
-	// deregistered_at = a string that cannot scan into sql.NullInt64.
+	db := openRelaxed(t)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry VALUES ('a','agent',NULL,1,'not-an-int','')`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, principal, created_at, deregistered_at)
+		 VALUES ('x', 'wizard', 'p', 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := reg.applyMemberAddTx(ctx, tx, storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 9}); err == nil {
-		t.Error("applyMemberAddTx must surface a non-ErrNoRows scan error from the lookup")
-	}
-}
-
-// applyMemberRemoveTx error arm: the UPDATE itself fails. We use a tx on a DB
-// whose actor_registry lacks deregistered_at so the SET clause errors.
-func TestApplyMemberRemoveTx_ExecError(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "noderg.sqlite"), OpenOptions{SkipDDL: true}, "")
-	if err != nil {
-		t.Fatalf("openSqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER)`); err != nil {
-		t.Fatalf("DDL: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := reg.applyMemberRemoveTx(ctx, tx, storespec.MemberActorRemove{ID: "a", At: 9}); err == nil {
-		t.Error("applyMemberRemoveTx must surface the UPDATE error (missing deregistered_at column)")
-	}
-}
-
-// A missing registry row is rejected as inactive; add transitions never create
-// caller-selected identities.
-func TestApplyMemberAddTx_MissingIdentityRejected(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "noins.sqlite"), OpenOptions{SkipDDL: true}, "")
-	if err != nil {
-		t.Fatalf("openSqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER, host TEXT)`); err != nil {
-		t.Fatalf("DDL: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := reg.applyMemberAddTx(ctx, tx, storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 9}); !errors.Is(err, storespec.ErrMemberInactive) {
-		t.Fatalf("applyMemberAddTx error=%v want ErrMemberInactive", err)
-	}
-}
-
-// ApplyMemberTransitions must abort (return the helper error) when the add
-// helper's INSERT fails mid-transition — driven over a registry whose
-// actor_registry lacks the expected schema.
-func TestApplyMemberTransitions_AddHelperError(t *testing.T) {
-	ctx := context.Background()
-	db := brokenRegistryDB(t)
-	reg := newActorRegistry(db, "C", nil)
-	err := reg.ApplyMemberTransitions(ctx,
-		[]storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 9}}, nil)
-	if err == nil {
-		t.Error("ApplyMemberTransitions must propagate the add-helper error")
-	}
-}
-
-// ApplyMemberTransitions must abort when the remove helper's UPDATE fails
-// mid-transition — driven over a registry missing deregistered_at.
-func TestApplyMemberTransitions_RemoveHelperError(t *testing.T) {
-	ctx := context.Background()
-	db := brokenRegistryDB(t)
-	reg := newActorRegistry(db, "C", nil)
-	err := reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "a", At: 9}})
-	if err == nil {
-		t.Error("ApplyMemberTransitions must propagate the remove-helper UPDATE error")
-	}
-}
-
-// brokenRegistryDB returns a DB with an actor_registry that lacks both
-// actor_binding and deregistered_at, so membership operations fail loudly.
-func brokenRegistryDB(t *testing.T) *sql.DB {
-	t.Helper()
-	ctx := context.Background()
-	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "broken.sqlite"), OpenOptions{SkipDDL: true}, "")
-	if err != nil {
-		t.Fatalf("openSqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER)`); err != nil {
-		t.Fatalf("DDL: %v", err)
-	}
-	return db
-}
-
-// A retired row stays retired even when the table shape would have allowed an
-// update in the legacy identity model.
-func TestApplyMemberAddTx_RetiredIdentityRejected(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "noreact.sqlite"), OpenOptions{SkipDDL: true}, "")
-	if err != nil {
-		t.Fatalf("openSqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER, host TEXT)`); err != nil {
-		t.Fatalf("DDL: %v", err)
-	}
-	// Seed a deregistered row so the lookup finds an inactive identity.
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, created_at, deregistered_at)
-		 VALUES ('a', 'agent', 1, 5)`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := reg.applyMemberAddTx(ctx, tx, storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 9}); !errors.Is(err, storespec.ErrMemberInactive) {
-		t.Fatalf("applyMemberAddTx error=%v want ErrMemberInactive", err)
+	if _, _, err := reg.LookupActivePrincipal(ctx, actor.Kind("wizard"), "p"); err == nil {
+		t.Error("LookupActivePrincipal must error on out-of-closed-set kind")
 	}
 }

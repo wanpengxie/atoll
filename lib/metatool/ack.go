@@ -24,6 +24,19 @@ type ToWaitHint struct {
 	Params map[string]any
 }
 
+// newCollectHint builds the shared "collect this request later" pair — the
+// to_wait descriptor and the if-not-waiting line — that every ack hands back
+// (call_actor's ack in exec.go, await_result's still-pending ack in
+// async_tools.go). The wording is parsed on the LLM side, so it is kept
+// byte-for-byte identical across both call sites.
+func newCollectHint(requestID string) (ToWaitHint, string) {
+	return ToWaitHint{
+			Tool:   "await_result",
+			Params: map[string]any{"request_id": requestID},
+		},
+		"result returns as kind=response, parent_id=" + requestID + " new turn trigger"
+}
+
 // FastPathWindow is the default bounded-wait window for call_actor.
 const FastPathWindow = 15 * time.Second
 

@@ -3,6 +3,8 @@ package accessdoor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -14,49 +16,53 @@ import (
 // Minter, mirroring harness never handing out the bare chain). It holds Deps and
 // runs the decision tree; the welded caller arrives as a parameter, never read
 // off the wire.
-type door struct{ deps Deps }
+type door struct {
+	deps         Deps
+	resourceGate sync.Mutex
+}
 
 // resolveFileRoute computes OpRead/OpWrite(file)'s (and, via query.go's
 // create, a with_content create's write) byte-access authorization product
-// (期11 spec §3.4/§5 item 0): same-daemon (caller's Membership.Lookup Host
-// equals placementDaemonID) → Local; else → mint a lane Token via
-// Deps.LaneControl. reservationID is "" for a plain OpRead/OpWrite (§3.5:
-// no outbox involvement — OpWrite never fires Committed) and the
-// just-reserved id for a with-content create's write route (§1.7).
+// (期11 spec §3.4/§5 item 0). Byte access is SAME-DAEMON ONLY: the caller's
+// authoritative storage host must equal placementDaemonID, and the route it
+// gets back is a ticket the daemon resolves into a local handle over the
+// control-RPC ResolveCoord step (platform/internal/link) — zero byte-hop,
+// true zerocopy for the file bytes themselves.
+//
+// A caller on a DIFFERENT daemon than the file is refused outright with
+// ErrFileCapabilityUnavailable. There is no daemon-to-daemon byte transport in
+// this deployment: the evaluation baseline is one daemon in one trust domain
+// (transfer-lifecycle-spec's own "单 daemon = 所有字节本地"), so the relay that
+// used to serve this branch existed only for a deployment shape that does not
+// exist, with failure semantics (EOF-as-commit, dropped Lost verdicts) that
+// were never finished. An honest refusal beats a path whose only reachable
+// form is the unfinished one; re-introducing it when a multi-daemon
+// deployment is real is additive.
+//
+// reservationID is "" for a plain OpRead/OpWrite (§3.5: no outbox involvement
+// — OpWrite never fires Committed) and the just-reserved id for a with-content
+// create's write route (§1.7).
 func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, placementDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (*FileRoute, error) {
-	if d.deps.Membership == nil {
-		return nil, errors.New("accessdoor: file byte route needs Deps.Membership (Lookup)")
-	}
-	_, host, found, err := d.deps.Membership.Lookup(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
-	// Same-daemon (Local) resolves coord itself via the daemon-side
-	// control-RPC ResolveCoord step (platform/internal/link) — never a lane
-	// byte-hop (§5 item 0's "同daemon→daemon本地os.Root句柄...zerocopy").
-	// Cross-host (!Local) redeems the Token by opening a lane stream on its
-	// own connection. Both branches mint the SAME Token through ONE
-	// LaneControl.OpenTransfer call — ResolveCoord's sender-auth check
-	// (target daemon only) needs somewhere to look coord up by regardless
-	// of which redemption path the caller takes (see platform/internal/
-	// link's doc for the full walk).
-	local := found && host != "" && host == placementDaemonID
-	if dir && !local {
-		// A directory lease is a whole-tree os.Root capability confined to one
-		// machine — it does NOT serialize onto the lane's single byte-pipe. A
-		// cross-host dir workspace Open is deferred whole (债② federation, 丁12
-		// scope: same-daemon only); reject honestly rather than mint a lane
-		// route the redeem side could only mis-handle as a byte stream.
-		return nil, errors.New("accessdoor: cross-host directory lease deferred (债② federation) — a dir workspace Open requires a same-daemon caller")
+	host := facts.PreferredStorageHost
+	if !facts.Active || host == "" || host != placementDaemonID {
+		return nil, fmt.Errorf("%w: file bytes are same-daemon only — caller host %q, file placed on %q",
+			ErrFileCapabilityUnavailable, host, placementDaemonID)
 	}
-	if d.deps.LaneControl == nil {
-		return nil, errors.New("accessdoor: file byte route not wired (Deps.LaneControl is nil)")
+	if d.deps.TransferControl == nil {
+		return nil, errors.New("accessdoor: file byte route not wired (Deps.TransferControl is nil)")
 	}
-	token, terr := d.deps.LaneControl.OpenTransfer(ctx, placementDaemonID, host, coord, mode, reservationID)
+	token, terr := d.deps.TransferControl.OpenTransfer(ctx, placementDaemonID, coord, mode, reservationID)
 	if terr != nil {
 		return nil, terr
 	}
-	return &FileRoute{Local: local, Token: token, Mode: mode, ReservationID: reservationID, Dir: dir}, nil
+	if token == "" {
+		return nil, errors.New("accessdoor: transfer control minted an empty ticket")
+	}
+	return &FileRoute{Token: token, Mode: mode, ReservationID: reservationID, Dir: dir}, nil
 }
 
 // driver resolves a kind to its Driver, returning a Go error when none is
@@ -72,7 +78,7 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 }
 
 // invoke runs the decision tree for one welded caller. ingress has already run
-// (boundHandle.Invoke → ingress → day1OpsOverreach → invoke), so op/args/grant
+// (boundHandle.Invoke → ingress → invoke), so op/args
 // are structurally valid here.
 //
 // Two error channels, deliberately distinct:
@@ -84,7 +90,9 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 //     verdict (Outcome.RejectReason, nil error), including an executor failure
 //     (driver_error). Folding EXECUTE failures into Go errors would leave
 //     driver_error unproducible — the bug v1 shipped.
-func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
+func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	meta, exists, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
 		return Outcome{}, err // store broken = infrastructure-level, Go error
@@ -101,26 +109,18 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 	if !exists {
 		return Outcome{RejectReason: access.ResourceNotFound}, nil
 	}
-
-	// ---- A8 two halves unioned: actor entry ∪ (members entry ∧ current member) ----
-	allowed, err := d.deps.Registry.ActorAllows(ctx, caller, id, op)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !allowed {
-		mAllow, err := d.deps.Registry.MembersAllow(ctx, id, op)
-		if err != nil {
-			return Outcome{}, err
-		}
-		if mAllow {
-			isM, err := d.deps.Membership.IsMember(ctx, caller) // late-binding: resolved at check time
-			if err != nil {
-				return Outcome{}, err
-			}
-			allowed = isM
-		}
-	}
-	if !allowed {
+	// ---- membrane-uniform authorization (PM-D1/PM-D3) ----
+	// The membrane is one trust phase: read/write on any channel-scoped
+	// resource is membership itself — active member ⇒ allowed, no per-object
+	// relation is consulted (none exists). delete alone distinguishes the
+	// creation fact: creator ∨ channel owner root (PM-D3, meta.CreatedBy is
+	// the authorization predicate). effectiveOps (query.go) is the SAME
+	// formula ranged over the op set — one formula, two loci.
+	if !effectiveOps(caller, facts.Active, facts.Owner, meta.CreatedBy)[op] {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
 
@@ -129,7 +129,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		if meta.Kind == resourcespec.KindFile {
 			// file bytes never ride Outcome.Value (§8.1 red line) — the execute
 			// arm's kind branch (期11 spec §3.4) redirects file read/write to
-			// the daemon-hosted / lane-forwarded byte path, NOT this door's
+			// the daemon-hosted byte path, NOT this door's
 			// Driver dispatch (file has no Driver — Allocator/Streamer, a
 			// structurally different shape, realize its bytes, §4). The
 			// accepted outcome carries a FileRoute (§5), never bytes.
@@ -170,53 +170,22 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		}
 		return Outcome{}, nil
 
-	case access.OpSet:
-		// set's executor is the substrate authz manager (Registry), not a driver.
-		// grant is non-nil and structurally valid (ingress), so the deref is safe.
-		//
-		// Authorization DECAY LAW (期11 spec §2 item 1): set(X, ops) additionally
-		// requires ops ⊆ effectiveOps(caller) — the ESCALATION check, distinct
-		// from the union-authorize step above (which only confirmed caller holds
-		// SET-right on id at all, not that the payload ops stay within caller's
-		// own reach). Without this, a set-right holder could grant a subject
-		// (themselves or a colluding third party) MORE than they themselves
-		// hold — self-escalation / collusion. Revoke (grant.Ops == ∅) is
-		// trivially legal for ANY caller (∅ ⊆ any set) and is short-circuited
-		// here rather than routed through effectiveOps: the empty loop below
-		// already accepts it, but skipping the (up to 4×ActorAllows +
-		// 4×MembersAllow + IsMember) computation entirely keeps revoke cheap
-		// and — more importantly — keeps revoke from depending on that
-		// computation SUCCEEDING (a Registry hiccup must never block a revoke
-		// that is unconditionally legal on its face).
-		if len(grant.Ops) > 0 {
-			eff, everr := d.effectiveOps(ctx, caller, id)
-			if everr != nil {
-				return Outcome{}, everr
-			}
-			for _, op := range grant.Ops {
-				if !eff[op] {
-					return Outcome{RejectReason: access.AccessDenied}, nil
-				}
-			}
-		}
-		if serr := d.deps.Registry.SetGrant(ctx, id, *grant); serr != nil {
-			return executeFailure(ctx, serr) // executor-authored (reason.go)
-		}
-		return Outcome{}, nil
-
 	case access.OpDelete:
 		// Time-order is KIND-DEPENDENT (期11 spec §1 item 8 — the flip from
 		// the universal "bytes first, existence row last" contract):
 		if meta.Kind == resourcespec.KindFile {
 			// file: ROW-FIRST-BYTES-LAST. Registry.Delete ALREADY runs this
-			// as one transaction (read row → write tombstone → delete row +
-			// grants, built in S1) — there is no Driver call at all: file has
+			// as one transaction (read row → write tombstone → delete row,
+			// built in S1) — there is no Driver call at all: file has
 			// no Driver (its bytes are realized by the daemon-side
 			// Allocator/Streamer, never a DriverTable entry), and the actual
 			// byte collection is the daemon-side Reclaimer's ASYNC job (§4,
 			// S4), confirmed via ReclaimAck — never this door's concern.
 			if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 				return executeFailure(ctx, derr)
+			}
+			if d.deps.Logger != nil {
+				d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", true)
 			}
 			return Outcome{}, nil
 		}
@@ -233,6 +202,9 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		}
 		if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 			return executeFailure(ctx, derr)
+		}
+		if d.deps.Logger != nil {
+			d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", false)
 		}
 		return Outcome{}, nil
 

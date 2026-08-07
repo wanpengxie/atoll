@@ -42,9 +42,13 @@ func (s *stateStore) Create(ctx context.Context, owner actor.ActorID, id resourc
 	// No empty-owner/id guards: owner is a COORDINATE the door welds at mint
 	// (store-not-validate, per the struct doc), and an empty id is rejected by
 	// the door's ingress (checkResourceID) before the store is reached.
+	// No membership re-judgement here: the verdict belongs at the door
+	// (organs judge once at their real entrance), and the transaction is purely
+	// mechanical. A second EXISTS check would be a second authority AND would
+	// let an End racing an already-admitted call veto it a second time.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO actor_state (owner_id, resource_id, bytes, created_at)
-		   VALUES (?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT(owner_id, resource_id) DO NOTHING`,
 		string(owner), string(id), initial, s.nowMs(),
 	)
@@ -115,9 +119,11 @@ func (s *stateStore) Write(ctx context.Context, owner actor.ActorID, id resource
 }
 
 // Delete removes the row; exists=false when no row was hit (door →
-// resource_not_found; repeated delete is honestly not-found). This is the
-// non-lossy "explicit delete" half; the OTHER death is scope-expiry (owner
-// deregister → clearActorScopedTx, store-internal, not an op).
+// resource_not_found; repeated delete is honestly not-found). It is the ONLY
+// death a state row has. Deregistering the owner deletes nothing: an ActorID is
+// never reused and state is keyed by ActorID, so a dead owner's rows are
+// unreachable inert data whose correctness is carried by the admission gate.
+// Reclaiming the disk is a garbage-collection concern, never lifecycle logic.
 func (s *stateStore) Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (exists bool, err error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM actor_state WHERE owner_id=? AND resource_id=?`,
@@ -133,23 +139,10 @@ func (s *stateStore) Delete(ctx context.Context, owner actor.ActorID, id resourc
 	return n > 0, nil
 }
 
-// clearActorScopedTx cascades the actor-scoped state locus: it deletes every
-// actor_state row owned by owner, inside the SAME transaction that deregisters
-// the actor (both dereg entry points in actors.go hang it there). This is the
-// scope law: an actor's private persistent state dies with the actor (like
-// Erlang ETS private tables dying with their owner). Idempotent: a re-run
-// over an already-cleared owner deletes zero rows. The channel-scoped resources
-// table is deliberately NOT touched — those objects are non-lossy, outliving
-// their creator and dying only on explicit delete / channel destroy.
-// Store-internal substrate mechanism, never exposed as a plane-2 door verb
-// (exposing it would be a bypass path around the door). It lives HERE beside the
-// locus's other SQL so actor_state has exactly ONE author file — a future second
-// actor-scoped mechanical shape edits this file and finds the cascade in it.
-func clearActorScopedTx(ctx context.Context, tx *sql.Tx, owner actor.ActorID) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM actor_state WHERE owner_id=?`, string(owner)); err != nil {
-		return fmt.Errorf("store: actor_state cascade clear %q: %w", owner, err)
-	}
-	return nil
-}
+// No deregistration cascade clears this table. A dead owner's rows are inert
+// data: ActorIDs are never reused and every belonging is keyed by ActorID, so
+// nobody but the dead can ever address them. Correctness lives at the admission
+// gate, never in a delete; reclaiming the disk is an explicit batch management
+// action, not lifecycle logic.
 
 var _ resourcespec.StateStore = (*stateStore)(nil)

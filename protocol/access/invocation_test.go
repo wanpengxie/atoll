@@ -25,7 +25,7 @@ func mkInvocation() Invocation {
 // TestInvocationRoundTripMinimal exercises the minimal object-op invocation:
 // only the always-present (non-omitempty) fields. It pins the wire contract that
 // a bare Invocation survives marshal/unmarshal without the substrate inventing
-// or dropping fields, and with Grant absent (nil) when not op=set.
+// or dropping fields.
 func TestInvocationRoundTripMinimal(t *testing.T) {
 	t.Parallel()
 	src := mkInvocation()
@@ -35,34 +35,10 @@ func TestInvocationRoundTripMinimal(t *testing.T) {
 	}
 }
 
-// TestInvocationRoundTripSetShape exercises the LEGAL op=set invocation: the
-// operand is the typed Grant and Args is nil (set/delete carry no Args;
-// a set with non-nil Args is malformed and rejected at the runtime door, so it
-// is deliberately NOT modeled here as a benign round-trip). Asserts struct
-// fidelity for Caller/Resource/Operation/Grant after a JSON round trip; Args
-// round-trip fidelity is covered by TestArgsTriState on an object op.
-func TestInvocationRoundTripSetShape(t *testing.T) {
-	t.Parallel()
-	src := Invocation{
-		Caller:    actor.ActorID("agent:alice"),
-		Resource:  resource.ResourceID("file:report"),
-		Operation: OpSet,
-		Grant: &Grant{
-			GranteeKind: GranteeActor,
-			Grantee:     actor.ActorID("agent:bob"),
-			Ops:         []Operation{OpRead, OpWrite},
-		},
-	}
-	got := roundTrip(t, src)
-	if !reflect.DeepEqual(got, src) {
-		t.Errorf("set-shape invocation round-trip mismatch\n got:  %#v\nwant: %#v", got, src)
-	}
-}
-
 // TestInvocationZeroValue pins the zero-value wire form: a bare Invocation{}
-// marshals with args:null (Args nil, no omitempty) and NO grant key (Grant nil,
-// omitempty), with the string fields empty — and survives a round trip. This
-// guards the empty/zero contract independently of any populated fixture.
+// marshals with args:null (Args nil, no omitempty), with the string fields
+// empty — and survives a round trip. This guards the empty/zero contract
+// independently of any populated fixture.
 func TestInvocationZeroValue(t *testing.T) {
 	t.Parallel()
 	raw, err := json.Marshal(Invocation{})
@@ -72,9 +48,6 @@ func TestInvocationZeroValue(t *testing.T) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("unmarshal map: %v", err)
-	}
-	if _, ok := m["grant"]; ok {
-		t.Errorf("zero-value Invocation must omit grant, got: %s", raw)
 	}
 	if got := string(m["args"]); got != "null" {
 		t.Errorf("zero-value args = %s, want null", got)
@@ -147,40 +120,6 @@ func TestArgsWireForm(t *testing.T) {
 	}
 }
 
-// TestGrantPresenceTriState pins the Grant pointer's absent/present signal: nil
-// Grant (the non-set ops) is OMITTED from the wire entirely (omitempty), so no
-// "grant" key appears; a non-nil Grant survives the round trip faithfully.
-func TestGrantPresenceTriState(t *testing.T) {
-	t.Parallel()
-
-	// nil Grant → no grant key on the wire (check the actual key set, not a
-	// loose substring — "grant" could appear inside a value otherwise).
-	nilGrant := mkInvocation()
-	raw, err := json.Marshal(nilGrant)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("unmarshal map: %v", err)
-	}
-	if _, ok := m["grant"]; ok {
-		t.Errorf("nil Grant should be omitted from wire, got: %s", raw)
-	}
-
-	// non-nil Grant → round-trips.
-	withGrant := mkInvocation()
-	withGrant.Operation = OpSet
-	withGrant.Grant = &Grant{GranteeKind: GranteeActor, Grantee: actor.ActorID("agent:bob"), Ops: []Operation{OpRead}}
-	got := roundTrip(t, withGrant)
-	if got.Grant == nil {
-		t.Fatalf("non-nil Grant dropped on round trip")
-	}
-	if !reflect.DeepEqual(got.Grant, withGrant.Grant) {
-		t.Errorf("Grant round-trip mismatch: got %#v, want %#v", got.Grant, withGrant.Grant)
-	}
-}
-
 // TestInvocationFieldSet1To1WithContentFields is the normative drift guard. It
 // reflects over the Invocation STRUCT TYPE (not a marshal of a fixture) and
 // compares every exported field's json-tag name 1:1 with contentFields. Reading
@@ -188,8 +127,7 @@ func TestGrantPresenceTriState(t *testing.T) {
 // with omitempty would be omitted from a zero-value marshal and slip past a
 // marshal-of-fixture check, but it cannot hide from reflect.TypeOf. Drift on
 // either side (struct grows a field the list lacks, or list names a dropped
-// field) trips this test. Unlike envelope's flattened sender.*, grant stays a
-// single top-level key.
+// field) trips this test.
 func TestInvocationFieldSet1To1WithContentFields(t *testing.T) {
 	t.Parallel()
 	typ := reflect.TypeOf(Invocation{})
@@ -216,61 +154,32 @@ func TestInvocationFieldSet1To1WithContentFields(t *testing.T) {
 	}
 }
 
-// TestInvocationWireKeys pins the omitempty WIRING (complementary to the
-// reflection drift guard above, which pins the struct↔contentFields 1:1): a
-// populated Invocation (non-nil Grant) emits exactly contentFields on the wire,
-// while a minimal one omits the omitempty grant key but keeps the other four.
+// TestInvocationWireKeys pins the wire key set (complementary to the
+// reflection drift guard above, which pins the struct↔contentFields 1:1):
+// every Invocation emits exactly contentFields on the wire — no field is
+// omitempty, so populated and minimal forms carry the same keys.
 func TestInvocationWireKeys(t *testing.T) {
 	t.Parallel()
-
-	wireKeys := func(inv Invocation) map[string]struct{} {
-		raw, err := json.Marshal(inv)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatalf("unmarshal map: %v", err)
-		}
-		set := make(map[string]struct{}, len(m))
-		for k := range m {
-			set[k] = struct{}{}
-		}
-		return set
+	raw, err := json.Marshal(mkInvocation())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-
-	// Populated (Grant present) → exactly contentFields.
-	full := Invocation{
-		Caller:    actor.ActorID("agent:alice"),
-		Resource:  resource.ResourceID("file:report"),
-		Operation: OpSet,
-		Grant:     &Grant{GranteeKind: GranteeActor, Grantee: actor.ActorID("agent:bob"), Ops: []Operation{OpRead}},
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal map: %v", err)
 	}
-	got := wireKeys(full)
-	if len(got) != len(contentFields) {
-		t.Errorf("populated Invocation wire keys = %v, want exactly contentFields %v", got, contentFields)
+	if len(m) != len(contentFields) {
+		t.Errorf("Invocation wire keys = %v, want exactly contentFields %v", m, contentFields)
 	}
 	for _, k := range contentFields {
-		if _, ok := got[k]; !ok {
-			t.Errorf("populated Invocation wire form missing key %q (keys=%v)", k, got)
-		}
-	}
-
-	// Minimal (nil Grant) → grant omitted, the other four present.
-	min := wireKeys(mkInvocation())
-	if _, ok := min["grant"]; ok {
-		t.Errorf("minimal Invocation must omit grant, got keys %v", min)
-	}
-	for _, k := range []string{"caller", "resource", "operation", "args"} {
-		if _, ok := min[k]; !ok {
-			t.Errorf("minimal Invocation wire form missing key %q (keys=%v)", k, min)
+		if _, ok := m[k]; !ok {
+			t.Errorf("Invocation wire form missing key %q (raw=%s)", k, raw)
 		}
 	}
 }
 
 // TestContentFieldsShape guards contentFields' own internal shape: non-empty and
-// every entry is a bare top-level key (Invocation has no dotted/nested wire keys;
-// grant is opaque, not flattened — unlike envelope's sender.*).
+// every entry is a bare top-level key (Invocation has no dotted/nested wire keys).
 func TestContentFieldsShape(t *testing.T) {
 	t.Parallel()
 	if len(contentFields) == 0 {
@@ -284,7 +193,7 @@ func TestContentFieldsShape(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// helpers (shared with grant_test.go)
+// helpers
 // ---------------------------------------------------------------------------
 
 func roundTrip[T any](t *testing.T, src T) T {

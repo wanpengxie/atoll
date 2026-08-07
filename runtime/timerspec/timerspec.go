@@ -8,15 +8,13 @@ import (
 )
 
 var (
-	ErrAuthorInactive = errors.New("timerspec: author inactive")
-	ErrScheduleQuota  = errors.New("timerspec: schedule quota exceeded")
+	ErrScheduleQuota = errors.New("timerspec: schedule quota exceeded")
 )
 
 type DeathClass string
 
 const (
-	DeathFireRejected   DeathClass = "fire_rejected"
-	DeathReviveRejected DeathClass = "revive_rejected"
+	DeathFireRejected DeathClass = "fire_rejected"
 )
 
 // TimerID names one pending timer. It is a RUNTIME-level name (control-plane),
@@ -34,21 +32,19 @@ const (
 // (the PRIMARY KEY only guards concurrently-pending rows).
 type TimerID string
 
-// TimerRow is one pending IDENTITY-level timer — control-plane intent, NEVER
-// truth. This store holds ONLY the durable half of the time axis: intent keyed
-// by a durable name (author identity), surviving restarts until deregister.
-// Incarnation-bind timers are NOT rows and never will be — they live in the
-// schedule engine's memory, welded to the live embodiment, and vanish with the
-// process (compare BEAM in-VM timers / Orleans in-activation Timers / POSIX
-// timers on task_struct — ephemeral intent lives in ephemeral memory; a
-// durable account for a must-die thing is half a token).
+// TimerRow is one pending timer in the Durable Scheduler home — control-plane
+// intent, NEVER truth. It is keyed by author identity and survives Scheduler
+// process restarts until fire/cancel/rejection. An author may become inactive
+// while an admitted Schedule is in flight; that ordinary stale intent is
+// rejected and reaped at fire time. Memory-home timers are kept only in the
+// current Channel/Scheduler instance and therefore have no row here. This
+// storage distinction is unrelated to actor AttemptKey/Incarnation.
 //
 // author_id is the identity that scheduled it AND the welded author of the
 // fired message (self-targeted: there is no target field, structurally — a
 // timer can only ever produce a message authored by the actor that scheduled
-// it). Incarnation is NOT here (it is not serialisable) — and there is no
-// bind column either: everything in this table is identity-bind by
-// construction (structure IS the bind).
+// it). No actor-generation coordinate belongs here: every timer is
+// ActorID-owned by construction.
 type TimerRow struct {
 	ID            TimerID
 	AuthorID      actor.ActorID
@@ -81,4 +77,10 @@ type TimerStore interface {
 	// handle can only ever cancel its own timers; a foreign/absent id is the
 	// same existed=false, no existence leak).
 	CancelOwned(ctx context.Context, id TimerID, author actor.ActorID) (existed bool, err error)
+	// MarkFired closes one durable fire after the deterministic fire message
+	// has passed the ordinary Harness path. Missing/already-fired rows are
+	// idempotent success: Cancel may win after the due snapshot, and a crash
+	// may leave the message committed before this marker is advanced.
+	MarkFired(context.Context, TimerID) error
+	AckOwned(context.Context, TimerID, actor.ActorID) (bool, error)
 }

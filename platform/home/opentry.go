@@ -1,0 +1,380 @@
+package home
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+
+	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/internal/sysactor"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
+	"github.com/wanpengxie/atoll/runtime/storespec"
+)
+
+// opEntry is a transport adapter. Actor lifecycle and identity mutations all
+// enter Controller through actorSystem; this type owns no actor map, gate, or
+// execution state. Business policy (owner protection, declaration visibility,
+// placement host) is resolved HERE, before the typed command is issued.
+type opEntry struct {
+	home *Home
+}
+
+var (
+	_ sysactor.OperateExecutor = (*opEntry)(nil)
+	_ sysactor.SystemOps       = (*opEntry)(nil)
+)
+
+func (e *opEntry) available() error {
+	if e == nil || e.home == nil || e.home.closed.Load() || e.home.actors == nil {
+		return &channelspec.OperationError{
+			Code: channelspec.ErrCodeChannelUnavailable, Detail: "channel is not serving", Retryable: true,
+		}
+	}
+	return nil
+}
+
+func (e *opEntry) Admit(ctx context.Context, req channelspec.AdmitRequest) (channel.AdmitResult, error) {
+	if err := e.available(); err != nil {
+		return channel.AdmitResult{}, err
+	}
+	if req.Principal == "" {
+		return channel.AdmitResult{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeBadPayload, Detail: "principal required",
+		}
+	}
+	result, err := e.home.actors.Admit(ctx, actorctl.AdmitRequest{Principal: req.Principal})
+	if err == nil && result.ActorID != "" {
+		e.home.ensureSubjectSlot(result.ActorID)
+		e.home.narrateBirth(ctx, result.ActorID, actor.KindHuman, result.Created)
+	}
+	return result, err
+}
+
+func (e *opEntry) Introduce(
+	ctx context.Context,
+	req channelspec.IntroduceRequest,
+) (channel.IntroduceResult, error) {
+	if err := e.available(); err != nil {
+		return channel.IntroduceResult{}, err
+	}
+	return e.introduce(ctx, req.DeclID, req.InitiatorActorID)
+}
+
+// introduce is the one introduction path. Both doors — the out-of-band
+// admission call above and the in-gate operate frame below — reach the same
+// verdict, because the verdict reads the initiator's own facts instead of
+// taking the door's word for what kind of initiator it is.
+func (e *opEntry) introduce(
+	ctx context.Context,
+	declID string,
+	initiator actor.ActorID,
+) (channel.IntroduceResult, error) {
+	command, err := e.home.resolveIntroduction(ctx, declID, initiator)
+	if err != nil {
+		return channel.IntroduceResult{}, err
+	}
+	result, err := e.home.actors.Introduce(ctx, command)
+	if err == nil && result.ActorID != "" {
+		e.home.narrateBirth(ctx, result.ActorID, command.Kind, result.Created)
+	}
+	return result, err
+}
+
+func (e *opEntry) Remove(
+	ctx context.Context,
+	req channelspec.RemoveRequest,
+) (channel.RemoveResult, error) {
+	if err := e.available(); err != nil {
+		return channel.RemoveResult{}, err
+	}
+	if err := e.home.guardOwnerTerminal(ctx, req.Target); err != nil {
+		return channel.RemoveResult{}, err
+	}
+	result, err := e.home.actors.Remove(ctx, actorctl.RemoveRequest{
+		Target: req.Target, InitiatorActorID: req.InitiatorActorID,
+	})
+	if err == nil {
+		e.home.announceAudit(ctx, "remove_actor", map[string]any{
+			"target": req.Target, "removed": result.Removed,
+		})
+	}
+	return result, err
+}
+
+// AttachDaemon is a wiring-domain management action: it writes one binding row
+// and touches no actor record.
+func (e *opEntry) AttachDaemon(
+	ctx context.Context,
+	req channelspec.DaemonRequest,
+) (channelspec.BindingResult, error) {
+	if err := e.available(); err != nil {
+		return channelspec.BindingResult{}, err
+	}
+	if req.DaemonID == "" {
+		return channelspec.BindingResult{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeBadPayload, Detail: "daemon_id required",
+		}
+	}
+	created, err := e.home.bindings.AttachDaemon(
+		ctx, storespec.DaemonID(req.DaemonID), e.home.nowMs())
+	if err != nil {
+		return channelspec.BindingResult{}, err
+	}
+	e.home.announceAudit(ctx, "attach_daemon", map[string]any{"daemon_id": req.DaemonID})
+	if created {
+		e.home.pokeReconcile()
+	}
+	if created {
+		e.home.emitRelations(channelspec.RelationDelta{
+			Kind: channelspec.RelationBound, DaemonID: req.DaemonID,
+		})
+	}
+	homeActorEffects{home: e.home}.PlanPoke(executionDomain(req.DaemonID))
+	return channelspec.BindingResult{Bound: true}, nil
+}
+
+// DetachDaemon removes the channel↔daemon binding row and NOTHING else. Actors
+// placed on the detached daemon stay members: their desired dangles, execution
+// fails closed, messages still arrive, and re-attaching the same daemon id
+// reconciles them back. Cleaning up actors is a separate, explicit management
+// action (ordinary End/Remove with an explicit target list).
+func (e *opEntry) DetachDaemon(
+	ctx context.Context,
+	req channelspec.DaemonRequest,
+) (channelspec.BindingResult, error) {
+	if err := e.available(); err != nil {
+		return channelspec.BindingResult{}, err
+	}
+	if req.DaemonID == "" {
+		return channelspec.BindingResult{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeBadPayload, Detail: "daemon_id required",
+		}
+	}
+	removed, err := e.home.bindings.DetachDaemon(
+		ctx, storespec.DaemonID(req.DaemonID))
+	if err != nil {
+		return channelspec.BindingResult{}, err
+	}
+	e.home.announceAudit(ctx, "detach_daemon", map[string]any{"daemon_id": req.DaemonID})
+	if e.home.daemonRoutes != nil {
+		e.home.daemonRoutes.RetireLane(req.DaemonID, string(e.home.channelID))
+	}
+	e.home.pokeReconcile()
+	if removed {
+		e.home.emitRelations(channelspec.RelationDelta{
+			Kind: channelspec.RelationUnbound, DaemonID: req.DaemonID,
+		})
+	}
+	homeActorEffects{home: e.home}.PlanPoke(executionDomain(req.DaemonID))
+	return channelspec.BindingResult{Bound: false}, nil
+}
+
+// Execute adapts the collaboration-plane system actor verbs.
+func (e *opEntry) Execute(
+	ctx context.Context,
+	operation string,
+	req sysactor.OperateRequest,
+) (any, error) {
+	if err := e.available(); err != nil {
+		return nil, asOperateError(err)
+	}
+	switch operation {
+	case sysactor.TypeIntroduceActor:
+		var payload struct {
+			DeclID string `json:"decl_id"`
+		}
+		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.DeclID == "" {
+			return nil, &sysactor.OperateError{
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "decl_id required",
+			}
+		}
+		result, err := e.introduce(ctx, payload.DeclID, req.Sender)
+		if err != nil {
+			return nil, asOperateError(err)
+		}
+		return map[string]any{"instance_id": result.ActorID, "created": result.Created}, nil
+
+	case sysactor.TypeRemoveActor:
+		var payload struct {
+			InstanceID actor.ActorID `json:"instance_id"`
+		}
+		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
+			return nil, &sysactor.OperateError{
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "instance_id required",
+			}
+		}
+		result, err := e.Remove(ctx, channelspec.RemoveRequest{
+			Target: payload.InstanceID, InitiatorActorID: req.Sender,
+		})
+		if err != nil {
+			return nil, asOperateError(err)
+		}
+		return map[string]any{"removed": result.Removed}, nil
+
+	case sysactor.TypeRestartActor:
+		var payload struct {
+			InstanceID actor.ActorID `json:"instance_id"`
+		}
+		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
+			return nil, &sysactor.OperateError{
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "instance_id required",
+			}
+		}
+		if err := e.home.actors.Restart(ctx, actorctl.RestartRequest{
+			ActorID: payload.InstanceID,
+		}); err != nil {
+			return nil, asOperateError(err)
+		}
+		e.home.announceAudit(ctx, "restart_actor", map[string]any{"target": payload.InstanceID})
+		return map[string]any{"restarted": payload.InstanceID}, nil
+
+	case sysactor.TypeSetDefaultAgent:
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload == nil {
+			return nil, &sysactor.OperateError{
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "payload must be an object",
+			}
+		}
+		_, hasInstance := payload["instance_id"]
+		_, hasSource := payload["source_decl_id"]
+		if hasInstance == hasSource {
+			return nil, &sysactor.OperateError{
+				Code:   string(channelspec.ErrCodeBadPayload),
+				Detail: "exactly one of instance_id or source_decl_id is required",
+			}
+		}
+		var target actor.ActorID
+		if hasInstance {
+			value, err := requiredJSONString(payload, "instance_id")
+			if err != nil {
+				return nil, &sysactor.OperateError{
+					Code: string(channelspec.ErrCodeBadPayload), Detail: err.Error(),
+				}
+			}
+			target = actor.ActorID(value)
+		} else {
+			source, err := requiredJSONString(payload, "source_decl_id")
+			if err != nil || source == "" {
+				detail := "source_decl_id must be a non-empty JSON string"
+				if err != nil {
+					detail = err.Error()
+				}
+				return nil, &sysactor.OperateError{
+					Code: string(channelspec.ErrCodeBadPayload), Detail: detail,
+				}
+			}
+			view := e.home.View()
+			resolved, resolveErr := resolveDefaultSource(ctx, source, view.DeclaredInstances, func(count int) {
+				e.home.logger.Error("platform.routing.declaration_cardinality_broken",
+					"source_decl_id", source, "count", count)
+			})
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			target = resolved
+		}
+		if target != "" {
+			member, err := e.home.controller.IsActive(ctx, target)
+			if err != nil {
+				return nil, &sysactor.OperateError{
+					Code: subjectgate.CodeUnavailable, Detail: err.Error(),
+				}
+			}
+			if !member {
+				return nil, &sysactor.OperateError{
+					Code:   string(channelspec.ErrCodeMemberInactive),
+					Detail: "target is not an active member",
+				}
+			}
+		}
+		if err := e.home.defaultAgent.set(ctx, target, req.Sender); err != nil {
+			return nil, &sysactor.OperateError{
+				Code: subjectgate.CodeUnavailable, Detail: err.Error(),
+			}
+		}
+		return map[string]any{"default_agent": target}, nil
+
+	default:
+		return nil, &sysactor.OperateError{
+			Code: string(channelspec.ErrCodeNotAcceptedSource), Detail: "operation is not accepted",
+		}
+	}
+}
+
+func resolveDefaultSource(
+	ctx context.Context,
+	source string,
+	declared func(context.Context, string) ([]actor.ActorID, error),
+	cardinalityBroken func(int),
+) (actor.ActorID, *sysactor.OperateError) {
+	instances, err := declared(ctx, source)
+	if err != nil {
+		return "", &sysactor.OperateError{
+			Code: subjectgate.CodeUnavailable, Detail: err.Error(),
+		}
+	}
+	switch len(instances) {
+	case 0:
+		return "", &sysactor.OperateError{
+			Code:   string(channelspec.ErrCodeMemberInactive),
+			Detail: "declaration has no active instance",
+		}
+	case 1:
+		return instances[0], nil
+	default:
+		if cardinalityBroken != nil {
+			cardinalityBroken(len(instances))
+		}
+		return "", &sysactor.OperateError{
+			Code:   subjectgate.CodeUnavailable,
+			Detail: "declaration resolved to multiple active instances",
+		}
+	}
+}
+
+func executionDomain(daemonID string) actorhost.ExecutionDomain {
+	return actorhost.ExecutionDomain(daemonID)
+}
+
+// narrateBirth writes the "joined the channel" narration for a freshly created
+// record. A replayed birth (created=false) narrates nothing. The narration is
+// composed from the command's own inputs — the tail never reads truth back.
+func (h *Home) narrateBirth(ctx context.Context, id actor.ActorID, kind actor.Kind, created bool) {
+	if !created {
+		return
+	}
+	h.announceRegistered(ctx, id, kind)
+}
+
+func asOperateError(err error) error {
+	var operationErr *channelspec.OperationError
+	if errors.As(err, &operationErr) {
+		return &sysactor.OperateError{
+			Code: string(operationErr.Code), Detail: operationErr.Detail,
+		}
+	}
+	switch {
+	case errors.Is(err, actorctl.ErrInactive), errors.Is(err, actorctl.ErrStaleAttempt):
+		return &sysactor.OperateError{
+			Code: string(channelspec.ErrCodeMemberInactive), Detail: err.Error(),
+		}
+	case errors.Is(err, actorctl.ErrClosed), errors.Is(err, actorctl.ErrChannelClosing):
+		return &sysactor.OperateError{
+			Code: string(channelspec.ErrCodeChannelUnavailable), Detail: err.Error(),
+		}
+	default:
+		return err
+	}
+}
+
+// SystemOps is the assembly-only direct realm adapter.
+func SystemOps(h *Home) sysactor.SystemOps {
+	if h == nil {
+		return nil
+	}
+	return h.opEntry
+}

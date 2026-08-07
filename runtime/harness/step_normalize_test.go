@@ -35,16 +35,17 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	if string(e.Payload) != "{}" {
 		t.Fatalf("payload = %q, want {} baseline", e.Payload)
 	}
+	if e.Audience == nil || len(e.Audience) != 0 {
+		t.Fatalf("event audience = %#v, want non-nil empty slice", e.Audience)
+	}
 	// ts_received is engine-owned and filled at the append sink (Chain.Write),
 	// not by normalize — the full-Write contract is pinned in chain_test.go.
 }
 
-// TestStepNormalize_DoesNotFillKind pins the invariant: normalize
-// NEVER fills kind — not for core types, not for business types. kind is
-// sender-required and enforced upstream by stepEnvelopeShape (empty kind →
-// field_missing, short-circuit), so a kind-fill in normalize is dead code.
-// The core-type table's kind field is a constraint in stepKindAndAudience,
-// not a fill.
+// TestStepNormalize_DoesNotFillKind pins the invariant: normalize NEVER
+// fills kind for any type. kind is sender-required and enforced upstream by
+// stepEnvelopeShape (empty kind → field_missing, short-circuit), so a
+// kind-fill in normalize is dead code.
 func TestStepNormalize_DoesNotFillKind(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
@@ -126,5 +127,14 @@ func TestStepNormalize_TimeRelationGuard(t *testing.T) {
 				t.Fatalf("reason = %q, want %q", out.RejectReason, tc.reason)
 			}
 		})
+	}
+}
+
+// nil envelope short-circuit: Chain.Write guards nil before the loop, so the
+// step's own nil branch is only reachable by calling the step directly.
+func TestStepNormalize_NilEnvelope(t *testing.T) {
+	out, err := newStepNormalize(Deps{NowMs: func() int64 { return fixedNowMs }}).Run(context.Background(), nil)
+	if err != nil || !out.Continue() {
+		t.Fatalf("nil envelope normalize = out=%+v err=%v, want continue/no-error", out, err)
 	}
 }

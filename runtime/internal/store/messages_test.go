@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/internal/store"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -22,7 +26,7 @@ func TestAppend_AllocatesMonotonicSeq(t *testing.T) {
 
 	var last int64
 	for i, id := range []string{"m1", "m2", "m3"} {
-		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"bob"}), false)
+		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"bob"}), false, storespec.AppendMetadata{})
 		if err != nil {
 			t.Fatalf("Append %s: %v", id, err)
 		}
@@ -30,6 +34,36 @@ func TestAppend_AllocatesMonotonicSeq(t *testing.T) {
 			t.Fatalf("seq not monotonic at #%d: got %d after %d", i, res.Seq, last)
 		}
 		last = res.Seq
+	}
+}
+
+func TestLatestBySenderAndTypeUsesStoreSeqAndExactSender(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+	appendRow := func(id, sender, typ, payload string) {
+		t.Helper()
+		env := newEnv(id, message.KindEvent, message.Audience{actor.SystemActorID},
+			withSender(actor.KindSystem, actor.ActorID(sender)),
+			withType(typ),
+			withPayload(payload),
+			withVisibility(message.VisibilitySystem),
+		)
+		if _, err := cs.Log.Append(ctx, env, false, storespec.AppendMetadata{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendRow("old", string(actor.SystemActorID), "channel.routing.default_set", `{"n":1}`)
+	appendRow("other-type", string(actor.SystemActorID), "other", `{"n":2}`)
+	appendRow("forged", "agent:forger", "channel.routing.default_set", `{"n":3}`)
+	appendRow("new", string(actor.SystemActorID), "channel.routing.default_set", `{"n":4}`)
+
+	row, found, err := cs.Query.LatestBySenderAndType(
+		ctx, actor.SystemActorID, "channel.routing.default_set")
+	if err != nil || !found || row.Envelope.ID != "new" {
+		t.Fatalf("latest=%+v found=%v err=%v", row, found, err)
+	}
+	if _, found, err := cs.Query.LatestBySenderAndType(ctx, actor.SystemActorID, "missing"); err != nil || found {
+		t.Fatalf("missing found=%v err=%v", found, err)
 	}
 }
 
@@ -44,12 +78,12 @@ func TestAppend_FindByID_RoundTrip(t *testing.T) {
 		withSender(actor.KindAgent, "planner"),
 		withType("xhs.publish"),
 		withPayload(`{"note":"hi"}`),
-		withVisibility(message.VisibilityPrivate),
+		withVisibility(message.VisibilityPublic),
 		withCorrelation("corr-7"),
 	)
 	in.ExpiresAt = &exp
 
-	res, err := cs.Log.Append(ctx, in, false)
+	res, err := cs.Log.Append(ctx, in, false, storespec.AppendMetadata{})
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -71,7 +105,7 @@ func TestAppend_FindByID_RoundTrip(t *testing.T) {
 	if e.Sender.Kind != actor.KindAgent || e.Sender.ID != "planner" {
 		t.Errorf("sender=%+v", e.Sender)
 	}
-	if e.Visibility != message.VisibilityPrivate {
+	if e.Visibility != message.VisibilityPublic {
 		t.Errorf("visibility=%q", e.Visibility)
 	}
 	if e.CorrelationID != "corr-7" {
@@ -98,7 +132,7 @@ func TestAppend_PersistsTerminalVerbatim(t *testing.T) {
 	// A request row passed isTerminal=true: store persists the bit as given
 	// even though "request" is semantically never terminal — proving the
 	// store does not derive the value itself.
-	if _, err := cs.Log.Append(ctx, newEnv("p1", message.KindRequest, message.Audience{"x"}), true); err != nil {
+	if _, err := cs.Log.Append(ctx, newEnv("p1", message.KindRequest, message.Audience{"x"}), true, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	got, ok, err := cs.Log.FindByID(ctx, "p1")
@@ -130,14 +164,14 @@ func TestAppend_RejectsProtocolViolations(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := cs.Log.Append(ctx, tc.env, false); err == nil {
+			if _, err := cs.Log.Append(ctx, tc.env, false, storespec.AppendMetadata{}); err == nil {
 				t.Fatalf("Append must reject %s, got nil error", tc.name)
 			}
 		})
 	}
 }
 
-// --- Append: id uniqueness is integrity, not dedup (A3) -----------------------
+// --- Append: strict internal ids + fingerprinted shell idempotency ------------
 
 // A second Append of the same envelope.id is a hard integrity violation
 // surfaced as a typed AppendError(harness_id_duplicate_conflict) — NOT a
@@ -146,10 +180,10 @@ func TestAppend_DuplicateID_TypedConflict(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	if _, err := cs.Log.Append(ctx, newEnv("dup", message.KindEvent, message.Audience{"x"}), false); err != nil {
+	if _, err := cs.Log.Append(ctx, newEnv("dup", message.KindEvent, message.Audience{"x"}), false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("first Append: %v", err)
 	}
-	_, err := cs.Log.Append(ctx, newEnv("dup", message.KindEvent, message.Audience{"x"}), false)
+	_, err := cs.Log.Append(ctx, newEnv("dup", message.KindEvent, message.Audience{"x"}), false, storespec.AppendMetadata{})
 	if err == nil {
 		t.Fatal("duplicate id Append must error, not dedup-noop")
 	}
@@ -162,6 +196,101 @@ func TestAppend_DuplicateID_TypedConflict(t *testing.T) {
 	}
 	if ae.PartialMessageID != "dup" {
 		t.Errorf("partial id=%q want dup", ae.PartialMessageID)
+	}
+}
+
+func TestAppend_ClientFingerprintReplayAndConflict(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+	meta := storespec.AppendMetadata{ClientFingerprint: "v1:same"}
+
+	first, err := cs.Log.Append(ctx, newEnv("client-id", message.KindEvent, message.Audience{"x"}), false, meta)
+	if err != nil || first.Replayed {
+		t.Fatalf("first append=(%+v,%v)", first, err)
+	}
+	replay, err := cs.Log.Append(ctx, newEnv("client-id", message.KindEvent, message.Audience{"x"}), false, meta)
+	if err != nil || !replay.Replayed || replay.Seq != first.Seq {
+		t.Fatalf("same-fingerprint replay=(%+v,%v), first=%+v", replay, err, first)
+	}
+	if max, err := cs.Query.MaxSeq(ctx); err != nil || max != first.Seq {
+		t.Fatalf("replay advanced truth: max=%d err=%v first=%d", max, err, first.Seq)
+	}
+
+	_, err = cs.Log.Append(ctx, newEnv("client-id", message.KindEvent, message.Audience{"x"}), false,
+		storespec.AppendMetadata{ClientFingerprint: "v1:different"})
+	var conflict *storespec.AppendError
+	if !errors.As(err, &conflict) || conflict.Reason != storespec.AppendRejectIDDuplicate {
+		t.Fatalf("different fingerprint err=%T %v", err, err)
+	}
+}
+
+func TestAppend_ClientFingerprintConcurrentReplay(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+	meta := storespec.AppendMetadata{ClientFingerprint: "v1:concurrent"}
+	const writers = 12
+	results := make(chan storespec.AppendResult, writers)
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := cs.Log.Append(ctx, newEnv("same-key", message.KindEvent, message.Audience{"x"}), false, meta)
+			results <- res
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent replay: %v", err)
+		}
+	}
+	var seq int64
+	var inserted int
+	for result := range results {
+		if seq == 0 {
+			seq = result.Seq
+		}
+		if result.Seq != seq {
+			t.Fatalf("replays returned different seq: %d vs %d", result.Seq, seq)
+		}
+		if !result.Replayed {
+			inserted++
+		}
+	}
+	if inserted != 1 {
+		t.Fatalf("physical inserts=%d want 1", inserted)
+	}
+}
+
+func TestAppend_ClientFingerprintSurvivesReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "messages.sqlite")
+	open := func() *store.ChannelStores {
+		cs, err := store.OpenChannel(ctx, channel.ID("C-restart"), path, store.OpenOptions{}, nil)
+		if err != nil {
+			t.Fatalf("OpenChannel: %v", err)
+		}
+		return cs
+	}
+	meta := storespec.AppendMetadata{ClientFingerprint: "v1:persisted"}
+	firstStore := open()
+	first, err := firstStore.Log.Append(ctx, newEnv("restart-key", message.KindEvent, message.Audience{"x"}), false, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secondStore := open()
+	defer secondStore.Close()
+	replay, err := secondStore.Log.Append(ctx, newEnv("restart-key", message.KindEvent, message.Audience{"x"}), false, meta)
+	if err != nil || !replay.Replayed || replay.Seq != first.Seq {
+		t.Fatalf("restart replay=(%+v,%v), first=%+v", replay, err, first)
 	}
 }
 
@@ -182,7 +311,7 @@ func TestAppend_TerminalResponseUniquePerRequest(t *testing.T) {
 			withParent("the-request"),
 			withType("agent.text"),
 		)
-		return cs.Log.Append(ctx, env, terminal)
+		return cs.Log.Append(ctx, env, terminal, storespec.AppendMetadata{})
 	}
 
 	// Two provisional responses to the same parent are both allowed.
@@ -219,7 +348,7 @@ func TestAppend_TerminalUniquenessScopedPerParent(t *testing.T) {
 	mk := func(id, parent string) error {
 		env := newEnv(id, message.KindResponse, message.Audience{"alice"},
 			withSender(actor.KindAgent, "p"), withParent(message.ID(parent)), withType("agent.text"))
-		_, err := cs.Log.Append(ctx, env, true)
+		_, err := cs.Log.Append(ctx, env, true, storespec.AppendMetadata{})
 		return err
 	}
 	if err := mk("f-a", "req-a"); err != nil {
@@ -247,7 +376,7 @@ func TestHasFinalResponse(t *testing.T) {
 	// A provisional response does NOT count as final.
 	prov := newEnv("prov", message.KindResponse, message.Audience{"a"},
 		withSender(actor.KindAgent, "p"), withParent("req-x"), withType("agent.text"))
-	if _, err := cs.Log.Append(ctx, prov, false); err != nil {
+	if _, err := cs.Log.Append(ctx, prov, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append provisional: %v", err)
 	}
 	if has, err := cs.Log.HasFinalResponse(ctx, "req-x"); err != nil || has {
@@ -256,7 +385,7 @@ func TestHasFinalResponse(t *testing.T) {
 	// A terminal response flips it to true.
 	fin := newEnv("fin", message.KindResponse, message.Audience{"a"},
 		withSender(actor.KindAgent, "p"), withParent("req-x"), withType("agent.text"))
-	if _, err := cs.Log.Append(ctx, fin, true); err != nil {
+	if _, err := cs.Log.Append(ctx, fin, true, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append terminal: %v", err)
 	}
 	if has, err := cs.Log.HasFinalResponse(ctx, "req-x"); err != nil || !has {
@@ -279,14 +408,14 @@ func TestAppend_ProvisionalAfterFinal_Rejected(t *testing.T) {
 	// A final terminal lands first.
 	fin := newEnv("fin", message.KindResponse, message.Audience{"caller"},
 		withSender(actor.KindAgent, "p"), withParent("req-1"), withType("agent.text"))
-	if _, err := cs.Log.Append(ctx, fin, true); err != nil {
+	if _, err := cs.Log.Append(ctx, fin, true, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append final: %v", err)
 	}
 
 	// A provisional for the same parent must be rejected — and leave no row.
 	prov := newEnv("zombie", message.KindResponse, message.Audience{"caller"},
 		withSender(actor.KindAgent, "p"), withParent("req-1"), withType("agent.text"))
-	_, err := cs.Log.Append(ctx, prov, false)
+	_, err := cs.Log.Append(ctx, prov, false, storespec.AppendMetadata{})
 	var appErr *storespec.AppendError
 	if !errors.As(err, &appErr) {
 		t.Fatalf("Append provisional-after-final err=%v, want *AppendError", err)
@@ -308,7 +437,7 @@ func TestAppend_ProvisionalBeforeFinal_Allowed(t *testing.T) {
 
 	prov := newEnv("prov", message.KindResponse, message.Audience{"caller"},
 		withSender(actor.KindAgent, "p"), withParent("req-1"), withType("agent.text"))
-	if _, err := cs.Log.Append(ctx, prov, false); err != nil {
+	if _, err := cs.Log.Append(ctx, prov, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append provisional-before-final: %v", err)
 	}
 	if _, ok, err := cs.Log.FindByID(ctx, "prov"); err != nil || !ok {
@@ -341,7 +470,7 @@ func TestMaxSeq(t *testing.T) {
 	}
 	var lastSeq int64
 	for _, id := range []string{"a", "b", "c"} {
-		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false)
+		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false, storespec.AppendMetadata{})
 		if err != nil {
 			t.Fatalf("Append %s: %v", id, err)
 		}
@@ -367,7 +496,7 @@ func TestReadAfterSeq_ForwardOrderedTail(t *testing.T) {
 
 	var seqs []int64
 	for _, id := range []string{"a", "b", "c", "d"} {
-		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false)
+		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false, storespec.AppendMetadata{})
 		if err != nil {
 			t.Fatalf("Append %s: %v", id, err)
 		}
@@ -399,7 +528,7 @@ func TestReadAfterSeq_LimitHonored(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 	for _, id := range []string{"a", "b", "c", "d", "e"} {
-		if _, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false); err != nil {
+		if _, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false, storespec.AppendMetadata{}); err != nil {
 			t.Fatalf("Append %s: %v", id, err)
 		}
 	}
@@ -425,7 +554,7 @@ func TestOpenRequestsForActor(t *testing.T) {
 		t.Helper()
 		env := newEnv(id, message.KindRequest, audience,
 			withSender(actor.KindAgent, "planner"), withType("xhs.publish"))
-		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+		if _, err := cs.Log.Append(ctx, env, false, storespec.AppendMetadata{}); err != nil {
 			t.Fatalf("Append request %s: %v", id, err)
 		}
 	}
@@ -433,7 +562,7 @@ func TestOpenRequestsForActor(t *testing.T) {
 		t.Helper()
 		env := newEnv(id, message.KindResponse, message.Audience{"planner"},
 			withSender(actor.KindTool, "tool:xhs"), withParent(message.ID(parent)), withType("agent.text"))
-		if _, err := cs.Log.Append(ctx, env, true); err != nil {
+		if _, err := cs.Log.Append(ctx, env, true, storespec.AppendMetadata{}); err != nil {
 			t.Fatalf("Append response %s: %v", id, err)
 		}
 	}
@@ -472,12 +601,12 @@ func TestOpenRequestsForActor_ProvisionalDoesNotClose(t *testing.T) {
 
 	req := newEnv("r1", message.KindRequest, message.Audience{"tool:xhs"},
 		withSender(actor.KindAgent, "planner"), withType("xhs.publish"))
-	if _, err := cs.Log.Append(ctx, req, false); err != nil {
+	if _, err := cs.Log.Append(ctx, req, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append request: %v", err)
 	}
 	prov := newEnv("r1-prov", message.KindResponse, message.Audience{"planner"},
 		withSender(actor.KindTool, "tool:xhs"), withParent("r1"), withType("agent.text"))
-	if _, err := cs.Log.Append(ctx, prov, false); err != nil {
+	if _, err := cs.Log.Append(ctx, prov, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append provisional: %v", err)
 	}
 	rows, err := cs.Query.OpenRequestsForActor(ctx, "tool:xhs")
@@ -501,7 +630,7 @@ func TestDistinctOpenRequestReceivers(t *testing.T) {
 		t.Helper()
 		env := newEnv(id, message.KindRequest, audience,
 			withSender(actor.KindAgent, "planner"), withType("xhs.publish"))
-		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+		if _, err := cs.Log.Append(ctx, env, false, storespec.AppendMetadata{}); err != nil {
 			t.Fatalf("Append request %s: %v", id, err)
 		}
 	}
@@ -509,7 +638,7 @@ func TestDistinctOpenRequestReceivers(t *testing.T) {
 		t.Helper()
 		env := newEnv(id, message.KindResponse, audience,
 			withSender(actor.KindTool, "tool:xhs"), withParent(message.ID(parent)), withType("agent.text"))
-		if _, err := cs.Log.Append(ctx, env, true); err != nil {
+		if _, err := cs.Log.Append(ctx, env, true, storespec.AppendMetadata{}); err != nil {
 			t.Fatalf("Append response %s: %v", id, err)
 		}
 	}
@@ -552,7 +681,7 @@ func TestExpiredOpenRequests(t *testing.T) {
 		t.Helper()
 		env := newEnv(id, message.KindRequest, message.Audience{"tool:xhs"},
 			withSender(actor.KindAgent, "planner"), withType("xhs.publish"), withExpiresAt(expiresAt))
-		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+		if _, err := cs.Log.Append(ctx, env, false, storespec.AppendMetadata{}); err != nil {
 			t.Fatalf("Append %s: %v", id, err)
 		}
 	}
@@ -563,7 +692,7 @@ func TestExpiredOpenRequests(t *testing.T) {
 	mkReq("e4", 9000) // future deadline → not expired at now=1000
 	resp := newEnv("e3-final", message.KindResponse, message.Audience{"planner"},
 		withSender(actor.KindTool, "tool:xhs"), withParent("e3"), withType("agent.text"))
-	if _, err := cs.Log.Append(ctx, resp, true); err != nil {
+	if _, err := cs.Log.Append(ctx, resp, true, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("Append e3-final: %v", err)
 	}
 
@@ -599,7 +728,7 @@ func TestExpiredOpenRequests_ManyRowsPaginate(t *testing.T) {
 	for i := 0; i < n; i++ {
 		env := newEnv(fmt.Sprintf("m%03d", i), message.KindRequest, message.Audience{"tool:xhs"},
 			withSender(actor.KindAgent, "planner"), withType("xhs.publish"), withExpiresAt(int64(100+i)))
-		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+		if _, err := cs.Log.Append(ctx, env, false, storespec.AppendMetadata{}); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}

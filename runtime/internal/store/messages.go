@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -22,12 +23,11 @@ import (
 // escape hatch that bypasses normalize, sender_kind overwrite, type /
 // schema validation, and the uniqueness contract.
 //
-// Append INSERTs the messages row in one transaction (raises *AppendError
-// on the messages.id UNIQUE violation or the terminal-duplicate UNIQUE
-// INDEX violation). envelope.id is a caller-generated random uuid
-// correlation anchor — uniqueness is a pure integrity guarantee, NOT a
-// dedup/idempotency seam. There are no same-transaction side-row observers
-// (see newMessages).
+// Append INSERTs the messages row and optional shell-submission fingerprint in
+// one transaction. A repeated id with the same non-empty fingerprint is an
+// idempotent replay and returns the original row position; a different (or
+// absent) fingerprint remains a typed duplicate conflict. Internal producers
+// that do not supply a fingerprint therefore retain strict unique-id behavior.
 //
 // IsTerminal is NOT computed here: the harness step 8 derives it from the
 // response's final status and hands it to Append.
@@ -61,7 +61,7 @@ func newMessages(db *sql.DB, onCommit func()) *messages {
 // Append implements storespec.MessageLog. The harness supplies the
 // pre-computed is_terminal (step 8) since the pure envelope no longer
 // carries that store-derived column.
-func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
+func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool, metadata storespec.AppendMetadata) (storespec.AppendResult, error) {
 	if env == nil {
 		return storespec.AppendResult{}, errors.New("store: append nil envelope")
 	}
@@ -85,7 +85,7 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := appendTx(ctx, tx, env, isTerminal)
+	res, err := appendTxWithMetadata(ctx, tx, env, isTerminal, metadata)
 	if err != nil {
 		return storespec.AppendResult{}, err
 	}
@@ -95,7 +95,7 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	// Truth advanced durably — fire the substrate commit signal so any tap
 	// (delivery pump / client tail) wakes and reads forward. Both write paths
 	// reach a commit; this is the harness path's chokepoint.
-	if m.onCommit != nil {
+	if m.onCommit != nil && !res.Replayed {
 		m.onCommit()
 	}
 	return res, nil
@@ -103,12 +103,17 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 
 // appendTx is the raw INSERT of one envelope row within an existing tx. It
 // is an UNEXPORTED package func, NOT a method on an exported type: there is
-// deliberately no public "append into this tx" primitive. The only callers
-// are Append (which wraps it in its own tx) and the membership control-plane
-// op in actors.go (which needs the row + its mirror event in one atomic tx).
+// deliberately no public "append into this tx" primitive. Its one caller is
+// Append, which wraps it in its own tx. The shape is kept for the next caller
+// that genuinely needs a row and something else committed together — the point
+// is that such a caller must live in this package, not that one exists.
 // No receiver is taken — it touches only tx, so it can never be a capability
 // someone obtains by constructing a *messages.
 func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
+	return appendTxWithMetadata(ctx, tx, env, isTerminal, storespec.AppendMetadata{})
+}
+
+func appendTxWithMetadata(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool, metadata storespec.AppendMetadata) (storespec.AppendResult, error) {
 	if tx == nil {
 		return storespec.AppendResult{}, errors.New("store: append tx nil")
 	}
@@ -147,8 +152,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		}
 	}
 
-	// INSERT row. env.id is a caller-generated random uuid: uniqueness is a
-	// pure integrity constraint, so a collision is an error (no dedup path).
+	// INSERT row. Shell submissions may carry a canonical fingerprint; it is
+	// persistence metadata and never enters the protocol envelope.
 	audJSON, _ := json.Marshal(env.Audience)
 
 	const ins = `INSERT INTO messages (
@@ -157,8 +162,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	   kind, type, payload,
 	   parent_id, correlation_id,
 	   visibility, audience, expires_at,
-	   is_terminal
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	   client_fingerprint, is_terminal
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if isTerminal {
@@ -171,13 +176,31 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)),
 		env.Visibility, string(audJSON),
 		nullableInt(env.ExpiresAt),
+		nullableString(metadata.ClientFingerprint),
 		terminalInt,
 	)
 	if err != nil {
+		if metadata.ClientFingerprint != "" && isMessageIDUniqueError(err) {
+			var existingFingerprint sql.NullString
+			var seq int64
+			lookupErr := tx.QueryRowContext(ctx,
+				`SELECT client_fingerprint,seq FROM messages WHERE id=?`, env.ID,
+			).Scan(&existingFingerprint, &seq)
+			if lookupErr != nil {
+				return storespec.AppendResult{}, fmt.Errorf("store: idempotency lookup: %w", lookupErr)
+			}
+			if existingFingerprint.Valid && existingFingerprint.String == metadata.ClientFingerprint {
+				return storespec.AppendResult{Seq: seq, Replayed: true}, nil
+			}
+		}
 		return storespec.AppendResult{}, classifyAppendErr(err, string(env.ID))
 	}
 	seq, _ := res.LastInsertId()
 	return storespec.AppendResult{Seq: seq}, nil
+}
+
+func isMessageIDUniqueError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: messages.id")
 }
 
 // MaxSeq returns the highest committed seq in this channel's message log
@@ -189,6 +212,36 @@ func (m *messages) MaxSeq(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("store: max seq: %w", err)
 	}
 	return seq, nil
+}
+
+// LatestBySenderAndType returns exactly the latest matching row. The query has
+// no cursor because authority folds must inspect the latest row and fail closed
+// on it; skipping a malformed latest row would silently resurrect stale truth.
+func (m *messages) LatestBySenderAndType(
+	ctx context.Context,
+	sender actor.ActorID,
+	typ string,
+) (storespec.StoredRow, bool, error) {
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id,
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
+	                  visibility, audience,
+	                  expires_at,
+	                  is_terminal, seq
+	             FROM messages
+	            WHERE sender_id = ? AND type = ?
+	            ORDER BY seq DESC
+	            LIMIT 1`
+	row := m.db.QueryRowContext(ctx, q, string(sender), typ)
+	stored, err := scanEnvelope(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storespec.StoredRow{}, false, nil
+	}
+	if err != nil {
+		return storespec.StoredRow{}, false, fmt.Errorf("store: latest by sender and type: %w", err)
+	}
+	return stored, true, nil
 }
 
 // ReadAfterSeq returns up to `limit` envelopes with seq > afterSeq for the
@@ -222,6 +275,58 @@ func (m *messages) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) 
 		out = append(out, env)
 	}
 	return out, rows.Err()
+}
+
+func (m *messages) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
+	if !reader.Valid() {
+		return nil, afterSeq, errors.New("store: invalid visible reader")
+	}
+	if limit <= 0 {
+		limit = 256
+	}
+	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, afterSeq, fmt.Errorf("store: visible read begin: %w", err)
+	}
+	defer tx.Rollback()
+	var head int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM messages`).Scan(&head); err != nil {
+		return nil, afterSeq, fmt.Errorf("store: visible read head: %w", err)
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+                  sender_kind, sender_id,
+                  kind, type, payload,
+                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
+                  visibility, audience,
+                  expires_at,
+                  is_terminal, seq
+             FROM messages m
+             WHERE m.seq > ? AND m.seq <= ? AND m.visibility <> 'system'
+             ORDER BY m.seq ASC LIMIT ?`
+	rows, err := tx.QueryContext(ctx, q, afterSeq, head, limit)
+	if err != nil {
+		return nil, afterSeq, fmt.Errorf("store: visible read: %w", err)
+	}
+	defer rows.Close()
+	var out []storespec.StoredRow
+	for rows.Next() {
+		row, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, afterSeq, fmt.Errorf("store: visible read scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, afterSeq, err
+	}
+	scanned := head
+	if len(out) == limit {
+		scanned = out[len(out)-1].Seq
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, afterSeq, err
+	}
+	return out, scanned, nil
 }
 
 // OpenRequestsForActor returns ALL open request rows whose first audience
@@ -543,9 +648,15 @@ func classifyAppendErr(err error, envID string) error {
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
 		}
-	case strings.Contains(msg, "ux_terminal_response_per_request") ||
-		strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
-		strings.Contains(msg, "parent_id, kind, is_terminal"):
+	// Two real UNIQUE constraints live on the messages table (schema.go): the
+	// `id UNIQUE` column (matched above) and the ux_terminal_response_per_request
+	// partial index on parent_id. modernc.org/sqlite reports the latter as
+	// "UNIQUE constraint failed: messages.parent_id" (the column, not the index
+	// name — this is the form the integration path actually produces, see
+	// TestAppend_TerminalResponseUniquePerRequest); the index-name form is kept
+	// as a defensive match for driver/version variants that name the index.
+	case strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
+		strings.Contains(msg, "ux_terminal_response_per_request"):
 		return &storespec.AppendError{
 			Reason:           storespec.AppendRejectTerminalDuplicate,
 			Detail:           msg,

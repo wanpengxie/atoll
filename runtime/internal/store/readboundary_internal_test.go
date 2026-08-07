@@ -37,7 +37,9 @@ CREATE TABLE messages (
   audience TEXT NOT NULL, expires_at INTEGER, is_terminal INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE actor_registry (
-  actor_id TEXT PRIMARY KEY, actor_kind TEXT NOT NULL, principal TEXT NOT NULL DEFAULT '', actor_binding TEXT, host TEXT,
+  actor_id TEXT PRIMARY KEY, actor_kind TEXT NOT NULL, principal TEXT NOT NULL DEFAULT '',
+  source_decl_id TEXT NOT NULL DEFAULT '', class TEXT NOT NULL DEFAULT '', config_json TEXT,
+  placement TEXT NOT NULL DEFAULT 'server', desired_host TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL, deregistered_at INTEGER
 );
 `
@@ -45,7 +47,7 @@ CREATE TABLE actor_registry (
 func openRelaxed(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
-	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "relaxed.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "relaxed.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -60,13 +62,13 @@ func TestRegistry_ReadRejectsPoisonKind(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'wizard', NULL, 1, NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, created_at, deregistered_at)
+		 VALUES ('x', 'wizard', 1, NULL)`); err != nil {
 		t.Fatalf("inject poison: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
-	if _, _, err := reg.Lookup(ctx, "x"); err == nil {
-		t.Error("Lookup must error on out-of-closed-set actor_kind, not silently cast into ADT")
+	if _, _, err := reg.LookupActive(ctx, "x"); err == nil {
+		t.Error("LookupActive must error on out-of-closed-set actor_kind, not silently cast into ADT")
 	}
 	if _, err := reg.ListActive(ctx); err == nil {
 		t.Error("ListActive must error on out-of-closed-set actor_kind")
@@ -94,12 +96,16 @@ func TestMessages_ReadRejectsPoisonKind(t *testing.T) {
 }
 
 func TestMessages_ReadRejectsPoisonVisibility(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	insertRawMessage(t, db, "m1", "human", "event", "cosmic")
-	m := newMessages(db, nil)
-	if _, _, err := m.FindByID(ctx, "m1"); err == nil {
-		t.Error("FindByID must error on out-of-closed-set visibility")
+	for _, visibility := range []string{"private", "cosmic"} {
+		t.Run(visibility, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRelaxed(t)
+			insertRawMessage(t, db, "m1", "human", "event", visibility)
+			m := newMessages(db, nil)
+			if _, _, err := m.FindByID(ctx, "m1"); err == nil {
+				t.Error("FindByID must error on out-of-closed-set visibility")
+			}
+		})
 	}
 }
 

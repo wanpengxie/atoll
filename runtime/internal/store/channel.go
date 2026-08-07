@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
@@ -20,16 +21,27 @@ import (
 // so a reader can never obtain the harness-bypass Append (ISP/CQRS role-split).
 type ChannelStores struct {
 	db *sql.DB
+	// closeMu/closeDone make Close retryable: sql.DB.Close marks the handle
+	// closed even when it returns an error, so the checkpoint half must never
+	// run against a handle a previous attempt already killed.
+	closeMu   sync.Mutex
+	closeDone bool
 
 	Log      storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
 	Query    storespec.MessageQuery // tail reads (no Append)
-	Expiry   storespec.ExpiryQuery  // expiry reaper's level-scan feed (期12 S3, own narrow role)
+	Visible  storespec.VisibleMessageQuery
+	Expiry   storespec.ExpiryQuery // expiry reaper's level-scan feed (期12 S3, own narrow role)
 	Requests storespec.RequestLookup
 
 	// Actor registry exposed via SEGREGATED interfaces (derived from role — a
-	// reader never receives any membership write):
-	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
-	Membership storespec.MembershipControlPlane // membership writes: Admit/Deregister + ApplyMemberTransitions
+	// reader never receives any membership write). Each face a consumer needs
+	// is its own explicit field over the one concrete actorRegistry; nothing
+	// downstream may type-assert one face back into another.
+	Principals   storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
+	Actors       storespec.ActorRegistryStore
+	Genesis      storespec.GenesisStore
+	Bindings     storespec.DaemonBindingStore
+	ResourceRead storespec.ResourceReadStore
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
@@ -55,10 +67,8 @@ type ChannelStores struct {
 	// around the pen, so unlike the door's collapsed-branch stores (whose
 	// confinement is enforced by "only the welded minter is exposed
 	// downstream"), the timer store has no minter-shaped collaborator sitting
-	// between it and a caller yet — the schedule engine's assembly
-	// (OpenScheduler, in the runtime package's root assembly) is the only
-	// intended reader, and it reaches this field from within the runtime tree,
-	// never as a public ChannelStores member.
+	// between it and a caller yet. The runtime Store facade exports it only
+	// through its Platform-confined AssemblyPorts for one-time composition.
 	timers timerspec.TimerStore
 }
 
@@ -66,18 +76,15 @@ type ChannelStores struct {
 // The raw *sql.DB is owned by the returned ChannelStores and never exposed.
 //
 // channelID is the channel scope, bound at construction. The store is bound to
-// ONE channel — its scope is fixed here, not re-asserted per call. The
-// membership control plane stamps this bound id into its mirror events (a
-// per-call channelID would be a pseudo-parameter the caller could lie about,
-// writing a foreign-channel row into this channel's sqlite — the same truth
-// corruption the harness shape-step dies to prevent; cf. FindByID, whose channel
-// scope is likewise the binding, not a per-call arg).
+// ONE channel — its scope is fixed here, not re-asserted per call. A per-call
+// channelID would be a pseudo-parameter the caller could lie about, writing a
+// foreign-channel row into this channel's sqlite — the same truth corruption
+// the harness shape-step dies to prevent; cf. FindByID, whose channel scope is
+// likewise the binding, not a per-call arg.
 //
-// onCommit is the post-commit signal source wired into BOTH write paths (the
-// request-path Append and the control-plane mirror append): the append
-// chokepoint produces "the log advanced" so a downstream tap is woken
-// identically regardless of which path committed. nil = no subscriber. May be
-// nil for read-only / test opens.
+// onCommit is the post-commit signal source wired into the append chokepoint:
+// committing a row produces "the log advanced" so a downstream tap is woken.
+// nil = no subscriber. May be nil for read-only / test opens.
 func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenOptions, onCommit func()) (*ChannelStores, error) {
 	db, err := openChannelDB(ctx, dbPath, opts)
 	if err != nil {
@@ -89,29 +96,44 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		db:         db,
 		Log:        msgs,
 		Query:      msgs,
+		Visible:    msgs,
 		Expiry:     msgs,
 		Requests:   newRequestLookup(msgs),
-		Registry:   reg,
-		Membership: reg,
+		Principals: reg,
+		Actors:     reg,
+		Genesis:    genesisStore{db: db},
+		Bindings:   newDaemonBindings(db, onCommit),
 		Resources:  newResourceRegistry(db),
 		KVDriver:   newKVDriver(db),
 		State:      newStateStore(db),
-		timers:     newTimerStore(db),
+		timers:     newTimerStore(db, onCommit),
 	}
+	cs.ResourceRead = cs.Resources.(*resourceRegistry)
 	return cs, nil
 }
 
-// Close releases the owned *sql.DB. After Close the assembly is unusable.
-func (c *ChannelStores) Close() error { return c.db.Close() }
+// Close checkpoints the WAL and releases the owned *sql.DB. It is retryable
+// in two phases: a failed checkpoint returns the error with the handle still
+// OPEN (a later Close attempts the whole sequence again — a sealed Destroy
+// retries through here to completion), while the driver Close is irreversible
+// (sql.DB.Close marks the handle closed even on error), so once it runs the
+// assembly is terminally closed and further Close calls are nil no-ops.
+func (c *ChannelStores) Close() error {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	if c.closeDone {
+		return nil
+	}
+	if _, err := c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return err
+	}
+	c.closeDone = true
+	return c.db.Close()
+}
 
-// Timers exposes the raw timerspec.TimerStore for the one intended reader
-// within the runtime tree — runtime.OpenScheduler (the schedule engine's
-// assembly seam). It is a METHOD, not a promoted exported field: the
+// Timers exposes the raw timerspec.TimerStore to the Platform-confined runtime
+// Store facade. It is a METHOD, not a promoted exported field: the
 // accessor itself is the confinement marker (an unexported field plus one
 // narrow reader), the same discipline the raw *sql.DB follows via
-// Close/Open rather than a public field. The runtime package (a different Go
-// package, even though it is the sole importer of this internal one) cannot
-// reach an unexported struct field directly — this is the seam that lets it
-// without promoting timers to a public ChannelStores member (no raw
-// TimerStore public surface).
+// Close/Open rather than a public field.
 func (c *ChannelStores) Timers() timerspec.TimerStore { return c.timers }

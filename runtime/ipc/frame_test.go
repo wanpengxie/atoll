@@ -17,7 +17,7 @@ import (
 
 // --- closed Kind set ------------------------------------------------------
 
-// The port-wire Kind set is closed at exactly 16 members with fixed wire
+// The actor-wire Kind set is closed at exactly 19 members with fixed wire
 // spellings. Every kind has a real producer + state transition; the dead
 // frames (fence / shutdown / heartbeat / control) are gone. KindCancel is the
 // request-scope of cancel(scope) crossing the wire (host→remote); KindCancelRequest
@@ -25,15 +25,13 @@ import (
 // own outbound requests); KindAccess/
 // KindSchedule + their acks are the plane-2 and time-axis capability arms (an
 // out-of-process actor's incarnation carries every plane a local cell's Caps do);
-// KindDetach/KindDespawn are the two lifecycle-termination arms (remote→host
-// graceful detach vs host→remote by-name despawn) and KindDeliverResult is the
+// KindDetach is the optional exact-route close and KindDeliverResult is the
 // remote host's delivery observation relayed home. If a wire spelling drifts or a
 // kind is added/removed, this trips — the two endpoints must agree on the exact
 // bytes.
 func TestKindClosedSet(t *testing.T) {
 	want := map[Kind]string{
 		KindHandshake:     "handshake",
-		KindHandshakeAck:  "handshake_ack",
 		KindDeliver:       "deliver",
 		KindEmit:          "emit",
 		KindEmitAck:       "emit_ack",
@@ -45,25 +43,26 @@ func TestKindClosedSet(t *testing.T) {
 		KindSchedule:      "schedule",
 		KindScheduleAck:   "schedule_ack",
 		KindDetach:        "detach",
-		KindDespawn:       "despawn",
 		KindDeliverResult: "deliver_result",
 		KindCancelRequest: "cancel_request",
+		KindSpawn:         "spawn",
+		KindSpawnAck:      "spawn_ack",
+		KindEnd:           "end",
+		KindEndAck:        "end_ack",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 16 {
-		t.Fatalf("expected exactly 16 kinds, guard lists %d", len(want))
+	if len(want) != 18 {
+		t.Fatalf("expected exactly 18 kinds, guard lists %d", len(want))
 	}
 }
 
-// The three lifecycle frames (detach / despawn / deliver_result) survive
+// The route-close and delivery-observation frames survive
 // Write→Read across a real net.Pipe (two independent endpoints, not one buffer):
-// what one end writes, the peer reads identically. detach/despawn reuse
-// DownPayload{Reason}; deliver_result carries its own DeliverResultPayload. This
-// pins the on-wire contract for the frames S1 added.
+// what one end writes, the peer reads identically.
 func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
@@ -71,7 +70,6 @@ func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 
 	frames := []Frame{
 		{Kind: KindDetach, Payload: mustMarshal(t, DownPayload{Reason: "ctx cancelled"})},
-		{Kind: KindDespawn, Payload: mustMarshal(t, DownPayload{Reason: "despawn"})},
 		{Kind: KindDeliverResult, Payload: mustMarshal(t, DeliverResultPayload{
 			EnvelopeID: message.ID("m-9"), Outcome: "not_hosted", Detail: "no cell",
 		})},
@@ -103,26 +101,13 @@ func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 
 	d1, err := rc.Read()
 	if err != nil {
-		t.Fatalf("read despawn: %v", err)
-	}
-	if d1.Kind != KindDespawn {
-		t.Fatalf("frame 1 kind = %q, want despawn", d1.Kind)
-	}
-	var dp1 DownPayload
-	mustUnmarshal(t, d1.Payload, &dp1)
-	if dp1.Reason != "despawn" {
-		t.Fatalf("despawn reason = %q, want despawn", dp1.Reason)
-	}
-
-	d2, err := rc.Read()
-	if err != nil {
 		t.Fatalf("read deliver_result: %v", err)
 	}
-	if d2.Kind != KindDeliverResult {
-		t.Fatalf("frame 2 kind = %q, want deliver_result", d2.Kind)
+	if d1.Kind != KindDeliverResult {
+		t.Fatalf("frame 1 kind = %q, want deliver_result", d1.Kind)
 	}
 	var drp DeliverResultPayload
-	mustUnmarshal(t, d2.Payload, &drp)
+	mustUnmarshal(t, d1.Payload, &drp)
 	if drp.EnvelopeID != message.ID("m-9") || drp.Outcome != "not_hosted" || drp.Detail != "no cell" {
 		t.Fatalf("deliver_result payload = %+v, want {m-9, not_hosted, no cell}", drp)
 	}
@@ -178,6 +163,24 @@ func TestWriteOmitsEmptyPayload(t *testing.T) {
 	}
 }
 
+func TestSpawnPayloadPreservesTaggedPlacementHost(t *testing.T) {
+	want := SpawnPayload{
+		RequestID: message.ID("fork-1"), Kind: actor.KindAgent, Class: "worker", NameHint: "child",
+		Config: json.RawMessage(`{"x":1}`), PlacementKind: "daemon", PlacementHost: "daemon-target",
+	}
+	raw := mustMarshal(t, want)
+	var got SpawnPayload
+	mustUnmarshal(t, raw, &got)
+	if got.RequestID != want.RequestID || got.Kind != want.Kind || got.Class != want.Class ||
+		got.NameHint != want.NameHint || string(got.Config) != string(want.Config) ||
+		got.PlacementKind != want.PlacementKind || got.PlacementHost != want.PlacementHost {
+		t.Fatalf("spawn payload=%+v want=%+v", got, want)
+	}
+	if bytes.Contains(raw, []byte(`"placement":`)) {
+		t.Fatalf("legacy kind-only placement field returned: %s", raw)
+	}
+}
+
 // --- round-trip per kind --------------------------------------------------
 
 // Each kind's payload survives Write→Read byte-for-byte at the struct level.
@@ -214,17 +217,6 @@ func TestRoundTripPerKind(t *testing.T) {
 				mustUnmarshal(t, got.Payload, &p)
 				if p.LeaseID != "lease-42" {
 					t.Errorf("lease_id = %q, want lease-42", p.LeaseID)
-				}
-			},
-		},
-		{
-			name:  "handshake_ack",
-			frame: Frame{Kind: KindHandshakeAck, Payload: mustMarshal(t, HandshakeAckPayload{Actor: actor.ActorID("agent:writer")})},
-			check: func(t *testing.T, got Frame) {
-				var p HandshakeAckPayload
-				mustUnmarshal(t, got.Payload, &p)
-				if p.Actor != actor.ActorID("agent:writer") {
-					t.Errorf("actor = %q, want agent:writer", p.Actor)
 				}
 			},
 		},
@@ -460,9 +452,9 @@ func TestReadRejectsMalformedJSON(t *testing.T) {
 
 // --- concurrent writes are atomic per frame -------------------------------
 
-// Write holds wmu across header+body, so concurrent writers never interleave
-// a header from one frame with the body of another. We fan N writers at one
-// codec and require the reader to recover N intact, well-formed frames.
+// Write holds wmu while emitting each complete frame in one call. We fan N
+// writers at one codec and require the reader to recover N intact,
+// well-formed frames.
 func TestConcurrentWritesDoNotInterleave(t *testing.T) {
 	var buf bytes.Buffer
 	c := NewCodec(&buf, &buf)
@@ -514,9 +506,7 @@ func TestWriteMarshalError(t *testing.T) {
 	}
 }
 
-// failWriter fails its Nth Write call (1-based), succeeding before then. It
-// lets a test target the length-prefix write (n=1) vs the body write (n=2)
-// independently — the two distinct error returns inside Codec.Write.
+// failWriter fails its Nth Write call (1-based), succeeding before then.
 type failWriter struct {
 	calls  int
 	failOn int
@@ -531,34 +521,32 @@ func (f *failWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Write returns the writer error from the LENGTH-PREFIX write (the first of
-// the two w.Write calls). The error is propagated raw (no wrapping) so the
-// host can inspect the underlying transport failure (e.g. a broken pipe).
-func TestWriteHeaderWriteError(t *testing.T) {
-	boom := errors.New("header boom")
+// Codec.Write serializes the length prefix and body into one underlying Write.
+// This is the stream-owner contract: one deadline covers one complete frame,
+// with no second application write that can outlive that deadline.
+func TestWriteUsesOneUnderlyingWrite(t *testing.T) {
+	boom := errors.New("wire boom")
 	w := &failWriter{failOn: 1, err: boom}
 	c := NewCodec(nil, w)
 	err := c.Write(Frame{Kind: KindDown})
 	if err != boom {
-		t.Fatalf("Write header-fail err = %v, want %v", err, boom)
+		t.Fatalf("Write err = %v, want %v", err, boom)
 	}
 	if w.calls != 1 {
-		t.Fatalf("expected to stop after the failed header write, saw %d writes", w.calls)
+		t.Fatalf("frame used %d underlying writes, want exactly 1", w.calls)
 	}
 }
 
-// Write returns the writer error from the BODY write (the second w.Write
-// call, after the header wrote fine). Propagated raw, same as the header path.
-func TestWriteBodyWriteError(t *testing.T) {
-	boom := errors.New("body boom")
-	w := &failWriter{failOn: 2, err: boom}
-	c := NewCodec(nil, w)
-	err := c.Write(Frame{Kind: KindDown})
-	if err != boom {
-		t.Fatalf("Write body-fail err = %v, want %v", err, boom)
-	}
-	if w.calls != 2 {
-		t.Fatalf("expected header write then failed body write (2 calls), saw %d", w.calls)
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	return len(p) - 1, nil
+}
+
+func TestWriteRejectsShortUnderlyingWrite(t *testing.T) {
+	err := NewCodec(nil, shortWriter{}).Write(Frame{Kind: KindDown})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Write short-write err = %v, want %v", err, io.ErrShortWrite)
 	}
 }
 

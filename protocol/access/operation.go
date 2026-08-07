@@ -2,13 +2,16 @@ package access
 
 // Operation is the substrate-meaningful verb set of the access plane — the CLOSED SET
 // that falls out of the resource lifecycle plus content access: an object is created /
-// mutated / granted / destroyed, and its bytes are read. The kernel must distinguish these
+// mutated / destroyed, and its bytes are read. The kernel must distinguish these
 // because each carries a distinct lifecycle/authorization meaning the door enforces (create
-// is CONTAINER-gated and IS ownership, write mutates existing content, set replaces a grant,
+// is CONTAINER-gated and IS ownership, write mutates existing content,
 // non-lossy delete, side-effect-free read). It is NOT the driver's FINE verb (sign/hmac/
 // select ride in Args, opaque — the substrate guards structure, not vocabulary). Closed
 // set; adding a verb is a protocol revision (use is a known additive extension, not
-// pre-reserved; transfer is NOT an op, it is set with control-level Ops).
+// pre-reserved). There is NO per-object grant verb: the membrane is a uniform
+// trust phase (PM-D1) — read/write authorization is membership itself, delete
+// additionally distinguishes the creator (PM-D3) — so R and its set verb have
+// no place in the model.
 type Operation string
 
 const (
@@ -34,23 +37,10 @@ const (
 	// Side-effecting; retry safety is the driver's call (PUT idempotent, append not).
 	OpWrite Operation = "write"
 
-	// OpSet — SET (replace) a subject's grant in the object's authorization relation R:
-	// chmod/setfacl semantics, NOT seL4 add-only — Grant.Ops is the grantee's NEW
-	// grant, and Ops=∅ REVOKES (so revoke needs no separate op). Idempotent (retry-safe).
-	// Governed: the door requires the caller hold set-right (day-1 the controller). The
-	// grant spec is the proto type access.Grant in the typed Invocation.Grant field —
-	// NOT opaque Args — because the substrate authz manager decodes it to write R and both
-	// wire ends must agree on its shape (an envelope/payload placement rule: structural
-	// fields the substrate must decode belong in the typed envelope, not opaque payload).
-	// Set's executor is the substrate, not a driver. DAY-1 Grant.Ops ⊆ {read,write}
-	// (granting set/delete = delegating control). TRANSFER (chown) is NOT a separate op:
-	// with no separate owner field (control = full grant in R), transfer = set(Y, full) +
-	// set(self, ∅), an Ops-policy widening.
-	OpSet Operation = "set"
-
 	// OpDelete — the object's explicit death. NON-LOSSY: an access-plane object dies
-	// ONLY by an explicit op=delete (a full-rights holder) or when its owning scope
-	// dies — channel-scoped objects with the channel destroy, actor-scoped objects with
+	// ONLY by an explicit op=delete (channel-scoped: the creator or the channel
+	// owner, PM-D3) or when its owning scope dies — channel-scoped objects with the
+	// channel destroy, actor-scoped objects with
 	// their owner's deregister (the scope law). Scope death is not a lossy auto-destroy:
 	// the object outlives everything short of its scope, and no living scope ever
 	// silently drops it. Deletes by id — it has NO operand. Side-effecting.
@@ -60,7 +50,7 @@ const (
 // allOperations backs ParseOperation. UNEXPORTED: the closed-set contract is the
 // ParseOperation predicate, not a mutable enumeration slice (an exported slice
 // would let an importer rewrite the protocol closed set at runtime).
-var allOperations = []Operation{OpCreate, OpRead, OpWrite, OpSet, OpDelete}
+var allOperations = []Operation{OpCreate, OpRead, OpWrite, OpDelete}
 
 // String returns the wire form.
 func (o Operation) String() string { return string(o) }

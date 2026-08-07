@@ -10,25 +10,35 @@ import (
 )
 
 // timerStore implements timerspec.TimerStore over the channel-local `timers`
-// table — the durable identity-level half of the time axis: control-plane
-// pending intent, keyed by a durable name (author identity), NEVER truth.
-// Bound to one channel database, the same locus discipline every other
-// channel-local store follows. It trusts its caller (the schedule engine
-// welds author before Insert; store-not-validate, mirrors
-// resourceRegistry/stateStore) and is itself confined to package store — the
-// runtime tree assembles it behind ChannelStores' unexported field.
+// table — the durable half of the time axis: control-plane pending intent,
+// keyed by author ActorID, NEVER truth. Bound to one channel database, the same
+// locus discipline every other channel-local store follows. It trusts its
+// caller (the schedule capability admits and welds author before Insert;
+// store-not-validate) and is itself confined to package store — the runtime
+// tree assembles it behind ChannelStores' unexported field.
 type timerStore struct {
-	db *sql.DB
+	db       *sql.DB
+	onCommit func()
 }
 
-const (
+// maxPendingTimersPerAuthor / maxDeadTimers are vars ONLY so same-package
+// tests can shrink them and exercise the quota/ring SEMANTICS without
+// physically inserting thousands of fsync'd rows (the ring-eviction test
+// alone burned 34s at production size); production never writes them, and
+// the production values are pinned by TestTimerCapsProductionValues.
+var (
 	maxPendingTimersPerAuthor = 1024
 	maxDeadTimers             = 4096
-	duePerAuthor              = 32
 )
 
-func newTimerStore(db *sql.DB) *timerStore {
-	return &timerStore{db: db}
+const duePerAuthor = 32
+
+func newTimerStore(db *sql.DB, callbacks ...func()) *timerStore {
+	var onCommit func()
+	if len(callbacks) > 0 {
+		onCommit = callbacks[0]
+	}
+	return &timerStore{db: db, onCommit: onCommit}
 }
 
 // Insert adds one pending row. The engine mints a fresh TimerID per Schedule
@@ -43,13 +53,7 @@ func (s *timerStore) Insert(ctx context.Context, row timerspec.TimerRow) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var active, pending int
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(row.AuthorID)).Scan(&active); err != nil {
-		return err
-	}
-	if active == 0 {
-		return timerspec.ErrAuthorInactive
-	}
+	var pending int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM timers WHERE author_id=?`, string(row.AuthorID)).Scan(&pending); err != nil {
 		return err
 	}
@@ -57,11 +61,10 @@ func (s *timerStore) Insert(ctx context.Context, row timerspec.TimerRow) error {
 		return timerspec.ErrScheduleQuota
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO timers (timer_id, author_id, fire_at, type, payload, correlation_id, created_at)
-		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
-		   SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL)`,
+		`INSERT INTO timers (timer_id, author_id, fire_at, type, payload, correlation_id, created_at, state)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
 		string(row.ID), string(row.AuthorID), row.FireAt, row.Type, row.Payload,
-		nullableString(row.CorrelationID), row.CreatedAt, string(row.AuthorID),
+		nullableString(row.CorrelationID), row.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: timer insert %q: %w", row.ID, err)
@@ -90,7 +93,7 @@ func (s *timerStore) Delete(ctx context.Context, id timerspec.TimerID) (bool, er
 func (s *timerStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, error) {
 	const q = `SELECT timer_id, author_id, fire_at, type, payload, COALESCE(correlation_id, ''), created_at FROM (
 	             SELECT *, ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY fire_at, timer_id) AS rn
-	             FROM timers WHERE fire_at <= ?) WHERE rn <= ? ORDER BY fire_at, timer_id`
+	             FROM timers WHERE state='pending' AND fire_at <= ?) WHERE rn <= ? ORDER BY fire_at, timer_id`
 	rows, err := s.db.QueryContext(ctx, q, now, duePerAuthor)
 	if err != nil {
 		return nil, fmt.Errorf("store: timers due: %w", err)
@@ -117,7 +120,12 @@ func (s *timerStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, 
 }
 
 func (s *timerStore) MoveToDead(ctx context.Context, id timerspec.TimerID, class timerspec.DeathClass, reason, detail string, diedAt int64) (bool, int, error) {
-	if class != timerspec.DeathFireRejected && class != timerspec.DeathReviveRejected {
+	// Explicit closed-set check: adding a DeathClass value means adding a case
+	// here, so a new class is admitted deliberately instead of being silently
+	// rejected by an equality against the (currently single) legal value.
+	switch class {
+	case timerspec.DeathFireRejected:
+	default:
 		return false, 0, fmt.Errorf("store: invalid timer death class %q", class)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -158,7 +166,7 @@ func (s *timerStore) MoveToDead(ctx context.Context, id timerspec.TimerID, class
 // empty) — the poll/wake loop's sleep-until target. Walks ix_timers_fire_at
 // via MIN().
 func (s *timerStore) NextFireAt(ctx context.Context) (int64, bool, error) {
-	const q = `SELECT MIN(fire_at) FROM timers`
+	const q = `SELECT MIN(fire_at) FROM timers WHERE state='pending'`
 	var fireAt sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, q).Scan(&fireAt); err != nil {
 		return 0, false, fmt.Errorf("store: timers next-fire-at: %w", err)
@@ -175,7 +183,7 @@ func (s *timerStore) NextFireAt(ctx context.Context) (int64, bool, error) {
 // existed=false, never leaking whether some OTHER author's timer exists.
 func (s *timerStore) CancelOwned(ctx context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM timers WHERE timer_id=? AND author_id=?`,
+		`DELETE FROM timers WHERE timer_id=? AND author_id=? AND state='pending'`,
 		string(id), string(author),
 	)
 	if err != nil {
@@ -188,24 +196,38 @@ func (s *timerStore) CancelOwned(ctx context.Context, id timerspec.TimerID, auth
 	return n > 0, nil
 }
 
-// clearTimersTx cascades the identity-level pending-timer locus: it deletes
-// every timers row owned by author, inside the same transaction that
-// deregisters the actor (both dereg entry points in actors.go hang it
-// there). It is a parallel sibling of clearActorScopedTx (state.go), never
-// merged into it — one locus, one function — so a future third scoped locus
-// finds its own cascade in its own file. Idempotent: a re-run over an
-// already-cleared author deletes zero rows.
-//
-// Incarnation-bind timers need NO hook here — they are not rows (they live
-// in the schedule engine's in-memory due-set, welded to the live
-// embodiment). Deregister implies the embodiment already died, so those
-// entries are reaped lazily at fire time via IsLive — zero coupling to this
-// cascade.
-func clearTimersTx(ctx context.Context, tx *sql.Tx, author actor.ActorID) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE author_id=?`, string(author)); err != nil {
-		return fmt.Errorf("store: timers cascade clear %q: %w", author, err)
+// MarkFired advances only timer control state. Message truth has already
+// passed the ordinary Harness and committed under its deterministic ID.
+func (s *timerStore) MarkFired(ctx context.Context, id timerspec.TimerID) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE timers SET state='fired' WHERE timer_id=? AND state='pending'`,
+		string(id),
+	)
+	if err != nil {
+		return fmt.Errorf("store: timer mark fired %q: %w", id, err)
+	}
+	if _, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: timer mark fired rows %q: %w", id, err)
 	}
 	return nil
 }
+
+func (s *timerStore) AckOwned(ctx context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM timers WHERE timer_id=? AND author_id=? AND state='fired'`, string(id), string(author))
+	if err != nil {
+		return false, fmt.Errorf("store: timer ack %q: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: timer ack rows %q: %w", id, err)
+	}
+	return n == 1, nil
+}
+
+// No deregistration cascade clears this table. A dead author's timer rows are
+// inert data — ActorIDs are never reused and every belonging is keyed by
+// ActorID, so those rows are unreachable to anyone but the dead. Correctness is
+// carried by the fire-time author admission gate (which refuses and reaps),
+// never by a delete.
 
 var _ timerspec.TimerStore = (*timerStore)(nil)
