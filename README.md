@@ -103,7 +103,7 @@ platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word tabl
 app/         reference realm (identity, channel directory/lifecycle, declarations,
              daemon tombstones, admission/lifecycle jobs, HTTP/WS)
 drivers/     external-world drivers: tools/ (echo, device, kimi, xhs),
-             agents/ (LLM engine providers: claudecode, kimi, script),
+             agents/ (agent engine providers: codex, script),
              gateway/ (human ingress)
 registry/    actor class registry (config → running actor)
 cmd/         binaries (server, daemon) + devtools

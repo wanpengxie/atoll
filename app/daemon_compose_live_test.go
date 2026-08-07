@@ -44,13 +44,13 @@ func (p *e2eLinkPlan) BuildClass(
 // TestDaemonComposition_E2E is the daemon-composition acceptance test: it runs
 // the FULL daemon flow against a real server —
 //
-//	introduce claude (placement='daemon')
+//	introduce test-agent (placement='daemon')
 //	  → PULL the assignment over the authenticated link    (what daemon does 1st)
 //	  → BUILD decls from it via registry.Build             (no blind-build)
 //	  → ATTACH over a real /compute link (compute.Run)
 //	  → the agent becomes a LIVE channel member (Home's canonical view)
 //
-// The app_test stub stands in for the claude engine (registry.Build("claude")
+// The app_test stub is built through the normal registry path (registry.Build("test-agent")
 // → stub; no CLI), exactly the seam the unit tests use. This proves pull → build
 // → attach → member wired end to end; the attach→member leg is the existing,
 // unchanged link path.
@@ -77,8 +77,8 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	chBody, cookies := createChannel(t, env, cookies, "CH")
 	chID := chBody["id"].(string)
 
-	// claude agent.
-	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Rev", "class": "claude"}, cookies)
+	// Deterministic test agent.
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Rev", "class": "test-agent"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 

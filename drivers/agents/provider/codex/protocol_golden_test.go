@@ -1,8 +1,14 @@
 package codex
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"reflect"
-	"slices"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +18,7 @@ func TestInitializeOptsOutAllDeltaNotificationMethods(t *testing.T) {
 		t.Fatalf("methods=%v", got)
 	}
 }
+
 func TestRequiredMethodsAndFieldsGolden(t *testing.T) {
 	want := map[string][]string{
 		"initialize":                            {"capabilities.optOutNotificationMethods", "clientInfo.name", "clientInfo.title", "clientInfo.version", "result.userAgent"},
@@ -33,35 +40,123 @@ func TestRequiredMethodsAndFieldsGolden(t *testing.T) {
 		"execCommandApproval":                   {"result.decision"},
 		"applyPatchApproval":                    {"result.decision"},
 	}
-	got := requiredProtocolSurface()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("protocol surface=\n%#v\nwant=\n%#v", got, want)
+	methods, declarations := productionProtocolSurface(t)
+	wantMethods := map[string]bool{}
+	for method := range want {
+		wantMethods[method] = true
+	}
+	if !reflect.DeepEqual(methods, wantMethods) {
+		t.Fatalf("production methods=\n%#v\nwant=\n%#v", methods, wantMethods)
+	}
+	for method, fields := range want {
+		jsonTokens := protocolTokensForMethod(t, method, declarations)
+		for _, field := range fields {
+			for _, segment := range strings.Split(field, ".") {
+				// result is the JSON-RPC envelope owned by rpcClient. The
+				// method-specific decoder starts at the result body.
+				if segment == "result" {
+					continue
+				}
+				if !jsonTokens[segment] {
+					t.Fatalf("%s dependency %q is absent from its production request/decoder path", method, field)
+				}
+			}
+		}
 	}
 }
 
-func requiredProtocolSurface() map[string][]string {
-	surface := map[string][]string{
-		"initialize":                            {"clientInfo.name", "clientInfo.title", "clientInfo.version", "capabilities.optOutNotificationMethods", "result.userAgent"},
-		"initialized":                           {},
-		"thread/start":                          {"approvalPolicy", "sandbox", "cwd", "result.thread.id"},
-		"thread/resume":                         {"threadId", "excludeTurns", "result.thread.id"},
-		"turn/start":                            {"threadId", "input"},
-		"turn/steer":                            {"threadId", "expectedTurnId", "input"},
-		"turn/interrupt":                        {"threadId", "turnId"},
-		"turn/started":                          {"threadId", "turn.id"},
-		"turn/completed":                        {"threadId", "turn.id", "turn.status", "turn.error.message", "turn.error.additionalDetails"},
-		"item/started":                          {"threadId", "turnId", "item.id", "item.type", "item.tool", "item.status"},
-		"item/completed":                        {"threadId", "turnId", "item.id", "item.type", "item.text", "item.tool", "item.command", "item.status", "item.aggregatedOutput"},
-		"error":                                 {"threadId", "turnId", "willRetry", "error.message"},
-		"currentTime/read":                      {},
-		"item/commandExecution/requestApproval": {"result.decision"},
-		"item/fileChange/requestApproval":       {"result.decision"},
-		"item/permissions/requestApproval":      {"error.code", "error.message"},
-		"execCommandApproval":                   {"result.decision"},
-		"applyPatchApproval":                    {"result.decision"},
+// productionProtocolSurface reads the production adapter, not a second test
+// literal. Removing or renaming a method/JSON field therefore breaks this
+// wall even when the expected fixture remains untouched.
+func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.Node) {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	dir := filepath.Dir(thisFile)
+	methods := map[string]bool{}
+	declarations := map[string]ast.Node{}
+	for _, name := range []string{"connection.go", "engine.go", "output.go", "rpc.go", "session.go"} {
+		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, declaration := range file.Decls {
+			switch declaration := declaration.(type) {
+			case *ast.FuncDecl:
+				declarations[declaration.Name.Name] = declaration
+			case *ast.GenDecl:
+				for _, spec := range declaration.Specs {
+					if typ, ok := spec.(*ast.TypeSpec); ok {
+						declarations[typ.Name.Name] = typ
+					}
+				}
+			}
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(literal.Value)
+			if err != nil {
+				return true
+			}
+			if isRPCMethodLiteral(value) {
+				methods[value] = true
+			}
+			return true
+		})
 	}
-	for _, fields := range surface {
-		slices.Sort(fields)
+	return methods, declarations
+}
+
+func protocolTokensForMethod(t *testing.T, method string, declarations map[string]ast.Node) map[string]bool {
+	t.Helper()
+	contexts := map[string][]string{
+		"initialize": {"openConnection"}, "initialized": {"openConnection"},
+		"thread/start": {"establishSession", "threadIDFrom"}, "thread/resume": {"resumeThread", "threadIDFrom"},
+		"turn/start": {"startTurn"}, "turn/steer": {"executeControl"}, "turn/interrupt": {"executeControl", "feedWatchdog"},
+		"turn/started": {"handleNotification", "turnNotice", "turnWire"}, "turn/completed": {"handleNotification", "turnNotice", "turnWire"},
+		"item/started": {"handleNotification", "handleItem", "itemNotice", "itemWire"}, "item/completed": {"handleNotification", "handleItem", "itemNotice", "itemWire"},
+		"error": {"handleNotification"}, "currentTime/read": {"handleServerRequest"},
+		"item/commandExecution/requestApproval": {"handleServerRequest"}, "item/fileChange/requestApproval": {"handleServerRequest"},
+		"item/permissions/requestApproval": {"handleServerRequest", "handleRequest", "rpcError"}, "execCommandApproval": {"handleServerRequest"},
+		"applyPatchApproval": {"handleServerRequest"},
 	}
-	return surface
+	tokens := map[string]bool{}
+	for _, name := range contexts[method] {
+		node := declarations[name]
+		if node == nil {
+			t.Fatalf("production declaration %q for %s is missing", name, method)
+		}
+		ast.Inspect(node, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(literal.Value)
+			if err != nil {
+				return true
+			}
+			if strings.HasPrefix(value, "json:") {
+				value = strings.Split(reflect.StructTag(value).Get("json"), ",")[0]
+			}
+			if value != "" && value != "-" {
+				tokens[value] = true
+			}
+			return true
+		})
+	}
+	return tokens
+}
+
+func isRPCMethodLiteral(value string) bool {
+	if strings.Contains(strings.ToLower(value), "delta") {
+		return false
+	}
+	for _, prefix := range []string{"thread/", "turn/", "item/", "currentTime/"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return value == "initialize" || value == "initialized" || value == "error" || value == "execCommandApproval" || value == "applyPatchApproval"
 }

@@ -9,10 +9,10 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -132,7 +132,7 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		case introspect.QueryStatus:
 			s.respondStatus(sys, msg)
 			return
-		case registry.TypeLogbookRecent:
+		case platform.TypeLogbookRecent:
 			s.respondLogbookRecent(sys, msg)
 			return
 		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor, TypeSetDefaultAgent:
@@ -226,7 +226,7 @@ func systemDescribe() introspect.Describe {
 				Description:  "read-time presence view for one actor id",
 				AllowedKinds: []string{string(message.KindRequest)},
 			},
-			registry.TypeLogbookRecent: {
+			platform.TypeLogbookRecent: {
 				Description:  "last filtered request/response rows in ascending log order",
 				AllowedKinds: []string{string(message.KindRequest)},
 			},

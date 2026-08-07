@@ -63,20 +63,25 @@ func (e *engine) handleNotification(c *connection, method string, params json.Ra
 			return
 		}
 		e.mu.Lock()
-		op := e.startOp
+		if e.current != c || c.retired.Load() || c.dead.Load() {
+			e.mu.Unlock()
+			return
+		}
+		op := c.startOp
 		if op == "" || n.Turn.ID == "" {
 			e.mu.Unlock()
 			return
 		}
-		e.startOp = ""
-		e.turnID = n.Turn.ID
-		e.final[n.Turn.ID] = ""
+		c.startOp = ""
+		c.turnOp = op
+		c.turnID = n.Turn.ID
+		c.final[n.Turn.ID] = ""
 		e.mu.Unlock()
 		e.events.TurnStarted(op, n.Turn.ID)
 		e.feedWatchdog(n.Turn.ID)
 	case "turn/completed":
 		var n turnNotice
-		if json.Unmarshal(params, &n) != nil || !e.activeNotice(n.ThreadID, n.Turn.ID) {
+		if json.Unmarshal(params, &n) != nil || !e.activeNotice(c, n.ThreadID, n.Turn.ID) {
 			return
 		}
 		if n.Turn.Status == "inProgress" {
@@ -86,9 +91,10 @@ func (e *engine) handleNotification(c *connection, method string, params json.Ra
 		}
 		e.stopWatchdog()
 		e.mu.Lock()
-		final := e.final[n.Turn.ID]
-		delete(e.final, n.Turn.ID)
-		e.turnID = ""
+		final := c.final[n.Turn.ID]
+		delete(c.final, n.Turn.ID)
+		c.turnID = ""
+		c.turnOp = ""
 		e.mu.Unlock()
 		status := base.TurnStatusOK
 		detail := ""
@@ -111,11 +117,11 @@ func (e *engine) handleNotification(c *connection, method string, params json.Ra
 		e.events.TurnEnded(n.Turn.ID, status, final, detail)
 	case "item/started", "item/completed":
 		var n itemNotice
-		if json.Unmarshal(params, &n) != nil || !e.activeNotice(n.ThreadID, n.TurnID) {
+		if json.Unmarshal(params, &n) != nil || !e.activeNotice(c, n.ThreadID, n.TurnID) {
 			return
 		}
 		e.feedWatchdog(n.TurnID)
-		e.handleItem(method, n)
+		e.handleItem(c, method, n)
 	case "error":
 		var n struct {
 			ThreadID  string `json:"threadId"`
@@ -125,7 +131,7 @@ func (e *engine) handleNotification(c *connection, method string, params json.Ra
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if json.Unmarshal(params, &n) == nil && e.activeNotice(n.ThreadID, n.TurnID) {
+		if json.Unmarshal(params, &n) == nil && e.activeNotice(c, n.ThreadID, n.TurnID) {
 			e.feedWatchdog(n.TurnID)
 			e.cfg.Logger.Warn("codex.turn_error", "turn", n.TurnID, "will_retry", n.WillRetry, "detail", n.Error.Message)
 		}
@@ -143,12 +149,12 @@ func (e *engine) threadMatches(id string) bool {
 	defer e.mu.Unlock()
 	return id != "" && id == e.threadID
 }
-func (e *engine) activeNotice(thread, turn string) bool {
+func (e *engine) activeNotice(c *connection, thread, turn string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return thread == e.threadID && turn != "" && turn == e.turnID
+	return e.current == c && thread == e.threadID && turn != "" && turn == c.turnID
 }
-func (e *engine) handleItem(method string, n itemNotice) {
+func (e *engine) handleItem(c *connection, method string, n itemNotice) {
 	phase := "started"
 	if method == "item/completed" {
 		phase = "ended"
@@ -156,7 +162,7 @@ func (e *engine) handleItem(method string, n itemNotice) {
 	if n.Item.Type == "agentMessage" {
 		if phase == "ended" && strings.TrimSpace(n.Item.Text) != "" {
 			e.mu.Lock()
-			e.final[n.TurnID] = n.Item.Text
+			c.final[n.TurnID] = n.Item.Text
 			e.mu.Unlock()
 		}
 		return
@@ -250,28 +256,28 @@ func isDeltaMethod(method string) bool { return strings.Contains(strings.ToLower
 func (e *engine) feedWatchdog(turn string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if turn == "" || turn != e.turnID {
+	c := e.current
+	if c == nil || turn == "" || turn != c.turnID {
 		return
 	}
 	if e.watchdog != nil {
 		e.watchdog.Stop()
 	}
-	c := e.current
 	e.watchdog = time.AfterFunc(watchdogInitialTimeout, func() {
 		e.mu.Lock()
-		if e.turnID != turn || e.current != c {
-			e.mu.Unlock()
+		live := e.current == c && c.turnID == turn
+		thread := e.threadID
+		e.mu.Unlock()
+		if !live {
 			return
 		}
-		thread := e.threadID
-		e.current = nil
-		e.turnID = ""
-		e.mu.Unlock()
-		if c != nil {
-			_, _ = c.rpc.call(e.life, "turn/interrupt", map[string]any{"threadId": thread, "turnId": turn}, time.Second)
-			c.retire()
+		// Best-effort interrupt, then request the single detach transition;
+		// only the CAS winner reports the timeout loss (an EOF observer may
+		// have beaten us here, in which case the loss is already reported).
+		_, _ = c.rpc.call(e.life, "turn/interrupt", map[string]any{"threadId": thread, "turnId": turn}, time.Second)
+		if e.detach(c) {
+			e.events.ProviderLost(base.LostTimeout, fmt.Sprintf("turn %s made no progress", turn))
 		}
-		e.events.ProviderLost(base.LostTimeout, fmt.Sprintf("turn %s made no progress", turn))
 	})
 }
 func (e *engine) stopWatchdog() {

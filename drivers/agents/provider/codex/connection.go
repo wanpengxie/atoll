@@ -15,6 +15,15 @@ type connection struct {
 	rpc     *rpcClient
 	retired atomic.Bool
 	dead    atomic.Bool
+
+	// Per-generation turn bookkeeping, guarded by engine.mu. It lives on the
+	// connection — not on the engine — so that a dead process cannot leave a
+	// live turn account behind: the account's reachability ends with the
+	// generation that produced it (workspace-process binding law).
+	startOp base.OpID
+	turnOp  base.OpID
+	turnID  string
+	final   map[string]string
 }
 
 func (e *engine) openConnection(ctx context.Context) (*connection, error) {
@@ -22,7 +31,7 @@ func (e *engine) openConnection(ctx context.Context) (*connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &connection{id: e.nextConnection.Add(1), process: p}
+	c := &connection{id: e.nextConnection.Add(1), process: p, final: map[string]string{}}
 	c.rpc = newRPC(p)
 	c.rpc.onNotification = func(method string, params json.RawMessage) {
 		if !c.retired.Load() {
@@ -31,8 +40,11 @@ func (e *engine) openConnection(ctx context.Context) (*connection, error) {
 	}
 	c.rpc.onRequest = handleServerRequest
 	c.rpc.onClose = func(err error) {
+		// Death observation, not death handling: request the single detach
+		// transition; only the winner of that CAS reports the loss. Explicitly
+		// retired generations lose the CAS and stay silent (Terminate 消音律).
 		c.dead.Store(true)
-		if !c.retired.Load() && e.isCurrentObject(c) {
+		if e.detach(c) {
 			e.events.ProviderLost(base.LostCrash, err.Error())
 		}
 	}
@@ -59,12 +71,25 @@ func (e *engine) openConnection(ctx context.Context) (*connection, error) {
 }
 
 func (c *connection) retire() {
-	if c.retired.Swap(true) {
-		return
+	if !c.retired.Swap(true) {
+		c.dead.Store(true)
+		c.rpc.retire()
 	}
-	c.dead.Store(true)
-	c.rpc.retire()
 	c.process.stop()
+}
+
+func (c *connection) retireAsync() {
+	if !c.retired.Swap(true) {
+		c.dead.Store(true)
+		// The whole teardown runs on its own goroutine: retireAsync is called
+		// from inside rpc.onClose (the EOF observer's detach), and rpc.retire
+		// re-enters closeWith — same-goroutine re-entry of its sync.Once would
+		// deadlock, while a fresh goroutine merely waits it out.
+		go func() {
+			c.rpc.retire()
+			c.process.stop()
+		}()
+	}
 }
 
 func handleServerRequest(method string, _ json.RawMessage) (any, *rpcError) {

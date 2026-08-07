@@ -145,7 +145,7 @@ type DeclarationOverlayRequest struct {
 
 type DeclarationCreateRequest struct {
 	Name       string          `json:"name"`
-	Class      string          `json:"class,omitempty"`
+	Class      string          `json:"class"`
 	Config     json.RawMessage `json:"config,omitempty"`
 	Visibility string          `json:"visibility,omitempty"`
 }

@@ -130,7 +130,7 @@ func forbidden(t *testing.T, err error) *channelspec.OperationError {
 func TestIntroducePublicDeclarationIgnoresOwnership(t *testing.T) {
 	t.Parallel()
 	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
-		"pub": {OwnerPrincipal: "alice", Visibility: "public", Class: "go-kimi"},
+		"pub": {OwnerPrincipal: "alice", Visibility: "public", Class: "script"},
 	}})
 	bob := admitHuman(t, h, "bob")
 
@@ -152,7 +152,7 @@ func TestIntroducePublicDeclarationIgnoresOwnership(t *testing.T) {
 func TestIntroducePrivateDeclarationByItsOwnerIsAllowed(t *testing.T) {
 	t.Parallel()
 	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
-		"mine": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
+		"mine": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
 	alice := admitHuman(t, h, "alice")
 
@@ -175,8 +175,8 @@ func TestIntroducePrivateDeclarationByItsOwnerIsAllowed(t *testing.T) {
 func TestBothIntroductionDoorsAgreeOnAnOwnersPrivateDeclaration(t *testing.T) {
 	t.Parallel()
 	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
-		"mine":  {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
-		"mine2": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
+		"mine":  {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
+		"mine2": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
 	alice := admitHuman(t, h, "alice")
 
@@ -199,8 +199,8 @@ func TestBothIntroductionDoorsAgreeOnAnOwnersPrivateDeclaration(t *testing.T) {
 func TestBothIntroductionDoorsAgreeOnAnotherPrincipalsPrivateDeclaration(t *testing.T) {
 	t.Parallel()
 	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
-		"hers":  {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
-		"hers2": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
+		"hers":  {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
+		"hers2": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
 	bob := admitHuman(t, h, "bob")
 
@@ -219,7 +219,7 @@ func TestBothIntroductionDoorsAgreeOnAnotherPrincipalsPrivateDeclaration(t *test
 func TestIntroducePrivateDeclarationByAnotherPrincipalIsForbidden(t *testing.T) {
 	t.Parallel()
 	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
-		"hers": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
+		"hers": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
 	bob := admitHuman(t, h, "bob")
 
@@ -239,12 +239,12 @@ func TestIntroducePrivateDeclarationByAnotherPrincipalIsForbidden(t *testing.T) 
 func TestIntroducePrivateDeclarationByPrincipalLessInitiatorIsForbidden(t *testing.T) {
 	t.Parallel()
 	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
-		"pub":     {OwnerPrincipal: "alice", Visibility: "public", Class: "go-kimi"},
-		"private": {OwnerPrincipal: "alice", Visibility: "private", Class: "go-kimi"},
+		"pub":     {OwnerPrincipal: "alice", Visibility: "public", Class: "script"},
+		"private": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 		// An owner field that never got filled. No realm path writes this today;
 		// the verdict must refuse a principal-less initiator on its own terms
 		// rather than because "" never equals a real owner.
-		"ownerless": {OwnerPrincipal: "", Visibility: "private", Class: "go-kimi"},
+		"ownerless": {OwnerPrincipal: "", Visibility: "private", Class: "script"},
 	}})
 	ctx := context.Background()
 	alice := admitHuman(t, h, "alice")

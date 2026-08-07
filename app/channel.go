@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -116,7 +117,16 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 func (a *App) createGroupChannel(ctx context.Context, caller, name string, parentID *string) (desiredChannel, bool, bool, bool, error) {
 	now := time.Now().UnixMilli()
 	chID := channel.ID(uuid.NewString())
-	snapshot, err := (channelspec.RenderedSnapshot{Class: defaultBoostClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
+	// Bootstrap actor IDs are minted from kind:source_decl_id:created_at. Point
+	// script at the realm-tool instance born in this same genesis batch so its
+	// required tool_id is both construction-valid and an actual channel actor.
+	boostConfig, err := json.Marshal(map[string]string{
+		"tool_id": fmt.Sprintf("%s:%s:%d", actor.KindTool, realmToolDeclID, now),
+	})
+	if err != nil {
+		return desiredChannel{}, false, false, false, err
+	}
+	snapshot, err := (channelspec.RenderedSnapshot{Class: defaultBoostClass, Config: boostConfig, Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
 	if err != nil {
 		return desiredChannel{}, false, false, false, err
 	}

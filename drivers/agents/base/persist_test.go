@@ -21,7 +21,8 @@ func TestPersistRetriesBackoffAndEmitsLoudObsAtThreshold(t *testing.T) {
 		return accessdoor.Outcome{}, nil
 	}
 	var waits []time.Duration
-	persistLoop(sys, ResumeSeedKey, []byte("thread"), func(_ context.Context, delay time.Duration) bool {
+	coordinator := &persistCoordinator{seq: 1}
+	coordinator.run(sys, ResumeSeedKey, []byte("thread"), 1, func(_ context.Context, delay time.Duration) bool {
 		waits = append(waits, delay)
 		return true
 	})

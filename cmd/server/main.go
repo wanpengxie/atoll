@@ -21,8 +21,8 @@ import (
 	// `go test ./app` can register its own stub). Both assembly roots (server +
 	// daemon) import the SAME catalog so placement can name any class the server
 	// might host (G21): whether it actually runs is answered honestly by
-	// Build/creds, not gated by binary contents. agent/all = the LLM engine
-	// classes (go-kimi + claude); actors/all = tools + devices.
+	// Build/creds, not gated by binary contents. agent/all = the agent engine
+	// classes (codex + script); actors/all = tools + devices.
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 )

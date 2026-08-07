@@ -2,8 +2,8 @@
 // minimal-loop e2e harness (c1-minimal-loop-build-spec.md §3): a non-LLM
 // assistant whose behaviour is a fixed function of its input, so the loop's
 // "做/回" legs are CI-assertable. It is registered as a flat agent class
-// ("script", kind=agent) beside claude/go-kimi and stays after the LLM looper
-// lands — demoted to the permanent regression line, never retired.
+// ("script", kind=agent) beside codex and serves as the permanent deterministic
+// regression line.
 //
 // Structural determinism (spec red line 3): this class calls no LLM, opens no
 // network connection, and derives nothing from wall-clock or randomness — the
@@ -68,7 +68,34 @@ type config struct {
 }
 
 func init() {
-	registry.Register("script", registry.ClassDecl{Kind: actor.KindAgent, New: construct})
+	registry.Register("script", registry.ClassDecl{
+		Kind: actor.KindAgent,
+		New:  construct,
+		// The acceptance gate, same parser as construct: without it the write
+		// APIs accept a declaration this class can never build, and the failure
+		// only surfaces later at every introduce — a 201 for something born
+		// dead. Refuse it at the door instead.
+		ValidateConfig: func(raw json.RawMessage) error {
+			_, err := parseConfig(raw)
+			return err
+		},
+	})
+}
+
+// parseConfig is the ONE parser shared by the acceptance gate and the build:
+// a config that passes admission is exactly one that can construct.
+func parseConfig(raw json.RawMessage) (config, error) {
+	var cfg config
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return config{}, fmt.Errorf("script: parse config: %w", err)
+		}
+	}
+	cfg.ToolID = strings.TrimSpace(cfg.ToolID)
+	if cfg.ToolID == "" {
+		return config{}, fmt.Errorf("script: config.tool_id required")
+	}
+	return cfg, nil
 }
 
 // construct closes the parsed config into the Proc (Constructor(spec,deps) →
@@ -78,16 +105,11 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 	if spec.ID == "" {
 		return platform.ActorDecl{}, fmt.Errorf("script: instance id required (no class default)")
 	}
-	var cfg config
-	if len(spec.Config) > 0 {
-		if err := json.Unmarshal(spec.Config, &cfg); err != nil {
-			return platform.ActorDecl{}, fmt.Errorf("script: parse config: %w", err)
-		}
+	cfg, err := parseConfig(spec.Config)
+	if err != nil {
+		return platform.ActorDecl{}, err
 	}
-	toolID := actor.ActorID(strings.TrimSpace(cfg.ToolID))
-	if toolID == "" {
-		return platform.ActorDecl{}, fmt.Errorf("script: config.tool_id required")
-	}
+	toolID := actor.ActorID(cfg.ToolID)
 	def, err := base.Def(actorDoc, base.Config{NewEngine: func(sys actorbase.Sys, _ []byte, events base.EventPort) (base.Engine, error) {
 		return newEngine(sys, toolID, events), nil
 	}})

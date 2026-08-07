@@ -31,12 +31,13 @@ func TestControlDoneFollowsSubmissionOrder(t *testing.T) {
 	events := &recordingEvents{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	e := &engine{cfg: Config{Logger: slog.New(slog.DiscardHandler), processFactory: func(context.Context, Config) (*childProcess, error) { return p, nil }}, events: events, life: ctx, final: map[string]string{}}
+	e := &engine{cfg: Config{Logger: slog.New(slog.DiscardHandler), processFactory: func(context.Context, Config) (*childProcess, error) { return p, nil }}, events: events, life: ctx}
 	c, err := e.openConnection(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.current, e.threadID, e.turnID = c, "thread", "turn"
+	e.current, e.threadID = c, "thread"
+	c.turnID = "turn"
 	go e.controlWorker()
 	trigger := base.Trigger{Envelope: message.Envelope{Payload: []byte(`{"text":"x"}`)}}
 	_ = e.Steer("first", trigger)
@@ -57,7 +58,7 @@ func TestControlDoneFollowsSubmissionOrder(t *testing.T) {
 }
 
 func TestControlSubmissionDoesNotBlockAtFormerChannelCapacity(t *testing.T) {
-	e := &engine{life: context.Background(), final: map[string]string{}}
+	e := &engine{life: context.Background()}
 	done := make(chan error, 1)
 	go func() {
 		for i := 0; i < 128; i++ {

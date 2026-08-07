@@ -71,8 +71,7 @@ func AckResult(toolName string, ack AckDescriptor) ResultValue {
 	}
 }
 
-// ResultValue is a tiny carrier so caller.go does not import go-kimi
-// types directly.
+// ResultValue is a tiny engine-neutral carrier for caller.go.
 type ResultValue struct {
 	Name    string
 	Value   map[string]any

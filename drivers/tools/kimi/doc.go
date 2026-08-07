@@ -6,9 +6,8 @@
 // body (entry=birth, sys.Recv() loop, return=death).
 //
 // It follows the adapter-actor shape: two faces, complexity pressed into one
-// stateful actor. Disambiguation: this package (actors/kimi)
-// is the WebBridge that controls a browser extension — it is unrelated to
-// agent/provider/kimi, the go-kimi looper engine.
+// stateful actor. This package is the WebBridge that controls a browser
+// extension; "kimi" here names that retained browser-tool actor.
 //
 //   - Inward (channel face): run()'s sys.Recv() loop, dispatched in
 //     Actor.handle. It serves a SINGLE request type, kimi.command, answers

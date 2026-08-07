@@ -7,23 +7,21 @@ import (
 	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
-// mcp.go is 期10 S2 — the心智 binding 物理接口, the public component
-// claudecode's private mcp.go升格 into. The contract面 is single: the agent
-// skeleton出一个 MCP 目录 (the 7 meta-tool 工具表); how a given engine ingests
-// it — native MCP直连, or适配件把目录机械翻译成引擎自家工具形 (go-kimi's
-// AdditionalTools) — is适配件内政, downstream of this neutral catalog. transport
+// mcp.go is 期10 S2 — the心智 binding 物理接口. The contract面 is single: the
+// agent skeleton出一个 MCP 目录 (the 7 meta-tool 工具表); how a given engine
+// ingests it — native MCP直连, or适配件把目录机械翻译成引擎自家工具形 — is适配件
+// 内政, downstream of this neutral catalog. transport
 // (in-process/stdio/HTTP) is a HOST concern, dispatched机械 by the provider, not
 // a developer knob.
 //
 // SDK-NEUTRAL by construction (archtest TestEngineQuarantine): this file names
 // NO engine SDK type. It emits []MCPTool — plain {name, description, schema,
-// handler} rows — which a provider wraps into claude.NewMCPTool /
-// gokimitools.Tool. The one contract every agent shares是"骨架只出 MCP 目录".
+// handler} rows — which a provider wraps into its SDK-specific tool type. The
+// one contract every agent shares是"骨架只出 MCP 目录".
 
 // MCPResult is the neutral outcome of one meta-tool invocation: the rendered
 // tool-message text plus the error flag. A provider materialises it into its
-// engine's own tool-result type (claude.MCPToolResult / go-kimi
-// types.ToolResult).
+// engine's own tool-result type.
 type MCPResult struct {
 	Text    string
 	IsError bool

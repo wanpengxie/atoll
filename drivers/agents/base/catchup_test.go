@@ -1,10 +1,38 @@
 package base
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
+
+// The boot that most needs catch-up is a rejoin, and that is exactly when the
+// outbound link is still coming up. Giving up on the first refusal would make
+// the mechanism absent precisely when there is something to catch up on.
+func TestCatchUpRetriesWhileTheLinkIsStillComingUp(t *testing.T) {
+	sys := newTestSys()
+	sys.callErrs = 3
+	loadCatchup(context.Background(), sys)
+	if sys.calls != 4 {
+		t.Fatalf("catch-up gave up on a link that was coming up: attempts=%d", sys.calls)
+	}
+}
+
+// A link that never comes up must not hold boot: the retry lives inside the
+// query budget and then lets go.
+func TestCatchUpStopsRetryingWithinItsBudget(t *testing.T) {
+	sys := newTestSys()
+	sys.callErrs = 1 << 30
+	start := time.Now()
+	if items := loadCatchup(context.Background(), sys); items != nil {
+		t.Fatalf("a dead link produced context: %#v", items)
+	}
+	if elapsed := time.Since(start); elapsed > catchupQueryBudget*2 {
+		t.Fatalf("catch-up held boot for %s", elapsed)
+	}
+}
 
 func TestCatchUpTakenOnceAndNeverRequeued(t *testing.T) {
 	l, e := newUnitLoop()

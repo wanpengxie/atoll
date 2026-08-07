@@ -6,9 +6,9 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
 )
 
 // unauthorizedSenderCode belongs to the sysactor transport gate. It is not an
@@ -36,7 +36,7 @@ const (
 	TypeIntroduceActor  = "channel.introduce_actor"
 	TypeRemoveActor     = "channel.remove_actor"
 	TypeRestartActor    = "channel.restart_actor"
-	TypeSetDefaultAgent = registry.TypeSetDefaultAgent
+	TypeSetDefaultAgent = platform.TypeSetDefaultAgent
 )
 
 // OperateRequest is the decoded delivery an OperateExecutor acts on: the gate

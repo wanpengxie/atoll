@@ -14,7 +14,7 @@ func TestFiveSysopWordsUsePredicateBeforeQualification(t *testing.T) {
 
 	_, outsiderCookies := register(t, env, "sysop-outsider@example.com", "secret123", "Outsider")
 	decl := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
-		"name": "sysop-target", "class": "go-kimi", "visibility": "public",
+		"name": "sysop-target", "class": "test-agent", "visibility": "public",
 	}, setup.cookies)
 	assertStatus(t, decl, http.StatusCreated)
 	declID := respJSON(t, decl)["id"].(string)

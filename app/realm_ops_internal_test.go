@@ -82,7 +82,7 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	}
 	_, err = (realmOps{app: a}).CreateDeclaration(context.Background(), realmtool.Requester{
 		ActorID: agent, ChannelID: "agent-realm-ops", RequestID: "agent-create-request",
-	}, realmtool.DeclSpec{Name: "must not persist", Class: "go-kimi", Visibility: "public", Config: json.RawMessage(`{}`)})
+	}, realmtool.DeclSpec{Name: "must not persist", Class: "codex", Visibility: "public", Config: json.RawMessage(`{}`)})
 	var realmErr *channelspec.RealmError
 	if !errors.As(err, &realmErr) || realmErr.Code != channelspec.RealmForbidden {
 		t.Fatalf("agent create err=%v", err)

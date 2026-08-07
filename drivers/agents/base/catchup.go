@@ -4,19 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/registry"
 )
 
 const (
-	catchupLimit       = 5
-	catchupCharBudget  = 64 << 10
-	catchupQueryBudget = 5 * time.Second
+	catchupLimit         = 5
+	catchupCharBudget    = 64 << 10
+	catchupQueryBudget   = 5 * time.Second
+	catchupRetryInterval = 100 * time.Millisecond
 )
 
 type logbookResponse struct {
@@ -34,18 +36,25 @@ type logbookResponse struct {
 }
 
 func loadCatchup(ctx context.Context, sys actorbase.Sys) []ContextItem {
-	pending, err := sys.Call(actor.SystemActorID, registry.TypeLogbookRecent, map[string]any{"limit": catchupLimit})
+	// Catch-up is best-effort — a failure must never block boot — but it must
+	// never fail silently either: without a line here, an agent that quietly
+	// stopped seeing the channel's recent history looks identical to one that
+	// had nothing to catch up on.
+	pending, err := callCatchupWithinBudget(ctx, sys)
 	if err != nil {
+		slog.Warn("agent catch-up query not sent", "actor", sys.Self(), "error", err)
 		return nil
 	}
 	qctx, cancel := context.WithTimeout(ctx, catchupQueryBudget)
 	defer cancel()
 	msg, err := pending.Wait(qctx, catchupQueryBudget)
 	if err != nil || msg.ID == "" {
+		slog.Warn("agent catch-up query unanswered", "actor", sys.Self(), "error", err)
 		return nil
 	}
 	var response logbookResponse
-	if json.Unmarshal(msg.Payload, &response) != nil {
+	if err := json.Unmarshal(msg.Payload, &response); err != nil {
+		slog.Warn("agent catch-up answer undecodable", "actor", sys.Self(), "error", err)
 		return nil
 	}
 	items := make([]ContextItem, 0, len(response.Messages))
@@ -54,6 +63,34 @@ func loadCatchup(ctx context.Context, sys actorbase.Sys) []ContextItem {
 		items = append(items, ContextItem{Seq: row.Seq, Sender: row.Message.Sender.ID, Kind: row.Message.Kind, Type: row.Message.Type, Payload: append([]byte(nil), row.Message.Payload...), Rendered: rendered})
 	}
 	return budgetContext(items, catchupCharBudget)
+}
+
+// callCatchupWithinBudget retries submission while the send itself is failing.
+// Catch-up runs at boot, and the boot that most needs it — an agent rejoining
+// after time away — happens exactly while its outbound link is coming up. A
+// single attempt there gives up milliseconds before the link is usable, so the
+// mechanism would be missing precisely when it has something to catch up on.
+// The retry stays inside the same budget the query itself gets, so a genuinely
+// unavailable link still never delays boot beyond it.
+func callCatchupWithinBudget(ctx context.Context, sys actorbase.Sys) (actorbase.Pending, error) {
+	deadline := time.Now().Add(catchupQueryBudget)
+	for attempt := 0; ; attempt++ {
+		pending, err := sys.Call(actor.SystemActorID, platform.TypeLogbookRecent, map[string]any{"limit": catchupLimit})
+		if err == nil {
+			if attempt > 0 {
+				slog.Info("agent catch-up query sent after link came up", "actor", sys.Self(), "attempts", attempt+1)
+			}
+			return pending, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(catchupRetryInterval):
+		}
+	}
 }
 
 func budgetContext(items []ContextItem, budget int) []ContextItem {

@@ -39,14 +39,16 @@ func triggerText(tr base.Trigger) string {
 }
 
 func triggerBody(tr base.Trigger) string {
+	// A present text field is authoritative even when empty — falling back to
+	// the raw JSON for {"text":""} would make empty input look non-empty and
+	// ship the literal braces to the model.
 	var p struct {
-		Text string `json:"text"`
+		Text *string `json:"text"`
 	}
-	body := string(tr.Envelope.Payload)
-	if json.Unmarshal(tr.Envelope.Payload, &p) == nil && p.Text != "" {
-		body = p.Text
+	if json.Unmarshal(tr.Envelope.Payload, &p) == nil && p.Text != nil {
+		return *p.Text
 	}
-	return body
+	return string(tr.Envelope.Payload)
 }
 func steerExpected(tr base.Trigger, fallback string) string {
 	var p struct {

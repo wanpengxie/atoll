@@ -92,7 +92,7 @@ echo "$PAGE" | jq -e --arg id "$MSGID" \
 echo "$PAGE" | jq -e --arg id "$MSGID" \
   '.messages[] | select(.envelope.kind=="response" and .envelope.parent_id==$id)' >/dev/null \
   || { echo "demo: response paired to our request not in paged read" >&2; exit 1; }
-# activity.* phase events come from base-wrapped LLM engines (kimi/claude);
+# activity.* phase events come from base-wrapped agent engines;
 # the deterministic script class is a bare Proc, so here they are informational
 # only — the phase-event acceptance is pinned by unit tests, not this demo.
 ACTIVITY="$(echo "$PAGE" | jq '[.messages[] | select(.envelope.type|startswith("activity."))] | length')"

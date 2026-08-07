@@ -9,7 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/base"
 )
 
-var invalidResumePattern = regexp.MustCompile(`(?i)(thread|rollout).*(not found|missing|invalid)|no rollout|does not exist`)
+var invalidResumePattern = regexp.MustCompile(`(?i)no rollout found|thread not found|conversation not found|is archived|(thread|rollout).*(not found|missing|invalid)|does not exist`)
 var closingPattern = regexp.MustCompile(`(?i)thread.*clos(?:ing|ed)`)
 var noActivePattern = regexp.MustCompile(`(?i)no active turn|turn.*not active`)
 var mismatchPattern = regexp.MustCompile(`(?i)expected.*turn|turn.*mismatch`)

@@ -7,7 +7,7 @@
 // orthogonal axes: compiled-in (availability — actors/all + agent/all are linked
 // so the daemon CAN build any tool/looper/device) vs run (the pulled assignment
 // decides). NOTHING auto-runs. tool / looper / device are uniform — all just
-// rows in the assignment; claude runs here with the user's LOCAL login.
+// rows in the assignment; workspace-backed engines run with the user's local setup.
 //
 // Identity is the home's, not the run's (home 模型: 身份=持有凭据): --server and
 // --key are FIRST-RUN registration (or an explicit rebind) and persist into the
@@ -37,7 +37,7 @@ import (
 
 	// Availability (NOT auto-run): blank-import every in-tree actor + engine so the
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
-	// agent/all = the LLM engine classes (claude / go-kimi). What actually runs is
+	// agent/all = the agent engine classes (codex / script). What actually runs is
 	// the pulled assignment, never "one of each".
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	_ "github.com/wanpengxie/atoll/drivers/tools/all"

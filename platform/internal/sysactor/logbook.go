@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -95,5 +95,5 @@ func includeLogbookRow(row storespec.StoredRow, caller actorbase.Msg) bool {
 	// Responses to a logbook request inherit the request type in the current
 	// response machinery; the prefix check above deliberately applies to both
 	// request and response rows.
-	return env.Type != registry.TypeLogbookRecent
+	return env.Type != platform.TypeLogbookRecent
 }

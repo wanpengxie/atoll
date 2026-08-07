@@ -8,10 +8,28 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
+func TestActorDeclCreationRequiresClassAndValidatesScriptConfig(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "decl-config@example.com", "secret123", "Decl Config")
+
+	missingClass := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{"name": "missing-class"}, cookies)
+	assertStatus(t, missingClass, http.StatusBadRequest)
+
+	invalidScript := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
+		"name": "invalid-script", "class": "script",
+	}, cookies)
+	assertStatus(t, invalidScript, http.StatusBadRequest)
+
+	validScript := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
+		"name": "valid-script", "class": "script", "config": map[string]any{"tool_id": "tool:test:1"},
+	}, cookies)
+	assertStatus(t, validScript, http.StatusCreated)
+}
+
 func TestActorDeclListProjectsInstancesWithoutChannelLocalVersions(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
-	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "versioned", "class": "go-kimi"}, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "versioned", "class": "test-agent"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	declID := respJSON(t, w)["id"].(string)
 	firstDaemon := createAndBindDaemon(t, env, s.chID, "version-host-a", s.cookies)["id"].(string)
@@ -72,7 +90,7 @@ func TestActorDeclListIncludesPublicAndOwnPrivateOnly(t *testing.T) {
 	create := func(cookies []*http.Cookie, name, visibility string) string {
 		t.Helper()
 		w := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
-			"name": name, "class": "go-kimi", "visibility": visibility,
+			"name": name, "class": "test-agent", "visibility": visibility,
 		}, cookies)
 		assertStatus(t, w, http.StatusCreated)
 		return respJSON(t, w)["id"].(string)

@@ -282,3 +282,50 @@ func TestReconcileClosureRecordsAWriteFaultAndClosesOnTheNextSweep(t *testing.T)
 		t.Fatalf("the successful retry logged another fault: total = %d", got)
 	}
 }
+
+func TestShutdownLeavesOpenUntilDeadlineThenReaperCloses(t *testing.T) {
+	h := openClosureHome(t, "shutdown-deadline-reaper")
+	closureStopReconcileLoop(t, h)
+	caller := routingAgent(t, h, closureCallerDecl)
+	receiver := routingAgent(t, h, closureReceiverDecl)
+	term, _ := serverTerm(t, h, caller)
+	basis, err := h.controller.PenBasis(caller, term)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
+	deadline := h.nowMs() + 10_000
+	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
+		Type: closureRequestType, Payload: json.RawMessage(`{"unit":"shutdown"}`),
+		Audience: message.Audience{receiver}, ExpiresAt: &deadline,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := pen.Write(context.Background(), env)
+	if err != nil || !result.Accepted() {
+		t.Fatalf("write request: result=%+v err=%v", result, err)
+	}
+	if terminals := closureTerminalsFor(t, h, env.ID); len(terminals) != 0 {
+		t.Fatalf("shutdown path synthesized an early terminal: %+v", terminals)
+	}
+
+	h.nowMs = func() int64 { return deadline - 1 }
+	h.sweepExpired(context.Background())
+	if terminals := closureTerminalsFor(t, h, env.ID); len(terminals) != 0 {
+		t.Fatalf("reaper closed before deadline: %+v", terminals)
+	}
+	h.nowMs = func() int64 { return deadline }
+	h.sweepExpired(context.Background())
+	terminals := closureTerminalsFor(t, h, env.ID)
+	if len(terminals) != 1 || terminals[0].Sender.ID != actor.SystemActorID {
+		t.Fatalf("deadline terminals=%+v", terminals)
+	}
+	var payload struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(terminals[0].Payload, &payload); err != nil || payload.Status != string(message.StatusFailed) || payload.Reason != string(message.TerminalUnansweredTimeout) {
+		t.Fatalf("deadline payload=%s err=%v", terminals[0].Payload, err)
+	}
+}

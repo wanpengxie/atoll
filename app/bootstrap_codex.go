@@ -9,11 +9,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
 )
 
 const bootstrapCodexName = "home-codex"
@@ -90,7 +90,7 @@ func submitDefaultAgent(ctx context.Context, bundle channelhost.Bundle, owner st
 		return err
 	}
 	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{
-		ChannelID: string(homeID), ID: uuid.NewString(), MsgType: registry.TypeSetDefaultAgent,
+		ChannelID: string(homeID), ID: uuid.NewString(), MsgType: platform.TypeSetDefaultAgent,
 		Kind: "request", Audience: []string{string(actor.SystemActorID)}, Visibility: "public", Payload: payload,
 	})
 	if err != nil {

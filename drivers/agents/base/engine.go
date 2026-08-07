@@ -60,6 +60,12 @@ type ContextItem struct {
 // Engine is the frozen asynchronous provider contract. Business and transport
 // outcomes are reported through EventPort; returned errors are programmer-state
 // errors only (not booted/closed).
+//
+// Terminate MUST NOT block: it retires the current provider generation and
+// returns immediately, with physical reaping as the engine's async internals.
+// This is what lets the base arbiter loop execute terminate inline — the
+// action lands in the same instant it is decided, so no stale kill can reach
+// a generation spawned after the decision.
 type Engine interface {
 	Boot(ctx context.Context, port BootPort) error
 	StartTurn(op OpID, batch []Trigger, background []ContextItem) error

@@ -16,8 +16,15 @@ func TestControlErrorClassification(t *testing.T) {
 	}
 }
 func TestResumeErrorPatterns(t *testing.T) {
-	if !isInvalidResumeError(errors.New("rollout not found")) {
-		t.Fatal("missing rollout not classified")
+	for _, text := range []string{
+		"no rollout found for thread",
+		"thread not found",
+		"conversation not found",
+		"session abc is archived",
+	} {
+		if !isInvalidResumeError(errors.New(text)) {
+			t.Fatalf("%q not classified as invalid resume", text)
+		}
 	}
 	if !isClosingError(errors.New("thread is closing")) {
 		t.Fatal("closing not classified")

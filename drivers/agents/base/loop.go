@@ -16,8 +16,15 @@ import (
 )
 
 const (
-	bootTimeout            = 30 * time.Second
-	watchdogInitialTimeout = 10 * time.Minute
+	bootTimeout = 30 * time.Second
+	// watchdogInitialTimeout bounds how long the loop may sit in a non-idle
+	// state without evidence of progress. It is deliberately weaker than a
+	// provider's own turn watchdog: an engine sees every provider-side signal
+	// (including ones that never cross EventPort, e.g. retrying errors), so in
+	// the window where both apply the better-informed owner must get to rule
+	// first. This one is the backstop for what no engine can see — a stall
+	// with no turn at all, or an engine that reports nothing whatsoever.
+	watchdogInitialTimeout = 20 * time.Minute
 )
 
 type loopState uint8
@@ -107,15 +114,22 @@ type turnResult struct {
 }
 
 type controlSlot struct {
-	kind string
-	item *requestItem
-	op   OpID
+	kind    string
+	item    *requestItem
+	op      OpID
+	rpcDone bool
+	phase   string
+	// timer is the slot's enforcement deadline. It is armed at enslotment —
+	// the verb's time bound is defined from acceptance, not from whichever
+	// phase later submits an RPC — and stopped only at the slot's terminal.
+	timer *time.Timer
 }
 
 type agentLoop struct {
-	def definition
-	sys actorbase.Sys
-	eng Engine
+	def    definition
+	sys    actorbase.Sys
+	eng    Engine
+	events chan providerEvent
 
 	state      loopState
 	settling   bool
@@ -127,13 +141,16 @@ type agentLoop struct {
 	committing map[OpID]*operation
 	active     *requestItem
 	lastOwner  *requestItem
-	result     *turnResult
-	background []ContextItem
+	// ownerDroppedByControl records that the workspace's owner was removed by
+	// an explicit control (stop/terminate/restart) rather than lost to a race.
+	// It is cleared when a new turn takes the workspace.
+	ownerDroppedByControl bool
+	result                *turnResult
+	background            []ContextItem
 
 	pendingControl   *controlSlot
 	executingControl *controlSlot
-	controlExpiry    chan OpID
-	controlTimer     *time.Timer
+	controlExpiry    chan *controlSlot
 }
 
 func (d definition) run(sys actorbase.Sys) error {
@@ -160,9 +177,13 @@ func (d definition) run(sys actorbase.Sys) error {
 		def: d, sys: sys, eng: eng, state: stateIdle, background: background,
 		buffer:        requestBuffer{maxCount: d.cfg.BufferMaxCount, maxBytes: d.cfg.BufferMaxBytes},
 		committing:    make(map[OpID]*operation),
-		controlExpiry: make(chan OpID, 1),
+		controlExpiry: make(chan *controlSlot, 4),
+		events:        events,
 	}
-	defer l.stopControlDeadline()
+	defer func() {
+		l.closeSlot(l.pendingControl)
+		l.closeSlot(l.executingControl)
+	}()
 	intake := make(chan actorbase.Msg)
 	recvErr := make(chan error, 1)
 	go func() {
@@ -185,6 +206,7 @@ func (d definition) run(sys actorbase.Sys) error {
 		<-watchdog.C
 	}
 	for {
+		turnBefore := l.turnIndex
 		select {
 		case <-sys.Life().Done():
 			return nil
@@ -194,31 +216,25 @@ func (d definition) run(sys actorbase.Sys) error {
 			}
 			return err
 		case msg := <-intake:
-			if l.handleIntakeAndShouldArmWatchdog(msg, closures) || l.state == stateIdle {
-				l.armWatchdog(watchdog)
-			}
+			l.handleIntake(msg, closures)
+			l.reconcileWatchdog(watchdog, false, turnBefore)
 		case e := <-events:
 			progress := l.isCurrentProgress(e)
 			l.handleProviderEvent(e)
-			if progress || l.state == stateIdle {
-				l.armWatchdog(watchdog)
-			}
+			l.reconcileWatchdog(watchdog, progress, turnBefore)
 		case c := <-closures:
 			l.handleClosure(c.id)
-		case op := <-l.controlExpiry:
-			l.expireControl(op)
+			l.reconcileWatchdog(watchdog, false, turnBefore)
+		case slot := <-l.controlExpiry:
+			l.expireControl(slot)
+			l.reconcileWatchdog(watchdog, false, turnBefore)
 		case <-watchdog.C:
 			_ = l.eng.Interrupt(l.opID())
 			_ = l.eng.Terminate()
 			l.providerLost(LostTimeout, "provider watchdog expired")
+			l.reconcileWatchdog(watchdog, false, turnBefore)
 		}
 	}
-}
-
-func (l *agentLoop) handleIntakeAndShouldArmWatchdog(msg actorbase.Msg, closures chan<- closureEvent) bool {
-	wasIdle := l.state == stateIdle
-	l.handleIntake(msg, closures)
-	return wasIdle && l.state != stateIdle
 }
 
 func (l *agentLoop) isCurrentProgress(e providerEvent) bool {
@@ -233,23 +249,29 @@ func (l *agentLoop) isCurrentProgress(e providerEvent) bool {
 	}
 }
 
-func (l *agentLoop) armWatchdog(t *time.Timer) {
-	if l.state == stateIdle {
+// reconcileWatchdog treats the watchdog as a lease on non-idle states,
+// reconciled from state deltas at the end of every loop iteration — never from
+// classifying which event arrived. A new turn (turnIndex moved) always takes a
+// fresh lease, so side-effect paths that start turns (crash recovery, control
+// expiry) cannot inherit a stale remainder; progress evidence refreshes it;
+// idle drops it.
+func (l *agentLoop) reconcileWatchdog(t *time.Timer, progress bool, turnBefore int) {
+	drain := func() {
 		if !t.Stop() {
 			select {
 			case <-t.C:
 			default:
 			}
 		}
+	}
+	if l.state == stateIdle {
+		drain()
 		return
 	}
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
+	if progress || l.turnIndex != turnBefore {
+		drain()
+		t.Reset(watchdogInitialTimeout)
 	}
-	t.Reset(watchdogInitialTimeout)
 }
 
 func (l *agentLoop) opID() OpID {
@@ -267,7 +289,11 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg, closures chan<- closureEvent
 		return
 	}
 	if strings.HasPrefix(msg.Type, "agent.") {
-		if _, known := map[string]struct{}{TypeSteer: {}, TypeInterrupt: {}, TypeQueue: {}, TypeStop: {}, TypeTerminate: {}, TypeRestart: {}}[msg.Type]; !known || !l.def.supports(msg.Type) {
+		_, known := map[string]struct{}{TypeSteer: {}, TypeInterrupt: {}, TypeQueue: {}, TypeStop: {}, TypeTerminate: {}, TypeRestart: {}}[msg.Type]
+		// Steer is also a content form: providers without a steer primitive
+		// degrade it to the ordinary queue. All other reserved controls remain
+		// governed by the frozen capability snapshot.
+		if !known || (msg.Type != TypeSteer && !l.def.supports(msg.Type)) {
 			_, _ = l.sys.Fail(msg, "type_unsupported", "agent does not support "+msg.Type)
 			return
 		}
@@ -280,6 +306,12 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg, closures chan<- closureEvent
 		}
 		_ = json.Unmarshal(msg.Payload, &p)
 		item.explicitCAS = strings.TrimSpace(p.ExpectedTurnID) != ""
+		if !controlHasContent(item) {
+			// Empty input is a mandatory failure form for steer in every
+			// state — degrading it to the queue would start a blank turn.
+			l.fail(item, errorEmptyInput, "steer requires text input")
+			return
+		}
 	}
 	go func(id string, ctx context.Context) {
 		select {
@@ -340,6 +372,9 @@ func (l *agentLoop) enqueue(item *requestItem, progress bool) {
 }
 
 func (l *agentLoop) acceptContent(item *requestItem, explicitSteer bool) {
+	// An explicit expected_turn_id is a CAS: any form in which it cannot be
+	// honored against the live turn fails loudly — explicit targeting never
+	// degrades silently into the queue.
 	switch l.state {
 	case stateIdle:
 		if explicitSteer && item.explicitCAS {
@@ -349,6 +384,10 @@ func (l *agentLoop) acceptContent(item *requestItem, explicitSteer bool) {
 		l.enqueue(item, false)
 	case stateTurnActive:
 		if !l.def.supports(TypeSteer) {
+			if explicitSteer && item.explicitCAS {
+				l.fail(item, errorCASMismatch, "provider cannot steer the active turn")
+				return
+			}
 			l.enqueue(item, true)
 			return
 		}
@@ -360,6 +399,10 @@ func (l *agentLoop) acceptContent(item *requestItem, explicitSteer bool) {
 			l.fail(item, errorProviderCrash, err.Error())
 		}
 	default:
+		if explicitSteer && item.explicitCAS {
+			l.fail(item, errorCASMismatch, "no steerable turn")
+			return
+		}
 		l.enqueue(item, true)
 	}
 }
@@ -409,6 +452,7 @@ func (l *agentLoop) handleProviderEvent(e providerEvent) {
 		}
 		delete(l.committing, e.op)
 		l.turnID, l.state, l.lastOwner = e.turnID, stateTurnActive, op.item
+		l.ownerDroppedByControl = false
 		if !op.item.closed {
 			l.active = op.item
 		}
@@ -449,11 +493,7 @@ func (l *agentLoop) handleProviderEvent(e providerEvent) {
 			return
 		}
 		l.result = &turnResult{status: e.status, text: e.finalText, err: e.detail}
-		if l.hasInFlightTurnControl() {
-			l.settling = true
-		} else {
-			l.settleTurn()
-		}
+		l.maybeSettle()
 	case eventControlDone:
 		l.controlDone(e)
 	case eventProviderLost:
@@ -461,9 +501,32 @@ func (l *agentLoop) handleProviderEvent(e providerEvent) {
 	}
 }
 
+// maybeSettle is the ONLY door into settleTurn. The settlement condition is a
+// conjunction over facts that arrive on different paths (final result present,
+// no turn control still in flight), so it must be evaluated at one point after
+// every relevant arrival — each arrival path knocks here instead of copying
+// the condition. A forgotten conjunct at a copied site is exactly how a late
+// steer used to leak into the next turn's account.
+func (l *agentLoop) maybeSettle() {
+	if l.result == nil {
+		return
+	}
+	if l.hasInFlightTurnControl() {
+		l.settling = true
+		return
+	}
+	l.settleTurn()
+}
+
 func (l *agentLoop) hasInFlightTurnControl() bool {
 	for _, op := range l.committing {
 		if op.kind == TypeSteer || op.kind == TypeInterrupt {
+			return true
+		}
+	}
+	if l.executingControl != nil && !l.executingControl.rpcDone {
+		switch l.executingControl.kind {
+		case TypeInterrupt, TypeStop:
 			return true
 		}
 	}
@@ -486,7 +549,12 @@ func (l *agentLoop) controlDone(e providerEvent) {
 		} else {
 			switch e.verdict {
 			case ControlAccepted:
-				if !op.item.closed {
+				if e.turnID != "" && l.turnID != "" && e.turnID != l.turnID {
+					// The steer resolved against a turn that is no longer the
+					// workspace's turn: its story closed with that turn.
+					// Same silencing as the control-slot rule — never re-top.
+					l.fail(op.item, errorCancelled, "steer resolved against a settled turn")
+				} else if !op.item.closed {
 					if l.active != nil && l.active != op.item {
 						l.reply(l.active, map[string]any{"preempted_by": op.item.msg.ID})
 					}
@@ -514,8 +582,8 @@ func (l *agentLoop) controlDone(e providerEvent) {
 			l.turnID, l.state = "", stateIdle
 		}
 	}
-	if l.settling && !l.hasInFlightTurnControl() {
-		l.settleTurn()
+	if l.result != nil {
+		l.maybeSettle()
 	} else if l.state == stateIdle {
 		l.maybeRunControl()
 		l.startNext()
@@ -536,12 +604,17 @@ func (l *agentLoop) settleTurn() {
 		default:
 			l.fail(l.active, errorProviderFailed, r.err)
 		}
+	} else {
+		l.publishOrphanTurnResult(r)
 	}
 	l.logActivityError(registry.ActivityTurnEnded, l.emitTurnEnded(r.status))
 	l.result, l.active, l.turnID, l.settling, l.state = nil, nil, "", false, stateIdle
-	if l.executingControl != nil && l.executingControl.kind == TypeInterrupt {
-		l.stopControlDeadline()
+	if l.executingControl != nil && l.executingControl.kind == TypeStop {
+		l.closeSlot(l.executingControl)
+		l.executingControl = nil
+	} else if l.executingControl != nil && l.executingControl.kind == TypeInterrupt {
 		slot := l.executingControl
+		l.closeSlot(slot)
 		l.executingControl = nil
 		if controlHasContent(slot.item) {
 			l.enqueue(slot.item, false)
@@ -592,8 +665,13 @@ func (l *agentLoop) providerLost(cause LostCause, detail string) {
 		delete(l.committing, opID)
 	}
 	if l.executingControl != nil {
-		l.fail(l.executingControl.item, code, detail)
+		l.closeSlot(l.executingControl)
+		if !l.executingControl.item.closed {
+			l.fail(l.executingControl.item, code, detail)
+		}
 	}
+	// Phase marker last: the log order is terminals first, turn.ended after.
+	l.closeTurnPhase(TurnStatusFailed)
 	l.executingControl, l.active, l.lastOwner, l.turnID, l.result, l.settling, l.state = nil, nil, nil, "", nil, false, stateIdle
 	l.maybeRunControl()
 	l.startNext()

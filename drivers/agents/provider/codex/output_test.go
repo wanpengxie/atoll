@@ -48,21 +48,21 @@ func TestToolSummaryCoversSupportedItemFamilies(t *testing.T) {
 
 func TestFinalAnswerCacheLastNonEmptyAndClearedPerTurn(t *testing.T) {
 	e, events, c := outputHarness()
-	e.turnID = "turn-a"
-	e.final["turn-a"] = ""
-	e.handleItem("item/completed", itemNotice{ThreadID: "thread", TurnID: "turn-a", Item: itemWire{Type: "agentMessage", Text: "first"}})
-	e.handleItem("item/completed", itemNotice{ThreadID: "thread", TurnID: "turn-a", Item: itemWire{Type: "agentMessage", Text: ""}})
-	e.handleItem("item/completed", itemNotice{ThreadID: "thread", TurnID: "turn-a", Item: itemWire{Type: "agentMessage", Text: "last"}})
+	c.turnID = "turn-a"
+	c.final["turn-a"] = ""
+	e.handleItem(c, "item/completed", itemNotice{ThreadID: "thread", TurnID: "turn-a", Item: itemWire{Type: "agentMessage", Text: "first"}})
+	e.handleItem(c, "item/completed", itemNotice{ThreadID: "thread", TurnID: "turn-a", Item: itemWire{Type: "agentMessage", Text: ""}})
+	e.handleItem(c, "item/completed", itemNotice{ThreadID: "thread", TurnID: "turn-a", Item: itemWire{Type: "agentMessage", Text: "last"}})
 	notify(t, e, c, "turn/completed", map[string]any{"threadId": "thread", "turn": map[string]any{"id": "turn-a", "status": "completed"}})
 	records := events.snapshot()
 	if len(records) != 1 || records[0].kind != "ended" || records[0].text != "last" {
 		t.Fatalf("turn A records=%#v", records)
 	}
-	if _, ok := e.final["turn-a"]; ok {
+	if _, ok := c.final["turn-a"]; ok {
 		t.Fatal("turn A cache survived terminal")
 	}
-	e.turnID = "turn-b"
-	e.final["turn-b"] = ""
+	c.turnID = "turn-b"
+	c.final["turn-b"] = ""
 	notify(t, e, c, "turn/completed", map[string]any{"threadId": "thread", "turn": map[string]any{"id": "turn-b", "status": "completed"}})
 	records = events.snapshot()
 	if len(records) != 2 || records[1].text != "" {
@@ -70,13 +70,32 @@ func TestFinalAnswerCacheLastNonEmptyAndClearedPerTurn(t *testing.T) {
 	}
 }
 
+// The driver must hand the final answer through whole: nothing on our path
+// (item cache, turn terminal, RPC line reader) may clip it. Pinned here rather
+// than end to end, where the length would be the model's behaviour, not ours.
+func TestFinalAnswerSurvivesFarBeyondToolSummaryBound(t *testing.T) {
+	e, events, c := outputHarness()
+	c.turnID = "turn-long"
+	c.final["turn-long"] = ""
+	long := "LONG-BEGIN-" + strings.Repeat("abc123", 900) + "-LONG-END"
+	e.handleItem(c, "item/completed", itemNotice{ThreadID: "thread", TurnID: "turn-long", Item: itemWire{Type: "agentMessage", Text: long}})
+	notify(t, e, c, "turn/completed", map[string]any{"threadId": "thread", "turn": map[string]any{"id": "turn-long", "status": "completed"}})
+	records := events.snapshot()
+	if len(records) != 1 || records[0].kind != "ended" {
+		t.Fatalf("records=%#v", records)
+	}
+	if records[0].text != long {
+		t.Fatalf("final answer altered: got %d runes want %d", len([]rune(records[0].text)), len([]rune(long)))
+	}
+}
+
 func TestErrorNotificationNeverSettles(t *testing.T) {
 	for _, retry := range []bool{false, true} {
 		e, events, c := outputHarness()
-		e.turnID = "turn"
+		c.turnID = "turn"
 		notify(t, e, c, "error", map[string]any{"threadId": "thread", "turnId": "turn", "willRetry": retry, "error": map[string]any{"message": "diagnostic"}})
-		if got := events.snapshot(); len(got) != 0 || e.turnID != "turn" {
-			t.Fatalf("willRetry=%v settled: records=%#v turn=%q", retry, got, e.turnID)
+		if got := events.snapshot(); len(got) != 0 || c.turnID != "turn" {
+			t.Fatalf("willRetry=%v settled: records=%#v turn=%q", retry, got, c.turnID)
 		}
 		e.stopWatchdog()
 	}
@@ -84,8 +103,8 @@ func TestErrorNotificationNeverSettles(t *testing.T) {
 
 func outputHarness() (*engine, *recordingEvents, *connection) {
 	events := &recordingEvents{}
-	c := &connection{id: 1}
-	e := &engine{cfg: Config{Logger: slog.New(slog.DiscardHandler)}, events: events, life: context.Background(), current: c, threadID: "thread", final: map[string]string{}}
+	c := &connection{id: 1, final: map[string]string{}}
+	e := &engine{cfg: Config{Logger: slog.New(slog.DiscardHandler)}, events: events, life: context.Background(), current: c, threadID: "thread"}
 	return e, events, c
 }
 

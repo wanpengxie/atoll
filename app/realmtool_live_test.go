@@ -49,7 +49,7 @@ func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
 	defer client.close()
 
 	created := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeCreateDeclaration, map[string]any{
-		"name": "created in channel", "class": "go-kimi", "visibility": "public", "config": map[string]any{},
+		"name": "created in channel", "class": "test-agent", "visibility": "public", "config": map[string]any{},
 	})
 	if string(created["status"]) != `"completed"` {
 		t.Fatalf("create response=%v", created)
@@ -100,7 +100,7 @@ func TestRealmToolActorOwnedIntroduceAndRemove(t *testing.T) {
 	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
 	defer client.close()
 	decl := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
-		"name": "actor-owned", "class": "go-kimi", "visibility": "public",
+		"name": "actor-owned", "class": "test-agent", "visibility": "public",
 	}, setup.cookies)
 	assertStatus(t, decl, http.StatusCreated)
 	declID := respJSON(t, decl)["id"].(string)
@@ -140,7 +140,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 		t.Fatalf("seed resource=%v", ack)
 	}
 	targetResp := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
-		"name": "fork-introduced", "class": "go-kimi", "visibility": "public",
+		"name": "fork-introduced", "class": "test-agent", "visibility": "public",
 	}, setup.cookies)
 	assertStatus(t, targetResp, http.StatusCreated)
 	targetDecl := respJSON(t, targetResp)["id"].(string)
@@ -164,7 +164,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 				deadline := time.Now().Add(3 * time.Second)
 				for {
 					child, err = sys.Fork(message.ID("fork-realm-requester"), actorcaps.ForkSpec{
-						Kind: actor.KindAgent, Class: "go-kimi", NameHint: "realm-requester",
+						Kind: actor.KindAgent, Class: "test-agent", NameHint: "realm-requester",
 					})
 					if err == nil || time.Now().After(deadline) {
 						break
@@ -267,7 +267,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 		}
 	})
 	requesterResp := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
-		"name": "fork-parent", "class": "go-kimi", "visibility": "public",
+		"name": "fork-parent", "class": "test-agent", "visibility": "public",
 	}, setup.cookies)
 	assertStatus(t, requesterResp, http.StatusCreated)
 	requesterDecl := respJSON(t, requesterResp)["id"].(string)
@@ -381,7 +381,7 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	defer client.close()
 
 	privateDecl := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
-		"name": "private introduction", "class": "go-kimi", "visibility": "private",
+		"name": "private introduction", "class": "test-agent", "visibility": "private",
 	}, setup.cookies)
 	assertStatus(t, privateDecl, http.StatusCreated)
 	privateID := respJSON(t, privateDecl)["id"].(string)
@@ -393,7 +393,7 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	assertStatus(t, external, http.StatusCreated)
 
 	publicDecl := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
-		"name": "public after switch", "class": "go-kimi", "visibility": "public",
+		"name": "public after switch", "class": "test-agent", "visibility": "public",
 	}, setup.cookies)
 	assertStatus(t, publicDecl, http.StatusCreated)
 	publicID := respJSON(t, publicDecl)["id"].(string)

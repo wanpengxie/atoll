@@ -1,19 +1,39 @@
 package base
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
+
+const ObsOrphanTurnResult actorrt.ObsKind = "agentbase.orphan_turn_result"
 
 func (l *agentLoop) activityAnchor() *requestItem {
 	if l.active != nil && !l.active.closed {
 		return l.active
 	}
 	return l.lastOwner
+}
+
+// publishOrphanTurnResult reports a final answer that arrived with nobody left
+// to receive it. "Nobody left" only counts as a loss when the workspace lost
+// its owner to a RACE; a stop or terminate removed the waiter on purpose, and
+// the answer arriving afterwards is the expected shape of that order, not a
+// dropped result.
+func (l *agentLoop) publishOrphanTurnResult(result *turnResult) {
+	if result == nil || l.lastOwner == nil || l.ownerDroppedByControl {
+		return
+	}
+	detail, _ := json.Marshal(map[string]any{
+		"turn_id": l.turnID, "turn_index": l.turnIndex, "status": result.status,
+		"has_final_text": result.text != "", "has_error": result.err != "",
+	})
+	_ = l.sys.PublishObs(ObsOrphanTurnResult, detail)
 }
 
 func (l *agentLoop) emitActivity(typ registry.ActivityType, payload any) error {
@@ -47,6 +67,18 @@ func (l *agentLoop) emitTurnEnded(status TurnStatus) error {
 	return l.emitActivity(registry.ActivityTurnEnded, registry.ActivityTurnEndedPayload{
 		TurnIndex: l.turnIndex, Status: string(status),
 	})
+}
+
+// closeTurnPhase publishes the closing phase marker for a turn that ends
+// WITHOUT a provider verdict — a lost provider, an escalated control deadline,
+// a stop. A started turn's phase boundary must close on every path it can die
+// on, or the channel log shows a turn that began and never ended. It must run
+// before the owners are cleared, since the anchor comes from them.
+func (l *agentLoop) closeTurnPhase(status TurnStatus) {
+	if l.turnID == "" {
+		return
+	}
+	l.logActivityError(registry.ActivityTurnEnded, l.emitTurnEnded(status))
 }
 
 func (l *agentLoop) emitTool(e providerEvent) error {

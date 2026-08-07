@@ -10,8 +10,8 @@ import (
 
 // ToolSpec is the protocol-layer definition of one meta tool: its name,
 // description, and JSON schema. This lives in lib/metatool because meta
-// tools are a substrate concept — any actor runtime (go-kimi, future
-// runtimes) wraps ToolSpec into its own tool type.
+// tools are a substrate concept — any actor runtime wraps ToolSpec into its own
+// tool type.
 type ToolSpec struct {
 	Name        string
 	Description string

@@ -19,64 +19,8 @@ import (
 // Mock protocol tests remain the deterministic CI lane; this test deliberately
 // requires both an explicit opt-in and a locally authenticated Codex install.
 func TestCodexDriverMultiTurnMemory(t *testing.T) {
-	if os.Getenv("ATOLL_CODEX_E2E") != "1" {
-		t.Skip("ATOLL_CODEX_E2E=1 not set")
-	}
-	binDir := requireE2EBin(t)
-	atollBin := filepath.Join(binDir, "atoll")
-	if _, err := os.Stat(atollBin); err != nil {
-		t.Fatalf("atoll binary missing: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(binDir, "atoll-server")); err != nil {
-		t.Fatalf("atoll-server binary missing: %v", err)
-	}
-
-	root := t.TempDir()
-	home := filepath.Join(root, "isolated-home")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	copyCodexAuthForSmoke(t, home)
-	env := scrubbedEnv(home)
-	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-		env = append(env, "OPENAI_API_KEY="+key)
-	}
-	env = append(env, "CODEX_HOME="+filepath.Join(home, ".codex"))
-
-	port := freePort(t)
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	nodeDir := filepath.Join(root, "node")
-	logPath := filepath.Join(root, "atoll.log")
-	p := startProc(t, "codex-atoll", atollBin, []string{
-		"up", "--dir", nodeDir, "--addr", fmt.Sprintf("127.0.0.1:%d", port),
-	}, root, logPath, env)
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("atoll log tail:\n%s", tailLog(logPath, 120))
-		}
-	})
-	waitHealthz(t, base, p, 45*time.Second)
-
-	tokenPath := filepath.Join(nodeDir, "server", "atoll-token")
-	token := waitTextFile(t, tokenPath, 15*time.Second)
-	api := newAPIClient(t, base)
-	api.bearer = token
-	channels := api.must("GET", "/api/channels", nil, http.StatusOK)
-	var homeID string
-	rows, ok := channels["channels"].([]any)
-	if !ok {
-		t.Fatalf("invalid channel list: %v", channels)
-	}
-	for _, raw := range rows {
-		row, _ := raw.(map[string]any)
-		if row["name"] == "home" {
-			homeID, _ = row["id"].(string)
-		}
-	}
-	if homeID == "" {
-		t.Fatalf("provisioned home missing: %v", channels)
-	}
-	ws := dialWSBearer(t, base, token, homeID)
+	h := newCodexSmokeHarness(t)
+	ws := h.ws
 
 	marker := fmt.Sprintf("ATOLL-%d", time.Now().UnixNano())
 	_, first := submitAndAwaitTerminal(t, ws, "user.text", json.RawMessage(fmt.Sprintf(`{"text":%q}`, "Remember this exact marker: "+marker+". Reply with the marker only.")), 3*time.Minute)

@@ -1305,7 +1305,8 @@
         }
       },
       "required": [
-        "name"
+        "name",
+        "class"
       ],
       "type": "object"
     },

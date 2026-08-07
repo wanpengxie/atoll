@@ -46,34 +46,7 @@ func (p *persistCoordinator) submit(sys actorbase.Sys, key string, value []byte)
 	p.seq++
 	seq := p.seq
 	p.mu.Unlock()
-	go func() {
-		delay, failures := persistRetryInitial, 0
-		for {
-			p.mu.Lock()
-			if seq != p.seq {
-				p.mu.Unlock()
-				return
-			}
-			out, err := sys.State().Put(resource.ResourceID(key), value)
-			p.mu.Unlock()
-			if err == nil && out.Accepted() {
-				return
-			}
-			failures++
-			if failures == persistLoudThreshold || failures%persistLoudThreshold == 0 {
-				publishCheckpointDrop(sys, key, failures, out, err)
-			}
-			if !waitPersistTimer(sys.Life(), delay) {
-				return
-			}
-			if delay < persistRetryMax {
-				delay *= 2
-				if delay > persistRetryMax {
-					delay = persistRetryMax
-				}
-			}
-		}
-	}()
+	go p.run(sys, key, value, seq, waitPersistTimer)
 }
 
 type persistWait func(context.Context, time.Duration) bool
@@ -89,11 +62,17 @@ func waitPersistTimer(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
-func persistLoop(sys actorbase.Sys, key string, value []byte, wait persistWait) {
+func (p *persistCoordinator) run(sys actorbase.Sys, key string, value []byte, seq uint64, wait persistWait) {
 	delay := persistRetryInitial
 	failures := 0
 	for {
+		p.mu.Lock()
+		if seq != p.seq {
+			p.mu.Unlock()
+			return
+		}
 		out, err := sys.State().Put(resource.ResourceID(key), value)
+		p.mu.Unlock()
 		if err == nil && out.Accepted() {
 			return
 		}

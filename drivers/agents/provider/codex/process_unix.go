@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -40,24 +41,40 @@ func spawnProcess(ctx context.Context, cfg Config) (*childProcess, error) {
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stdoutWriter.Close()
 		return nil, err
 	}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = stdoutWriter.Close()
 		_ = stderr.Close()
+		_ = stderrWriter.Close()
 		recordSpawnFailure(gateKey, err, cfg.Logger, time.Now())
 		return nil, err
 	}
+	// The parent must not retain write ends. Unlike Cmd.StdoutPipe, these read
+	// ends are not closed by Wait, so the RPC/stderr readers can drain every
+	// final byte after process exit without racing the reaper.
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
 	recordSpawnSuccess(gateKey)
 	p := &childProcess{cmd: cmd, stdin: stdin, stdout: stdout, done: make(chan error, 1)}
-	go func() { _, _ = io.Copy(logWriter{logger: cfg.Logger}, stderr) }()
+	go func() {
+		_, _ = io.Copy(logWriter{logger: cfg.Logger}, stderr)
+		_ = stderr.Close()
+	}()
 	go func() { p.done <- cmd.Wait(); close(p.done) }()
 	return p, nil
 }
