@@ -159,6 +159,23 @@ func requestMsg(id, typ string, payload string) actorbase.Msg {
 	})
 }
 
+func runHandler(sys *fakeSys) error {
+	for {
+		msg, err := sys.Recv()
+		if err != nil {
+			return err
+		}
+		switch msg.Type {
+		case TypeChat:
+			handleChat(sys, msg, "agent:echo-1")
+		case TypeVerify:
+			handleVerify(sys, msg)
+		default:
+			_, _ = sys.Fail(msg, "type_unsupported", "unsupported")
+		}
+	}
+}
+
 // completedTerminal fabricates the tool's completed terminal: the reply payload
 // with status merged in (the RespondJSON shape the engine strips back off).
 func completedTerminal(payload map[string]any) actorbase.Msg {
@@ -178,7 +195,7 @@ func TestChat_CallsToolWritesResourceAndReplies(t *testing.T) {
 		pending:  &fakePending{term: completedTerminal(map[string]any{"text": "hello loop"})},
 		resource: res,
 	}
-	if err := newRun("agent:echo-1")(sys); !errors.Is(err, errStop) {
+	if err := runHandler(sys); !errors.Is(err, errStop) {
 		t.Fatalf("run returned %v, want errStop", err)
 	}
 	if len(sys.fails) != 0 {
@@ -219,7 +236,7 @@ func TestChat_CallsToolWritesResourceAndReplies(t *testing.T) {
 
 func TestChat_NonObjectPayloadFailsBadPayload(t *testing.T) {
 	sys := &fakeSys{queue: []actorbase.Msg{requestMsg("m-2", TypeChat, `[1,2]`)}}
-	if err := newRun("agent:echo-1")(sys); !errors.Is(err, errStop) {
+	if err := runHandler(sys); !errors.Is(err, errStop) {
 		t.Fatalf("run returned %v", err)
 	}
 	if len(sys.fails) != 1 || sys.fails[0].code != "bad_payload" {
@@ -240,7 +257,7 @@ func TestChat_ToolFailureFailsToolCallFailed(t *testing.T) {
 		pending:  &fakePending{term: term},
 		resource: newFakeResource(),
 	}
-	if err := newRun("agent:echo-1")(sys); !errors.Is(err, errStop) {
+	if err := runHandler(sys); !errors.Is(err, errStop) {
 		t.Fatalf("run returned %v", err)
 	}
 	if len(sys.fails) != 1 || sys.fails[0].code != "tool_call_failed" {
@@ -261,7 +278,7 @@ func TestVerify_PollsStatThenReadsBytes(t *testing.T) {
 		queue:    []actorbase.Msg{requestMsg("m-4", TypeVerify, `{"resource_id":"`+rid+`"}`)},
 		resource: res,
 	}
-	if err := newRun("agent:echo-1")(sys); !errors.Is(err, errStop) {
+	if err := runHandler(sys); !errors.Is(err, errStop) {
 		t.Fatalf("run returned %v", err)
 	}
 	if len(sys.fails) != 0 {
@@ -286,7 +303,7 @@ func TestChat_DuplicateResourceIDRejectedNotSilentlyOverwritten(t *testing.T) {
 		pending:  &fakePending{term: completedTerminal(map[string]any{"text": "again"})},
 		resource: res,
 	}
-	if err := newRun("agent:echo-1")(sys); !errors.Is(err, errStop) {
+	if err := runHandler(sys); !errors.Is(err, errStop) {
 		t.Fatalf("run returned %v", err)
 	}
 	if len(sys.fails) != 1 || sys.fails[0].code != "resource_failed" ||
@@ -300,7 +317,7 @@ func TestChat_DuplicateResourceIDRejectedNotSilentlyOverwritten(t *testing.T) {
 
 func TestVerify_MissingResourceIDFailsBadPayload(t *testing.T) {
 	sys := &fakeSys{queue: []actorbase.Msg{requestMsg("m-5", TypeVerify, `{}`)}}
-	if err := newRun("agent:echo-1")(sys); !errors.Is(err, errStop) {
+	if err := runHandler(sys); !errors.Is(err, errStop) {
 		t.Fatalf("run returned %v", err)
 	}
 	if len(sys.fails) != 1 || sys.fails[0].code != "bad_payload" {
@@ -310,7 +327,7 @@ func TestVerify_MissingResourceIDFailsBadPayload(t *testing.T) {
 
 func TestUnknownTypeFailsTypeUnsupported(t *testing.T) {
 	sys := &fakeSys{queue: []actorbase.Msg{requestMsg("m-6", "loop.nope", `{}`)}}
-	if err := newRun("agent:echo-1")(sys); !errors.Is(err, errStop) {
+	if err := runHandler(sys); !errors.Is(err, errStop) {
 		t.Fatalf("run returned %v", err)
 	}
 	if len(sys.fails) != 1 || sys.fails[0].code != "type_unsupported" {

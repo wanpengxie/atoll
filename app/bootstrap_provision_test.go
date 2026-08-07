@@ -2,11 +2,13 @@ package app_test
 
 import (
 	"context"
+	_ "github.com/wanpengxie/atoll/drivers/agents/provider/codex"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // TestProvisionLocalNodeConvergesIdempotently pins `atoll up`'s provisioning
@@ -61,6 +63,22 @@ func TestProvisionLocalNodeConvergesIdempotently(t *testing.T) {
 	}
 	if sessions != 1 {
 		t.Fatalf("bootstrap owner must hold exactly 1 live session after rotation, got %d", sessions)
+	}
+	decl, found, err := env.app.StableBootstrapCodexDeclarationForTest(first.OwnerID)
+	if err != nil || !found {
+		t.Fatalf("stable codex declaration: found=%v err=%v", found, err)
+	}
+	count, err := env.app.BootstrapCodexDeclarationCountForTest(first.OwnerID)
+	if err != nil || count != 1 {
+		t.Fatalf("codex declaration count=%d err=%v", count, err)
+	}
+	instances, err := env.app.DeclaredInstancesForTest(channel.ID(first.HomeChannelID), decl.ID)
+	if err != nil || len(instances) != 1 {
+		t.Fatalf("codex instances=%v err=%v", instances, err)
+	}
+	defaultAgent, found, err := env.app.DefaultAgentForTest(channel.ID(first.HomeChannelID))
+	if err != nil || !found || defaultAgent != instances[0] {
+		t.Fatalf("default=%q found=%v err=%v instances=%v", defaultAgent, found, err, instances)
 	}
 }
 

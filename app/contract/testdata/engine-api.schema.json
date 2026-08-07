@@ -628,8 +628,9 @@
       "properties": {
         "status": {
           "enum": [
-            "completed",
-            "failed"
+            "ok",
+            "failed",
+            "interrupted"
           ],
           "type": "string"
         },
@@ -695,18 +696,10 @@
     },
     "AgentMessagePayload": {
       "additionalProperties": true,
-      "description": "Open payload convention for messages addressed to agents; absent intent means steer. Intent and expected_turn_id stay inside payload and are opaque to the substrate.",
+      "description": "Open content payload convention for messages addressed to agents. Agent actions are expressed by message type; expected_turn_id is the optional CAS field for agent.steer.",
       "properties": {
         "expected_turn_id": {
           "type": "string"
-        },
-        "intent": {
-          "description": "Provider delivery intent. Omitted means steer; the vocabulary grows additively.",
-          "type": "string",
-          "x-known-values": [
-            "steer",
-            "interrupt"
-          ]
         },
         "text": {
           "type": "string"

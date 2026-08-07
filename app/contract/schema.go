@@ -168,12 +168,7 @@ func schemaDefinitions() map[string]any {
 	errorProperties := errorDef["properties"].(map[string]any)
 	errorProperties["code"] = map[string]any{"type": "string", "x-known-values": ErrorCodes()}
 	agentPayload := schemaForType(reflect.TypeOf(AgentMessagePayload{}), true)
-	agentPayload["description"] = "Open payload convention for messages addressed to agents; absent intent means steer. Intent and expected_turn_id stay inside payload and are opaque to the substrate."
-	agentPayloadProperties := agentPayload["properties"].(map[string]any)
-	agentPayloadProperties["intent"] = map[string]any{
-		"type": "string", "x-known-values": []AgentIntent{AgentIntentSteer, AgentIntentInterrupt},
-		"description": "Provider delivery intent. Omitted means steer; the vocabulary grows additively.",
-	}
+	agentPayload["description"] = "Open content payload convention for messages addressed to agents. Agent actions are expressed by message type; expected_turn_id is the optional CAS field for agent.steer."
 	defs["AgentMessagePayload"] = agentPayload
 
 	for _, decl := range registry.ActivityTypes() {
@@ -181,10 +176,14 @@ func schemaDefinitions() map[string]any {
 		props := defs[decl.SchemaName].(map[string]any)["properties"].(map[string]any)
 		switch decl.Type {
 		case registry.ActivityTurnStarted, registry.ActivityToolStarted:
-			props["status"] = map[string]any{"type": "string", "const": registry.ActivityStatusStarted}
-		case registry.ActivityTurnEnded, registry.ActivityToolEnded:
+			props["status"] = map[string]any{"type": "string", "const": registry.ActivityStartedStatus}
+		case registry.ActivityTurnEnded:
 			props["status"] = map[string]any{"type": "string", "enum": []string{
-				registry.ActivityStatusCompleted, registry.ActivityStatusFailed,
+				registry.ActivityTurnEndedStatusOK, registry.ActivityTurnEndedStatusFailed, registry.ActivityTurnEndedStatusInterrupted,
+			}}
+		case registry.ActivityToolEnded:
+			props["status"] = map[string]any{"type": "string", "enum": []string{
+				registry.ActivityToolEndedStatusCompleted, registry.ActivityToolEndedStatusFailed,
 			}}
 		}
 	}

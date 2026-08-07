@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +18,68 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
+
+var errDeclarationConflict = errors.New("declaration id conflicts with existing value")
+
+// createDeclarationCore is the transport-free declaration creation path used
+// by both HTTP and local-node convergence. A caller-provided stable id is
+// idempotently reusable only when every declaration value agrees.
+func (a *App) createDeclarationCore(ctx context.Context, id, name, owner, class string, config json.RawMessage, visibility string) (contract.Declaration, error) {
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	owner = strings.TrimSpace(owner)
+	class = strings.TrimSpace(class)
+	visibility = strings.TrimSpace(visibility)
+	if id == "" || name == "" || owner == "" || class == "" {
+		return contract.Declaration{}, errors.New("id, name, owner, and class required")
+	}
+	if visibility == "" {
+		visibility = "private"
+	}
+	if visibility != "public" && visibility != "private" {
+		return contract.Declaration{}, errors.New("visibility must be public or private")
+	}
+	if _, ok, err := a.declarationClassKind(ctx, class); err != nil || !ok {
+		return contract.Declaration{}, fmt.Errorf("unknown or reserved class %q", class)
+	}
+	if len(config) > 0 && !isJSONObject(config) {
+		return contract.Declaration{}, errors.New("config must be a JSON object")
+	}
+	if err := registry.ValidateConfig(class, config); err != nil {
+		return contract.Declaration{}, err
+	}
+	cfg := ""
+	if len(config) > 0 {
+		var object map[string]any
+		if err := json.Unmarshal(config, &object); err != nil {
+			return contract.Declaration{}, errors.New("config must be a JSON object")
+		}
+		canonical, err := json.Marshal(object)
+		if err != nil {
+			return contract.Declaration{}, err
+		}
+		cfg = string(canonical)
+	}
+	var existing contract.Declaration
+	var existingCfg string
+	var deleted sql.NullInt64
+	err := a.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,visibility,created_at,deleted_at FROM actor_decls WHERE id=?`, id).Scan(&existing.ID, &existing.Name, &existing.Owner, &existing.Class, &existingCfg, &existing.Visibility, &existing.CreatedAt, &deleted)
+	if err == nil {
+		if deleted.Valid || existing.Name != name || existing.Owner != owner || existing.Class != class || existingCfg != cfg || existing.Visibility != visibility {
+			return contract.Declaration{}, errDeclarationConflict
+		}
+		existing.Instances = []contract.DeclarationInstance{}
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return contract.Declaration{}, err
+	}
+	now := time.Now().UnixMilli()
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO actor_decls (id,name,owner,default_class,config_json,created_at,updated_at,visibility) VALUES (?,?,?,?,?,?,?,?)`, id, name, owner, class, cfg, now, now, visibility); err != nil {
+		return contract.Declaration{}, err
+	}
+	return contract.Declaration{ID: id, Name: name, Owner: owner, Class: class, Visibility: visibility, CreatedAt: now, Instances: []contract.DeclarationInstance{}}, nil
+}
 
 // actor_decls.go is the declaration registry's global-value face: the front-end
 // CRUD for a user's blueprints (create / inspect / edit / soft-delete). Channel
@@ -71,30 +135,13 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 		return
 	}
 	id := uuid.NewString()
-	now := time.Now().UnixMilli()
-	cfg := ""
-	if len(req.Config) > 0 {
-		if !isJSONObject(req.Config) {
-			writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "config must be a JSON object")
-			return
-		}
-		cfg = string(req.Config)
-	}
-	if err := registry.ValidateConfig(class, req.Config); err != nil {
-		writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "invalid config")
-		return
-	}
-	if _, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO actor_decls (id, name, owner, default_class, config_json, created_at, updated_at, visibility) VALUES (?,?,?,?,?,?,?,?)`,
-		id, strings.TrimSpace(req.Name), userID, class, cfg, now, now, visibility); err != nil {
+	decl, err := a.createDeclarationCore(c.Request.Context(), id, req.Name, userID, class, req.Config, visibility)
+	if err != nil {
 		a.logger.Error("create decl", "err", err)
-		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "internal error")
+		writeAPIError(c, http.StatusBadRequest, contract.CodeConfigInvalid, "invalid declaration")
 		return
 	}
-	c.JSON(http.StatusCreated, contract.Declaration{
-		ID: id, Name: strings.TrimSpace(req.Name), Class: class, Owner: userID,
-		Visibility: visibility, CreatedAt: now, Instances: []contract.DeclarationInstance{},
-	})
+	c.JSON(http.StatusCreated, decl)
 }
 
 // handleListDecls lists every public declaration plus the current principal's

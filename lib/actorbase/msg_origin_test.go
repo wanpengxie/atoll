@@ -63,7 +63,7 @@ func TestZeroOriginMsgIsRefusedByEveryWriteVerb(t *testing.T) {
 	if _, err := e.Fail(zero, "boom", "d"); !errors.Is(err, ErrMsgOriginUnset) {
 		t.Fatalf("Fail(zero-origin) = %v, want ErrMsgOriginUnset", err)
 	}
-	if _, err := e.Progress(zero, ok); !errors.Is(err, ErrMsgOriginUnset) {
+	if _, err := e.Progress(zero, message.StatusProcessing, ok); !errors.Is(err, ErrMsgOriginUnset) {
 		t.Fatalf("Progress(zero-origin) = %v, want ErrMsgOriginUnset", err)
 	}
 	if pen.count() != 0 {
@@ -290,7 +290,7 @@ func TestProgressNeverClosesTheLedgerEntry(t *testing.T) {
 	}
 	ctx, _ := e.serve.ctxFor(env.ID)
 
-	if _, err := e.Progress(NewMsg(OriginMailbox, ctx, *env), map[string]string{"step": "1"}); err != nil {
+	if _, err := e.Progress(NewMsg(OriginMailbox, ctx, *env), message.StatusProcessing, map[string]string{"step": "1"}); err != nil {
 		t.Fatalf("Progress = %v, want nil", err)
 	}
 	if e.serve.len() != 1 {
@@ -317,7 +317,7 @@ func TestProgressRefusesALogOriginHandle(t *testing.T) {
 		t.Fatal("expected admit to succeed")
 	}
 
-	_, err := e.Progress(logMsg(t, env), map[string]string{"step": "1"})
+	_, err := e.Progress(logMsg(t, env), message.StatusProcessing, map[string]string{"step": "1"})
 	if !errors.Is(err, ErrLogOriginTerminalOnly) {
 		t.Fatalf("Progress(log origin) = %v, want ErrLogOriginTerminalOnly", err)
 	}

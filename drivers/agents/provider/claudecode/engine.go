@@ -16,82 +16,54 @@ import (
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/registry"
 )
 
-// engine is the claude-code base.Engine (期10 S5): the ONE thing this provider
-// writes now that the mailbox loop / turn queue / response分拣 / describe
-// dispatch / per-turn checkpoint挂账 all live in agent/base. It封s the claude
-// CLI's synchronous SDK message shape entirely — the base never sees it.
 type engine struct {
 	cfg     Config
 	client  claudeClient
-	x       *metatool.Exec // the meta-tool execution face (built from Sys)
-	workDir string         // the claude session's per-process Cwd
+	x       *metatool.Exec
+	workDir string
+	events  base.EventPort
+	life    context.Context
 
-	// curMu guards curRC — the in-flight turn's RuntimeContext, read by the MCP
-	// tool handlers (which fire on the SDK's own goroutine mid-turn). Turns are
-	// serial (the base loop), so it is well-defined per turn.
-	curMu sync.Mutex
-	curRC metatool.RuntimeContext
-
-	// session captures the claude session id from each ResultMessage. It seeds
-	// the durable resume checkpoint (WithResume on the next incarnation). Guarded
-	// by curMu (written on the Turn goroutine, read by Checkpoint on the same
-	// base loop goroutine — the mutex is belt-and-braces).
+	mu      sync.Mutex
+	curRC   metatool.RuntimeContext
+	cancel  context.CancelFunc
 	session string
+	booted  bool
+	closed  bool
 }
 
 var _ base.Engine = (*engine)(nil)
 
-// claudeClient is the subset of *claude.ClaudeClient the engine consumes — carved
-// out so the test suite stubs the engine without spawning the `claude` CLI.
 type claudeClient interface {
 	Connect(ctx context.Context) error
 	Query(ctx context.Context, prompt string) error
 	ReceiveResponseWithErrors(ctx context.Context) (<-chan claude.Message, <-chan error)
 	Close() error
 }
-
-// clientFactory builds a claudeClient; the engine passes its own MCP server and
-// the resume seed. Swapped in tests (see export_test.go).
 type clientFactory func(e *engine, resumeSeed []byte) (claudeClient, error)
 
-// newEngineFn returns the base.NewEngine the Constructor closes over: it builds
-// the exec face from Sys, mints the claude client (wired with the meta-tool MCP
-// server + resume seed), and connects it. A connect failure is loud死 (no
-// half-alive agent).
 func newEngineFn(cfg Config, factory clientFactory) base.NewEngine {
-	return func(sys actorbase.Sys, seed []byte) (base.Engine, error) {
+	return func(sys actorbase.Sys, seed []byte, events base.EventPort) (base.Engine, error) {
 		workDir, err := os.MkdirTemp("", "atoll-claude-")
 		if err != nil {
 			return nil, fmt.Errorf("claude: workdir: %w", err)
 		}
-		e := &engine{cfg: cfg, workDir: workDir}
+		e := &engine{cfg: cfg, workDir: workDir, events: events, life: sys.Life()}
 		e.x = base.ExecFace(sys, cfg.FastPathWindow)
 		client, err := factory(e, seed)
 		if err != nil {
 			return nil, err
-		}
-		if err := client.Connect(sys.Life()); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("claude: connect: %w", err)
 		}
 		e.client = client
 		return e, nil
 	}
 }
 
-// defaultClientFactory builds a claude.NewClient wired with the atoll meta-tool
-// MCP server, the per-process Cwd, the system prompt, and — when the durable
-// resume seed is present — WithResume(sessionID) so a restarted incarnation
-// continues its prior claude session (10.0 durable resume on sys.State).
 func defaultClientFactory(e *engine, resumeSeed []byte) (claudeClient, error) {
-	opts := []claude.Option{
-		claude.WithModel(e.cfg.Model),
-		claude.WithPermissionMode(claude.PermissionBypassPermissions),
-		claude.WithMcpServers(map[string]claude.McpServerConfig{"atoll": e.buildMCPServer()}),
-		claude.WithCwd(e.workDir),
-	}
+	opts := []claude.Option{claude.WithModel(e.cfg.Model), claude.WithPermissionMode(claude.PermissionBypassPermissions), claude.WithMcpServers(map[string]claude.McpServerConfig{"atoll": e.buildMCPServer()}), claude.WithCwd(e.workDir)}
 	if strings.TrimSpace(e.cfg.SystemPrompt) != "" {
 		opts = append(opts, claude.WithSystemPrompt(e.cfg.SystemPrompt))
 	}
@@ -101,77 +73,83 @@ func defaultClientFactory(e *engine, resumeSeed []byte) (claudeClient, error) {
 	return claude.NewClient(opts...), nil
 }
 
-// setCurrentRC/currentRC thread the in-flight runtime context to MCP handlers
-// (which run on the SDK's ctx, not the base loop's).
-func (e *engine) setCurrentRC(rc metatool.RuntimeContext) {
-	e.curMu.Lock()
-	e.curRC = rc
-	e.curMu.Unlock()
+func (e *engine) Boot(ctx context.Context, _ base.BootPort) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errors.New("claude: engine closed")
+	}
+	if e.booted {
+		return errors.New("claude: engine already booted")
+	}
+	if err := e.client.Connect(ctx); err != nil {
+		return fmt.Errorf("claude: connect: %w", err)
+	}
+	e.booted = true
+	return nil
 }
 
-func (e *engine) currentRC() metatool.RuntimeContext {
-	e.curMu.Lock()
-	defer e.curMu.Unlock()
-	return e.curRC
+func (e *engine) StartTurn(op base.OpID, batch []base.Trigger, background []base.ContextItem) error {
+	e.mu.Lock()
+	if !e.booted || e.closed {
+		e.mu.Unlock()
+		return errors.New("claude: engine unavailable")
+	}
+	if e.cancel != nil {
+		e.mu.Unlock()
+		return errors.New("claude: turn already active")
+	}
+	ctx, cancel := context.WithCancel(e.life)
+	e.cancel = cancel
+	e.mu.Unlock()
+	turnID := string(op)
+	go e.runTurn(ctx, op, turnID, batch, background)
+	return nil
 }
 
-// Turn drives one claude exchange: Query the composed input, drain
-// ReceiveResponse (ending at the ResultMessage), and report the full terminal
-// value through the base Sink. Tool calls resolve through the atoll MCP server
-// and report typed phases there. An engine/LLM error uses Sink.Fail and returns
-// nil so the actor stays alive; only a
-// Sink write failure (A1: never swallowed) propagates as loud死.
-func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink) error {
-	e.setCurrentRC(metatool.RuntimeContext{
-		Trigger: metatool.Trigger{
-			Envelope:      trigger.Envelope,
-			CorrelationID: trigger.CorrelationID,
-		},
-	})
-
-	input := composeUserInput(trigger.Envelope)
+func (e *engine) runTurn(ctx context.Context, op base.OpID, turnID string, batch []base.Trigger, background []base.ContextItem) {
+	defer func() { e.mu.Lock(); e.cancel = nil; e.mu.Unlock() }()
+	if len(batch) == 0 {
+		e.events.TurnRejected(op, "provider_failed", "empty batch")
+		return
+	}
+	e.events.TurnStarted(op, turnID)
+	last := batch[len(batch)-1]
+	e.setCurrentRC(metatool.RuntimeContext{Trigger: metatool.Trigger{Envelope: last.Envelope, CorrelationID: last.CorrelationID}})
+	input := composeBatchInput(batch, background)
 	if err := e.client.Query(ctx, input); err != nil {
 		if errors.Is(err, context.Canceled) {
-			return err
+			e.events.TurnEnded(turnID, base.TurnStatusInterrupted, "", err.Error())
+		} else {
+			e.events.TurnEnded(turnID, base.TurnStatusFailed, "", fmt.Sprintf("claude query: %v", err))
 		}
-		return emitFailed(sink, err, "claude_query")
+		return
 	}
-
-	pendingTools := map[string]string{}
-	var toolOrder []string
-	endPendingTools := func() error {
-		for _, callID := range toolOrder {
-			tool, found := pendingTools[callID]
-			if !found {
-				continue
+	pending := map[string]string{}
+	order := []string{}
+	final := ""
+	failed := ""
+	endPending := func() {
+		for _, id := range order {
+			if tool, ok := pending[id]; ok {
+				e.events.Tool(turnID, id, "ended", tool, registry.ActivityToolEndedStatusFailed, "turn ended before tool result")
+				delete(pending, id)
 			}
-			if err := sink.ToolEnded(base.ToolActivity{CallID: callID, Tool: tool, Status: "failed", Detail: "turn ended before tool result"}); err != nil {
-				return err
-			}
-			delete(pendingTools, callID)
 		}
-		return nil
 	}
-	messages, streamErrors := e.client.ReceiveResponseWithErrors(ctx)
+	messages, errs := e.client.ReceiveResponseWithErrors(ctx)
 	for msg := range messages {
 		switch m := msg.(type) {
 		case *claude.AssistantMessage:
 			if m.Error != "" {
-				if err := endPendingTools(); err != nil {
-					return err
-				}
-				return emitFailed(sink, fmt.Errorf("assistant error: %s", m.Error), classifyAssistantError(m.Error))
+				failed = fmt.Sprintf("assistant error: %s", m.Error)
+				continue
 			}
 			for _, block := range m.Content {
-				switch b := block.(type) {
-				case *claude.ToolUseBlock:
-					pendingTools[b.ID] = b.Name
-					toolOrder = append(toolOrder, b.ID)
-					if err := sink.ToolStarted(base.ToolActivity{CallID: b.ID, Tool: b.Name}); err != nil {
-						return err
-					}
-					// Text/thinking blocks are streaming/provider narration. The full
-					// ResultMessage.Result is the sole terminal value crossing the adapter.
+				if b, ok := block.(*claude.ToolUseBlock); ok {
+					pending[b.ID] = b.Name
+					order = append(order, b.ID)
+					e.events.Tool(turnID, b.ID, "started", b.Name, registry.ActivityStartedStatus, "")
 				}
 			}
 		case *claude.UserMessage:
@@ -180,99 +158,132 @@ func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink)
 				continue
 			}
 			for _, block := range blocks {
-				result, ok := block.(*claude.ToolResultBlock)
+				r, ok := block.(*claude.ToolResultBlock)
 				if !ok {
 					continue
 				}
-				tool, found := pendingTools[result.ToolUseID]
-				if !found {
+				tool, ok := pending[r.ToolUseID]
+				if !ok {
 					continue
 				}
-				status := "completed"
-				if result.IsError != nil && *result.IsError {
-					status = "failed"
+				status := registry.ActivityToolEndedStatusCompleted
+				if r.IsError != nil && *r.IsError {
+					status = registry.ActivityToolEndedStatusFailed
 				}
-				if err := sink.ToolEnded(base.ToolActivity{CallID: result.ToolUseID, Tool: tool, Status: status}); err != nil {
-					return err
-				}
-				delete(pendingTools, result.ToolUseID)
+				e.events.Tool(turnID, r.ToolUseID, "ended", tool, status, "")
+				delete(pending, r.ToolUseID)
 			}
 		case *claude.ResultMessage:
-			if m.SessionID != "" && m.SessionID != e.session {
+			if m.SessionID != "" {
+				e.mu.Lock()
 				e.session = m.SessionID
+				e.mu.Unlock()
+				e.events.Persist(base.ResumeSeedKey, []byte(m.SessionID))
 			}
-			text := strings.TrimSpace(m.Result)
+			final = strings.TrimSpace(m.Result)
 			if m.IsError {
-				if err := endPendingTools(); err != nil {
-					return err
-				}
-				return emitFailed(sink, fmt.Errorf("result error: %s", text), "claude_result")
-			}
-			if err := endPendingTools(); err != nil {
-				return err
-			}
-			if err := sink.Complete(base.FinalValue{Text: text, NextAction: "done"}); err != nil {
-				return err // plumbing failure: propagate → loud死 (A1)
+				failed = "claude result: " + final
 			}
 		}
 	}
-	if streamErr, ok := <-streamErrors; ok && streamErr != nil {
-		if err := endPendingTools(); err != nil {
-			return err
+	if err, ok := <-errs; ok && err != nil {
+		if errors.Is(err, context.Canceled) {
+			endPending()
+			e.events.TurnEnded(turnID, base.TurnStatusInterrupted, "", err.Error())
+			return
 		}
-		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
-			return streamErr
-		}
-		return emitFailed(sink, streamErr, "claude_stream")
+		failed = "claude stream: " + err.Error()
 	}
-	return endPendingTools()
+	endPending()
+	if failed != "" {
+		e.events.TurnEnded(turnID, base.TurnStatusFailed, "", failed)
+	} else {
+		e.events.TurnEnded(turnID, base.TurnStatusOK, final, "")
+	}
 }
 
-// emitFailed surfaces an engine/LLM failure as a terminal failed response and
-// returns nil — the failure is now in the channel log, the turn ends, the actor
-// stays alive. A Sink write error is propagated (A1: never swallowed).
-func emitFailed(sink base.Sink, cause error, reason string) error {
-	if err := sink.Fail(base.Failure{
-		ErrorCode: reason,
-		Detail:    fmt.Sprintf("claude bridge failed: %v", cause),
-	}); err != nil {
-		return err
+func composeBatchInput(batch []base.Trigger, background []base.ContextItem) string {
+	var b strings.Builder
+	if len(background) > 0 {
+		b.WriteString("频道最近记录（可能与你已知重叠）：\n")
+		for _, item := range background {
+			b.WriteString(item.Rendered)
+			b.WriteByte('\n')
+		}
+		b.WriteString("\n当前消息：\n")
 	}
+	for _, tr := range batch {
+		b.WriteString(composeUserInput(tr.Envelope))
+		b.WriteByte('\n')
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func (e *engine) Steer(op base.OpID, _ base.Trigger) error {
+	e.events.ControlDone(op, base.ControlNotSteerable, "", "claude sdk has no steer primitive")
 	return nil
 }
-
-// Describe returns the provider's actor.describe data (the base stamps ActorID).
-func (e *engine) Describe() introspect.Describe {
-	return introspect.Describe{
-		Description: agentDescription,
-		SkillDoc:    agentSkillDoc,
-	}
-}
-
-// Checkpoint returns the durable resume seed (the claude session id) whenever a
-// session exists, nil otherwise. No dirty micro-opt: re-returning the unchanged
-// value every turn is an idempotent zero-cost upsert (spec F8), and it is what
-// makes the base's persist self-healing — a turn whose Put failed re-writes the
-// same seed next turn. The base persists it on sys.State per turn.
-func (e *engine) Checkpoint() []byte {
-	e.curMu.Lock()
-	defer e.curMu.Unlock()
-	if e.session == "" {
+func (e *engine) Interrupt(op base.OpID) error {
+	e.mu.Lock()
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel == nil {
+		e.events.ControlDone(op, base.ControlNoActiveTurn, "", "")
 		return nil
 	}
-	return []byte(e.session)
-}
-
-// Close releases the claude client at incarnation death.
-func (e *engine) Close() error {
-	if e.client != nil {
-		return e.client.Close()
-	}
+	cancel()
+	e.events.ControlDone(op, base.ControlAccepted, "", "")
 	return nil
 }
+func (e *engine) Terminate() error {
+	e.mu.Lock()
+	cancel := e.cancel
+	e.cancel = nil
+	e.booted = false
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return e.client.Close()
+}
+func (e *engine) EnsureAlive(op base.OpID) error {
+	go func() {
+		if err := e.client.Connect(e.life); err != nil {
+			e.events.ControlDone(op, base.ControlRPCError, "", err.Error())
+			return
+		}
+		e.mu.Lock()
+		e.booted = true
+		e.mu.Unlock()
+		e.events.ControlDone(op, base.ControlAccepted, "", "")
+	}()
+	return nil
+}
+func (e *engine) Describe() introspect.Describe {
+	return introspect.Describe{Description: agentDescription, SkillDoc: agentSkillDoc}
+}
+func (e *engine) Close() error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.closed = true
+	cancel := e.cancel
+	e.cancel = nil
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return e.client.Close()
+}
+func (e *engine) setCurrentRC(rc metatool.RuntimeContext) { e.mu.Lock(); e.curRC = rc; e.mu.Unlock() }
+func (e *engine) currentRC() metatool.RuntimeContext {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.curRC
+}
 
-// composeUserInput renders a trigger envelope into the engine's user input,
-// stamping the sender so the model knows whose message / result this is.
 func composeUserInput(env message.Envelope) string {
 	text := extractText(env.Payload)
 	sender := string(env.Sender.ID)
@@ -281,19 +292,15 @@ func composeUserInput(env message.Envelope) string {
 	}
 	return fmt.Sprintf("[from %s]\n%s", sender, text)
 }
-
 func extractText(payload []byte) string {
 	var p struct {
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(payload, &p); err == nil && p.Text != "" {
+	if json.Unmarshal(payload, &p) == nil && p.Text != "" {
 		return p.Text
 	}
 	return string(payload)
 }
-
-// classifyAssistantError maps a claude AssistantMessageError into a coarse reason
-// bucket for the failed terminal envelope.
 func classifyAssistantError(e claude.AssistantMessageError) string {
 	switch e {
 	case claude.AssistantErrorAuthenticationFailed:
@@ -311,11 +318,5 @@ func classifyAssistantError(e claude.AssistantMessageError) string {
 	}
 }
 
-// agentDescription / agentSkillDoc are the claude agent's actor.describe
-// self-answer (mechanical — the base serves it, the LLM never sees it).
 const agentDescription = "Claude Code agent: the channel's conversational brain (claude looper). Send it any request — it reasons over the channel context and orchestrates the channel's tool actors via call_actor."
-
-const agentSkillDoc = "# agent (claude looper)\n\n" +
-	"Conversational actor backed by the Claude Code engine. Accepts any kind=request " +
-	"as a turn trigger (no closed type set), replies with a terminal response, and calls " +
-	"other actors through the channel's meta tools.\n"
+const agentSkillDoc = "# agent (claude looper)\n\nConversational actor backed by the Claude Code engine. Accepts any kind=request as a turn trigger, replies with a terminal response, and calls other actors through the channel's meta tools.\n"

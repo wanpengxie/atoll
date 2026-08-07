@@ -2,9 +2,11 @@ package home
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,19 +39,23 @@ func TestEmitSystemEventSealsEnvelopeAndChecksAccepted(t *testing.T) {
 	if captured == nil || captured.ID == "" || captured.TS != 1234 ||
 		captured.Kind != message.KindEvent || captured.Type != "test.event" ||
 		captured.Visibility != message.VisibilitySystem ||
-		len(captured.Audience) != 1 || captured.Audience[0] != actor.SystemActorID ||
+		captured.Audience == nil || len(captured.Audience) != 0 ||
 		string(captured.Payload) != `{"x":1}` {
 		t.Fatalf("captured=%+v", captured)
+	}
+	wire, _ := json.Marshal(captured)
+	if !strings.Contains(string(wire), `"audience":[]`) {
+		t.Fatalf("wire audience is not []: %s", wire)
 	}
 
 	h.systemPen = penFunc(func(context.Context, *message.Envelope) (harness.WriteResult, error) {
 		return harness.WriteResult{
-			RejectReason: harness.HarnessAudienceEmpty, RejectDetail: "rejected",
+			RejectReason: harness.HarnessTypeUnknown, RejectDetail: "rejected",
 		}, nil
 	})
 	err := h.emitSystemEvent(context.Background(), "test.rejected", map[string]any{})
 	var rejected *systemEventWriteError
-	if !errors.As(err, &rejected) || rejected.Reason != harness.HarnessAudienceEmpty {
+	if !errors.As(err, &rejected) || rejected.Reason != harness.HarnessTypeUnknown {
 		t.Fatalf("reject err=%v", err)
 	}
 }

@@ -38,7 +38,8 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
 	}
 	def, err := base.Def(agentSkillDoc, base.Config{
-		NewEngine: newEngineFn(cfg, defaultAgentFactory),
+		NewEngine:         newEngineFn(cfg, defaultAgentFactory),
+		SupportedControls: []string{base.TypeInterrupt},
 	})
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("kimi agent def: %w", err)

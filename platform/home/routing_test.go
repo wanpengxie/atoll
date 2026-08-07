@@ -120,8 +120,7 @@ func TestDefaultAgentFold_SetClearAndReopen(t *testing.T) {
 	if row.Envelope.Sender.ID != actor.SystemActorID ||
 		row.Envelope.Kind != message.KindEvent ||
 		row.Envelope.Visibility != message.VisibilitySystem ||
-		len(row.Envelope.Audience) != 1 ||
-		row.Envelope.Audience[0] != actor.SystemActorID {
+		row.Envelope.Audience == nil || len(row.Envelope.Audience) != 0 {
 		t.Fatalf("setting envelope contract drifted: %+v", row.Envelope)
 	}
 	var event map[string]any

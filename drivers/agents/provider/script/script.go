@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -87,37 +88,17 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 	if toolID == "" {
 		return platform.ActorDecl{}, fmt.Errorf("script: config.tool_id required")
 	}
-	return platform.ActorDecl{
-		ID:   spec.ID,
-		Kind: actor.KindAgent,
-		Factory: platform.ActorFactory{Proc: actorbase.Def{
-			Doc: actorDoc,
-			New: func() (actorbase.Proc, error) { return newRun(toolID), nil },
-		}},
-	}, nil
-}
-
-// newRun returns the Proc body: a bare Recv loop dispatching the two-row
-// behaviour table. Per-message failures Fail the message and keep looping
-// (断段可定位); only the Recv termination contract ends the Proc.
-func newRun(toolID actor.ActorID) actorbase.Proc {
-	return func(sys actorbase.Sys) error {
-		for {
-			msg, err := sys.Recv()
-			if err != nil {
-				return err
-			}
-			switch msg.Type {
-			case TypeChat:
-				handleChat(sys, msg, toolID)
-			case TypeVerify:
-				handleVerify(sys, msg)
-			default:
-				_, _ = sys.Fail(msg, "type_unsupported",
-					fmt.Sprintf("script actor does not handle %s", msg.Type))
-			}
-		}
+	def, err := base.Def(actorDoc, base.Config{NewEngine: func(sys actorbase.Sys, _ []byte, events base.EventPort) (base.Engine, error) {
+		return newEngine(sys, toolID, events), nil
+	}})
+	if err != nil {
+		return platform.ActorDecl{}, err
 	}
+	return platform.ActorDecl{
+		ID:      spec.ID,
+		Kind:    actor.KindAgent,
+		Factory: platform.ActorFactory{Proc: def},
+	}, nil
 }
 
 // isJSONObject mirrors the write-face guard: the chat payload must be a JSON

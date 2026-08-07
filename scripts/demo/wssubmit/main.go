@@ -1,7 +1,7 @@
 // Command wssubmit is the demo's websocket leg. Pure curl cannot speak ws, so
 // scripts/demo-curl.sh shells out here for the live half of the closed loop:
 // attach (contract version comes back in the receipt), one submit with a
-// self-minted idempotency id + intent riding the agent-message payload, then
+// self-minted idempotency id and ordinary content payload, then
 // wait on the live feed until the scripted agent's kind=response lands.
 // On success it prints the minted message id to stdout for the paged-read
 // verification back in the shell script.
@@ -80,13 +80,13 @@ func main() {
 	}
 	log.Printf("wssubmit: attached, contract_version=%v", p["contract_version"])
 
-	// One submit: self-minted id (idempotency key), intent inside the payload
+	// One submit: self-minted id (idempotency key), ordinary content payload.
 	// (agent vocabulary — never an envelope field).
 	msgID := uuid.NewString()
 	send("submit", "demo-1", map[string]any{
 		"channel_id": *channelID, "id": msgID, "msg_type": *msgType,
 		"kind": "request", "audience": []string{*actor},
-		"payload": map[string]any{"text": *text, "intent": "steer"},
+		"payload": map[string]any{"text": *text},
 	})
 
 	for {

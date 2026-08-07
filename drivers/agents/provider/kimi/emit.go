@@ -10,17 +10,27 @@ import (
 
 	kimierrors "github.com/wanpengxie/go-kimi/pkg/kimi/errors"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
-
-	"github.com/wanpengxie/atoll/drivers/agents/base"
 )
 
-// errSinkWrite wraps a base.Sink emit failure so Turn can tell a plumbing break
-// (loud死 — the write door rejected / errored) apart from an ordinary
-// missing-TurnEnd (surface as a failed terminal, stay alive).
+type toolActivity struct{ CallID, Tool, Status, Detail string }
+type finalValue struct {
+	Text, NextAction string
+	Extra            map[string]any
+}
+type failure struct{ ErrorCode, Detail string }
+type turnSink interface {
+	ToolStarted(toolActivity) error
+	ToolEnded(toolActivity) error
+	Complete(finalValue) error
+	Fail(failure) error
+}
+
+// errSinkWrite distinguishes collector plumbing faults from an ordinary
+// missing TurnEnd, which is reported as a failed provider turn.
 var errSinkWrite = errors.New("kimi: sink emit failed")
 
 // emitTurnEnd writes the single full terminal value for one Agent.Run.
-func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd) error {
+func (e *engine) emitTurnEnd(sink turnSink, end wire.TurnEnd) error {
 	stop := strings.ToLower(strings.TrimSpace(end.StopReason))
 	text := extractTurnEndText(end.Output)
 
@@ -36,7 +46,7 @@ func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd) error {
 		// the LLM was still yielding — close cleanly as done.
 		nextAction = "done"
 	}
-	if err := sink.Complete(base.FinalValue{
+	if err := sink.Complete(finalValue{
 		Text:       text,
 		NextAction: nextAction,
 		Extra:      map[string]any{"stop_reason": end.StopReason},
@@ -47,13 +57,12 @@ func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd) error {
 }
 
 // emitTerminalLLMError surfaces an LLM error as a failed terminal and returns
-// nil on success (actor stays alive); a Sink write failure
-// is propagated as errSinkWrite (loud死). err == nil short-circuits to no-op.
-func (e *engine) emitTerminalLLMError(sink base.Sink, err error) error {
+// nil on success; a collector write failure is propagated as errSinkWrite.
+func (e *engine) emitTerminalLLMError(sink turnSink, err error) error {
 	if err == nil {
 		return nil
 	}
-	if emitErr := sink.Fail(base.Failure{
+	if emitErr := sink.Fail(failure{
 		ErrorCode: classifyLLMError(err),
 		Detail:    fmt.Sprintf("llm bridge failed: %v", err),
 	}); emitErr != nil {

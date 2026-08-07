@@ -22,22 +22,22 @@ import (
 )
 
 type recordSink struct {
-	started  []base.ToolActivity
-	ended    []base.ToolActivity
-	complete []base.FinalValue
-	failures []base.Failure
+	started  []toolActivity
+	ended    []toolActivity
+	complete []finalValue
+	failures []failure
 }
 
-func (s *recordSink) ToolStarted(a base.ToolActivity) error {
+func (s *recordSink) ToolStarted(a toolActivity) error {
 	s.started = append(s.started, a)
 	return nil
 }
-func (s *recordSink) ToolEnded(a base.ToolActivity) error { s.ended = append(s.ended, a); return nil }
-func (s *recordSink) Complete(v base.FinalValue) error {
+func (s *recordSink) ToolEnded(a toolActivity) error { s.ended = append(s.ended, a); return nil }
+func (s *recordSink) Complete(v finalValue) error {
 	s.complete = append(s.complete, v)
 	return nil
 }
-func (s *recordSink) Fail(f base.Failure) error { s.failures = append(s.failures, f); return nil }
+func (s *recordSink) Fail(f failure) error { s.failures = append(s.failures, f); return nil }
 
 // scriptedAgent is the kimiAgent test double: on Run it emits a canned wire
 // sequence into the engine's wire channel, then returns runErr.
@@ -87,7 +87,7 @@ func TestKimiTurn_EmitsTerminal(t *testing.T) {
 	}, nil)
 	sink := &recordSink{}
 	tr := base.Trigger{Envelope: triggerEnv("req-1"), CorrelationID: "corr-1", Index: 1}
-	if err := e.Turn(context.Background(), tr, sink); err != nil {
+	if err := e.runTurn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
 	if len(sink.complete) != 1 {
@@ -110,7 +110,7 @@ func TestKimiTurn_TypedToolPhases(t *testing.T) {
 	}, nil)
 	sink := &recordSink{}
 	tr := base.Trigger{Envelope: triggerEnv("req-p"), Index: 1}
-	if err := e.Turn(context.Background(), tr, sink); err != nil {
+	if err := e.runTurn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
 	if len(sink.started) != 2 || len(sink.ended) != 2 || len(sink.complete) != 1 {
@@ -134,7 +134,7 @@ func TestKimiTurn_LLMErrorFailedTerminal(t *testing.T) {
 	e, _ := newTestEngine(nil, llmErr)
 	sink := &recordSink{}
 	tr := base.Trigger{Envelope: triggerEnv("req-err"), Index: 1}
-	if err := e.Turn(context.Background(), tr, sink); err != nil {
+	if err := e.runTurn(context.Background(), tr, sink); err != nil {
 		t.Fatalf("Turn should stay alive on an LLM error: %v", err)
 	}
 	if len(sink.failures) != 1 {

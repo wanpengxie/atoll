@@ -295,7 +295,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return actorbase.New(systemCaps, h.hooks(), sysactor.Def(sysactor.Deps{
 			Authority: h.actors, Clock: clock,
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
-			Logger:   logger, Operate: h.opEntry,
+			Logger:   logger, Operate: h.opEntry, Logbook: h.query,
 		}))
 	}, nil)
 	if err != nil {

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -75,7 +75,7 @@ func (f *fakeSys) Fail(msg Msg, code, detail string) (message.ID, error) {
 	return "fail-id", nil
 }
 
-func (f *fakeSys) Progress(msg Msg, v any) (message.ID, error) {
+func (f *fakeSys) Progress(msg Msg, _ string, v any) (message.ID, error) {
 	panic("not implemented")
 }
 

@@ -517,7 +517,10 @@ func (e *engine) writeFailure(msg Msg, code, detail string) (message.ID, error) 
 	})
 }
 
-func (e *engine) Progress(msg Msg, v any) (message.ID, error) {
+func (e *engine) Progress(msg Msg, status string, v any) (message.ID, error) {
+	if !message.IsProvisionalCoreStatus(status) {
+		return "", fmt.Errorf("actorbase: invalid provisional status %q", status)
+	}
 	switch msg.origin {
 	case OriginMailbox:
 		if e.serve.isClosed(msg.ID) {
@@ -535,7 +538,7 @@ func (e *engine) Progress(msg Msg, v any) (message.ID, error) {
 	// the write discipline that used to live here). Deliberately NO
 	// serve.close: a provisional never closes the request — that asymmetry
 	// with Reply/Fail is THIS method's whole meaning and stays engine-side.
-	return behavior.Progress(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), v)
+	return behavior.Progress(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), status, v)
 }
 
 // --- Sys: unregistered writes (event / request-without-closure) ------------

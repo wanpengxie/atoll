@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -66,7 +66,7 @@ type Sys interface {
 	// Progress commits a non-final provisional response for the request Msg
 	// in hand — the request stays Admitted, awaiting its eventual terminal.
 	// A log-origin Msg is a TERMINAL-ONLY handle and is refused here.
-	Progress(msg Msg, v any) (message.ID, error)
+	Progress(msg Msg, status string, v any) (message.ID, error)
 
 	// --- Pen: event write ---------------------------------------------
 	// Emit writes a kind=event message. Events carry no closure obligation

@@ -12,6 +12,7 @@ package all
 
 import (
 	_ "github.com/wanpengxie/atoll/drivers/agents/provider/claudecode" // engine class: claude
+	_ "github.com/wanpengxie/atoll/drivers/agents/provider/codex"      // engine class: codex app-server
 	_ "github.com/wanpengxie/atoll/drivers/agents/provider/kimi"       // engine class: go-kimi
 	_ "github.com/wanpengxie/atoll/drivers/agents/provider/script"     // engine class: script (deterministic, e2e loop)
 )

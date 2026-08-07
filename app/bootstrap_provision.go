@@ -118,6 +118,9 @@ func (a *App) ProvisionLocalNode(ctx context.Context, spec ProvisionSpec) (Provi
 		// Same partial-result contract as the ctx branch.
 		return result, fmt.Errorf("provision: bind daemon to home: %w", bindErr)
 	}
+	if err := a.convergeBootstrapCodex(ctx, ownerID, accepted.ID); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 

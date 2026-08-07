@@ -74,8 +74,8 @@ durable log——消息 append 后不可变、不丢序，每条有频道内唯�
 ## 5. 写（提交）
 
 - 提交帧字段：`channel_id`、`id`（**由你铸造**，uuid 即可）、`msg_type`、
-  `kind`、`audience`、`payload`（内容；发给 agent 时可带 `intent` 与
-  `expected_turn_id`）。
+  `kind`、`audience`、`payload`。普通内容只放文本等内容字段；agent 动作由
+  `msg_type` 表达（如 `agent.steer`、`agent.interrupt`）。
 - `kind=event` 的 `audience` 可省略或为 `[]`：两者都规范化为 wire/store 的
   `[]`，表示只落账、不即时唤醒。`request` 省略 audience 时仅 human 接入口会按
   默认应答者补齐；最终 request/response audience 恒恰为一个具名 actor。
@@ -83,17 +83,8 @@ durable log——消息 append 后不可变、不丢序，每条有频道内唯�
   同键**同内容**重发 → 返回原回执（确认原 message id；receipt 恒不含 seq——
   位置由 feed/分页读到达）；同键**不同内容** → 错误码 `idempotency_conflict`
   （你复用了 id，恒不当成功）。**不带 `id` 恒无幂等**——要重试安全恒自铸。
-- **intent（发给 agent 的消息才有）**：这条消息想干什么，住在**消息 payload 里**
-  ——它是 agent 专属语义，人/tool 收件的消息没有这个字段。day-1 活值：缺省
-  （`steer`——请求注入 agent 当前运行）、`interrupt`（掐掉重来；"停止继续"
-  不是"撤销已做"）。枚举会长（collect / context-only / …），**不认识的值你恒
-  不需要理解——你只是传导人的选择**。
-- **intent 是请求不是命令**：支持运行中寻址的 provider 拒绝时（目标 turn 不符/
-  该 turn 不可插话），你会收到结构化的拒绝回执；其余 provider 下 steer 未生效
-  **无回执**——但**话恒不丢**：消息已 durable 落档，agent 下一轮自然看到，
-  只是没插进当前这轮。
-- `expected_turn_id`（可选，provider 相关）：支持 steer 且暴露 turn 寻址的
-  provider 下，带上你以为的目标 turn 可防误注；provider 不支持则忽略。
+- `agent.steer` 可在 payload 带 `expected_turn_id` 做显式 CAS；目标已失效会得到
+  `cas_mismatch`。普通内容消息不带调度字段，由 agent 的合并策略决定何时生效。
 - **slash 命令恒由 engine 解析**，你只透传文本 + 渲染结果。
 - 人能在 UI 做的，agent 走同一协议能做——恒无 UI 专属旁路。
 
@@ -133,5 +124,5 @@ durable log——消息 append 后不可变、不丢序，每条有频道内唯�
 
 `scripts/demo-curl.sh`：注册 → Bearer token → `/api/meta` → 建频道 → 建并挂载
 daemon（agent 恒设备宿主）→ 引入 echo 工具 + 脚本 agent → ws 提交（attach
-回执带版本、自铸 id、payload 带 intent）→ agent 回应落 live → 分页读回验证。
+回执带版本、自铸 id、普通内容 payload）→ agent 回应落 live → 分页读回验证。
 纯 curl + 一个 ws 小工具（`scripts/demo/wssubmit`），全程 header 认证。

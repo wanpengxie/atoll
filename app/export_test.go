@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -20,6 +22,36 @@ import (
 
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
+
+func (a *App) DefaultAgentForTest(chID channel.ID) (actor.ActorID, bool, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return "", false, errTestChannelNotLoaded
+	}
+	return bundle.View().DefaultAgent(context.Background())
+}
+
+func (a *App) StableBootstrapCodexDeclarationForTest(owner string) (contract.Declaration, bool, error) {
+	id := stableBootstrapCodexDeclID(owner)
+	var d contract.Declaration
+	var config string
+	var deleted sql.NullInt64
+	err := a.db.QueryRow(`SELECT id,name,owner,default_class,config_json,visibility,created_at,deleted_at FROM actor_decls WHERE id=?`, id).
+		Scan(&d.ID, &d.Name, &d.Owner, &d.Class, &config, &d.Visibility, &d.CreatedAt, &deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return contract.Declaration{}, false, nil
+	}
+	if err != nil {
+		return contract.Declaration{}, false, err
+	}
+	return d, !deleted.Valid, nil
+}
+
+func (a *App) BootstrapCodexDeclarationCountForTest(owner string) (int, error) {
+	var count int
+	err := a.db.QueryRow(`SELECT COUNT(*) FROM actor_decls WHERE owner=? AND default_class='codex' AND deleted_at IS NULL`, owner).Scan(&count)
+	return count, err
+}
 
 func declaredInstanceOneForTest(ctx context.Context, view channelhost.View, source string) (actor.ActorID, bool, error) {
 	ids, err := view.DeclaredInstances(ctx, source)

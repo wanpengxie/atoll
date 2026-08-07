@@ -158,9 +158,10 @@ func freePort(t *testing.T) int {
 // ---------------------------------------------------------------------------
 
 type apiClient struct {
-	t    *testing.T
-	base string
-	hc   *http.Client
+	t      *testing.T
+	base   string
+	hc     *http.Client
+	bearer string
 }
 
 func newAPIClient(t *testing.T, base string) *apiClient {
@@ -188,6 +189,9 @@ func (a *apiClient) do(method, path string, body any) (int, map[string]any) {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if a.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+a.bearer)
 	}
 	resp, err := a.hc.Do(req)
 	if err != nil {

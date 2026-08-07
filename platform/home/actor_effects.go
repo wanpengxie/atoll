@@ -143,7 +143,7 @@ func (h *Home) emitSystemEvent(
 		Type:       typ,
 		Payload:    raw,
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{actor.SystemActorID},
+		Audience:   message.Audience{},
 	}
 	result, err := h.systemPen.Write(ctx, env)
 	if err != nil {

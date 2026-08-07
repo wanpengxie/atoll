@@ -128,18 +128,10 @@ func TestAgentMessagePayloadSchemaIsOpenAndProviderFacing(t *testing.T) {
 		t.Fatalf("agent payload content vocabulary must stay open: %#v", def)
 	}
 	props := def["properties"].(map[string]any)
-	for _, name := range []string{"intent", "expected_turn_id", "text"} {
+	for _, name := range []string{"expected_turn_id", "text"} {
 		if _, ok := props[name]; !ok {
 			t.Fatalf("agent payload schema missing %q", name)
 		}
-	}
-	intent := props["intent"].(map[string]any)
-	if _, closed := intent["enum"]; closed {
-		t.Fatalf("intent vocabulary must grow additively: %#v", intent)
-	}
-	want := []AgentIntent{AgentIntentSteer, AgentIntentInterrupt}
-	if !reflect.DeepEqual(intent["x-known-values"], want) {
-		t.Fatalf("intent known values=%#v want %#v", intent["x-known-values"], want)
 	}
 }
 

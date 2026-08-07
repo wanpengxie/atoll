@@ -110,14 +110,18 @@ func Progress(
 	pen harness.Pen,
 	clock func() time.Time,
 	request *message.Envelope,
+	status string,
 	result any,
 ) (message.ID, error) {
+	if !message.IsProvisionalCoreStatus(status) {
+		return "", fmt.Errorf("behavior: invalid provisional status %q", status)
+	}
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("behavior: progress marshal: %w", err)
 	}
 	env, err := BuildResponseFromRequest(request, clock, ResponseSpec{
-		Status:  message.StatusProcessing,
+		Status:  status,
 		Payload: raw,
 	})
 	if err != nil {

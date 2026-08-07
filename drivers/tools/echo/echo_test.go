@@ -87,7 +87,7 @@ func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, erro
 	return msg.ID, nil
 }
 
-func (f *fakeSys) Progress(msg actorbase.Msg, v any) (message.ID, error) {
+func (f *fakeSys) Progress(msg actorbase.Msg, _ string, v any) (message.ID, error) {
 	f.progresses = append(f.progresses, replyCall{msg, v})
 	return msg.ID, nil
 }

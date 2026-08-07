@@ -156,16 +156,16 @@ func TestInterpretSubmit(t *testing.T) {
 	}
 }
 
-func TestInterpretSubmitKeepsAgentIntentInsideOpaquePayload(t *testing.T) {
-	const payload = `{"text":"stop and reconsider","intent":"interrupt","expected_turn_id":"turn-7","provider_field":{"x":1}}`
-	fs := &fakeSys{self: "human:alice", writeID: "m-intent"}
-	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "intent-ref", subjectgate.SubmitPayload{
+func TestInterpretSubmitKeepsProviderFieldsInsideOpaquePayload(t *testing.T) {
+	const payload = `{"text":"stop and reconsider","expected_turn_id":"turn-7","provider_field":{"x":1}}`
+	fs := &fakeSys{self: "human:alice", writeID: "m-opaque"}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "opaque-ref", subjectgate.SubmitPayload{
 		ChannelID: "c1", ID: "client-id", MsgType: "human.message",
 		Audience: []string{"agent:a"}, Payload: json.RawMessage(payload),
 	})
 	got := interpretFrame(fs, newDeps("human:alice", nil, false), f)
 	if got.Type != subjectgate.FrameReceipt {
-		t.Fatalf("intent submit failed: %+v", decodeErr(t, got))
+		t.Fatalf("opaque payload submit failed: %+v", decodeErr(t, got))
 	}
 	if !fs.posted || fs.emitted {
 		t.Fatalf("agent message must remain an ordinary request")
@@ -174,7 +174,7 @@ func TestInterpretSubmitKeepsAgentIntentInsideOpaquePayload(t *testing.T) {
 		t.Fatalf("agent payload changed in transit: got %s want %s", fs.postSpec.Payload, payload)
 	}
 	if fs.postSpec.ID != "client-id" || fs.postSpec.Type != "human.message" {
-		t.Fatalf("intent leaked into standard message fields: %+v", fs.postSpec)
+		t.Fatalf("provider field leaked into standard message fields: %+v", fs.postSpec)
 	}
 }
 
@@ -313,13 +313,13 @@ func TestSubmitFingerprintUsesCanonicalClientSemantics(t *testing.T) {
 		t.Fatalf("JSON key order/default spelling changed fingerprint:\n%s\n%s", base, equivalent)
 	}
 
-	changed := request("id-3", "request", "public", `{"a":{"x":1,"y":2},"z":1,"intent":"interrupt"}`)
+	changed := request("id-3", "request", "public", `{"a":{"x":1,"y":2},"z":1,"provider_mode":"interrupt"}`)
 	changedFingerprint, err := submitFingerprint(changed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if changedFingerprint == base {
-		t.Fatal("payload intent must participate in the fingerprint")
+		t.Fatal("opaque provider fields must participate in the fingerprint")
 	}
 
 	// Frame ref never reaches SubmitPayload, and client id is the idempotency

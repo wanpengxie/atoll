@@ -19,6 +19,27 @@ type rejectWriter struct {
 	detail string
 }
 
+func TestProgressAcceptsOnlyCoreStatus(t *testing.T) {
+	for _, status := range []string{message.StatusQueued, message.StatusProcessing} {
+		w := &recordingWriter{}
+		if _, err := Progress(context.Background(), w, fixedClock(1), newRequest("r1", nil), status, map[string]any{"ok": true}); err != nil {
+			t.Fatalf("core status %q rejected: %v", status, err)
+		}
+		if w.count() != 1 {
+			t.Fatalf("core status %q wrote %d envelopes", status, w.count())
+		}
+	}
+	for _, status := range []string{"", message.StatusCompleted, message.StatusFailed, "provider-specific"} {
+		w := &recordingWriter{}
+		if _, err := Progress(context.Background(), w, fixedClock(1), newRequest("r1", nil), status, nil); err == nil {
+			t.Fatalf("non-core status %q accepted", status)
+		}
+		if w.count() != 0 {
+			t.Fatalf("non-core status %q wrote %d envelopes", status, w.count())
+		}
+	}
+}
+
 func (w *rejectWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	return harness.WriteResult{MessageID: env.ID, RejectReason: harness.HarnessRejectReason(w.reason), RejectDetail: w.detail}, nil
 }
@@ -252,7 +273,7 @@ func TestProgressAbsorbsBothTerminalAlreadyLandedVerdicts(t *testing.T) {
 			req := newRequest("req-progress", nil)
 			w := &recordingWriter{reject: tc.reject}
 
-			id, err := Progress(context.Background(), w, fixedClock(0), req, map[string]any{"pct": 50})
+			id, err := Progress(context.Background(), w, fixedClock(0), req, message.StatusProcessing, map[string]any{"pct": 50})
 			if err != nil {
 				t.Fatalf("Progress under %s: want benign settle, got error: %v", tc.reject, err)
 			}
@@ -273,7 +294,7 @@ func TestProgressStillSurfacesUnrelatedRejects(t *testing.T) {
 	req := newRequest("req-progress-2", nil)
 	w := &recordingWriter{reject: harness.HarnessResponseParentNotFound}
 
-	if _, err := Progress(context.Background(), w, fixedClock(0), req, map[string]any{}); err == nil {
+	if _, err := Progress(context.Background(), w, fixedClock(0), req, message.StatusProcessing, map[string]any{}); err == nil {
 		t.Fatal("Progress: an unrelated harness reject must surface as an error, got nil")
 	}
 }

@@ -20,24 +20,12 @@ import (
 // subjectgate.FrameVersion.
 const Version = "1.0"
 
-// AgentIntent is the additive provider-facing delivery intent carried inside
-// an agent message payload. It is deliberately not a message-envelope field:
-// the substrate keeps message payloads opaque, while providers may interpret
-// the values they support.
-type AgentIntent string
-
-const (
-	AgentIntentSteer     AgentIntent = "steer"
-	AgentIntentInterrupt AgentIntent = "interrupt"
-)
-
 // AgentMessagePayload documents the day-1 conventions for messages addressed
 // to agents. The generated schema remains open: content fields are provider
 // vocabulary, and text is only a common optional convention.
 type AgentMessagePayload struct {
-	Intent         AgentIntent `json:"intent,omitempty"`
-	ExpectedTurnID string      `json:"expected_turn_id,omitempty"`
-	Text           string      `json:"text,omitempty"`
+	ExpectedTurnID string `json:"expected_turn_id,omitempty"`
+	Text           string `json:"text,omitempty"`
 }
 
 // ErrorCode is the closed, append-only vocabulary clients branch on.

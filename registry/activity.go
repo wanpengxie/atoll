@@ -12,10 +12,23 @@ const (
 )
 
 const (
-	ActivityStatusStarted   = "started"
-	ActivityStatusCompleted = "completed"
-	ActivityStatusFailed    = "failed"
+	ActivityStartedStatus = "started"
+
+	ActivityTurnEndedStatusOK          = "ok"
+	ActivityTurnEndedStatusFailed      = "failed"
+	ActivityTurnEndedStatusInterrupted = "interrupted"
+
+	ActivityToolEndedStatusCompleted = "completed"
+	ActivityToolEndedStatusFailed    = "failed"
 )
+
+func IsActivityTurnEndedStatus(status string) bool {
+	return status == ActivityTurnEndedStatusOK || status == ActivityTurnEndedStatusFailed || status == ActivityTurnEndedStatusInterrupted
+}
+
+func IsActivityToolEndedStatus(status string) bool {
+	return status == ActivityToolEndedStatusCompleted || status == ActivityToolEndedStatusFailed
+}
 
 type ActivityTurnStartedPayload struct {
 	TurnIndex int    `json:"turn_index"`

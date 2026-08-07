@@ -90,7 +90,8 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
 	}
 	def, err := base.Def(agentSkillDoc, base.Config{
-		NewEngine: newEngineFn(cfg, defaultClientFactory),
+		NewEngine:         newEngineFn(cfg, defaultClientFactory),
+		SupportedControls: []string{base.TypeInterrupt, base.TypeTerminate, base.TypeRestart},
 	})
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("claude agent def: %w", err)

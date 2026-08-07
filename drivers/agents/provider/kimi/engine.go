@@ -1,9 +1,7 @@
-// Package kimi is the go-kimi agent engine, built on agent/base's skeleton
-// (期10 S5). It implements base.Engine (the model-adaptation三件套 — Turn /
-// Describe / Checkpoint / Close); the mailbox loop, turn queue, response分拣,
-// describe dispatch, per-turn checkpoint挂账, and emit all live in agent/base.
-// The go-kimi流式 wire帧 state machine (wire_parse.go) is封 entirely inside
-// Turn — the base never sees it.
+// Package kimi adapts go-kimi to the asynchronous base.Engine contract. The
+// provider's streaming wire state machine remains private; complete phases and
+// the terminal value return through EventPort while base owns mailbox
+// arbitration, progress, activity, persistence, and request settlement.
 //
 // The engine drives the shared actor-invocation machinery through a
 // metatool.Exec (the substrate JobTable + sys.Call face) built from Sys — it
@@ -18,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	gokimi "github.com/wanpengxie/go-kimi/pkg/kimi"
@@ -120,6 +119,12 @@ type engine struct {
 
 	kagent kimiAgent
 	wireCh chan wire.WireMessage
+	events base.EventPort
+	life   context.Context
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	booted bool
+	closed bool
 }
 
 var _ base.Engine = (*engine)(nil)
@@ -135,12 +140,12 @@ func defaultAgentFactory(ac gokimi.AgentConfig) (kimiAgent, error) {
 // the exec face from Sys, then the provider + go-kimi Agent (with the meta-tool
 // AdditionalTools installed). A boot failure is loud死 (no half-alive agent).
 func newEngineFn(cfg Config, factory agentFactory) base.NewEngine {
-	return func(sys actorbase.Sys, seed []byte) (base.Engine, error) {
+	return func(sys actorbase.Sys, seed []byte, events base.EventPort) (base.Engine, error) {
 		workDir, err := os.MkdirTemp("", "atoll-kimi-")
 		if err != nil {
 			return nil, fmt.Errorf("kimi: workdir: %w", err)
 		}
-		e := &engine{cfg: cfg, workDir: workDir}
+		e := &engine{cfg: cfg, workDir: workDir, events: events, life: sys.Life()}
 		e.x = base.ExecFace(sys, cfg.FastPathWindow)
 
 		provider, err := e.buildProvider()
@@ -161,9 +166,7 @@ func newEngineFn(cfg Config, factory agentFactory) base.NewEngine {
 // buildAgent builds a fresh kimiAgent bound to (workDir, emitter, provider) with
 // the meta-tool surface installed. Cold start: kimi's session lives on-disk in
 // the ephemeral WorkDir, so the durable resume seed is NOT consumed here (a
-// restored session id would point at files a fresh tmp dir does not carry) —
-// durable kimi resume needs a durable WorkDir,申报 defer. Checkpoint returns
-// nil in kind.
+// restored session id would point at files a fresh tmp dir does not carry).
 func (e *engine) buildAgent(provider llm.ChatProvider, emitter wire.Emitter, factory agentFactory) (kimiAgent, error) {
 	return factory(gokimi.AgentConfig{
 		WorkDir:         e.workDir,
@@ -200,12 +203,12 @@ func (e *engine) buildProvider() (llm.ChatProvider, error) {
 	return p, nil
 }
 
-// Turn drives one Agent.Run: compose the user input from the trigger, kick the
+// runTurn drives one Agent.Run: compose the user input from the trigger, kick the
 // agent in a goroutine, and consume wire events until the turn completes. The
-// tool phases + terminal full value are written to the typed base Sink. An
-// engine/LLM error becomes a failed terminal response (actor stays
-// alive, Turn returns nil); only a Sink write failure (A1) propagates as loud死.
-func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink) error {
+// tool phases + terminal full value are collected and then forwarded through
+// EventPort. An engine/LLM error becomes a failed turn; collector plumbing
+// errors remain loud implementation faults.
+func (e *engine) runTurn(ctx context.Context, trigger base.Trigger, sink turnSink) error {
 	input := composeUserInput(trigger.Envelope)
 
 	turnCtx, cancel := context.WithCancel(ctx)
@@ -221,8 +224,8 @@ func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink)
 
 	consumeErr := e.consumeWire(turnCtx, agentDone, trigger, sink)
 	if consumeErr != nil {
-		// A Sink write failure is a plumbing break (A1 — propagate loud). A
-		// missing TurnEnd means the run ended abnormally; the provider error
+		// A collector write failure is a plumbing break. A missing TurnEnd
+		// means the run ended abnormally; the provider error
 		// (runErr) is the meaningful signal, surfaced as a failed terminal.
 		if errors.Is(consumeErr, errSinkWrite) {
 			return consumeErr
@@ -255,14 +258,137 @@ func (e *engine) Describe() introspect.Describe {
 	}
 }
 
-// Checkpoint returns nil — kimi's session lives on-disk in the ephemeral
-// WorkDir, so there is no durable resume seed to persist across incarnations
-// this period (申报: durable kimi resume needs a durable WorkDir, defer; the
-// claude engine demonstrates the checkpoint path on its server-side sessions).
-func (e *engine) Checkpoint() []byte { return nil }
+func (e *engine) Boot(context.Context, base.BootPort) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errors.New("kimi: engine closed")
+	}
+	e.booted = true
+	return nil
+}
 
-// Close releases the go-kimi agent at incarnation death.
+type eventSink struct {
+	e      *engine
+	turnID string
+	final  *finalValue
+	failed *failure
+}
+
+func (s *eventSink) ToolStarted(a toolActivity) error {
+	s.e.events.Tool(s.turnID, a.CallID, "started", a.Tool, "started", a.Detail)
+	return nil
+}
+func (s *eventSink) ToolEnded(a toolActivity) error {
+	s.e.events.Tool(s.turnID, a.CallID, "ended", a.Tool, a.Status, a.Detail)
+	return nil
+}
+func (s *eventSink) Complete(v finalValue) error { s.final = &v; return nil }
+func (s *eventSink) Fail(f failure) error        { s.failed = &f; return nil }
+
+func (e *engine) StartTurn(op base.OpID, batch []base.Trigger, background []base.ContextItem) error {
+	e.mu.Lock()
+	if !e.booted || e.closed {
+		e.mu.Unlock()
+		return errors.New("kimi: engine unavailable")
+	}
+	if e.cancel != nil {
+		e.mu.Unlock()
+		return errors.New("kimi: turn already active")
+	}
+	ctx, cancel := context.WithCancel(e.life)
+	e.cancel = cancel
+	e.mu.Unlock()
+	if len(batch) == 0 {
+		e.events.TurnRejected(op, "provider_failed", "empty batch")
+		return nil
+	}
+	turnID := string(op)
+	e.events.TurnStarted(op, turnID)
+	tr := batch[len(batch)-1]
+	var input strings.Builder
+	if len(background) > 0 {
+		input.WriteString("频道最近记录（可能与你已知重叠）：\n")
+		for _, item := range background {
+			input.WriteString(item.Rendered)
+			input.WriteByte('\n')
+		}
+	}
+	for _, item := range batch {
+		input.WriteString(composeUserInput(item.Envelope))
+		input.WriteByte('\n')
+	}
+	raw, _ := json.Marshal(map[string]any{"text": strings.TrimSpace(input.String())})
+	tr.Envelope.Payload = raw
+	go func() {
+		defer func() { e.mu.Lock(); e.cancel = nil; e.mu.Unlock() }()
+		sink := &eventSink{e: e, turnID: turnID}
+		err := e.runTurn(ctx, tr, sink)
+		if errors.Is(err, context.Canceled) {
+			e.events.TurnEnded(turnID, base.TurnStatusInterrupted, "", err.Error())
+			return
+		}
+		if err != nil {
+			e.events.TurnEnded(turnID, base.TurnStatusFailed, "", err.Error())
+			return
+		}
+		if sink.failed != nil {
+			e.events.TurnEnded(turnID, base.TurnStatusFailed, "", sink.failed.Detail)
+			return
+		}
+		text := ""
+		if sink.final != nil {
+			text = sink.final.Text
+		}
+		e.events.TurnEnded(turnID, base.TurnStatusOK, text, "")
+	}()
+	return nil
+}
+func (e *engine) Steer(op base.OpID, _ base.Trigger) error {
+	e.events.ControlDone(op, base.ControlNotSteerable, "", "kimi has no steer primitive")
+	return nil
+}
+func (e *engine) Interrupt(op base.OpID) error {
+	e.mu.Lock()
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel == nil {
+		e.events.ControlDone(op, base.ControlNoActiveTurn, "", "")
+	} else {
+		cancel()
+		e.events.ControlDone(op, base.ControlAccepted, "", "")
+	}
+	return nil
+}
+func (e *engine) Terminate() error {
+	e.mu.Lock()
+	cancel := e.cancel
+	e.booted = false
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if e.kagent != nil {
+		return e.kagent.Close()
+	}
+	return nil
+}
+func (e *engine) EnsureAlive(op base.OpID) error {
+	e.events.ControlDone(op, base.ControlRPCError, "", "kimi engine cannot reopen a closed agent")
+	return nil
+}
 func (e *engine) Close() error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.closed = true
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if e.kagent != nil {
 		return e.kagent.Close()
 	}

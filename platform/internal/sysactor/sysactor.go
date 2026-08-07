@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -45,7 +46,11 @@ type SystemActor struct {
 	clock     func() time.Time
 	presence  PresenceStat
 	operate   OperateExecutor
-	logger    *slog.Logger
+	logbook   interface {
+		MaxSeq(context.Context) (int64, error)
+		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
+	}
+	logger *slog.Logger
 }
 
 // Deps bundles the channel services the system actor needs.
@@ -58,6 +63,12 @@ type Deps struct {
 	// implementation half; the gate here does permission + routing). Nil → the four
 	// control types are inert (no synthesis) — the injection point is unfilled.
 	Operate OperateExecutor
+	// Logbook is the channel-scoped read face. It intentionally exposes no
+	// append capability to the system actor.
+	Logbook interface {
+		MaxSeq(context.Context) (int64, error)
+		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
+	}
 }
 
 // New constructs the channel system actor's process state (exported so a
@@ -77,6 +88,7 @@ func New(deps Deps) *SystemActor {
 		clock:     clock,
 		presence:  deps.Presence,
 		operate:   deps.Operate,
+		logbook:   deps.Logbook,
 		logger:    logger,
 	}
 }
@@ -119,6 +131,9 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		case introspect.QueryStatus:
 			s.respondStatus(sys, msg)
+			return
+		case registry.TypeLogbookRecent:
+			s.respondLogbookRecent(sys, msg)
 			return
 		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor, TypeSetDefaultAgent:
 			// Channel operate face (NP-1=c): in-gate control plane. Permission +
@@ -197,10 +212,11 @@ func (s *SystemActor) kernelEntry(msg actorbase.Msg) introspect.CatalogEntry {
 func systemDescribe() introspect.Describe {
 	return introspect.Describe{
 		ActorID:     string(actor.SystemActorID),
-		Description: "Channel system actor: answers the reserved actor directory and presence queries.",
+		Description: "Channel system actor: answers reserved directory, presence, and bounded logbook queries.",
 		SkillDoc: "# system\n\nReserved channel directory.\n\n## Tool surface\n\n" +
 			"- `actor.list` — channel-wide active-identity directory composed with presence.\n" +
-			"- `actor.status` — read-time presence view for one actor id.\n",
+			"- `actor.status` — read-time presence view for one actor id.\n" +
+			"- `logbook.recent` — last five filtered request/response rows for catch-up.\n",
 		Types: map[string]introspect.TypeMeta{
 			introspect.QueryList: {
 				Description:  "channel-wide actor directory: membership ∧ liveness",
@@ -208,6 +224,10 @@ func systemDescribe() introspect.Describe {
 			},
 			introspect.QueryStatus: {
 				Description:  "read-time presence view for one actor id",
+				AllowedKinds: []string{string(message.KindRequest)},
+			},
+			registry.TypeLogbookRecent: {
+				Description:  "last filtered request/response rows in ascending log order",
 				AllowedKinds: []string{string(message.KindRequest)},
 			},
 		},

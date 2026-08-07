@@ -31,7 +31,7 @@ func (e *engine) consumeWire(
 	ctx context.Context,
 	agentDone <-chan struct{},
 	trigger base.Trigger,
-	sink base.Sink,
+	sink turnSink,
 ) error {
 	state := &turnState{pendingTools: map[string]string{}}
 
@@ -93,7 +93,7 @@ func (e *engine) consumeWire(
 func (e *engine) handleWireMsg(
 	state *turnState,
 	msg wire.WireMessage,
-	sink base.Sink,
+	sink turnSink,
 ) (bool, error) {
 	switch m := msg.(type) {
 	case wire.TextDelta:
@@ -107,7 +107,7 @@ func (e *engine) handleWireMsg(
 		}
 		state.pendingTools[callID] = m.ToolCall.Name
 		state.pendingOrder = append(state.pendingOrder, callID)
-		if err := sink.ToolStarted(base.ToolActivity{CallID: callID, Tool: m.ToolCall.Name}); err != nil {
+		if err := sink.ToolStarted(toolActivity{CallID: callID, Tool: m.ToolCall.Name}); err != nil {
 			return false, fmt.Errorf("%w: %v", errSinkWrite, err)
 		}
 		return false, nil
@@ -128,7 +128,7 @@ func (e *engine) handleWireMsg(
 		if m.Result.IsError {
 			status = "failed"
 		}
-		if err := sink.ToolEnded(base.ToolActivity{CallID: callID, Tool: tool, Status: status}); err != nil {
+		if err := sink.ToolEnded(toolActivity{CallID: callID, Tool: tool, Status: status}); err != nil {
 			return false, fmt.Errorf("%w: %v", errSinkWrite, err)
 		}
 		delete(state.pendingTools, callID)
@@ -143,13 +143,13 @@ func (e *engine) handleWireMsg(
 	}
 }
 
-func endPendingTools(state *turnState, sink base.Sink, detail string) error {
+func endPendingTools(state *turnState, sink turnSink, detail string) error {
 	for _, callID := range state.pendingOrder {
 		tool, found := state.pendingTools[callID]
 		if !found {
 			continue
 		}
-		if err := sink.ToolEnded(base.ToolActivity{CallID: callID, Tool: tool, Status: "failed", Detail: detail}); err != nil {
+		if err := sink.ToolEnded(toolActivity{CallID: callID, Tool: tool, Status: "failed", Detail: detail}); err != nil {
 			return fmt.Errorf("%w: %v", errSinkWrite, err)
 		}
 		delete(state.pendingTools, callID)

@@ -262,7 +262,7 @@ func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[mess
 	// ── Progress: a NON-terminal provisional response. The account stays
 	// open — this is the "I heard you, working on it" tier, the same shape an
 	// agent's activity stream refines.
-	_, _ = sys.Progress(msg, map[string]any{"armed": true, "seconds": p.Seconds, "ask": askAnswer})
+	_, _ = sys.Progress(msg, message.StatusProcessing, map[string]any{"armed": true, "seconds": p.Seconds, "ask": askAnswer})
 
 	// ── Emit arm: a kind=event bystander note. No one owes anything on an
 	// event; parent/correlation tie it into this request's causal group.

@@ -23,22 +23,34 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type activityAcceptanceEngine struct{}
+type activityAcceptanceEngine struct{ events base.EventPort }
 
-func (activityAcceptanceEngine) Turn(_ context.Context, _ base.Trigger, sink base.Sink) error {
-	if err := sink.ToolStarted(base.ToolActivity{CallID: "acceptance-tool-1", Tool: "acceptance_tool"}); err != nil {
-		return err
-	}
-	if err := sink.ToolEnded(base.ToolActivity{CallID: "acceptance-tool-1", Tool: "acceptance_tool", Status: "completed"}); err != nil {
-		return err
-	}
-	return sink.Complete(base.FinalValue{Text: "activity-ok", NextAction: "done"})
+func (activityAcceptanceEngine) Boot(context.Context, base.BootPort) error { return nil }
+func (e activityAcceptanceEngine) StartTurn(op base.OpID, _ []base.Trigger, _ []base.ContextItem) error {
+	turnID := "acceptance-turn"
+	e.events.TurnStarted(op, turnID)
+	e.events.Tool(turnID, "acceptance-tool-1", "started", "acceptance_tool", "started", "")
+	e.events.Tool(turnID, "acceptance-tool-1", "ended", "acceptance_tool", "completed", "")
+	e.events.TurnEnded(turnID, base.TurnStatusOK, "activity-ok", "")
+	return nil
+}
+func (e activityAcceptanceEngine) Steer(op base.OpID, _ base.Trigger) error {
+	e.events.ControlDone(op, base.ControlNotSteerable, "", "")
+	return nil
+}
+func (e activityAcceptanceEngine) Interrupt(op base.OpID) error {
+	e.events.ControlDone(op, base.ControlNoActiveTurn, "", "")
+	return nil
+}
+func (activityAcceptanceEngine) Terminate() error { return nil }
+func (e activityAcceptanceEngine) EnsureAlive(op base.OpID) error {
+	e.events.ControlDone(op, base.ControlAccepted, "", "")
+	return nil
 }
 func (activityAcceptanceEngine) Describe() introspect.Describe {
 	return introspect.Describe{Description: "activity acceptance"}
 }
-func (activityAcceptanceEngine) Checkpoint() []byte { return nil }
-func (activityAcceptanceEngine) Close() error       { return nil }
+func (activityAcceptanceEngine) Close() error { return nil }
 
 // ---------------------------------------------------------------------------
 // wsClient — a black-box gateway ws driver for the standard frame protocol
@@ -300,7 +312,7 @@ func TestSubmitIdempotencySurvivesReconnect(t *testing.T) {
 	}
 
 	firstClient := dialWS(t, srv, setup.cookies, setup.chID, 0)
-	first := submit(firstClient, "attempt-1", map[string]any{"text": "hello", "intent": "steer"})
+	first := submit(firstClient, "attempt-1", map[string]any{"text": "hello", "provider_field": "alpha"})
 	if first["type"] != "ack" || first["message_id"] != "client-stable-id" {
 		t.Fatalf("first submit=%v", first)
 	}
@@ -308,11 +320,11 @@ func TestSubmitIdempotencySurvivesReconnect(t *testing.T) {
 
 	secondClient := dialWS(t, srv, setup.cookies, setup.chID, 0)
 	defer secondClient.close()
-	replay := submit(secondClient, "attempt-2", map[string]any{"intent": "steer", "text": "hello"})
+	replay := submit(secondClient, "attempt-2", map[string]any{"provider_field": "alpha", "text": "hello"})
 	if replay["type"] != "ack" || replay["message_id"] != "client-stable-id" {
 		t.Fatalf("same-content reconnect replay=%v", replay)
 	}
-	conflict := submit(secondClient, "attempt-3", map[string]any{"text": "different", "intent": "steer"})
+	conflict := submit(secondClient, "attempt-3", map[string]any{"text": "different", "provider_field": "alpha"})
 	if conflict["type"] != "error" || conflict["error"] != "idempotency_conflict" {
 		t.Fatalf("different-content replay=%v", conflict)
 	}
@@ -325,9 +337,9 @@ func TestSubmitIdempotencySurvivesReconnect(t *testing.T) {
 	for _, row := range rows {
 		if row.Envelope.ID == "client-stable-id" {
 			matches++
-			if string(row.Envelope.Payload) != `{"text":"hello","intent":"steer"}` &&
-				string(row.Envelope.Payload) != `{"intent":"steer","text":"hello"}` {
-				t.Fatalf("intent payload changed in log: %s", row.Envelope.Payload)
+			if string(row.Envelope.Payload) != `{"text":"hello","provider_field":"alpha"}` &&
+				string(row.Envelope.Payload) != `{"provider_field":"alpha","text":"hello"}` {
+				t.Fatalf("opaque payload changed in log: %s", row.Envelope.Payload)
 			}
 		}
 	}
@@ -410,8 +422,8 @@ func TestWebSocketObservationStateMachine(t *testing.T) {
 func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 	env := setupTestApp(t)
 	testAgentBuilder = func(_ channel.ID, _ actor.ActorID) (actorbase.Proc, error) {
-		def, err := base.Def("activity acceptance", base.Config{NewEngine: func(actorbase.Sys, []byte) (base.Engine, error) {
-			return activityAcceptanceEngine{}, nil
+		def, err := base.Def("activity acceptance", base.Config{NewEngine: func(_ actorbase.Sys, _ []byte, events base.EventPort) (base.Engine, error) {
+			return activityAcceptanceEngine{events: events}, nil
 		}})
 		if err != nil {
 			return nil, err
@@ -426,7 +438,7 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 
 	const requestID = "activity-acceptance-request"
 	ack := client.sendMessage(map[string]any{
-		"id": requestID, "msg_type": "agent.activity.acceptance", "kind": "request",
+		"id": requestID, "msg_type": "user.activity.acceptance", "kind": "request",
 		"audience": []string{string(setup.boostID)}, "visibility": "public",
 		"payload": map[string]any{"text": "run"},
 	})
@@ -435,11 +447,12 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 	}
 
 	wantTypes := []string{
-		"agent.activity.acceptance",
+		"user.activity.acceptance",
+		"user.activity.acceptance", // processing provisional at commit
 		"activity.turn.started",
 		"activity.tool.started",
 		"activity.tool.ended",
-		"agent.activity.acceptance",
+		"user.activity.acceptance",
 		"activity.turn.ended",
 	}
 	var matched []storespec.StoredRow
@@ -464,7 +477,11 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if len(matched) != len(wantTypes) {
-		t.Fatalf("correlated log rows=%d want %d", len(matched), len(wantTypes))
+		got := make([]string, 0, len(matched))
+		for _, row := range matched {
+			got = append(got, row.Envelope.Type)
+		}
+		t.Fatalf("correlated log rows=%d want %d: %v", len(matched), len(wantTypes), got)
 	}
 	for i, row := range matched {
 		if row.Envelope.Type != wantTypes[i] {
@@ -476,13 +493,13 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 			}
 		}
 	}
-	if matched[4].Envelope.Kind != message.KindResponse {
-		t.Fatalf("terminal kind=%q want response", matched[4].Envelope.Kind)
+	if matched[5].Envelope.Kind != message.KindResponse {
+		t.Fatalf("terminal kind=%q want response", matched[5].Envelope.Kind)
 	}
 
 	page := env.do(t, http.MethodGet, "/api/channels/"+setup.chID+"/messages?after_seq="+fmt.Sprint(matched[0].Seq-1)+"&limit=20", nil, setup.cookies)
 	assertStatus(t, page, http.StatusOK)
-	for _, activityType := range wantTypes[1:4] {
+	for _, activityType := range wantTypes[2:5] {
 		if !strings.Contains(page.Body.String(), `"type":"`+activityType+`"`) {
 			t.Fatalf("paginated replay omitted %q: %s", activityType, page.Body.String())
 		}
