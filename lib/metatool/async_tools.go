@@ -22,8 +22,7 @@ return that result. Use this to collect a long call that returned an ack
 
   - request_id: the id from the ack's request_id / to_wait.params.request_id.
   - timeout_ms: optional bound on how long to wait. On timeout you get a
-    still-pending ack back (the call keeps running; try again later or let the
-    result return as a new message).
+    still-pending ack back (the call keeps running; claim it explicitly later).
 
 If the request is unknown (already collected, cancelled, or lost to a cell
 restart), the result is an error explaining so.
@@ -89,12 +88,11 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 		// Still pending after the window — hand control back with an ack.
 		toWait, notWaiting := newCollectHint(reqID.String())
 		return AckResult("await_result", AckDescriptor{
-			RequestID: reqID,
-			Accepted:  true,
-			Status:    "accepted",
-			EstWaitMs: int64(timeout / time.Millisecond),
-			Guidance: "Still running after the wait window. The call keeps running; try await_result again, " +
-				"or do other work and react to the result when it returns as a new message.",
+			RequestID:  reqID,
+			Accepted:   true,
+			Status:     "accepted",
+			EstWaitMs:  int64(timeout / time.Millisecond),
+			Guidance:   "Still running after the wait window. The call keeps running; claim it later with await_result.",
 			ToWait:     toWait,
 			NotWaiting: notWaiting,
 		})
@@ -172,8 +170,8 @@ reached their final result. Returns only the id list — no status — as a deci
 for which await_result / cancel to issue next.
 
 Note: this view is per-process. If the cell restarted, the list is empty even
-though earlier calls may still be running in the daemon; their results will return
-as new messages.
+though earlier calls may still be running in the daemon; this incarnation can no
+longer claim those rows.
 `),
 	Schema: json.RawMessage(`{"type":"object","properties":{}}`),
 }

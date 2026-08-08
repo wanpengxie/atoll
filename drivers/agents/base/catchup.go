@@ -35,7 +35,7 @@ type logbookResponse struct {
 	} `json:"messages"`
 }
 
-func loadCatchup(ctx context.Context, sys actorbase.Sys) []ContextItem {
+func loadCatchup(ctx context.Context, sys actorbase.Sys) []RuntimeContextItem {
 	// Catch-up is best-effort — a failure must never block boot — but it must
 	// never fail silently either: without a line here, an agent that quietly
 	// stopped seeing the channel's recent history looks identical to one that
@@ -57,10 +57,10 @@ func loadCatchup(ctx context.Context, sys actorbase.Sys) []ContextItem {
 		slog.Warn("agent catch-up answer undecodable", "actor", sys.Self(), "error", err)
 		return nil
 	}
-	items := make([]ContextItem, 0, len(response.Messages))
+	items := make([]RuntimeContextItem, 0, len(response.Messages))
 	for _, row := range response.Messages {
 		rendered := fmt.Sprintf("[%s %s %s] %s", row.Message.Sender.ID, row.Message.Kind, row.Message.Type, strings.TrimSpace(string(row.Message.Payload)))
-		items = append(items, ContextItem{Seq: row.Seq, Sender: row.Message.Sender.ID, Kind: row.Message.Kind, Type: row.Message.Type, Payload: append([]byte(nil), row.Message.Payload...), Rendered: rendered})
+		items = append(items, RuntimeContextItem{Seq: row.Seq, Sender: row.Message.Sender.ID, Kind: row.Message.Kind, Type: row.Message.Type, Payload: append([]byte(nil), row.Message.Payload...), Text: rendered})
 	}
 	return budgetContext(items, catchupCharBudget)
 }
@@ -93,15 +93,15 @@ func callCatchupWithinBudget(ctx context.Context, sys actorbase.Sys) (actorbase.
 	}
 }
 
-func budgetContext(items []ContextItem, budget int) []ContextItem {
+func budgetContext(items []RuntimeContextItem, budget int) []RuntimeContextItem {
 	if budget <= 0 {
 		return nil
 	}
-	kept := make([]ContextItem, 0, len(items))
+	kept := make([]RuntimeContextItem, 0, len(items))
 	total := 0
 	oversize := false
 	for _, item := range items {
-		n := utf8.RuneCountInString(item.Rendered)
+		n := utf8.RuneCountInString(item.Text)
 		if n > budget {
 			oversize = true
 			continue
@@ -111,7 +111,7 @@ func budgetContext(items []ContextItem, budget int) []ContextItem {
 	}
 	truncated := false
 	for len(kept) > 0 && total > budget {
-		total -= utf8.RuneCountInString(kept[0].Rendered)
+		total -= utf8.RuneCountInString(kept[0].Text)
 		kept = kept[1:]
 		truncated = true
 	}
@@ -122,18 +122,12 @@ func budgetContext(items []ContextItem, budget int) []ContextItem {
 		}
 		markLen := utf8.RuneCountInString(mark)
 		for len(kept) > 0 && markLen+total > budget {
-			total -= utf8.RuneCountInString(kept[0].Rendered)
+			total -= utf8.RuneCountInString(kept[0].Text)
 			kept = kept[1:]
 		}
 		if markLen <= budget {
-			kept = append([]ContextItem{{Rendered: mark}}, kept...)
+			kept = append([]RuntimeContextItem{{Text: mark}}, kept...)
 		}
 	}
 	return kept
-}
-
-func (l *agentLoop) takeBackground() []ContextItem {
-	background := l.background
-	l.background = nil
-	return background
 }

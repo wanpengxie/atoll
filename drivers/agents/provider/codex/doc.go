@@ -1,4 +1,5 @@
-// Package codex adapts one local `codex app-server` process to agent/base's
-// asynchronous Engine contract. It owns only process/RPC/thread translation;
-// Codex configuration, MCP, skills, plugins, and approvals remain Codex-owned.
+// Package codex translates one generation-scoped `codex app-server` process
+// into the provider-neutral driver protocol. Lifecycle arbitration, retries,
+// watchdogs, canonical turns, and user terminals belong to the shared runtime
+// and Base rather than this adapter.
 package codex

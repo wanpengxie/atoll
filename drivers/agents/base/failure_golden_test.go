@@ -2,11 +2,12 @@ package base
 
 import "testing"
 
-func TestRuntimeErrorCodeGoldenIsExactlyNine(t *testing.T) {
+func TestRuntimeErrorCodeGolden(t *testing.T) {
 	want := map[string]struct{}{
 		"cancelled": {}, "cas_mismatch": {}, "interrupted": {}, "overloaded": {},
 		"provider_timeout": {}, "provider_crash": {}, "provider_failed": {},
 		"input_too_large": {}, "empty_input": {},
+		"agent_internal": {},
 	}
 	got := map[string]struct{}{}
 	for _, code := range runtimeErrorCodes {

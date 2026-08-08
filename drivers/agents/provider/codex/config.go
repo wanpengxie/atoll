@@ -17,7 +17,6 @@ const (
 )
 
 type Config struct {
-	ActorID        string
 	WorkspaceDir   string
 	Binary         string
 	Logger         *slog.Logger

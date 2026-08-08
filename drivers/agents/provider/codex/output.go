@@ -5,14 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 	"unicode/utf8"
 
-	"github.com/wanpengxie/atoll/drivers/agents/base"
-	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
-
-const watchdogInitialTimeout = 10 * time.Minute
 
 type turnWire struct {
 	ID     string `json:"id"`
@@ -52,58 +48,49 @@ type itemNotice struct {
 	Item     itemWire `json:"item"`
 }
 
-func (e *engine) handleNotification(c *connection, method string, params json.RawMessage) {
-	if !e.isCurrent(c) {
+func (w *worker) notification(c *connection, method string, params json.RawMessage) {
+	w.mu.Lock()
+	if w.conn != c && w.conn != nil {
+		w.mu.Unlock()
 		return
 	}
+	thread, attempt, target := w.thread, w.attempt, w.target
+	w.mu.Unlock()
 	switch method {
 	case "turn/started":
 		var n turnNotice
-		if json.Unmarshal(params, &n) != nil || !e.threadMatches(n.ThreadID) {
+		if json.Unmarshal(params, &n) != nil || n.Turn.ID == "" || n.ThreadID != thread || attempt == 0 {
 			return
 		}
-		e.mu.Lock()
-		if e.current != c || c.retired.Load() || c.dead.Load() {
-			e.mu.Unlock()
+		target = driverproto.WorkerTurnTarget{Attempt: attempt, Native: driverproto.WorkerTurnRef(n.Turn.ID)}
+		w.mu.Lock()
+		if w.attempt != attempt {
+			w.mu.Unlock()
 			return
 		}
-		op := c.startOp
-		if op == "" || n.Turn.ID == "" {
-			e.mu.Unlock()
-			return
-		}
-		c.startOp = ""
-		c.turnOp = op
-		c.turnID = n.Turn.ID
-		c.final[n.Turn.ID] = ""
-		e.mu.Unlock()
-		e.events.TurnStarted(op, n.Turn.ID)
-		e.feedWatchdog(n.Turn.ID)
+		w.target = target
+		w.final[target.Native] = ""
+		w.mu.Unlock()
+		w.host.Events().Publish(driverproto.TurnStarted{Target: target})
 	case "turn/completed":
 		var n turnNotice
-		if json.Unmarshal(params, &n) != nil || !e.activeNotice(c, n.ThreadID, n.Turn.ID) {
+		if json.Unmarshal(params, &n) != nil || target.Native != driverproto.WorkerTurnRef(n.Turn.ID) || n.ThreadID != thread {
 			return
 		}
-		if n.Turn.Status == "inProgress" {
-			e.feedWatchdog(n.Turn.ID)
-			e.cfg.Logger.Warn("codex.turn_completed_in_progress", "turn", n.Turn.ID)
-			return
-		}
-		e.stopWatchdog()
-		e.mu.Lock()
-		final := c.final[n.Turn.ID]
-		delete(c.final, n.Turn.ID)
-		c.turnID = ""
-		c.turnOp = ""
-		e.mu.Unlock()
-		status := base.TurnStatusOK
+		w.mu.Lock()
+		final := w.final[target.Native]
+		delete(w.final, target.Native)
+		w.attempt = 0
+		w.target = driverproto.WorkerTurnTarget{}
+		w.mu.Unlock()
+		status := driverproto.TurnOK
 		detail := ""
 		switch n.Turn.Status {
 		case "completed":
 		case "interrupted":
-			status = base.TurnStatusInterrupted
+			status = driverproto.TurnInterrupted
 		case "failed":
-			status = base.TurnStatusFailed
+			status = driverproto.TurnFailed
 			if n.Turn.Error != nil {
 				detail = n.Turn.Error.Message
 				if n.Turn.Error.Additional != "" {
@@ -111,19 +98,45 @@ func (e *engine) handleNotification(c *connection, method string, params json.Ra
 				}
 			}
 		default:
-			status = base.TurnStatusFailed
+			status = driverproto.TurnFailed
 			detail = "unknown codex turn status: " + n.Turn.Status
 		}
-		e.events.TurnEnded(n.Turn.ID, status, final, detail)
+		w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail})
 	case "item/started", "item/completed":
 		var n itemNotice
-		if json.Unmarshal(params, &n) != nil || !e.activeNotice(c, n.ThreadID, n.TurnID) {
+		if json.Unmarshal(params, &n) != nil || n.ThreadID != thread || driverproto.WorkerTurnRef(n.TurnID) != target.Native {
 			return
 		}
-		e.feedWatchdog(n.TurnID)
-		e.handleItem(c, method, n)
+		if n.Item.Type == "agentMessage" {
+			if method == "item/completed" && strings.TrimSpace(n.Item.Text) != "" {
+				w.mu.Lock()
+				w.final[target.Native] = n.Item.Text
+				w.mu.Unlock()
+			}
+			return
+		}
+		if n.Item.Type == "userMessage" || n.Item.Type == "reasoning" || n.Item.Type == "plan" || n.Item.Type == "contextCompaction" {
+			w.host.Events().Publish(driverproto.Activity{Target: target})
+			return
+		}
+		phase := driverproto.ToolStarted
+		if method == "item/completed" {
+			phase = driverproto.ToolEnded
+		}
+		name := n.Item.Tool
+		if name == "" {
+			name = n.Item.Type
+		}
+		status := driverproto.ToolStatusUnknown
+		if phase == driverproto.ToolEnded {
+			status = driverproto.ToolStatusCompleted
+			if strings.EqualFold(n.Item.Status, "failed") {
+				status = driverproto.ToolStatusFailed
+			}
+		}
+		w.host.Events().Publish(driverproto.Tool{Target: target, CallID: n.Item.ID, Phase: phase, Name: name, Status: status, Detail: boundedToolSummary(n.Item)})
 	case "error":
-		var n struct {
+		var notice struct {
 			ThreadID  string `json:"threadId"`
 			TurnID    string `json:"turnId"`
 			WillRetry bool   `json:"willRetry"`
@@ -131,69 +144,25 @@ func (e *engine) handleNotification(c *connection, method string, params json.Ra
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if json.Unmarshal(params, &n) == nil && e.activeNotice(c, n.ThreadID, n.TurnID) {
-			e.feedWatchdog(n.TurnID)
-			e.cfg.Logger.Warn("codex.turn_error", "turn", n.TurnID, "will_retry", n.WillRetry, "detail", n.Error.Message)
+		if json.Unmarshal(params, &notice) == nil && notice.ThreadID == thread && driverproto.WorkerTurnRef(notice.TurnID) == target.Native && target.Valid() {
+			w.host.Events().Publish(driverproto.Activity{Target: target})
 		}
-	case "deprecationNotice":
-		e.cfg.Logger.Warn("codex.deprecation_notice", "payload", string(params))
 	default:
-		if isDeltaMethod(method) {
-			return
+		if isDeltaMethod(method) && target.Valid() {
+			w.host.Events().Publish(driverproto.Activity{Target: target})
 		}
 	}
 }
 
-func (e *engine) threadMatches(id string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return id != "" && id == e.threadID
-}
-func (e *engine) activeNotice(c *connection, thread, turn string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.current == c && thread == e.threadID && turn != "" && turn == c.turnID
-}
-func (e *engine) handleItem(c *connection, method string, n itemNotice) {
-	phase := "started"
-	if method == "item/completed" {
-		phase = "ended"
-	}
-	if n.Item.Type == "agentMessage" {
-		if phase == "ended" && strings.TrimSpace(n.Item.Text) != "" {
-			e.mu.Lock()
-			c.final[n.TurnID] = n.Item.Text
-			e.mu.Unlock()
-		}
-		return
-	}
-	if n.Item.Type == "userMessage" || n.Item.Type == "reasoning" || n.Item.Type == "plan" || n.Item.Type == "contextCompaction" {
-		return
-	}
-	name := n.Item.Tool
-	if name == "" {
-		name = n.Item.Type
-	}
-	status := ""
-	if phase == "ended" {
-		status = registry.ActivityToolEndedStatusCompleted
-		if strings.EqualFold(n.Item.Status, "failed") {
-			status = registry.ActivityToolEndedStatusFailed
-		}
-	}
-	e.events.Tool(n.TurnID, n.Item.ID, phase, name, status, boundedToolSummary(n.Item))
-}
 func boundedToolSummary(item itemWire) string {
-	s := toolSummary(item)
+	s := redactNative(toolSummary(item))
 	r := []rune(s)
 	if len(r) <= toolSummaryMaxChars {
 		return s
 	}
 	mark := "…[truncated]"
-	limit := toolSummaryMaxChars - utf8.RuneCountInString(mark)
-	return string(r[:limit]) + mark
+	return string(r[:toolSummaryMaxChars-utf8.RuneCountInString(mark)]) + mark
 }
-
 func toolSummary(item itemWire) string {
 	switch item.Type {
 	case "commandExecution":
@@ -211,32 +180,28 @@ func toolSummary(item itemWire) string {
 	case "imageGeneration":
 		return firstNonEmpty(item.SavedPath, compactJSON(item.Result), item.Status)
 	case "collabAgentToolCall":
-		targets := strings.Join(item.ReceiverThreadIDs, ",")
-		return joinToolSummary(item.Tool, targets, item.Prompt, item.Status)
+		return joinToolSummary(item.Tool, strings.Join(item.ReceiverThreadIDs, ","), item.Prompt, item.Status)
 	default:
 		return firstNonEmpty(item.Command, item.AggregatedOutput, item.Status)
 	}
 }
-
 func joinToolSummary(parts ...string) string {
-	nonEmpty := parts[:0]
-	for _, part := range parts {
-		if part = strings.TrimSpace(part); part != "" {
-			nonEmpty = append(nonEmpty, part)
+	out := parts[:0]
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
-	return strings.Join(nonEmpty, " · ")
+	return strings.Join(out, " · ")
 }
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
+func firstNonEmpty(v ...string) string {
+	for _, s := range v {
+		if strings.TrimSpace(s) != "" {
+			return s
 		}
 	}
 	return ""
 }
-
 func compactJSON(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
@@ -252,39 +217,3 @@ func compactJSON(raw json.RawMessage) string {
 	return string(raw)
 }
 func isDeltaMethod(method string) bool { return strings.Contains(strings.ToLower(method), "delta") }
-
-func (e *engine) feedWatchdog(turn string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	c := e.current
-	if c == nil || turn == "" || turn != c.turnID {
-		return
-	}
-	if e.watchdog != nil {
-		e.watchdog.Stop()
-	}
-	e.watchdog = time.AfterFunc(watchdogInitialTimeout, func() {
-		e.mu.Lock()
-		live := e.current == c && c.turnID == turn
-		thread := e.threadID
-		e.mu.Unlock()
-		if !live {
-			return
-		}
-		// Best-effort interrupt, then request the single detach transition;
-		// only the CAS winner reports the timeout loss (an EOF observer may
-		// have beaten us here, in which case the loss is already reported).
-		_, _ = c.rpc.call(e.life, "turn/interrupt", map[string]any{"threadId": thread, "turnId": turn}, time.Second)
-		if e.detach(c) {
-			e.events.ProviderLost(base.LostTimeout, fmt.Sprintf("turn %s made no progress", turn))
-		}
-	})
-}
-func (e *engine) stopWatchdog() {
-	e.mu.Lock()
-	if e.watchdog != nil {
-		e.watchdog.Stop()
-		e.watchdog = nil
-	}
-	e.mu.Unlock()
-}

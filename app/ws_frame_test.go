@@ -1,7 +1,6 @@
 package app_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,34 +22,26 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type activityAcceptanceEngine struct{ events base.EventPort }
+type activityAcceptanceRuntime struct{ events base.RuntimeEvents }
 
-func (activityAcceptanceEngine) Boot(context.Context, base.BootPort) error { return nil }
-func (e activityAcceptanceEngine) StartTurn(op base.OpID, _ []base.Trigger, _ []base.ContextItem) error {
-	turnID := "acceptance-turn"
-	e.events.TurnStarted(op, turnID)
-	e.events.Tool(turnID, "acceptance-tool-1", "started", "acceptance_tool", "started", "")
-	e.events.Tool(turnID, "acceptance-tool-1", "ended", "acceptance_tool", "completed", "")
+func (e activityAcceptanceRuntime) Start(c base.StartCommand) error {
+	turnID := base.TurnID("acceptance-turn")
+	e.events.TurnStarted(c.Op, turnID)
+	e.events.Tool(turnID, base.ToolEvent{CallID: "acceptance-tool-1", Phase: "started", Name: "acceptance_tool"})
+	e.events.Tool(turnID, base.ToolEvent{CallID: "acceptance-tool-1", Phase: "ended", Name: "acceptance_tool", Status: "completed"})
 	e.events.TurnEnded(turnID, base.TurnStatusOK, "activity-ok", "")
 	return nil
 }
-func (e activityAcceptanceEngine) Steer(op base.OpID, _ base.Trigger) error {
-	e.events.ControlDone(op, base.ControlNotSteerable, "", "")
+func (e activityAcceptanceRuntime) Control(c base.ControlCommand) error {
+	e.events.ControlDone(c.Op, c.Target, base.ControlNotSteerable, "")
 	return nil
 }
-func (e activityAcceptanceEngine) Interrupt(op base.OpID) error {
-	e.events.ControlDone(op, base.ControlNoActiveTurn, "", "")
+func (activityAcceptanceRuntime) Terminate() error { return nil }
+func (e activityAcceptanceRuntime) EnsureReady(op base.OpID) error {
+	e.events.ReadyDone(op, base.ReadyResult{Ready: true})
 	return nil
 }
-func (activityAcceptanceEngine) Terminate() error { return nil }
-func (e activityAcceptanceEngine) EnsureAlive(op base.OpID) error {
-	e.events.ControlDone(op, base.ControlAccepted, "", "")
-	return nil
-}
-func (activityAcceptanceEngine) Describe() introspect.Describe {
-	return introspect.Describe{Description: "activity acceptance"}
-}
-func (activityAcceptanceEngine) Close() error { return nil }
+func (activityAcceptanceRuntime) Close() {}
 
 // ---------------------------------------------------------------------------
 // wsClient — a black-box gateway ws driver for the standard frame protocol
@@ -422,8 +413,8 @@ func TestWebSocketObservationStateMachine(t *testing.T) {
 func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 	env := setupTestApp(t)
 	testAgentBuilder = func(_ channel.ID, _ actor.ActorID) (actorbase.Proc, error) {
-		def, err := base.Def("activity acceptance", base.Config{NewEngine: func(_ actorbase.Sys, _ []byte, events base.EventPort) (base.Engine, error) {
-			return activityAcceptanceEngine{events: events}, nil
+		def, err := base.Def("activity acceptance", base.Config{Runtime: base.RuntimeSpec{Describe: introspect.Describe{Description: "activity acceptance"}}, NewRuntime: func(_ base.RuntimeDeps, _ []byte, events base.RuntimeEvents) (base.Runtime, error) {
+			return activityAcceptanceRuntime{events: events}, nil
 		}})
 		if err != nil {
 			return nil, err

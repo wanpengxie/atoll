@@ -15,11 +15,14 @@ import (
 )
 
 type childProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	done   chan error
-	once   sync.Once
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	done       chan error
+	waitDone   chan struct{}
+	stderrDone chan struct{}
+	reaped     chan struct{}
+	once       sync.Once
 }
 type processFactory func(context.Context, Config) (*childProcess, error)
 
@@ -27,10 +30,7 @@ func spawnProcess(ctx context.Context, cfg Config) (*childProcess, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	gateKey := cfg.ActorID
-	if gateKey == "" {
-		gateKey = cfg.Binary
-	}
+	gateKey := cfg.Binary + "@" + cfg.WorkspaceDir
 	if err := waitSpawnGate(ctx, gateKey); err != nil {
 		return nil, err
 	}
@@ -70,12 +70,14 @@ func spawnProcess(ctx context.Context, cfg Config) (*childProcess, error) {
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 	recordSpawnSuccess(gateKey)
-	p := &childProcess{cmd: cmd, stdin: stdin, stdout: stdout, done: make(chan error, 1)}
+	p := &childProcess{cmd: cmd, stdin: stdin, stdout: stdout, done: make(chan error, 1), waitDone: make(chan struct{}), stderrDone: make(chan struct{}), reaped: make(chan struct{})}
 	go func() {
+		defer close(p.stderrDone)
 		_, _ = io.Copy(logWriter{logger: cfg.Logger}, stderr)
 		_ = stderr.Close()
 	}()
-	go func() { p.done <- cmd.Wait(); close(p.done) }()
+	go func() { p.done <- cmd.Wait(); close(p.done); close(p.waitDone) }()
+	go func() { <-p.waitDone; <-p.stderrDone; close(p.reaped) }()
 	return p, nil
 }
 
@@ -85,7 +87,7 @@ type logWriter struct {
 
 func (w logWriter) Write(p []byte) (int, error) {
 	if len(p) > 0 {
-		w.logger.Warn("codex.app_server.stderr", "text", string(p))
+		w.logger.Warn("codex.app_server.stderr", "text", redactNative(string(p)))
 	}
 	return len(p), nil
 }
@@ -93,28 +95,15 @@ func (w logWriter) Write(p []byte) (int, error) {
 func (p *childProcess) stop() {
 	p.once.Do(func() {
 		_ = p.stdin.Close()
+		_ = p.stdout.Close()
 		if p.cmd == nil || p.cmd.Process == nil {
 			return
 		}
 		pgid, err := syscall.Getpgid(p.cmd.Process.Pid)
 		if err == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGTERM)
-		} else {
-			_ = p.cmd.Process.Signal(syscall.SIGTERM)
-		}
-		select {
-		case <-p.done:
-			return
-		case <-time.After(2 * time.Second):
-		}
-		if pgid > 0 {
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		} else {
 			_ = p.cmd.Process.Kill()
-		}
-		select {
-		case <-p.done:
-		case <-time.After(2 * time.Second):
 		}
 	})
 }

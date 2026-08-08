@@ -4,8 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/atoll/drivers/agents/base"
-	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
 
 func TestInputLimitCountsUnicodeCharacters(t *testing.T) {
@@ -23,7 +22,7 @@ func TestInputLimitCountsUnicodeCharacters(t *testing.T) {
 		{"emoji-n+1", "🙂", inputMaxChars + 1, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := buildInput([]base.Trigger{{Envelope: message.Envelope{Payload: []byte(strings.Repeat(tt.unit, tt.count))}}}, nil)
+			_, err := buildInput([]driverproto.DriverMessage{{Text: strings.Repeat(tt.unit, tt.count)}}, nil)
 			if (err == nil) != tt.ok {
 				t.Fatalf("err=%v ok=%v", err, tt.ok)
 			}

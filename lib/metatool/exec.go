@@ -221,8 +221,7 @@ func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestS
 // ackResult renders the immediate ack with the standard collect-it guidance.
 func (x *Exec) ackResult(toolName string, ack AckDescriptor) ResultValue {
 	id := ack.RequestID.String()
-	ack.Guidance = "Accepted. To wait, call await_result(request_id=" + id +
-		"). If you do not wait, the result returns as a new message (parent_id=" + id + ")."
+	ack.Guidance = "Accepted. Claim the final explicitly with await_result(request_id=" + id + ")."
 	ack.ToWait, ack.NotWaiting = newCollectHint(id)
 	return AckResult(toolName, ack)
 }

@@ -74,7 +74,7 @@ func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.No
 	dir := filepath.Dir(thisFile)
 	methods := map[string]bool{}
 	declarations := map[string]ast.Node{}
-	for _, name := range []string{"connection.go", "engine.go", "output.go", "rpc.go", "session.go"} {
+	for _, name := range []string{"worker.go", "output.go", "rpc.go", "session.go"} {
 		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -112,12 +112,12 @@ func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.No
 func protocolTokensForMethod(t *testing.T, method string, declarations map[string]ast.Node) map[string]bool {
 	t.Helper()
 	contexts := map[string][]string{
-		"initialize": {"openConnection"}, "initialized": {"openConnection"},
-		"thread/start": {"establishSession", "threadIDFrom"}, "thread/resume": {"resumeThread", "threadIDFrom"},
-		"turn/start": {"startTurn"}, "turn/steer": {"executeControl"}, "turn/interrupt": {"executeControl", "feedWatchdog"},
-		"turn/started": {"handleNotification", "turnNotice", "turnWire"}, "turn/completed": {"handleNotification", "turnNotice", "turnWire"},
-		"item/started": {"handleNotification", "handleItem", "itemNotice", "itemWire"}, "item/completed": {"handleNotification", "handleItem", "itemNotice", "itemWire"},
-		"error": {"handleNotification"}, "currentTime/read": {"handleServerRequest"},
+		"initialize": {"Open"}, "initialized": {"Open"},
+		"thread/start": {"establishSession", "threadIDFrom"}, "thread/resume": {"establishSession", "threadIDFrom"},
+		"turn/start": {"Start"}, "turn/steer": {"Control"}, "turn/interrupt": {"Control"},
+		"turn/started": {"notification", "turnNotice", "turnWire"}, "turn/completed": {"notification", "turnNotice", "turnWire"},
+		"item/started": {"notification", "itemNotice", "itemWire"}, "item/completed": {"notification", "itemNotice", "itemWire"},
+		"error": {"notification"}, "currentTime/read": {"handleServerRequest"},
 		"item/commandExecution/requestApproval": {"handleServerRequest"}, "item/fileChange/requestApproval": {"handleServerRequest"},
 		"item/permissions/requestApproval": {"handleServerRequest", "handleRequest", "rpcError"}, "execCommandApproval": {"handleServerRequest"},
 		"applyPatchApproval": {"handleServerRequest"},

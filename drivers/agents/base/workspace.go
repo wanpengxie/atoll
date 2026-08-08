@@ -17,6 +17,7 @@ func (l *agentLoop) reply(item *requestItem, value any) {
 		return
 	}
 	item.closed = true
+	item.scope.Revoke()
 }
 
 func (l *agentLoop) fail(item *requestItem, code, detail string) {
@@ -30,6 +31,7 @@ func (l *agentLoop) fail(item *requestItem, code, detail string) {
 		return
 	}
 	item.closed = true
+	item.scope.Revoke()
 }
 
 func isClosed(err error) bool { return errors.Is(err, actorbase.ErrRequestClosed) }

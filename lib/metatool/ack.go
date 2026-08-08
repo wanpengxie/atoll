@@ -34,7 +34,7 @@ func newCollectHint(requestID string) (ToWaitHint, string) {
 			Tool:   "await_result",
 			Params: map[string]any{"request_id": requestID},
 		},
-		"result returns as kind=response, parent_id=" + requestID + " new turn trigger"
+		"result stays in the caller job table; claim it with await_result(request_id=" + requestID + ")"
 }
 
 // FastPathWindow is the default bounded-wait window for call_actor.

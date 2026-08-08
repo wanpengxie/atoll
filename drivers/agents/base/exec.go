@@ -2,7 +2,6 @@ package base
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -11,51 +10,36 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// ExecFace builds the meta-tool execution face from this incarnation's Sys
-// (期10 S5). The seven meta-tools drive TWO substrate faces:
-//
-//   - the out-station JobTable (call_actor/await_result/cancel/list_pending):
-//     the engine IS the JobTable, so the base extracts it via
-//     sys.(actorbase.JobTable) — the engine concrete type implements both Sys
-//     and JobTable (spec §5"形施工定"授权面内).
-//   - a synchronous sys.Call face (describe×2/list_actors): a transient
-//     request+await-final round-trip that never litters the durable job table.
-//
-// fastPathWindow is the volatile inline-wait cap (the sync EXPERIENCE). The
-// provider builds this once per incarnation and threads it into its engine's
-// tool handlers.
+// ExecFace binds all metatool calls to the incarnation's one JobTable. Even
+// transient introspection submits the full RequestSpec, awaits it, and cancels
+// the row on timeout; no reduced sys.Call path can discard correlation fields.
 func ExecFace(sys actorbase.Sys, fastPathWindow time.Duration) *metatool.Exec {
 	jobs, _ := sys.(actorbase.JobTable)
 	return &metatool.Exec{
 		Jobs:           jobs,
-		Call:           callFace(sys),
+		Call:           transientCallBridge(jobs),
 		Clock:          time.Now,
 		FastPathWindow: fastPathWindow,
 	}
 }
 
-// callFace wraps sys.Call + Pending.Wait into the metatool.CallFunc the
-// introspection queries drive: submit a transient request, block up to window
-// for its final. ok=false = no final within the window (the Pending returns a
-// zero Msg).
-func callFace(sys actorbase.Sys) metatool.CallFunc {
+// transientCallBridge is the bounded introspection face. Unlike call_actor, a
+// timed-out transient query is explicitly cancelled instead of retained.
+func transientCallBridge(jobs actorbase.JobTable) metatool.CallFunc {
 	return func(ctx context.Context, spec behavior.RequestSpec, window time.Duration) (*message.Envelope, bool, error) {
-		if len(spec.Audience) == 0 {
-			return nil, false, errors.New("agent/base: call audience required")
-		}
-		p, err := sys.Call(spec.Audience[0], spec.Type, spec.Payload)
+		id, err := jobs.Submit(spec)
 		if err != nil {
 			return nil, false, err
 		}
-		msg, err := p.Wait(ctx, window)
+		env, ok, err := jobs.Await(ctx, id, window)
 		if err != nil {
+			_ = jobs.Cancel(id)
 			return nil, false, err
 		}
-		if msg.ID == "" {
-			// No final within the window (Pending.Wait returns a zero Msg).
+		if !ok {
+			_ = jobs.Cancel(id)
 			return nil, false, nil
 		}
-		env := envelopeFromMsg(msg)
-		return &env, true, nil
+		return env, true, nil
 	}
 }

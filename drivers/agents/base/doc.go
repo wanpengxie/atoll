@@ -1,7 +1,4 @@
-// Package base owns the provider-independent agent mailbox specialization.
-// One arbitration loop merges mailbox intake, provider EventPort callbacks,
-// request closures, control deadlines, and watchdog expiry. Its explicit
-// bounded buffer, committing set, workspace owner, control slot, and settling
-// fence keep requests paired while provider engines remain asynchronous. Base
-// alone writes progress, activity, terminal envelopes, and resume state.
+// Package base owns the channel-facing agent product ledger. It translates
+// requests and controls into typed Runtime commands, owns every user terminal
+// and EffectScope, and never observes provider generations or native protocol.
 package base

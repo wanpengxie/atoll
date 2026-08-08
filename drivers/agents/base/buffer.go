@@ -1,9 +1,11 @@
 package base
 
 import (
+	"encoding/json"
+	"strings"
+
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 const (
@@ -13,55 +15,59 @@ const (
 )
 
 type requestItem struct {
-	msg         actorbase.Msg
-	trigger     Trigger
-	bytes       int
-	explicitCAS bool
-	closed      bool
+	msg          actorbase.Msg
+	input        RuntimeInput
+	scope        EffectScope
+	bytes        int
+	explicitCAS  bool
+	expectedTurn TurnID
+	closed       bool
 }
 
-func newRequestItem(msg actorbase.Msg, index int) *requestItem {
-	return &requestItem{
-		msg: msg,
-		trigger: Trigger{
-			Envelope:      envelopeFromMsg(msg),
-			CorrelationID: behavior.CorrelationID(msg.CorrelationID, msg.ID),
-			Index:         index,
-		},
-		bytes: len(msg.Payload),
+func newRequestItem(msg actorbase.Msg) *requestItem {
+	corr := behavior.CorrelationID(msg.CorrelationID, msg.ID)
+	return &requestItem{msg: msg, input: RuntimeInput{SourceID: string(msg.ID), Type: msg.Type, Sender: string(msg.Sender.ID), Payload: append(json.RawMessage(nil), msg.Payload...), Text: messageText(msg.Payload)}, scope: NewEffectScope(string(msg.ID), string(corr)), bytes: len(msg.Payload)}
+}
+func messageText(raw json.RawMessage) string {
+	var p struct {
+		Text *string `json:"text"`
 	}
+	if json.Unmarshal(raw, &p) == nil && p.Text != nil {
+		return *p.Text
+	}
+	return string(raw)
+}
+func steerInput(item *requestItem) RuntimeInput {
+	x := item.input
+	x.Type = ""
+	x.Payload = nil
+	x.Text = strings.TrimSpace(messageText(item.msg.Payload))
+	return x
 }
 
 type requestBuffer struct {
-	items    []*requestItem
-	bytes    int
-	maxCount int
-	maxBytes int
+	items                     []*requestItem
+	bytes, maxCount, maxBytes int
 }
 
-func (b *requestBuffer) push(item *requestItem) bool {
-	if len(b.items)+1 > b.maxCount || b.bytes+item.bytes > b.maxBytes {
+func (b *requestBuffer) push(i *requestItem) bool {
+	if len(b.items)+1 > b.maxCount || b.bytes+i.bytes > b.maxBytes {
 		return false
 	}
-	b.items = append(b.items, item)
-	b.bytes += item.bytes
+	b.items = append(b.items, i)
+	b.bytes += i.bytes
 	return true
 }
-
 func (b *requestBuffer) remove(id string) *requestItem {
-	for i, item := range b.items {
-		if string(item.msg.ID) != id {
-			continue
+	for n, i := range b.items {
+		if string(i.msg.ID) == id {
+			b.items = append(b.items[:n], b.items[n+1:]...)
+			b.bytes -= i.bytes
+			return i
 		}
-		b.items = append(b.items[:i], b.items[i+1:]...)
-		b.bytes -= item.bytes
-		return item
 	}
 	return nil
 }
-
-// popBatch consumes one consecutive same-sender batch. Closed entries are
-// discarded before grouping; a different sender is a hard batch boundary.
 func (b *requestBuffer) popBatch(max int) []*requestItem {
 	for len(b.items) > 0 && b.items[0].closed {
 		b.bytes -= b.items[0].bytes
@@ -72,24 +78,13 @@ func (b *requestBuffer) popBatch(max int) []*requestItem {
 	}
 	sender := b.items[0].msg.Sender.ID
 	n := 0
-	for n < len(b.items) && n < max && b.items[n].msg.Sender.ID == sender {
-		if b.items[n].closed {
-			break
-		}
+	for n < len(b.items) && n < max && b.items[n].msg.Sender.ID == sender && !b.items[n].closed {
 		n++
 	}
 	out := append([]*requestItem(nil), b.items[:n]...)
-	for _, item := range out {
-		b.bytes -= item.bytes
+	for _, i := range out {
+		b.bytes -= i.bytes
 	}
 	b.items = b.items[n:]
 	return out
-}
-
-func envelopeFromMsg(m actorbase.Msg) (env message.Envelope) {
-	env.ID, env.TS, env.ChannelID, env.Sender = m.ID, m.TS, m.ChannelID, m.Sender
-	env.Kind, env.Type, env.Payload = m.Kind, m.Type, m.Payload
-	env.ParentID, env.CorrelationID = m.ParentID, m.CorrelationID
-	env.Visibility, env.Audience, env.ExpiresAt = m.Visibility, m.Audience, m.ExpiresAt
-	return env
 }

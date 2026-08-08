@@ -30,10 +30,9 @@ Result shapes (fast-path, default):
     where code is the actor-CLI closed set.
   - Long calls (still running past the fast-path window): you get an ACK instead —
     {status:"accepted", request_id, est_wait_ms, guidance, to_wait, if_not_waiting}.
-    The call keeps running. To collect it, call await_result(request_id) to block,
-    or do other work — the result will return on its own as a NEW message
-    (parent_id = request_id) you can react to in a later turn. Use list_pending()
-    to see what is still in flight, and cancel(request_id) to stop one.
+    The call keeps running. Its final is retained by the caller job table and is
+    claimed explicitly with await_result(request_id). Use list_pending() to see
+    what is still in flight, and cancel(request_id) to stop one.
 
 wait parameter:
   - omit / true (default behaviour above is bounded; pass wait=true for sync):

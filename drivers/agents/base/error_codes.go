@@ -10,6 +10,7 @@ const (
 	errorProviderFailed  = "provider_failed"
 	errorInputTooLarge   = "input_too_large"
 	errorEmptyInput      = "empty_input"
+	errorAgentInternal   = "agent_internal"
 )
 
 var runtimeErrorCodes = []string{
@@ -22,4 +23,5 @@ var runtimeErrorCodes = []string{
 	errorProviderFailed,
 	errorInputTooLarge,
 	errorEmptyInput,
+	errorAgentInternal,
 }

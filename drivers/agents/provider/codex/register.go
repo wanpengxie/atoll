@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/atoll/drivers/agents/base"
+	agentruntime "github.com/wanpengxie/atoll/drivers/agents/runtime"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
@@ -25,12 +25,11 @@ func newDecl(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("codex config: %w", err)
 	}
-	cfg.ActorID = string(spec.ID)
-	def, err := base.Def(agentSkillDoc, base.Config{NewEngine: newEngineFn(cfg), SupportedControls: []string{base.TypeSteer, base.TypeInterrupt, base.TypeTerminate, base.TypeRestart}})
+	def, err := agentruntime.Def(NewProvider(cfg))
 	if err != nil {
 		return platform.ActorDecl{}, err
 	}
 	return platform.ActorDecl{ID: spec.ID, Kind: actor.KindAgent, Factory: platform.ActorFactory{Proc: def}}, nil
 }
 
-const agentSkillDoc = "# codex agent\n\nWorkspace-backed assistant using the local Codex app-server. Ordinary non-reserved request types are content; standard agent controls are declared through actor.describe.\n"
+const agentSkillDoc = "# codex agent\n\nWorkspace-backed assistant using the local Codex app-server."

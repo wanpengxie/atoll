@@ -6,281 +6,184 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/registry"
 )
+
+type runtimeEventKind uint8
 
 const (
-	bootTimeout = 30 * time.Second
-	// watchdogInitialTimeout bounds how long the loop may sit in a non-idle
-	// state without evidence of progress. It is deliberately weaker than a
-	// provider's own turn watchdog: an engine sees every provider-side signal
-	// (including ones that never cross EventPort, e.g. retrying errors), so in
-	// the window where both apply the better-informed owner must get to rule
-	// first. This one is the backstop for what no engine can see — a stall
-	// with no turn at all, or an engine that reports nothing whatsoever.
-	watchdogInitialTimeout = 20 * time.Minute
+	evTurnStarted runtimeEventKind = iota
+	evTurnRejected
+	evTool
+	evTurnEnded
+	evControlDone
+	evReadyDone
+	evProviderLost
+	evSeed
 )
 
-type loopState uint8
-
-const (
-	stateIdle loopState = iota
-	stateStarting
-	stateTurnActive
-	stateInterrupting
-)
-
-type eventKind uint8
-
-const (
-	eventTurnStarted eventKind = iota
-	eventTurnRejected
-	eventTool
-	eventTurnEnded
-	eventControlDone
-	eventProviderLost
-)
-
-type providerEvent struct {
-	kind       eventKind
-	op         OpID
-	turnID     string
-	code       string
-	detail     string
-	callID     string
-	phase      string
-	name       string
-	toolStatus string
-	status     TurnStatus
-	finalText  string
-	verdict    ControlVerdict
-	cause      LostCause
+type runtimeEvent struct {
+	kind               runtimeEventKind
+	op                 OpID
+	turnID             TurnID
+	code, detail, text string
+	tool               ToolEvent
+	status             TurnStatus
+	verdict            ControlVerdict
+	ready              ReadyResult
+	cause              LostCause
+	seed               []byte
 }
-
-type eventPort struct {
+type runtimePort struct {
 	life    context.Context
-	events  chan<- providerEvent
-	sys     actorbase.Sys
-	closed  atomic.Bool
+	mu      sync.Mutex
+	closed  bool
+	items   []runtimeEvent
+	wake    chan struct{}
 	persist persistCoordinator
+	sys     actorbase.Sys
 }
 
-func (p *eventPort) send(e providerEvent) {
-	if p.closed.Load() {
+func (p *runtimePort) send(v runtimeEvent) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
 		return
 	}
+	p.items = append(p.items, v)
+	p.mu.Unlock()
 	select {
-	case p.events <- e:
-	case <-p.life.Done():
+	case p.wake <- struct{}{}:
+	default:
 	}
 }
-func (p *eventPort) TurnStarted(op OpID, turnID string) {
-	p.send(providerEvent{kind: eventTurnStarted, op: op, turnID: turnID})
+func (p *runtimePort) Seal() { p.mu.Lock(); p.closed = true; p.items = nil; p.mu.Unlock() }
+func (p *runtimePort) pop() (runtimeEvent, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.items) == 0 {
+		return runtimeEvent{}, false
+	}
+	v := p.items[0]
+	p.items[0] = runtimeEvent{}
+	p.items = p.items[1:]
+	return v, true
 }
-func (p *eventPort) TurnRejected(op OpID, code, detail string) {
-	p.send(providerEvent{kind: eventTurnRejected, op: op, code: code, detail: detail})
+func (p *runtimePort) TurnStarted(op OpID, id TurnID) {
+	p.send(runtimeEvent{kind: evTurnStarted, op: op, turnID: id})
 }
-func (p *eventPort) Tool(turnID, callID string, phase, name, status, detail string) {
-	p.send(providerEvent{kind: eventTool, turnID: turnID, callID: callID, phase: phase, name: name, toolStatus: status, detail: detail})
+func (p *runtimePort) TurnRejected(op OpID, c, d string) {
+	p.send(runtimeEvent{kind: evTurnRejected, op: op, code: c, detail: d})
 }
-func (p *eventPort) TurnEnded(turnID string, status TurnStatus, finalText string, errInfo string) {
-	p.send(providerEvent{kind: eventTurnEnded, turnID: turnID, status: status, finalText: finalText, detail: errInfo})
+func (p *runtimePort) Tool(id TurnID, t ToolEvent) {
+	p.send(runtimeEvent{kind: evTool, turnID: id, tool: t})
 }
-func (p *eventPort) ControlDone(op OpID, verdict ControlVerdict, turnID, detail string) {
-	p.send(providerEvent{kind: eventControlDone, op: op, verdict: verdict, turnID: turnID, detail: detail})
+func (p *runtimePort) TurnEnded(id TurnID, s TurnStatus, text, detail string) {
+	p.send(runtimeEvent{kind: evTurnEnded, turnID: id, status: s, text: text, detail: detail})
 }
-func (p *eventPort) ProviderLost(cause LostCause, detail string) {
-	p.send(providerEvent{kind: eventProviderLost, cause: cause, detail: detail})
+func (p *runtimePort) ControlDone(op OpID, id TurnID, v ControlVerdict, d string) {
+	p.send(runtimeEvent{kind: evControlDone, op: op, turnID: id, verdict: v, detail: d})
 }
-func (p *eventPort) Persist(key string, value []byte) { p.persist.submit(p.sys, key, value) }
+func (p *runtimePort) ReadyDone(op OpID, r ReadyResult) {
+	p.send(runtimeEvent{kind: evReadyDone, op: op, ready: r})
+}
+func (p *runtimePort) ProviderLost(id TurnID, c LostCause, d string) {
+	p.send(runtimeEvent{kind: evProviderLost, turnID: id, cause: c, detail: d})
+}
+func (p *runtimePort) ResumeSeedUpdated(v []byte) {
+	p.send(runtimeEvent{kind: evSeed, seed: append([]byte(nil), v...)})
+}
 
 type closureEvent struct{ id string }
-
-type operation struct {
-	kind string
-	item *requestItem
-}
-
-type turnResult struct {
-	status TurnStatus
-	text   string
-	err    string
-}
-
-type controlSlot struct {
-	kind    string
-	item    *requestItem
-	op      OpID
-	rpcDone bool
-	phase   string
-	// timer is the slot's enforcement deadline. It is armed at enslotment —
-	// the verb's time bound is defined from acceptance, not from whichever
-	// phase later submits an RPC — and stopped only at the slot's terminal.
-	timer *time.Timer
-}
-
 type agentLoop struct {
-	def    definition
-	sys    actorbase.Sys
-	eng    Engine
-	events chan providerEvent
-
-	state      loopState
-	settling   bool
-	turnID     string
-	turnIndex  int
-	nextItem   int
-	nextOp     uint64
-	buffer     requestBuffer
-	committing map[OpID]*operation
-	active     *requestItem
-	lastOwner  *requestItem
-	// ownerDroppedByControl records that the workspace's owner was removed by
-	// an explicit control (stop/terminate/restart) rather than lost to a race.
-	// It is cleared when a new turn takes the workspace.
-	ownerDroppedByControl bool
-	result                *turnResult
-	background            []ContextItem
-
-	pendingControl   *controlSlot
-	executingControl *controlSlot
-	controlExpiry    chan *controlSlot
+	def                                        definition
+	sys                                        actorbase.Sys
+	rt                                         Runtime
+	port                                       *runtimePort
+	book                                       baseBook
+	background                                 []RuntimeContextItem
+	nextOp, nextTurn, nextAction, nextRevision uint64
+	intake                                     chan actorbase.Msg
+	recvErr                                    chan error
+	closures                                   chan closureEvent
+	deadlines                                  chan deadlineFire
 }
 
 func (d definition) run(sys actorbase.Sys) error {
-	events := make(chan providerEvent, 256)
-	port := &eventPort{life: sys.Life(), events: events, sys: sys}
-	eng, err := d.cfg.NewEngine(sys, readSeed(sys), port)
+	port := &runtimePort{life: sys.Life(), wake: make(chan struct{}, 1), sys: sys}
+	tools := newToolBridge(sys)
+	resources := newResourceBridge(sys)
+	rt, err := d.cfg.NewRuntime(RuntimeDeps{Parent: sys.Life(), Tools: tools, Resources: resources}, readSeed(sys), port)
 	if err != nil {
-		return fmt.Errorf("agent/base: engine construct: %w", err)
+		return fmt.Errorf("agent/base: runtime construct: %w", err)
 	}
-	defer func() {
-		port.closed.Store(true)
-		_ = eng.Close()
-	}()
-
-	bootCtx, cancel := context.WithTimeout(sys.Life(), bootTimeout)
-	background := loadCatchup(bootCtx, sys)
-	if err := eng.Boot(bootCtx, port); err != nil {
-		cancel()
-		return fmt.Errorf("agent/base: engine boot: %w", err)
-	}
-	cancel()
-
-	l := &agentLoop{
-		def: d, sys: sys, eng: eng, state: stateIdle, background: background,
-		buffer:        requestBuffer{maxCount: d.cfg.BufferMaxCount, maxBytes: d.cfg.BufferMaxBytes},
-		committing:    make(map[OpID]*operation),
-		controlExpiry: make(chan *controlSlot, 4),
-		events:        events,
-	}
-	defer func() {
-		l.closeSlot(l.pendingControl)
-		l.closeSlot(l.executingControl)
-	}()
-	intake := make(chan actorbase.Msg)
-	recvErr := make(chan error, 1)
-	go func() {
-		for {
-			msg, err := sys.Recv()
-			if err != nil {
-				recvErr <- err
-				return
-			}
-			select {
-			case intake <- msg:
-			case <-sys.Life().Done():
-				return
-			}
-		}
-	}()
-	closures := make(chan closureEvent, d.cfg.BufferMaxCount+32)
-	watchdog := time.NewTimer(time.Hour)
-	if !watchdog.Stop() {
-		<-watchdog.C
-	}
+	defer func() { port.Seal(); rt.Close() }()
+	l := &agentLoop{def: d, sys: sys, rt: rt, port: port, background: loadCatchup(sys.Life(), sys), intake: make(chan actorbase.Msg), recvErr: make(chan error, 1), closures: make(chan closureEvent, d.cfg.BufferMaxCount+32), deadlines: make(chan deadlineFire, 64)}
+	l.book.buffer = requestBuffer{maxCount: d.cfg.BufferMaxCount, maxBytes: d.cfg.BufferMaxBytes}
+	l.book.committing = map[OpID]*commitOp{}
+	go l.receive()
+	return l.runLoop()
+}
+func (l *agentLoop) receive() {
 	for {
-		turnBefore := l.turnIndex
+		m, err := l.sys.Recv()
+		if err != nil {
+			select {
+			case l.recvErr <- err:
+			case <-l.sys.Life().Done():
+			}
+			return
+		}
 		select {
-		case <-sys.Life().Done():
+		case l.intake <- m:
+		case <-l.sys.Life().Done():
+			return
+		}
+	}
+}
+func (l *agentLoop) runLoop() error {
+	for {
+		select {
+		case <-l.sys.Life().Done():
 			return nil
-		case err := <-recvErr:
-			if sys.Life().Err() != nil {
+		case err := <-l.recvErr:
+			if l.sys.Life().Err() != nil {
 				return nil
 			}
 			return err
-		case msg := <-intake:
-			l.handleIntake(msg, closures)
-			l.reconcileWatchdog(watchdog, false, turnBefore)
-		case e := <-events:
-			progress := l.isCurrentProgress(e)
-			l.handleProviderEvent(e)
-			l.reconcileWatchdog(watchdog, progress, turnBefore)
-		case c := <-closures:
+		case m := <-l.intake:
+			l.handleIntake(m)
+		case <-l.port.wake:
+			for {
+				e, ok := l.port.pop()
+				if !ok {
+					break
+				}
+				l.handleRuntimeEvent(e)
+				if l.book.fault != nil {
+					break
+				}
+			}
+		case c := <-l.closures:
 			l.handleClosure(c.id)
-			l.reconcileWatchdog(watchdog, false, turnBefore)
-		case slot := <-l.controlExpiry:
-			l.expireControl(slot)
-			l.reconcileWatchdog(watchdog, false, turnBefore)
-		case <-watchdog.C:
-			_ = l.eng.Interrupt(l.opID())
-			_ = l.eng.Terminate()
-			l.providerLost(LostTimeout, "provider watchdog expired")
-			l.reconcileWatchdog(watchdog, false, turnBefore)
-		}
-	}
-}
-
-func (l *agentLoop) isCurrentProgress(e providerEvent) bool {
-	switch e.kind {
-	case eventTurnStarted, eventTurnRejected:
-		op := l.committing[e.op]
-		return op != nil && op.kind == "start"
-	case eventTool, eventTurnEnded:
-		return e.turnID != "" && e.turnID == l.turnID
-	default:
-		return false
-	}
-}
-
-// reconcileWatchdog treats the watchdog as a lease on non-idle states,
-// reconciled from state deltas at the end of every loop iteration — never from
-// classifying which event arrived. A new turn (turnIndex moved) always takes a
-// fresh lease, so side-effect paths that start turns (crash recovery, control
-// expiry) cannot inherit a stale remainder; progress evidence refreshes it;
-// idle drops it.
-func (l *agentLoop) reconcileWatchdog(t *time.Timer, progress bool, turnBefore int) {
-	drain := func() {
-		if !t.Stop() {
-			select {
-			case <-t.C:
-			default:
+		case d := <-l.deadlines:
+			if l.deadlineCurrent(d) {
+				return l.runtimeFault("receipt_backstop", d.kind+" receipt deadline exceeded")
 			}
 		}
-	}
-	if l.state == stateIdle {
-		drain()
-		return
-	}
-	if progress || l.turnIndex != turnBefore {
-		drain()
-		t.Reset(watchdogInitialTimeout)
+		if l.book.fault != nil {
+			return fmt.Errorf("agent/base: runtime fault: %s", l.book.fault.detail)
+		}
 	}
 }
 
-func (l *agentLoop) opID() OpID {
-	l.nextOp++
-	return OpID(fmt.Sprintf("op-%d", l.nextOp))
-}
-
-func (l *agentLoop) handleIntake(msg actorbase.Msg, closures chan<- closureEvent) {
-	// Kind/self fencing is intentionally before all type dispatch.
+func (l *agentLoop) opID() OpID { l.nextOp++; return OpID(fmt.Sprintf("op-%d", l.nextOp)) }
+func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	if msg.Kind != message.KindRequest || msg.Sender.ID == l.sys.Self() {
 		return
 	}
@@ -289,27 +192,23 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg, closures chan<- closureEvent
 		return
 	}
 	if strings.HasPrefix(msg.Type, "agent.") {
-		_, known := map[string]struct{}{TypeSteer: {}, TypeInterrupt: {}, TypeQueue: {}, TypeStop: {}, TypeTerminate: {}, TypeRestart: {}}[msg.Type]
-		// Steer is also a content form: providers without a steer primitive
-		// degrade it to the ordinary queue. All other reserved controls remain
-		// governed by the frozen capability snapshot.
+		known := msg.Type == TypeSteer || msg.Type == TypeInterrupt || msg.Type == TypeQueue || msg.Type == TypeStop || msg.Type == TypeTerminate || msg.Type == TypeRestart
 		if !known || (msg.Type != TypeSteer && !l.def.supports(msg.Type)) {
 			_, _ = l.sys.Fail(msg, "type_unsupported", "agent does not support "+msg.Type)
 			return
 		}
 	}
-	l.nextItem++
-	item := newRequestItem(msg, l.nextItem)
+	i := newRequestItem(msg)
 	if msg.Type == TypeSteer {
 		var p struct {
-			ExpectedTurnID string `json:"expected_turn_id"`
+			Expected string `json:"expected_turn_id"`
 		}
 		_ = json.Unmarshal(msg.Payload, &p)
-		item.explicitCAS = strings.TrimSpace(p.ExpectedTurnID) != ""
-		if !controlHasContent(item) {
-			// Empty input is a mandatory failure form for steer in every
-			// state — degrading it to the queue would start a blank turn.
-			l.fail(item, errorEmptyInput, "steer requires text input")
+		i.explicitCAS = strings.TrimSpace(p.Expected) != ""
+		i.expectedTurn = TurnID(strings.TrimSpace(p.Expected))
+		i.input = steerInput(i)
+		if strings.TrimSpace(messageText(msg.Payload)) == "" {
+			l.fail(i, errorEmptyInput, "steer requires text input")
 			return
 		}
 	}
@@ -317,32 +216,37 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg, closures chan<- closureEvent
 		select {
 		case <-ctx.Done():
 			select {
-			case closures <- closureEvent{id: id}:
+			case l.closures <- closureEvent{id}:
 			case <-l.sys.Life().Done():
 			}
 		case <-l.sys.Life().Done():
 		}
 	}(string(msg.ID), msg.Ctx())
-
 	switch msg.Type {
 	case TypeQueue:
-		l.enqueue(item, true)
+		i.input = steerInput(i)
+		l.enqueue(i, true)
 	case TypeSteer:
-		l.acceptContent(item, true)
-	case TypeInterrupt, TypeStop, TypeTerminate, TypeRestart:
-		l.acceptControl(item)
+		l.acceptContent(i, true)
+	case TypeInterrupt:
+		l.acceptAction(actionInterrupt, i)
+	case TypeStop:
+		l.acceptAction(actionStop, i)
+	case TypeTerminate:
+		l.acceptAction(actionTerminate, i)
+	case TypeRestart:
+		l.acceptAction(actionRestart, i)
 	default:
-		l.acceptContent(item, false)
+		l.acceptContent(i, false)
 	}
 }
-
 func (l *agentLoop) answerDescribe(msg actorbase.Msg) {
 	req, err := introspect.ParseDescribeRequest(msg.Payload)
 	if err != nil {
 		_, _ = l.sys.Fail(msg, "payload_invalid", err.Error())
 		return
 	}
-	d := l.eng.Describe()
+	d := l.def.cfg.Runtime.Describe
 	d.ActorID = string(l.sys.Self())
 	if d.Types == nil {
 		d.Types = map[string]introspect.TypeMeta{}
@@ -358,331 +262,513 @@ func (l *agentLoop) answerDescribe(msg actorbase.Msg) {
 	_, _ = l.sys.Reply(msg, answer)
 }
 
-func (l *agentLoop) enqueue(item *requestItem, progress bool) {
-	if !l.buffer.push(item) {
-		l.fail(item, errorOverloaded, "agent request buffer limit exceeded")
+func (l *agentLoop) enqueue(i *requestItem, progress bool) {
+	if !l.book.buffer.push(i) {
+		l.fail(i, errorOverloaded, "agent request buffer limit exceeded")
 		return
 	}
 	if progress {
-		_, _ = l.sys.Progress(item.msg, message.StatusQueued, map[string]any{"turn_index": item.trigger.Index})
+		_, _ = l.sys.Progress(i.msg, message.StatusQueued, map[string]any{})
 	}
-	if l.state == stateIdle && l.executingControl == nil && l.pendingControl == nil {
-		l.startNext()
-	}
+	l.startNext()
 }
-
-func (l *agentLoop) acceptContent(item *requestItem, explicitSteer bool) {
-	// An explicit expected_turn_id is a CAS: any form in which it cannot be
-	// honored against the live turn fails loudly — explicit targeting never
-	// degrades silently into the queue.
-	switch l.state {
-	case stateIdle:
-		if explicitSteer && item.explicitCAS {
-			l.fail(item, errorCASMismatch, "no active turn")
+func (l *agentLoop) acceptContent(i *requestItem, steer bool) {
+	t := l.book.turn
+	if t == nil {
+		if steer && i.explicitCAS {
+			l.fail(i, errorCASMismatch, "no active turn")
 			return
 		}
-		l.enqueue(item, false)
-	case stateTurnActive:
-		if !l.def.supports(TypeSteer) {
-			if explicitSteer && item.explicitCAS {
-				l.fail(item, errorCASMismatch, "provider cannot steer the active turn")
-				return
-			}
-			l.enqueue(item, true)
-			return
-		}
-		op := l.opID()
-		l.committing[op] = &operation{kind: TypeSteer, item: item}
-		_, _ = l.sys.Progress(item.msg, message.StatusProcessing, map[string]any{"turn_id": l.turnID})
-		if err := l.eng.Steer(op, item.trigger); err != nil {
-			delete(l.committing, op)
-			l.fail(item, errorProviderCrash, err.Error())
-		}
-	default:
-		if explicitSteer && item.explicitCAS {
-			l.fail(item, errorCASMismatch, "no steerable turn")
-			return
-		}
-		l.enqueue(item, true)
-	}
-}
-
-func (l *agentLoop) startNext() {
-	if l.state != stateIdle || l.executingControl != nil || l.pendingControl != nil {
+		l.enqueue(i, false)
 		return
 	}
-	batch := l.buffer.popBatch(l.def.cfg.BatchMaxCount)
+	if t.turnID == "" || t.terminal != nil || !l.def.cfg.Runtime.Capabilities.Steer {
+		if steer && i.explicitCAS {
+			l.fail(i, errorCASMismatch, "no steerable turn")
+			return
+		}
+		l.enqueue(i, true)
+		return
+	}
+	if i.explicitCAS && i.expectedTurn != t.turnID {
+		l.fail(i, errorCASMismatch, "turn target mismatch")
+		return
+	}
+	op := l.opID()
+	l.book.committing[op] = &commitOp{kind: commitSteer, items: []*requestItem{i}, targetTurn: t.seq}
+	t.ops[op] = &turnOp{kind: turnOpSteer, blocking: true}
+	_, _ = l.sys.Progress(i.msg, message.StatusProcessing, map[string]any{"turn_id": t.turnID})
+	cmd := ControlCommand{Op: op, Kind: RuntimeSteer, Target: t.turnID, Content: ptrInput(steerInput(i)), Scope: i.scope}
+	if err := l.rt.Control(cmd); err != nil {
+		l.runtimeFault("command_admission", err.Error())
+		return
+	}
+	l.arm("turn-op", t.seq, uint64Op(op))
+}
+func ptrInput(v RuntimeInput) *RuntimeInput { return &v }
+func (l *agentLoop) startNext() {
+	if l.book.fault != nil || l.book.turn != nil || l.book.running != nil || l.book.pending != nil {
+		return
+	}
+	batch := l.book.buffer.popBatch(l.def.cfg.BatchMaxCount)
 	if len(batch) == 0 {
 		return
 	}
 	tail := batch[len(batch)-1]
-	for _, item := range batch[:len(batch)-1] {
-		l.reply(item, map[string]any{"merged_into": tail.msg.ID})
+	for _, i := range batch[:len(batch)-1] {
+		l.reply(i, map[string]any{"merged_into": tail.msg.ID})
+		i.scope.Revoke()
 	}
 	if tail.closed {
 		l.startNext()
 		return
 	}
-	l.turnIndex++
-	tail.trigger.Index = l.turnIndex
-	triggers := make([]Trigger, 0, len(batch))
-	for _, item := range batch {
-		item.trigger.Index = l.turnIndex
-		triggers = append(triggers, item.trigger)
-	}
+	l.nextTurn++
 	op := l.opID()
-	l.committing[op] = &operation{kind: "start", item: tail}
-	l.state = stateStarting
-	_, _ = l.sys.Progress(tail.msg, message.StatusProcessing, map[string]any{"turn_index": l.turnIndex})
-	background := l.takeBackground()
-	if err := l.eng.StartTurn(op, triggers, background); err != nil {
-		delete(l.committing, op)
-		l.state = stateIdle
-		l.fail(tail, errorProviderCrash, err.Error())
-		l.startNext()
+	t := &baseTurn{seq: l.nextTurn, startOp: op, owner: tail, anchor: tail, scope: tail.scope, ops: map[OpID]*turnOp{}}
+	l.book.turn = t
+	l.book.committing[op] = &commitOp{kind: commitStart, items: batch, targetTurn: t.seq}
+	_, _ = l.sys.Progress(tail.msg, message.StatusProcessing, map[string]any{"turn_index": t.seq})
+	msgs := make([]RuntimeInput, len(batch))
+	for n, i := range batch {
+		msgs[n] = i.input
 	}
+	cmd := StartCommand{Op: op, Input: TurnInput{Messages: msgs, Background: l.takeBackground()}, Scope: tail.scope}
+	if err := l.rt.Start(cmd); err != nil {
+		l.runtimeFault("command_admission", err.Error())
+		return
+	}
+	l.arm("start", t.seq, uint64Op(op))
 }
 
-func (l *agentLoop) handleProviderEvent(e providerEvent) {
-	switch e.kind {
-	case eventTurnStarted:
-		op := l.committing[e.op]
-		if op == nil || op.kind != "start" || l.state != stateStarting || e.turnID == "" {
-			return
-		}
-		delete(l.committing, e.op)
-		l.turnID, l.state, l.lastOwner = e.turnID, stateTurnActive, op.item
-		l.ownerDroppedByControl = false
-		if !op.item.closed {
-			l.active = op.item
-		}
-		l.logActivityError(registry.ActivityTurnStarted, l.emitTurnStarted())
-		if l.active == nil {
-			interruptOp := l.opID()
-			l.committing[interruptOp] = &operation{kind: TypeInterrupt}
-			l.state = stateInterrupting
-			_ = l.eng.Interrupt(interruptOp)
-		}
-		l.maybeRunControl()
-	case eventTurnRejected:
-		op := l.committing[e.op]
-		if op == nil || op.kind != "start" {
-			return
-		}
-		delete(l.committing, e.op)
-		code := e.code
-		switch code {
-		case errorInputTooLarge, errorProviderCrash, errorProviderFailed:
-		default:
-			code = errorProviderFailed
-		}
-		l.fail(op.item, code, e.detail)
-		l.state, l.turnID = stateIdle, ""
-		l.maybeRunControl()
-		l.startNext()
-	case eventTool:
-		if e.turnID == l.turnID {
-			activityType := registry.ActivityToolStarted
-			if e.phase == "ended" {
-				activityType = registry.ActivityToolEnded
+func (l *agentLoop) acceptAction(k actionKind, i *requestItem) {
+	l.nextAction++
+	a := &baseAction{id: l.nextAction, kind: k, item: i}
+	if l.book.pending != nil {
+		l.reply(l.book.pending.item, map[string]any{"superseded_by": i.msg.ID})
+	}
+	if l.book.running != nil {
+		l.book.pending = a
+		return
+	}
+	l.book.pending = a
+	l.maybeRunAction()
+}
+func (l *agentLoop) maybeRunAction() {
+	if l.book.running != nil || l.book.pending == nil {
+		return
+	}
+	if l.book.turn != nil && l.book.turn.turnID == "" && l.book.pending.kind == actionInterrupt {
+		return
+	}
+	a := l.book.pending
+	l.book.pending = nil
+	l.book.running = a
+	t := l.book.turn
+	switch a.kind {
+	case actionStop:
+		l.clearWork("stop", true)
+		l.reply(a.item, map[string]any{"stopped": true})
+		l.book.running = nil
+		if t != nil && t.turnID != "" && l.def.cfg.Runtime.Capabilities.Interrupt {
+			op := l.opID()
+			t.ops[op] = &turnOp{kind: turnOpInterrupt, blocking: false}
+			if err := l.rt.Control(ControlCommand{Op: op, Kind: RuntimeInterrupt, Target: t.turnID}); err != nil {
+				l.runtimeFault("command_admission", err.Error())
+				return
 			}
-			l.logActivityError(activityType, l.emitTool(e))
 		}
-	case eventTurnEnded:
-		if e.turnID != l.turnID || l.state == stateIdle {
+		l.maybeRunAction()
+		l.startNext()
+	case actionTerminate:
+		l.clearWork("terminate", false)
+		if err := l.rt.Terminate(); err != nil {
+			l.runtimeFault("command_admission", err.Error())
 			return
 		}
-		l.result = &turnResult{status: e.status, text: e.finalText, err: e.detail}
-		l.maybeSettle()
-	case eventControlDone:
+		l.reply(a.item, map[string]any{"terminated": true})
+		l.dropTurn()
+		l.book.running = nil
+		l.maybeRunAction()
+		l.startNext()
+	case actionRestart:
+		l.clearWork("restart", false)
+		if err := l.rt.Terminate(); err != nil {
+			l.runtimeFault("command_admission", err.Error())
+			return
+		}
+		l.dropTurn()
+		a.op = l.opID()
+		a.await = waitWorkerReady
+		if err := l.rt.EnsureReady(a.op); err != nil {
+			l.runtimeFault("command_admission", err.Error())
+			return
+		}
+		l.arm("action", 0, a.id)
+	case actionInterrupt:
+		if t == nil || t.turnID == "" {
+			l.book.running = nil
+			if controlHasContent(a.item) {
+				a.item.input = steerInput(a.item)
+				a.item.msg.Type = ""
+				l.enqueue(a.item, false)
+			} else {
+				l.reply(a.item, map[string]any{"interrupted": ""})
+			}
+			l.maybeRunAction()
+			return
+		}
+		a.op = l.opID()
+		a.targetTurn = t.seq
+		a.await = waitRPC | waitTurnTerminal
+		t.ops[a.op] = &turnOp{kind: turnOpInterrupt, blocking: true}
+		if err := l.rt.Control(ControlCommand{Op: a.op, Kind: RuntimeInterrupt, Target: t.turnID}); err != nil {
+			l.runtimeFault("command_admission", err.Error())
+			return
+		}
+		l.arm("action", t.seq, a.id)
+	}
+}
+func controlHasContent(i *requestItem) bool {
+	return i != nil && strings.TrimSpace(messageText(i.msg.Payload)) != ""
+}
+
+func (l *agentLoop) handleRuntimeEvent(e runtimeEvent) {
+	if l.book.fault != nil {
+		return
+	}
+	t := l.book.turn
+	switch e.kind {
+	case evTurnStarted:
+		if t == nil || t.startOp != e.op || t.turnID != "" || e.turnID == "" {
+			return
+		}
+		t.turnID = e.turnID
+		delete(l.book.committing, e.op)
+		l.emitTurnStarted()
+		if t.owner == nil && l.def.cfg.Runtime.Capabilities.Interrupt {
+			op := l.opID()
+			t.ops[op] = &turnOp{kind: turnOpInterrupt}
+			if err := l.rt.Control(ControlCommand{Op: op, Kind: RuntimeInterrupt, Target: t.turnID}); err != nil {
+				l.runtimeFault("command_admission", err.Error())
+				return
+			}
+		}
+		l.maybeRunAction()
+	case evTurnRejected:
+		if t == nil || t.startOp != e.op {
+			return
+		}
+		if c := l.book.committing[e.op]; c != nil {
+			for _, i := range c.items {
+				if !i.closed {
+					l.fail(i, normalizeStartCode(e.code), e.detail)
+				}
+				i.scope.Revoke()
+			}
+		}
+		delete(l.book.committing, e.op)
+		l.dropTurn()
+		l.maybeRunAction()
+		l.startNext()
+	case evTool:
+		if t != nil && t.turnID == e.turnID {
+			l.emitTool(e.tool)
+		}
+	case evTurnEnded:
+		if t == nil || t.turnID != e.turnID || t.terminal != nil {
+			return
+		}
+		t.terminal = &turnTerminal{status: e.status, text: e.text, detail: e.detail}
+		if a := l.book.running; a != nil && a.targetTurn == t.seq {
+			a.await &^= waitTurnTerminal
+		}
+		l.trySettle()
+	case evControlDone:
 		l.controlDone(e)
-	case eventProviderLost:
-		l.providerLost(e.cause, e.detail)
+	case evReadyDone:
+		if a := l.book.running; a != nil && a.op == e.op && a.kind == actionRestart {
+			a.await &^= waitWorkerReady
+			if !e.ready.Ready {
+				l.fail(a.item, errorProviderCrash, e.ready.Detail)
+			}
+			l.finishAction()
+		}
+	case evProviderLost:
+		if t == nil || t.turnID != e.turnID {
+			return
+		}
+		code := errorProviderCrash
+		if e.cause == LostTimeout {
+			code = errorProviderTimeout
+		}
+		l.failTurnOwned(code, e.detail)
+		l.emitTurnEnded(TurnStatusFailed)
+		l.dropTurn()
+		l.finishAction()
+		l.maybeRunAction()
+		l.startNext()
+	case evSeed:
+		l.port.persist.submit(l.sys, ResumeSeedKey, e.seed)
 	}
 }
-
-// maybeSettle is the ONLY door into settleTurn. The settlement condition is a
-// conjunction over facts that arrive on different paths (final result present,
-// no turn control still in flight), so it must be evaluated at one point after
-// every relevant arrival — each arrival path knocks here instead of copying
-// the condition. A forgotten conjunct at a copied site is exactly how a late
-// steer used to leak into the next turn's account.
-func (l *agentLoop) maybeSettle() {
-	if l.result == nil {
+func (l *agentLoop) controlDone(e runtimeEvent) {
+	t := l.book.turn
+	if t == nil {
 		return
 	}
-	if l.hasInFlightTurnControl() {
-		l.settling = true
-		return
-	}
-	l.settleTurn()
-}
-
-func (l *agentLoop) hasInFlightTurnControl() bool {
-	for _, op := range l.committing {
-		if op.kind == TypeSteer || op.kind == TypeInterrupt {
-			return true
-		}
-	}
-	if l.executingControl != nil && !l.executingControl.rpcDone {
-		switch l.executingControl.kind {
-		case TypeInterrupt, TypeStop:
-			return true
-		}
-	}
-	return false
-}
-
-func (l *agentLoop) controlDone(e providerEvent) {
-	op := l.committing[e.op]
+	op := t.ops[e.op]
 	if op == nil {
-		if l.executingControl != nil && l.executingControl.op == e.op {
-			l.finishExecutingControl(e)
-		}
 		return
 	}
-	delete(l.committing, e.op)
-	switch op.kind {
-	case TypeSteer:
-		if l.pendingControl != nil || l.executingControl != nil {
-			l.fail(op.item, errorCancelled, "control pending")
-		} else {
+	delete(t.ops, e.op)
+	if op.kind == turnOpSteer {
+		c := l.book.committing[e.op]
+		delete(l.book.committing, e.op)
+		if c != nil && len(c.items) > 0 {
+			i := c.items[0]
 			switch e.verdict {
 			case ControlAccepted:
-				if e.turnID != "" && l.turnID != "" && e.turnID != l.turnID {
-					// The steer resolved against a turn that is no longer the
-					// workspace's turn: its story closed with that turn.
-					// Same silencing as the control-slot rule — never re-top.
-					l.fail(op.item, errorCancelled, "steer resolved against a settled turn")
-				} else if !op.item.closed {
-					if l.active != nil && l.active != op.item {
-						l.reply(l.active, map[string]any{"preempted_by": op.item.msg.ID})
-					}
-					l.active, l.lastOwner = op.item, op.item
+				if t.owner != nil && t.owner != i {
+					l.reply(t.owner, map[string]any{"preempted_by": i.msg.ID})
+					t.owner.scope.Revoke()
+				}
+				t.owner = i
+				t.anchor = i
+				t.scope = i.scope
+			case ControlNotSteerable, ControlNoActiveTurn, ControlMismatch:
+				if i.explicitCAS {
+					l.fail(i, errorCASMismatch, e.detail)
+					i.scope.Revoke()
+				} else {
+					l.enqueue(i, true)
 				}
 			case ControlEmptyInput:
-				l.fail(op.item, errorEmptyInput, e.detail)
-			case ControlMismatch, ControlNoActiveTurn, ControlNotSteerable:
-				if op.item.explicitCAS {
-					l.fail(op.item, errorCASMismatch, e.detail)
-				} else {
-					l.enqueue(op.item, true)
-				}
+				l.fail(i, errorEmptyInput, e.detail)
+				i.scope.Revoke()
+			case ControlInputTooLarge:
+				l.fail(i, errorInputTooLarge, e.detail)
+				i.scope.Revoke()
 			default:
-				l.fail(op.item, errorProviderCrash, e.detail)
+				l.fail(i, errorProviderCrash, e.detail)
+				i.scope.Revoke()
 			}
 		}
-	case TypeInterrupt:
+	}
+	if a := l.book.running; a != nil && a.op == e.op {
+		a.await &^= waitRPC
 		if e.verdict != ControlAccepted && e.verdict != ControlNoActiveTurn {
-			if op.item != nil {
-				l.fail(op.item, errorProviderCrash, e.detail)
-			}
-			l.state = stateTurnActive
-		} else if e.verdict == ControlNoActiveTurn && l.result == nil {
-			l.turnID, l.state = "", stateIdle
+			l.fail(a.item, errorProviderCrash, e.detail)
+			a.await = 0
 		}
 	}
-	if l.result != nil {
-		l.maybeSettle()
-	} else if l.state == stateIdle {
-		l.maybeRunControl()
-		l.startNext()
-	}
+	l.trySettle()
+	l.finishAction()
 }
-
-func (l *agentLoop) settleTurn() {
-	if l.result == nil {
+func (l *agentLoop) trySettle() {
+	t := l.book.turn
+	if t == nil || t.terminal == nil {
 		return
 	}
-	r := l.result
-	if l.active != nil && !l.active.closed {
+	for _, op := range t.ops {
+		if op.blocking {
+			return
+		}
+	}
+	if a := l.book.running; a != nil && a.targetTurn == t.seq && a.await != 0 {
+		return
+	}
+	r := t.terminal
+	if t.owner != nil && !t.owner.closed {
 		switch r.status {
 		case TurnStatusOK:
-			l.reply(l.active, map[string]any{"turn_index": l.turnIndex, "text": r.text})
+			l.reply(t.owner, map[string]any{"turn_index": t.seq, "text": r.text})
 		case TurnStatusInterrupted:
-			l.fail(l.active, errorInterrupted, r.err)
+			l.fail(t.owner, errorInterrupted, r.detail)
 		default:
-			l.fail(l.active, errorProviderFailed, r.err)
+			l.fail(t.owner, errorProviderFailed, r.detail)
 		}
-	} else {
-		l.publishOrphanTurnResult(r)
+		t.owner.scope.Revoke()
 	}
-	l.logActivityError(registry.ActivityTurnEnded, l.emitTurnEnded(r.status))
-	l.result, l.active, l.turnID, l.settling, l.state = nil, nil, "", false, stateIdle
-	if l.executingControl != nil && l.executingControl.kind == TypeStop {
-		l.closeSlot(l.executingControl)
-		l.executingControl = nil
-	} else if l.executingControl != nil && l.executingControl.kind == TypeInterrupt {
-		slot := l.executingControl
-		l.closeSlot(slot)
-		l.executingControl = nil
-		if controlHasContent(slot.item) {
-			l.enqueue(slot.item, false)
-		} else {
-			l.reply(slot.item, map[string]any{"interrupted": r.status})
-		}
-	}
-	l.maybeRunControl()
-	if l.executingControl == nil && l.pendingControl == nil {
-		l.startNext()
-	}
+	l.emitTurnEnded(r.status)
+	l.dropTurn()
+	l.finishAction()
+	l.maybeRunAction()
+	l.startNext()
 }
-
-func (l *agentLoop) handleClosure(id string) {
-	if item := l.buffer.remove(id); item != nil {
-		item.closed = true
+func (l *agentLoop) finishAction() {
+	a := l.book.running
+	if a == nil || a.await != 0 {
 		return
 	}
-	for _, op := range l.committing {
-		if op.item != nil && string(op.item.msg.ID) == id {
-			op.item.closed = true
+	if !a.item.closed {
+		switch a.kind {
+		case actionInterrupt:
+			if controlHasContent(a.item) {
+				a.item.input = steerInput(a.item)
+				a.item.msg.Type = ""
+				l.book.running = nil
+				l.enqueue(a.item, false)
+				return
+			}
+			l.reply(a.item, map[string]any{"interrupted": true})
+		case actionRestart:
+			l.reply(a.item, map[string]any{"restarted": true})
 		}
 	}
-	if l.active != nil && string(l.active.msg.ID) == id {
-		l.active.closed = true
-		l.active = nil
-		if l.state == stateTurnActive {
-			op := l.opID()
-			l.committing[op] = &operation{kind: TypeInterrupt}
-			l.state = stateInterrupting
-			_ = l.eng.Interrupt(op)
-		}
-	}
-}
-
-func (l *agentLoop) providerLost(cause LostCause, detail string) {
-	code := errorProviderCrash
-	if cause == LostTimeout {
-		code = errorProviderTimeout
-	}
-	if l.active != nil {
-		l.fail(l.active, code, detail)
-	}
-	for opID, op := range l.committing {
-		if op.item != nil {
-			l.fail(op.item, code, detail)
-		}
-		delete(l.committing, opID)
-	}
-	if l.executingControl != nil {
-		l.closeSlot(l.executingControl)
-		if !l.executingControl.item.closed {
-			l.fail(l.executingControl.item, code, detail)
-		}
-	}
-	// Phase marker last: the log order is terminals first, turn.ended after.
-	l.closeTurnPhase(TurnStatusFailed)
-	l.executingControl, l.active, l.lastOwner, l.turnID, l.result, l.settling, l.state = nil, nil, nil, "", nil, false, stateIdle
-	l.maybeRunControl()
+	l.book.running = nil
+	l.maybeRunAction()
 	l.startNext()
 }
 
-func (l *agentLoop) logActivityError(activityType registry.ActivityType, err error) {
-	if err == nil {
+func (l *agentLoop) clearWork(detail string, clearBuffer bool) {
+	if t := l.book.turn; t != nil {
+		if t.owner != nil {
+			l.fail(t.owner, errorCancelled, detail)
+			t.owner.scope.Revoke()
+			t.owner = nil
+		}
+		for op, c := range l.book.committing {
+			for _, i := range c.items {
+				l.fail(i, errorCancelled, detail)
+				i.scope.Revoke()
+			}
+			delete(l.book.committing, op)
+			delete(t.ops, op)
+		}
+	}
+	if clearBuffer {
+		for _, i := range l.book.buffer.items {
+			l.fail(i, errorCancelled, detail)
+			i.scope.Revoke()
+		}
+		l.book.buffer.items = nil
+		l.book.buffer.bytes = 0
+	}
+}
+func (l *agentLoop) failTurnOwned(code, detail string) {
+	if t := l.book.turn; t != nil {
+		if t.owner != nil {
+			l.fail(t.owner, code, detail)
+			t.owner.scope.Revoke()
+		}
+		for op, c := range l.book.committing {
+			for _, i := range c.items {
+				l.fail(i, code, detail)
+				i.scope.Revoke()
+			}
+			delete(l.book.committing, op)
+		}
+	}
+	if a := l.book.running; a != nil && !a.item.closed {
+		l.fail(a.item, code, detail)
+		a.await = 0
+	}
+}
+func (l *agentLoop) dropTurn() {
+	if l.book.turn != nil {
+		l.book.turn.scope.Revoke()
+	}
+	l.book.turn = nil
+	l.book.committing = map[OpID]*commitOp{}
+}
+func (l *agentLoop) handleClosure(id string) {
+	if i := l.book.buffer.remove(id); i != nil {
+		i.closed = true
+		i.scope.Revoke()
 		return
 	}
-	slog.Error("agent activity write failed", "actor", l.sys.Self(), "activity_type", activityType, "error", err)
+	if t := l.book.turn; t != nil {
+		if t.owner != nil && string(t.owner.msg.ID) == id {
+			t.owner.closed = true
+			t.owner.scope.Revoke()
+			t.owner = nil
+			if t.turnID != "" && l.def.cfg.Runtime.Capabilities.Interrupt {
+				op := l.opID()
+				t.ops[op] = &turnOp{kind: turnOpInterrupt}
+				if err := l.rt.Control(ControlCommand{Op: op, Kind: RuntimeInterrupt, Target: t.turnID}); err != nil {
+					l.runtimeFault("command_admission", err.Error())
+					return
+				}
+			}
+		}
+		for _, c := range l.book.committing {
+			for _, i := range c.items {
+				if string(i.msg.ID) == id {
+					i.closed = true
+					i.scope.Revoke()
+				}
+			}
+		}
+	}
 }
 
-var _ EventPort = (*eventPort)(nil)
-var _ BootPort = (*eventPort)(nil)
+func (l *agentLoop) runtimeFault(source, detail string) error {
+	if l.book.fault != nil {
+		return fmt.Errorf("%s", l.book.fault.detail)
+	}
+	l.book.fault = &baseFault{source: source, detail: detail}
+	for _, i := range l.book.buffer.items {
+		l.fail(i, errorAgentInternal, detail)
+		i.scope.Revoke()
+	}
+	l.book.buffer.items = nil
+	l.failTurnOwned(errorAgentInternal, detail)
+	if l.book.pending != nil {
+		l.fail(l.book.pending.item, errorAgentInternal, detail)
+	}
+	if l.book.running != nil {
+		l.fail(l.book.running.item, errorAgentInternal, detail)
+	}
+	return fmt.Errorf("agent runtime %s: %s", source, detail)
+}
+func (l *agentLoop) arm(kind string, turn, owner uint64) {
+	l.nextRevision++
+	d := deadlineFire{turnSeq: turn, owner: owner, revision: l.nextRevision, kind: kind}
+	rev := d.revision
+	time.AfterFunc(l.def.cfg.ReceiptDeadline, func() {
+		d.revision = rev
+		select {
+		case l.deadlines <- d:
+		case <-l.sys.Life().Done():
+		}
+	})
+}
+func (l *agentLoop) deadlineCurrent(d deadlineFire) bool {
+	switch d.kind {
+	case "start":
+		return l.book.turn != nil && l.book.turn.seq == d.turnSeq && l.book.turn.turnID == "" && uint64Op(l.book.turn.startOp) == d.owner
+	case "turn-op":
+		if l.book.turn == nil || l.book.turn.seq != d.turnSeq {
+			return false
+		}
+		for op := range l.book.turn.ops {
+			if uint64Op(op) == d.owner {
+				return true
+			}
+		}
+	case "action":
+		return l.book.running != nil && l.book.running.id == d.owner && l.book.running.await != 0
+	}
+	return false
+}
+func uint64Op(op OpID) uint64 { var n uint64; _, _ = fmt.Sscanf(string(op), "op-%d", &n); return n }
+func normalizeStartCode(c string) string {
+	switch c {
+	case errorInputTooLarge, errorProviderCrash, errorProviderFailed, errorProviderTimeout, errorOverloaded:
+		return c
+	}
+	return errorProviderFailed
+}
+func (l *agentLoop) takeBackground() []RuntimeContextItem {
+	x := l.background
+	l.background = nil
+	return x
+}
+func (l *agentLoop) logError(msg string, err error) {
+	if err != nil {
+		slog.Error(msg, "actor", l.sys.Self(), "error", err)
+	}
+}
+
+var _ RuntimeEvents = (*runtimePort)(nil)

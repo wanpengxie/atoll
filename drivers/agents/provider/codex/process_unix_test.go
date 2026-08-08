@@ -49,7 +49,7 @@ func TestProcessWaitDoesNotCloseStdoutBeforeFinalDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := spawnProcess(context.Background(), Config{
-		ActorID: "process-final-output-test", Binary: binary, WorkspaceDir: dir,
+		Binary: binary, WorkspaceDir: dir,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {

@@ -46,10 +46,11 @@ type rpcClient struct {
 	onNotification func(string, json.RawMessage)
 	onRequest      func(string, json.RawMessage) (any, *rpcError)
 	onClose        func(error)
+	pumpDone       chan struct{}
 }
 
 func newRPC(p *childProcess) *rpcClient {
-	return &rpcClient{in: p.stdin, out: p.stdout, pending: map[string]chan rpcReply{}}
+	return &rpcClient{in: p.stdin, out: p.stdout, pending: map[string]chan rpcReply{}, pumpDone: make(chan struct{})}
 }
 func (c *rpcClient) start() { go c.readPump() }
 func (c *rpcClient) call(ctx context.Context, method string, params any, timeout time.Duration) (json.RawMessage, error) {
@@ -104,6 +105,7 @@ func (c *rpcClient) take(key string) chan rpcReply {
 	return ch
 }
 func (c *rpcClient) readPump() {
+	defer close(c.pumpDone)
 	r := bufio.NewReaderSize(c.out, 64<<10)
 	for {
 		line, err := readBoundedLine(r, maxRPCLineBytes)
