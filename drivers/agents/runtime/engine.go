@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -793,28 +794,65 @@ func (e *engine) handleReaped(r reapedFact) {
 	if r.generation != e.generation.id || !e.slot.clear(r.generation, r.worker) {
 		return
 	}
-	if e.generation.phase != generationRetiring {
-		if e.turn != nil && e.turn.starting {
-			e.publish(publishTurnRejected{op: e.turn.op, code: "provider_crash", detail: "worker reaped unexpectedly"})
-			e.turn.cancel()
-			e.turn = nil
-		} else if e.turn != nil && !e.turn.terminal {
-			e.closeLost(runtimeproto.LostCrash, "worker reaped unexpectedly")
-		} else if e.turn != nil {
-			// Terminal turn: the only obligation left is an unanswered control.
-			// Settle it before the wipe below discards the books; a late
-			// ControlFactDeadline verdict can never match a wiped generation.
-			e.rejectControl("worker reaped unexpectedly")
-		}
-	}
-	e.generation = generationState{}
-	if e.turn != nil {
-		e.turn.cancel()
-		e.turn = nil
+	if !e.settleAndWipeReapedGeneration("worker reaped unexpectedly") {
+		return
 	}
 	if e.pending != nil {
 		e.spawn()
 	}
+}
+
+// settleAndWipeReapedGeneration is the sole destructive generation cleanup
+// path. A pending demand is deliberately carried across the wipe and causes a
+// fresh spawn; every obligation owned by the dead generation is settled first.
+func (e *engine) settleAndWipeReapedGeneration(detail string) bool {
+	if e.generation.sink != nil {
+		e.generation.sink.seal()
+	}
+	if e.turn != nil {
+		if !e.turn.terminal {
+			e.closeLost(runtimeproto.LostCrash, detail)
+		} else {
+			e.rejectControl(detail)
+			e.cancelRunningCallbacks(e.turn, detail)
+		}
+	}
+	return e.wipeSettledGeneration()
+}
+
+// wipeSettledGeneration is the unique generation zero-write mouth. Refusing
+// to wipe on debt turns a future missed settlement into an explicit Runtime
+// contract fault instead of silently orphaning an operation.
+func (e *engine) wipeSettledGeneration() bool {
+	if debt := e.generationDebt(); debt != "" {
+		e.contractFault("generation_wipe_debt", debt)
+		return false
+	}
+	e.generation = generationState{}
+	if e.turn != nil {
+		if e.turn.cancel != nil {
+			e.turn.cancel()
+		}
+		e.turn = nil
+	}
+	return true
+}
+
+func (e *engine) generationDebt() string {
+	if e.turn == nil {
+		return ""
+	}
+	var debt []string
+	if !e.turn.terminal {
+		debt = append(debt, "turn has no terminal fact")
+	}
+	if e.turn.control != nil {
+		debt = append(debt, "control has no outcome")
+	}
+	if n := runningCallbacks(e.turn); n != 0 {
+		debt = append(debt, fmt.Sprintf("%d host callbacks are still running", n))
+	}
+	return strings.Join(debt, "; ")
 }
 
 func (e *engine) handleProtocolFault(f protocolFault) {
@@ -860,12 +898,7 @@ func (e *engine) closeLost(cause runtimeproto.LostCause, detail string) {
 	}
 	e.turn.terminal = true
 	e.turn.cancel()
-	for _, row := range e.turn.callbacks {
-		if row.running {
-			respondCancelled(row.request, "turn no longer active")
-			row.running = false
-		}
-	}
+	e.cancelRunningCallbacks(e.turn, "turn no longer active")
 }
 
 func failureForLost(c runtimeproto.LostCause) string {
@@ -884,13 +917,20 @@ func (e *engine) abandonTurn() {
 	}
 	e.turn.terminal = true
 	e.turn.cancel()
-	for _, row := range e.turn.callbacks {
+	e.cancelRunningCallbacks(e.turn, "turn abandoned")
+	e.turn = nil
+}
+
+func (e *engine) cancelRunningCallbacks(t *turnState, detail string) {
+	if t == nil {
+		return
+	}
+	for _, row := range t.callbacks {
 		if row.running {
-			respondCancelled(row.request, "turn abandoned")
+			respondCancelled(row.request, detail)
 			row.running = false
 		}
 	}
-	e.turn = nil
 }
 
 func (e *engine) finishTurnReusable() {

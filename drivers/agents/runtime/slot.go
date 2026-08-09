@@ -59,11 +59,16 @@ func retirePhysical(w driverproto.Worker, cancel context.CancelFunc) {
 
 func (s *workerSlot) clear(g uint64, w driverproto.Worker) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.generation != g || s.worker != w {
+		s.mu.Unlock()
 		return false
 	}
+	cancel := s.cancel
 	s.generation, s.worker, s.cancel, s.retiring = 0, nil, nil, false
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return true
 }
 

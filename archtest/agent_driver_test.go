@@ -122,6 +122,55 @@ func TestAgentDriverProductionWriteMouths(t *testing.T) {
 	}
 }
 
+func TestRuntimeGenerationHasSingleWipeMouth(t *testing.T) {
+	type wipe struct {
+		file, function string
+		line           int
+	}
+	var wipes []wipe
+	for _, source := range productionFiles(t) {
+		if !hasPathPrefix(source.dir, "drivers/agents/runtime") || hasPathPrefix(source.dir, "drivers/agents/runtimeproto") {
+			continue
+		}
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, "../"+source.path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, declaration := range parsed.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				assignment, ok := node.(*ast.AssignStmt)
+				if !ok || assignment.Tok != token.ASSIGN || len(assignment.Lhs) != len(assignment.Rhs) {
+					return true
+				}
+				for i, left := range assignment.Lhs {
+					selector, ok := left.(*ast.SelectorExpr)
+					if !ok || selector.Sel.Name != "generation" {
+						continue
+					}
+					literal, ok := assignment.Rhs[i].(*ast.CompositeLit)
+					if !ok || len(literal.Elts) != 0 {
+						continue
+					}
+					typeName, ok := literal.Type.(*ast.Ident)
+					if !ok || typeName.Name != "generationState" {
+						continue
+					}
+					wipes = append(wipes, wipe{file: source.path, function: fn.Name.Name, line: fset.Position(assignment.Pos()).Line})
+				}
+				return true
+			})
+		}
+	}
+	if len(wipes) != 1 || wipes[0].file != "drivers/agents/runtime/engine.go" || wipes[0].function != "wipeSettledGeneration" {
+		t.Fatalf("Runtime generation zero writes=%+v; want exactly engine.wipeSettledGeneration", wipes)
+	}
+}
+
 // TestAgentDriverPackagesHoldNoMutableGlobalState 钉的不变量：agent driver 各层
 // （base/runtime/协议叶包/provider）的一切可变状态必须有唯一属主——挂在 worker/
 // engine/owner loop 或由组装根显式注入的对象上。包级可变全局是无主状态，

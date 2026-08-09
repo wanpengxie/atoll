@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -57,9 +59,11 @@ func (w *testWorker) Retire() {
 func (w *testWorker) Reaped() <-chan struct{} { return w.reaped }
 
 type resumeRetryProvider struct {
-	mu     sync.Mutex
-	next   int
-	opened chan []byte
+	mu                sync.Mutex
+	next              int
+	opened            chan []byte
+	rejectPhase       string
+	succeedAfterRetry bool
 }
 
 func (p *resumeRetryProvider) Spec() driverproto.ProviderSpec {
@@ -75,24 +79,34 @@ func (p *resumeRetryProvider) NewWorker(h driverproto.WorkerHost) (driverproto.W
 	index := p.next
 	p.next++
 	p.mu.Unlock()
-	return &resumeRetryWorker{index: index, host: h, opened: p.opened, reaped: make(chan struct{})}, nil
+	return &resumeRetryWorker{index: index, host: h, opened: p.opened, rejectPhase: p.rejectPhase, succeedAfterRetry: p.succeedAfterRetry, reaped: make(chan struct{})}, nil
 }
 
 type resumeRetryWorker struct {
-	index  int
-	host   driverproto.WorkerHost
-	opened chan []byte
-	reaped chan struct{}
-	once   sync.Once
+	index             int
+	host              driverproto.WorkerHost
+	opened            chan []byte
+	rejectPhase       string
+	succeedAfterRetry bool
+	reaped            chan struct{}
+	once              sync.Once
 }
 
 func (w *resumeRetryWorker) Open(_ context.Context, req driverproto.OpenRequest) {
 	w.opened <- append([]byte(nil), req.ResumeSeed...)
+	if w.rejectPhase == "open" && (w.index == 0 || !w.succeedAfterRetry) {
+		w.host.Events().Publish(driverproto.OpenRejected{
+			Class:       driverproto.FailureResumeInvalid,
+			Detail:      "stale seed",
+			Disposition: driverproto.RetireWorker,
+		})
+		return
+	}
 	w.host.Events().Publish(driverproto.WorkerReady{})
 }
 
 func (w *resumeRetryWorker) Start(_ context.Context, req driverproto.StartRequest) {
-	if w.index == 0 {
+	if w.rejectPhase == "submission" && (w.index == 0 || !w.succeedAfterRetry) {
 		w.host.Events().Publish(driverproto.SubmissionRejected{
 			Attempt:     req.Attempt,
 			Class:       driverproto.FailureResumeInvalid,
@@ -193,47 +207,65 @@ func TestRuntimeFactsDriveTurnAndUUIDv7(t *testing.T) {
 	}
 }
 
-func TestSubmissionResumeInvalidRetriesOnceWithEmptySeed(t *testing.T) {
-	p := &resumeRetryProvider{opened: make(chan []byte, 2)}
-	factory, _, err := Build(p, Policy{
-		OpenFactDeadline:  time.Second,
-		StartFactDeadline: time.Second,
-		ReapedDemand:      time.Second,
-		Watchdog:          time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	events := newCollector()
-	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, []byte("stale-seed"), events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt.Close()
-	if err := rt.Start(runtimeproto.StartCommand{Op: 1, Messages: []runtimeproto.Input{{Text: "hello"}}}); err != nil {
-		t.Fatal(err)
-	}
-
-	for index, want := range [][]byte{[]byte("stale-seed"), nil} {
-		select {
-		case got := <-p.opened:
-			if string(got) != string(want) {
-				t.Fatalf("open %d seed=%q want %q", index, got, want)
+func TestResumeInvalidRetriesAtMostOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		rejectPhase       string
+		succeedAfterRetry bool
+		wantFinal         string
+	}{
+		{name: "open_then_success", rejectPhase: "open", succeedAfterRetry: true, wantFinal: "ended"},
+		{name: "open_twice", rejectPhase: "open", wantFinal: "rejected"},
+		{name: "submission_then_success", rejectPhase: "submission", succeedAfterRetry: true, wantFinal: "ended"},
+		{name: "submission_twice", rejectPhase: "submission", wantFinal: "rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &resumeRetryProvider{opened: make(chan []byte, 3), rejectPhase: tc.rejectPhase, succeedAfterRetry: tc.succeedAfterRetry}
+			factory, _, err := Build(p, Policy{
+				OpenFactDeadline:  time.Second,
+				StartFactDeadline: time.Second,
+				ReapedDemand:      time.Second,
+				Watchdog:          time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
-		case <-time.After(time.Second):
-			t.Fatalf("open %d did not occur", index)
-		}
-	}
-	started := awaitKind(t, events, "started")
-	ended := awaitKind(t, events, "ended")
-	if ended.turn != started.turn || ended.text != "retried" {
-		t.Fatalf("ended=%+v started=%+v", ended, started)
-	}
-	p.mu.Lock()
-	workers := p.next
-	p.mu.Unlock()
-	if workers != 2 {
-		t.Fatalf("workers=%d want 2", workers)
+			events := newCollector()
+			rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, []byte("stale-seed"), events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rt.Close()
+			if err := rt.Start(runtimeproto.StartCommand{Op: 1, Messages: []runtimeproto.Input{{Text: "hello"}}}); err != nil {
+				t.Fatal(err)
+			}
+
+			for index, want := range [][]byte{[]byte("stale-seed"), nil} {
+				select {
+				case got := <-p.opened:
+					if string(got) != string(want) {
+						t.Fatalf("open %d seed=%q want %q", index, got, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("open %d did not occur", index)
+				}
+			}
+			final := awaitKind(t, events, tc.wantFinal)
+			if tc.wantFinal == "ended" && final.text != "retried" {
+				t.Fatalf("final=%+v want retried turn", final)
+			}
+			select {
+			case seed := <-p.opened:
+				t.Fatalf("resume retried more than once, third seed=%q", seed)
+			case <-time.After(50 * time.Millisecond):
+			}
+			p.mu.Lock()
+			workers := p.next
+			p.mu.Unlock()
+			if workers != 2 {
+				t.Fatalf("workers=%d want 2", workers)
+			}
+		})
 	}
 }
 
@@ -406,6 +438,245 @@ func TestUnexpectedReapSettlesPendingControlOnTerminalTurn(t *testing.T) {
 	settled := awaitKind(t, events, "control")
 	if settled.op != 2 || settled.turn != started.turn {
 		t.Fatalf("control settled=%+v want op=2 turn=%s", settled, started.turn)
+	}
+}
+
+func newStateEngine(t *testing.T) (*engine, *testWorker, *eventCollector) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	policy := Policy{
+		OpenFactDeadline:    time.Hour,
+		StartFactDeadline:   time.Hour,
+		ControlFactDeadline: time.Hour,
+		InterruptEnded:      time.Hour,
+		Watchdog:            time.Hour,
+		ReapedDemand:        time.Hour,
+	}.normalized()
+	provider := &testProvider{neverReap: true}
+	events := newCollector()
+	q := newInbox(policy)
+	gate := &hostAdmission{}
+	sink := &generationSink{generation: 1, queue: q, gate: gate, logger: slog.New(slog.DiscardHandler)}
+	e := &engine{
+		provider:     provider,
+		providerSpec: provider.Spec(),
+		policy:       policy,
+		deps:         runtimeproto.Deps{Logger: slog.New(slog.DiscardHandler)},
+		events:       events,
+		root:         ctx,
+		cancel:       cancel,
+		inbox:        q,
+		timers:       map[timerKind]*time.Timer{},
+		generation:   generationState{id: 1, phase: generationReady, sink: sink},
+	}
+	if generation, ok := e.ids.Generation(); !ok || generation != 1 {
+		t.Fatalf("initial generation=%d ok=%v", generation, ok)
+	}
+	_, workerCancel := context.WithCancel(ctx)
+	w := &testWorker{reaped: make(chan struct{}), neverReap: true}
+	if !e.slot.install(1, w, workerCancel) {
+		t.Fatal("worker fixture install failed")
+	}
+	t.Cleanup(func() {
+		for _, timer := range e.timers {
+			timer.Stop()
+		}
+		e.slot.close()
+		cancel()
+	})
+	return e, w, events
+}
+
+func setFixtureTurn(e *engine, starting, terminal bool) (*turnState, driverproto.WorkerTurnTarget) {
+	target := driverproto.WorkerTurnTarget{Attempt: 1, Native: "native-turn"}
+	life, cancel := context.WithCancel(e.root)
+	t := &turnState{
+		op:        11,
+		attempt:   1,
+		target:    target,
+		id:        "canonical-turn",
+		starting:  starting,
+		terminal:  terminal,
+		life:      life,
+		cancel:    cancel,
+		callbacks: map[string]*callbackRow{},
+	}
+	e.turn = t
+	e.generation.phase = generationRunning
+	return t, target
+}
+
+func drainEventKinds(c *eventCollector) []string {
+	var kinds []string
+	for {
+		select {
+		case event := <-c.ch:
+			kinds = append(kinds, event.kind)
+		default:
+			return kinds
+		}
+	}
+}
+
+func TestReapedSettlementMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setup      func(*engine)
+		wantEvents []string
+		wantCarry  bool
+	}{
+		{name: "ready_empty", setup: func(e *engine) { e.generation.phase = generationReady }},
+		{name: "retiring_empty", setup: func(e *engine) { e.generation.phase = generationRetiring }},
+		{name: "opening_pending", setup: func(e *engine) {
+			e.generation.phase = generationOpening
+			e.pending = &pendingDemand{kind: demandReady, op: 9}
+		}, wantCarry: true},
+		{name: "starting", setup: func(e *engine) { setFixtureTurn(e, true, false) }, wantEvents: []string{"rejected"}},
+		{name: "active", setup: func(e *engine) { setFixtureTurn(e, false, false) }, wantEvents: []string{"lost"}},
+		{name: "active_with_pending", setup: func(e *engine) {
+			setFixtureTurn(e, false, false)
+			e.pending = &pendingDemand{kind: demandReady, op: 9}
+		}, wantEvents: []string{"lost"}, wantCarry: true},
+		{name: "active_with_control", setup: func(e *engine) {
+			t, target := setFixtureTurn(e, false, false)
+			t.control = &controlState{op: 12, action: 2, target: target}
+		}, wantEvents: []string{"control", "lost"}},
+		{name: "terminal_with_control", setup: func(e *engine) {
+			t, target := setFixtureTurn(e, false, true)
+			t.control = &controlState{op: 12, action: 2, target: target}
+		}, wantEvents: []string{"control"}},
+		{name: "retiring_terminal_with_control", setup: func(e *engine) {
+			t, target := setFixtureTurn(e, false, true)
+			t.control = &controlState{op: 12, action: 2, target: target}
+			e.generation.phase = generationRetiring
+		}, wantEvents: []string{"control"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, worker, events := newStateEngine(t)
+			oldSink := e.generation.sink
+			tc.setup(e)
+			e.handleReaped(reapedFact{generation: 1, worker: worker})
+			if got := drainEventKinds(events); !reflect.DeepEqual(got, tc.wantEvents) {
+				t.Fatalf("events=%v want %v", got, tc.wantEvents)
+			}
+			if !oldSink.gate.sealed.Load() {
+				t.Fatal("reaped generation sink remained open")
+			}
+			if e.turn != nil {
+				t.Fatalf("turn survived generation wipe: %+v", e.turn)
+			}
+			if tc.wantCarry {
+				if e.pending == nil || e.generation.id != 2 || e.generation.phase != generationOpening {
+					t.Fatalf("pending demand was not carried to a fresh generation: pending=%+v generation=%+v", e.pending, e.generation)
+				}
+			} else if e.generation.id != 0 || e.generation.phase != generationNil || e.generation.sink != nil {
+				t.Fatalf("generation was not wiped: %+v", e.generation)
+			}
+		})
+	}
+}
+
+func TestGenerationWipeRefusesOutstandingDebt(t *testing.T) {
+	e, _, events := newStateEngine(t)
+	setFixtureTurn(e, false, false)
+	if e.wipeSettledGeneration() {
+		t.Fatal("generation wipe accepted a non-terminal turn")
+	}
+	if e.generation.id != 1 || e.turn == nil {
+		t.Fatal("failed wipe mutated live generation state")
+	}
+	if got := drainEventKinds(events); !reflect.DeepEqual(got, []string{"fault"}) {
+		t.Fatalf("events=%v want [fault]", got)
+	}
+}
+
+func TestControlAndTerminalArrivalOrdersConverge(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		terminalFirst bool
+		wantEvents    []string
+	}{
+		{name: "control_then_terminal", wantEvents: []string{"control", "ended"}},
+		{name: "terminal_then_control", terminalFirst: true, wantEvents: []string{"ended", "control"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _, events := newStateEngine(t)
+			turn, target := setFixtureTurn(e, false, false)
+			turn.control = &controlState{op: 12, action: 2, kind: runtimeproto.ControlSteer, target: target}
+			outcome := driverproto.ControlOutcome{Action: 2, Target: target, Verdict: driverproto.ControlAccepted}
+			terminal := driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "done"}
+			if tc.terminalFirst {
+				e.turnEnded(terminal)
+				e.controlOutcome(outcome)
+			} else {
+				e.controlOutcome(outcome)
+				e.turnEnded(terminal)
+			}
+			if got := drainEventKinds(events); !reflect.DeepEqual(got, tc.wantEvents) {
+				t.Fatalf("events=%v want %v", got, tc.wantEvents)
+			}
+			if e.turn != nil || e.generation.phase != generationReady {
+				t.Fatalf("order did not converge to reusable worker: turn=%+v generation=%+v", e.turn, e.generation)
+			}
+		})
+	}
+}
+
+func TestCallbackAndTerminalArrivalOrders(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		terminalFirst   bool
+		wantEvent       string
+		wantResultError bool
+	}{
+		{name: "completion_then_terminal", wantEvent: "ended"},
+		{name: "terminal_then_completion", terminalFirst: true, wantEvent: "lost", wantResultError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, worker, events := newStateEngine(t)
+			turn, target := setFixtureTurn(e, false, false)
+			request := &callbackRequest{generation: 1, kind: callbackTool, target: target, callID: "call", ctx: e.root, response: make(chan callbackResult, 1)}
+			turn.callbacks["callback"] = &callbackRow{request: request, running: true}
+			completion := callbackCompletion{generation: 1, key: "callback", result: callbackResult{tool: driverproto.ToolResult{Text: "ok"}}}
+			terminal := driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "done"}
+			if tc.terminalFirst {
+				e.turnEnded(terminal)
+				e.handleCallbackCompletion(completion)
+			} else {
+				e.handleCallbackCompletion(completion)
+				e.turnEnded(terminal)
+			}
+			result := <-request.response
+			if result.tool.IsError != tc.wantResultError {
+				t.Fatalf("result=%+v want error=%v", result.tool, tc.wantResultError)
+			}
+			if got := drainEventKinds(events); !reflect.DeepEqual(got, []string{tc.wantEvent}) {
+				t.Fatalf("events=%v want [%s]", got, tc.wantEvent)
+			}
+			if tc.terminalFirst {
+				e.handleReaped(reapedFact{generation: 1, worker: worker})
+				if e.generation.id != 0 || e.generation.phase != generationNil || e.generation.sink != nil || e.turn != nil {
+					t.Fatalf("settled callback survived reap: generation=%+v turn=%+v", e.generation, e.turn)
+				}
+			} else if e.turn != nil || e.generation.phase != generationReady {
+				t.Fatalf("completed callback did not leave reusable worker: turn=%+v generation=%+v", e.turn, e.generation)
+			}
+		})
+	}
+}
+
+func TestStaleTimersCannotSettleCurrentTurnOrControl(t *testing.T) {
+	e, _, events := newStateEngine(t)
+	turn, target := setFixtureTurn(e, false, false)
+	turn.watchdogRevision = 5
+	turn.control = &controlState{op: 12, action: 2, target: target, revision: 7}
+	e.handleTimer(timerFact{kind: timerWatchdog, generation: 1, revision: 4, attempt: 1})
+	e.handleTimer(timerFact{kind: timerControl, generation: 1, revision: 6, action: 2})
+	if got := drainEventKinds(events); len(got) != 0 {
+		t.Fatalf("stale timers emitted events: %v", got)
+	}
+	if turn.terminal || turn.control == nil || e.generation.phase != generationRunning {
+		t.Fatalf("stale timers mutated current state: turn=%+v generation=%+v", turn, e.generation)
 	}
 }
 
