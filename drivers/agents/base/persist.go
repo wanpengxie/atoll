@@ -1,24 +1,14 @@
 package base
 
 import (
-	"context"
 	"encoding/json"
-	"sync"
-	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/resource"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
-const (
-	ResumeSeedKey        = "agent.resume-seed"
-	persistRetryInitial  = 100 * time.Millisecond
-	persistRetryMax      = 5 * time.Second
-	persistLoudThreshold = 5
-)
-
+const ResumeSeedKey = "agent.resume-seed"
 const ObsCheckpointDrop actorrt.ObsKind = "agentbase.checkpoint_drop"
 
 func readSeed(sys actorbase.Sys) []byte {
@@ -29,74 +19,21 @@ func readSeed(sys actorbase.Sys) []byte {
 	return append([]byte(nil), out.Value...)
 }
 
-// persistCoordinator prevents an older retrying checkpoint from overwriting a
-// newer value. Puts are serialized only for the tiny state write; retry waits
-// never hold the lock.
-type persistCoordinator struct {
-	mu  sync.Mutex
-	seq uint64
-}
-
-func (p *persistCoordinator) submit(sys actorbase.Sys, key string, value []byte) {
-	if key == "" {
-		key = ResumeSeedKey
-	}
+// persistSeed intentionally has no coordinator, fence, retry, or ordering
+// state. Resume self-healing is the only reliability mechanism for this
+// low-frequency opaque checkpoint.
+func persistSeed(sys actorbase.Sys, value []byte) {
 	value = append([]byte(nil), value...)
-	p.mu.Lock()
-	p.seq++
-	seq := p.seq
-	p.mu.Unlock()
-	go p.run(sys, key, value, seq, waitPersistTimer)
-}
-
-type persistWait func(context.Context, time.Duration) bool
-
-func waitPersistTimer(ctx context.Context, delay time.Duration) bool {
-	t := time.NewTimer(delay)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
-
-func (p *persistCoordinator) run(sys actorbase.Sys, key string, value []byte, seq uint64, wait persistWait) {
-	delay := persistRetryInitial
-	failures := 0
-	for {
-		p.mu.Lock()
-		if seq != p.seq {
-			p.mu.Unlock()
-			return
-		}
-		out, err := sys.State().Put(resource.ResourceID(key), value)
-		p.mu.Unlock()
+	go func() {
+		out, err := sys.State().Put(resource.ResourceID(ResumeSeedKey), value)
 		if err == nil && out.Accepted() {
 			return
 		}
-		failures++
-		if failures == persistLoudThreshold || failures%persistLoudThreshold == 0 {
-			publishCheckpointDrop(sys, key, failures, out, err)
+		detail := map[string]any{"key": ResumeSeedKey, "reject_reason": string(out.RejectReason)}
+		if err != nil {
+			detail["error"] = err.Error()
 		}
-		if !wait(sys.Life(), delay) || sys.Life().Err() != nil {
-			return
-		}
-		if delay < persistRetryMax {
-			delay *= 2
-			if delay > persistRetryMax {
-				delay = persistRetryMax
-			}
-		}
-	}
-}
-
-func publishCheckpointDrop(sys actorbase.Sys, key string, failures int, out accessdoor.Outcome, err error) {
-	detail := map[string]any{"key": key, "consecutive_failures": failures, "reject_reason": string(out.RejectReason)}
-	if err != nil {
-		detail["error"] = err.Error()
-	}
-	val, _ := json.Marshal(detail)
-	_ = sys.PublishObs(ObsCheckpointDrop, val)
+		raw, _ := json.Marshal(detail)
+		_ = sys.PublishObs(ObsCheckpointDrop, raw)
+	}()
 }

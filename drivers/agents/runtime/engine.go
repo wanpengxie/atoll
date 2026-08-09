@@ -2,32 +2,16 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	runtimebook "github.com/wanpengxie/atoll/drivers/agents/runtime/internal/book"
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 )
-
-const (
-	ticketPending uint32 = iota
-	ticketAccepted
-	ticketAbandoned
-)
-
-type admissionTicket struct {
-	id    uint64
-	state atomic.Uint32
-	ack   chan struct{}
-}
 
 type commandKind uint8
 
@@ -35,1217 +19,1010 @@ const (
 	commandStart commandKind = iota
 	commandControl
 	commandTerminate
-	commandEnsure
+	commandEnsureReady
 )
 
-type runtimeCommand struct {
+type command struct {
 	kind    commandKind
-	ticket  *admissionTicket
-	start   base.StartCommand
-	control base.ControlCommand
-	op      base.OpID
+	start   runtimeproto.StartCommand
+	control runtimeproto.ControlCommand
+	op      runtimeproto.OpID
 }
 
-type shellPhase uint8
-
-const (
-	shellOpen shellPhase = iota
-	shellPoisoned
-	shellClosed
-)
-
-type emergencyHandle struct {
-	worker driverproto.Worker
-	sink   *eventSink
-	cancel context.CancelFunc
-}
-type runtimeFuse struct {
-	mu     sync.Mutex
-	phase  shellPhase
-	handle *emergencyHandle
-}
-
-type Engine struct {
-	adapter    driverproto.Adapter
-	spec       driverproto.ProviderSpec
-	policy     Policy
-	deps       base.RuntimeDeps
-	events     base.RuntimeEvents
-	root       context.Context
-	cancel     context.CancelFunc
-	commands   chan runtimeCommand
-	internal   chan any
-	eventq     *unboundedQueue[eventEnvelope]
-	outbox     *unboundedQueue[func(base.RuntimeEvents)]
-	fuse       runtimeFuse
-	nextTicket atomic.Uint64
-	closeOnce  sync.Once
-	instance   uint64
-}
-
-var nextInstance atomic.Uint64
-
-func New(adapter driverproto.Adapter, spec driverproto.ProviderSpec, policy Policy, deps base.RuntimeDeps, seed []byte, events base.RuntimeEvents) (*Engine, error) {
-	if adapter == nil || events == nil {
-		return nil, errors.New("agent/runtime: adapter and events required")
-	}
-	parent := deps.Parent
-	if parent == nil {
-		parent = context.Background()
-	}
-	root, cancel := context.WithCancel(parent)
-	e := &Engine{
-		adapter: adapter, spec: spec, policy: policy.normalized(), deps: deps, events: events,
-		root: root, cancel: cancel, commands: make(chan runtimeCommand, 64), internal: make(chan any, 256),
-		eventq: newQueue[eventEnvelope](), outbox: newQueue[func(base.RuntimeEvents)](), instance: nextInstance.Add(1),
-	}
-	go e.outputLoop()
-	go e.supervise(append([]byte(nil), seed...))
-	return e, nil
-}
-
-func (e *Engine) Start(c base.StartCommand) error {
-	if c.Op == "" {
-		return base.ErrRuntimeState
-	}
-	return e.admit(runtimeCommand{kind: commandStart, start: cloneStart(c)})
-}
-func (e *Engine) Control(c base.ControlCommand) error {
-	if c.Op == "" || c.Kind > base.RuntimeInterrupt {
-		return base.ErrRuntimeState
-	}
-	return e.admit(runtimeCommand{kind: commandControl, control: cloneControl(c)})
-}
-func (e *Engine) Terminate() error { return e.admit(runtimeCommand{kind: commandTerminate}) }
-func (e *Engine) EnsureReady(op base.OpID) error {
-	if op == "" {
-		return base.ErrRuntimeState
-	}
-	return e.admit(runtimeCommand{kind: commandEnsure, op: op})
-}
-
-func (e *Engine) admit(c runtimeCommand) error {
-	e.fuse.mu.Lock()
-	phase := e.fuse.phase
-	open := phase == shellOpen
-	e.fuse.mu.Unlock()
-	if !open {
-		if phase == shellClosed {
-			return base.ErrRuntimeClosed
-		}
-		return base.ErrRuntimeUnavailable
-	}
-	t := &admissionTicket{id: e.nextTicket.Add(1), ack: make(chan struct{}, 1)}
-	c.ticket = t
-	timer := time.NewTimer(e.policy.CommandAdmission)
-	defer timer.Stop()
-	select {
-	case e.commands <- c:
-	case <-timer.C:
-		t.state.CompareAndSwap(ticketPending, ticketAbandoned)
-		e.poison()
-		return base.ErrRuntimeUnavailable
-	case <-e.root.Done():
-		return base.ErrRuntimeUnavailable
-	}
-	select {
-	case <-t.ack:
-		return nil
-	case <-timer.C:
-		t.state.CompareAndSwap(ticketPending, ticketAbandoned)
-		e.poison()
-		return base.ErrRuntimeUnavailable
-	case <-e.root.Done():
-		return base.ErrRuntimeUnavailable
-	}
-}
-
-func (e *Engine) poison() { e.shutdown(shellPoisoned) }
-func (e *Engine) Close()  { e.closeOnce.Do(func() { e.shutdown(shellClosed) }) }
-func (e *Engine) shutdown(want shellPhase) {
-	e.fuse.mu.Lock()
-	if e.fuse.phase == shellClosed || (e.fuse.phase == shellPoisoned && want == shellPoisoned) {
-		e.fuse.mu.Unlock()
-		return
-	}
-	e.fuse.phase = want
-	h := e.fuse.handle
-	if h != nil {
-		h.sink.seal()
-		h.cancel()
-	}
-	e.eventq.seal()
-	e.outbox.seal()
-	e.cancel()
-	e.fuse.mu.Unlock()
-	if h != nil {
-		h.worker.Retire()
-	}
-}
-
-func (e *Engine) install(h *emergencyHandle) bool {
-	e.fuse.mu.Lock()
-	if e.fuse.phase != shellOpen {
-		e.fuse.mu.Unlock()
-		h.sink.seal()
-		h.cancel()
-		h.worker.Retire()
-		return false
-	}
-	e.fuse.handle = h
-	e.fuse.mu.Unlock()
-	return true
-}
-func (e *Engine) clearInstalled(h *emergencyHandle) {
-	e.fuse.mu.Lock()
-	if e.fuse.handle == h {
-		e.fuse.handle = nil
-	}
-	e.fuse.mu.Unlock()
-}
-
-func (e *Engine) outputLoop() {
-	for {
-		select {
-		case <-e.root.Done():
-			return
-		case <-e.outbox.wake:
-			for {
-				f, ok := e.outbox.pop()
-				if !ok {
-					break
-				}
-				f(e.events)
-			}
-		}
-	}
-}
-
-type eventEnvelope struct {
-	generation uint64
-	event      driverproto.DriverEvent
-}
-type eventSink struct {
-	generation uint64
-	q          *unboundedQueue[eventEnvelope]
-	mu         sync.Mutex
-	sealed     bool
-	active     driverproto.WorkerTurnTarget
-	liveness   uint64
-}
-
-func (s *eventSink) Publish(v driverproto.DriverEvent) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if v == nil || s.sealed {
-		return false
-	}
-	if target, ok := eventTarget(v); ok && target == s.active {
-		s.liveness++
-	}
-	return s.q.push(eventEnvelope{generation: s.generation, event: v})
-}
-func (s *eventSink) seal() { s.mu.Lock(); s.sealed = true; s.mu.Unlock() }
-func (s *eventSink) activate(target driverproto.WorkerTurnTarget) uint64 {
-	s.mu.Lock()
-	s.active = target
-	s.liveness++
-	rev := s.liveness
-	s.mu.Unlock()
-	return rev
-}
-func (s *eventSink) deactivate(target driverproto.WorkerTurnTarget) {
-	s.mu.Lock()
-	if s.active == target {
-		s.active = driverproto.WorkerTurnTarget{}
-	}
-	s.mu.Unlock()
-}
-func (s *eventSink) pulse(target driverproto.WorkerTurnTarget) (uint64, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.liveness, s.active == target
-}
-func eventTarget(v driverproto.DriverEvent) (driverproto.WorkerTurnTarget, bool) {
-	switch x := v.(type) {
-	case driverproto.Activity:
-		return x.Target, true
-	case driverproto.Tool:
-		return x.Target, true
-	case driverproto.TurnEnded:
-		return x.Target, true
-	default:
-		return driverproto.WorkerTurnTarget{}, false
-	}
-}
-
-type workerPhase uint8
+type generationPhase uint8
 
 const (
-	workerCreated workerPhase = iota
-	workerOpening
-	workerReady
-	workerDraining
-	workerReaping
-	workerReapStalled
+	generationNil generationPhase = iota
+	generationOpening
+	generationReady
+	generationRunning
+	generationRetiring
 )
 
-type turnPhase uint8
+type demandKind uint8
 
 const (
-	turnStarting turnPhase = iota
-	turnActive
-	turnTerminal
+	demandStart demandKind = iota
+	demandReady
 )
 
-type runtimeTurn struct {
-	serial          uint64
-	canonical       base.TurnID
-	target          driverproto.WorkerTurnTarget
-	startOp         base.OpID
-	phase           turnPhase
-	life            context.Context
-	cancel          context.CancelFunc
-	scope           base.EffectScope
-	transition      *scopeTransition
-	effects         map[effectKey]*effectRow
-	eventsSeen      bool
-	startAccepted   bool
-	startResultSeen bool
-	command         base.StartCommand
-	resumeRetried   bool
-	watchRev        uint64
-	pendingEffects  int
-	terminalEvent   *driverproto.TurnEnded
-	terminalOps     []*controlAction
-	terminalSent    bool
-}
-type scopeTransition struct {
-	op        base.OpID
-	old       base.EffectScope
-	candidate base.EffectScope
-	held      []*effectRequest
-	heldTools []base.ToolEvent
-}
-type effectKey struct {
-	target   driverproto.WorkerTurnTarget
-	callID   driverproto.ProviderToolCallID
-	resource bool
-}
-type effectRow struct {
-	fingerprint [32]byte
-	done        bool
-	dispatched  bool
-	tool        driverproto.ToolResult
-	resource    driverproto.ResourceResult
-	waiters     []*effectRequest
-}
-type workerGeneration struct {
-	id             uint64
-	phase          workerPhase
-	worker         driverproto.Worker
-	host           *workerHost
-	sink           *eventSink
-	life           context.Context
-	cancel         context.CancelFunc
-	emergency      *emergencyHandle
-	turn           *runtimeTurn
-	controls       []*controlAction
-	controlRunning bool
-	retired        bool
-	retirement     *retireDecision
-	stagedSeed     []byte
-	resumeRetry    bool
-}
-type retireDecision struct {
-	cause      string
-	reportLoss bool
-}
-type startIntent struct {
-	command       base.StartCommand
+type pendingDemand struct {
+	kind          demandKind
+	op            runtimeproto.OpID
+	start         runtimeproto.StartCommand
 	resumeRetried bool
-}
-type controlAction struct {
-	command    base.ControlCommand
-	generation uint64
-	serial     uint64
-	target     driverproto.WorkerTurnTarget
-}
-type runtimeBook struct {
-	epoch          uint64
-	nextGeneration uint64
-	nextAttempt    driverproto.AttemptToken
-	nextTurn       uint64
-	worker         *workerGeneration
-	nextStart      *startIntent
-	ensure         []base.OpID
-	seed           []byte
+	revision      uint64
 }
 
-type openDone struct {
-	gen    uint64
-	result driverproto.OpenResult
+type generationState struct {
+	id           uint64
+	phase        generationPhase
+	openRevision uint64
+	reapRevision uint64
+	sink         *generationSink
+	stagedSeed   []byte
 }
-type startDone struct {
-	gen, serial uint64
-	attempt     driverproto.AttemptToken
-	result      driverproto.StartResult
+
+type controlState struct {
+	op           runtimeproto.OpID
+	action       driverproto.ActionToken
+	kind         runtimeproto.ControlKind
+	target       driverproto.WorkerTurnTarget
+	candidate    runtimeproto.ControlCommand
+	revision     uint64
+	terminalSeen bool
+	outcomeSeen  bool
 }
-type controlDone struct {
-	gen, serial uint64
-	action      *controlAction
-	result      driverproto.ControlResult
-	safety      bool
+
+type callbackRow struct {
+	request *callbackRequest
+	running bool
 }
-type reapedDone struct {
-	gen       uint64
-	emergency *emergencyHandle
+
+type turnState struct {
+	op                runtimeproto.OpID
+	attempt           driverproto.AttemptToken
+	target            driverproto.WorkerTurnTarget
+	id                runtimeproto.TurnID
+	acceptedSteer     runtimeproto.ControlCommand
+	hasAcceptedSteer  bool
+	starting          bool
+	terminal          bool
+	startRevision     uint64
+	watchdogRevision  uint64
+	interruptRevision uint64
+	life              context.Context
+	cancel            context.CancelFunc
+	start             runtimeproto.StartCommand
+	resumeRetried     bool
+	control           *controlState
+	callbacks         map[string]*callbackRow
 }
+
 type timerKind uint8
 
 const (
-	timerStarted timerKind = iota
+	timerOpen timerKind = iota
+	timerStart
+	timerControl
+	timerInterrupt
 	timerWatchdog
-	timerSafety
-	timerDrain
-	timerReap
+	timerReapedDemand
 )
 
-type timerDone struct {
-	kind             timerKind
-	gen, serial, rev uint64
+type timerFact struct {
+	kind                 timerKind
+	generation, revision uint64
+	attempt              driverproto.AttemptToken
+	action               driverproto.ActionToken
 }
-type effectDone struct {
-	request  *effectRequest
-	tool     driverproto.ToolResult
-	resource driverproto.ResourceResult
+type reapedFact struct {
+	generation uint64
+	worker     driverproto.Worker
 }
 
-func (e *Engine) supervise(seed []byte) {
-	b := runtimeBook{seed: seed}
+type engine struct {
+	provider     driverproto.Provider
+	providerSpec driverproto.ProviderSpec
+	policy       Policy
+	deps         runtimeproto.Deps
+	events       runtimeproto.Events
+	root         context.Context
+	cancel       context.CancelFunc
+	inbox        *inbox
+	slot         workerSlot
+	closeOnce    sync.Once
+	timers       map[timerKind]*time.Timer
+	ids          runtimebook.Counters
+	generation   generationState
+	pending      *pendingDemand
+	turn         *turnState
+	seed         []byte
+}
+
+func newEngine(provider driverproto.Provider, spec driverproto.ProviderSpec, policy Policy, deps runtimeproto.Deps, seed []byte, events runtimeproto.Events) (*engine, error) {
+	if deps.Parent == nil {
+		return nil, fmt.Errorf("agent/runtime: parent context required")
+	}
+	if events == nil {
+		return nil, fmt.Errorf("agent/runtime: events required")
+	}
+	if deps.Logger == nil {
+		deps.Logger = slog.New(slog.DiscardHandler)
+	}
+	root, cancel := context.WithCancel(deps.Parent)
+	e := &engine{provider: provider, providerSpec: spec, policy: policy, deps: deps, events: events, root: root, cancel: cancel, inbox: newInbox(policy), timers: map[timerKind]*time.Timer{}, seed: append([]byte(nil), seed...)}
+	go e.run()
+	return e, nil
+}
+
+func (e *engine) Start(v runtimeproto.StartCommand) error {
+	v.Messages = cloneInputs(v.Messages)
+	v.Background = cloneContexts(v.Background)
+	if !e.inbox.push(classCommand, command{kind: commandStart, start: v}) {
+		if e.inbox.isSealed() {
+			return runtimeproto.ErrClosed
+		}
+		return runtimeproto.ErrUnavailable
+	}
+	return nil
+}
+func (e *engine) Control(v runtimeproto.ControlCommand) error {
+	if v.Content != nil {
+		x := runtimeproto.CloneInput(*v.Content)
+		v.Content = &x
+	}
+	if !e.inbox.push(classCommand, command{kind: commandControl, control: v}) {
+		if e.inbox.isSealed() {
+			return runtimeproto.ErrClosed
+		}
+		return runtimeproto.ErrUnavailable
+	}
+	return nil
+}
+func (e *engine) Terminate() error {
+	if !e.inbox.push(classCommand, command{kind: commandTerminate}) {
+		if e.inbox.isSealed() {
+			return runtimeproto.ErrClosed
+		}
+		return runtimeproto.ErrUnavailable
+	}
+	return nil
+}
+func (e *engine) EnsureReady(op runtimeproto.OpID) error {
+	if !e.inbox.push(classCommand, command{kind: commandEnsureReady, op: op}) {
+		if e.inbox.isSealed() {
+			return runtimeproto.ErrClosed
+		}
+		return runtimeproto.ErrUnavailable
+	}
+	return nil
+}
+
+func (e *engine) Close() {
+	e.closeOnce.Do(func() {
+		e.inbox.seal()
+		e.cancel()
+		e.slot.close()
+	})
+}
+
+func cloneInputs(v []runtimeproto.Input) []runtimeproto.Input {
+	out := make([]runtimeproto.Input, len(v))
+	for i := range v {
+		out[i] = runtimeproto.CloneInput(v[i])
+	}
+	return out
+}
+func cloneContexts(v []runtimeproto.ContextItem) []runtimeproto.ContextItem {
+	out := make([]runtimeproto.ContextItem, len(v))
+	for i := range v {
+		out[i] = runtimeproto.CloneContext(v[i])
+	}
+	return out
+}
+
+func (e *engine) run() {
+	defer func() {
+		for _, timer := range e.timers {
+			timer.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-e.root.Done():
 			return
-		case c := <-e.commands:
-			if !c.ticket.state.CompareAndSwap(ticketPending, ticketAccepted) {
-				continue
-			}
-			effect := e.acceptCommand(&b, c)
-			select {
-			case c.ticket.ack <- struct{}{}:
-			default:
-			}
-			if effect != nil {
-				effect()
-			}
-		case <-e.eventq.wake:
+		case <-e.inbox.wake:
 			for {
-				v, ok := e.eventq.pop()
+				item, ok := e.inbox.pop()
 				if !ok {
 					break
 				}
-				e.applyEvent(&b, v)
+				e.handle(item.value)
+				if e.root.Err() != nil {
+					return
+				}
 			}
-		case v := <-e.internal:
-			e.applyInternal(&b, v)
 		}
 	}
 }
 
-func (e *Engine) acceptCommand(b *runtimeBook, c runtimeCommand) func() {
+func (e *engine) handle(v any) {
+	switch x := v.(type) {
+	case command:
+		e.handleCommand(x)
+	case driverFact:
+		e.handleDriverFact(x)
+	case timerFact:
+		e.handleTimer(x)
+	case reapedFact:
+		e.handleReaped(x)
+	case protocolFault:
+		e.handleProtocolFault(x)
+	case *callbackRequest:
+		e.handleCallback(x)
+	case callbackCompletion:
+		e.handleCallbackCompletion(x)
+	default:
+		e.contractFault("unknown_fact", fmt.Sprintf("unexpected runtime fact %T", v))
+	}
+}
+
+func (e *engine) handleCommand(c command) {
 	switch c.kind {
 	case commandStart:
-		if b.worker != nil && b.worker.phase == workerReapStalled {
-			return func() { e.turnRejected(c.start.Op, "provider_crash", "previous worker has not reaped") }
-		}
-		if err := validateInput(c.start.Input, e.policy); err != nil {
-			return func() { e.turnRejected(c.start.Op, "input_too_large", err.Error()) }
-		}
-		if b.nextStart != nil || (b.worker != nil && b.worker.turn != nil) {
-			return func() { e.turnRejected(c.start.Op, "provider_failed", "turn already in flight") }
-		}
-		b.nextStart = &startIntent{command: c.start}
-		return func() { e.ensureWorker(b) }
+		e.acceptStart(c.start)
 	case commandControl:
-		return func() { e.acceptControl(b, c.control) }
+		e.acceptControl(c.control)
 	case commandTerminate:
-		b.nextStart = nil
-		if b.worker != nil {
-			g := b.worker
-			e.claimRetire(g, false, "manual")
-			return func() { e.finishRetire(g) }
-		}
-	case commandEnsure:
-		if b.worker != nil && b.worker.phase == workerReapStalled {
-			return func() { e.readyDone(c.op, false, "previous worker has not reaped") }
-		}
-		if b.worker != nil && b.worker.phase == workerReady && !b.worker.retired {
-			return func() { e.readyDone(c.op, true, "") }
-		}
-		b.ensure = append(b.ensure, c.op)
-		return func() { e.ensureWorker(b) }
+		e.acceptTerminate()
+	case commandEnsureReady:
+		e.acceptEnsureReady(c.op)
+	default:
+		e.contractFault("invalid_command", "unknown command kind")
 	}
-	return nil
 }
 
-func (e *Engine) ensureWorker(b *runtimeBook) {
-	if b.worker != nil {
-		if b.worker.phase == workerReady {
-			e.maybeStart(b)
-		} else if b.worker.phase == workerCreated {
-			e.openGeneration(b.worker, b.seed)
-		}
+func (e *engine) acceptStart(c runtimeproto.StartCommand) {
+	if c.Op == 0 || len(c.Messages) == 0 || e.pending != nil {
+		e.contractFault("invalid_start", "duplicate or malformed Start command")
 		return
 	}
-	b.nextGeneration++
-	genID := b.nextGeneration
+	if len(c.Messages)+len(c.Background) > e.policy.InputMaxItems || inputBytes(c.Messages, c.Background) > e.policy.InputMaxBytes {
+		e.publish(publishTurnRejected{op: c.Op, code: "input_too_large", detail: "runtime input bound exceeded"})
+		return
+	}
+	e.pending = &pendingDemand{kind: demandStart, op: c.Op, start: c}
+	switch e.generation.phase {
+	case generationNil:
+		e.spawn()
+	case generationReady:
+		e.dispatchDemand()
+	case generationOpening, generationRunning:
+	case generationRetiring:
+		e.armReapedDemand()
+	default:
+		e.contractFault("invalid_generation", "invalid generation state")
+	}
+}
+
+func inputBytes(in []runtimeproto.Input, bg []runtimeproto.ContextItem) int {
+	n := 0
+	for _, x := range in {
+		n += len(x.Payload) + len(x.Text)
+	}
+	for _, x := range bg {
+		n += len(x.Payload) + len(x.Text)
+	}
+	return n
+}
+
+func (e *engine) acceptEnsureReady(op runtimeproto.OpID) {
+	if op == 0 || e.pending != nil {
+		e.contractFault("invalid_ready", "duplicate or malformed EnsureReady command")
+		return
+	}
+	if e.generation.phase == generationReady {
+		e.publish(publishReadyDone{op: op, result: runtimeproto.ReadyResult{Ready: true}})
+		return
+	}
+	e.pending = &pendingDemand{kind: demandReady, op: op}
+	if e.generation.phase == generationNil {
+		e.spawn()
+	} else if e.generation.phase == generationRetiring {
+		e.armReapedDemand()
+	}
+}
+
+func (e *engine) acceptControl(c runtimeproto.ControlCommand) {
+	if c.Op == 0 || c.Target == "" || e.turn == nil || e.turn.starting || e.turn.control != nil || e.turn.id != c.Target || e.turn.terminal {
+		e.contractFault("invalid_control", "Control does not match the single active turn")
+		return
+	}
+	if c.Kind == runtimeproto.ControlSteer && (!e.providerSpec.Capabilities.Steer || c.Content == nil) {
+		e.contractFault("invalid_control", "unsupported or empty steer command")
+		return
+	}
+	if c.Kind == runtimeproto.ControlInterrupt && (!e.providerSpec.Capabilities.Interrupt || c.Content != nil) {
+		e.contractFault("invalid_control", "unsupported or content-bearing interrupt command")
+		return
+	}
+	action, ok := e.ids.Action()
+	if !ok {
+		e.contractFault("counter_overflow", "control action counter overflow")
+		return
+	}
+	cs := &controlState{op: c.Op, action: driverproto.ActionToken(action), kind: c.Kind, target: e.turn.target, candidate: c, revision: e.revision()}
+	e.turn.control = cs
+	w := e.slot.get(e.generation.id)
+	if w == nil {
+		e.contractFault("worker_slot", "active generation has no worker")
+		return
+	}
+	req := driverproto.ControlRequest{Action: cs.action, Target: cs.target}
+	if c.Kind == runtimeproto.ControlSteer {
+		req.Kind = driverproto.ControlSteer
+		req.Message = toDriverInput(c.Content)
+	} else {
+		req.Kind = driverproto.ControlInterrupt
+	}
+	e.workerControl(w, req)
+	e.arm(timerControl, e.policy.ControlFactDeadline, timerFact{kind: timerControl, generation: e.generation.id, revision: cs.revision, action: cs.action})
+}
+
+func (e *engine) acceptTerminate() {
+	if e.pending != nil && e.pending.kind == demandStart {
+		e.pending = nil
+	}
+	if e.generation.phase == generationNil {
+		return
+	}
+	if e.turn != nil {
+		e.abandonTurn()
+	}
+	e.beginRetire("manual terminate")
+}
+
+func (e *engine) spawn() {
+	if e.pending == nil || e.generation.phase != generationNil {
+		return
+	}
+	g, ok := e.ids.Generation()
+	if !ok {
+		e.contractFault("counter_overflow", "generation counter overflow")
+		return
+	}
 	life, cancel := context.WithCancel(e.root)
-	sink := &eventSink{generation: genID, q: e.eventq}
-	host := &workerHost{engine: e, generation: genID, life: life, sink: sink, logger: safeLogger(nil), ready: make(chan struct{})}
-	w, err := e.adapter.NewWorker(host)
-	if err != nil {
+	gate := &hostAdmission{}
+	sink := &generationSink{generation: g, queue: e.inbox, gate: gate, logger: e.deps.Logger}
+	catalog := []driverproto.ToolSpec(nil)
+	if e.deps.Tools != nil {
+		for _, v := range e.deps.Tools.Catalog() {
+			catalog = append(catalog, driverproto.ToolSpec{Name: v.Name, Description: v.Description, Schema: append([]byte(nil), v.Schema...)})
+		}
+	}
+	host := &workerHost{life: life, sink: sink, tools: &toolPort{generation: g, q: e.inbox, catalog: catalog, gate: gate}, resources: &resourcePort{generation: g, q: e.inbox, gate: gate}, logger: e.deps.Logger}
+	w, err := e.spawnWorker(host)
+	if err != nil || w == nil {
 		cancel()
-		sink.seal()
-		e.openFailed(b, "provider worker: "+err.Error())
-		return
-	}
-	if w == nil || w.Reaped() == nil {
-		cancel()
-		sink.seal()
-		if w != nil {
-			w.Retire()
+		detail := "provider returned nil worker"
+		if err != nil {
+			detail = err.Error()
 		}
-		e.openFailed(b, "provider returned invalid worker")
+		e.settleDemand(false, "provider_unavailable", detail)
 		return
 	}
-	h := &emergencyHandle{worker: w, sink: sink, cancel: cancel}
-	g := &workerGeneration{id: genID, phase: workerCreated, worker: w, host: host, sink: sink, life: life, cancel: cancel, emergency: h}
-	b.worker = g
-	if !e.install(h) {
+	if !e.slot.install(g, w, cancel) {
 		return
 	}
-	e.openGeneration(g, b.seed)
-	go func() { <-w.Reaped(); e.clearInstalled(h); e.sendInternal(reapedDone{gen: genID, emergency: h}) }()
+	e.generation = generationState{id: g, phase: generationOpening, sink: sink, openRevision: e.revision()}
+	go e.watchReaped(g, w)
+	seed := append([]byte(nil), e.seed...)
+	e.workerOpen(w, driverproto.OpenRequest{ResumeSeed: seed})
+	e.arm(timerOpen, e.policy.OpenFactDeadline, timerFact{kind: timerOpen, generation: g, revision: e.generation.openRevision})
 }
 
-func (e *Engine) openGeneration(g *workerGeneration, seed []byte) {
-	if g == nil || g.phase != workerCreated || g.retired {
-		return
-	}
-	g.phase = workerOpening
-	g.stagedSeed = nil
-	ctx, cc := context.WithTimeout(g.life, e.policy.OpenCall)
-	req := driverproto.OpenRequest{ResumeSeed: append([]byte(nil), seed...)}
-	go func() { defer cc(); r := g.worker.Open(ctx, req); e.sendInternal(openDone{gen: g.id, result: r}) }()
-}
-
-func (e *Engine) applyInternal(b *runtimeBook, v any) {
-	switch x := v.(type) {
-	case openDone:
-		e.onOpenDone(b, x)
-	case startDone:
-		e.onStartDone(b, x)
-	case controlDone:
-		e.onControlDone(b, x)
-	case reapedDone:
-		e.onReaped(b, x)
-	case timerDone:
-		e.onTimer(b, x)
-	case *effectRequest:
-		e.onEffectRequest(b, x)
-	case effectDone:
-		e.onEffectDone(b, x)
-	}
-}
-
-func (e *Engine) onOpenDone(b *runtimeBook, d openDone) {
-	g := b.worker
-	if g == nil || g.id != d.gen || g.phase != workerOpening {
-		return
-	}
-	if err := d.result.Validate(); err != nil {
-		e.protocolFault(b, g, err.Error())
-		return
-	}
-	switch d.result.Verdict() {
-	case driverproto.OpenReady:
-		g.phase = workerReady
-		if len(g.stagedSeed) > 0 {
-			b.seed = append([]byte(nil), g.stagedSeed...)
-			e.seedUpdated(b.seed)
-		}
-		for _, op := range b.ensure {
-			e.readyDone(op, true, "")
-		}
-		b.ensure = nil
-		e.maybeStart(b)
-	case driverproto.OpenResumeInvalid:
-		if !g.resumeRetry && len(b.seed) > 0 {
-			g.resumeRetry = true
-			b.seed = nil
-			e.retire(b, g, false, "resume-invalid")
-			return
-		}
-		e.openFailed(b, d.result.Detail())
-		e.retire(b, g, false, "open-failed")
-	case driverproto.OpenRejected, driverproto.OpenAmbiguous:
-		e.openFailed(b, d.result.Detail())
-		if d.result.Disposition() == driverproto.RetireWorker {
-			e.retire(b, g, false, "open-failed")
-		} else {
-			g.phase = workerCreated
-		}
-	}
-}
-
-func (e *Engine) openFailed(b *runtimeBook, detail string) {
-	if detail == "" {
-		detail = "provider open failed"
-	}
-	if b.nextStart != nil {
-		e.turnRejected(b.nextStart.command.Op, "provider_crash", detail)
-		b.nextStart = nil
-	}
-	for _, op := range b.ensure {
-		e.readyDone(op, false, detail)
-	}
-	b.ensure = nil
-}
-
-func (e *Engine) maybeStart(b *runtimeBook) {
-	g := b.worker
-	in := b.nextStart
-	if g == nil || g.phase != workerReady || g.turn != nil || in == nil {
-		return
-	}
-	b.nextStart = nil
-	b.nextAttempt++
-	b.nextTurn++
-	life, cancel := context.WithCancel(g.life)
-	t := &runtimeTurn{serial: b.nextTurn, startOp: in.command.Op, phase: turnStarting, life: life, cancel: cancel, scope: in.command.Scope, effects: map[effectKey]*effectRow{}, target: driverproto.WorkerTurnTarget{Attempt: b.nextAttempt}, command: cloneStart(in.command), resumeRetried: in.resumeRetried}
-	g.turn = t
-	req := driverproto.StartRequest{Attempt: b.nextAttempt, Life: life, Messages: translateMessages(in.command.Input.Messages), Background: translateContext(in.command.Input.Background)}
-	ctx, cc := context.WithTimeout(g.life, e.policy.StartCall)
-	go func(gen, serial uint64, attempt driverproto.AttemptToken) {
-		defer cc()
-		r := g.worker.Start(ctx, req)
-		e.sendInternal(startDone{gen: gen, serial: serial, attempt: attempt, result: r})
-	}(g.id, t.serial, t.target.Attempt)
-}
-
-func (e *Engine) onStartDone(b *runtimeBook, d startDone) {
-	g, t := currentTurn(b, d.gen, d.serial)
-	if t == nil || t.target.Attempt != d.attempt {
-		return
-	}
-	if err := d.result.Validate(); err != nil {
-		e.protocolFault(b, g, err.Error())
-		return
-	}
-	t.startResultSeen = true
-	if d.result.Verdict() == driverproto.StartResumeInvalid {
-		if t.eventsSeen || t.resumeRetried {
-			e.protocolFault(b, g, "resume invalid after attempt event")
-			return
-		}
-		command := t.command
-		t.cancel()
-		g.turn = nil
-		if len(b.seed) > 0 {
-			b.seed = nil
-			b.nextStart = &startIntent{command: command, resumeRetried: true}
-			e.retire(b, g, false, "resume-invalid")
-			return
-		}
-		e.turnRejected(command.Op, "provider_failed", d.result.Detail())
-		e.retire(b, g, false, "resume-invalid")
-		return
-	}
-	if d.result.Certainty() == driverproto.Ambiguous {
-		if t.phase == turnTerminal {
-			// Natural terminal already won the user-visible first claim.
-		} else if t.canonical == "" && !t.eventsSeen {
-			e.turnRejected(t.startOp, failureCode(d.result.Failure()), d.result.Detail())
-		} else {
-			e.providerLost(t.canonical, base.LostCrash, d.result.Detail())
-		}
-		e.retire(b, g, false, "ambiguous")
-		return
-	}
-	if d.result.Verdict() == driverproto.StartRejected {
-		if t.canonical == "" && !t.eventsSeen {
-			e.turnRejected(t.startOp, failureCode(d.result.Failure()), d.result.Detail())
-			t.cancel()
-			g.turn = nil
-		} else {
-			e.protocolFault(b, g, "start rejected after attempt event")
-			return
-		}
-		if d.result.Disposition() == driverproto.RetireWorker {
-			e.retire(b, g, t.canonical != "", "start-rejected")
-		}
-		return
-	}
-	t.startAccepted = true
-	if d.result.Disposition() == driverproto.RetireWorker {
-		if t.canonical == "" {
-			e.turnRejected(t.startOp, "provider_crash", "worker retired after accepting start")
-		} else {
-			e.providerLost(t.canonical, base.LostCrash, "worker retired after accepting start")
-		}
-		e.retire(b, g, false, "start-disposition")
-		return
-	}
-	if t.canonical == "" {
-		e.arm(timerStarted, g.id, t.serial, 0, e.policy.Started)
-	} else if t.phase == turnTerminal {
-		e.finalizeTurnEnded(b, g, t)
-	}
-}
-
-func (e *Engine) acceptControl(b *runtimeBook, c base.ControlCommand) {
-	g := b.worker
-	if c.Kind == base.RuntimeSteer && (c.Content == nil || strings.TrimSpace(c.Content.Text) == "") {
-		e.controlResult(c.Op, c.Target, base.ControlEmptyInput, "steer requires input")
-		return
-	}
-	if c.Kind == base.RuntimeSteer {
-		if err := validateControlInput(*c.Content, e.policy); err != nil {
-			e.controlResult(c.Op, c.Target, base.ControlInputTooLarge, err.Error())
-			return
-		}
-	}
-	if g == nil || g.turn == nil || g.turn.canonical == "" || g.turn.phase != turnActive {
-		e.controlResult(c.Op, c.Target, base.ControlNoActiveTurn, "no active turn")
-		return
-	}
-	if c.Target == "" || c.Target != g.turn.canonical {
-		e.controlResult(c.Op, c.Target, base.ControlMismatch, "turn target mismatch")
-		return
-	}
-	if c.Kind == base.RuntimeSteer && !e.spec.Capabilities.Steer {
-		e.controlResult(c.Op, c.Target, base.ControlNotSteerable, "steer unsupported")
-		return
-	}
-	if c.Kind == base.RuntimeInterrupt && !e.spec.Capabilities.Interrupt {
-		e.controlResult(c.Op, c.Target, base.ControlRPCError, "interrupt unsupported")
-		return
-	}
-	a := &controlAction{command: c, generation: g.id, serial: g.turn.serial, target: g.turn.target}
-	g.controls = append(g.controls, a)
-	e.dispatchControl(g)
-}
-
-func (e *Engine) dispatchControl(g *workerGeneration) {
-	if g.controlRunning || len(g.controls) == 0 || g.retired {
-		return
-	}
-	a := g.controls[0]
-	g.controlRunning = true
-	kind := driverproto.ControlInterrupt
-	var msg *driverproto.DriverMessage
-	if a.command.Kind == base.RuntimeSteer {
-		kind = driverproto.ControlSteer
-		m := translateMessage(*a.command.Content)
-		msg = &m
-		g.turn.transition = &scopeTransition{op: a.command.Op, old: g.turn.scope, candidate: a.command.Scope}
-	}
-	req := driverproto.ControlRequest{Kind: kind, Target: a.target, Message: msg}
-	ctx, cancel := context.WithTimeout(g.life, e.policy.ControlCall)
-	go func() {
-		defer cancel()
-		r := g.worker.Control(ctx, req)
-		e.sendInternal(controlDone{gen: a.generation, serial: a.serial, action: a, result: r})
-	}()
-}
-
-func (e *Engine) onControlDone(b *runtimeBook, d controlDone) {
-	g, t := currentTurn(b, d.gen, d.serial)
-	if g == nil {
-		return
-	}
-	if d.safety {
-		e.arm(timerDrain, g.id, d.serial, 0, e.policy.TerminalDrain)
-		return
-	}
-	if len(g.controls) == 0 || g.controls[0] != d.action {
-		return
-	}
-	g.controls = g.controls[1:]
-	g.controlRunning = false
-	if err := d.result.Validate(); err != nil {
-		e.controlResult(d.action.command.Op, d.action.command.Target, base.ControlRPCError, err.Error())
-		e.protocolFault(b, g, err.Error())
-		return
-	}
-	if d.action.command.Kind == base.RuntimeInterrupt && d.result.Verdict() == driverproto.ControlNotSteerable {
-		e.controlResult(d.action.command.Op, d.action.command.Target, base.ControlRPCError, "invalid interrupt verdict")
-		e.protocolFault(b, g, "not-steerable returned for interrupt")
-		return
-	}
-	verdict := base.ControlRPCError
-	switch d.result.Verdict() {
-	case driverproto.ControlAccepted:
-		verdict = base.ControlAccepted
-	case driverproto.ControlNotSteerable:
-		verdict = base.ControlNotSteerable
-	case driverproto.ControlTargetGone:
-		if t == nil || t.phase == turnTerminal {
-			verdict = base.ControlNoActiveTurn
-		}
-	}
-	if t != nil && t.transition != nil && t.transition.op == d.action.command.Op {
-		tr := t.transition
-		t.transition = nil
-		if verdict == base.ControlAccepted {
-			t.scope = tr.candidate
-		}
-		e.controlResult(d.action.command.Op, d.action.command.Target, verdict, d.result.Detail())
-		for _, r := range tr.held {
-			if d.result.Certainty() == driverproto.Ambiguous {
-				r.replyError("effect ownership ambiguous")
-			} else {
-				e.admitEffect(b, t, r)
-			}
-		}
-		if d.result.Certainty() != driverproto.Ambiguous {
-			for _, tool := range tr.heldTools {
-				e.tool(t.canonical, tool)
-			}
-		}
-	} else {
-		e.controlResult(d.action.command.Op, d.action.command.Target, verdict, d.result.Detail())
-	}
-	if d.result.Certainty() == driverproto.Ambiguous {
-		e.retire(b, g, t != nil && t.canonical != "", "control-ambiguous")
-		return
-	}
-	if d.result.Verdict() == driverproto.ControlTargetGone && t != nil && t.phase == turnActive {
-		e.retire(b, g, true, "target-gone")
-		return
-	}
-	if d.result.Disposition() == driverproto.RetireWorker {
-		e.retire(b, g, t != nil && t.canonical != "", "control-disposition")
-		return
-	}
-	if d.action.command.Kind == base.RuntimeInterrupt && verdict == base.ControlAccepted && t != nil {
-		e.arm(timerDrain, g.id, t.serial, 0, e.policy.InterruptEnded)
-	}
-	e.dispatchControl(g)
-}
-
-func (e *Engine) applyEvent(b *runtimeBook, env eventEnvelope) {
-	g := b.worker
-	if g == nil || g.id != env.generation {
-		return
-	}
-	switch v := env.event.(type) {
-	case driverproto.TurnStarted:
-		t := g.turn
-		if t == nil || t.phase != turnStarting || v.Target.Attempt != t.target.Attempt || !v.Target.Valid() {
-			return
-		}
-		t.eventsSeen = true
-		t.target = v.Target
-		t.phase = turnActive
-		g.host.activate(v.Target)
-		t.watchRev = g.sink.activate(v.Target)
-		t.canonical = base.TurnID(fmt.Sprintf("turn-%d-%d", e.instance, t.serial))
-		e.turnStarted(t.startOp, t.canonical)
-		e.arm(timerWatchdog, g.id, t.serial, t.watchRev, e.policy.Watchdog)
-	case driverproto.Activity:
-		if t := matchingTurn(g, v.Target); t != nil && t.phase == turnActive {
-			t.eventsSeen = true
-			t.watchRev, _ = g.sink.pulse(t.target)
-			e.arm(timerWatchdog, g.id, t.serial, t.watchRev, e.policy.Watchdog)
-		}
-	case driverproto.Tool:
-		if t := matchingTurn(g, v.Target); t != nil && t.phase == turnActive {
-			if v.CallID == "" || v.Name == "" {
-				e.protocolFault(b, g, "invalid tool event")
-				return
-			}
-			t.eventsSeen = true
-			t.watchRev, _ = g.sink.pulse(t.target)
-			e.arm(timerWatchdog, g.id, t.serial, t.watchRev, e.policy.Watchdog)
-			ev := base.ToolEvent{CallID: v.CallID, Name: v.Name, Detail: v.Detail}
-			if v.Phase == driverproto.ToolEnded {
-				ev.Phase = "ended"
-			} else {
-				ev.Phase = "started"
-			}
-			if v.Status == driverproto.ToolStatusCompleted {
-				ev.Status = "completed"
-			} else if v.Status == driverproto.ToolStatusFailed {
-				ev.Status = "failed"
-			}
-			if t.transition != nil {
-				t.transition.heldTools = append(t.transition.heldTools, ev)
-			} else {
-				e.tool(t.canonical, ev)
-			}
-		}
-	case driverproto.TurnEnded:
-		e.onTurnEnded(b, g, v)
-	case driverproto.SeedUpdated:
-		if g.phase == workerOpening {
-			g.stagedSeed = append([]byte(nil), v.Value...)
-		} else if !g.retired {
-			b.seed = append([]byte(nil), v.Value...)
-			e.seedUpdated(b.seed)
-		}
-	case driverproto.WorkerEnded:
-		detail := v.Detail
-		if detail == "" {
-			detail = "provider worker ended"
-		}
-		if g.turn != nil && g.turn.phase != turnTerminal {
-			if g.turn.canonical != "" {
-				e.providerLost(g.turn.canonical, base.LostCrash, detail)
-			} else {
-				e.turnRejected(g.turn.startOp, "provider_crash", detail)
-			}
-		} else if g.phase == workerOpening {
-			e.openFailed(b, detail)
-		}
-		e.retire(b, g, false, "worker-ended")
-	case driverproto.Diagnostic:
-		e.safeLog().Log(e.root, slog.LevelDebug, "provider diagnostic", "code", v.Code, "detail", sanitize(v.Detail))
-	}
-}
-
-func (e *Engine) onTurnEnded(b *runtimeBook, g *workerGeneration, v driverproto.TurnEnded) {
-	t := matchingTurn(g, v.Target)
-	if t == nil || t.canonical == "" || t.phase == turnTerminal {
-		return
-	}
-	t.eventsSeen = true
-	t.phase = turnTerminal
-	g.host.deactivate(t.target)
-	g.sink.deactivate(t.target)
-	t.cancel()
-	t.terminalOps = append([]*controlAction(nil), g.controls...)
-	vv := v
-	t.terminalEvent = &vv
-	if t.transition != nil {
-		for _, r := range t.transition.held {
-			e.rejectEffect(t, r, "turn ended before effect ownership resolved")
-		}
-		t.transition = nil
-	}
-	g.controls = nil
-	g.controlRunning = false
-	e.finalizeTurnEnded(b, g, t)
-}
-
-func (e *Engine) finalizeTurnEnded(b *runtimeBook, g *workerGeneration, t *runtimeTurn) {
-	if t == nil || t.terminalEvent == nil || t.pendingEffects != 0 {
-		return
-	}
-	v := *t.terminalEvent
-	status := base.TurnStatusOK
-	if v.Status == driverproto.TurnFailed {
-		status = base.TurnStatusFailed
-	} else if v.Status == driverproto.TurnInterrupted {
-		status = base.TurnStatusInterrupted
-	}
-	if !t.terminalSent {
-		e.turnEnded(t.canonical, status, v.FinalText, v.ErrorDetail)
-		for _, a := range t.terminalOps {
-			e.controlResult(a.command.Op, a.command.Target, base.ControlNoActiveTurn, "turn already ended")
-		}
-		t.terminalSent = true
-	}
-	if !t.startResultSeen {
-		return
-	}
-	g.turn = nil
-	if g.phase == workerDraining {
-		e.finishRetire(g)
-	} else {
-		g.phase = workerReady
-		e.maybeStart(b)
-	}
-}
-
-func (e *Engine) onTimer(b *runtimeBook, d timerDone) {
-	g, t := currentTurn(b, d.gen, d.serial)
-	switch d.kind {
-	case timerStarted:
-		if t != nil && t.phase == turnStarting && t.canonical == "" {
-			e.turnRejected(t.startOp, "provider_timeout", "turn did not start")
-			e.retire(b, g, false, "start-timeout")
-		}
-	case timerWatchdog:
-		pulse, active := uint64(0), false
-		if g != nil && t != nil {
-			pulse, active = g.sink.pulse(t.target)
-		}
-		if t != nil && t.phase == turnActive && active && pulse == d.rev {
-			g.phase = workerDraining
-			if e.spec.Capabilities.Interrupt {
-				req := driverproto.ControlRequest{Kind: driverproto.ControlInterrupt, Target: t.target}
-				ctx, cancel := context.WithTimeout(g.life, e.policy.SafetyInterrupt)
-				go func() {
-					defer cancel()
-					r := g.worker.Control(ctx, req)
-					e.sendInternal(controlDone{gen: g.id, serial: t.serial, result: r, safety: true})
-				}()
-				e.arm(timerSafety, g.id, t.serial, 0, e.policy.SafetyInterrupt)
-			} else {
-				e.arm(timerDrain, g.id, t.serial, 0, e.policy.TerminalDrain)
-			}
-		}
-	case timerSafety:
-		if t != nil && g.phase == workerDraining {
-			e.arm(timerDrain, g.id, t.serial, 0, e.policy.TerminalDrain)
-		}
-	case timerDrain:
-		if t != nil && t.phase != turnTerminal && g.phase == workerDraining {
-			e.providerLost(t.canonical, base.LostTimeout, "provider turn inactive")
-			e.finishRetire(g)
-		}
-	case timerReap:
-		if g != nil && g.phase == workerReaping {
-			g.phase = workerReapStalled
-			e.openFailed(b, "provider worker did not reap")
-		}
-	}
-}
-
-func (e *Engine) retire(b *runtimeBook, g *workerGeneration, reportLoss bool, cause string) {
-	_ = b
-	if !e.claimRetire(g, reportLoss, cause) {
-		return
-	}
-	e.finishRetire(g)
-}
-func (e *Engine) claimRetire(g *workerGeneration, reportLoss bool, cause string) bool {
-	if g == nil || g.retired {
-		return false
-	}
-	g.retired = true
-	g.retirement = &retireDecision{cause: cause, reportLoss: reportLoss}
-	g.phase = workerDraining
-	if g.turn != nil {
-		if reportLoss && g.turn.canonical != "" {
-			e.providerLost(g.turn.canonical, base.LostCrash, sanitize(cause))
-		}
-		g.turn.cancel()
-		g.host.deactivate(g.turn.target)
-		g.sink.deactivate(g.turn.target)
-		if g.turn.transition != nil {
-			for _, r := range g.turn.transition.held {
-				e.rejectEffect(g.turn, r, "worker retired")
-			}
-		}
-	}
-	return true
-}
-func (e *Engine) finishRetire(g *workerGeneration) {
-	if g.phase == workerReaping || g.phase == workerReapStalled {
-		return
-	}
-	g.sink.seal()
-	g.cancel()
-	g.phase = workerReaping
-	g.worker.Retire()
-	e.arm(timerReap, g.id, 0, 0, e.policy.Reap)
-}
-func (e *Engine) onReaped(b *runtimeBook, d reapedDone) {
-	g := b.worker
-	if g == nil || g.id != d.gen {
-		return
-	}
-	b.worker = nil
-	if e.root.Err() != nil {
-		return
-	}
-	if b.nextStart != nil || len(b.ensure) > 0 {
-		e.ensureWorker(b)
-	}
-}
-func (e *Engine) protocolFault(b *runtimeBook, g *workerGeneration, detail string) {
-	if g.turn != nil {
-		if g.turn.canonical != "" {
-			e.providerLost(g.turn.canonical, base.LostCrash, detail)
-		} else {
-			e.turnRejected(g.turn.startOp, "provider_crash", detail)
-		}
-	}
-	e.retire(b, g, false, "protocol-fault")
-}
-
-func currentTurn(b *runtimeBook, gen, serial uint64) (*workerGeneration, *runtimeTurn) {
-	g := b.worker
-	if g == nil || g.id != gen {
-		return nil, nil
-	}
-	t := g.turn
-	if t == nil || t.serial != serial {
-		return g, nil
-	}
-	return g, t
-}
-func matchingTurn(g *workerGeneration, target driverproto.WorkerTurnTarget) *runtimeTurn {
-	if g == nil || g.turn == nil || g.turn.target != target {
-		return nil
-	}
-	return g.turn
-}
-func (e *Engine) arm(k timerKind, gen, serial, rev uint64, d time.Duration) {
-	time.AfterFunc(d, func() { e.sendInternal(timerDone{kind: k, gen: gen, serial: serial, rev: rev}) })
-}
-func (e *Engine) sendInternal(v any) {
+func (e *engine) watchReaped(g uint64, w driverproto.Worker) {
 	select {
-	case e.internal <- v:
+	case <-w.Reaped():
+		e.inbox.push(classCompletion, reapedFact{generation: g, worker: w})
 	case <-e.root.Done():
 	}
 }
 
-func (e *Engine) turnStarted(op base.OpID, id base.TurnID) {
-	e.outbox.push(func(x base.RuntimeEvents) { x.TurnStarted(op, id) })
-}
-func (e *Engine) turnRejected(op base.OpID, code, detail string) {
-	detail = sanitize(detail)
-	e.outbox.push(func(x base.RuntimeEvents) { x.TurnRejected(op, code, detail) })
-}
-func (e *Engine) tool(id base.TurnID, v base.ToolEvent) {
-	e.outbox.push(func(x base.RuntimeEvents) { x.Tool(id, v) })
-}
-func (e *Engine) turnEnded(id base.TurnID, s base.TurnStatus, text, detail string) {
-	detail = sanitize(detail)
-	e.outbox.push(func(x base.RuntimeEvents) { x.TurnEnded(id, s, text, detail) })
-}
-func (e *Engine) controlResult(op base.OpID, id base.TurnID, v base.ControlVerdict, detail string) {
-	detail = sanitize(detail)
-	e.outbox.push(func(x base.RuntimeEvents) { x.ControlDone(op, id, v, detail) })
-}
-func (e *Engine) readyDone(op base.OpID, ok bool, detail string) {
-	detail = sanitize(detail)
-	e.outbox.push(func(x base.RuntimeEvents) { x.ReadyDone(op, base.ReadyResult{Ready: ok, Detail: detail}) })
-}
-func (e *Engine) providerLost(id base.TurnID, c base.LostCause, detail string) {
-	detail = sanitize(detail)
-	e.outbox.push(func(x base.RuntimeEvents) { x.ProviderLost(id, c, detail) })
-}
-func (e *Engine) seedUpdated(v []byte) {
-	v = append([]byte(nil), v...)
-	e.outbox.push(func(x base.RuntimeEvents) { x.ResumeSeedUpdated(v) })
+func (e *engine) dispatchDemand() {
+	d := e.pending
+	if d == nil || e.generation.phase != generationReady {
+		return
+	}
+	if d.kind == demandReady {
+		e.pending = nil
+		e.publish(publishReadyDone{op: d.op, result: runtimeproto.ReadyResult{Ready: true}})
+		return
+	}
+	e.pending = nil
+	attempt, ok := e.ids.Attempt()
+	if !ok {
+		e.contractFault("counter_overflow", "attempt counter overflow")
+		return
+	}
+	life, cancel := context.WithCancel(e.root)
+	t := &turnState{op: d.op, attempt: driverproto.AttemptToken(attempt), starting: true, startRevision: e.revision(), life: life, cancel: cancel, start: d.start, resumeRetried: d.resumeRetried, callbacks: map[string]*callbackRow{}}
+	e.turn = t
+	e.generation.phase = generationRunning
+	w := e.slot.get(e.generation.id)
+	if w == nil {
+		e.contractFault("worker_slot", "ready generation has no worker")
+		return
+	}
+	req := driverproto.StartRequest{Attempt: t.attempt, Life: life, Messages: toDriverInputs(d.start.Messages), Background: toDriverContexts(d.start.Background)}
+	e.workerStart(w, req)
+	e.arm(timerStart, e.policy.StartFactDeadline, timerFact{kind: timerStart, generation: e.generation.id, revision: t.startRevision, attempt: t.attempt})
 }
 
-func validateInput(in base.TurnInput, p Policy) error {
-	n := len(in.Messages) + len(in.Background)
-	if n == 0 {
-		return errors.New("empty input")
+func toDriverInputs(in []runtimeproto.Input) []driverproto.DriverMessage {
+	out := make([]driverproto.DriverMessage, len(in))
+	for i, v := range in {
+		out[i] = driverproto.DriverMessage{SourceID: v.SourceID, Type: v.Type, Sender: v.Sender, Payload: append([]byte(nil), v.Payload...), Text: v.Text}
 	}
-	if n > p.InputMaxItems {
-		return errors.New("input item limit exceeded")
-	}
-	total := 0
-	for _, m := range in.Messages {
-		if strings.HasPrefix(m.Type, "agent.") {
-			return errors.New("reserved agent control in runtime input")
-		}
-		total += len(m.Payload) + len(m.Text)
-	}
-	for _, m := range in.Background {
-		total += len(m.Payload) + len(m.Text)
-	}
-	if total > p.InputMaxBytes {
-		return errors.New("input byte limit exceeded")
-	}
-	return nil
+	return out
 }
-func validateControlInput(in base.RuntimeInput, p Policy) error {
-	if len(in.Payload)+len(in.Text) > p.InputMaxBytes {
-		return errors.New("input byte limit exceeded")
+func toDriverInput(in *runtimeproto.Input) *driverproto.DriverMessage {
+	if in == nil {
+		return nil
 	}
-	if strings.HasPrefix(in.Type, "agent.") {
-		return errors.New("reserved agent control in runtime input")
+	return &driverproto.DriverMessage{SourceID: in.SourceID, Type: in.Type, Sender: in.Sender, Payload: append([]byte(nil), in.Payload...), Text: in.Text}
+}
+func toDriverContexts(in []runtimeproto.ContextItem) []driverproto.ContextMessage {
+	out := make([]driverproto.ContextMessage, len(in))
+	for i, v := range in {
+		out[i] = driverproto.ContextMessage{Seq: v.Seq, Sender: v.Sender, Kind: v.Kind, Type: v.Type, Payload: append([]byte(nil), v.Payload...), Text: v.Text}
 	}
-	return nil
+	return out
+}
+
+func (e *engine) handleDriverFact(f driverFact) {
+	if f.generation != e.generation.id || e.generation.phase == generationNil {
+		e.logContradiction("late generation fact", f.event)
+		return
+	}
+	switch x := f.event.(type) {
+	case driverproto.WorkerReady:
+		e.workerReady()
+	case driverproto.OpenRejected:
+		e.openRejected(x)
+	case driverproto.SubmissionRejected:
+		e.submissionRejected(x)
+	case driverproto.TurnStarted:
+		e.turnStarted(x)
+	case driverproto.Activity:
+		e.activity(x)
+	case driverproto.Tool:
+		e.nativeTool(x)
+	case driverproto.TurnEnded:
+		e.turnEnded(x)
+	case driverproto.ControlOutcome:
+		e.controlOutcome(x)
+	case driverproto.SeedUpdated:
+		e.seedUpdated(x)
+	case driverproto.WorkerEnded:
+		e.workerEnded(x)
+	case driverproto.Diagnostic:
+		e.deps.Logger.Log(e.root, slog.LevelDebug, "agent provider diagnostic", "code", x.Code, "detail", x.Detail)
+	default:
+		e.handleProtocolFault(protocolFault{generation: f.generation, code: "unknown_event", detail: fmt.Sprintf("unknown driver event %T", f.event)})
+	}
+}
+
+func (e *engine) workerReady() {
+	if e.generation.phase != generationOpening {
+		e.logContradiction("contradictory WorkerReady", nil)
+		return
+	}
+	e.generation.phase = generationReady
+	if len(e.generation.stagedSeed) > 0 {
+		e.publish(publishSeed{value: e.generation.stagedSeed})
+		e.generation.stagedSeed = nil
+	}
+	e.dispatchDemand()
+}
+
+func (e *engine) openRejected(x driverproto.OpenRejected) {
+	if e.generation.phase != generationOpening {
+		e.logContradiction("contradictory OpenRejected", x)
+		return
+	}
+	if x.Class == driverproto.FailureResumeInvalid && len(e.seed) > 0 && e.pending != nil && !e.pending.resumeRetried {
+		e.seed = nil
+		e.pending.resumeRetried = true
+		e.beginRetire("invalid resume seed")
+		return
+	}
+	e.settleDemand(false, failureCode(x.Class), x.Detail)
+	e.beginRetire("open rejected")
+}
+
+func (e *engine) turnStarted(x driverproto.TurnStarted) {
+	t := e.turn
+	if t == nil || !t.starting || x.Target.Attempt != t.attempt || !x.Target.Valid() {
+		e.logContradiction("contradictory TurnStarted", x)
+		return
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		e.contractFault("turn_id", err.Error())
+		return
+	}
+	t.starting = false
+	t.target = x.Target
+	t.id = runtimeproto.TurnID(id.String())
+	t.watchdogRevision = e.revision()
+	e.publish(publishTurnStarted{op: t.op, turn: t.id})
+	e.arm(timerWatchdog, e.policy.Watchdog, timerFact{kind: timerWatchdog, generation: e.generation.id, revision: t.watchdogRevision, attempt: t.attempt})
+}
+
+func (e *engine) submissionRejected(x driverproto.SubmissionRejected) {
+	t := e.turn
+	if t == nil || !t.starting || x.Attempt != t.attempt {
+		e.logContradiction("contradictory SubmissionRejected", x)
+		return
+	}
+	if x.Class == driverproto.FailureResumeInvalid && len(e.seed) > 0 && !t.resumeRetried {
+		e.seed = nil
+		e.pending = &pendingDemand{kind: demandStart, op: t.op, start: t.start, resumeRetried: true}
+		t.cancel()
+		e.turn = nil
+		e.beginRetire("invalid resume seed")
+		return
+	}
+	e.publish(publishTurnRejected{op: t.op, code: failureCode(x.Class), detail: x.Detail})
+	t.cancel()
+	e.turn = nil
+	if x.Disposition == driverproto.RetireWorker {
+		e.beginRetire("submission rejected")
+	} else {
+		e.generation.phase = generationReady
+		e.dispatchDemand()
+	}
+}
+
+func (e *engine) activity(x driverproto.Activity) {
+	if !e.currentTarget(x.Target) {
+		e.logContradiction("late Activity", x)
+		return
+	}
+	e.resetWatchdog()
+}
+
+func (e *engine) nativeTool(x driverproto.Tool) {
+	if !e.currentTarget(x.Target) {
+		e.logContradiction("late Tool", x)
+		return
+	}
+	phase := "started"
+	if x.Phase == driverproto.ToolEnded {
+		phase = "ended"
+	}
+	status := ""
+	if x.Status == driverproto.ToolStatusCompleted {
+		status = "completed"
+	} else if x.Status == driverproto.ToolStatusFailed {
+		status = "failed"
+	}
+	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: x.CallID, Phase: phase, Name: x.Name, Status: status, Detail: x.Detail}})
+	e.resetWatchdog()
+}
+
+func (e *engine) turnEnded(x driverproto.TurnEnded) {
+	if !e.currentTarget(x.Target) {
+		e.logContradiction("contradictory TurnEnded", x)
+		return
+	}
+	if runningCallbacks(e.turn) != 0 {
+		e.closeLost(runtimeproto.LostProtocol, "provider ended turn with running host callbacks")
+		e.beginRetire("callback order violation")
+		return
+	}
+	status := runtimeproto.TurnStatusOK
+	if x.Status == driverproto.TurnFailed {
+		status = runtimeproto.TurnStatusFailed
+	} else if x.Status == driverproto.TurnInterrupted {
+		status = runtimeproto.TurnStatusInterrupted
+	}
+	e.publish(publishTurnEnded{turn: e.turn.id, status: status, text: x.FinalText, detail: x.ErrorDetail})
+	e.turn.terminal = true
+	e.turn.cancel()
+	if e.turn.control != nil {
+		e.turn.control.terminalSeen = true
+	} else {
+		e.finishTurnReusable()
+	}
+}
+
+func (e *engine) controlOutcome(x driverproto.ControlOutcome) {
+	t := e.turn
+	if t == nil || t.control == nil || x.Action != t.control.action || x.Target != t.control.target {
+		e.logContradiction("contradictory ControlOutcome", x)
+		return
+	}
+	c := t.control
+	c.outcomeSeen = true
+	verdict := runtimeproto.ControlRejected
+	switch x.Verdict {
+	case driverproto.ControlAccepted:
+		verdict = runtimeproto.ControlAccepted
+	case driverproto.ControlNotSteerable:
+		verdict = runtimeproto.ControlNotSteerable
+	case driverproto.ControlTargetGone:
+		verdict = runtimeproto.ControlTargetGone
+	}
+	e.publish(publishControlDone{op: c.op, turn: t.id, verdict: verdict, detail: x.Detail})
+	if x.Verdict == driverproto.ControlAccepted && c.kind == runtimeproto.ControlSteer && !t.terminal {
+		t.acceptedSteer, t.hasAcceptedSteer = c.candidate, true
+	}
+	if x.Verdict == driverproto.ControlAccepted && c.kind == runtimeproto.ControlInterrupt && !t.terminal {
+		t.interruptRevision = e.revision()
+		e.arm(timerInterrupt, e.policy.InterruptEnded, timerFact{kind: timerInterrupt, generation: e.generation.id, revision: t.interruptRevision, attempt: t.attempt})
+	}
+	t.control = nil
+	if x.Disposition == driverproto.RetireWorker {
+		if !t.terminal {
+			e.closeLost(runtimeproto.LostCrash, "provider retired after control outcome")
+		}
+		e.beginRetire("control disposition")
+		return
+	}
+	if t.terminal {
+		e.finishTurnReusable()
+	}
+}
+
+func (e *engine) seedUpdated(x driverproto.SeedUpdated) {
+	v := append([]byte(nil), x.Value...)
+	e.seed = v
+	if e.generation.phase == generationOpening {
+		e.generation.stagedSeed = v
+		return
+	}
+	e.publish(publishSeed{value: v})
+}
+
+func (e *engine) workerEnded(x driverproto.WorkerEnded) {
+	if e.turn != nil && e.turn.terminal {
+		e.rejectControl(x.Detail)
+	}
+	switch {
+	case e.generation.phase == generationOpening:
+		e.settleDemand(false, "provider_crash", x.Detail)
+	case e.turn != nil && e.turn.starting:
+		e.publish(publishTurnRejected{op: e.turn.op, code: "provider_crash", detail: x.Detail})
+		e.turn.cancel()
+		e.turn = nil
+	case e.turn != nil && !e.turn.terminal:
+		e.closeLost(runtimeproto.LostCrash, x.Detail)
+	}
+	e.beginRetire("worker ended")
+}
+
+func (e *engine) currentTarget(target driverproto.WorkerTurnTarget) bool {
+	return e.turn != nil && !e.turn.starting && !e.turn.terminal && e.turn.target == target
+}
+func (e *engine) resetWatchdog() {
+	if e.turn == nil {
+		return
+	}
+	e.turn.watchdogRevision = e.revision()
+	e.arm(timerWatchdog, e.policy.Watchdog, timerFact{kind: timerWatchdog, generation: e.generation.id, revision: e.turn.watchdogRevision, attempt: e.turn.attempt})
+}
+
+func (e *engine) handleTimer(t timerFact) {
+	if t.generation != e.generation.id {
+		return
+	}
+	switch t.kind {
+	case timerOpen:
+		if e.generation.phase == generationOpening && t.revision == e.generation.openRevision {
+			e.settleDemand(false, "provider_timeout", "provider open produced no fact")
+			e.beginRetire("open timeout")
+		}
+	case timerStart:
+		if e.turn != nil && e.turn.starting && t.attempt == e.turn.attempt && t.revision == e.turn.startRevision {
+			e.publish(publishTurnRejected{op: e.turn.op, code: "provider_timeout", detail: "provider start produced no fact"})
+			e.turn.cancel()
+			e.turn = nil
+			e.beginRetire("start timeout")
+		}
+	case timerControl:
+		if e.turn != nil && e.turn.control != nil && t.action == e.turn.control.action && t.revision == e.turn.control.revision {
+			e.publish(publishControlDone{op: e.turn.control.op, turn: e.turn.id, verdict: runtimeproto.ControlTimeout, detail: "provider control produced no fact"})
+			e.turn.control = nil
+			if !e.turn.terminal {
+				e.closeLost(runtimeproto.LostTimeout, "provider control timeout")
+			}
+			e.beginRetire("control timeout")
+		}
+	case timerInterrupt:
+		if e.turn != nil && !e.turn.terminal && t.attempt == e.turn.attempt && t.revision == e.turn.interruptRevision {
+			e.closeLost(runtimeproto.LostTimeout, "interrupt did not end turn")
+			e.beginRetire("interrupt timeout")
+		}
+	case timerWatchdog:
+		if e.turn != nil && !e.turn.starting && !e.turn.terminal && t.attempt == e.turn.attempt && t.revision == e.turn.watchdogRevision {
+			e.closeLost(runtimeproto.LostTimeout, "provider turn inactivity timeout")
+			e.beginRetire("watchdog")
+		}
+	case timerReapedDemand:
+		if e.generation.phase == generationRetiring && e.pending != nil && t.revision == e.generation.reapRevision {
+			e.settleDemand(false, "provider_timeout", "worker did not reap before demand deadline")
+		}
+	}
+}
+
+func (e *engine) arm(kind timerKind, delay time.Duration, fact timerFact) {
+	if old := e.timers[kind]; old != nil {
+		old.Stop()
+	}
+	e.timers[kind] = time.AfterFunc(delay, func() {
+		if !e.inbox.push(classTimer, fact) {
+			e.inbox.latchFault(protocolFault{generation: fact.generation, code: "timer_overflow", detail: "reserved timer slot unavailable"})
+		}
+	})
+}
+
+func (e *engine) beginRetire(detail string) {
+	if e.generation.phase == generationNil || e.generation.phase == generationRetiring {
+		return
+	}
+	e.generation.phase = generationRetiring
+	if e.generation.sink != nil {
+		e.generation.sink.seal()
+	}
+	e.retireWorker(e.generation.id)
+	if e.pending != nil {
+		e.armReapedDemand()
+	}
+	e.deps.Logger.Debug("agent worker retiring", "generation", e.generation.id, "detail", detail)
+}
+
+func (e *engine) armReapedDemand() {
+	e.generation.reapRevision = e.revision()
+	e.arm(timerReapedDemand, e.policy.ReapedDemand, timerFact{kind: timerReapedDemand, generation: e.generation.id, revision: e.generation.reapRevision})
+}
+
+func (e *engine) handleReaped(r reapedFact) {
+	if r.generation != e.generation.id || !e.slot.clear(r.generation, r.worker) {
+		return
+	}
+	if e.generation.phase != generationRetiring {
+		if e.turn != nil && e.turn.starting {
+			e.publish(publishTurnRejected{op: e.turn.op, code: "provider_crash", detail: "worker reaped unexpectedly"})
+			e.turn.cancel()
+			e.turn = nil
+		} else if e.turn != nil && !e.turn.terminal {
+			e.closeLost(runtimeproto.LostCrash, "worker reaped unexpectedly")
+		} else if e.turn != nil {
+			// Terminal turn: the only obligation left is an unanswered control.
+			// Settle it before the wipe below discards the books; a late
+			// ControlFactDeadline verdict can never match a wiped generation.
+			e.rejectControl("worker reaped unexpectedly")
+		}
+	}
+	e.generation = generationState{}
+	if e.turn != nil {
+		e.turn.cancel()
+		e.turn = nil
+	}
+	if e.pending != nil {
+		e.spawn()
+	}
+}
+
+func (e *engine) handleProtocolFault(f protocolFault) {
+	if f.generation != e.generation.id {
+		return
+	}
+	if e.turn != nil && e.turn.terminal {
+		e.rejectControl(f.detail)
+	}
+	if e.turn != nil && e.turn.starting {
+		e.publish(publishTurnRejected{op: e.turn.op, code: "provider_protocol", detail: f.detail})
+		e.turn.cancel()
+		e.turn = nil
+	} else if e.turn != nil && !e.turn.terminal {
+		e.closeLost(runtimeproto.LostProtocol, f.detail)
+	} else if e.generation.phase == generationOpening {
+		e.settleDemand(false, "provider_protocol", f.detail)
+	}
+	e.beginRetire(f.code)
+}
+
+func (e *engine) rejectControl(detail string) {
+	if e.turn == nil || e.turn.control == nil {
+		return
+	}
+	e.publish(publishControlDone{op: e.turn.control.op, turn: e.turn.id, verdict: runtimeproto.ControlRejected, detail: detail})
+	e.turn.control = nil
+}
+
+func (e *engine) closeLost(cause runtimeproto.LostCause, detail string) {
+	if e.turn == nil || e.turn.terminal {
+		return
+	}
+	id := e.turn.id
+	if e.turn.control != nil {
+		e.publish(publishControlDone{op: e.turn.control.op, turn: id, verdict: runtimeproto.ControlRejected, detail: detail})
+		e.turn.control = nil
+	}
+	if e.turn.starting {
+		e.publish(publishTurnRejected{op: e.turn.op, code: failureForLost(cause), detail: detail})
+	} else {
+		e.publish(publishProviderLost{turn: id, cause: cause, detail: detail})
+	}
+	e.turn.terminal = true
+	e.turn.cancel()
+	for _, row := range e.turn.callbacks {
+		if row.running {
+			respondCancelled(row.request, "turn no longer active")
+			row.running = false
+		}
+	}
+}
+
+func failureForLost(c runtimeproto.LostCause) string {
+	if c == runtimeproto.LostTimeout {
+		return "provider_timeout"
+	}
+	if c == runtimeproto.LostProtocol {
+		return "provider_protocol"
+	}
+	return "provider_crash"
+}
+
+func (e *engine) abandonTurn() {
+	if e.turn == nil {
+		return
+	}
+	e.turn.terminal = true
+	e.turn.cancel()
+	for _, row := range e.turn.callbacks {
+		if row.running {
+			respondCancelled(row.request, "turn abandoned")
+			row.running = false
+		}
+	}
+	e.turn = nil
+}
+
+func (e *engine) finishTurnReusable() {
+	if e.turn == nil || !e.turn.terminal || e.turn.control != nil {
+		return
+	}
+	e.turn = nil
+	if e.generation.phase != generationRetiring {
+		e.generation.phase = generationReady
+		e.dispatchDemand()
+	}
+}
+
+func (e *engine) settleDemand(ready bool, code, detail string) {
+	d := e.pending
+	if d == nil {
+		return
+	}
+	e.pending = nil
+	if d.kind == demandReady {
+		e.publish(publishReadyDone{op: d.op, result: runtimeproto.ReadyResult{Ready: ready, Code: code, Detail: detail}})
+	} else if !ready {
+		e.publish(publishTurnRejected{op: d.op, code: code, detail: detail})
+	}
+}
+
+func (e *engine) contractFault(code, detail string) {
+	e.publish(publishFault{code: code, detail: detail})
+}
+func (e *engine) revision() uint64 {
+	revision, ok := e.ids.Revision()
+	if !ok {
+		e.contractFault("counter_overflow", "revision counter overflow")
+	}
+	return revision
+}
+func (e *engine) logContradiction(msg string, fact any) {
+	e.deps.Logger.Error(msg, "generation", e.generation.id, "fact", fmt.Sprintf("%T", fact))
 }
 func failureCode(c driverproto.FailureClass) string {
 	switch c {
 	case driverproto.FailureInvalidInput:
-		return "input_too_large"
+		return "input_invalid"
 	case driverproto.FailureOverloaded:
-		return "overloaded"
+		return "provider_overloaded"
 	case driverproto.FailureTransport:
 		return "provider_crash"
+	case driverproto.FailureResumeInvalid:
+		return "resume_invalid"
 	default:
 		return "provider_failed"
 	}
 }
 
-var secretPattern = regexp.MustCompile(`(?i)(bearer\s+)[^\s,;]+|((?:authorization|api[_-]?key|token|password)\s*[:=]\s*)[^\s,;]+`)
-
-func sanitize(s string) string {
-	s = strings.TrimSpace(s)
-	s = secretPattern.ReplaceAllString(s, "$1$2[redacted]")
-	if len(s) > 4096 {
-		s = s[:4096]
+func (e *engine) handleCallback(r *callbackRequest) {
+	if r.generation != e.generation.id || !e.currentTarget(r.target) {
+		respondCancelled(r, "target is not active")
+		return
 	}
-	return s
-}
-func safeLogger(l *slog.Logger) *slog.Logger {
-	if l == nil {
-		return slog.New(slog.DiscardHandler)
+	key := callbackKey(r)
+	if key == "" || e.turn.callbacks[key] != nil {
+		respondCancelled(r, "duplicate or empty provider call id")
+		e.handleProtocolFault(protocolFault{generation: r.generation, code: "duplicate_callback", detail: "duplicate provider callback"})
+		return
 	}
-	return l
-}
-func (e *Engine) safeLog() *slog.Logger { return safeLogger(nil) }
-
-func cloneStart(c base.StartCommand) base.StartCommand {
-	c.Input.Messages = append([]base.RuntimeInput(nil), c.Input.Messages...)
-	for i := range c.Input.Messages {
-		c.Input.Messages[i].Payload = append(json.RawMessage(nil), c.Input.Messages[i].Payload...)
-	}
-	c.Input.Background = append([]base.RuntimeContextItem(nil), c.Input.Background...)
-	for i := range c.Input.Background {
-		c.Input.Background[i].Payload = append(json.RawMessage(nil), c.Input.Background[i].Payload...)
-	}
-	return c
-}
-func cloneControl(c base.ControlCommand) base.ControlCommand {
-	if c.Content != nil {
-		x := *c.Content
-		x.Payload = append(json.RawMessage(nil), x.Payload...)
-		c.Content = &x
-	}
-	return c
-}
-func translateMessage(m base.RuntimeInput) driverproto.DriverMessage {
-	return driverproto.DriverMessage{SourceID: m.SourceID, Type: m.Type, Sender: m.Sender, Payload: append(json.RawMessage(nil), m.Payload...), Text: m.Text}
-}
-func translateMessages(ms []base.RuntimeInput) []driverproto.DriverMessage {
-	out := make([]driverproto.DriverMessage, len(ms))
-	for i := range ms {
-		out[i] = translateMessage(ms[i])
-	}
-	return out
-}
-func translateContext(ms []base.RuntimeContextItem) []driverproto.ContextMessage {
-	out := make([]driverproto.ContextMessage, len(ms))
-	for i, m := range ms {
-		out[i] = driverproto.ContextMessage{Seq: m.Seq, Sender: m.Sender, Kind: m.Kind, Type: m.Type, Payload: append(json.RawMessage(nil), m.Payload...), Text: m.Text}
-	}
-	return out
+	e.turn.callbacks[key] = &callbackRow{request: r, running: true}
+	e.resetWatchdog()
+	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: r.callID, Phase: "started", Name: callbackName(r)}})
+	e.invokeBridge(r, key, e.turn.start, e.turn.acceptedSteer, e.turn.hasAcceptedSteer)
 }
 
-var _ base.Runtime = (*Engine)(nil)
-var _ driverproto.EventSink = (*eventSink)(nil)
-
-// fingerprint is shared by tool and resource ledgers.
-func fingerprint(parts ...[]byte) [32]byte {
-	h := sha256.New()
-	for _, p := range parts {
-		_, _ = h.Write(p)
-		_, _ = h.Write([]byte{0})
+func (e *engine) handleCallbackCompletion(c callbackCompletion) {
+	if c.generation != e.generation.id || e.turn == nil {
+		return
 	}
-	var out [32]byte
-	copy(out[:], h.Sum(nil))
-	return out
+	row := e.turn.callbacks[c.key]
+	if row == nil || !row.running {
+		return
+	}
+	row.running = false
+	e.resetWatchdog()
+	status, detail := "completed", ""
+	if row.request.kind == callbackTool && c.result.tool.IsError {
+		status, detail = "failed", c.result.tool.Text
+	}
+	if row.request.kind == callbackResource && c.result.resource.Error != "" {
+		status, detail = "failed", c.result.resource.Error
+	}
+	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: row.request.callID, Phase: "ended", Name: callbackName(row.request), Status: status, Detail: detail}})
+	select {
+	case row.request.response <- c.result:
+	default:
+	}
 }
+
+func callbackKey(r *callbackRequest) string {
+	if r.callID == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d/%s/%d/%s", r.generation, r.target.Attempt, r.target.Native, r.kind, r.callID)
+}
+func callbackName(r *callbackRequest) string {
+	if r.kind == callbackTool {
+		return r.tool.Name
+	}
+	return "resource." + r.resource.Operation
+}
+func runningCallbacks(t *turnState) int {
+	n := 0
+	if t != nil {
+		for _, row := range t.callbacks {
+			if row.running {
+				n++
+			}
+		}
+	}
+	return n
+}
+func respondCancelled(r *callbackRequest, detail string) {
+	out := callbackResult{}
+	if r.kind == callbackTool {
+		out.tool = driverproto.ToolResult{Text: detail, IsError: true}
+	} else {
+		out.resource = driverproto.ResourceResult{Error: detail}
+	}
+	select {
+	case r.response <- out:
+	default:
+	}
+}
+func runtimeprotoToDriverTool(v runtimeproto.ToolResult) driverproto.ToolResult {
+	return driverproto.ToolResult{Text: v.Text, IsError: v.IsError}
+}
+
+var _ runtimeproto.Runtime = (*engine)(nil)

@@ -10,19 +10,14 @@ import (
 
 type Provider interface {
 	Spec() ProviderSpec
-	NewAdapter() (Adapter, error)
-}
-
-// Adapter is an immutable, resource-free worker factory.
-type Adapter interface {
 	NewWorker(WorkerHost) (Worker, error)
 }
 
 // Worker owns every physical resource in one runtime generation.
 type Worker interface {
-	Open(context.Context, OpenRequest) OpenResult
-	Start(context.Context, StartRequest) StartResult
-	Control(context.Context, ControlRequest) ControlResult
+	Open(context.Context, OpenRequest)
+	Start(context.Context, StartRequest)
+	Control(context.Context, ControlRequest)
 	Retire()
 	Reaped() <-chan struct{}
 }

@@ -47,9 +47,6 @@ func init() {
 	registry.Register("script", registry.ClassDecl{
 		Kind: actor.KindAgent,
 		New:  stub,
-		// Keep the production class name honest in app tests: the real script
-		// provider cannot build without tool_id. Generic app tests use the
-		// deliberately permissive test-agent class below instead.
 		ValidateConfig: func(raw json.RawMessage) error {
 			var cfg struct {
 				ToolID string `json:"tool_id"`
@@ -65,6 +62,7 @@ func init() {
 			return nil
 		},
 	})
+	registry.Register("codex", registry.ClassDecl{Kind: actor.KindAgent, New: stub})
 	registry.Register("test-agent", registry.ClassDecl{Kind: actor.KindAgent, New: stub})
 }
 

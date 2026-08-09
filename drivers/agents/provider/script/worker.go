@@ -10,67 +10,151 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
 
+type workerPhase uint8
+
+const (
+	phaseConstructed workerPhase = iota
+	phaseOpening
+	phaseReady
+	phaseActive
+	phaseRetiring
+	phaseReaped
+)
+
 type worker struct {
-	toolID  string
-	host    driverproto.WorkerHost
-	mu      sync.Mutex
-	retired bool
-	calls   sync.WaitGroup
-	reaped  chan struct{}
-	once    sync.Once
+	toolID    string
+	host      driverproto.WorkerHost
+	mu        sync.Mutex
+	phase     workerPhase
+	producing bool
+	target    driverproto.WorkerTurnTarget
+	callbacks int
+	calls     sync.WaitGroup
+	reaped    chan struct{}
+	once      sync.Once
 }
 
 func newWorker(toolID string, h driverproto.WorkerHost) *worker {
-	return &worker{toolID: toolID, host: h, reaped: make(chan struct{})}
+	return &worker{toolID: toolID, host: h, producing: true, reaped: make(chan struct{})}
 }
-func (w *worker) begin() bool {
+
+func (w *worker) Open(context.Context, driverproto.OpenRequest) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.retired {
-		return false
+	if w.phase != phaseConstructed {
+		w.mu.Unlock()
+		return
+	}
+	w.phase = phaseOpening
+	w.calls.Add(1)
+	w.mu.Unlock()
+	defer w.calls.Done()
+	w.mu.Lock()
+	if w.phase == phaseOpening {
+		w.phase = phaseReady
+	}
+	w.mu.Unlock()
+	w.publish(driverproto.WorkerReady{})
+}
+
+func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
+	w.mu.Lock()
+	if w.phase != phaseReady {
+		w.mu.Unlock()
+		return
 	}
 	w.calls.Add(1)
-	return true
-}
-func (w *worker) Open(context.Context, driverproto.OpenRequest) driverproto.OpenResult {
-	if !w.begin() {
-		return driverproto.OpenReject(driverproto.FailureTransport, "retired", driverproto.RetireWorker)
-	}
-	defer w.calls.Done()
-	return driverproto.Ready()
-}
-func (w *worker) Start(_ context.Context, req driverproto.StartRequest) driverproto.StartResult {
-	if !w.begin() {
-		return driverproto.StartReject(driverproto.FailureTransport, "retired", driverproto.RetireWorker)
-	}
 	if len(req.Messages) == 0 {
+		w.mu.Unlock()
+		w.publish(driverproto.SubmissionRejected{Attempt: req.Attempt, Class: driverproto.FailureInvalidInput, Detail: "empty input", Disposition: driverproto.KeepWorker})
 		w.calls.Done()
-		return driverproto.StartReject(driverproto.FailureInvalidInput, "empty input", driverproto.KeepWorker)
+		return
 	}
 	target := driverproto.WorkerTurnTarget{Attempt: req.Attempt, Native: driverproto.WorkerTurnRef(fmt.Sprintf("script-%d", req.Attempt))}
-	if !w.host.Events().Publish(driverproto.TurnStarted{Target: target}) {
-		w.calls.Done()
-		return driverproto.StartReject(driverproto.FailureTransport, "event sink closed", driverproto.RetireWorker)
-	}
+	w.phase, w.target = phaseActive, target
+	w.mu.Unlock()
 	m := req.Messages[len(req.Messages)-1]
 	go func() {
 		defer w.calls.Done()
+		if !w.publish(driverproto.TurnStarted{Target: target}) { return }
 		text, detail := w.execute(req.Life, target, m)
 		status := driverproto.TurnOK
 		if detail != "" {
 			status = driverproto.TurnFailed
 		}
-		w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: text, ErrorDetail: detail})
+		w.mu.Lock()
+		if w.phase != phaseActive || w.target != target || w.callbacks != 0 {
+			w.mu.Unlock()
+			return
+		}
+		w.phase, w.target = phaseReady, driverproto.WorkerTurnTarget{}
+		w.mu.Unlock()
+		w.publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: text, ErrorDetail: detail})
 	}()
-	return driverproto.StartAccept(driverproto.KeepWorker)
 }
-func (w *worker) Control(context.Context, driverproto.ControlRequest) driverproto.ControlResult {
-	return driverproto.ControlReject(driverproto.FailureProvider, "script controls are unsupported", driverproto.KeepWorker)
+
+func (w *worker) Control(_ context.Context, req driverproto.ControlRequest) {
+	w.mu.Lock()
+	if w.phase != phaseActive || w.target != req.Target {
+		w.mu.Unlock()
+		return
+	}
+	w.calls.Add(1)
+	w.mu.Unlock()
+	defer w.calls.Done()
+	w.publish(driverproto.ControlOutcome{Action: req.Action, Target: req.Target, Verdict: driverproto.ControlRejected, Detail: "script controls are unsupported", Disposition: driverproto.KeepWorker})
 }
+
+func (w *worker) publish(event driverproto.DriverEvent) bool {
+	w.mu.Lock()
+	allowed := w.producing && w.phase != phaseRetiring && w.phase != phaseReaped
+	w.mu.Unlock()
+	if !allowed {
+		return false
+	}
+	ok := w.host.Events().Publish(event)
+	if !ok {
+		w.mu.Lock()
+		w.producing = false
+		w.mu.Unlock()
+	}
+	return ok
+}
+
 func (w *worker) Retire() {
-	w.once.Do(func() { w.mu.Lock(); w.retired = true; w.mu.Unlock(); go func() { w.calls.Wait(); close(w.reaped) }() })
+	w.once.Do(func() {
+		w.mu.Lock()
+		w.phase, w.producing = phaseRetiring, false
+		w.mu.Unlock()
+		go func() { w.calls.Wait(); w.mu.Lock(); w.phase = phaseReaped; w.mu.Unlock(); close(w.reaped) }()
+	})
 }
 func (w *worker) Reaped() <-chan struct{} { return w.reaped }
+
+func (w *worker) beginCallback(target driverproto.WorkerTurnTarget) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.phase != phaseActive || w.target != target {
+		return false
+	}
+	w.callbacks++
+	return true
+}
+func (w *worker) endCallback() { w.mu.Lock(); w.callbacks--; w.mu.Unlock() }
+func (w *worker) tool(ctx context.Context, target driverproto.WorkerTurnTarget, in driverproto.ToolInvocation) driverproto.ToolResult {
+	if !w.beginCallback(target) {
+		return driverproto.ToolResult{Text: "turn is not active", IsError: true}
+	}
+	defer w.endCallback()
+	return w.host.Tools().Invoke(ctx, target, in)
+}
+func (w *worker) resource(ctx context.Context, target driverproto.WorkerTurnTarget, in driverproto.ResourceInvocation) driverproto.ResourceResult {
+	if !w.beginCallback(target) {
+		return driverproto.ResourceResult{Error: "turn is not active"}
+	}
+	defer w.endCallback()
+	return w.host.Resources().Invoke(ctx, target, in)
+}
+
 func (w *worker) execute(ctx context.Context, target driverproto.WorkerTurnTarget, m driverproto.DriverMessage) (string, string) {
 	switch m.Type {
 	case TypeChat:
@@ -87,7 +171,7 @@ func (w *worker) chat(ctx context.Context, target driverproto.WorkerTurnTarget, 
 		return "", "bad_payload: loop.chat payload must be a JSON object"
 	}
 	params, _ := json.Marshal(map[string]any{"actor_id": w.toolID, "type": toolSayType, "payload": payload, "wait": true})
-	tool := w.host.Tools().Invoke(ctx, target, driverproto.ToolInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("call-%d", target.Attempt)), Name: "call_actor", Params: params})
+	tool := w.tool(ctx, target, driverproto.ToolInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("call-%d", target.Attempt)), Name: "call_actor", Params: params})
 	if tool.IsError {
 		return "", "tool_call_failed: " + tool.Text
 	}
@@ -96,7 +180,7 @@ func (w *worker) chat(ctx context.Context, target driverproto.WorkerTurnTarget, 
 		return "", "tool_call_failed: invalid tool result"
 	}
 	rid := "file:loop/" + m.SourceID
-	res := w.host.Resources().Invoke(ctx, target, driverproto.ResourceInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("write-%d", target.Attempt)), Operation: "write_file", ResourceID: rid, Payload: m.Payload})
+	res := w.resource(ctx, target, driverproto.ResourceInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("write-%d", target.Attempt)), Operation: "write_file", ResourceID: rid, Payload: m.Payload})
 	if res.Error != "" {
 		return "", "resource_failed: " + res.Error
 	}
@@ -110,16 +194,16 @@ func (w *worker) verify(ctx context.Context, target driverproto.WorkerTurnTarget
 	if json.Unmarshal(m.Payload, &p) != nil || strings.TrimSpace(p.ResourceID) == "" {
 		return "", "bad_payload: loop.verify requires resource_id"
 	}
-	out := w.host.Resources().Invoke(ctx, target, driverproto.ResourceInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("read-%d", target.Attempt)), Operation: "read_file", ResourceID: p.ResourceID})
+	out := w.resource(ctx, target, driverproto.ResourceInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("read-%d", target.Attempt)), Operation: "read_file", ResourceID: p.ResourceID})
 	if out.Error != "" {
 		return "", "resource_failed: " + out.Error
 	}
-	var v map[string]any
-	if json.Unmarshal(out.Payload, &v) != nil {
+	var value map[string]any
+	if json.Unmarshal(out.Payload, &value) != nil {
 		return "", "resource_failed: invalid read result"
 	}
-	v["exists"] = true
-	raw, _ := json.Marshal(v)
+	value["exists"] = true
+	raw, _ := json.Marshal(value)
 	return string(raw), ""
 }
 

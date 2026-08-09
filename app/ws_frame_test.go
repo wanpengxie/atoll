@@ -14,6 +14,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/contract"
 	"github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -22,23 +23,23 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type activityAcceptanceRuntime struct{ events base.RuntimeEvents }
+type activityAcceptanceRuntime struct{ events runtimeproto.Events }
 
-func (e activityAcceptanceRuntime) Start(c base.StartCommand) error {
-	turnID := base.TurnID("acceptance-turn")
+func (e activityAcceptanceRuntime) Start(c runtimeproto.StartCommand) error {
+	turnID := runtimeproto.TurnID("acceptance-turn")
 	e.events.TurnStarted(c.Op, turnID)
-	e.events.Tool(turnID, base.ToolEvent{CallID: "acceptance-tool-1", Phase: "started", Name: "acceptance_tool"})
-	e.events.Tool(turnID, base.ToolEvent{CallID: "acceptance-tool-1", Phase: "ended", Name: "acceptance_tool", Status: "completed"})
-	e.events.TurnEnded(turnID, base.TurnStatusOK, "activity-ok", "")
+	e.events.Tool(turnID, runtimeproto.ToolEvent{CallID: "acceptance-tool-1", Phase: "started", Name: "acceptance_tool"})
+	e.events.Tool(turnID, runtimeproto.ToolEvent{CallID: "acceptance-tool-1", Phase: "ended", Name: "acceptance_tool", Status: "completed"})
+	e.events.TurnEnded(turnID, runtimeproto.TurnStatusOK, "activity-ok", "")
 	return nil
 }
-func (e activityAcceptanceRuntime) Control(c base.ControlCommand) error {
-	e.events.ControlDone(c.Op, c.Target, base.ControlNotSteerable, "")
+func (e activityAcceptanceRuntime) Control(c runtimeproto.ControlCommand) error {
+	e.events.ControlDone(c.Op, c.Target, runtimeproto.ControlNotSteerable, "")
 	return nil
 }
 func (activityAcceptanceRuntime) Terminate() error { return nil }
-func (e activityAcceptanceRuntime) EnsureReady(op base.OpID) error {
-	e.events.ReadyDone(op, base.ReadyResult{Ready: true})
+func (e activityAcceptanceRuntime) EnsureReady(op runtimeproto.OpID) error {
+	e.events.ReadyDone(op, runtimeproto.ReadyResult{Ready: true})
 	return nil
 }
 func (activityAcceptanceRuntime) Close() {}
@@ -413,7 +414,7 @@ func TestWebSocketObservationStateMachine(t *testing.T) {
 func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 	env := setupTestApp(t)
 	testAgentBuilder = func(_ channel.ID, _ actor.ActorID) (actorbase.Proc, error) {
-		def, err := base.Def("activity acceptance", base.Config{Runtime: base.RuntimeSpec{Describe: introspect.Describe{Description: "activity acceptance"}}, NewRuntime: func(_ base.RuntimeDeps, _ []byte, events base.RuntimeEvents) (base.Runtime, error) {
+		def, err := base.Def("activity acceptance", base.Config{Runtime: runtimeproto.Spec{Describe: introspect.Describe{Description: "activity acceptance"}}, NewRuntime: func(_ runtimeproto.Deps, _ []byte, events runtimeproto.Events) (runtimeproto.Runtime, error) {
 			return activityAcceptanceRuntime{events: events}, nil
 		}})
 		if err != nil {
@@ -443,8 +444,8 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 		"activity.turn.started",
 		"activity.tool.started",
 		"activity.tool.ended",
-		"user.activity.acceptance",
 		"activity.turn.ended",
+		"user.activity.acceptance",
 	}
 	var matched []storespec.StoredRow
 	deadline := time.Now().Add(3 * time.Second)
@@ -472,7 +473,13 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 		for _, row := range matched {
 			got = append(got, row.Envelope.Type)
 		}
-		t.Fatalf("correlated log rows=%d want %d: %v", len(matched), len(wantTypes), got)
+		all := make([]string, 0)
+		if rows, err := env.app.MessagesForTest(channel.ID(setup.chID)); err == nil {
+			for _, row := range rows {
+				all = append(all, fmt.Sprintf("%s(parent=%s,corr=%s)", row.Envelope.Type, row.Envelope.ParentID, row.Envelope.CorrelationID))
+			}
+		}
+		t.Fatalf("correlated log rows=%d want %d: %v; all=%v", len(matched), len(wantTypes), got, all)
 	}
 	for i, row := range matched {
 		if row.Envelope.Type != wantTypes[i] {
@@ -484,8 +491,8 @@ func TestAgentActivityPersistsAndReplaysThroughMessagePage(t *testing.T) {
 			}
 		}
 	}
-	if matched[5].Envelope.Kind != message.KindResponse {
-		t.Fatalf("terminal kind=%q want response", matched[5].Envelope.Kind)
+	if matched[6].Envelope.Kind != message.KindResponse {
+		t.Fatalf("terminal kind=%q want response", matched[6].Envelope.Kind)
 	}
 
 	page := env.do(t, http.MethodGet, "/api/channels/"+setup.chID+"/messages?after_seq="+fmt.Sprint(matched[0].Seq-1)+"&limit=20", nil, setup.cookies)

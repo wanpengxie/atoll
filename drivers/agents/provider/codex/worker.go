@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/codex/internal/emit"
 )
 
 type connection struct {
@@ -24,53 +26,65 @@ func (c *connection) Retire() {
 	}
 }
 
+type workerPhase uint8
+
+const (
+	phaseConstructed workerPhase = iota
+	phaseOpening
+	phaseReady
+	phaseStarting
+	phaseActive
+	phaseRetiring
+	phaseReaped
+)
+
 type worker struct {
 	cfg        Config
-	host       driverproto.WorkerHost
+	gate       *emit.Gate
 	mu         sync.Mutex
-	retired    bool
+	phase      workerPhase
 	conn       *connection
 	thread     string
 	attempt    driverproto.AttemptToken
 	target     driverproto.WorkerTurnTarget
 	final      map[driverproto.WorkerTurnRef]string
-	calls      sync.WaitGroup
+	leases     sync.WaitGroup
 	reaped     chan struct{}
 	retireOnce sync.Once
 }
 
 func newWorker(cfg Config, host driverproto.WorkerHost) *worker {
-	return &worker{cfg: cfg, host: host, final: map[driverproto.WorkerTurnRef]string{}, reaped: make(chan struct{})}
-}
-func (w *worker) begin() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.retired {
-		return false
-	}
-	w.calls.Add(1)
-	return true
-}
-func (w *worker) reap() {
-	w.calls.Wait()
-	w.mu.Lock()
-	c := w.conn
-	w.mu.Unlock()
-	if c != nil {
-		<-c.process.reaped
-		<-c.rpc.pumpDone
-	}
-	close(w.reaped)
+	return &worker{cfg: cfg, gate: emit.New(host.Events()), phase: phaseConstructed, final: map[driverproto.WorkerTurnRef]string{}, reaped: make(chan struct{})}
 }
 
-func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) driverproto.OpenResult {
-	if !w.begin() {
-		return driverproto.OpenReject(driverproto.FailureTransport, "worker retired", driverproto.RetireWorker)
+func (w *worker) begin(allowed ...workerPhase) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, p := range allowed {
+		if w.phase == p {
+			w.leases.Add(1)
+			return true
+		}
 	}
-	defer w.calls.Done()
+	return false
+}
+func (w *worker) end() { w.leases.Done() }
+
+// Open registers all ownership before writing and returns after the initial
+// initialize frame has been physically submitted. Native replies are mapped
+// back through the one EventSink stream.
+func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
+	if !w.begin(phaseConstructed) {
+		return
+	}
+	defer w.end()
+	w.mu.Lock()
+	w.phase = phaseOpening
+	w.mu.Unlock()
 	p, err := w.cfg.processFactory(ctx, w.cfg)
 	if err != nil {
-		return driverproto.OpenReject(driverproto.FailureTransport, err.Error(), driverproto.RetireWorker)
+		w.publish(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+		return
 	}
 	c := &connection{process: p}
 	c.rpc = newRPC(p)
@@ -82,131 +96,192 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) driverpr
 	c.rpc.onRequest = handleServerRequest
 	c.rpc.onClose = func(err error) {
 		if !c.retired.Load() {
-			w.host.Events().Publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
+			w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 		}
 	}
 	w.mu.Lock()
-	if w.retired {
+	if w.phase != phaseOpening {
 		w.mu.Unlock()
 		c.Retire()
-		return driverproto.OpenReject(driverproto.FailureTransport, "worker retired", driverproto.RetireWorker)
+		return
 	}
 	w.conn = c
 	w.mu.Unlock()
 	c.rpc.start()
 	params := map[string]any{"clientInfo": map[string]any{"name": "atoll", "title": "Atoll Codex Agent", "version": "1"}, "capabilities": map[string]any{"experimentalApi": true, "optOutNotificationMethods": deltaNotificationMethods()}}
-	rawInit, err := c.rpc.call(ctx, "initialize", params, initializeTimeout)
-	if err != nil {
-		c.Retire()
-		return classifyOpen(err)
+	if err := c.rpc.callAsync("initialize", params, func(raw json.RawMessage, err error) { w.afterInitialize(c, req.ResumeSeed, raw, err) }); err != nil {
+		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 	}
-	var initResult struct {
+}
+
+func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage, err error) {
+	if !w.isOpening(c) {
+		return
+	}
+	if err != nil {
+		w.publish(openRejection(err))
+		return
+	}
+	var initialized struct {
 		UserAgent string `json:"userAgent"`
 	}
-	_ = json.Unmarshal(rawInit, &initResult)
-	if err = c.rpc.notify("initialized", map[string]any{}); err != nil {
-		c.Retire()
-		return driverproto.OpenUncertain(driverproto.FailureTransport, err.Error())
+	_ = json.Unmarshal(raw, &initialized)
+	if err := c.rpc.notify("initialized", map[string]any{}); err != nil {
+		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
+		return
 	}
-	thread, res := w.establishSession(ctx, c, string(req.ResumeSeed))
-	if res.Validate() != nil || res.Verdict() != driverproto.OpenReady {
-		c.Retire()
-		return res
+	method, params := "thread/start", any(map[string]any{"approvalPolicy": "never", "sandbox": "danger-full-access", "cwd": w.cfg.WorkspaceDir})
+	if len(seed) > 0 {
+		method, params = "thread/resume", map[string]any{"threadId": string(seed), "excludeTurns": true}
 	}
-	w.mu.Lock()
-	if w.retired {
-		w.mu.Unlock()
-		c.Retire()
-		return driverproto.OpenReject(driverproto.FailureTransport, "worker retired", driverproto.RetireWorker)
+	if err := c.rpc.callAsync(method, params, func(raw json.RawMessage, err error) { w.afterSession(c, len(seed) > 0, raw, err) }); err != nil {
+		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 	}
-	w.thread = thread
-	w.mu.Unlock()
-	w.host.Events().Publish(driverproto.SeedUpdated{Value: []byte(thread)})
-	return driverproto.Ready()
 }
 
-func (w *worker) Start(ctx context.Context, req driverproto.StartRequest) driverproto.StartResult {
-	if !w.begin() {
-		return driverproto.StartReject(driverproto.FailureTransport, "worker retired", driverproto.RetireWorker)
+func (w *worker) afterSession(c *connection, resumed bool, raw json.RawMessage, err error) {
+	if !w.isOpening(c) {
+		return
 	}
-	defer w.calls.Done()
-	input, err := buildInput(req.Messages, req.Background)
 	if err != nil {
-		return driverproto.StartReject(driverproto.FailureInvalidInput, err.Error(), driverproto.KeepWorker)
+		if resumed && isInvalidResumeError(err) {
+			w.publish(driverproto.OpenRejected{Class: driverproto.FailureResumeInvalid, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+		} else {
+			w.publish(openRejection(err))
+		}
+		return
+	}
+	id := threadIDFrom(raw)
+	if id == "" {
+		w.publish(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: "session response missing thread id", Disposition: driverproto.RetireWorker})
+		return
 	}
 	w.mu.Lock()
-	c, thread := w.conn, w.thread
-	if c == nil || w.attempt != 0 {
+	if w.phase != phaseOpening || w.conn != c {
 		w.mu.Unlock()
-		return driverproto.StartReject(driverproto.FailureProvider, "worker not ready or turn active", driverproto.KeepWorker)
+		return
 	}
-	w.attempt = req.Attempt
+	w.thread, w.phase = id, phaseReady
+	w.mu.Unlock()
+	if !w.publish(driverproto.SeedUpdated{Value: []byte(id)}) {
+		return
+	}
+	w.publish(driverproto.WorkerReady{})
+}
+
+func (w *worker) isOpening(c *connection) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.phase == phaseOpening && w.conn == c
+}
+
+func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
+	if !w.begin(phaseReady) {
+		return
+	}
+	defer w.end()
+	input := buildInput(req.Messages, req.Background)
+	w.mu.Lock()
+	if w.phase != phaseReady || w.conn == nil {
+		w.mu.Unlock()
+		return
+	}
+	c, thread := w.conn, w.thread
+	w.phase, w.attempt = phaseStarting, req.Attempt
 	w.target = driverproto.WorkerTurnTarget{Attempt: req.Attempt}
 	w.mu.Unlock()
-	_, err = c.rpc.call(ctx, "turn/start", map[string]any{"threadId": thread, "input": input}, rpcTimeout)
-	if err == nil {
-		return driverproto.StartAccept(driverproto.KeepWorker)
+	if err := c.rpc.callAsync("turn/start", map[string]any{"threadId": thread, "input": input}, func(_ json.RawMessage, err error) { w.afterStartResponse(req.Attempt, err) }); err != nil {
+		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 	}
-	var rpcErr *rpcError
-	if errors.As(err, &rpcErr) {
-		w.mu.Lock()
-		started := w.target.Attempt == req.Attempt && w.target.Native != ""
-		w.mu.Unlock()
-		if started {
-			return driverproto.StartUncertain(driverproto.FailureProvider, err.Error())
-		}
-		w.clearAttempt(req.Attempt)
-		return driverproto.StartReject(driverproto.FailureProvider, err.Error(), driverproto.KeepWorker)
-	}
-	return driverproto.StartUncertain(driverproto.FailureTransport, err.Error())
 }
 
-func (w *worker) Control(ctx context.Context, req driverproto.ControlRequest) driverproto.ControlResult {
-	if !w.begin() {
-		return driverproto.ControlReject(driverproto.FailureTransport, "worker retired", driverproto.RetireWorker)
+func (w *worker) afterStartResponse(attempt driverproto.AttemptToken, err error) {
+	if err == nil {
+		return
 	}
-	defer w.calls.Done()
+	w.mu.Lock()
+	current, started := w.attempt == attempt, w.target.Native != ""
+	w.mu.Unlock()
+	if !current {
+		return
+	}
+	class := driverproto.FailureProvider
+	disposition := driverproto.KeepWorker
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) {
+		class, disposition = driverproto.FailureTransport, driverproto.RetireWorker
+	}
+	if !started {
+		w.clearAttempt(attempt)
+		w.publish(driverproto.SubmissionRejected{Attempt: attempt, Class: class, Detail: err.Error(), Disposition: disposition})
+		return
+	}
+	// Contradictory testimony remains visible to Runtime, which logs it.
+	w.publish(driverproto.SubmissionRejected{Attempt: attempt, Class: class, Detail: err.Error(), Disposition: disposition})
+}
+
+func (w *worker) Control(_ context.Context, req driverproto.ControlRequest) {
+	if !w.begin(phaseActive) {
+		return
+	}
+	defer w.end()
 	w.mu.Lock()
 	c, thread, target := w.conn, w.thread, w.target
 	w.mu.Unlock()
 	if c == nil || target != req.Target || !target.Valid() {
-		return driverproto.TargetGone("target is not active", driverproto.KeepWorker)
+		w.publish(driverproto.ControlOutcome{Action: req.Action, Target: req.Target, Verdict: driverproto.ControlTargetGone, Detail: "target is not active", Disposition: driverproto.KeepWorker})
+		return
 	}
 	method := "turn/interrupt"
-	params := map[string]any{"threadId": thread, "turnId": string(target.Native)}
+	params := any(map[string]any{"threadId": thread, "turnId": string(target.Native)})
 	if req.Kind == driverproto.ControlSteer {
 		if req.Message == nil || req.Message.Text == "" {
-			return driverproto.ControlReject(driverproto.FailureInvalidInput, "empty steer", driverproto.KeepWorker)
+			w.publish(driverproto.ControlOutcome{Action: req.Action, Target: target, Verdict: driverproto.ControlRejected, Detail: "empty steer", Disposition: driverproto.KeepWorker})
+			return
 		}
-		input, err := buildInput([]driverproto.DriverMessage{*req.Message}, nil)
-		if err != nil {
-			return driverproto.ControlReject(driverproto.FailureInvalidInput, err.Error(), driverproto.KeepWorker)
-		}
-		method = "turn/steer"
-		params = map[string]any{"threadId": thread, "expectedTurnId": string(target.Native), "input": input}
+		input := buildInput([]driverproto.DriverMessage{*req.Message}, nil)
+		method, params = "turn/steer", map[string]any{"threadId": thread, "expectedTurnId": string(target.Native), "input": input}
 	}
-	_, err := c.rpc.call(ctx, method, params, rpcTimeout)
-	return classifyControl(err, req.Kind)
+	if err := c.rpc.callAsync(method, params, func(_ json.RawMessage, err error) { w.publish(classifyControlOutcome(req, err)) }); err != nil {
+		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
+	}
 }
+
+func (w *worker) publish(v driverproto.DriverEvent) bool { return w.gate.Publish(v) }
 
 func (w *worker) Retire() {
 	w.retireOnce.Do(func() {
+		w.gate.Close()
 		w.mu.Lock()
-		w.retired = true
+		w.phase = phaseRetiring
 		c := w.conn
 		w.mu.Unlock()
 		if c != nil {
 			c.Retire()
 		}
-		go w.reap()
+		go func() {
+			w.leases.Wait()
+			if c != nil {
+				<-c.process.reaped
+				<-c.rpc.pumpDone
+			}
+			w.mu.Lock()
+			w.phase = phaseReaped
+			w.mu.Unlock()
+			close(w.reaped)
+		}()
 	})
 }
 func (w *worker) Reaped() <-chan struct{} { return w.reaped }
+
 func (w *worker) clearAttempt(a driverproto.AttemptToken) {
 	w.mu.Lock()
 	if w.attempt == a {
 		w.attempt = 0
 		w.target = driverproto.WorkerTurnTarget{}
+		if w.phase != phaseRetiring {
+			w.phase = phaseReady
+		}
 	}
 	w.mu.Unlock()
 }
@@ -230,17 +305,25 @@ func handleServerRequest(method string, _ json.RawMessage) (any, *rpcError) {
 		return nil, &rpcError{Code: -32601, Message: "method not supported: " + method}
 	}
 }
-func classifyOpen(err error) driverproto.OpenResult {
-	if isInvalidResumeError(err) {
-		return driverproto.ResumeInvalid(err.Error())
-	}
-	var rpcErr *rpcError
-	if errors.As(err, &rpcErr) {
-		return driverproto.OpenReject(driverproto.FailureProvider, err.Error(), driverproto.RetireWorker)
-	}
-	return driverproto.OpenUncertain(driverproto.FailureTransport, err.Error())
-}
 
+func openRejection(err error) driverproto.OpenRejected {
+	class := driverproto.FailureProvider
+	disposition := driverproto.RetireWorker
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) {
+		class = driverproto.FailureTransport
+	}
+	return driverproto.OpenRejected{Class: class, Detail: err.Error(), Disposition: disposition}
+}
+func threadIDFrom(raw json.RawMessage) string {
+	var v struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	_ = json.Unmarshal(raw, &v)
+	return strings.TrimSpace(v.Thread.ID)
+}
 func deltaNotificationMethods() []string {
 	return []string{"item/agentMessage/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/plan/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "command/exec/outputDelta", "process/outputDelta", "thread/realtime/outputAudio/delta", "thread/realtime/transcript/delta"}
 }

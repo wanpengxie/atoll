@@ -64,24 +64,30 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 		}
 		target = driverproto.WorkerTurnTarget{Attempt: attempt, Native: driverproto.WorkerTurnRef(n.Turn.ID)}
 		w.mu.Lock()
-		if w.attempt != attempt {
+		if w.attempt != attempt || w.phase != phaseStarting {
 			w.mu.Unlock()
 			return
 		}
 		w.target = target
+		w.phase = phaseActive
 		w.final[target.Native] = ""
 		w.mu.Unlock()
-		w.host.Events().Publish(driverproto.TurnStarted{Target: target})
+		w.publish(driverproto.TurnStarted{Target: target})
 	case "turn/completed":
 		var n turnNotice
 		if json.Unmarshal(params, &n) != nil || target.Native != driverproto.WorkerTurnRef(n.Turn.ID) || n.ThreadID != thread {
 			return
 		}
 		w.mu.Lock()
+		if w.phase != phaseActive || w.target != target {
+			w.mu.Unlock()
+			return
+		}
 		final := w.final[target.Native]
 		delete(w.final, target.Native)
 		w.attempt = 0
 		w.target = driverproto.WorkerTurnTarget{}
+		w.phase = phaseReady
 		w.mu.Unlock()
 		status := driverproto.TurnOK
 		detail := ""
@@ -101,7 +107,7 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 			status = driverproto.TurnFailed
 			detail = "unknown codex turn status: " + n.Turn.Status
 		}
-		w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail})
+		w.publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail})
 	case "item/started", "item/completed":
 		var n itemNotice
 		if json.Unmarshal(params, &n) != nil || n.ThreadID != thread || driverproto.WorkerTurnRef(n.TurnID) != target.Native {
@@ -116,7 +122,7 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 			return
 		}
 		if n.Item.Type == "userMessage" || n.Item.Type == "reasoning" || n.Item.Type == "plan" || n.Item.Type == "contextCompaction" {
-			w.host.Events().Publish(driverproto.Activity{Target: target})
+			w.publish(driverproto.Activity{Target: target})
 			return
 		}
 		phase := driverproto.ToolStarted
@@ -134,7 +140,7 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				status = driverproto.ToolStatusFailed
 			}
 		}
-		w.host.Events().Publish(driverproto.Tool{Target: target, CallID: n.Item.ID, Phase: phase, Name: name, Status: status, Detail: boundedToolSummary(n.Item)})
+		w.publish(driverproto.Tool{Target: target, CallID: n.Item.ID, Phase: phase, Name: name, Status: status, Detail: boundedToolSummary(n.Item)})
 	case "error":
 		var notice struct {
 			ThreadID  string `json:"threadId"`
@@ -145,11 +151,11 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 			} `json:"error"`
 		}
 		if json.Unmarshal(params, &notice) == nil && notice.ThreadID == thread && driverproto.WorkerTurnRef(notice.TurnID) == target.Native && target.Valid() {
-			w.host.Events().Publish(driverproto.Activity{Target: target})
+			w.publish(driverproto.Activity{Target: target})
 		}
 	default:
 		if isDeltaMethod(method) && target.Valid() {
-			w.host.Events().Publish(driverproto.Activity{Target: target})
+			w.publish(driverproto.Activity{Target: target})
 		}
 	}
 }

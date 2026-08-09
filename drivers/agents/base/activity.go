@@ -9,46 +9,38 @@ import (
 )
 
 func (l *agentLoop) emit(typ registry.ActivityType, payload any) {
-	t := l.book.turn
-	if t == nil || t.anchor == nil {
+	t := l.state.Turn
+	if t == nil || t.AnchorParent == "" {
 		return
 	}
 	spec, err := behavior.EventSpecJSON(string(typ), payload)
 	if err != nil {
 		return
 	}
-	spec.Audience = message.Audience{}
-	spec.Visibility = message.VisibilityPublic
-	spec.ParentID = t.anchor.msg.ID
-	spec.CorrelationID = t.anchor.msg.CorrelationID
+	spec = emptyAudiencePublic(spec)
+	spec.ParentID = message.ID(t.AnchorParent)
+	spec.CorrelationID = message.ID(t.AnchorCorrelation)
 	if spec.CorrelationID == "" {
-		spec.CorrelationID = t.anchor.msg.ID
+		spec.CorrelationID = spec.ParentID
 	}
-	_, err = l.sys.Emit(spec)
-	l.logError("agent activity write failed", err)
+	l.exec.emit(spec)
 }
 func (l *agentLoop) emitTurnStarted() {
-	t := l.book.turn
-	if t != nil {
-		l.emit(registry.ActivityTurnStarted, registry.ActivityTurnStartedPayload{TurnIndex: int(t.seq), Status: registry.ActivityStartedStatus})
+	if t := l.state.Turn; t != nil {
+		l.emit(registry.ActivityTurnStarted, registry.ActivityTurnStartedPayload{TurnIndex: int(t.Serial), Status: registry.ActivityStartedStatus})
 	}
 }
-func (l *agentLoop) emitTurnEnded(s TurnStatus) {
-	t := l.book.turn
-	if t != nil {
-		l.emit(registry.ActivityTurnEnded, registry.ActivityTurnEndedPayload{TurnIndex: int(t.seq), Status: string(s)})
+func (l *agentLoop) emitTurnEnded(status string) {
+	if t := l.state.Turn; t != nil {
+		l.emit(registry.ActivityTurnEnded, registry.ActivityTurnEndedPayload{TurnIndex: int(t.Serial), Status: status})
 	}
 }
-func (l *agentLoop) emitTool(v ToolEvent) {
-	if v.CallID == "" || v.Name == "" {
-		return
-	}
-	t := l.book.turn
-	if t == nil {
+func (l *agentLoop) emitTool(v toolEvent) {
+	if v.CallID == "" || v.Name == "" || l.state.Turn == nil {
 		return
 	}
 	if v.Phase == "started" {
-		l.emit(registry.ActivityToolStarted, registry.ActivityToolStartedPayload{TurnIndex: int(t.seq), ToolCallID: v.CallID, Tool: v.Name, Status: registry.ActivityStartedStatus})
+		l.emit(registry.ActivityToolStarted, registry.ActivityToolStartedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: registry.ActivityStartedStatus})
 		return
 	}
 	status := v.Status
@@ -56,8 +48,8 @@ func (l *agentLoop) emitTool(v ToolEvent) {
 		status = registry.ActivityToolEndedStatusCompleted
 	}
 	if !registry.IsActivityToolEndedStatus(status) {
-		l.logError("agent invalid tool status", fmt.Errorf("%s", status))
+		l.logger.Error("agent invalid tool status", "status", fmt.Sprint(status))
 		return
 	}
-	l.emit(registry.ActivityToolEnded, registry.ActivityToolEndedPayload{TurnIndex: int(t.seq), ToolCallID: v.CallID, Tool: v.Name, Status: status, Detail: v.Detail})
+	l.emit(registry.ActivityToolEnded, registry.ActivityToolEndedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: status, Detail: v.Detail})
 }

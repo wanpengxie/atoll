@@ -12,6 +12,7 @@ const (
 )
 
 type ControlRequest struct {
+	Action  ActionToken
 	Kind    ControlKind
 	Target  WorkerTurnTarget
 	Message *DriverMessage

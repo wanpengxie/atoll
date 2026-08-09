@@ -9,9 +9,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 const (
@@ -35,7 +37,7 @@ type logbookResponse struct {
 	} `json:"messages"`
 }
 
-func loadCatchup(ctx context.Context, sys actorbase.Sys) []RuntimeContextItem {
+func loadCatchup(ctx context.Context, sys actorbase.Sys) []runtimeproto.ContextItem {
 	// Catch-up is best-effort — a failure must never block boot — but it must
 	// never fail silently either: without a line here, an agent that quietly
 	// stopped seeing the channel's recent history looks identical to one that
@@ -57,10 +59,13 @@ func loadCatchup(ctx context.Context, sys actorbase.Sys) []RuntimeContextItem {
 		slog.Warn("agent catch-up answer undecodable", "actor", sys.Self(), "error", err)
 		return nil
 	}
-	items := make([]RuntimeContextItem, 0, len(response.Messages))
+	items := make([]runtimeproto.ContextItem, 0, len(response.Messages))
 	for _, row := range response.Messages {
+		if row.Message.Kind == string(message.KindEvent) && strings.HasPrefix(row.Message.Type, "activity.") && row.Message.Sender.ID != string(sys.Self()) {
+			continue
+		}
 		rendered := fmt.Sprintf("[%s %s %s] %s", row.Message.Sender.ID, row.Message.Kind, row.Message.Type, strings.TrimSpace(string(row.Message.Payload)))
-		items = append(items, RuntimeContextItem{Seq: row.Seq, Sender: row.Message.Sender.ID, Kind: row.Message.Kind, Type: row.Message.Type, Payload: append([]byte(nil), row.Message.Payload...), Text: rendered})
+		items = append(items, runtimeproto.ContextItem{Seq: row.Seq, Sender: row.Message.Sender.ID, Kind: row.Message.Kind, Type: row.Message.Type, Payload: append([]byte(nil), row.Message.Payload...), Text: rendered})
 	}
 	return budgetContext(items, catchupCharBudget)
 }
@@ -93,11 +98,11 @@ func callCatchupWithinBudget(ctx context.Context, sys actorbase.Sys) (actorbase.
 	}
 }
 
-func budgetContext(items []RuntimeContextItem, budget int) []RuntimeContextItem {
+func budgetContext(items []runtimeproto.ContextItem, budget int) []runtimeproto.ContextItem {
 	if budget <= 0 {
 		return nil
 	}
-	kept := make([]RuntimeContextItem, 0, len(items))
+	kept := make([]runtimeproto.ContextItem, 0, len(items))
 	total := 0
 	oversize := false
 	for _, item := range items {
@@ -126,7 +131,7 @@ func budgetContext(items []RuntimeContextItem, budget int) []RuntimeContextItem 
 			kept = kept[1:]
 		}
 		if markLen <= budget {
-			kept = append([]RuntimeContextItem{{Text: mark}}, kept...)
+			kept = append([]runtimeproto.ContextItem{{Text: mark}}, kept...)
 		}
 	}
 	return kept

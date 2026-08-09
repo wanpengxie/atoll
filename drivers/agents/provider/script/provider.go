@@ -11,9 +11,9 @@ type provider struct{ toolID string }
 func NewProvider(toolID string) driverproto.Provider { return provider{toolID: toolID} }
 func (provider) Spec() driverproto.ProviderSpec {
 	return driverproto.ProviderSpec{
-		Name: "script",
+		Name: Class,
 		Describe: introspect.Describe{
-			Description: actorDoc,
+			Description: ActorDoc,
 			SkillDoc:    "# script\n\nDeterministic regression provider.",
 			Types: map[string]introspect.TypeMeta{
 				TypeChat:   {Description: "call echo and persist payload", AllowedKinds: []string{string(message.KindRequest)}},
@@ -22,13 +22,8 @@ func (provider) Spec() driverproto.ProviderSpec {
 		},
 	}
 }
-func (p provider) NewAdapter() (driverproto.Adapter, error) { return adapter{toolID: p.toolID}, nil }
-
-type adapter struct{ toolID string }
-
-func (a adapter) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
-	return newWorker(a.toolID, h), nil
+func (p provider) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
+	return newWorker(p.toolID, h), nil
 }
 
 var _ driverproto.Provider = provider{}
-var _ driverproto.Adapter = adapter{}

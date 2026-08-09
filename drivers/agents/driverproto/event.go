@@ -2,6 +2,23 @@ package driverproto
 
 type DriverEvent interface{ driverEvent() }
 
+type WorkerDisposition uint8
+
+const (
+	KeepWorker WorkerDisposition = iota
+	RetireWorker
+)
+
+type FailureClass string
+
+const (
+	FailureInvalidInput  FailureClass = "invalid_input"
+	FailureOverloaded    FailureClass = "overloaded"
+	FailureProvider      FailureClass = "provider"
+	FailureTransport     FailureClass = "transport"
+	FailureResumeInvalid FailureClass = "resume_invalid"
+)
+
 type TurnEndStatus uint8
 
 const (
@@ -42,6 +59,35 @@ const (
 	DiagnosticError
 )
 
+type ControlVerdict uint8
+
+const (
+	ControlAccepted ControlVerdict = iota
+	ControlRejected
+	ControlNotSteerable
+	ControlTargetGone
+)
+
+type WorkerReady struct{}
+type OpenRejected struct {
+	Class       FailureClass
+	Detail      string
+	Disposition WorkerDisposition
+}
+type SubmissionRejected struct {
+	Attempt     AttemptToken
+	Class       FailureClass
+	Detail      string
+	Disposition WorkerDisposition
+}
+type ControlOutcome struct {
+	Action      ActionToken
+	Target      WorkerTurnTarget
+	Verdict     ControlVerdict
+	Detail      string
+	Disposition WorkerDisposition
+}
+
 type TurnStarted struct{ Target WorkerTurnTarget }
 type Activity struct{ Target WorkerTurnTarget }
 type Tool struct {
@@ -69,10 +115,14 @@ type Diagnostic struct {
 	Detail string
 }
 
-func (TurnStarted) driverEvent() {}
-func (Activity) driverEvent()    {}
-func (Tool) driverEvent()        {}
-func (TurnEnded) driverEvent()   {}
-func (SeedUpdated) driverEvent() {}
-func (WorkerEnded) driverEvent() {}
-func (Diagnostic) driverEvent()  {}
+func (TurnStarted) driverEvent()        {}
+func (Activity) driverEvent()           {}
+func (Tool) driverEvent()               {}
+func (TurnEnded) driverEvent()          {}
+func (SeedUpdated) driverEvent()        {}
+func (WorkerEnded) driverEvent()        {}
+func (Diagnostic) driverEvent()         {}
+func (WorkerReady) driverEvent()        {}
+func (OpenRejected) driverEvent()       {}
+func (SubmissionRejected) driverEvent() {}
+func (ControlOutcome) driverEvent()     {}

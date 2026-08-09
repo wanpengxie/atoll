@@ -4,18 +4,26 @@ import (
 	"errors"
 	"time"
 
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 type Config struct {
-	NewRuntime      NewRuntime
-	Runtime         RuntimeSpec
+	NewRuntime      runtimeproto.Factory
+	Runtime         runtimeproto.Spec
+	RequestMaxCount int
 	BufferMaxCount  int
 	BufferMaxBytes  int
 	BatchMaxCount   int
 	ReceiptDeadline time.Duration
 }
+
+const (
+	defaultBufferMaxCount = 128
+	defaultBufferMaxBytes = 8 << 20
+	defaultBatchMaxCount  = 32
+)
 
 type Definition = actorbase.Def
 
@@ -44,11 +52,17 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 	if d.cfg.BufferMaxCount <= 0 {
 		d.cfg.BufferMaxCount = defaultBufferMaxCount
 	}
+	if d.cfg.RequestMaxCount <= 0 {
+		d.cfg.RequestMaxCount = d.cfg.BufferMaxCount + 8
+	}
 	if d.cfg.BufferMaxBytes <= 0 {
 		d.cfg.BufferMaxBytes = defaultBufferMaxBytes
 	}
 	if d.cfg.BatchMaxCount <= 0 {
 		d.cfg.BatchMaxCount = defaultBatchMaxCount
+	}
+	if d.cfg.ReceiptDeadline <= 0 {
+		d.cfg.ReceiptDeadline = cfg.Runtime.Bounds.ReceiptDeadline
 	}
 	if d.cfg.ReceiptDeadline <= 0 {
 		d.cfg.ReceiptDeadline = 20 * time.Minute

@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	_ "github.com/wanpengxie/atoll/drivers/agents/provider/codex"
 	"path/filepath"
 	"testing"
 	"time"

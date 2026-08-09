@@ -65,7 +65,7 @@ func TestRequiredMethodsAndFieldsGolden(t *testing.T) {
 	}
 }
 
-// productionProtocolSurface reads the production adapter, not a second test
+// productionProtocolSurface reads the production provider, not a second test
 // literal. Removing or renaming a method/JSON field therefore breaks this
 // wall even when the expected fixture remains untouched.
 func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.Node) {
@@ -74,7 +74,7 @@ func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.No
 	dir := filepath.Dir(thisFile)
 	methods := map[string]bool{}
 	declarations := map[string]ast.Node{}
-	for _, name := range []string{"worker.go", "output.go", "rpc.go", "session.go"} {
+	for _, name := range []string{"worker.go", "output.go", "rpc.go"} {
 		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -112,8 +112,8 @@ func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.No
 func protocolTokensForMethod(t *testing.T, method string, declarations map[string]ast.Node) map[string]bool {
 	t.Helper()
 	contexts := map[string][]string{
-		"initialize": {"Open"}, "initialized": {"Open"},
-		"thread/start": {"establishSession", "threadIDFrom"}, "thread/resume": {"establishSession", "threadIDFrom"},
+		"initialize": {"Open", "afterInitialize"}, "initialized": {"afterInitialize"},
+		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom"},
 		"turn/start": {"Start"}, "turn/steer": {"Control"}, "turn/interrupt": {"Control"},
 		"turn/started": {"notification", "turnNotice", "turnWire"}, "turn/completed": {"notification", "turnNotice", "turnWire"},
 		"item/started": {"notification", "itemNotice", "itemWire"}, "item/completed": {"notification", "itemNotice", "itemWire"},

@@ -2,48 +2,55 @@ package runtime
 
 import "time"
 
+// Policy contains only bounds consumed by the production Runtime.
 type Policy struct {
-	CommandAdmission time.Duration
-	OpenCall         time.Duration
-	StartCall        time.Duration
-	Started          time.Duration
-	ControlCall      time.Duration
-	InterruptEnded   time.Duration
-	Watchdog         time.Duration
-	SafetyInterrupt  time.Duration
-	TerminalDrain    time.Duration
-	Reap             time.Duration
-	InputMaxItems    int
-	InputMaxBytes    int
+	CommandCapacity     int
+	IngressCapacity     int
+	CallbackCapacity    int
+	EventCapacity       int
+	OpenFactDeadline    time.Duration
+	StartFactDeadline   time.Duration
+	ControlFactDeadline time.Duration
+	InterruptEnded      time.Duration
+	Watchdog            time.Duration
+	ReapedDemand        time.Duration
+	MethodCall          time.Duration
+	InputMaxItems       int
+	InputMaxBytes       int
 }
 
 func DefaultPolicy() Policy {
 	return Policy{
-		CommandAdmission: 2 * time.Second,
-		OpenCall:         30 * time.Second, StartCall: 45 * time.Second,
-		Started: 45 * time.Second, ControlCall: 45 * time.Second,
-		InterruptEnded: 45 * time.Second, Watchdog: 10 * time.Minute,
-		SafetyInterrupt: 5 * time.Second, TerminalDrain: 5 * time.Second,
-		Reap: 30 * time.Second, InputMaxItems: 256, InputMaxBytes: 8 << 20,
+		CommandCapacity: 32, IngressCapacity: 256, CallbackCapacity: 32, EventCapacity: 256,
+		OpenFactDeadline: 45 * time.Second, StartFactDeadline: 45 * time.Second,
+		ControlFactDeadline: 45 * time.Second, InterruptEnded: 45 * time.Second,
+		Watchdog: 10 * time.Minute, ReapedDemand: 30 * time.Second,
+		MethodCall: 30 * time.Second, InputMaxItems: 256, InputMaxBytes: 8 << 20,
 	}
 }
 
 func (p Policy) normalized() Policy {
 	d := DefaultPolicy()
-	if p.CommandAdmission <= 0 {
-		p.CommandAdmission = d.CommandAdmission
+	if p.CommandCapacity <= 0 {
+		p.CommandCapacity = d.CommandCapacity
 	}
-	if p.OpenCall <= 0 {
-		p.OpenCall = d.OpenCall
+	if p.IngressCapacity <= 0 {
+		p.IngressCapacity = d.IngressCapacity
 	}
-	if p.StartCall <= 0 {
-		p.StartCall = d.StartCall
+	if p.CallbackCapacity <= 0 {
+		p.CallbackCapacity = d.CallbackCapacity
 	}
-	if p.Started <= 0 {
-		p.Started = d.Started
+	if p.EventCapacity <= 0 {
+		p.EventCapacity = d.EventCapacity
 	}
-	if p.ControlCall <= 0 {
-		p.ControlCall = d.ControlCall
+	if p.OpenFactDeadline <= 0 {
+		p.OpenFactDeadline = d.OpenFactDeadline
+	}
+	if p.StartFactDeadline <= 0 {
+		p.StartFactDeadline = d.StartFactDeadline
+	}
+	if p.ControlFactDeadline <= 0 {
+		p.ControlFactDeadline = d.ControlFactDeadline
 	}
 	if p.InterruptEnded <= 0 {
 		p.InterruptEnded = d.InterruptEnded
@@ -51,14 +58,11 @@ func (p Policy) normalized() Policy {
 	if p.Watchdog <= 0 {
 		p.Watchdog = d.Watchdog
 	}
-	if p.SafetyInterrupt <= 0 {
-		p.SafetyInterrupt = d.SafetyInterrupt
+	if p.ReapedDemand <= 0 {
+		p.ReapedDemand = d.ReapedDemand
 	}
-	if p.TerminalDrain <= 0 {
-		p.TerminalDrain = d.TerminalDrain
-	}
-	if p.Reap <= 0 {
-		p.Reap = d.Reap
+	if p.MethodCall <= 0 {
+		p.MethodCall = d.MethodCall
 	}
 	if p.InputMaxItems <= 0 {
 		p.InputMaxItems = d.InputMaxItems

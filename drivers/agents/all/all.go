@@ -1,15 +1,64 @@
-// Package all blank-imports every in-tree agent provider so one binary
-// packages the agent stack. Each provider package's init registers itself as a
-// flat actor class (kind=agent) into the one registry — codex / script are
-// PEERS of the tool classes (echo/xhs/device), NOT variants of an umbrella
-// "agent" class (there is none).
-//
-// Symmetric to actors/all (which packages the tool actors). Kept separate on
-// purpose: native protocols are quarantined under agent/provider/*. Adding a
-// provider requires only a Provider/Adapter/Worker and one blank import here.
+// Package all is the sole composition and registration root for Agent
+// Drivers. Providers expose immutable factories only and never self-register.
 package all
 
 import (
-	_ "github.com/wanpengxie/atoll/drivers/agents/provider/codex"
-	_ "github.com/wanpengxie/atoll/drivers/agents/provider/script"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/codex"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/script"
+	agentruntime "github.com/wanpengxie/atoll/drivers/agents/runtime"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/registry"
 )
+
+func init() {
+	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, New: newCodex, ValidateConfig: codex.ValidateConfig})
+	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
+}
+
+func newCodex(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
+	if spec.ID == "" {
+		return platform.ActorDecl{}, errors.New("codex: explicit instance id required")
+	}
+	if deps.ChannelID == "" {
+		return platform.ActorDecl{}, errors.New("codex: channel required")
+	}
+	cfg, err := codex.ParseConfig(spec.Config, deps.WorkspaceDir, deps.Logger)
+	if err != nil {
+		return platform.ActorDecl{}, fmt.Errorf("codex config: %w", err)
+	}
+	return compose(spec, codex.NewProvider(cfg))
+}
+
+func newScript(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
+	if spec.ID == "" {
+		return platform.ActorDecl{}, errors.New("script: explicit instance id required")
+	}
+	cfg, err := script.ParseConfig(spec.Config)
+	if err != nil {
+		return platform.ActorDecl{}, err
+	}
+	return compose(spec, script.NewProvider(cfg.ToolID))
+}
+
+func compose(spec registry.InstanceSpec, provider driverproto.Provider) (platform.ActorDecl, error) {
+	factory, runtimeSpec, err := agentruntime.Default(provider)
+	if err != nil {
+		return platform.ActorDecl{}, err
+	}
+	doc := runtimeSpec.Describe.SkillDoc
+	if doc == "" {
+		doc = runtimeSpec.Describe.Description
+	}
+	definition, err := base.Def(doc, base.Config{NewRuntime: factory, Runtime: runtimeSpec})
+	if err != nil {
+		return platform.ActorDecl{}, err
+	}
+	return platform.ActorDecl{ID: spec.ID, Kind: actor.KindAgent, Factory: platform.ActorFactory{Proc: definition}}, nil
+}

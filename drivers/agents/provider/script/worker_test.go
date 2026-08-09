@@ -2,7 +2,7 @@ package script
 
 import (
 	"context"
-	"encoding/json"
+	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -10,74 +10,39 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
 
-type testSink struct{ events chan driverproto.DriverEvent }
+type sink struct{ ch chan driverproto.DriverEvent }
 
-func (s *testSink) Publish(v driverproto.DriverEvent) bool { s.events <- v; return true }
+func (s *sink) Publish(v driverproto.DriverEvent) bool { s.ch <- v; return true }
 
-type testTools struct{}
-
-func (testTools) Catalog() []driverproto.ToolSpec { return nil }
-func (testTools) Invoke(context.Context, driverproto.WorkerTurnTarget, driverproto.ToolInvocation) driverproto.ToolResult {
-	return driverproto.ToolResult{Text: `{"text":"hello"}`}
+type host struct {
+	life   context.Context
+	events *sink
 }
 
-type testResources struct {
-	written chan driverproto.ResourceInvocation
-}
+func (h host) GenerationLife() context.Context     { return h.life }
+func (h host) Events() driverproto.EventSink       { return h.events }
+func (h host) Tools() driverproto.ToolPort         { return nil }
+func (h host) Resources() driverproto.ResourcePort { return nil }
+func (h host) Logger() *slog.Logger                { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-func (r testResources) Invoke(_ context.Context, _ driverproto.WorkerTurnTarget, in driverproto.ResourceInvocation) driverproto.ResourceResult {
-	r.written <- in
-	return driverproto.ResourceResult{Payload: json.RawMessage(`{"ok":true}`)}
-}
-
-type testHost struct {
-	life      context.Context
-	sink      *testSink
-	resources testResources
-}
-
-func (h testHost) GenerationLife() context.Context     { return h.life }
-func (h testHost) Events() driverproto.EventSink       { return h.sink }
-func (testHost) Logger() *slog.Logger                  { return slog.New(slog.DiscardHandler) }
-func (testHost) Tools() driverproto.ToolPort           { return testTools{} }
-func (h testHost) Resources() driverproto.ResourcePort { return h.resources }
-
-func TestWorkerUsesPortsAndPublishesCompleteTarget(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sink := &testSink{events: make(chan driverproto.DriverEvent, 4)}
-	writes := make(chan driverproto.ResourceInvocation, 1)
-	w := newWorker("tool:echo", testHost{life: ctx, sink: sink, resources: testResources{written: writes}})
-	if r := w.Open(ctx, driverproto.OpenRequest{}); r.Verdict() != driverproto.OpenReady {
-		t.Fatalf("open=%v", r.Verdict())
+func TestWorkerCommandsReportOnlyThroughFactStream(t *testing.T) {
+	events := &sink{ch: make(chan driverproto.DriverEvent, 8)}
+	p := NewProvider("tool:test")
+	w, err := p.NewWorker(host{life: context.Background(), events: events})
+	if err != nil {
+		t.Fatal(err)
 	}
-	life, stop := context.WithCancel(ctx)
-	defer stop()
-	res := w.Start(ctx, driverproto.StartRequest{Attempt: 7, Life: life, Messages: []driverproto.DriverMessage{{SourceID: "m1", Type: TypeChat, Payload: json.RawMessage(`{"text":"hello"}`), Text: "hello"}}})
-	if res.Verdict() != driverproto.StartAccepted {
-		t.Fatalf("start=%v", res.Verdict())
+	start := time.Now()
+	w.Open(context.Background(), driverproto.OpenRequest{})
+	if time.Since(start) > 50*time.Millisecond {
+		t.Fatal("Open blocked on a semantic response")
 	}
-	started := <-sink.events
-	s, ok := started.(driverproto.TurnStarted)
-	if !ok || !s.Target.Valid() || s.Target.Attempt != 7 {
-		t.Fatalf("started=%#v", started)
+	if _, ok := (<-events.ch).(driverproto.WorkerReady); !ok {
+		t.Fatal("Open did not publish WorkerReady")
 	}
-	select {
-	case in := <-writes:
-		if in.Operation != "write_file" || in.ResourceID != "file:loop/m1" {
-			t.Fatalf("resource=%+v", in)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("resource call missing")
-	}
-	select {
-	case event := <-sink.events:
-		ended, ok := event.(driverproto.TurnEnded)
-		if !ok || ended.Target != s.Target || ended.Status != driverproto.TurnOK {
-			t.Fatalf("ended=%#v", event)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("turn end missing")
+	w.Start(context.Background(), driverproto.StartRequest{Attempt: 1, Life: context.Background()})
+	if got, ok := (<-events.ch).(driverproto.SubmissionRejected); !ok || got.Attempt != 1 {
+		t.Fatalf("start fact=%#v", got)
 	}
 	w.Retire()
 	select {

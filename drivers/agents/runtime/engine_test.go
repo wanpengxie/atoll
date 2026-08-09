@@ -2,703 +2,439 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
+	"github.com/wanpengxie/atoll/lib/introspect"
 )
 
-type fakeAdapter struct {
-	mu      sync.Mutex
-	workers []*fakeWorker
-	factory func(int, driverproto.WorkerHost) *fakeWorker
+type testProvider struct {
+	mu        sync.Mutex
+	workers   []*testWorker
+	neverReap bool
 }
 
-func (a *fakeAdapter) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	w := a.factory(len(a.workers), h)
-	a.workers = append(a.workers, w)
+func (p *testProvider) Spec() driverproto.ProviderSpec {
+	return driverproto.ProviderSpec{Name: "test", Capabilities: driverproto.Capabilities{Interrupt: true, Steer: true}, Describe: introspect.Describe{Description: "test"}}
+}
+func (p *testProvider) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
+	w := &testWorker{host: h, reaped: make(chan struct{}), neverReap: p.neverReap}
+	p.mu.Lock()
+	p.workers = append(p.workers, w)
+	p.mu.Unlock()
 	return w, nil
 }
-func (a *fakeAdapter) count() int { a.mu.Lock(); defer a.mu.Unlock(); return len(a.workers) }
 
-type fakeWorker struct {
-	host    driverproto.WorkerHost
-	open    func(context.Context, driverproto.OpenRequest) driverproto.OpenResult
-	start   func(context.Context, driverproto.StartRequest) driverproto.StartResult
-	control func(context.Context, driverproto.ControlRequest) driverproto.ControlResult
-	retired atomic.Int32
-	reaped  chan struct{}
-	once    sync.Once
+type testWorker struct {
+	host      driverproto.WorkerHost
+	reaped    chan struct{}
+	once      sync.Once
+	neverReap bool
 }
 
-func (w *fakeWorker) Open(c context.Context, r driverproto.OpenRequest) driverproto.OpenResult {
-	if w.open != nil {
-		return w.open(c, r)
+func (w *testWorker) Open(context.Context, driverproto.OpenRequest) {
+	w.host.Events().Publish(driverproto.WorkerReady{})
+}
+func (w *testWorker) Start(_ context.Context, r driverproto.StartRequest) {
+	target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "turn"}
+	w.host.Events().Publish(driverproto.TurnStarted{Target: target})
+	w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "done"})
+}
+func (w *testWorker) Control(_ context.Context, r driverproto.ControlRequest) {
+	w.host.Events().Publish(driverproto.ControlOutcome{Action: r.Action, Target: r.Target, Verdict: driverproto.ControlAccepted})
+}
+func (w *testWorker) Retire() {
+	if !w.neverReap {
+		w.once.Do(func() { close(w.reaped) })
 	}
-	return driverproto.Ready()
 }
-func (w *fakeWorker) Start(c context.Context, r driverproto.StartRequest) driverproto.StartResult {
-	return w.start(c, r)
-}
-func (w *fakeWorker) Control(c context.Context, r driverproto.ControlRequest) driverproto.ControlResult {
-	if w.control != nil {
-		return w.control(c, r)
-	}
-	return driverproto.ControlAccept(driverproto.KeepWorker)
-}
-func (w *fakeWorker) Retire()                 { w.retired.Add(1) }
-func (w *fakeWorker) Reaped() <-chan struct{} { return w.reaped }
-func (w *fakeWorker) reap()                   { w.once.Do(func() { close(w.reaped) }) }
+func (w *testWorker) Reaped() <-chan struct{} { return w.reaped }
 
-type recorded struct {
-	kind    string
-	op      base.OpID
-	turn    base.TurnID
-	verdict base.ControlVerdict
+type resumeRetryProvider struct {
+	mu     sync.Mutex
+	next   int
+	opened chan []byte
 }
-type eventRecorder struct{ ch chan recorded }
 
-func (r *eventRecorder) TurnStarted(op base.OpID, id base.TurnID) {
-	r.ch <- recorded{kind: "started", op: op, turn: id}
-}
-func (r *eventRecorder) TurnRejected(op base.OpID, _, _ string) {
-	r.ch <- recorded{kind: "rejected", op: op}
-}
-func (r *eventRecorder) Tool(_ base.TurnID, v base.ToolEvent) {
-	r.ch <- recorded{kind: "tool-" + v.Phase}
-}
-func (r *eventRecorder) TurnEnded(id base.TurnID, _ base.TurnStatus, _, _ string) {
-	r.ch <- recorded{kind: "ended", turn: id}
-}
-func (r *eventRecorder) ControlDone(op base.OpID, _ base.TurnID, verdict base.ControlVerdict, _ string) {
-	r.ch <- recorded{kind: "control", op: op, verdict: verdict}
-}
-func (r *eventRecorder) ReadyDone(op base.OpID, v base.ReadyResult) {
-	kind := "ready-failed"
-	if v.Ready {
-		kind = "ready"
+func (p *resumeRetryProvider) Spec() driverproto.ProviderSpec {
+	return driverproto.ProviderSpec{
+		Name:         "resume-retry",
+		Capabilities: driverproto.Capabilities{Resume: true},
+		Describe:     introspect.Describe{Description: "resume retry test"},
 	}
-	r.ch <- recorded{kind: kind, op: op}
 }
-func (r *eventRecorder) ProviderLost(id base.TurnID, _ base.LostCause, _ string) {
-	r.ch <- recorded{kind: "lost", turn: id}
+
+func (p *resumeRetryProvider) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
+	p.mu.Lock()
+	index := p.next
+	p.next++
+	p.mu.Unlock()
+	return &resumeRetryWorker{index: index, host: h, opened: p.opened, reaped: make(chan struct{})}, nil
 }
-func (r *eventRecorder) ResumeSeedUpdated([]byte) {}
-func nextEvent(t *testing.T, r *eventRecorder) recorded {
+
+type resumeRetryWorker struct {
+	index  int
+	host   driverproto.WorkerHost
+	opened chan []byte
+	reaped chan struct{}
+	once   sync.Once
+}
+
+func (w *resumeRetryWorker) Open(_ context.Context, req driverproto.OpenRequest) {
+	w.opened <- append([]byte(nil), req.ResumeSeed...)
+	w.host.Events().Publish(driverproto.WorkerReady{})
+}
+
+func (w *resumeRetryWorker) Start(_ context.Context, req driverproto.StartRequest) {
+	if w.index == 0 {
+		w.host.Events().Publish(driverproto.SubmissionRejected{
+			Attempt:     req.Attempt,
+			Class:       driverproto.FailureResumeInvalid,
+			Detail:      "stale seed",
+			Disposition: driverproto.RetireWorker,
+		})
+		return
+	}
+	target := driverproto.WorkerTurnTarget{Attempt: req.Attempt, Native: "retried-turn"}
+	w.host.Events().Publish(driverproto.TurnStarted{Target: target})
+	w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "retried"})
+}
+
+func (*resumeRetryWorker) Control(context.Context, driverproto.ControlRequest) {}
+func (w *resumeRetryWorker) Retire()                                           { w.once.Do(func() { close(w.reaped) }) }
+func (w *resumeRetryWorker) Reaped() <-chan struct{}                           { return w.reaped }
+
+type collectedEvent struct {
+	kind string
+	op   runtimeproto.OpID
+	turn runtimeproto.TurnID
+	text string
+}
+type eventCollector struct{ ch chan collectedEvent }
+
+func newCollector() *eventCollector { return &eventCollector{ch: make(chan collectedEvent, 32)} }
+func (c *eventCollector) TurnStarted(op runtimeproto.OpID, id runtimeproto.TurnID) {
+	c.ch <- collectedEvent{kind: "started", op: op, turn: id}
+}
+func (c *eventCollector) TurnRejected(op runtimeproto.OpID, code, detail string) {
+	c.ch <- collectedEvent{kind: "rejected", op: op, text: code + detail}
+}
+func (c *eventCollector) Tool(runtimeproto.TurnID, runtimeproto.ToolEvent) {}
+func (c *eventCollector) TurnEnded(id runtimeproto.TurnID, _ runtimeproto.TurnStatus, text, _ string) {
+	c.ch <- collectedEvent{kind: "ended", turn: id, text: text}
+}
+func (c *eventCollector) ControlDone(op runtimeproto.OpID, id runtimeproto.TurnID, _ runtimeproto.ControlVerdict, _ string) {
+	c.ch <- collectedEvent{kind: "control", op: op, turn: id}
+}
+func (c *eventCollector) ReadyDone(op runtimeproto.OpID, _ runtimeproto.ReadyResult) {
+	c.ch <- collectedEvent{kind: "ready", op: op}
+}
+func (c *eventCollector) ProviderLost(id runtimeproto.TurnID, _ runtimeproto.LostCause, detail string) {
+	c.ch <- collectedEvent{kind: "lost", turn: id, text: detail}
+}
+func (c *eventCollector) ResumeSeedUpdated([]byte) {}
+func (c *eventCollector) RuntimeFault(code, detail string) {
+	c.ch <- collectedEvent{kind: "fault", text: code + detail}
+}
+
+type immediateToolBridge struct{}
+
+func (immediateToolBridge) Catalog() []runtimeproto.ToolSpec { return nil }
+func (immediateToolBridge) Invoke(context.Context, effectcap.Scope, runtimeproto.ToolInvocation) runtimeproto.ToolResult {
+	return runtimeproto.ToolResult{Text: "ok"}
+}
+
+func awaitKind(t *testing.T, c *eventCollector, kind string) collectedEvent {
 	t.Helper()
-	select {
-	case v := <-r.ch:
-		return v
-	case <-time.After(time.Second):
-		t.Fatal("event timeout")
-		return recorded{}
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case got := <-c.ch:
+			if got.kind == kind {
+				return got
+			}
+		case <-deadline:
+			t.Fatalf("no %s event", kind)
+		}
 	}
-}
-func testPolicy() Policy {
-	p := DefaultPolicy()
-	p.CommandAdmission = 100 * time.Millisecond
-	p.OpenCall = time.Second
-	p.StartCall = time.Second
-	p.Started = time.Second
-	p.Watchdog = time.Hour
-	p.Reap = time.Second
-	return p
 }
 
-func TestLazyOpenAndSynchronousEventReordering(t *testing.T) {
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, r driverproto.StartRequest) driverproto.StartResult {
-			target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "native"}
-			h.Events().Publish(driverproto.TurnStarted{Target: target})
-			h.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "ok"})
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}
-		return w
-	}
-	r := &eventRecorder{ch: make(chan recorded, 8)}
-	e, err := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
+func TestRuntimeFactsDriveTurnAndUUIDv7(t *testing.T) {
+	p := &testProvider{}
+	factory, _, err := Build(p, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, Watchdog: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer e.Close()
-	if a.count() != 0 {
-		t.Fatal("runtime opened eagerly")
-	}
-	if err = e.Start(base.StartCommand{Op: "s1", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "hi"}}}, Scope: base.NewEffectScope("m", "m")}); err != nil {
-		t.Fatal(err)
-	}
-	if v := nextEvent(t, r); v.kind != "started" {
-		t.Fatalf("first=%+v", v)
-	}
-	if v := nextEvent(t, r); v.kind != "ended" {
-		t.Fatalf("second=%+v", v)
-	}
-}
-
-func TestTerminateDoesNotCrossReapedBarrier(t *testing.T) {
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		return &fakeWorker{host: h, reaped: make(chan struct{}), start: func(context.Context, driverproto.StartRequest) driverproto.StartResult {
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}}
-	}
-	r := &eventRecorder{ch: make(chan recorded, 8)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	if err := e.EnsureReady("ready"); err != nil {
-		t.Fatal(err)
-	}
-	if nextEvent(t, r).kind != "ready" {
-		t.Fatal("not ready")
-	}
-	if err := e.Terminate(); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.Start(base.StartCommand{Op: "next", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "next"}}}, Scope: base.NewEffectScope("n", "n")}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(30 * time.Millisecond)
-	if a.count() != 1 {
-		t.Fatalf("opened %d workers before reap", a.count())
-	}
-	a.mu.Lock()
-	first := a.workers[0]
-	a.mu.Unlock()
-	first.reap()
-	deadline := time.Now().Add(time.Second)
-	for a.count() != 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if a.count() != 2 {
-		t.Fatal("did not reopen after reap")
-	}
-}
-
-func TestTerminateReturnsToAbsentWithoutDemand(t *testing.T) {
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		return &fakeWorker{host: h, reaped: make(chan struct{}), start: func(context.Context, driverproto.StartRequest) driverproto.StartResult {
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}}
-	}
-	r := &eventRecorder{ch: make(chan recorded, 4)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	if err := e.EnsureReady("ready"); err != nil {
-		t.Fatal(err)
-	}
-	_ = nextEvent(t, r)
-	if err := e.Terminate(); err != nil {
-		t.Fatal(err)
-	}
-	a.mu.Lock()
-	first := a.workers[0]
-	a.mu.Unlock()
-	first.reap()
-	time.Sleep(30 * time.Millisecond)
-	if got := a.count(); got != 1 {
-		t.Fatalf("terminate reopened %d workers without demand", got)
-	}
-}
-
-func TestWorkerEndedDuringOpenSettlesDemandWithoutTransparentRetry(t *testing.T) {
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{}), start: func(context.Context, driverproto.StartRequest) driverproto.StartResult {
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}}
-		w.open = func(ctx context.Context, _ driverproto.OpenRequest) driverproto.OpenResult {
-			h.Events().Publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: "open transport ended"})
-			<-ctx.Done()
-			w.reap()
-			return driverproto.OpenUncertain(driverproto.FailureTransport, ctx.Err().Error())
-		}
-		return w
-	}
-	r := &eventRecorder{ch: make(chan recorded, 4)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	if err := e.Start(base.StartCommand{Op: "start", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope("m", "m")}); err != nil {
-		t.Fatal(err)
-	}
-	if got := nextEvent(t, r); got.kind != "rejected" || got.op != "start" {
-		t.Fatalf("opening failure result=%+v", got)
-	}
-	time.Sleep(30 * time.Millisecond)
-	if got := a.count(); got != 1 {
-		t.Fatalf("opening failure transparently created %d workers", got)
-	}
-}
-
-func TestCloseRetiresWithoutWaitingForReaped(t *testing.T) {
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		return &fakeWorker{host: h, reaped: make(chan struct{}), start: func(context.Context, driverproto.StartRequest) driverproto.StartResult {
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}}
-	}
-	r := &eventRecorder{ch: make(chan recorded, 2)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	if err := e.EnsureReady("r"); err != nil {
-		t.Fatal(err)
-	}
-	_ = nextEvent(t, r)
-	start := time.Now()
-	e.Close()
-	if time.Since(start) > 50*time.Millisecond {
-		t.Fatal("Close waited for Reaped")
-	}
-	a.mu.Lock()
-	w := a.workers[0]
-	a.mu.Unlock()
-	if w.retired.Load() != 1 {
-		t.Fatalf("retire calls=%d", w.retired.Load())
-	}
-	if w.host.Events().Publish(driverproto.Diagnostic{Code: "tail"}) {
-		t.Fatal("closed runtime accepted tail event")
-	}
-	if err := e.EnsureReady("x"); err != base.ErrRuntimeClosed {
-		t.Fatalf("post-close error=%v", err)
-	}
-}
-
-func TestStartResumeInvalidRetriesOriginalInputOnce(t *testing.T) {
-	a := &fakeAdapter{}
-	var got string
-	a.factory = func(n int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		if n == 0 {
-			w.start = func(context.Context, driverproto.StartRequest) driverproto.StartResult {
-				go w.reap()
-				return driverproto.StartInvalidResume("bad seed")
-			}
-		} else {
-			w.start = func(_ context.Context, r driverproto.StartRequest) driverproto.StartResult {
-				got = r.Messages[0].Text
-				target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "new"}
-				h.Events().Publish(driverproto.TurnStarted{Target: target})
-				h.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK})
-				return driverproto.StartAccept(driverproto.KeepWorker)
-			}
-		}
-		return w
-	}
-	r := &eventRecorder{ch: make(chan recorded, 8)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake", Capabilities: driverproto.Capabilities{Resume: true}}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, []byte("seed"), r)
-	defer e.Close()
-	if err := e.Start(base.StartCommand{Op: "start", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "original"}}}, Scope: base.NewEffectScope("m", "m")}); err != nil {
-		t.Fatal(err)
-	}
-	if nextEvent(t, r).kind != "started" {
-		t.Fatal("retry did not start")
-	}
-	if got != "original" {
-		t.Fatalf("retried input=%q", got)
-	}
-}
-
-func TestAdmissionTimeoutPoisonsAndEmergencyRetires(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &fakeWorker{reaped: make(chan struct{}), start: func(context.Context, driverproto.StartRequest) driverproto.StartResult {
-		return driverproto.StartAccept(driverproto.KeepWorker)
-	}}
-	sink := &eventSink{q: newQueue[eventEnvelope]()}
-	e := &Engine{policy: Policy{CommandAdmission: 10 * time.Millisecond}.normalized(), root: ctx, cancel: cancel, commands: make(chan runtimeCommand), eventq: newQueue[eventEnvelope](), outbox: newQueue[func(base.RuntimeEvents)]()}
-	e.fuse.handle = &emergencyHandle{worker: w, sink: sink, cancel: func() {}}
-	err := e.EnsureReady("x")
-	if err != base.ErrRuntimeUnavailable {
-		t.Fatalf("error=%v", err)
-	}
-	if w.retired.Load() != 1 {
-		t.Fatal("emergency retire not issued")
-	}
-}
-
-type trackingBridge struct {
-	old, new base.EffectScope
-	mu       sync.Mutex
-	invoked  []string
-	acquired string
-}
-
-type settlingBridge struct {
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (*settlingBridge) Catalog() []base.ToolSpec { return nil }
-func (*settlingBridge) Acquire(base.EffectScope) (base.EffectLease, bool) {
-	return base.NewEffectLease("ok"), true
-}
-func (b *settlingBridge) Invoke(context.Context, base.EffectLease, base.ToolInvocation) base.ToolResult {
-	close(b.entered)
-	<-b.release
-	return base.ToolResult{Text: "ok"}
-}
-
-func (*trackingBridge) Catalog() []base.ToolSpec { return nil }
-func (b *trackingBridge) Acquire(s base.EffectScope) (base.EffectLease, bool) {
-	label := "unknown"
-	if s == b.old {
-		label = "old"
-	}
-	if s == b.new {
-		label = "new"
-	}
-	b.mu.Lock()
-	b.acquired = label
-	b.mu.Unlock()
-	return base.NewEffectLease(label), true
-}
-func (b *trackingBridge) Invoke(_ context.Context, l base.EffectLease, _ base.ToolInvocation) base.ToolResult {
-	b.mu.Lock()
-	b.invoked = append(b.invoked, b.acquired)
-	b.mu.Unlock()
-	return base.ToolResult{Text: "ok"}
-}
-
-func TestSteerScopeTransitionHoldsCallbackUntilControlDone(t *testing.T) {
-	oldScope, newScope := base.NewEffectScope("old", "old"), base.NewEffectScope("new", "new")
-	bridge := &trackingBridge{old: oldScope, new: newScope}
-	var target driverproto.WorkerTurnTarget
-	invokeDone := make(chan driverproto.ToolResult, 1)
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, r driverproto.StartRequest) driverproto.StartResult {
-			target = driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "native"}
-			h.Events().Publish(driverproto.TurnStarted{Target: target})
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}
-		w.control = func(_ context.Context, _ driverproto.ControlRequest) driverproto.ControlResult {
-			go func() {
-				invokeDone <- h.Tools().Invoke(h.GenerationLife(), target, driverproto.ToolInvocation{CallID: "tool-1", Name: "call_actor"})
-			}()
-			time.Sleep(20 * time.Millisecond)
-			bridge.mu.Lock()
-			n := len(bridge.invoked)
-			bridge.mu.Unlock()
-			if n != 0 {
-				t.Errorf("effect escaped pending transition")
-			}
-			return driverproto.ControlAccept(driverproto.KeepWorker)
-		}
-		return w
-	}
-	r := &eventRecorder{ch: make(chan recorded, 16)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake", Capabilities: driverproto.Capabilities{Steer: true}}, testPolicy(), base.RuntimeDeps{Parent: context.Background(), Tools: bridge}, nil, r)
-	defer e.Close()
-	if err := e.Start(base.StartCommand{Op: "start", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "hi"}}}, Scope: oldScope}); err != nil {
+	defer cancel()
+	events := newCollector()
+	rt, err := factory(runtimeproto.Deps{Parent: ctx}, nil, events)
+	if err != nil {
 		t.Fatal(err)
 	}
-	started := nextEvent(t, r)
-	if started.kind != "started" {
-		t.Fatalf("event=%+v", started)
-	}
-	if err := e.Control(base.ControlCommand{Op: "steer", Kind: base.RuntimeSteer, Target: started.turn, Content: &base.RuntimeInput{Text: "new"}, Scope: newScope}); err != nil {
+	defer rt.Close()
+	if err := rt.Start(runtimeproto.StartCommand{Op: 1, Messages: []runtimeproto.Input{{Text: "hello"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if v := nextEvent(t, r); v.kind != "control" {
-		t.Fatalf("first after steer=%+v", v)
+	started := awaitKind(t, events, "started")
+	parsed, err := uuid.Parse(string(started.turn))
+	if err != nil || parsed.Version() != 7 {
+		t.Fatalf("turn id=%q version=%v err=%v", started.turn, parsed.Version(), err)
 	}
-	if v := nextEvent(t, r); v.kind != "tool-started" {
-		t.Fatalf("second after steer=%+v", v)
-	}
-	select {
-	case out := <-invokeDone:
-		if out.IsError {
-			t.Fatalf("tool error=%s", out.Text)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("held tool never released")
-	}
-	bridge.mu.Lock()
-	defer bridge.mu.Unlock()
-	if len(bridge.invoked) != 1 || bridge.invoked[0] != "new" {
-		t.Fatalf("scope invocations=%v", bridge.invoked)
+	ended := awaitKind(t, events, "ended")
+	if ended.turn != started.turn || ended.text != "done" {
+		t.Fatalf("ended=%+v started=%+v", ended, started)
 	}
 }
 
-func TestRejectedEffectRetryReusesDefinitiveError(t *testing.T) {
-	results := make(chan driverproto.ToolResult, 2)
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, req driverproto.StartRequest) driverproto.StartResult {
-			target := driverproto.WorkerTurnTarget{Attempt: req.Attempt, Native: "native"}
-			h.Events().Publish(driverproto.TurnStarted{Target: target})
-			go func() {
-				invoke := driverproto.ToolInvocation{CallID: "same", Name: "call_actor"}
-				results <- h.Tools().Invoke(req.Life, target, invoke)
-				results <- h.Tools().Invoke(req.Life, target, invoke)
-			}()
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}
-		return w
+func TestSubmissionResumeInvalidRetriesOnceWithEmptySeed(t *testing.T) {
+	p := &resumeRetryProvider{opened: make(chan []byte, 2)}
+	factory, _, err := Build(p, Policy{
+		OpenFactDeadline:  time.Second,
+		StartFactDeadline: time.Second,
+		ReapedDemand:      time.Second,
+		Watchdog:          time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	r := &eventRecorder{ch: make(chan recorded, 4)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	_ = e.Start(base.StartCommand{Op: "s", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope("m", "m")})
-	_ = nextEvent(t, r)
-	for n := 0; n < 2; n++ {
+	events := newCollector()
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, []byte("stale-seed"), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	if err := rt.Start(runtimeproto.StartCommand{Op: 1, Messages: []runtimeproto.Input{{Text: "hello"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	for index, want := range [][]byte{[]byte("stale-seed"), nil} {
 		select {
-		case got := <-results:
-			if !got.IsError || got.Text != "tool bridge unavailable" {
-				t.Fatalf("retry result=%+v", got)
+		case got := <-p.opened:
+			if string(got) != string(want) {
+				t.Fatalf("open %d seed=%q want %q", index, got, want)
 			}
 		case <-time.After(time.Second):
-			t.Fatal("rejected effect retry blocked")
+			t.Fatalf("open %d did not occur", index)
 		}
+	}
+	started := awaitKind(t, events, "started")
+	ended := awaitKind(t, events, "ended")
+	if ended.turn != started.turn || ended.text != "retried" {
+		t.Fatalf("ended=%+v started=%+v", ended, started)
+	}
+	p.mu.Lock()
+	workers := p.next
+	p.mu.Unlock()
+	if workers != 2 {
+		t.Fatalf("workers=%d want 2", workers)
 	}
 }
 
-func TestTurnEndedWaitsForAdmittedEffect(t *testing.T) {
-	bridge := &settlingBridge{entered: make(chan struct{}), release: make(chan struct{})}
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, req driverproto.StartRequest) driverproto.StartResult {
-			target := driverproto.WorkerTurnTarget{Attempt: req.Attempt, Native: "native"}
-			h.Events().Publish(driverproto.TurnStarted{Target: target})
-			go h.Tools().Invoke(req.Life, target, driverproto.ToolInvocation{CallID: "tool", Name: "call_actor"})
-			<-bridge.entered
-			h.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK})
-			return driverproto.StartAccept(driverproto.KeepWorker)
+func TestSequentialCallbacksHaveNoPerTurnSemanticQuota(t *testing.T) {
+	policy := Policy{CallbackCapacity: 1, Watchdog: time.Hour}.normalized()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	target := driverproto.WorkerTurnTarget{Attempt: 1, Native: "turn"}
+	e := &engine{
+		policy:     policy,
+		deps:       runtimeproto.Deps{Tools: immediateToolBridge{}},
+		events:     newCollector(),
+		root:       ctx,
+		inbox:      newInbox(policy),
+		timers:     map[timerKind]*time.Timer{},
+		generation: generationState{id: 1, phase: generationRunning},
+		turn:       &turnState{id: "canonical", target: target, life: ctx, callbacks: map[string]*callbackRow{}},
+	}
+	defer func() {
+		for _, timer := range e.timers {
+			timer.Stop()
 		}
-		return w
-	}
-	r := &eventRecorder{ch: make(chan recorded, 8)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background(), Tools: bridge}, nil, r)
-	defer e.Close()
-	_ = e.Start(base.StartCommand{Op: "s", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope("m", "m")})
-	if nextEvent(t, r).kind != "started" || nextEvent(t, r).kind != "tool-started" {
-		t.Fatal("effect did not start")
-	}
-	select {
-	case got := <-r.ch:
-		t.Fatalf("terminal escaped settling: %+v", got)
-	case <-time.After(30 * time.Millisecond):
-	}
-	close(bridge.release)
-	if got := nextEvent(t, r); got.kind != "tool-ended" {
-		t.Fatalf("first settled event=%+v", got)
-	}
-	if got := nextEvent(t, r); got.kind != "ended" {
-		t.Fatalf("second settled event=%+v", got)
-	}
-}
+	}()
 
-func TestAcceptedActivityInvalidatesQueuedWatchdogTimer(t *testing.T) {
-	target := driverproto.WorkerTurnTarget{Attempt: 1, Native: "native"}
-	sink := &eventSink{generation: 1, q: newQueue[eventEnvelope]()}
-	rev := sink.activate(target)
-	turn := &runtimeTurn{serial: 1, target: target, phase: turnActive, canonical: "turn", watchRev: rev}
-	g := &workerGeneration{id: 1, phase: workerReady, sink: sink, turn: turn}
-	b := runtimeBook{worker: g}
-	e := &Engine{policy: testPolicy()}
-	if !sink.Publish(driverproto.Activity{Target: target}) {
-		t.Fatal("activity not accepted")
-	}
-	e.onTimer(&b, timerDone{kind: timerWatchdog, gen: 1, serial: 1, rev: rev})
-	if g.phase != workerReady {
-		t.Fatal("accepted activity did not invalidate watchdog timer")
-	}
-}
+	for i := 0; i < 3; i++ {
+		r := &callbackRequest{
+			generation: 1,
+			kind:       callbackTool,
+			target:     target,
+			callID:     fmt.Sprintf("call-%d", i),
+			tool:       driverproto.ToolInvocation{Name: "test"},
+			ctx:        ctx,
+			response:   make(chan callbackResult, 1),
+		}
+		if !e.inbox.push(classCallback, r) {
+			t.Fatalf("callback %d was rejected by an empty physical inbox", i)
+		}
+		entry, ok := e.inbox.pop()
+		if !ok || entry.value != r {
+			t.Fatalf("callback %d admission was not consumed", i)
+		}
+		e.handleCallback(r)
 
-func TestOversizedSteerRejectedBeforeWorkerControl(t *testing.T) {
-	var controls atomic.Int32
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, req driverproto.StartRequest) driverproto.StartResult {
-			h.Events().Publish(driverproto.TurnStarted{Target: driverproto.WorkerTurnTarget{Attempt: req.Attempt, Native: "native"}})
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}
-		w.control = func(context.Context, driverproto.ControlRequest) driverproto.ControlResult {
-			controls.Add(1)
-			return driverproto.ControlAccept(driverproto.KeepWorker)
-		}
-		return w
-	}
-	p := testPolicy()
-	p.InputMaxBytes = 4
-	r := &eventRecorder{ch: make(chan recorded, 8)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake", Capabilities: driverproto.Capabilities{Steer: true}}, p, base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	_ = e.Start(base.StartCommand{Op: "s", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope("m", "m")})
-	started := nextEvent(t, r)
-	_ = e.Control(base.ControlCommand{Op: "steer", Kind: base.RuntimeSteer, Target: started.turn, Content: &base.RuntimeInput{Text: "12345"}, Scope: base.NewEffectScope("n", "n")})
-	got := nextEvent(t, r)
-	if got.verdict != base.ControlInputTooLarge || controls.Load() != 0 {
-		t.Fatalf("oversized steer result=%+v worker calls=%d", got, controls.Load())
-	}
-}
-
-func TestNaturalTerminalWinsOverLateAmbiguousStartResult(t *testing.T) {
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, r driverproto.StartRequest) driverproto.StartResult {
-			target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "native"}
-			h.Events().Publish(driverproto.TurnStarted{Target: target})
-			h.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK})
-			time.Sleep(20 * time.Millisecond)
-			return driverproto.StartUncertain(driverproto.FailureTransport, "late timeout")
-		}
-		return w
-	}
-	r := &eventRecorder{ch: make(chan recorded, 8)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	_ = e.Start(base.StartCommand{Op: "s", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope("m", "m")})
-	if nextEvent(t, r).kind != "started" || nextEvent(t, r).kind != "ended" {
-		t.Fatal("natural terminal missing")
-	}
-	select {
-	case v := <-r.ch:
-		if v.kind == "lost" {
-			t.Fatal("late ambiguity overrode terminal")
-		}
-	case <-time.After(50 * time.Millisecond):
-	}
-	a.mu.Lock()
-	w := a.workers[0]
-	a.mu.Unlock()
-	if w.retired.Load() == 0 {
-		t.Fatal("ambiguous worker was reused")
-	}
-}
-
-func TestOldAttemptTailCannotEndNewTurn(t *testing.T) {
-	a := &fakeAdapter{}
-	var old, newTarget driverproto.WorkerTurnTarget
-	calls := 0
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, r driverproto.StartRequest) driverproto.StartResult {
-			calls++
-			target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: driverproto.WorkerTurnRef("native")}
-			if calls == 1 {
-				old = target
-			} else {
-				newTarget = target
+		deadline := time.After(time.Second)
+		for {
+			entry, ok := e.inbox.pop()
+			if ok {
+				completion, ok := entry.value.(callbackCompletion)
+				if !ok {
+					t.Fatalf("callback %d produced %T", i, entry.value)
+				}
+				e.handleCallbackCompletion(completion)
+				break
 			}
-			h.Events().Publish(driverproto.TurnStarted{Target: target})
-			if calls == 1 {
-				h.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK})
+			select {
+			case <-e.inbox.wake:
+			case <-deadline:
+				t.Fatalf("callback %d did not complete", i)
 			}
-			return driverproto.StartAccept(driverproto.KeepWorker)
 		}
-		return w
-	}
-	r := &eventRecorder{ch: make(chan recorded, 12)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	start := func(op base.OpID) {
-		if err := e.Start(base.StartCommand{Op: op, Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope(string(op), string(op))}); err != nil {
-			t.Fatal(err)
+		select {
+		case result := <-r.response:
+			if result.tool.IsError {
+				t.Fatalf("callback %d failed: %+v", i, result.tool)
+			}
+		default:
+			t.Fatalf("callback %d result was not returned", i)
 		}
 	}
-	start("one")
-	_ = nextEvent(t, r)
-	_ = nextEvent(t, r)
-	start("two")
-	_ = nextEvent(t, r)
-	a.mu.Lock()
-	h := a.workers[0].host
-	a.mu.Unlock()
-	h.Events().Publish(driverproto.TurnEnded{Target: old, Status: driverproto.TurnOK})
-	select {
-	case v := <-r.ch:
-		if v.kind == "ended" {
-			t.Fatal("old attempt ended new turn")
-		}
-	case <-time.After(40 * time.Millisecond):
-	}
-	h.Events().Publish(driverproto.TurnEnded{Target: newTarget, Status: driverproto.TurnOK})
-	if nextEvent(t, r).kind != "ended" {
-		t.Fatal("new terminal missing")
+	if got := len(e.turn.callbacks); got != 3 {
+		t.Fatalf("callback rows=%d want 3 distinct CallID rows", got)
 	}
 }
 
-func TestTurnTerminalSettlesInFlightControlBeforeLateRPCResult(t *testing.T) {
-	a := &fakeAdapter{}
-	controlStarted := make(chan struct{})
-	release := make(chan struct{})
-	var target driverproto.WorkerTurnTarget
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, r driverproto.StartRequest) driverproto.StartResult {
-			target = driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "native"}
-			h.Events().Publish(driverproto.TurnStarted{Target: target})
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}
-		w.control = func(context.Context, driverproto.ControlRequest) driverproto.ControlResult {
-			close(controlStarted)
-			<-release
-			return driverproto.ControlAccept(driverproto.KeepWorker)
-		}
-		return w
+func TestBuildUsesPhysicalEventCapacityWithoutObservationBudget(t *testing.T) {
+	_, spec, err := Build(&testProvider{}, Policy{IngressCapacity: 1, EventCapacity: 1})
+	if err != nil {
+		t.Fatal(err)
 	}
-	r := &eventRecorder{ch: make(chan recorded, 12)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake", Capabilities: driverproto.Capabilities{Interrupt: true}}, testPolicy(), base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	_ = e.Start(base.StartCommand{Op: "s", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope("m", "m")})
-	started := nextEvent(t, r)
-	_ = e.Control(base.ControlCommand{Op: "interrupt", Kind: base.RuntimeInterrupt, Target: started.turn})
+	if spec.Bounds.EventCapacity != 1 {
+		t.Fatalf("event capacity=%d want 1", spec.Bounds.EventCapacity)
+	}
+}
+
+type controlCrashProvider struct {
+	mu      sync.Mutex
+	workers []*controlCrashWorker
+}
+
+func (p *controlCrashProvider) Spec() driverproto.ProviderSpec {
+	return driverproto.ProviderSpec{Name: "control-crash", Capabilities: driverproto.Capabilities{Interrupt: true}, Describe: introspect.Describe{Description: "control crash test"}}
+}
+func (p *controlCrashProvider) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
+	w := &controlCrashWorker{host: h, reaped: make(chan struct{}), controlled: make(chan struct{})}
+	p.mu.Lock()
+	p.workers = append(p.workers, w)
+	p.mu.Unlock()
+	return w, nil
+}
+
+// controlCrashWorker starts a turn, swallows the control request without a
+// verdict, and lets the test end the turn and crash the process.
+type controlCrashWorker struct {
+	host       driverproto.WorkerHost
+	mu         sync.Mutex
+	target     driverproto.WorkerTurnTarget
+	reaped     chan struct{}
+	controlled chan struct{}
+	once       sync.Once
+}
+
+func (w *controlCrashWorker) Open(context.Context, driverproto.OpenRequest) {
+	w.host.Events().Publish(driverproto.WorkerReady{})
+}
+func (w *controlCrashWorker) Start(_ context.Context, r driverproto.StartRequest) {
+	target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "turn"}
+	w.mu.Lock()
+	w.target = target
+	w.mu.Unlock()
+	w.host.Events().Publish(driverproto.TurnStarted{Target: target})
+}
+func (w *controlCrashWorker) Control(context.Context, driverproto.ControlRequest) {
+	close(w.controlled)
+}
+func (w *controlCrashWorker) endTurn() {
+	w.mu.Lock()
+	target := w.target
+	w.mu.Unlock()
+	w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnInterrupted})
+}
+func (w *controlCrashWorker) crash()                  { w.once.Do(func() { close(w.reaped) }) }
+func (w *controlCrashWorker) Retire()                 {}
+func (w *controlCrashWorker) Reaped() <-chan struct{} { return w.reaped }
+
+func TestUnexpectedReapSettlesPendingControlOnTerminalTurn(t *testing.T) {
+	p := &controlCrashProvider{}
+	factory, _, err := Build(p, Policy{
+		OpenFactDeadline:    time.Second,
+		StartFactDeadline:   time.Second,
+		ControlFactDeadline: time.Minute,
+		Watchdog:            time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := newCollector()
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, nil, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	if err := rt.Start(runtimeproto.StartCommand{Op: 1, Messages: []runtimeproto.Input{{Text: "hello"}}}); err != nil {
+		t.Fatal(err)
+	}
+	started := awaitKind(t, events, "started")
+	if err := rt.Control(runtimeproto.ControlCommand{Op: 2, Target: started.turn, Kind: runtimeproto.ControlInterrupt}); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	w := p.workers[0]
+	p.mu.Unlock()
 	select {
-	case <-controlStarted:
+	case <-w.controlled:
 	case <-time.After(time.Second):
-		t.Fatal("control not dispatched")
+		t.Fatal("control was not dispatched to the worker")
 	}
-	a.mu.Lock()
-	h := a.workers[0].host
-	a.mu.Unlock()
-	h.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnInterrupted})
-	if nextEvent(t, r).kind != "ended" {
-		t.Fatal("terminal missing")
+	w.endTurn()
+	awaitKind(t, events, "ended")
+	w.crash()
+	settled := awaitKind(t, events, "control")
+	if settled.op != 2 || settled.turn != started.turn {
+		t.Fatalf("control settled=%+v want op=2 turn=%s", settled, started.turn)
 	}
-	if v := nextEvent(t, r); v.kind != "control" || v.op != "interrupt" {
-		t.Fatalf("control settlement=%+v", v)
-	}
-	close(release)
 }
 
-func TestWatchdogReportsLossBeforeReaped(t *testing.T) {
-	p := testPolicy()
-	p.Watchdog = 15 * time.Millisecond
-	p.TerminalDrain = 10 * time.Millisecond
-	a := &fakeAdapter{}
-	a.factory = func(_ int, h driverproto.WorkerHost) *fakeWorker {
-		w := &fakeWorker{host: h, reaped: make(chan struct{})}
-		w.start = func(_ context.Context, r driverproto.StartRequest) driverproto.StartResult {
-			h.Events().Publish(driverproto.TurnStarted{Target: driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "native"}})
-			return driverproto.StartAccept(driverproto.KeepWorker)
-		}
-		return w
+func TestCloseDoesNotWaitForBrokenReaped(t *testing.T) {
+	p := &testProvider{neverReap: true}
+	factory, _, err := Build(p, Policy{OpenFactDeadline: time.Second})
+	if err != nil {
+		t.Fatal(err)
 	}
-	r := &eventRecorder{ch: make(chan recorded, 8)}
-	e, _ := New(a, driverproto.ProviderSpec{Name: "fake"}, p, base.RuntimeDeps{Parent: context.Background()}, nil, r)
-	defer e.Close()
-	_ = e.Start(base.StartCommand{Op: "s", Input: base.TurnInput{Messages: []base.RuntimeInput{{Text: "x"}}}, Scope: base.NewEffectScope("m", "m")})
-	if nextEvent(t, r).kind != "started" {
-		t.Fatal("start missing")
+	events := newCollector()
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, nil, events)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if nextEvent(t, r).kind != "lost" {
-		t.Fatal("watchdog loss missing")
+	if err := rt.EnsureReady(1); err != nil {
+		t.Fatal(err)
 	}
-	a.mu.Lock()
-	w := a.workers[0]
-	a.mu.Unlock()
-	if w.retired.Load() == 0 {
-		t.Fatal("watchdog did not hard-retire worker")
+	awaitKind(t, events, "ready")
+	done := make(chan struct{})
+	go func() { rt.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Close waited for Reaped")
 	}
 }
+
+var _ driverproto.Provider = (*testProvider)(nil)
+var _ driverproto.Worker = (*testWorker)(nil)
+var _ driverproto.Provider = (*resumeRetryProvider)(nil)
+var _ driverproto.Worker = (*resumeRetryWorker)(nil)
+var _ runtimeproto.Events = (*eventCollector)(nil)

@@ -23,6 +23,7 @@ type ContextMessage struct {
 }
 
 type AttemptToken uint64
+type ActionToken uint64
 type WorkerTurnRef string
 
 type WorkerTurnTarget struct {

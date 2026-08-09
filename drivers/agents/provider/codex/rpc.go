@@ -3,14 +3,12 @@ package codex
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type rpcError struct {
@@ -39,7 +37,7 @@ type rpcClient struct {
 	out            io.ReadCloser
 	writeMu        sync.Mutex
 	mu             sync.Mutex
-	pending        map[string]chan rpcReply
+	pending        map[string]func(rpcReply)
 	next           atomic.Uint64
 	closed         atomic.Bool
 	closeOnce      sync.Once
@@ -50,38 +48,23 @@ type rpcClient struct {
 }
 
 func newRPC(p *childProcess) *rpcClient {
-	return &rpcClient{in: p.stdin, out: p.stdout, pending: map[string]chan rpcReply{}, pumpDone: make(chan struct{})}
+	return &rpcClient{in: p.stdin, out: p.stdout, pending: map[string]func(rpcReply){}, pumpDone: make(chan struct{})}
 }
 func (c *rpcClient) start() { go c.readPump() }
-func (c *rpcClient) call(ctx context.Context, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+func (c *rpcClient) callAsync(method string, params any, done func(json.RawMessage, error)) error {
 	if c.closed.Load() {
-		return nil, errors.New("codex rpc closed")
+		return errors.New("codex rpc closed")
 	}
 	id := c.next.Add(1)
 	key := fmt.Sprint(id)
-	ch := make(chan rpcReply, 1)
 	c.mu.Lock()
-	c.pending[key] = ch
+	c.pending[key] = func(r rpcReply) { done(r.result, r.err) }
 	c.mu.Unlock()
 	if err := c.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		c.take(key)
-		return nil, err
+		return err
 	}
-	if timeout <= 0 {
-		timeout = rpcTimeout
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case reply := <-ch:
-		return reply.result, reply.err
-	case <-ctx.Done():
-		c.take(key)
-		return nil, ctx.Err()
-	case <-timer.C:
-		c.take(key)
-		return nil, fmt.Errorf("codex rpc %s timeout", method)
-	}
+	return nil
 }
 func (c *rpcClient) notify(method string, params any) error {
 	return c.write(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
@@ -97,7 +80,7 @@ func (c *rpcClient) write(v any) error {
 	_, err = c.in.Write(raw)
 	return err
 }
-func (c *rpcClient) take(key string) chan rpcReply {
+func (c *rpcClient) take(key string) func(rpcReply) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ch := c.pending[key]
@@ -131,9 +114,9 @@ func (c *rpcClient) readPump() {
 			}
 			if ch := c.take(key); ch != nil {
 				if msg.Error != nil {
-					ch <- rpcReply{err: msg.Error}
+					ch(rpcReply{err: msg.Error})
 				} else {
-					ch <- rpcReply{result: msg.Result}
+					ch(rpcReply{result: msg.Result})
 				}
 			}
 			continue
@@ -182,10 +165,10 @@ func (c *rpcClient) closeWith(err error) {
 		c.closed.Store(true)
 		c.mu.Lock()
 		pending := c.pending
-		c.pending = map[string]chan rpcReply{}
+		c.pending = map[string]func(rpcReply){}
 		c.mu.Unlock()
 		for _, ch := range pending {
-			ch <- rpcReply{err: err}
+			ch(rpcReply{err: err})
 		}
 		if c.onClose != nil {
 			c.onClose(err)

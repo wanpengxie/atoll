@@ -18,21 +18,27 @@ func redactNative(s string) string { return nativeSecretPattern.ReplaceAllString
 func isInvalidResumeError(err error) bool {
 	return err != nil && invalidResumePattern.MatchString(err.Error())
 }
-func classifyControl(err error, kind driverproto.ControlKind) driverproto.ControlResult {
+func classifyControlOutcome(req driverproto.ControlRequest, err error) driverproto.ControlOutcome {
+	out := driverproto.ControlOutcome{Action: req.Action, Target: req.Target, Verdict: driverproto.ControlAccepted, Disposition: driverproto.KeepWorker}
 	if err == nil {
-		return driverproto.ControlAccept(driverproto.KeepWorker)
+		return out
 	}
+	out.Detail = err.Error()
 	var re *rpcError
 	if errors.As(err, &re) {
-		if bytesContains(re.Data, []byte("activeTurnNotSteerable")) && kind == driverproto.ControlSteer {
-			return driverproto.NotSteerable(err.Error(), driverproto.KeepWorker)
+		if bytesContains(re.Data, []byte("activeTurnNotSteerable")) && req.Kind == driverproto.ControlSteer {
+			out.Verdict = driverproto.ControlNotSteerable
+			return out
 		}
 		if noActivePattern.MatchString(err.Error()) {
-			return driverproto.TargetGone(err.Error(), driverproto.KeepWorker)
+			out.Verdict = driverproto.ControlTargetGone
+			return out
 		}
-		return driverproto.ControlReject(driverproto.FailureProvider, err.Error(), driverproto.KeepWorker)
+		out.Verdict = driverproto.ControlRejected
+		return out
 	}
-	return driverproto.ControlUncertain(driverproto.FailureTransport, err.Error())
+	out.Verdict, out.Disposition = driverproto.ControlRejected, driverproto.RetireWorker
+	return out
 }
 func bytesContains(raw json.RawMessage, needle []byte) bool {
 	return strings.Contains(string(raw), string(needle))
