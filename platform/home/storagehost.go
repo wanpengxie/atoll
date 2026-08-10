@@ -55,7 +55,7 @@ func (m daemonStorageMounts) ListStorageDaemons(context.Context, channelpkg.ID) 
 	return out, nil
 }
 
-// daemonStorageControl routes AllocRequest through the realm-owned daemon
+// daemonStorageControl routes AllocRequest through the space-owned daemon
 // carrier and this Home's lane, then waits for its exact-lane reply.
 type daemonStorageControl struct {
 	routes platform.DaemonRoutes
@@ -90,7 +90,7 @@ func (c daemonStorageControl) ReclaimRequest(ctx context.Context, daemonID strin
 	return asDoorStorageError(c.routes.SendReclaim(ctx, daemonID, string(c.chID), coord))
 }
 
-// daemonTransferControl mints a transfer ticket in the realm daemon host.
+// daemonTransferControl mints a transfer ticket in the space daemon host.
 type daemonTransferControl struct {
 	routes platform.DaemonRoutes
 	chID   channelpkg.ID

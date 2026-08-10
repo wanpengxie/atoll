@@ -197,7 +197,7 @@ type appShutdowner interface {
 // gracefulShutdown runs the ordered teardown — the order IS the semantics: ①
 // drain the HTTP entry (stop accepting, finish in-flight), ② silence the gateway
 // (关站全序: 停在场圈 → close every session → join read pumps → 等已获准递交归零 —
-// gateway先静默 before ChannelHost, 连接模型勘误期 §3.2 / DoD-9), ③ close realm
+// gateway先静默 before ChannelHost, 连接模型勘误期 §3.2 / DoD-9), ③ close space
 // workers and ChannelHost (the substrate behind the entry), ④ close the app db.
 // Each step logs before it runs so the order is assertable. All run even if an
 // earlier one errors; errors are joined.
@@ -206,7 +206,7 @@ func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner,
 	e1 := a.Shutdown(ctx)
 	logger.Info("server: shutdown step 2/4: silencing gateway")
 	e2 := gw.Close()
-	logger.Info("server: shutdown step 3/4: closing realm workers and channel host")
+	logger.Info("server: shutdown step 3/4: closing space workers and channel host")
 	e3 := a.Close(ctx)
 	logger.Info("server: shutdown step 4/4: closing app db")
 	e4 := db.Close()

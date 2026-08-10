@@ -114,7 +114,7 @@ func (a *App) createDaemonRow(ctx context.Context, ownerID, name string) (string
 	return daemonID, apiKey, nil
 }
 
-// handleDeleteDaemon commits the realm tombstone and immediately revokes the
+// handleDeleteDaemon commits the space tombstone and immediately revokes the
 // device carrier. Channel-local bindings are intentionally retained.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
@@ -168,7 +168,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 	}
 	// A channel roster is channel-scoped, not viewer-owned. Any member who can
 	// read the channel sees every daemon currently bound to it, regardless of
-	// which member registered that daemon in the realm.
+	// which member registered that daemon in the space.
 	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,name,created_at FROM daemons WHERE deleted_at IS NULL ORDER BY id`)
 	if err != nil {
 		writeAPIError(c, http.StatusInternalServerError, contract.CodeInternal, "query failed")

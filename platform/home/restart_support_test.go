@@ -15,7 +15,7 @@ import (
 // channel does afterwards. It is fixture setup, never the thing under test.
 //
 // Remove is the door: ending someone OTHER than yourself is TerminalRemove,
-// which production drives from the admission and realm-ops handlers and which
+// which production drives from the admission and space-ops handlers and which
 // requires an active member as its initiator. End is self-termination and
 // presents the caller's own current term, so it is not the command a test
 // reaches for when it simply wants an identity gone. (These tests used to pass

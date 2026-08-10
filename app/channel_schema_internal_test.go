@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestChannelDirectorySchemaIsRealmScoped(t *testing.T) {
+func TestChannelDirectorySchemaIsSpaceScoped(t *testing.T) {
 	db, err := openTestAppDB(t, filepath.Join(t.TempDir(), "app.db"))
 	if err != nil {
 		t.Fatal(err)

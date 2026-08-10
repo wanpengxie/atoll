@@ -62,7 +62,7 @@ durable log——消息 append 后不可变、不丢序，每条有频道内唯�
   receipt / error / observe_ended`。下行 kind 会增长——不认识的恒忽略（生长律）。
 - **feed 帧恒带 `(channel_id, seq)`**——live 流免费维护你的 last-seq 表;
   receipt / error / observe_ended 等控制帧不属任何频道 log，恒不推进游标。
-- **observe / unobserve**：临时观看非成员频道（realm 公开观察）。连接局部，
+- **observe / unobserve**：临时观看非成员频道（space 公开观察）。连接局部，
   断线即清；资格逐帧活算，失效收 `observe_ended{channel_id, reason}` 帧。
 - 可靠性：**live 流允许有损，但损恒显式**——你消费太慢时 engine 断链（这就是
   信号），重连后按 last-seq 表补页：**durable 事实零丢失，live-only 动画丢了不补**;

@@ -1,4 +1,4 @@
-package realmtool
+package spacetool
 
 import (
 	"context"
@@ -17,18 +17,18 @@ import (
 )
 
 const (
-	TypeListDeclarations   = "realm.declarations.list"
-	TypeInspectDeclaration = "realm.declarations.inspect"
-	TypeCreateDeclaration  = "realm.declarations.create"
-	TypeEditDeclaration    = "realm.declarations.edit"
-	TypeRevokeDeclaration  = "realm.declarations.revoke"
-	TypeIntroduce          = "realm.introduce"
-	TypeRemove             = "realm.remove"
-	TypeListResources      = "realm.resources.list"
-	TypeFetchResource      = "realm.resources.fetch"
+	TypeListDeclarations   = "space.declarations.list"
+	TypeInspectDeclaration = "space.declarations.inspect"
+	TypeCreateDeclaration  = "space.declarations.create"
+	TypeEditDeclaration    = "space.declarations.edit"
+	TypeRevokeDeclaration  = "space.declarations.revoke"
+	TypeIntroduce          = "space.introduce"
+	TypeRemove             = "space.remove"
+	TypeListResources      = "space.resources.list"
+	TypeFetchResource      = "space.resources.fetch"
 )
 
-type RealmOps interface {
+type SpaceOps interface {
 	ListDeclarations(context.Context, Requester) ([]DeclSummary, error)
 	InspectDeclaration(context.Context, Requester, string) (DeclDetail, error)
 	CreateDeclaration(context.Context, Requester, DeclSpec) (DeclDetail, error)
@@ -40,13 +40,13 @@ type RealmOps interface {
 	FetchResource(context.Context, Requester, channel.ID, resource.ResourceID) (channel.ResourceFetch, error)
 }
 
-func Def(ops RealmOps) actorbase.Def {
-	return actorbase.Def{Doc: "realm boundary operations", New: func() (actorbase.Proc, error) {
+func Def(ops SpaceOps) actorbase.Def {
+	return actorbase.Def{Doc: "space boundary operations", New: func() (actorbase.Proc, error) {
 		return func(sys actorbase.Sys) error { return serve(sys, ops) }, nil
 	}}
 }
 
-func serve(sys actorbase.Sys, ops RealmOps) error {
+func serve(sys actorbase.Sys, ops SpaceOps) error {
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
@@ -68,15 +68,15 @@ func decode(msg actorbase.Msg, out any) error {
 		return nil
 	}
 	if err := json.Unmarshal(msg.Payload, out); err != nil {
-		return &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "invalid JSON payload"}
+		return &channelspec.SpaceError{Code: channelspec.SpaceInvalidRequest, Detail: "invalid JSON payload"}
 	}
 	return nil
 }
 
 func fail(sys actorbase.Sys, msg actorbase.Msg, err error) {
-	var realmErr *channelspec.RealmError
-	if errors.As(err, &realmErr) {
-		_, _ = sys.Fail(msg, string(realmErr.Code), realmErr.Detail)
+	var spaceErr *channelspec.SpaceError
+	if errors.As(err, &spaceErr) {
+		_, _ = sys.Fail(msg, string(spaceErr.Code), spaceErr.Detail)
 		return
 	}
 	var unknown *ErrResultUnknown
@@ -84,12 +84,12 @@ func fail(sys actorbase.Sys, msg actorbase.Msg, err error) {
 		_, _ = sys.Reply(msg, map[string]any{"status": "result_unknown", "ref": unknown.Ref})
 		return
 	}
-	_, _ = sys.Fail(msg, string(channelspec.RealmUnavailable), err.Error())
+	_, _ = sys.Fail(msg, string(channelspec.SpaceUnavailable), err.Error())
 }
 
-func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
+func handle(sys actorbase.Sys, ops SpaceOps, msg actorbase.Msg) {
 	if ops == nil {
-		fail(sys, msg, &channelspec.RealmError{Code: channelspec.RealmUnavailable})
+		fail(sys, msg, &channelspec.SpaceError{Code: channelspec.SpaceUnavailable})
 		return
 	}
 	req := requester(msg)
@@ -109,7 +109,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			declaration, err = ops.InspectDeclaration(msg.Ctx(), req, p.DeclID)
 			result = map[string]any{"declaration": declaration}
 		} else if err == nil {
-			err = &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "decl_id required"}
+			err = &channelspec.SpaceError{Code: channelspec.SpaceInvalidRequest, Detail: "decl_id required"}
 		}
 	case TypeCreateDeclaration:
 		var p DeclSpec
@@ -168,13 +168,13 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 				var body []byte
 				body, err = io.ReadAll(fetched.Body)
 				if err == nil {
-					newID := resource.ResourceID("realm-copy:" + uuid.NewString())
+					newID := resource.ResourceID("space-copy:" + uuid.NewString())
 					out, createErr := sys.Resource().CreateFrom(newID, body, p)
 					if createErr != nil || !out.Accepted() {
 						if createErr != nil {
 							err = createErr
 						} else {
-							err = &channelspec.RealmError{Code: channelspec.RealmConflict, Detail: string(out.RejectReason)}
+							err = &channelspec.SpaceError{Code: channelspec.SpaceConflict, Detail: string(out.RejectReason)}
 						}
 					} else {
 						result = map[string]any{"resource_id": newID, "source": p}
@@ -183,7 +183,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			}
 		}
 	default:
-		err = &channelspec.RealmError{Code: channelspec.RealmInvalidRequest, Detail: "unsupported realm operation"}
+		err = &channelspec.SpaceError{Code: channelspec.SpaceInvalidRequest, Detail: "unsupported space operation"}
 	}
 	if err != nil {
 		fail(sys, msg, err)

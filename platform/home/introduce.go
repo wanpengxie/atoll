@@ -57,7 +57,7 @@ func (h *Home) resolveIntroduction(
 	// the door does not get to assert it. An initiator that carries no principal
 	// (every non-human admission: the store forbids them one) can therefore own
 	// nothing, and the empty-vs-empty comparison that would otherwise admit it
-	// is refused explicitly rather than left to depend on realm-side invariants
+	// is refused explicitly rather than left to depend on space-side invariants
 	// keeping every declaration owner non-empty.
 	if facts.Visibility != "public" &&
 		(initiatorFacts.Principal == "" || initiatorFacts.Principal != facts.OwnerPrincipal) {

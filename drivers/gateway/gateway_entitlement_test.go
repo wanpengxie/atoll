@@ -284,7 +284,7 @@ func TestStartFeedSyncEligibility(t *testing.T) {
 
 func TestNewRequiresResolver(t *testing.T) {
 	if _, err := New(Config{Resolver: newResolver()}); err == nil {
-		// Resolver is the only required realm-side seam; routing is evaluated by
+		// Resolver is the only required space-side seam; routing is evaluated by
 		// the channel harness after the frame crosses the Bundle boundary.
 	} else {
 		t.Fatalf("New with Resolver: %v", err)

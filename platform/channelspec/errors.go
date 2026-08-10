@@ -1,35 +1,35 @@
 package channelspec
 
-// RealmErrorCode is the closed error vocabulary of the realm-tool contract.
+// SpaceErrorCode is the closed error vocabulary of the space-tool contract.
 // The contract crosses the membrane — the membrane's read faces, the app's
-// forwarding gates and the realm-tool frame codec all speak these codes — so
+// forwarding gates and the space-tool frame codec all speak these codes — so
 // the vocabulary lives in the boundary leaf package rather than inside any
 // single party's package.
-type RealmErrorCode string
+type SpaceErrorCode string
 
 const (
-	RealmForbidden             RealmErrorCode = "forbidden"
-	RealmDeclNotFound          RealmErrorCode = "decl_not_found"
-	RealmResourceNotFound      RealmErrorCode = "resource_not_found"
-	RealmCapabilityUnavailable RealmErrorCode = "capability_unavailable"
-	RealmChannelUnavailable    RealmErrorCode = "channel_unavailable"
-	RealmUnavailable           RealmErrorCode = "realm_unavailable"
-	RealmInvalidRequest        RealmErrorCode = "invalid_request"
-	RealmConflict              RealmErrorCode = "conflict"
+	SpaceForbidden             SpaceErrorCode = "forbidden"
+	SpaceDeclNotFound          SpaceErrorCode = "decl_not_found"
+	SpaceResourceNotFound      SpaceErrorCode = "resource_not_found"
+	SpaceCapabilityUnavailable SpaceErrorCode = "capability_unavailable"
+	SpaceChannelUnavailable    SpaceErrorCode = "channel_unavailable"
+	SpaceUnavailable           SpaceErrorCode = "space_unavailable"
+	SpaceInvalidRequest        SpaceErrorCode = "invalid_request"
+	SpaceConflict              SpaceErrorCode = "conflict"
 )
 
-var realmErrorCodes = [...]RealmErrorCode{
-	RealmForbidden, RealmDeclNotFound, RealmResourceNotFound,
-	RealmCapabilityUnavailable, RealmChannelUnavailable, RealmUnavailable,
-	RealmInvalidRequest, RealmConflict,
+var spaceErrorCodes = [...]SpaceErrorCode{
+	SpaceForbidden, SpaceDeclNotFound, SpaceResourceNotFound,
+	SpaceCapabilityUnavailable, SpaceChannelUnavailable, SpaceUnavailable,
+	SpaceInvalidRequest, SpaceConflict,
 }
 
-type RealmError struct {
-	Code   RealmErrorCode
+type SpaceError struct {
+	Code   SpaceErrorCode
 	Detail string
 }
 
-func (e *RealmError) Error() string {
+func (e *SpaceError) Error() string {
 	if e.Detail == "" {
 		return string(e.Code)
 	}

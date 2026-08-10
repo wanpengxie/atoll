@@ -53,7 +53,7 @@ type sysopForward[T any] struct {
 }
 
 // forwardSysop is the one predicate → qualification → membrane-forward
-// skeleton for all five structural words and both HTTP/RealmOps entry families.
+// skeleton for all five structural words and both HTTP/SpaceOps entry families.
 func forwardSysop[T any](ctx context.Context, a *App, chID channel.ID, call sysopForward[T]) (sysopOutcome[T], error) {
 	var zero sysopOutcome[T]
 	release := a.channelLocks.lock(string(chID))
@@ -154,22 +154,22 @@ func writeSysopError(c *gin.Context, err error) {
 	writeRetryingAPIError(c, http.StatusServiceUnavailable, contract.CodeResultUnknown, "result unknown")
 }
 
-func sysopRealmErrorCode(code string) channelspec.RealmErrorCode {
+func sysopSpaceErrorCode(code string) channelspec.SpaceErrorCode {
 	switch classifySysopError(code) {
 	case sysopBadRequest:
-		return channelspec.RealmInvalidRequest
+		return channelspec.SpaceInvalidRequest
 	case sysopForbidden:
-		return channelspec.RealmForbidden
+		return channelspec.SpaceForbidden
 	case sysopNotFound:
 		if channelspec.OperationErrorCode(code) == channelspec.ErrCodeDeclNotFound {
-			return channelspec.RealmDeclNotFound
+			return channelspec.SpaceDeclNotFound
 		}
-		return channelspec.RealmUnavailable
+		return channelspec.SpaceUnavailable
 	default:
 		if channelspec.OperationErrorCode(code) == channelspec.ErrCodeChannelUnavailable {
-			return channelspec.RealmChannelUnavailable
+			return channelspec.SpaceChannelUnavailable
 		}
-		return channelspec.RealmConflict
+		return channelspec.SpaceConflict
 	}
 }
 

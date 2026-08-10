@@ -23,12 +23,12 @@ const (
 	declPullSeed   = `{"model":"v1"}`
 )
 
-// declPullRealm is a fully programmable stand-in for the realm half of the
+// declPullSpace is a fully programmable stand-in for the space half of the
 // declaration pull loop. Every verdict that ends a round WITHOUT touching truth
 // — the resolver could not answer, the declaration is gone, the class registry
 // could not answer, the class is unknown, the class disagrees with the record's
 // kind — is a value this type can be moved to between rounds.
-type declPullRealm struct {
+type declPullSpace struct {
 	mu         sync.Mutex
 	resolveErr error
 	class      string
@@ -50,14 +50,14 @@ type declPullRealm struct {
 	unparks sync.Once
 }
 
-func newDeclPullRealm() *declPullRealm {
-	return &declPullRealm{
+func newDeclPullSpace() *declPullSpace {
+	return &declPullSpace{
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
 }
 
-func (r *declPullRealm) ResolveDeclaration(
+func (r *declPullSpace) ResolveDeclaration(
 	context.Context, channel.ID, string,
 ) (channelspec.DeclarationFacts, error) {
 	r.mu.Lock()
@@ -78,40 +78,40 @@ func (r *declPullRealm) ResolveDeclaration(
 	}, nil
 }
 
-func (r *declPullRealm) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+func (r *declPullSpace) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.classKinds++
 	return r.kind, r.kindFound, r.kindErr
 }
 
-func (r *declPullRealm) setFacts(class, config string) {
+func (r *declPullSpace) setFacts(class, config string) {
 	r.mu.Lock()
 	r.class, r.config = class, config
 	r.mu.Unlock()
 }
 
-func (r *declPullRealm) setResolveErr(err error) {
+func (r *declPullSpace) setResolveErr(err error) {
 	r.mu.Lock()
 	r.resolveErr = err
 	r.mu.Unlock()
 }
 
-func (r *declPullRealm) setClassKind(kind actor.Kind, found bool, err error) {
+func (r *declPullSpace) setClassKind(kind actor.Kind, found bool, err error) {
 	r.mu.Lock()
 	r.kind, r.kindFound, r.kindErr = kind, found, err
 	r.mu.Unlock()
 }
 
-func (r *declPullRealm) arm() {
+func (r *declPullSpace) arm() {
 	r.mu.Lock()
 	r.armed = true
 	r.mu.Unlock()
 }
 
-func (r *declPullRealm) unpark() { r.unparks.Do(func() { close(r.release) }) }
+func (r *declPullSpace) unpark() { r.unparks.Do(func() { close(r.release) }) }
 
-func (r *declPullRealm) counts() (resolves, classKinds int) {
+func (r *declPullSpace) counts() (resolves, classKinds int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.resolves, r.classKinds
@@ -129,7 +129,7 @@ func declPullDeclaration() DeclareRequest {
 func openDeclPullHome(
 	t *testing.T,
 	name string,
-	realm *declPullRealm,
+	space *declPullSpace,
 	logger *slog.Logger,
 ) *Home {
 	t.Helper()
@@ -137,7 +137,7 @@ func openDeclPullHome(
 		ChannelID:             channel.ID(name),
 		DBPath:                filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver:   routingResolver{},
-		IntroductionResolver:  realm,
+		IntroductionResolver:  space,
 		ReconcileInterval:     time.Hour,
 		Logger:                logger,
 		Bootstrap:             true,
@@ -163,15 +163,15 @@ func declPullOnlyInstance(t *testing.T, h *Home) actor.ActorID {
 // until now not one of them had ever been taken in a test. Each round below
 // hands the loop a definition that DIFFERS from the record's, so "the record
 // did not move" can only mean the round was skipped — and the control round at
-// the end, identical except that the realm now agrees about the class kind,
+// the end, identical except that the space now agrees about the class kind,
 // proves the definition on offer really was appliable the whole time.
-func TestDeclarationPullSkipsEveryUnusableRealmAnswer(t *testing.T) {
-	realm := newDeclPullRealm()
-	realm.setFacts(declPullClass, `{"model":"v2"}`)
-	realm.setResolveErr(errors.New("realm rpc failed"))
-	realm.setClassKind(actor.KindAgent, true, nil)
+func TestDeclarationPullSkipsEveryUnusableSpaceAnswer(t *testing.T) {
+	space := newDeclPullSpace()
+	space.setFacts(declPullClass, `{"model":"v2"}`)
+	space.setResolveErr(errors.New("space rpc failed"))
+	space.setClassKind(actor.KindAgent, true, nil)
 
-	h := openDeclPullHome(t, "decl-pull-skips", realm, nil)
+	h := openDeclPullHome(t, "decl-pull-skips", space, nil)
 	ctx := context.Background()
 	id := declPullOnlyInstance(t, h)
 	base, baseSpec := serverTerm(t, h, id)
@@ -185,29 +185,29 @@ func TestDeclarationPullSkipsEveryUnusableRealmAnswer(t *testing.T) {
 		asksTheMap bool
 	}{
 		{"resolver fault", func() {
-			realm.setResolveErr(errors.New("realm rpc failed"))
+			space.setResolveErr(errors.New("space rpc failed"))
 		}, false},
 		{"declaration gone", func() {
-			realm.setResolveErr(channelspec.ErrDeclarationNotFound)
+			space.setResolveErr(channelspec.ErrDeclarationNotFound)
 		}, false},
 		{"class registry fault", func() {
-			realm.setResolveErr(nil)
-			realm.setClassKind("", false, errors.New("class registry down"))
+			space.setResolveErr(nil)
+			space.setClassKind("", false, errors.New("class registry down"))
 		}, true},
 		{"class unknown", func() {
-			realm.setClassKind("", false, nil)
+			space.setClassKind("", false, nil)
 		}, true},
 		{"class kind disagrees with the record", func() {
-			realm.setClassKind(actor.KindTool, true, nil)
+			space.setClassKind(actor.KindTool, true, nil)
 		}, true},
 	}
 	for _, round := range rounds {
 		round.arrange()
-		resolvesBefore, kindsBefore := realm.counts()
+		resolvesBefore, kindsBefore := space.counts()
 		h.reconcileDeclarations(ctx)
-		resolvesAfter, kindsAfter := realm.counts()
+		resolvesAfter, kindsAfter := space.counts()
 		if resolvesAfter != resolvesBefore+1 {
-			t.Fatalf("%s: the loop asked the realm %d times, want exactly 1",
+			t.Fatalf("%s: the loop asked the space %d times, want exactly 1",
 				round.name, resolvesAfter-resolvesBefore)
 		}
 		wantKinds := kindsBefore
@@ -225,13 +225,13 @@ func TestDeclarationPullSkipsEveryUnusableRealmAnswer(t *testing.T) {
 		}
 	}
 
-	// The control: the same offered definition, the same loop, one realm answer
+	// The control: the same offered definition, the same loop, one space answer
 	// changed — and now it lands.
-	realm.setClassKind(actor.KindAgent, true, nil)
+	space.setClassKind(actor.KindAgent, true, nil)
 	h.reconcileDeclarations(ctx)
 	term, spec := serverTerm(t, h, id)
 	if term == base {
-		t.Fatal("a fully agreeing realm answer minted no new term; the skips above prove nothing")
+		t.Fatal("a fully agreeing space answer minted no new term; the skips above prove nothing")
 	}
 	if string(spec.Config) != `{"model":"v2"}` {
 		t.Fatalf("applied spec = %s, want the offered definition", spec.Config)
@@ -239,7 +239,7 @@ func TestDeclarationPullSkipsEveryUnusableRealmAnswer(t *testing.T) {
 }
 
 // T16. The pull loop reads its comparison inputs, then leaves the ledger to go
-// ask the realm. While it is out there the instance it is holding can die and
+// ask the space. While it is out there the instance it is holding can die and
 // the SAME declaration can be introduced again, minting a different instance.
 // The answer that comes back must be spent on the identity it was fetched for
 // and nothing else: the reborn twin carries its own definition and its own
@@ -247,25 +247,25 @@ func TestDeclarationPullSkipsEveryUnusableRealmAnswer(t *testing.T) {
 // predecessor.
 func TestDeclarationPullCannotCrossFromARemovedInstanceToItsRebornTwin(t *testing.T) {
 	probe := newLifecycleLogProbe("", nil)
-	realm := newDeclPullRealm()
-	realm.setResolveErr(channelspec.ErrDeclarationNotFound)
-	realm.setClassKind(actor.KindAgent, true, nil)
+	space := newDeclPullSpace()
+	space.setResolveErr(channelspec.ErrDeclarationNotFound)
+	space.setClassKind(actor.KindAgent, true, nil)
 
-	h := openDeclPullHome(t, "decl-pull-aba", realm, slog.New(probe))
+	h := openDeclPullHome(t, "decl-pull-aba", space, slog.New(probe))
 	ctx := context.Background()
 	stale := declPullOnlyInstance(t, h)
 
 	// Arm one in-flight resolve carrying a definition that WOULD be applied.
-	realm.setFacts(declPullClass, `{"model":"pulled"}`)
-	realm.setResolveErr(nil)
-	realm.arm()
-	t.Cleanup(realm.unpark)
+	space.setFacts(declPullClass, `{"model":"pulled"}`)
+	space.setResolveErr(nil)
+	space.arm()
+	t.Cleanup(space.unpark)
 	go h.reconcileDeclarations(ctx)
-	restartRecv(t, "the declaration pull to park inside the realm resolve", realm.entered)
+	restartRecv(t, "the declaration pull to park inside the space resolve", space.entered)
 
 	// From here on every other round of the loop is a no-op, so the only
 	// declaration answer still in flight is the one held for the stale id.
-	realm.setResolveErr(channelspec.ErrDeclarationNotFound)
+	space.setResolveErr(channelspec.ErrDeclarationNotFound)
 
 	// Truth moves underneath the parked resolve.
 	if _, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
@@ -289,7 +289,7 @@ func TestDeclarationPullCannotCrossFromARemovedInstanceToItsRebornTwin(t *testin
 	}
 	freshTerm, freshSpec := serverTerm(t, h, fresh)
 
-	realm.unpark()
+	space.unpark()
 	restartEventually(t, "the stale instance's apply to be refused", func() bool {
 		return probe.count("platform.declaration_pull.apply_failed") >= 1
 	})

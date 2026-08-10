@@ -7,7 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// SystemOps is the direct realm-to-system transport adapter. The implementation
+// SystemOps is the direct space-to-system transport adapter. The implementation
 // is the unexported Home OpEntry; callers receive this interface only through
 // ChannelHost assembly.
 type SystemOps interface {

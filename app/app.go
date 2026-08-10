@@ -1,4 +1,4 @@
-// Package app is the reference realm: principal identity, channel directory and
+// Package app is the reference space: principal identity, channel directory and
 // lifecycle, daemon registry, and HTTP API. Per-channel truth belongs to the
 // platform membrane.
 package app
@@ -236,7 +236,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
-// Close joins realm workers before transferring process teardown to ChannelHost,
+// Close joins space workers before transferring process teardown to ChannelHost,
 // the sole owner of serving Home instances and their physical stores. The
 // caller's budget bounds every join: whatever refuses to leave in time is
 // abandoned with its account in the returned error, because process death —
@@ -393,6 +393,6 @@ const (
 	// classes (kind=agent), there is NO umbrella "agent" class. boost has no
 	// actor_decls declaration row, so it can't carry a default_class; it runs
 	// this fixed deterministic engine. script requires a tool_id at construction;
-	// channel genesis derives it from the co-created realm-tool instance.
+	// channel genesis derives it from the co-created space-tool instance.
 	defaultBoostClass = "script"
 )

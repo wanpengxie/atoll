@@ -272,7 +272,7 @@ const xhsStatusDeviceAddr = "127.0.0.1:18091"
 // device-presence edge (PublishObs) → the daemon's population forwarder sends it UP
 // the link as a KindObs frame → the home port relays it into publishObs → the
 // home presence fold materialises the level → the system actor projects it via
-// actor.status. The realm never receives a raw Snapshot capability.
+// actor.status. The space never receives a raw Snapshot capability.
 func TestXHSLiveActorStatus(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())

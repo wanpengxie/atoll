@@ -16,7 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// mutableDeclarationResolver is the realm half of the declaration pull loop: it
+// mutableDeclarationResolver is the space half of the declaration pull loop: it
 // answers "what should this declaration be right now" and can be moved between
 // rounds.
 type mutableDeclarationResolver struct {
@@ -106,7 +106,7 @@ func TestDeclarationPullAppliesChangeAndIsQuietWhenEqual(t *testing.T) {
 	}
 	id := instances[0]
 
-	// Round 1 moves the record onto the realm's current definition.
+	// Round 1 moves the record onto the space's current definition.
 	h.reconcileDeclarations(ctx)
 	applied, spec := serverTerm(t, h, id)
 	if string(spec.Config) != `{"model":"v1"}` {

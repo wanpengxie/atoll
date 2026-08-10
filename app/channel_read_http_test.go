@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-func TestChannelDetailIsDesiredWhileObserverContentRequiresRealmTool(t *testing.T) {
+func TestChannelDetailIsDesiredWhileObserverContentRequiresSpaceTool(t *testing.T) {
 	env := setupTestApp(t)
 	owner := fullSetup(t, env)
 	_, outsiderCookies := register(t, env, "observer-http@example.com", "secret123", "Observer")
@@ -24,7 +24,7 @@ func TestChannelDetailIsDesiredWhileObserverContentRequiresRealmTool(t *testing.
 	} {
 		assertStatus(t, env.do(t, http.MethodGet, path, nil, outsiderCookies), http.StatusOK)
 	}
-	if err := env.app.RemoveRealmToolForTest(channel.ID(owner.chID)); err != nil {
+	if err := env.app.RemoveSpaceToolForTest(channel.ID(owner.chID)); err != nil {
 		t.Fatal(err)
 	}
 	detail := env.do(t, http.MethodGet, "/api/channels/"+owner.chID, nil, outsiderCookies)
@@ -82,14 +82,14 @@ func waitSSETerminal(t *testing.T, scanner *bufio.Scanner, want string) {
 }
 
 func TestObserverSSETerminatesOnCapabilityRemovalAndJoin(t *testing.T) {
-	t.Run("realm tool removed", func(t *testing.T) {
+	t.Run("space tool removed", func(t *testing.T) {
 		env := setupTestApp(t)
 		owner := fullSetup(t, env)
 		_, observer := register(t, env, "observer-sse-remove@example.com", "secret123", "Observer")
 		srv := httptest.NewServer(env.app.Handler())
 		defer srv.Close()
 		_, scanner := openObserverStream(t, srv, owner.chID, observer)
-		if err := env.app.RemoveRealmToolForTest(channel.ID(owner.chID)); err != nil {
+		if err := env.app.RemoveSpaceToolForTest(channel.ID(owner.chID)); err != nil {
 			t.Fatal(err)
 		}
 		waitSSETerminal(t, scanner, "capability_unavailable")

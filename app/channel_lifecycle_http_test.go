@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// TestHalfBuiltChannel_DeleteSucceeds pins that delete authority is realm-side
+// TestHalfBuiltChannel_DeleteSucceeds pins that delete authority is space-side
 // owner policy and must remain reachable when the channel-local image is
 // incomplete.
 func TestHalfBuiltChannel_DeleteSucceeds(t *testing.T) {
@@ -39,7 +39,7 @@ func TestHalfBuiltChannel_DeleteSucceeds(t *testing.T) {
 
 // TestHalfBuiltChannel_OpenClearError pins that opening a half-built channel
 // gives a clear, non-panic response. Cross-membrane reads require the channel's
-// realm-tool capability, which a half-built image cannot provide.
+// space-tool capability, which a half-built image cannot provide.
 func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())

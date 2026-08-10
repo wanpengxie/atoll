@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-func TestRealmChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
+func TestSpaceChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
 	env := setupTestApp(t)
-	owner, ownerCookies := register(t, env, "realm-owner@example.com", "secret123", "Owner")
+	owner, ownerCookies := register(t, env, "space-owner@example.com", "secret123", "Owner")
 	parentResp := env.do(t, "POST", "/api/channels", map[string]any{"name": "parent"}, ownerCookies)
 	assertStatus(t, parentResp, http.StatusCreated)
 	parent := respJSON(t, parentResp)
@@ -45,7 +45,7 @@ func TestRealmChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
 		t.Fatalf("duplicate name left a physical artifact: %v", entries)
 	}
 
-	_, outsiderCookies := register(t, env, "realm-outsider@example.com", "secret123", "Outsider")
+	_, outsiderCookies := register(t, env, "space-outsider@example.com", "secret123", "Outsider")
 	denied := env.do(t, "DELETE", "/api/channels/"+parentID, nil, outsiderCookies)
 	assertStatus(t, denied, http.StatusForbidden)
 

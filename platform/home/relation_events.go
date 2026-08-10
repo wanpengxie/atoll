@@ -20,7 +20,7 @@ func (h *Home) emitRelations(deltas ...channelspec.RelationDelta) {
 
 // emitRelationSnapshot announces the membrane's complete relation facts once
 // after a real Home open succeeds. It is set alignment input, not a periodic
-// sweep and not a realm-side readback. A failed edge read drops the WHOLE
+// sweep and not a space-side readback. A failed edge read drops the WHOLE
 // batch — a partial snapshot's Reset would delete live rows (under-grant);
 // the Error log is the only signal, and repair waits for the next real open.
 func (h *Home) emitRelationSnapshot(ctx context.Context) {

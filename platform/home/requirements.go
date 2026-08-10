@@ -8,9 +8,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// IntroductionResolver is the realm-current-facts read port shared by exact
+// IntroductionResolver is the space-current-facts read port shared by exact
 // introduction and level reconciliation. Implementors must not call back into
-// the same channel or mutate realm state while resolving; callers read before
+// the same channel or mutate space state while resolving; callers read before
 // the channel serial section and fail closed on any uncertainty.
 type IntroductionResolver interface {
 	ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error)

@@ -892,7 +892,7 @@ func carrierLastSeen(t *testing.T, host *Host, daemonID string) time.Time {
 // lease is only ever reaped over an unanswered probe, never over silence this
 // host did not question. Without it, any LeaseTTL below the probe cadence
 // reaps every healthy carrier at its first tick — the lease expires before
-// the first question is even sent — and the realm flaps forever on one
+// the first question is even sent — and the space flaps forever on one
 // misconfigured knob.
 func TestExpiredLeaseIsAskedBeforeItIsReaped(t *testing.T) {
 	clock := newTestClock(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
@@ -944,7 +944,7 @@ func TestDeviceTrafficDoesNotRenewTheLease(t *testing.T) {
 // channel snapshot cannot stop that device's lease from being renewed.
 //
 // The snapshot costs one bounded lookup per channel, and those lookups hit a
-// store that can be slow exactly when the realm is under stress. Building it on
+// store that can be slow exactly when the space is under stress. Building it on
 // the spine reader means the probe replies queued behind it are not read until
 // it finishes — so the lease the reply was going to renew expires, and a
 // perfectly healthy device is reaped because this host was busy answering it.
@@ -1218,7 +1218,7 @@ func TestRevocationDoesNotWaitOnAWedgedLane(t *testing.T) {
 
 // TestScanAndLeaseSweepDoNotWaitOnAWedgedLane covers the two periodic
 // decisions. Neither may block behind a lane reader stuck inside a membrane
-// call: a scan that waits stops every daemon in the realm from having lanes
+// call: a scan that waits stops every daemon in the space from having lanes
 // opened, reopened or reaped, and a liveness cycle that waits lets the lease it
 // is supposed to renew run out.
 func TestScanAndLeaseSweepDoNotWaitOnAWedgedLane(t *testing.T) {

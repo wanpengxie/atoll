@@ -48,8 +48,8 @@ func TestDeclarationClassTransitionAndReservedClass(t *testing.T) {
 	if ok, err := a.declarationClassTransition(ctx, "decl-access-test-agent-a", "decl-access-test-tool"); err != nil || ok {
 		t.Fatalf("cross-kind transition: ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := a.declarationClassKind(ctx, realmToolClass); err != nil || ok {
-		t.Fatalf("reserved realm-tool: found=%v err=%v", ok, err)
+	if _, ok, err := a.declarationClassKind(ctx, spaceToolClass); err != nil || ok {
+		t.Fatalf("reserved space-tool: found=%v err=%v", ok, err)
 	}
 }
 
@@ -60,11 +60,11 @@ func TestSysopErrorClassificationAdapters(t *testing.T) {
 	if got := sysopErrorHTTP(string(sysopCodeDaemonNotFound)); got != 404 {
 		t.Fatalf("daemon_not_found HTTP=%d", got)
 	}
-	// RealmOps has no daemon attach operation, and daemon identities are not the
-	// resource family addressed by RealmResourceNotFound. If malformed persisted
-	// input ever crosses this adapter, fail honestly as a realm-level outage.
-	if got := sysopRealmErrorCode(string(sysopCodeDaemonNotFound)); got != channelspec.RealmUnavailable {
-		t.Fatalf("daemon_not_found Realm=%q", got)
+	// SpaceOps has no daemon attach operation, and daemon identities are not the
+	// resource family addressed by SpaceResourceNotFound. If malformed persisted
+	// input ever crosses this adapter, fail honestly as a space-level outage.
+	if got := sysopSpaceErrorCode(string(sysopCodeDaemonNotFound)); got != channelspec.SpaceUnavailable {
+		t.Fatalf("daemon_not_found Space=%q", got)
 	}
 	if got := classifySysopError(string(channelspec.ErrCodeChannelUnavailable)); got != sysopConflict {
 		t.Fatalf("channel_unavailable class=%v", got)
@@ -72,7 +72,7 @@ func TestSysopErrorClassificationAdapters(t *testing.T) {
 	if got := sysopErrorHTTP(string(channelspec.ErrCodeChannelUnavailable)); got != 409 {
 		t.Fatalf("channel_unavailable HTTP=%d", got)
 	}
-	if got := sysopRealmErrorCode(string(channelspec.ErrCodeChannelUnavailable)); got != channelspec.RealmChannelUnavailable {
-		t.Fatalf("channel_unavailable Realm=%q", got)
+	if got := sysopSpaceErrorCode(string(channelspec.ErrCodeChannelUnavailable)); got != channelspec.SpaceChannelUnavailable {
+		t.Fatalf("channel_unavailable Space=%q", got)
 	}
 }

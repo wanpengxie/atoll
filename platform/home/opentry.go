@@ -371,7 +371,7 @@ func asOperateError(err error) error {
 	}
 }
 
-// SystemOps is the assembly-only direct realm adapter.
+// SystemOps is the assembly-only direct space adapter.
 func SystemOps(h *Home) sysactor.SystemOps {
 	if h == nil {
 		return nil

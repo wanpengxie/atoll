@@ -79,7 +79,7 @@ func (v View) Resources() ResourceView {
 // reader gate needs existence, never a record.
 func validateReader(ctx context.Context, authority storespec.IdentityPresence, as channel.Reader) error {
 	if !as.Valid() {
-		return &channelspec.RealmError{Code: channelspec.RealmForbidden}
+		return &channelspec.SpaceError{Code: channelspec.SpaceForbidden}
 	}
 	if as.Mode != channel.ReaderMember {
 		return nil
@@ -89,7 +89,7 @@ func validateReader(ctx context.Context, authority storespec.IdentityPresence, a
 		return err
 	}
 	if !active {
-		return &channelspec.RealmError{Code: channelspec.RealmForbidden}
+		return &channelspec.SpaceError{Code: channelspec.SpaceForbidden}
 	}
 	return nil
 }
@@ -110,7 +110,7 @@ func (v ResourceView) Stat(ctx context.Context, as channel.Reader, id resource.R
 		return channel.ResourceMeta{}, err
 	}
 	if !found {
-		return channel.ResourceMeta{}, &channelspec.RealmError{Code: channelspec.RealmResourceNotFound}
+		return channel.ResourceMeta{}, &channelspec.SpaceError{Code: channelspec.SpaceResourceNotFound}
 	}
 	return meta, nil
 }
@@ -121,13 +121,13 @@ func (v ResourceView) Fetch(ctx context.Context, as channel.Reader, id resource.
 	}
 	meta, value, found, err := v.store.FetchReadable(ctx, id)
 	if errors.Is(err, storespec.ErrResourceCapabilityUnavailable) {
-		return channel.ResourceFetch{}, &channelspec.RealmError{Code: channelspec.RealmCapabilityUnavailable}
+		return channel.ResourceFetch{}, &channelspec.SpaceError{Code: channelspec.SpaceCapabilityUnavailable}
 	}
 	if err != nil {
 		return channel.ResourceFetch{}, err
 	}
 	if !found {
-		return channel.ResourceFetch{}, &channelspec.RealmError{Code: channelspec.RealmResourceNotFound}
+		return channel.ResourceFetch{}, &channelspec.SpaceError{Code: channelspec.SpaceResourceNotFound}
 	}
 	return channel.ResourceFetch{Meta: meta, Body: io.NopCloser(bytes.NewReader(value))}, nil
 }
@@ -240,7 +240,7 @@ func (v View) DeclaredInstances(_ context.Context, declID string) ([]actor.Actor
 	return v.authority.DeclaredInstances(declID)
 }
 
-// HasDeclaredInstance is the availability question (realm-tool and routing
+// HasDeclaredInstance is the availability question (space-tool and routing
 // fallback): does this declaration have a live instance at all.
 func (v View) HasDeclaredInstance(ctx context.Context, declID string) (bool, error) {
 	ids, err := v.DeclaredInstances(ctx, declID)

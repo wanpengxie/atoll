@@ -16,7 +16,7 @@ const (
 
 // Reader is the closed identity shape used by channel-visible read views.
 // Member readers carry their active channel actor; observer readers carry the
-// realm-authenticated principal whose perspective is being represented.
+// space-authenticated principal whose perspective is being represented.
 type Reader struct {
 	Principal string        `json:"principal,omitempty"`
 	ActorID   actor.ActorID `json:"actor_id,omitempty"`

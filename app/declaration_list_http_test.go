@@ -1,6 +1,6 @@
 package app_test
 
-// Declaration list read face: /api/actor-decls answers from the realm relation
+// Declaration list read face: /api/actor-decls answers from the space relation
 // index, so it stays available even when a channel's serving image is not —
 // the projection is the read path, the membrane is not consulted per request.
 

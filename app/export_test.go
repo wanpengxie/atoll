@@ -136,7 +136,7 @@ func (a *App) Handler() http.Handler {
 	return a.engine
 }
 
-// DropHomeForTest closes the borrowed serving handle while retaining the realm
+// DropHomeForTest closes the borrowed serving handle while retaining the space
 // directory row, reproducing a channel-unavailable image.
 func (a *App) DropHomeForTest(chID channel.ID) {
 	_ = a.host.Destroy(context.Background(), chID)
@@ -232,12 +232,12 @@ func (a *App) CloseHomeForTest(chID channel.ID) error {
 	return a.host.Destroy(context.Background(), chID)
 }
 
-func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
+func (a *App) RemoveSpaceToolForTest(chID channel.ID) error {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
 		return errTestChannelNotLoaded
 	}
-	target, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
+	target, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), spaceToolDeclID)
 	if err != nil || !found {
 		return err
 	}
@@ -250,7 +250,7 @@ func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
 		return err
 	}
 	_, err = bundle.SysOp().Remove(context.Background(), channelspec.RemoveRequest{
-		Ref: "test-remove-realm-tool:" + uuid.NewString(), Target: target, InitiatorActorID: initiator,
+		Ref: "test-remove-space-tool:" + uuid.NewString(), Target: target, InitiatorActorID: initiator,
 	})
 	return err
 }

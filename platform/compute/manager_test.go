@@ -78,7 +78,7 @@ func (s *teardownOrderStream) Close() error {
 func (*teardownOrderStream) SendCancelRequest(message.ID) error { return nil }
 func (*teardownOrderStream) PublishObs(string, []byte) error    { return nil }
 
-// testPresent is the realm channel directory the host enumerates when a device
+// testPresent is the space channel directory the host enumerates when a device
 // pulls its compartment snapshot. Every test that expects a compartment to be
 // retired needs one, because a host that cannot enumerate the directory
 // deliberately sends no snapshot at all.
@@ -602,7 +602,7 @@ func TestChannelDeletedWhileOfflineIsRetiredOnReconnect(t *testing.T) {
 		return host.LaneAttached("daemon-a", "a")
 	})
 
-	// The channel is destroyed: its Home unregisters and it leaves the realm
+	// The channel is destroyed: its Home unregisters and it leaves the space
 	// directory. Nothing is sent to the device, which may well be offline.
 	host.Unregister("a", 1)
 	present.Store([]channel.ID(nil))

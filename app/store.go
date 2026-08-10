@@ -189,8 +189,8 @@ func initializeSchema(db *sql.DB) error {
 	}
 	now := time.Now().UnixMilli()
 	if _, err := tx.Exec(`INSERT INTO actor_decls(id,name,owner,default_class,config_json,created_at,updated_at,visibility)
-		VALUES (?,?,?,?,?,?,?,'public')`, realmToolDeclID, "Realm Tool", "system", realmToolClass, `{}`, now, now); err != nil {
-		return fmt.Errorf("seed realm tool declaration: %w", err)
+		VALUES (?,?,?,?,?,?,?,'public')`, spaceToolDeclID, "Space Tool", "system", spaceToolClass, `{}`, now, now); err != nil {
+		return fmt.Errorf("seed space tool declaration: %w", err)
 	}
 	return tx.Commit()
 }

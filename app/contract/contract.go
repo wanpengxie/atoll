@@ -55,7 +55,7 @@ const (
 	CodeChannelUnavailable    ErrorCode = "channel_unavailable"
 	CodeCapabilityUnavailable ErrorCode = "capability_unavailable"
 	CodeAuthorityUnavailable  ErrorCode = "authority_unavailable"
-	CodeRealmUnavailable      ErrorCode = "realm_unavailable"
+	CodeSpaceUnavailable      ErrorCode = "space_unavailable"
 	CodeRoutingUnavailable    ErrorCode = "routing_unavailable"
 	CodeUnavailable           ErrorCode = "unavailable"
 	CodeResultUnknown         ErrorCode = "result_unknown"
@@ -70,7 +70,7 @@ var errorCodes = [...]ErrorCode{
 	CodeConfigInvalid, CodeUnknownClass, CodeChannelUnavailable,
 	CodeInvalidDesiredHost, CodeProtectedActor, CodeNotAcceptedSource,
 	CodeMemberInactive, CodeCapabilityUnavailable, CodeAuthorityUnavailable,
-	CodeRealmUnavailable, CodeRoutingUnavailable,
+	CodeSpaceUnavailable, CodeRoutingUnavailable,
 	CodeUnavailable, CodeResultUnknown, CodeInternal,
 }
 

@@ -1,4 +1,4 @@
-// Package daemonhost owns realm-wide daemon carriers and their per-channel
+// Package daemonhost owns space-wide daemon carriers and their per-channel
 // lanes. Channel Homes publish value capabilities here and never hold sockets.
 package daemonhost
 
@@ -681,7 +681,7 @@ func (h *Host) answerPlanPulls(carrier *carrierRow, spineDone <-chan struct{}) {
 //
 // Silence is the only safe partial answer: the device retires every compartment
 // whose channel the snapshot did not name, so a snapshot missing a channel the
-// realm still has would destroy a compartment that must live. A channel this
+// space still has would destroy a compartment that must live. A channel this
 // host cannot judge right now (its Home is not open, or the binding store is
 // unreachable) is therefore named in Unknown rather than omitted, and a
 // directory enumeration that fails at all suppresses the reply entirely.
@@ -885,7 +885,7 @@ func (h *Host) sealCarrierLocked(carrier *carrierRow) bool {
 // That collection has an owner: the carrier's supervisor, which is the single
 // place that joins these goroutines. Waiting for it here instead would put a
 // device's stuck handler in front of revocation, scanning, lease sweeping and
-// the accept path, which is how one wedged daemon used to stall the realm.
+// the accept path, which is how one wedged daemon used to stall the space.
 //
 // Idempotent: a second call finds no lanes and a wire already closing.
 func (h *Host) beginCarrierShutdown(carrier *carrierRow) {

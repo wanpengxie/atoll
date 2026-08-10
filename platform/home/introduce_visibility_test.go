@@ -30,15 +30,15 @@ import (
 // The non-human half matters on its own: the store forbids a non-human
 // admission a login principal at all, so an agent initiator carries "". If the
 // check were only "principal equals owner", an empty owner would match it. That
-// no declaration currently has an empty owner is a realm-side invariant living
+// no declaration currently has an empty owner is a space-side invariant living
 // two packages away; the verdict refuses a principal-less initiator outright
 // instead of leaning on it.
 
-type visibilityRealm struct {
+type visibilitySpace struct {
 	facts map[string]channelspec.DeclarationFacts
 }
 
-func (r visibilityRealm) ResolveDeclaration(
+func (r visibilitySpace) ResolveDeclaration(
 	_ context.Context, _ channel.ID, declID string,
 ) (channelspec.DeclarationFacts, error) {
 	facts, ok := r.facts[declID]
@@ -48,15 +48,15 @@ func (r visibilityRealm) ResolveDeclaration(
 	return facts, nil
 }
 
-func (visibilityRealm) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+func (visibilitySpace) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return actor.KindAgent, true, nil
 }
 
-func openVisibilityHome(t *testing.T, realm visibilityRealm) *home.Home {
+func openVisibilityHome(t *testing.T, space visibilitySpace) *home.Home {
 	t.Helper()
 	h, err := home.Open(home.Config{
 		CompositionResolver:  emptyCompositionResolver{},
-		IntroductionResolver: realm,
+		IntroductionResolver: space,
 		ChannelID:            testChannelID,
 		DBPath:               filepath.Join(t.TempDir(), "home.sqlite"),
 		Bootstrap:            true,
@@ -100,7 +100,7 @@ func introduceViaOperateFrame(
 	t.Helper()
 	executor, ok := home.SystemOps(h).(sysactor.OperateExecutor)
 	if !ok {
-		t.Fatal("the realm adapter no longer serves the operate face; this test can no longer reach the second door")
+		t.Fatal("the space adapter no longer serves the operate face; this test can no longer reach the second door")
 	}
 	payload, err := json.Marshal(struct {
 		DeclID string `json:"decl_id"`
@@ -129,7 +129,7 @@ func forbidden(t *testing.T, err error) *channelspec.OperationError {
 // A public declaration is anyone's to place: the owner field is not consulted.
 func TestIntroducePublicDeclarationIgnoresOwnership(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
+	h := openVisibilityHome(t, visibilitySpace{facts: map[string]channelspec.DeclarationFacts{
 		"pub": {OwnerPrincipal: "alice", Visibility: "public", Class: "script"},
 	}})
 	bob := admitHuman(t, h, "bob")
@@ -151,7 +151,7 @@ func TestIntroducePublicDeclarationIgnoresOwnership(t *testing.T) {
 // same declaration.
 func TestIntroducePrivateDeclarationByItsOwnerIsAllowed(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
+	h := openVisibilityHome(t, visibilitySpace{facts: map[string]channelspec.DeclarationFacts{
 		"mine": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
 	alice := admitHuman(t, h, "alice")
@@ -174,7 +174,7 @@ func TestIntroducePrivateDeclarationByItsOwnerIsAllowed(t *testing.T) {
 // same answer.
 func TestBothIntroductionDoorsAgreeOnAnOwnersPrivateDeclaration(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
+	h := openVisibilityHome(t, visibilitySpace{facts: map[string]channelspec.DeclarationFacts{
 		"mine":  {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 		"mine2": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
@@ -198,7 +198,7 @@ func TestBothIntroductionDoorsAgreeOnAnOwnersPrivateDeclaration(t *testing.T) {
 // satisfied by both doors simply saying yes to everything.
 func TestBothIntroductionDoorsAgreeOnAnotherPrincipalsPrivateDeclaration(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
+	h := openVisibilityHome(t, visibilitySpace{facts: map[string]channelspec.DeclarationFacts{
 		"hers":  {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 		"hers2": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
@@ -218,7 +218,7 @@ func TestBothIntroductionDoorsAgreeOnAnotherPrincipalsPrivateDeclaration(t *test
 // Someone else's private declaration is refused, whichever door asked.
 func TestIntroducePrivateDeclarationByAnotherPrincipalIsForbidden(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
+	h := openVisibilityHome(t, visibilitySpace{facts: map[string]channelspec.DeclarationFacts{
 		"hers": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
 	}})
 	bob := admitHuman(t, h, "bob")
@@ -238,10 +238,10 @@ func TestIntroducePrivateDeclarationByAnotherPrincipalIsForbidden(t *testing.T) 
 // The refusal must not depend on declaration owners happening to be non-empty.
 func TestIntroducePrivateDeclarationByPrincipalLessInitiatorIsForbidden(t *testing.T) {
 	t.Parallel()
-	h := openVisibilityHome(t, visibilityRealm{facts: map[string]channelspec.DeclarationFacts{
+	h := openVisibilityHome(t, visibilitySpace{facts: map[string]channelspec.DeclarationFacts{
 		"pub":     {OwnerPrincipal: "alice", Visibility: "public", Class: "script"},
 		"private": {OwnerPrincipal: "alice", Visibility: "private", Class: "script"},
-		// An owner field that never got filled. No realm path writes this today;
+		// An owner field that never got filled. No space path writes this today;
 		// the verdict must refuse a principal-less initiator on its own terms
 		// rather than because "" never equals a real owner.
 		"ownerless": {OwnerPrincipal: "", Visibility: "private", Class: "script"},
@@ -276,7 +276,7 @@ func TestIntroducePrivateDeclarationByPrincipalLessInitiatorIsForbidden(t *testi
 	if _, err := home.SystemOps(h).Introduce(ctx, channelspec.IntroduceRequest{
 		Ref: "intro-ownerless-by-agent", DeclID: "ownerless", InitiatorActorID: agent.ActorID,
 	}); err == nil {
-		t.Fatal("empty principal matched an empty owner — the refusal is leaning on realm-side invariants")
+		t.Fatal("empty principal matched an empty owner — the refusal is leaning on space-side invariants")
 	} else {
 		forbidden(t, err)
 	}

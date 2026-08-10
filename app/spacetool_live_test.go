@@ -12,34 +12,34 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/compute"
-	"github.com/wanpengxie/atoll/platform/realmtool"
+	"github.com/wanpengxie/atoll/platform/spacetool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
-func realmToolRequest(t *testing.T, env *testEnv, setup setupResult, client *wsClient, tool actor.ActorID, typ string, payload any) map[string]json.RawMessage {
+func spaceToolRequest(t *testing.T, env *testEnv, setup setupResult, client *wsClient, tool actor.ActorID, typ string, payload any) map[string]json.RawMessage {
 	t.Helper()
 	ack := client.sendMessage(map[string]any{
 		"channel_id": setup.chID, "msg_type": typ, "kind": "request",
 		"audience": []string{string(tool)}, "payload": payload,
 	})
 	if ack["type"] != "ack" {
-		t.Fatalf("realm request ack=%v", ack)
+		t.Fatalf("space request ack=%v", ack)
 	}
 	raw := waitForResponse(t, env, setup, ack["message_id"].(string), 5*time.Second)
 	var response map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &response); err != nil {
-		t.Fatalf("decode realm response %s: %v", raw, err)
+		t.Fatalf("decode space response %s: %v", raw, err)
 	}
 	return response
 }
 
-func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
+func TestSpaceToolBuiltInListCreateAndInspect(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)
-	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "space-tool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
 	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
 	defer client.close()
 
-	created := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeCreateDeclaration, map[string]any{
+	created := spaceToolRequest(t, env, setup, client, toolID, spacetool.TypeCreateDeclaration, map[string]any{
 		"name": "created in channel", "class": "test-agent", "visibility": "public", "config": map[string]any{},
 	})
 	if string(created["status"]) != `"completed"` {
@@ -65,7 +65,7 @@ func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
 		t.Fatalf("created declaration=%+v err=%v raw=%s", wrapper, err, rawCreate)
 	}
 
-	listed := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeListDeclarations, map[string]any{})
+	listed := spaceToolRequest(t, env, setup, client, toolID, spacetool.TypeListDeclarations, map[string]any{})
 	var declarations []map[string]any
 	if err := json.Unmarshal(listed["declarations"], &declarations); err != nil {
 		t.Fatalf("list response=%v err=%v", listed, err)
@@ -80,18 +80,18 @@ func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
 		t.Fatalf("created declaration absent from list: %v", declarations)
 	}
 
-	inspected := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeInspectDeclaration, map[string]any{"decl_id": wrapper.Declaration.ID})
+	inspected := spaceToolRequest(t, env, setup, client, toolID, spacetool.TypeInspectDeclaration, map[string]any{"decl_id": wrapper.Declaration.ID})
 	var detail map[string]any
 	if err := json.Unmarshal(inspected["declaration"], &detail); err != nil || detail["id"] != wrapper.Declaration.ID {
 		t.Fatalf("inspect=%v detail=%v err=%v", inspected, detail, err)
 	}
 }
 
-func TestRealmToolActorOwnedIntroduceAndRemove(t *testing.T) {
+func TestSpaceToolActorOwnedIntroduceAndRemove(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)
 	createAndBindDaemon(t, env, setup.chID, "actor-owned-host", setup.cookies)
-	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "space-tool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,28 +105,28 @@ func TestRealmToolActorOwnedIntroduceAndRemove(t *testing.T) {
 	assertStatus(t, decl, http.StatusCreated)
 	declID := respJSON(t, decl)["id"].(string)
 
-	introduced := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeIntroduce, map[string]any{"decl_id": declID})
+	introduced := spaceToolRequest(t, env, setup, client, toolID, spacetool.TypeIntroduce, map[string]any{"decl_id": declID})
 	var target actor.ActorID
 	if err := json.Unmarshal(introduced["actor_id"], &target); err != nil || target == "" {
 		t.Fatalf("actor-owned introduce=%v target=%q err=%v", introduced, target, err)
 	}
-	removed := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeRemove, map[string]any{"target": target})
+	removed := spaceToolRequest(t, env, setup, client, toolID, spacetool.TypeRemove, map[string]any{"target": target})
 	var removedIDs []actor.ActorID
 	if err := json.Unmarshal(removed["removed"], &removedIDs); err != nil || len(removedIDs) != 1 || removedIDs[0] != target {
 		t.Fatalf("actor-owned remove=%v ids=%v err=%v", removed, removedIDs, err)
 	}
 	if _, err := env.app.ResolveSourceForTest(setup.chID, declID); err == nil {
-		t.Fatal("realm-tool remove left target active")
+		t.Fatal("space-tool remove left target active")
 	}
 }
 
-func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testing.T) {
+func TestForkWithEmptyPrincipalDrivesSpaceOperationAndResourceFamilies(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)
-	daemon := createAndBindDaemon(t, env, setup.chID, "fork-realm-host", setup.cookies)
-	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
+	daemon := createAndBindDaemon(t, env, setup.chID, "fork-space-host", setup.cookies)
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "space-tool")
 	if err != nil {
-		t.Fatalf("realm tool unavailable: id=%q err=%v", toolID, err)
+		t.Fatalf("space tool unavailable: id=%q err=%v", toolID, err)
 	}
 	srv := httptest.NewServer(env.app.Handler())
 	defer srv.Close()
@@ -163,8 +163,8 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 				var err error
 				deadline := time.Now().Add(3 * time.Second)
 				for {
-					child, err = sys.Fork(message.ID("fork-realm-requester"), actorcaps.ForkSpec{
-						Kind: actor.KindAgent, Class: "test-agent", NameHint: "realm-requester",
+					child, err = sys.Fork(message.ID("fork-space-requester"), actorcaps.ForkSpec{
+						Kind: actor.KindAgent, Class: "test-agent", NameHint: "space-requester",
 					})
 					if err == nil || time.Now().After(deadline) {
 						break
@@ -177,7 +177,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 				}
 				var pending actorbase.Pending
 				for {
-					pending, err = sys.Call(child, "realm.run", map[string]any{})
+					pending, err = sys.Call(child, "space.run", map[string]any{})
 					if err == nil || time.Now().After(deadline) {
 						break
 					}
@@ -207,14 +207,14 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 						time.Sleep(10 * time.Millisecond)
 					}
 				}
-				introduced, err := call(realmtool.TypeIntroduce, map[string]any{"decl_id": targetDecl})
+				introduced, err := call(spacetool.TypeIntroduce, map[string]any{"decl_id": targetDecl})
 				if err == nil {
 					var body channel.IntroduceResult
 					err = json.Unmarshal(introduced.Payload, &body)
 					result.introduced = body.ActorID
 				}
 				if err == nil {
-					listed, listErr := call(realmtool.TypeListResources, map[string]any{
+					listed, listErr := call(spacetool.TypeListResources, map[string]any{
 						"channel_id": setup.chID, "query": map[string]any{"limit": 100},
 					})
 					err = listErr
@@ -229,7 +229,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 					}
 				}
 				if err == nil {
-					fetched, fetchErr := call(realmtool.TypeFetchResource, channel.ResourceRef{
+					fetched, fetchErr := call(spacetool.TypeFetchResource, channel.ResourceRef{
 						ChannelID: channel.ID(setup.chID), ResourceID: "artifact:fork-source",
 					})
 					err = fetchErr
@@ -285,7 +285,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 	select {
 	case got := <-done:
 		if got.err != nil || got.child == "" || got.introduced == "" || !got.listed || got.fetched == "" {
-			t.Fatalf("fork realm combination=%+v err=%v", got, got.err)
+			t.Fatalf("fork space combination=%+v err=%v", got, got.err)
 		}
 		facts, foundFork, err := env.app.ActorFactsForTest(channel.ID(setup.chID), got.child)
 		if err != nil {
@@ -298,11 +298,11 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 			t.Fatalf("fork principal=%q, want empty", facts.Principal)
 		}
 	case <-time.After(8 * time.Second):
-		t.Fatalf("fork requester did not finish realm operation/resource combination: builds=%d", builds.Load())
+		t.Fatalf("fork requester did not finish space operation/resource combination: builds=%d", builds.Load())
 	}
 }
 
-func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
+func TestSpaceToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 	env := setupTestApp(t)
 	target := fullSetup(t, env)
 
@@ -322,13 +322,13 @@ func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 		t.Fatalf("source resource create=%v", ack)
 	}
 
-	toolID, err := env.app.ResolveSourceForTest(target.chID, "realm-tool")
+	toolID, err := env.app.ResolveSourceForTest(target.chID, "space-tool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	targetClient := dialWS(t, srv, target.cookies, target.chID, 0)
 	defer targetClient.close()
-	fetched := realmToolRequest(t, env, target, targetClient, toolID, realmtool.TypeFetchResource, channel.ResourceRef{
+	fetched := spaceToolRequest(t, env, target, targetClient, toolID, spacetool.TypeFetchResource, channel.ResourceRef{
 		ChannelID: channel.ID(sourceID), ResourceID: "artifact:source",
 	})
 	var newID string
@@ -354,7 +354,7 @@ func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 	if destroy.Code != http.StatusOK {
 		t.Fatalf("destroy source status=%d body=%s", destroy.Code, destroy.Body.String())
 	}
-	failed := realmToolRequest(t, env, target, targetClient, toolID, realmtool.TypeFetchResource, channel.ResourceRef{
+	failed := spaceToolRequest(t, env, target, targetClient, toolID, spacetool.TypeFetchResource, channel.ResourceRef{
 		ChannelID: channel.ID(sourceID), ResourceID: "artifact:source",
 	})
 	if string(failed["error_code"]) != `"channel_unavailable"` {
@@ -367,11 +367,11 @@ func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 	}
 }
 
-func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
+func TestSpaceToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)
-	createAndBindDaemon(t, env, setup.chID, "realm-tool-introduce-host", setup.cookies)
-	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
+	createAndBindDaemon(t, env, setup.chID, "space-tool-introduce-host", setup.cookies)
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "space-tool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,9 +385,9 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	}, setup.cookies)
 	assertStatus(t, privateDecl, http.StatusCreated)
 	privateID := respJSON(t, privateDecl)["id"].(string)
-	denied := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeIntroduce, map[string]any{"decl_id": privateID})
+	denied := spaceToolRequest(t, env, setup, client, toolID, spacetool.TypeIntroduce, map[string]any{"decl_id": privateID})
 	if string(denied["error_code"]) != `"forbidden"` {
-		t.Fatalf("realm-tool private introduce=%v", denied)
+		t.Fatalf("space-tool private introduce=%v", denied)
 	}
 	external := env.do(t, http.MethodPost, "/api/channels/"+setup.chID+"/actors", map[string]any{"decl_id": privateID}, setup.cookies)
 	assertStatus(t, external, http.StatusCreated)
@@ -397,18 +397,18 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	}, setup.cookies)
 	assertStatus(t, publicDecl, http.StatusCreated)
 	publicID := respJSON(t, publicDecl)["id"].(string)
-	if err := env.app.RemoveRealmToolForTest(channel.ID(setup.chID)); err != nil {
+	if err := env.app.RemoveSpaceToolForTest(channel.ID(setup.chID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool"); err == nil {
-		t.Fatal("realm tool remained in the channel after sovereignty switch")
+	if _, err := env.app.ResolveSourceForTest(setup.chID, "space-tool"); err == nil {
+		t.Fatal("space tool remained in the channel after sovereignty switch")
 	}
 	ack := client.sendMessage(map[string]any{
-		"channel_id": setup.chID, "msg_type": realmtool.TypeIntroduce, "kind": "request",
+		"channel_id": setup.chID, "msg_type": spacetool.TypeIntroduce, "kind": "request",
 		"audience": []string{string(toolID)}, "payload": map[string]any{"decl_id": publicID},
 	})
 	if ack["type"] != "error" {
-		t.Fatalf("removed realm-tool request=%v", ack)
+		t.Fatalf("removed space-tool request=%v", ack)
 	}
 	external = env.do(t, http.MethodPost, "/api/channels/"+setup.chID+"/actors", map[string]any{"decl_id": publicID}, setup.cookies)
 	assertStatus(t, external, http.StatusCreated)

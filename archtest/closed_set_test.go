@@ -116,7 +116,7 @@ func TestIPCKindVocabularyIsRegistered(t *testing.T) {
 
 // channelProtocolExportSurface —— protocol/channel（kernel 协议叶）的导出面
 // 全集：13 个 kernel 类型 + 2 个规范化函数 + 2 个错误 + 4 个枚举成员。
-// 业务/realm/膜类型恒不出现在这里。
+// 业务/space/膜类型恒不出现在这里。
 var channelProtocolExportSurface = []string{
 	// types
 	"ID", "Reader", "ReaderMode", "AdmitResult", "IntroduceResult", "RemoveResult",

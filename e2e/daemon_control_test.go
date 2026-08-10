@@ -186,7 +186,7 @@ func TestDaemonCarrierReconnectRestoresCompartments(t *testing.T) {
 	}, http.StatusCreated)
 	channelRow := api.must("POST", "/api/channels", map[string]any{"name": "home"}, http.StatusCreated)
 	channelID, _ := channelRow["id"].(string)
-	// Daemon identity is realm truth; its channel binding is a separate SysOp
+	// Daemon identity is space truth; its channel binding is a separate SysOp
 	// committed inside the channel membrane.
 	daemonRow := api.must("POST", "/api/daemons", map[string]any{"name": "canonical-box"}, http.StatusCreated)
 	daemonID, _ := daemonRow["id"].(string)

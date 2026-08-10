@@ -1,14 +1,14 @@
 package app_test
 
 // Identity HTTP face: register → login → me → create/list channels — the
-// principal's first-session flow over the realm directory.
+// principal's first-session flow over the space directory.
 
 import (
 	"net/http"
 	"testing"
 )
 
-func TestRegisterLoginRealmChannel(t *testing.T) {
+func TestRegisterLoginSpaceChannel(t *testing.T) {
 	env := setupTestApp(t)
 
 	// 1. Register
@@ -39,14 +39,14 @@ func TestRegisterLoginRealmChannel(t *testing.T) {
 		t.Fatalf("me email mismatch: %v", meBody["email"])
 	}
 
-	// 4. Create channel directly in the realm directory.
+	// 4. Create channel directly in the space directory.
 	chBody, cookies := createChannel(t, env, cookies, "general")
 	chID := chBody["id"].(string)
 	if chID == "" {
 		t.Fatal("channel id empty")
 	}
 
-	// 5. List realm channels.
+	// 5. List space channels.
 	w = env.do(t, "GET", "/api/channels", nil, cookies)
 	assertStatus(t, w, http.StatusOK)
 	chListBody := respJSON(t, w)

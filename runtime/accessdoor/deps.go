@@ -25,7 +25,7 @@ type StorageMount struct {
 // StorageMounts is placement routing's mount-table Dep (期11 spec §4.3): "which
 // daemons are bound to this channel and currently have a ready service lane".
 // The runtime tree DEFINES this contract; platform assembly FILLS it
-// (injected from the realm daemon host's positive-ready lane view —
+// (injected from the space daemon host's positive-ready lane view —
 // injection-point discipline: "注入点契约 runtime 定,实现填充下游做"). This
 // package never imports platform/app to answer it itself.
 type StorageMounts interface {

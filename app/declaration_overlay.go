@@ -38,8 +38,8 @@ func (a *App) handleDeleteDeclarationOverlay(c *gin.Context) {
 }
 
 // writeDeclarationOverlay keeps the declaration authorization facts and the
-// overlay mutation in one realm transaction. Membership is channel truth and
-// is deliberately checked before entering the realm transaction.
+// overlay mutation in one space transaction. Membership is channel truth and
+// is deliberately checked before entering the space transaction.
 func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, clear bool) {
 	chID, ok := a.requireChannelMember(c)
 	if !ok {

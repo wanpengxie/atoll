@@ -90,7 +90,7 @@ func TestResourceReadableProjectionPreservesSourceProvenance(t *testing.T) {
 	plan := resourcespec.ResourceBirthPlan{
 		SourceChannelID: "source-channel", SourceResourceID: "kv:source",
 	}
-	if err := reg.Create(ctx, "kv:copy", resourcespec.KindKV, "tool:realm", "", "", []byte("artifact"), plan); err != nil {
+	if err := reg.Create(ctx, "kv:copy", resourcespec.KindKV, "tool:space", "", "", []byte("artifact"), plan); err != nil {
 		t.Fatal(err)
 	}
 	page, err := reg.ListReadable(ctx, channel.ResourceListQuery{Limit: 10})

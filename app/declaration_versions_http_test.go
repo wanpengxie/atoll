@@ -71,10 +71,10 @@ func TestActorDeclListProjectsInstancesWithoutChannelLocalVersions(t *testing.T)
 		}
 		for _, instance := range []map[string]any{first, second} {
 			if _, leaked := instance["current_version"]; leaked {
-				t.Fatalf("channel-local current_version leaked into realm DTO: %v", instance)
+				t.Fatalf("channel-local current_version leaked into space DTO: %v", instance)
 			}
 			if _, leaked := instance["latest_version"]; leaked {
-				t.Fatalf("channel-local latest_version leaked into realm DTO: %v", instance)
+				t.Fatalf("channel-local latest_version leaked into space DTO: %v", instance)
 			}
 		}
 		return

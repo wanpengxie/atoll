@@ -25,7 +25,7 @@
 //     provider and compute sink, including the declaration version and canonical
 //     declaration metadata both hosts compare.
 //   - DaemonMembrane / DaemonRoutes (daemonlink.go) — transport-free values
-//     shared by channel Homes and the realm daemon host.
+//     shared by channel Homes and the space daemon host.
 //
 // # Root-file topology
 //
@@ -42,7 +42,7 @@
 // platform/home is the channel-home assembly root (server side — one
 // channel's truth and execution wiring: Open/View/Admit/Restart/Subscribe/Close
 // plus the subjectgate slot seam; it owns no daemon transport).
-// platform/daemonhost owns realm-wide daemon carriers and channel lanes.
+// platform/daemonhost owns space-wide daemon carriers and channel lanes.
 // platform/compute is the daemon-side multi-compartment assembly root.
 // platform/subjectgate is the per-identity
 // binding-slot protocol both the gateway and a subject's own frame-driven

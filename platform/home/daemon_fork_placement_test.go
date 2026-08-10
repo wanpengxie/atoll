@@ -28,7 +28,7 @@ import (
 // T24 + T25. Fork is the one lifecycle verb that crosses the link in the
 // UPSTREAM direction, and its child's placement is inherited, not stated. So
 // the only honest way to check where a daemon-placed Fork lands is over a real
-// wire in both directions: the realm's device host hands the daemon its plan
+// wire in both directions: the space's device host hands the daemon its plan
 // (downstream), the daemon-hosted parent forks (upstream), and the resulting
 // control rows must fall in the daemon's execution domain — carrier on the
 // server, body on the daemon, and the daemon must really build that body and
@@ -36,7 +36,7 @@ import (
 //
 // Nothing here is a stub. Since the connection-is-a-device rewrite, a channel
 // Home never serves a socket itself: it publishes ONE capability bundle
-// (platform.DaemonMembrane, home.go's h.daemonMembrane) to a realm-wide
+// (platform.DaemonMembrane, home.go's h.daemonMembrane) to a space-wide
 // platform/daemonhost.Host, exactly as platform/channelhost.Open does for
 // every production channel (home.DaemonMembrane(h) → Host.Register). These
 // fixtures reproduce that one registration step directly — the daemon side is
@@ -175,10 +175,10 @@ func (s *daemonForkStarted) count(plan *daemonForkPlan, id actor.ActorID) int {
 // daemon, binds that daemon, and returns the Home. The server's composition
 // resolver knows NOTHING: a daemon-placed body must never be built here.
 //
-// routes is the realm device host the Home is wired to (platform.DaemonRoutes,
+// routes is the space device host the Home is wired to (platform.DaemonRoutes,
 // satisfied by *daemonhost.Host structurally, exactly as app.go wires
 // a.daemonHost in) — supplied by the caller because in production it is
-// realm-scoped, constructed once, well outside any one channel's Open call.
+// space-scoped, constructed once, well outside any one channel's Open call.
 func openDaemonForkChannel(
 	t *testing.T,
 	channelID channel.ID,
@@ -220,7 +220,7 @@ func openDaemonForkChannel(
 // platform/channelhost.Open takes for every real channel (Register(chID,
 // generation, home.DaemonMembrane(h))) — then attaches a real daemon carrier
 // to host's own HTTP endpoint and runs it, over a real websocket, until the
-// test ends. host.Serve is the realm device host's connection acceptor
+// test ends. host.Serve is the space device host's connection acceptor
 // (platform/daemonhost.Host.Serve); the daemon side is production compute.Run.
 func runDaemonFor(
 	t *testing.T,

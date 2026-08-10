@@ -96,11 +96,11 @@ lib/         stdlib for actor authors: actorbase (the Proc + verb-table base eve
              actor stands on), behavior, metatool (tool catalog / call_actor
              vocabulary), introspect
 platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word table);
-             channelhost/ (the channel contract surface the realm talks to),
-             realmtool/ (in-channel port for realm requests), home/ (server-side
-             channel-home assembly), daemonhost/ (realm device carriers),
+             channelhost/ (the channel contract surface the space talks to),
+             spacetool/ (in-channel port for space requests), home/ (server-side
+             channel-home assembly), daemonhost/ (space device carriers),
              compute/ (daemon-side multi-compartment assembly), subjectgate/
-app/         reference realm (identity, channel directory/lifecycle, declarations,
+app/         reference space (identity, channel directory/lifecycle, declarations,
              daemon tombstones, admission/lifecycle jobs, HTTP/WS)
 drivers/     external-world drivers: tools/ (echo, device, kimi, xhs),
              agents/ (agent engine providers: codex, script),
@@ -188,7 +188,7 @@ Atoll is **v0.01 — a working minimal kernel, pre-release**. The five elements 
 both planes are in place and enforced; the developer shell around them (one-command
 setup, coding-agent connectors, scaffolding) is being built next. Known, deliberate
 boundaries at this stage: single trust domain per deployment; observer read access is
-a revocable per-channel realm capability, while members retain intrinsic read access.
+a revocable per-channel space capability, while members retain intrinsic read access.
 APIs still move without deprecation cycles. Kernel first, polish second — watch the
 repo if you want to see the rest arrive.
 

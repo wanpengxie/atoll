@@ -118,10 +118,10 @@ func (a *App) createGroupChannel(ctx context.Context, caller, name string, paren
 	now := time.Now().UnixMilli()
 	chID := channel.ID(uuid.NewString())
 	// Bootstrap actor IDs are minted from kind:source_decl_id:created_at. Point
-	// script at the realm-tool instance born in this same genesis batch so its
+	// script at the space-tool instance born in this same genesis batch so its
 	// required tool_id is both construction-valid and an actual channel actor.
 	boostConfig, err := json.Marshal(map[string]string{
-		"tool_id": fmt.Sprintf("%s:%s:%d", actor.KindTool, realmToolDeclID, now),
+		"tool_id": fmt.Sprintf("%s:%s:%d", actor.KindTool, spaceToolDeclID, now),
 	})
 	if err != nil {
 		return desiredChannel{}, false, false, false, err
@@ -130,14 +130,14 @@ func (a *App) createGroupChannel(ctx context.Context, caller, name string, paren
 	if err != nil {
 		return desiredChannel{}, false, false, false, err
 	}
-	realmSnapshot, err := (channelspec.RenderedSnapshot{Class: realmToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
+	spaceSnapshot, err := (channelspec.RenderedSnapshot{Class: spaceToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
 	if err != nil {
 		return desiredChannel{}, false, false, false, err
 	}
 	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: "group", OwnerPrincipal: caller, CreatedAt: now,
 		GenesisDeclarations: []channelhost.GenesisDeclaration{
 			{DeclID: "sys:boost", Kind: actor.KindAgent, Rendered: snapshot},
-			{DeclID: realmToolDeclID, Kind: actor.KindTool, Rendered: realmSnapshot},
+			{DeclID: spaceToolDeclID, Kind: actor.KindTool, Rendered: spaceSnapshot},
 		}}
 	if parentID != nil {
 		spec.Origin = &channelhost.Origin{ParentChannelID: channel.ID(*parentID), InitiatorPrincipal: caller}

@@ -18,7 +18,7 @@ func declarationVisibleTo(visibility, owner, principal string) bool {
 
 func (a *App) declarationClassKind(ctx context.Context, class string) (actor.Kind, bool, error) {
 	class = strings.TrimSpace(class)
-	if class == realmToolClass {
+	if class == spaceToolClass {
 		return "", false, nil
 	}
 	return (compositionResolver{app: a}).ClassKind(ctx, class)

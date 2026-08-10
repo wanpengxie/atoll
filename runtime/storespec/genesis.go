@@ -3,7 +3,7 @@ package storespec
 import "context"
 
 // ChannelGenesis is the immutable self-description stored inside one channel
-// database. Names intentionally do not appear here: they are realm routing
+// database. Names intentionally do not appear here: they are space routing
 // metadata, not channel identity.
 type ChannelGenesis struct {
 	ChannelID          string

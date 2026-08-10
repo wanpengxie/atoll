@@ -3,7 +3,7 @@ package platform
 // The channel system actor's public request verbs — the words an outsider must
 // say to address it. They live here, in the membrane, because the system actor
 // itself is platform-internal while its callers are not: an agent driver asks
-// for channel history, the realm bootstrap sets the default agent. Both sides
+// for channel history, the space bootstrap sets the default agent. Both sides
 // need the same word, and the layer graph puts platform below every caller, so
 // this is the one place all of them can read it from without a back edge.
 const (

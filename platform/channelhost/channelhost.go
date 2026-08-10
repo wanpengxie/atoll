@@ -93,7 +93,7 @@ type CensusEntry struct {
 	State     CensusState
 }
 
-// HomeDeps contains only realm-owned resolution and notification seams. Channel
+// HomeDeps contains only space-owned resolution and notification seams. Channel
 // execution, binding admission, and planning stay behind the membrane.
 type HomeDeps struct {
 	CompositionResolver  home.CompositionResolver
@@ -207,7 +207,7 @@ func (h *ChannelHost) paths(id channel.ID) (main, tombstone string, err error) {
 // KNOWN, deliberately unhandled at this stage: the per-ID lock table only
 // grows — every channel ID ever touched keeps its mutex until process exit.
 // Bounded by lifetime channel count; revisit with a refcounted keyed lock if a
-// long-lived realm's churn ever makes this measurable.
+// long-lived space's churn ever makes this measurable.
 func (h *ChannelHost) idLock(id channel.ID) *sync.Mutex {
 	h.mu.Lock()
 	defer h.mu.Unlock()

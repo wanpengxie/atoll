@@ -304,7 +304,7 @@ type SpineFrame struct {
 	Reason     string            `json:"reason,omitempty"`
 	Nonce      string            `json:"nonce,omitempty"`
 
-	// Serve/Unknown carry the compartment plan reply. Every channel the realm
+	// Serve/Unknown carry the compartment plan reply. Every channel the space
 	// directory enumerated lands in exactly one of them; a channel in neither
 	// no longer exists and the device retires its compartment. The server only
 	// answers when it can enumerate the directory completely — a partial
@@ -534,13 +534,13 @@ func validateRequestID(outer, inner string, validation error) error {
 }
 
 const (
-	SpineCarrierAccept    = "carrier_accept"
-	SpineCarrierReject    = "carrier_reject"
+	SpineCarrierAccept        = "carrier_accept"
+	SpineCarrierReject        = "carrier_reject"
 	SpineCompartmentPlanPoke  = "compartment_plan_poke"
 	SpineCompartmentPlanPull  = "compartment_plan_pull"
 	SpineCompartmentPlanReply = "compartment_plan_reply"
-	SpineProbe            = "probe"
-	SpineProbeReply       = "probe_reply"
+	SpineProbe                = "probe"
+	SpineProbeReply           = "probe_reply"
 )
 
 type rawCarrier struct {

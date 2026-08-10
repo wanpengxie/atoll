@@ -50,10 +50,10 @@ func (a *App) ResolveObservation(ctx context.Context, principal string, chID cha
 	return ObservationRoute{Channel: chID, Bundle: bundle, Reader: reader}, "", nil
 }
 
-// canObserve is the single realm policy gate for observer Readers. P1 is
-// realm-public: authentication is established by the HTTP membrane or by a
+// canObserve is the single space policy gate for observer Readers. P1 is
+// space-public: authentication is established by the HTTP membrane or by a
 // trusted in-channel requester before this method is called. The source
-// channel must exist, be serving, retain its realm-tool member, and the
+// channel must exist, be serving, retain its space-tool member, and the
 // principal must not already be an active human member.
 func (a *App) canObserve(ctx context.Context, chID channel.ID, principal string) (channelhost.Bundle, channel.Reader, observeReason, error) {
 	if principal == "" {
@@ -100,7 +100,7 @@ func (a *App) readerForPrincipal(ctx context.Context, bundle channelhost.Bundle,
 		}
 		return channel.Reader{}, observeNowMember, nil
 	}
-	hasTool, err := bundle.View().HasDeclaredInstance(ctx, realmToolDeclID)
+	hasTool, err := bundle.View().HasDeclaredInstance(ctx, spaceToolDeclID)
 	if err != nil {
 		return channel.Reader{}, observeUnavailable, err
 	}
@@ -284,20 +284,20 @@ func (a *App) resourceSubject(c *gin.Context) (channelhost.Bundle, channel.Reade
 	return bundle, reader, true
 }
 
-func writeRealmFailure(c *gin.Context, err error) {
-	var realmErr *channelspec.RealmError
-	if errors.As(err, &realmErr) {
-		switch realmErr.Code {
-		case channelspec.RealmResourceNotFound:
-			writeAPIError(c, http.StatusNotFound, contract.ErrorCode(realmErr.Code), realmErr.Error())
-		case channelspec.RealmForbidden:
-			writeAPIError(c, http.StatusForbidden, contract.ErrorCode(realmErr.Code), realmErr.Error())
-		case channelspec.RealmInvalidRequest:
-			writeAPIError(c, http.StatusBadRequest, contract.ErrorCode(realmErr.Code), realmErr.Error())
-		case channelspec.RealmCapabilityUnavailable:
-			writeAPIError(c, http.StatusConflict, contract.ErrorCode(realmErr.Code), realmErr.Error())
+func writeSpaceFailure(c *gin.Context, err error) {
+	var spaceErr *channelspec.SpaceError
+	if errors.As(err, &spaceErr) {
+		switch spaceErr.Code {
+		case channelspec.SpaceResourceNotFound:
+			writeAPIError(c, http.StatusNotFound, contract.ErrorCode(spaceErr.Code), spaceErr.Error())
+		case channelspec.SpaceForbidden:
+			writeAPIError(c, http.StatusForbidden, contract.ErrorCode(spaceErr.Code), spaceErr.Error())
+		case channelspec.SpaceInvalidRequest:
+			writeAPIError(c, http.StatusBadRequest, contract.ErrorCode(spaceErr.Code), spaceErr.Error())
+		case channelspec.SpaceCapabilityUnavailable:
+			writeAPIError(c, http.StatusConflict, contract.ErrorCode(spaceErr.Code), spaceErr.Error())
 		default:
-			writeAPIError(c, http.StatusServiceUnavailable, contract.ErrorCode(realmErr.Code), realmErr.Error())
+			writeAPIError(c, http.StatusServiceUnavailable, contract.ErrorCode(spaceErr.Code), spaceErr.Error())
 		}
 		return
 	}
@@ -315,7 +315,7 @@ func (a *App) handleListResources(c *gin.Context) {
 	}
 	page, err := bundle.View().Resources().List(c.Request.Context(), reader, query)
 	if err != nil {
-		writeRealmFailure(c, err)
+		writeSpaceFailure(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, page)
@@ -328,7 +328,7 @@ func (a *App) handleStatResource(c *gin.Context) {
 	}
 	meta, err := bundle.View().Resources().Stat(c.Request.Context(), reader, resource.ResourceID(c.Param("rid")))
 	if err != nil {
-		writeRealmFailure(c, err)
+		writeSpaceFailure(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, meta)
@@ -341,7 +341,7 @@ func (a *App) handleFetchResource(c *gin.Context) {
 	}
 	fetch, err := bundle.View().Resources().Fetch(c.Request.Context(), reader, resource.ResourceID(c.Param("rid")))
 	if err != nil {
-		writeRealmFailure(c, err)
+		writeSpaceFailure(c, err)
 		return
 	}
 	defer fetch.Body.Close()

@@ -612,7 +612,7 @@ func waitActorStatus(t *testing.T, env *testEnv, s setupResult, client *wsClient
 
 // pollPresence observes the canonical product read path: a member asks the
 // system actor for actor.status, which projects the membrane-internal presence
-// fold. No realm-side raw Snapshot capability is involved.
+// fold. No space-side raw Snapshot capability is involved.
 func pollPresence(t *testing.T, env *testEnv, s setupResult, client *wsClient, actorID actor.ActorID, wantKnown, wantOnline bool, timeout time.Duration) introspect.Status {
 	t.Helper()
 	return waitActorStatus(t, env, s, client, actorID, timeout, func(status introspect.Status) bool {
@@ -669,7 +669,7 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 	}
 }
 
-// TestWS_NonMemberWriteRejected: a realm principal who is not a channel member
+// TestWS_NonMemberWriteRejected: a space principal who is not a channel member
 // cannot submit a frame (膜律 看得见≠在里面).
 func TestWS_NonMemberWriteRejected(t *testing.T) {
 	env := setupTestApp(t)

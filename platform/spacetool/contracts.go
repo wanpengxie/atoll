@@ -1,4 +1,4 @@
-package realmtool
+package spacetool
 
 import (
 	"crypto/sha256"
@@ -38,7 +38,7 @@ type Requester struct {
 	RequestID string        `json:"request_id"`
 }
 
-// The realm error vocabulary (RealmErrorCode / RealmError) lives in
+// The space error vocabulary (SpaceErrorCode / SpaceError) lives in
 // platform/channelspec: the contract crosses the membrane, so its codes are
 // boundary vocabulary shared by the membrane's read faces, the app gates and
 // this codec — not any single party's property.
@@ -47,11 +47,11 @@ type ErrResultUnknown struct{ Ref string }
 
 func (e *ErrResultUnknown) Error() string { return "result_unknown: " + e.Ref }
 
-func DerivedRealmToolRef(channelID channel.ID, requestID string) string {
+func DerivedSpaceToolRef(channelID channel.ID, requestID string) string {
 	payload := appendLengthPrefixed(nil, string(channelID))
 	payload = appendLengthPrefixed(payload, requestID)
 	sum := sha256.Sum256(payload)
-	return "adm:rt:v1:" + hex.EncodeToString(sum[:])
+	return "adm:st:v1:" + hex.EncodeToString(sum[:])
 }
 
 func appendLengthPrefixed(dst []byte, value string) []byte {

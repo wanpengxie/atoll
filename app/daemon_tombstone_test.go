@@ -1,6 +1,6 @@
 package app_test
 
-// Daemon deletion = a realm tombstone value write. These tests pin the two
+// Daemon deletion = a space tombstone value write. These tests pin the two
 // halves of that mechanism: the tombstone transaction is atomic (a persist
 // failure is a loud 5xx, never a false ok), and a committed tombstone revokes
 // the device carrier while leaving channel-local bindings untouched (binding
@@ -31,7 +31,7 @@ func TestDeleteDaemonTombstonePersistFailureReturns5xx(t *testing.T) {
 	assertStatus(t, w, http.StatusCreated)
 	daemonID := respJSON(t, w)["id"].(string)
 
-	// Create a channel and bind the daemon. A failed realm tombstone transaction
+	// Create a channel and bind the daemon. A failed space tombstone transaction
 	// must leave both the daemon and its independently authoritative channel binding.
 	cookies2 := cookies
 	chBody := env.do(t, "POST", "/api/channels", map[string]any{"name": "c"}, cookies2)
@@ -78,7 +78,7 @@ func TestDeleteDaemonTombstonePersistFailureReturns5xx(t *testing.T) {
 		}
 	}
 	if !bindingSurvived {
-		t.Fatal("channel binding was deleted despite the realm tombstone transaction rolling back")
+		t.Fatal("channel binding was deleted despite the space tombstone transaction rolling back")
 	}
 }
 
@@ -164,6 +164,6 @@ func TestDeleteDaemonRevokesDeviceAndKeepsBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !stillBound {
-		t.Fatalf("realm tombstone removed channel-local binding %q", daemonID)
+		t.Fatalf("space tombstone removed channel-local binding %q", daemonID)
 	}
 }

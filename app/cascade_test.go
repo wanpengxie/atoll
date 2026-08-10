@@ -6,7 +6,7 @@ import (
 )
 
 // Declaration ownership is a principal string, not a users-table species FK.
-// The built-in realm declaration is therefore allowed to belong to "system".
+// The built-in space declaration is therefore allowed to belong to "system".
 func TestDeclarationOwnerDoesNotRequireUserRow(t *testing.T) {
 	db, err := openTestAppDB(t, filepath.Join(t.TempDir(), "app.db"))
 	if err != nil {
@@ -15,7 +15,7 @@ func TestDeclarationOwnerDoesNotRequireUserRow(t *testing.T) {
 	defer db.Close()
 
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM actor_decls WHERE id='realm-tool' AND owner='system'`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM actor_decls WHERE id='space-tool' AND owner='system'`).Scan(&n); err != nil {
 		t.Fatalf("count declaration: %v", err)
 	}
 	if n != 1 {

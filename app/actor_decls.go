@@ -86,7 +86,7 @@ func (a *App) createDeclarationCore(ctx context.Context, id, name, owner, class 
 // introduction and removal are structural operations; channel-local config lives
 // in the declaration-keyed overlay API. The declaration layer is kind-neutral:
 // one row = identity + class + config + owner + visibility, for agents and tools
-// alike. It writes realm current values directly, then pokes serving channels;
+// alike. It writes space current values directly, then pokes serving channels;
 // each Home pulls and applies the resolved snapshot during reconcile.
 
 // isJSONObject reports whether raw is a JSON object — the only shape a declared
@@ -118,10 +118,10 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 		writeAPIError(c, http.StatusBadRequest, contract.CodeInvalidRequest, "class required")
 		return
 	}
-	// Same gate as realmOps.CreateDeclaration (realm_ops.go): an unknown class is
-	// rejected, and realm-tool is reserved — composition.go builds a real realm
-	// boundary tool for class=="realm-tool", so a forged realm-tool declaration
-	// would smuggle a membrane entry past the "remove realm-tool = close it"
+	// Same gate as spaceOps.CreateDeclaration (space_ops.go): an unknown class is
+	// rejected, and space-tool is reserved — composition.go builds a real space
+	// boundary tool for class=="space-tool", so a forged space-tool declaration
+	// would smuggle a membrane entry past the "remove space-tool = close it"
 	// sovereignty switch.
 	if _, ok, err := a.declarationClassKind(c.Request.Context(), class); err != nil || !ok {
 		writeAPIError(c, http.StatusBadRequest, contract.CodeUnknownClass, "unknown or reserved class")
@@ -146,7 +146,7 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 }
 
 // handleListDecls lists every public declaration plus the current principal's
-// private declarations. Visibility is a realm roster policy; ownership is not a
+// private declarations. Visibility is a space roster policy; ownership is not a
 // prerequisite for inspecting a public declaration.
 func (a *App) handleListDecls(c *gin.Context) {
 	userID := middleware.UserID(c)
@@ -181,7 +181,7 @@ func (a *App) handleListDecls(c *gin.Context) {
 	}
 
 	// Project instance identity only. A channel's declaration version is a local
-	// history/order fence, not realm value identity and not part of this API DTO.
+	// history/order fence, not space value identity and not part of this API DTO.
 	for i := range out {
 		declID := out[i].ID
 		instances := make([]contract.DeclarationInstance, 0)

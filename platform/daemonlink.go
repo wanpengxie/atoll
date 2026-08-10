@@ -13,7 +13,7 @@ import (
 )
 
 // DaemonMembrane is the complete, generation-scoped capability bundle a
-// channel publishes to the realm daemon host. It contains no transport.
+// channel publishes to the space daemon host. It contains no transport.
 type DaemonMembrane struct {
 	Generation uint64
 
