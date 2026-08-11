@@ -7,6 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -26,12 +27,24 @@ func (emptyCompositionResolver) BuildClass(channel.ID, actor.ActorID, string, js
 	return platform.ActorFactory{}, false
 }
 
+type emptyBindingReader struct{}
+
+func (emptyBindingReader) IsBound(context.Context, channel.ID, string) (bool, error) {
+	return false, nil
+}
+func (emptyBindingReader) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
+	return nil, nil
+}
+
 func completeHomeTestConfig(cfg home.Config) home.Config {
 	if cfg.CompositionResolver == nil {
 		cfg.CompositionResolver = emptyCompositionResolver{}
 	}
 	if cfg.IntroductionResolver == nil {
 		cfg.IntroductionResolver = emptyIntroductionResolver{}
+	}
+	if cfg.RegistryBindings == nil {
+		cfg.RegistryBindings = emptyBindingReader{}
 	}
 	return cfg
 }

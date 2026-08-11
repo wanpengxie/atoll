@@ -1,7 +1,7 @@
 package channelspec
 
 // SpaceErrorCode is the closed error vocabulary of the space-tool contract.
-// The contract crosses the membrane — the membrane's read faces, the app's
+// The contract crosses the membrane — the membrane's read faces, the portal's
 // forwarding gates and the space-tool frame codec all speak these codes — so
 // the vocabulary lives in the boundary leaf package rather than inside any
 // single party's package.

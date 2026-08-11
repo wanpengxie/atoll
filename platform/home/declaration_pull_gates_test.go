@@ -268,8 +268,8 @@ func TestDeclarationPullCannotCrossFromARemovedInstanceToItsRebornTwin(t *testin
 	space.setResolveErr(channelspec.ErrDeclarationNotFound)
 
 	// Truth moves underneath the parked resolve.
-	if _, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
-		Ref: "aba:remove", Target: stale, InitiatorActorID: stale,
+	if _, err := h.opEntry.remove(ctx, removeRequest{
+		Target: stale, InitiatorActorID: stale,
 	}); err != nil {
 		t.Fatalf("remove the in-flight instance: %v", err)
 	}

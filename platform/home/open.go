@@ -57,11 +57,10 @@ func Open(cfg Config) (_ *Home, retErr error) {
 
 	h := &Home{
 		channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{}),
-		nowMs:            func() int64 { return time.Now().UnixMilli() },
-		onRelationChange: cfg.OnRelationChange,
-		daemonRoutes:     cfg.DaemonRoutes,
-		subjectgate:      subjectgate.NewRegistry(),
-		pokeCh:           make(chan struct{}, 1),
+		nowMs:        func() int64 { return time.Now().UnixMilli() },
+		daemonRoutes: cfg.DaemonRoutes,
+		subjectgate:  subjectgate.NewRegistry(),
+		pokeCh:       make(chan struct{}, 1),
 	}
 	defer func() {
 		if p := recover(); p != nil {
@@ -97,9 +96,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.visible = cs.Visible
 	h.expiry = cs.Expiry
 	h.requests = cs.Requests
-	h.bindings = cs.Bindings
+	h.registryBindings = cfg.RegistryBindings
+	if h.registryBindings == nil {
+		h.registryBindings = unavailableBindingReader{}
+	}
 	h.resourceRead = cs.ResourceRead
-	h.defaultAgent = openDefaultAgentFold(ctx, h, cs.Query, logger)
 
 	if cfg.Bootstrap && cfg.Genesis != nil {
 		if err := cs.Genesis.CreateGenesis(ctx, *cfg.Genesis); err != nil {
@@ -283,6 +284,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: construct server actor host: %w", err)
 	}
 	h.opEntry = &opEntry{home: h}
+	h.callPort = sysactor.NewCallPort()
 
 	systemCaps, err := systemCapsMinter.Mint(ctx)
 	if err != nil {
@@ -295,7 +297,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return actorbase.New(systemCaps, h.hooks(), sysactor.Def(sysactor.Deps{
 			Authority: h.actors, Clock: clock,
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
-			Logger:   logger, Operate: h.opEntry, Logbook: h.query,
+			Logger:   logger, Operate: h.opEntry, Logbook: h.query, Calls: h.callPort,
 		}))
 	}, nil)
 	if err != nil {
@@ -328,7 +330,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		Storage:       storageAuthority,
 		Plan:          h.planForDaemon,
 		IsBound: func(ctx context.Context, daemonID string) (bool, error) {
-			return h.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
+			return h.registryBindings.IsBound(ctx, h.channelID, daemonID)
 		},
 	}
 
@@ -338,12 +340,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.engine.Start()
 	h.delivery = tap.OpenPump(h.signal, h.query, from, deliveryHandle(h, cfg.ChannelID, logger), logger)
-
-	// Snapshot self-broadcast goes out BEFORE the reconcile sweep and its
-	// goroutine start emitting deltas: a birth delta applied downstream after
-	// the snapshot's reads but before its Reset apply would be wiped by the
-	// set alignment.
-	h.emitRelationSnapshot(ctx)
 
 	h.reconcileSweep(ctx)
 	reconcileCtx, stop := context.WithCancel(context.Background())

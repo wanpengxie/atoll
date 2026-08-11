@@ -69,5 +69,4 @@ type DaemonRoutes interface {
 	OpenTransfer(context.Context, string, string, string, access.Operation, string) (string, error)
 	AttachedDaemons(string) []string
 	LaneAttached(string, string) bool
-	RetireLane(string, string)
 }

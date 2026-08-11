@@ -35,7 +35,7 @@
 //     only be imported by platform — archtest.TestRuntimeAssemblyConfinedToPlatform.
 //
 // TODO(lint-rebuild): the one residual unmechanised edge is runtime/* → lib//
-// app/ back-flow for lib leaf packages that do not themselves depend on
+// composition-root back-flow for lib leaf packages that do not themselves depend on
 // runtime (the major reverse edges are already impossible via Go import
 // cycles). Fold into the deferred v2-topology lint rebuild.
 package runtime

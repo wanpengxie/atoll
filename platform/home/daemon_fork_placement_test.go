@@ -14,7 +14,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -176,7 +175,7 @@ func (s *daemonForkStarted) count(plan *daemonForkPlan, id actor.ActorID) int {
 // resolver knows NOTHING: a daemon-placed body must never be built here.
 //
 // routes is the space device host the Home is wired to (platform.DaemonRoutes,
-// satisfied by *daemonhost.Host structurally, exactly as app.go wires
+// satisfied by *daemonhost.Host structurally, exactly as engineboot wires
 // a.daemonHost in) — supplied by the caller because in production it is
 // space-scoped, constructed once, well outside any one channel's Open call.
 func openDaemonForkChannel(
@@ -198,6 +197,7 @@ func openDaemonForkChannel(
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		DaemonRoutes:         routes,
+		RegistryBindings:     oneBindingReader{},
 		BootstrapDeclarations: []DeclareRequest{{
 			SourceDeclID: daemonForkDecl, Kind: actor.KindAgent,
 			Class: daemonForkParentClass, Placement: placement,
@@ -208,11 +208,6 @@ func openDaemonForkChannel(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.closeInternal("test") })
-	if _, err := h.opEntry.AttachDaemon(context.Background(), channelspec.DaemonRequest{
-		Ref: "test:attach:" + uuid.NewString(), DaemonID: daemonForkDomain,
-	}); err != nil {
-		t.Fatalf("bind the daemon: %v", err)
-	}
 	return h
 }
 

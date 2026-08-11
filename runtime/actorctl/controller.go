@@ -243,6 +243,7 @@ func (c *Controller) ActorFacts(
 	}
 	return storespec.ActorFacts{
 		Kind: value.Record.Kind, Principal: value.Record.Principal,
+		SourceDeclID: value.Record.SourceDeclID,
 	}, true, nil
 }
 

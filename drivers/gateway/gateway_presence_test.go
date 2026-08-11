@@ -107,7 +107,7 @@ func TestCrossChannelPresenceIsolated(t *testing.T) {
 }
 
 // TestT6RealRemoveCascadeIsolated (DoD-2/T6 消融钉锚): the canonical T6
-// anchor driven through the Bundle SysOp revoke path — the channel's cascade must
+// anchor driven through the channel operate-frame revoke path — the cascade must
 // torn c1's slot down (RemoveSubjectSlot: a later SubjectSlotFor lookup on the SAME id
 // misses), and c2's slot/presence account must be UNTOUCHED — proving the T6-era bug
 // ("一人两频道共享同一 per-identity 槽") cannot recur: a c1 removal's cascade has no
@@ -259,7 +259,7 @@ func TestPresenceConvergesFromAnyDirty(t *testing.T) {
 
 // TestPresenceTickConvergesWithoutPoke is the periodic half of DoD-6/7④: after the
 // real presence loop has drained the attach poke and is waiting, a membership route is
-// added without an OnRelationChange wire. Only the injected PresenceTick alarm can
+// added without a projection-event wire. Only the injected PresenceTick alarm can
 // wake the loop; advancing the clock proves that timer path publishes online.
 func TestPresenceTickConvergesWithoutPoke(t *testing.T) {
 	clk := newClock()
@@ -445,14 +445,26 @@ func TestCloseCleanupNarrow(t *testing.T) {
 	// A foreign-epoch slot parked in coverage (异代): its testimony is at a HIGHER epoch,
 	// so Close's ForgetEpoch(100) is a CAS no-op. (A real admitted slot, published at a
 	// foreign epoch directly.)
-	fid, _ := h.Admit(context.Background(), "human", "ghost")
-	foreign, _ := h.SubjectSlotFor(fid)
+	fid, err := h.Admit(context.Background(), "human", "ghost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, ok := h.SubjectSlotFor(fid)
+	if !ok {
+		t.Fatal("ghost subject slot unavailable")
+	}
 	foreign.PublishCurrent(999, subjectgate.LevelOnline)
 	g.coverage[covKey{principal: "ghost", channel: "c"}] = &covEntry{slot: foreign}
 
 	// An offline残值 slot: it went offline and was销账 from coverage (not present at Close).
-	rid, _ := h.Admit(context.Background(), "human", "residual")
-	residual, _ := h.SubjectSlotFor(rid)
+	rid, err := h.Admit(context.Background(), "human", "residual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	residual, ok := h.SubjectSlotFor(rid)
+	if !ok {
+		t.Fatal("residual subject slot unavailable")
+	}
 	residual.PublishCurrent(100, subjectgate.LevelOnline)
 	residual.PublishCurrent(100, subjectgate.LevelOffline)
 

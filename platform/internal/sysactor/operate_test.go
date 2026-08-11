@@ -56,7 +56,6 @@ type stubExecutor struct {
 	introduced int
 	removed    int
 	restarted  int
-	setDefault int
 	err        error
 	result     any
 }
@@ -69,8 +68,6 @@ func (s *stubExecutor) Execute(ctx context.Context, operation string, req Operat
 		return s.Remove(ctx, req)
 	case TypeRestartActor:
 		return s.Restart(ctx, req)
-	case TypeSetDefaultAgent:
-		return s.SetDefaultAgent(ctx, req)
 	default:
 		return nil, errors.New("unsupported operation")
 	}
@@ -86,10 +83,6 @@ func (s *stubExecutor) Remove(context.Context, OperateRequest) (any, error) {
 }
 func (s *stubExecutor) Restart(context.Context, OperateRequest) (any, error) {
 	s.restarted++
-	return s.result, s.err
-}
-func (s *stubExecutor) SetDefaultAgent(context.Context, OperateRequest) (any, error) {
-	s.setDefault++
 	return s.result, s.err
 }
 

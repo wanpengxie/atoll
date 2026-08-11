@@ -61,8 +61,8 @@ func TestOwnerTerminalGuardRefusesAtTheDoor(t *testing.T) {
 	}
 
 	// The owner is protected: refused with the typed door error, still active.
-	_, err = h.opEntry.Remove(ctx, channelspec.RemoveRequest{
-		Ref: "remove-owner", Target: ownerID, InitiatorActorID: agentID,
+	_, err = h.opEntry.remove(ctx, removeRequest{
+		Target: ownerID, InitiatorActorID: agentID,
 	})
 	var opErr *channelspec.OperationError
 	if !errors.As(err, &opErr) || opErr.Code != channelspec.ErrCodeProtectedActor {
@@ -73,8 +73,8 @@ func TestOwnerTerminalGuardRefusesAtTheDoor(t *testing.T) {
 	}
 
 	// A non-owner member passes the same door.
-	result, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
-		Ref: "remove-agent", Target: agentID, InitiatorActorID: agentID,
+	result, err := h.opEntry.remove(ctx, removeRequest{
+		Target: agentID, InitiatorActorID: agentID,
 	})
 	if err != nil {
 		t.Fatalf("removing a non-owner member: %v", err)

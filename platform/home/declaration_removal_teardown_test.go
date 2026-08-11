@@ -107,7 +107,7 @@ func TestRemovingADeclaredInstanceUnpublishesItsDesiredRowAndTearsTheBodyDown(t 
 		return ok && snapshot.Actual == actorhost.ActualBody && snapshot.Unit.IsAlive()
 	})
 
-	if err := removeThroughSysOp(h, ctx, instance); err != nil {
+	if err := removeActorForTest(h, ctx, instance); err != nil {
 		t.Fatalf("remove the declared instance: %v", err)
 	}
 

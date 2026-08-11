@@ -295,7 +295,8 @@ func TestStorageSiblingSharesItsLaneLifecycle(t *testing.T) {
 	t.Run("lane retirement takes the sibling", func(t *testing.T) {
 		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
 		storage := openTestStorageSibling(t, host, carrier, lane)
-		host.RetireLane("daemon-a", "channel-a")
+		lane.RetireLogical()
+		lane.CollectPhysical()
 		expectStreamDeath(t, storage, "the lane retired but its storage sibling stayed live")
 	})
 

@@ -27,7 +27,7 @@ type StorageMount struct {
 // The runtime tree DEFINES this contract; platform assembly FILLS it
 // (injected from the space daemon host's positive-ready lane view —
 // injection-point discipline: "注入点契约 runtime 定,实现填充下游做"). This
-// package never imports platform/app to answer it itself.
+// package never imports a composition root to answer it itself.
 type StorageMounts interface {
 	ListStorageDaemons(ctx context.Context, channelID channel.ID) ([]StorageMount, error)
 }

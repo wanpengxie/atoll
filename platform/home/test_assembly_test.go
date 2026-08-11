@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/internal/sysactor"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -27,6 +29,15 @@ func (emptyCompositionResolver) BuildClass(channel.ID, actor.ActorID, string, js
 	return platform.ActorFactory{}, false
 }
 
+type emptyBindingReader struct{}
+
+func (emptyBindingReader) IsBound(context.Context, channel.ID, string) (bool, error) {
+	return false, nil
+}
+func (emptyBindingReader) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
+	return nil, nil
+}
+
 func completeHomeTestConfig(cfg Config) Config {
 	if cfg.CompositionResolver == nil {
 		cfg.CompositionResolver = emptyCompositionResolver{}
@@ -34,28 +45,40 @@ func completeHomeTestConfig(cfg Config) Config {
 	if cfg.IntroductionResolver == nil {
 		cfg.IntroductionResolver = inertIntroductionResolver{}
 	}
+	if cfg.RegistryBindings == nil {
+		cfg.RegistryBindings = emptyBindingReader{}
+	}
 	return cfg
 }
 
-// admitThroughSysOp and removeThroughSysOp keep white-box setup on the same
-// serving gate as production. They add only fresh test coordinates; they do not
-// expose a second mutation path.
-func admitThroughSysOp(h *Home, ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
+// introduceHumanForTest and removeActorForTest drive the same frame executor as
+// the channel system actor, without exposing a second production mutation face.
+func introduceHumanForTest(h *Home, ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
 	if kind != actor.KindHuman {
-		return "", &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "admit creates human identities"}
+		return "", &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "human kind required"}
 	}
-	result, err := SystemOps(h).Admit(ctx, channelspec.AdmitRequest{Ref: "test:admit:" + uuid.NewString(), Principal: principal})
-	return result.ActorID, err
+	value, err := h.opEntry.Execute(ctx, "channel.introduce_actor", sysactor.OperateRequest{
+		Anchor: uuid.NewString(), Payload: json.RawMessage(`{"kind":"human","principal":"` + principal + `"}`),
+	})
+	if err != nil {
+		return "", err
+	}
+	return value.(map[string]any)["instance_id"].(actor.ActorID), nil
 }
 
-func removeThroughSysOp(h *Home, ctx context.Context, target actor.ActorID) error {
-	_, err := SystemOps(h).Remove(ctx, channelspec.RemoveRequest{
-		Ref: "test:remove:" + uuid.NewString(), Target: target, InitiatorActorID: target,
+func removeActorForTest(h *Home, ctx context.Context, target actor.ActorID) error {
+	payload, _ := json.Marshal(map[string]any{"instance_id": target})
+	_, err := h.opEntry.Execute(ctx, "channel.remove_actor", sysactor.OperateRequest{
+		Sender: target, Anchor: uuid.NewString(), Payload: payload,
 	})
 	return err
 }
 
 func isChannelUnavailableForTest(err error) bool {
 	var opErr *channelspec.OperationError
-	return errors.As(err, &opErr) && opErr.Code == channelspec.ErrCodeChannelUnavailable
+	if errors.As(err, &opErr) {
+		return opErr.Code == channelspec.ErrCodeChannelUnavailable
+	}
+	var wireErr *sysactor.OperateError
+	return errors.As(err, &wireErr) && wireErr.Code == string(channelspec.ErrCodeChannelUnavailable)
 }

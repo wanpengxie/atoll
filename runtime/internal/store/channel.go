@@ -40,7 +40,6 @@ type ChannelStores struct {
 	Principals   storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
 	Actors       storespec.ActorRegistryStore
 	Genesis      storespec.GenesisStore
-	Bindings     storespec.DaemonBindingStore
 	ResourceRead storespec.ResourceReadStore
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
@@ -102,7 +101,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Principals: reg,
 		Actors:     reg,
 		Genesis:    genesisStore{db: db},
-		Bindings:   newDaemonBindings(db, onCommit),
 		Resources:  newResourceRegistry(db),
 		KVDriver:   newKVDriver(db),
 		State:      newStateStore(db),

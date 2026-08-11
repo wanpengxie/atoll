@@ -279,7 +279,7 @@ func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
 	}
 	c := chainWith(t, lg)
 
-	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-app", "agent:p"))
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-agent", "agent:p"))
 	if err != nil {
 		t.Fatalf("typed AppendError should be a reject, not error: %v", err)
 	}

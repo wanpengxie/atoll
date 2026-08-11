@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -23,8 +22,8 @@ const unauthorizedSenderCode = "unauthorized_sender"
 // verdict has ONE authority (this gate).
 //
 // 防 ioctl 法条 (owner 2026-07-05 过堂): this verb table MUST NOT grow linearly.
-// The four types are noun-CRUD on the channel composition (remove_actor=delete a
-// composition row / set_default_agent=update the channel's default-agent field /
+// The three types are noun-CRUD on the channel composition (remove_actor=delete a
+// composition row /
 // introduce_actor=the add-OR-update UPSERT of a composition row, incl. its config
 // field (改配置门, K2=a/S8: config is an existing FIELD on the noun, so 改配置 is
 // CRUD-Update — NOT a new verb) / restart_actor=祈使残渣 foldable into an
@@ -33,10 +32,9 @@ const unauthorizedSenderCode = "unauthorized_sender"
 // Linux's closed verb set + open file-name noun = the pattern; ioctl = the escape
 // hatch this law forbids).
 const (
-	TypeIntroduceActor  = "channel.introduce_actor"
-	TypeRemoveActor     = "channel.remove_actor"
-	TypeRestartActor    = "channel.restart_actor"
-	TypeSetDefaultAgent = platform.TypeSetDefaultAgent
+	TypeIntroduceActor = "channel.introduce_actor"
+	TypeRemoveActor    = "channel.remove_actor"
+	TypeRestartActor   = "channel.restart_actor"
 )
 
 // OperateRequest is the decoded delivery an OperateExecutor acts on: the gate
@@ -62,7 +60,7 @@ type OperateError struct {
 func (e *OperateError) Error() string { return e.Code + ": " + e.Detail }
 
 // OperateExecutor executes one channel-scoped control action the gate has already
-// authorised. It is the INJECTION-POINT CONTRACT (the app assembly fills it; the
+// authorised. It is the INJECTION-POINT CONTRACT (the process assembly fills it; the
 // gate does permission + transport, the executor does the intent write + Home-face
 // call). Each method returns a reply value on success or an error (an *OperateError
 // to pick the code, else mapped to internal_error). nil executor = the injection

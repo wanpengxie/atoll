@@ -14,7 +14,7 @@ import (
 // unrepresentable, not merely blocked by a separate special-case check) and
 // '/' (no nesting via a single segment). Both this package's inputs are
 // substrate-generated day-1 (coord: resourcespec.GenerateCoord's hex(sha256);
-// channelID: whatever shape the app layer mints) — "substrate-generated" is
+// channelID: whatever shape the registrar mints) — "substrate-generated" is
 // not itself a trust argument (§8.4 asserts regardless, "路径全substrate自
 // 生成,无不可信输入面" describes provenance, not a reason to skip the assert).
 var pathSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)

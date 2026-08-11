@@ -182,7 +182,7 @@ func TestCloseSealsAllSessionsBeforePresenceJoin(t *testing.T) {
 // barrierResolver blocks its FIRST Snapshot on `release` (signalling `entered` first),
 // so a test can park the presence loop inside enumeration and hold Gateway.Close at
 // presenceWG.Wait — a real teardown barrier (Snapshot ignores ctx, so the loop only
-// exits AFTER Snapshot returns, exactly like a slow app-side membership query).
+// exits AFTER Snapshot returns, exactly like a slow policy-side membership query).
 type barrierResolver struct {
 	entered chan struct{}
 	release chan struct{}
@@ -287,7 +287,7 @@ func TestSessionClosedThenStartFeedRefused(t *testing.T) {
 }
 
 // hangingResolver signals `entered` on its first Snapshot call, then blocks on
-// `release` FOREVER — it deliberately ignores ctx, modelling a badly-behaved app-side
+// `release` FOREVER — it deliberately ignores ctx, modelling a badly-behaved policy-side
 // resolver (or a stuck DB call) that a bounded ctx timeout cannot rescue.
 type hangingResolver struct {
 	entered chan struct{}

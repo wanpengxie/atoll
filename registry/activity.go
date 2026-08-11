@@ -1,6 +1,6 @@
 package registry
 
-// ActivityType is an app-level durable phase-event type. The registry below is
+// ActivityType is a composition-level durable phase-event type. The registry below is
 // the single vocabulary source used by producers and contract generation.
 type ActivityType string
 

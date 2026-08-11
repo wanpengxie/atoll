@@ -13,6 +13,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -20,6 +21,17 @@ import (
 type testResolver struct {
 	declaration     channelspec.DeclarationFacts
 	declarationLive bool
+}
+
+type testBindings struct{}
+
+func (testBindings) IsBound(context.Context, channel.ID, string) (bool, error) { return false, nil }
+func (testBindings) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
+	return nil, nil
+}
+func (testBindings) ListChannels(context.Context) ([]lagoon.ChannelRow, error) { return nil, nil }
+func (testBindings) GetChannelDesired(context.Context, channel.ID) (lagoon.ChannelRow, bool, error) {
+	return lagoon.ChannelRow{}, false, nil
 }
 
 func (testResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
@@ -37,7 +49,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	liveResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`)}}
-	host, err := New(root, HomeDeps{CompositionResolver: liveResolver, IntroductionResolver: liveResolver})
+	host, err := New(root, testBindings{}, HomeDeps{CompositionResolver: liveResolver, IntroductionResolver: liveResolver, RegistryBindings: testBindings{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +80,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	}
 
 	latestResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"b"}`)}}
-	reopened, err := New(root, HomeDeps{CompositionResolver: latestResolver, IntroductionResolver: latestResolver})
+	reopened, err := New(root, testBindings{}, HomeDeps{CompositionResolver: latestResolver, IntroductionResolver: latestResolver, RegistryBindings: testBindings{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +109,7 @@ func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool
 }
 func newTestHost(t *testing.T) *ChannelHost {
 	t.Helper()
-	host, err := New(t.TempDir(), HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}})
+	host, err := New(t.TempDir(), testBindings{}, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +122,9 @@ func TestMembraneUnregisterPrecedesHomeQuiesce(t *testing.T) {
 	var opened Bundle
 	var host *ChannelHost
 	callback := make(chan error, 1)
-	host, err := New(t.TempDir(), HomeDeps{
+	host, err := New(t.TempDir(), testBindings{}, HomeDeps{
 		CompositionResolver: testResolver{}, IntroductionResolver: testResolver{},
+		RegistryBindings: testBindings{},
 		OnMembraneClose: func(id channel.ID, _ uint64) {
 			if _, visible := host.Acquire(id); visible {
 				callback <- errors.New("closing membrane remained published")

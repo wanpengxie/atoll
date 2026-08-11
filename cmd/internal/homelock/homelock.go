@@ -1,7 +1,7 @@
 // Package homelock pins the home model's process rule: one home, at most one
 // live process. Two processes sharing a home is the double-identity accident
 // in every role — two carriers presenting one device credential, two engines
-// mutating one app db — so the second starter must fail LOUDLY at the door
+// mutating one installation — so the second starter must fail LOUDLY at the door
 // with a human answer, not deep in a driver with a yamux or sqlite growl.
 //
 // Mechanism: flock(LOCK_EX|LOCK_NB) on <home>/.lock, held for the process

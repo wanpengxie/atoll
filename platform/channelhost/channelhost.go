@@ -98,8 +98,8 @@ type CensusEntry struct {
 type HomeDeps struct {
 	CompositionResolver  home.CompositionResolver
 	IntroductionResolver home.IntroductionResolver
-	OnRelationChange     func(channel.ID, []channelspec.RelationDelta)
 	DaemonRoutes         platform.DaemonRoutes
+	RegistryBindings     home.BindingReader
 	OnMembraneOpen       func(channel.ID, uint64, platform.DaemonMembrane)
 	OnMembraneClose      func(channel.ID, uint64)
 	Logger               *slog.Logger
@@ -115,7 +115,6 @@ const (
 
 type entry struct {
 	home           *home.Home
-	sysOp          SysOp
 	generation     uint64
 	state          entryState
 	closed         bool
@@ -128,9 +127,11 @@ type entry struct {
 }
 
 type ChannelHost struct {
-	root   string
-	deps   HomeDeps
-	logger *slog.Logger
+	root        string
+	deps        HomeDeps
+	logger      *slog.Logger
+	registry    RegistryReader
+	convergence *convergenceState
 
 	mu      sync.RWMutex
 	closed  bool
@@ -153,15 +154,21 @@ func (h *ChannelHost) Poke(id channel.ID) bool {
 	return true
 }
 
-func New(root string, deps HomeDeps) (*ChannelHost, error) {
+func New(root string, registry RegistryReader, deps HomeDeps) (*ChannelHost, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("channelhost: root required")
+	}
+	if registry == nil {
+		return nil, errors.New("channelhost: registry required")
 	}
 	if deps.CompositionResolver == nil {
 		return nil, errors.New("channelhost: CompositionResolver required")
 	}
 	if deps.IntroductionResolver == nil {
 		return nil, errors.New("channelhost: IntroductionResolver required")
+	}
+	if deps.RegistryBindings == nil {
+		return nil, errors.New("channelhost: RegistryBindings required")
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("channelhost: create root: %w", err)
@@ -170,7 +177,9 @@ func New(root string, deps HomeDeps) (*ChannelHost, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &ChannelHost{root: root, deps: deps, logger: logger, entries: make(map[channel.ID]*entry), locks: make(map[channel.ID]*sync.Mutex)}, nil
+	h := &ChannelHost{root: root, deps: deps, logger: logger, registry: registry, entries: make(map[channel.ID]*entry), locks: make(map[channel.ID]*sync.Mutex)}
+	h.convergence = newConvergenceState()
+	return h, nil
 }
 
 func encodeID(id channel.ID) (string, error) {
@@ -182,6 +191,17 @@ func encodeID(id channel.ID) (string, error) {
 		return "", ErrInvalidChannelID
 	}
 	return encoded, nil
+}
+
+// DBPath returns the ordinary channel database path used by ChannelHost. Boot
+// uses it only to locate c0 before any host exists; schema creation still goes
+// through runtime.OpenChannel, the same store-opening path Provision uses.
+func DBPath(root string, id channel.ID) (string, error) {
+	encoded, err := encodeID(id)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, encoded+".db"), nil
 }
 
 func decodeID(encoded string) (channel.ID, error) {
@@ -369,7 +389,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 		_ = home.Shutdown(homeInstance)
 		return nil
 	}
-	h.entries[spec.ChannelID] = &entry{home: homeInstance, sysOp: home.SystemOps(homeInstance), generation: generation, state: stateServing, genesisType: spec.ExpectedType}
+	h.entries[spec.ChannelID] = &entry{home: homeInstance, generation: generation, state: stateServing, genesisType: spec.ExpectedType}
 	h.mu.Unlock()
 	notifyGeneration = generation
 	notifyMembrane = home.DaemonMembrane(homeInstance)
@@ -390,13 +410,13 @@ func (h *ChannelHost) openHome(
 		Logger: h.logger, BootstrapOwnerPrincipal: bootstrapOwner,
 		BootstrapDeclarations: bootstrapDeclarations,
 		DaemonRoutes:          h.deps.DaemonRoutes,
+		RegistryBindings:      h.deps.RegistryBindings,
 	}
 	if bootstrap {
 		config.Genesis = genesis
 	} else {
 		config.ExpectedGenesis = genesis
 	}
-	config.OnRelationChange = h.deps.OnRelationChange
 	return home.Open(config)
 }
 
@@ -410,7 +430,7 @@ func (h *ChannelHost) Acquire(id channel.ID) (Bundle, bool) {
 	if entry == nil || entry.state != stateServing || entry.home == nil {
 		return nil, false
 	}
-	return &bundle{home: entry.home, sysOp: entry.sysOp, generation: entry.generation}, true
+	return &bundle{home: entry.home, generation: entry.generation}, true
 }
 
 func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
@@ -571,6 +591,7 @@ func (h *ChannelHost) checkOpen() error {
 // exactly those — and its store close keeps running in the background, where
 // process death is what finally reclaims it.
 func (h *ChannelHost) Close(ctx context.Context) error {
+	h.stopConvergence()
 	h.mu.Lock()
 	h.closed = true
 	entries := make(map[channel.ID]*entry, len(h.entries))

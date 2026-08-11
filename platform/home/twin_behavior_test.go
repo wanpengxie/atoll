@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -205,7 +205,7 @@ func TestEntryAndDurableActorsAreBehaviourallyIdentical(t *testing.T) {
 		if active, err := h.actors.IsActive(ctx, id); err != nil || !active {
 			t.Fatalf("%s twin active=%v err=%v before terminal", name, active, err)
 		}
-		if err := removeThroughSysOp(h, ctx, id); err != nil {
+		if err := removeActorForTest(h, ctx, id); err != nil {
 			t.Fatalf("%s twin terminal: %v", name, err)
 		}
 		if active, err := h.actors.IsActive(ctx, id); err != nil || active {

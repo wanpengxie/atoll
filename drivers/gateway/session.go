@@ -108,7 +108,7 @@ type Session struct {
 	onceClose sync.Once
 }
 
-// Attach opens a session for one authenticated connection (连接模型勘误期: the app
+// Attach opens a session for one authenticated connection (连接模型勘误期: the portal
 // membrane resolved cookie→principal — no channel ACL at connection level). It seats
 // the device (首入 → 踢在场圈) and hands back the session; the attach receipt is now
 // EMPTY (报到 ack — attach is no longer a binding grant). Refused after Close.
@@ -487,7 +487,7 @@ func (s *Session) reconcile() {
 		delete(s.subs, ch)
 	}
 	// Temporary observations use the same periodic/poke reconcile discipline
-	// as membership subscriptions, but are re-evaluated through the app-owned
+	// as membership subscriptions, but are re-evaluated through the injected
 	// observer policy and never published into upstream write eligibility.
 	for ch, sub := range s.subs {
 		if !sub.temporary {

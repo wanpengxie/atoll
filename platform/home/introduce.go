@@ -18,6 +18,7 @@ import (
 func (h *Home) resolveIntroduction(
 	ctx context.Context,
 	declID string,
+	principal string,
 	initiator actor.ActorID,
 ) (actorctl.IntroduceRequest, error) {
 	if declID == "" || initiator == "" {
@@ -84,8 +85,11 @@ func (h *Home) resolveIntroduction(
 	if err != nil {
 		return actorctl.IntroduceRequest{}, err
 	}
+	if principal != "" && kind != actor.KindAgent {
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "only an agent declaration may carry principal"}
+	}
 	return actorctl.IntroduceRequest{
-		DeclID: declID, Kind: kind, Placement: placement,
+		DeclID: declID, Kind: kind, Principal: principal, Placement: placement,
 		Definition: storespec.ActorDefinition{
 			Class:  facts.Class,
 			Config: append(json.RawMessage(nil), facts.Config...),
@@ -96,7 +100,7 @@ func (h *Home) resolveIntroduction(
 // resolveDaemonPlacement picks the placement host for a declaration-backed
 // actor: the first bound daemon.
 func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement, error) {
-	bound, err := h.bindings.ListBoundDaemons(ctx)
+	bound, err := h.registryBindings.ListBoundDevices(ctx, h.channelID)
 	if err != nil {
 		return storespec.Placement{}, err
 	}
@@ -105,5 +109,5 @@ func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement,
 			Code: channelspec.ErrCodeInvalidDesiredHost, Detail: "daemon is not bound to this channel",
 		}
 	}
-	return storespec.NewDaemonPlacement(string(bound[0]))
+	return storespec.NewDaemonPlacement(bound[0].ID)
 }

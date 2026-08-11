@@ -91,7 +91,7 @@ const (
 
 // knownFrameTypes is the SINGLE machine registry of the frame table: every
 // wire frame type and the direction that owns it. Schema generation
-// (app/contract) derives its frame lists from FrameTypesByDirection — never a
+// The wire contract derives its frame lists from FrameTypesByDirection — never a
 // second hand-written copy (codegen has one source). Envelope parsing
 // deliberately does not reject values outside it: downstream growth must
 // remain readable by older clients.

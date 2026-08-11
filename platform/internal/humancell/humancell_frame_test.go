@@ -353,17 +353,9 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 		})
 		return f
 	}
-	base := func(snapshot RoutingSnapshot) (*fakeSys, Deps) {
+	t.Run("event may keep an empty audience", func(t *testing.T) {
 		fs := &fakeSys{self: "human:alice", writeID: "m1"}
 		deps := newDeps("human:alice", nil, false)
-		deps.Routing = func() RoutingSnapshot { return snapshot }
-		deps.IsActive = func(context.Context, actor.ActorID) (bool, error) { return true, nil }
-		deps.Present = func(actor.ActorID) bool { return true }
-		return fs, deps
-	}
-
-	t.Run("event stays empty and ignores default routing", func(t *testing.T) {
-		fs, deps := base(RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"})
 		got := interpretFrame(fs, deps, frame("event"))
 		if got.Type != subjectgate.FrameReceipt {
 			t.Fatalf("got error: %+v", decodeErr(t, got))
@@ -376,44 +368,12 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 		}
 	})
 
-	t.Run("unset", func(t *testing.T) {
-		fs, deps := base(RoutingSnapshot{State: RoutingUnset})
+	t.Run("request must name a recipient", func(t *testing.T) {
+		fs := &fakeSys{self: "human:alice", writeID: "m1"}
+		deps := newDeps("human:alice", nil, false)
 		err := decodeErr(t, interpretFrame(fs, deps, frame("request")))
 		if err.Code != subjectgate.CodeRoutingUnavailable ||
-			err.Detail != "未设置默认应答者，请设置或指名收件人" {
-			t.Fatalf("error=%+v", err)
-		}
-	})
-
-	for _, tc := range []struct {
-		name     string
-		snapshot RoutingSnapshot
-		active   bool
-		present  bool
-	}{
-		{"fold unavailable", RoutingSnapshot{State: RoutingUnavailable}, true, true},
-		{"inactive", RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"}, false, true},
-		{"not present", RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"}, true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fs, deps := base(tc.snapshot)
-			deps.IsActive = func(context.Context, actor.ActorID) (bool, error) { return tc.active, nil }
-			deps.Present = func(actor.ActorID) bool { return tc.present }
-			err := decodeErr(t, interpretFrame(fs, deps, frame("request")))
-			if err.Code != subjectgate.CodeRoutingUnavailable ||
-				err.Detail != "默认应答者当前不可用，请重新设置一次" {
-				t.Fatalf("error=%+v", err)
-			}
-		})
-	}
-
-	t.Run("active read failure", func(t *testing.T) {
-		fs, deps := base(RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"})
-		deps.IsActive = func(context.Context, actor.ActorID) (bool, error) {
-			return false, errors.New("ledger down")
-		}
-		err := decodeErr(t, interpretFrame(fs, deps, frame("request")))
-		if err.Code != subjectgate.CodeUnavailable {
+			err.Detail != "request must name at least one recipient" {
 			t.Fatalf("error=%+v", err)
 		}
 	})

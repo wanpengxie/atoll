@@ -20,8 +20,8 @@
 //
 // Fence (archtest drivers_confinement_test.go): drivers/* may import only the
 // lib/protocol/runtime + platform export faces + registry; the gateway reaches
-// app-side policy (Routing, EntitlementResolver) and the membership poke through
-// injected seams the assembly root wires, never by importing app.
+// injected entitlement policy and the membership poke through
+// seams the assembly root wires.
 package gateway
 
 import (
@@ -62,13 +62,6 @@ const (
 	defaultPumpJoinTimeout = 10 * time.Second
 )
 
-// Routing is the app-domain routing-resolution面 the assembly root injects (design
-// §5.3: routing政策留 app). Given a submit intent whose audience is empty, it
-// resolves the concrete audience + kind. Explicit audience bypasses this function.
-// A per-request routing
-// condition (no reachable brain) comes back as a non-empty retryable detail → the
-// gateway maps it to an unavailable error frame (never written as truth). err is a
-// genuine internal failure.
 // clockSource is the gateway's single injected time source. Now anchors leases and
 // telemetry; NewTimer arms the actual reconcile loops at an ABSOLUTE deadline. The
 // absolute form is load-bearing: a scheduler pause between computing a remaining
@@ -100,7 +93,7 @@ func (t systemTimer) Stop() bool          { return t.timer.Stop() }
 
 // Config configures the Gateway (assembly-root injected).
 type Config struct {
-	// Resolver is the required app-domain entitlement面 (principal → 合法频道集).
+	// Resolver is the required entitlement面 (principal → 合法频道集).
 	Resolver EntitlementResolver
 	Observer ObserverResolver
 	Logger   *slog.Logger
@@ -352,7 +345,7 @@ func (g *Gateway) unregisterPump() {
 // Close tears the gateway down (关站全序): set the全站闩 and freeze the finite Session
 // set → stop the presence loop → close every Session before any blocking join → join
 // presence → clean coverage → bounded read-pump join → wait已获准递交归零. This order
-// lets app close Home only after gateway silence. Idempotent; concurrent callers all
+// lets the owner close Home only after gateway silence. Idempotent; concurrent callers all
 // return only after the one teardown completes.
 func (g *Gateway) Close() error {
 	started := g.clock.Now()

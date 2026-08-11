@@ -1,52 +1,24 @@
+// Package spacetool implements the per-channel syscall actor. It owns no
+// judgement: every accepted word is decoded into the lagoon contract and sent
+// through the c0 corridor.
 package spacetool
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"io"
-
-	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/platform/channelspec"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
-const (
-	TypeListDeclarations   = "space.declarations.list"
-	TypeInspectDeclaration = "space.declarations.inspect"
-	TypeCreateDeclaration  = "space.declarations.create"
-	TypeEditDeclaration    = "space.declarations.edit"
-	TypeRevokeDeclaration  = "space.declarations.revoke"
-	TypeIntroduce          = "space.introduce"
-	TypeRemove             = "space.remove"
-	TypeListResources      = "space.resources.list"
-	TypeFetchResource      = "space.resources.fetch"
-)
-
-type SpaceOps interface {
-	ListDeclarations(context.Context, Requester) ([]DeclSummary, error)
-	InspectDeclaration(context.Context, Requester, string) (DeclDetail, error)
-	CreateDeclaration(context.Context, Requester, DeclSpec) (DeclDetail, error)
-	EditDeclaration(context.Context, Requester, string, DeclSpec) (DeclDetail, error)
-	RevokeDeclaration(context.Context, Requester, string) error
-	Introduce(context.Context, Requester, string, IntroduceOpts) (channel.IntroduceResult, error)
-	Remove(context.Context, Requester, actor.ActorID) (channel.RemoveResult, error)
-	ListResources(context.Context, Requester, channel.ID, channel.ResourceListQuery) (channel.ResourcePage, error)
-	FetchResource(context.Context, Requester, channel.ID, resource.ResourceID) (channel.ResourceFetch, error)
-}
-
-func Def(ops SpaceOps) actorbase.Def {
-	return actorbase.Def{Doc: "space boundary operations", New: func() (actorbase.Proc, error) {
-		return func(sys actorbase.Sys) error { return serve(sys, ops) }, nil
+func Def(binder lagoon.SpaceOpsBinder) actorbase.Def {
+	return actorbase.Def{Doc: "channel-zero registry operations", New: func() (actorbase.Proc, error) {
+		return func(sys actorbase.Sys) error { return serve(sys, binder) }, nil
 	}}
 }
 
-func serve(sys actorbase.Sys, ops SpaceOps) error {
+func serve(sys actorbase.Sys, binder lagoon.SpaceOpsBinder) error {
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
@@ -55,139 +27,135 @@ func serve(sys actorbase.Sys, ops SpaceOps) error {
 		if msg.Kind != message.KindRequest {
 			continue
 		}
-		handle(sys, ops, msg)
+		handle(sys, binder, msg)
 	}
 }
 
-func requester(msg actorbase.Msg) Requester {
-	return Requester{ActorID: msg.Sender.ID, ChannelID: msg.ChannelID, RequestID: string(msg.ID)}
-}
-
-func decode(msg actorbase.Msg, out any) error {
-	if len(msg.Payload) == 0 {
-		return nil
+func decode(raw json.RawMessage, out any) error {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
 	}
-	if err := json.Unmarshal(msg.Payload, out); err != nil {
-		return &channelspec.SpaceError{Code: channelspec.SpaceInvalidRequest, Detail: "invalid JSON payload"}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return &lagoon.Error{Code: lagoon.CodeInvalidArgs, Detail: "invalid JSON payload"}
 	}
 	return nil
 }
 
 func fail(sys actorbase.Sys, msg actorbase.Msg, err error) {
-	var spaceErr *channelspec.SpaceError
-	if errors.As(err, &spaceErr) {
-		_, _ = sys.Fail(msg, string(spaceErr.Code), spaceErr.Detail)
+	var le *lagoon.Error
+	if errors.As(err, &le) {
+		_, _ = sys.Fail(msg, string(le.Code), le.Detail)
 		return
 	}
-	var unknown *ErrResultUnknown
-	if errors.As(err, &unknown) {
-		_, _ = sys.Reply(msg, map[string]any{"status": "result_unknown", "ref": unknown.Ref})
-		return
-	}
-	_, _ = sys.Fail(msg, string(channelspec.SpaceUnavailable), err.Error())
+	_, _ = sys.Fail(msg, "internal_error", err.Error())
 }
 
-func handle(sys actorbase.Sys, ops SpaceOps, msg actorbase.Msg) {
-	if ops == nil {
-		fail(sys, msg, &channelspec.SpaceError{Code: channelspec.SpaceUnavailable})
+func handle(sys actorbase.Sys, binder lagoon.SpaceOpsBinder, msg actorbase.Msg) {
+	if binder == nil {
+		fail(sys, msg, errors.New("space-tool unavailable"))
 		return
 	}
-	req := requester(msg)
-	var result any
+	ops, queries := binder.Bind(lagoon.SubmitIn{Source: msg.ChannelID, Sender: msg.Sender.ID, RequestID: string(msg.ID)})
+	var value any
 	var err error
-	switch msg.Type {
-	case TypeListDeclarations:
-		var declarations []DeclSummary
-		declarations, err = ops.ListDeclarations(msg.Ctx(), req)
-		result = map[string]any{"declarations": declarations}
-	case TypeInspectDeclaration:
-		var p struct {
-			DeclID string `json:"decl_id"`
+	switch lagoon.Word(msg.Type) {
+	case lagoon.WordChannelCreate:
+		var p lagoon.ChannelCreate
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.CreateChannel(msg.Ctx(), p)
 		}
-		if err = decode(msg, &p); err == nil && p.DeclID != "" {
-			var declaration DeclDetail
-			declaration, err = ops.InspectDeclaration(msg.Ctx(), req, p.DeclID)
-			result = map[string]any{"declaration": declaration}
-		} else if err == nil {
-			err = &channelspec.SpaceError{Code: channelspec.SpaceInvalidRequest, Detail: "decl_id required"}
+	case lagoon.WordChannelRetire:
+		var p lagoon.ChannelRetire
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.RetireChannel(msg.Ctx(), p)
 		}
-	case TypeCreateDeclaration:
-		var p DeclSpec
-		if err = decode(msg, &p); err == nil {
-			var declaration DeclDetail
-			declaration, err = ops.CreateDeclaration(msg.Ctx(), req, p)
-			result = map[string]any{"declaration": declaration}
+	case lagoon.WordPrincipalRetire:
+		var p lagoon.PrincipalRetire
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.RetirePrincipal(msg.Ctx(), p)
 		}
-	case TypeEditDeclaration:
-		var p struct {
-			DeclID string   `json:"decl_id"`
-			Spec   DeclSpec `json:"spec"`
+	case lagoon.WordCredentialSet:
+		var p lagoon.CredentialSet
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.SetCredential(msg.Ctx(), p)
 		}
-		if err = decode(msg, &p); err == nil {
-			var declaration DeclDetail
-			declaration, err = ops.EditDeclaration(msg.Ctx(), req, p.DeclID, p.Spec)
-			result = map[string]any{"declaration": declaration}
+	case lagoon.WordDeclRegister:
+		var p lagoon.DeclRegister
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.RegisterDecl(msg.Ctx(), p)
 		}
-	case TypeRevokeDeclaration:
-		var p struct {
-			DeclID string `json:"decl_id"`
+	case lagoon.WordDeclEdit:
+		var p lagoon.DeclEdit
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.EditDecl(msg.Ctx(), p)
 		}
-		if err = decode(msg, &p); err == nil {
-			err = ops.RevokeDeclaration(msg.Ctx(), req, p.DeclID)
-			result = map[string]any{"revoked": p.DeclID}
+	case lagoon.WordDeclRevoke:
+		var p lagoon.DeclRevoke
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.RevokeDecl(msg.Ctx(), p)
 		}
-	case TypeIntroduce:
-		var p struct {
-			DeclID string `json:"decl_id"`
+	case lagoon.WordOverlaySet:
+		var p lagoon.OverlaySet
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.SetOverlay(msg.Ctx(), p)
 		}
-		if err = decode(msg, &p); err == nil {
-			result, err = ops.Introduce(msg.Ctx(), req, p.DeclID, IntroduceOpts{})
+	case lagoon.WordOverlayClear:
+		var p lagoon.OverlayClear
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.ClearOverlay(msg.Ctx(), p)
 		}
-	case TypeRemove:
-		var p struct {
-			Target actor.ActorID `json:"target"`
+	case lagoon.WordDeviceMint:
+		var p lagoon.DeviceMint
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.MintDevice(msg.Ctx(), p)
 		}
-		if err = decode(msg, &p); err == nil {
-			result, err = ops.Remove(msg.Ctx(), req, p.Target)
+	case lagoon.WordDeviceClaim:
+		var p lagoon.DeviceClaim
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.ClaimDevice(msg.Ctx(), p)
 		}
-	case TypeListResources:
-		var p struct {
-			ChannelID channel.ID                `json:"channel_id"`
-			Query     channel.ResourceListQuery `json:"query"`
+	case lagoon.WordDeviceRetire:
+		var p lagoon.DeviceRetire
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.RetireDevice(msg.Ctx(), p)
 		}
-		if err = decode(msg, &p); err == nil {
-			result, err = ops.ListResources(msg.Ctx(), req, p.ChannelID, p.Query)
+	case lagoon.WordDeviceAttach:
+		var p lagoon.DeviceBinding
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.AttachDevice(msg.Ctx(), p)
 		}
-	case TypeFetchResource:
-		var p channel.ResourceRef
-		if err = decode(msg, &p); err == nil {
-			var fetched channel.ResourceFetch
-			fetched, err = ops.FetchResource(msg.Ctx(), req, p.ChannelID, p.ResourceID)
-			if err == nil {
-				defer fetched.Body.Close()
-				var body []byte
-				body, err = io.ReadAll(fetched.Body)
-				if err == nil {
-					newID := resource.ResourceID("space-copy:" + uuid.NewString())
-					out, createErr := sys.Resource().CreateFrom(newID, body, p)
-					if createErr != nil || !out.Accepted() {
-						if createErr != nil {
-							err = createErr
-						} else {
-							err = &channelspec.SpaceError{Code: channelspec.SpaceConflict, Detail: string(out.RejectReason)}
-						}
-					} else {
-						result = map[string]any{"resource_id": newID, "source": p}
-					}
-				}
-			}
+	case lagoon.WordDeviceDetach:
+		var p lagoon.DeviceBinding
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = ops.DetachDevice(msg.Ctx(), p)
 		}
+	case lagoon.WordChannelList:
+		var p lagoon.ChannelList
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = queries.ListChannels(msg.Ctx(), p)
+		}
+	case lagoon.WordChannelGet:
+		var p lagoon.ChannelGet
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = queries.GetChannel(msg.Ctx(), p)
+		}
+	case lagoon.WordChannelCandidates:
+		var p lagoon.ChannelCandidates
+		if err = decode(msg.Payload, &p); err == nil {
+			value, err = queries.ListCandidates(msg.Ctx(), p)
+		}
+	case lagoon.WordDeclList:
+		value, err = queries.ListDecls(msg.Ctx())
+	case lagoon.WordDeviceList:
+		value, err = queries.ListDevices(msg.Ctx())
+	case lagoon.WordPrincipalMe:
+		value, err = queries.Me(msg.Ctx())
 	default:
-		err = &channelspec.SpaceError{Code: channelspec.SpaceInvalidRequest, Detail: "unsupported space operation"}
+		err = &lagoon.Error{Code: lagoon.CodeInvalidArgs, Detail: "unsupported space operation"}
 	}
 	if err != nil {
 		fail(sys, msg, err)
 		return
 	}
-	_, _ = sys.Reply(msg, result)
+	_, _ = sys.Reply(msg, value)
 }

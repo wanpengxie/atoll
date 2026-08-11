@@ -10,7 +10,6 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -184,8 +183,8 @@ func TestBuildVoidedByRemovalIsNeverPublished_ReconcilePath(t *testing.T) {
 	}
 
 	// Membership truth moves while both builds are held open.
-	if _, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
-		Ref: "build-window:remove", Target: doomed, InitiatorActorID: doomed,
+	if _, err := h.opEntry.remove(ctx, removeRequest{
+		Target: doomed, InitiatorActorID: doomed,
 	}); err != nil {
 		t.Fatalf("remove the member under construction: %v", err)
 	}
@@ -238,8 +237,8 @@ func TestBuildVoidedByRemovalIsNeverPublished_RebuildAfterExitPath(t *testing.T)
 		t.Fatalf("the replacement build parked for %s, want %s", got, doomed)
 	}
 
-	if _, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
-		Ref: "build-window:remove-rebuild", Target: doomed, InitiatorActorID: doomed,
+	if _, err := h.opEntry.remove(ctx, removeRequest{
+		Target: doomed, InitiatorActorID: doomed,
 	}); err != nil {
 		t.Fatalf("remove the member under reconstruction: %v", err)
 	}

@@ -1,246 +1,368 @@
-// Package engineboot is the engine assembly root shared by the two binaries
-// that run a server (cmd/server, and cmd/atoll's `up`): open the process db,
-// build the App, wire the human-ingress gateway, start the convergence arm,
-// serve until signal, tear down in order. One assembly, two packagings — the
-// wiring semantics (resolver bridges, phase order, shutdown order) live here
-// exactly once, and ONLY here: Engine's internals are private, so every
-// packaging drives the engine through the same four doors
-// (ProvisionLocalNode / RotateOwnerToken / Serve+Ready / Close) and none can
-// reach the db or gateway to invent its own boot or teardown.
-//
-// Phase order is the point ("先布置店面，再开门营业"): Boot wires AND starts
-// the background convergence arm with the port still closed, so provisioning
-// runs against a live engine that nobody outside can see yet; Serve binds the
-// listener LAST and closes Ready() the moment it exists. A connectable node
-// is therefore always a fully-provisioned node, and readiness is a fact the
-// engine states — never something a caller infers by poking the port.
-//
-// NOTE: engineboot must never import drivers/devicehost — the server assembly
-// is storage-free by 期11 §8.2's red line (storagehost's doc pins it); the
-// device carrier is composed NEXT TO the engine by cmd/atoll, not inside it.
+// Package engineboot is the sole running-process assembly root.
 package engineboot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"sync"
 	"time"
 
-	"github.com/wanpengxie/atoll/app"
-	"github.com/wanpengxie/atoll/app/contract"
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/drivers/gateway"
-	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
+	"github.com/wanpengxie/atoll/drivers/gateway/portal"
+	"github.com/wanpengxie/atoll/platform/boot"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/daemonhost"
+	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// shutdownTimeout bounds the in-flight drain so a wedged request cannot hold
-// the process open forever.
 const shutdownTimeout = 30 * time.Second
+const contractVersion = "5"
 
-// Config selects the engine's stores and listen address.
 type Config struct {
-	DBPath       string
 	ChannelDBDir string
 	Addr         string
-	UIDist       string
-	InitDB       bool
+	TokenPath    string
+	RootPassword string
 }
 
-// Engine is a booted engine: everything wired, the convergence arm running,
-// nothing bound to the listen address yet. Provision between Boot and Serve.
 type Engine struct {
-	app       *app.App
-	processDB *app.ProcessDB
-	gw        *gateway.Gateway
-	cfg       Config
-	logger    *slog.Logger
-	ready     chan struct{}
-	boundAddr string
+	cfg        Config
+	logger     *slog.Logger
+	registry   *lagoon.Registry
+	host       *channelhost.ChannelHost
+	daemonHost *daemonhost.Host
+	gateway    *gateway.Gateway
+	sessions   *gateway.SessionStore
+	submitter  lagoon.Submitter
+	handler    http.Handler
+	server     *http.Server
+	ready      chan struct{}
+	boundAddr  string
+	closeOnce  sync.Once
+	closeErr   error
 }
 
-// Boot opens stores, wires the full assembly (app + gateway + connector) and
-// starts the background convergence arm — everything except the listener.
 func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
-	processDB, err := app.OpenProcessDB(cfg.DBPath, cfg.InitDB)
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if cfg.ChannelDBDir == "" {
+		return nil, errors.New("engineboot: channel db dir required")
+	}
+	installed, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: cfg.ChannelDBDir, RootPassword: cfg.RootPassword})
 	if err != nil {
 		return nil, err
 	}
-	a, err := app.New(app.Config{
-		DB:     processDB.DB,
-		Logger: logger,
-		HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
-			return channelhost.New(cfg.ChannelDBDir, deps)
-		},
-		UIDist: cfg.UIDist,
+	if installed.Installed && installed.RootPassword != "" {
+		logger.Info("atoll installed", "root_password", installed.RootPassword)
+	}
+	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.NewSessionStore()}
+	var host *channelhost.ChannelHost
+	e.registry, err = lagoon.Open(installed.C0DBPath, func(change lagoon.Change) {
+		if host != nil {
+			host.RegistryChanged(change)
+		}
 	})
 	if err != nil {
-		processDB.Close()
 		return nil, err
 	}
-	// Human-ingress gateway (gateway 期 S3, 连接模型勘误期): constructed AFTER the
-	// app so it can hold the app's routing + entitlement面, then injected back
-	// (the construction cycle is broken by the setters). ChannelHost wires
-	// membrane relation-change emit points through HomeDeps.OnRelationChange to
-	// Gateway.Poke directly; the entitlement resolver bridges the app's own DTO
-	// into gateway.Route (app → drivers is fenced, so the assembly root does the
-	// DTO→DTO map here).
-	gw, err := gateway.New(gateway.Config{
-		Resolver: gatewayResolver(a),
-		Observer: gatewayObserverResolver(a),
-		Logger:   logger,
-	})
+	resolver := &assemblyResolver{registry: e.registry, logger: logger}
+	// The init host opens only the already-installed c0. No gateway, device host,
+	// other channel, or convergence loop exists before registrar reconciliation.
+	e.host, err = channelhost.New(cfg.ChannelDBDir, e.registry, channelhost.HomeDeps{CompositionResolver: resolver, IntroductionResolver: resolver, RegistryBindings: e.registry, Logger: logger})
 	if err != nil {
-		processDB.Close()
-		return nil, err
+		return nil, e.fail(err)
 	}
-	gw.Start()
-	a.SetGateway(web.New(gw, contract.Version))
-	a.SetMembershipPoke(gw.Poke)
-	// Assembly complete — start the convergence arm now, with the port still
-	// closed: reopened channels converge and provisioning verbs work while the
-	// node is not yet visible to anyone.
-	a.Start()
-	return &Engine{app: a, processDB: processDB, gw: gw, cfg: cfg, logger: logger, ready: make(chan struct{})}, nil
+	host = e.host
+	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host}, resolver)
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
+		return nil, e.fail(fmt.Errorf("open c0: %w", err))
+	}
+	c0, ok := e.host.Acquire(protocol.C0ChannelID)
+	if !ok {
+		return nil, e.fail(errors.New("c0 did not publish"))
+	}
+	if err := resolver.registrar.ReconcileSystem(context.Background()); err != nil {
+		return nil, e.fail(fmt.Errorf("reconcile registry system rows: %w", err))
+	}
+	if cfg.TokenPath != "" {
+		if _, err := gateway.MintAutomationToken(e.sessions, protocol.RootPrincipalID, cfg.TokenPath); err != nil {
+			return nil, e.fail(err)
+		}
+	}
+
+	// Cross the init line: retire the c0-only host, start line-side mechanisms,
+	// then reopen c0 through the same ordinary ChannelHost path with full deps.
+	host = nil
+	if err := e.host.Close(context.Background()); err != nil {
+		return nil, e.fail(fmt.Errorf("close init c0: %w", err))
+	}
+	e.daemonHost = daemonhost.New(daemonhost.Config{Logger: logger, Present: func(ctx context.Context) ([]channel.ID, error) {
+		rows, err := e.registry.ListPresentChannels(ctx)
+		out := make([]channel.ID, len(rows))
+		for i, row := range rows {
+			out[i] = row.ID
+		}
+		return out, err
+	}, DaemonFact: func(ctx context.Context, id string) daemonhost.DaemonFact {
+		status, ok, err := e.registry.GetDeviceFact(ctx, id)
+		if err != nil {
+			return daemonhost.DaemonUnavailable
+		}
+		if !ok || status == lagoon.DeviceRetired {
+			return daemonhost.DaemonDeleted
+		}
+		return daemonhost.DaemonAlive
+	}})
+	e.host, err = channelhost.New(cfg.ChannelDBDir, e.registry, channelhost.HomeDeps{CompositionResolver: resolver, IntroductionResolver: resolver, RegistryBindings: e.registry, Logger: logger, DaemonRoutes: e.daemonHost, OnMembraneOpen: e.daemonHost.Register, OnMembraneClose: e.daemonHost.Unregister})
+	if err != nil {
+		return nil, e.fail(err)
+	}
+	host = e.host
+	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host}, resolver)
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
+		return nil, e.fail(fmt.Errorf("reopen c0 after init: %w", err))
+	}
+	c0, ok = e.host.Acquire(protocol.C0ChannelID)
+	if !ok {
+		return nil, e.fail(errors.New("reopened c0 did not publish"))
+	}
+	e.submitter = lagoon.NewSubmitter(c0.RegistrarCaller(), sourceFacts{host: e.host}, e.registry)
+	resolver.binder = lagoon.NewSpaceOps(e.submitter)
+	if err := e.host.StartConvergence(); err != nil {
+		return nil, e.fail(err)
+	}
+	e.gateway, err = gateway.New(gateway.Config{Resolver: gateway.ResolverFunc(e.resolveEntitlements), Logger: logger})
+	if err != nil {
+		return nil, e.fail(err)
+	}
+	e.gateway.Start()
+	p := portal.New(portal.Config{Registry: e.registry, Submitter: e.submitter, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, ContractVersion: contractVersion})
+	e.handler = p
+	return e, nil
 }
 
-// Ready is closed the moment the listener is bound (inside Serve) — the
-// engine's own readiness statement, for whoever composes alongside it (the
-// in-process device carrier dials only after this).
+func (e *Engine) resolveEntitlements(ctx context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
+	rows, err := e.registry.ListPresentChannels(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var routes []gateway.Route
+	var failed []channel.ID
+	for _, row := range rows {
+		bundle, ok := e.host.Acquire(row.ID)
+		if !ok {
+			failed = append(failed, row.ID)
+			continue
+		}
+		id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+		if err != nil {
+			failed = append(failed, row.ID)
+			continue
+		}
+		if found {
+			routes = append(routes, gateway.Route{Channel: row.ID, Bundle: bundle, SubjectID: id})
+		}
+	}
+	return routes, failed, nil
+}
+
+type ProvisionResult struct {
+	HomeChannelID channel.ID
+	DeviceID      string
+	DeviceKey     string
+}
+
+func (e *Engine) ProvisionLocalNode(ctx context.Context) (ProvisionResult, error) {
+	rootActor, err := e.principalActor(ctx, protocol.C0ChannelID, protocol.RootPrincipalID)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	call := func(word lagoon.Word, payload any) (lagoon.Reply, error) {
+		return e.submitter.Submit(ctx, lagoon.SubmitIn{Source: protocol.C0ChannelID, Sender: rootActor, RequestID: uuid.NewString(), Word: word, Payload: payload})
+	}
+	if _, err := call(lagoon.WordDeviceAttach, lagoon.DeviceBinding{ChannelID: protocol.C0ChannelID, DeviceID: protocol.LocalDeviceID}); err != nil {
+		return ProvisionResult{}, err
+	}
+	reply, err := call(lagoon.WordChannelCreate, lagoon.ChannelCreate{Name: protocol.RootPrincipalID, Parent: protocol.C0ChannelID})
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	var home lagoon.ChannelRow
+	if !decodeValue(reply.Value, &home) {
+		return ProvisionResult{}, errors.New("provision: invalid home reply")
+	}
+	if err := e.waitChannel(ctx, home.ID); err != nil {
+		return ProvisionResult{}, err
+	}
+	stewardDecl := lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward")
+	if _, err := call(lagoon.WordDeclRegister, lagoon.DeclRegister{ID: stewardDecl, Name: "Steward", Class: "codex", Config: json.RawMessage(`{}`), Visibility: "private"}); err != nil {
+		return ProvisionResult{}, err
+	}
+	if err := e.introduce(ctx, protocol.C0ChannelID, protocol.RootPrincipalID, stewardDecl, protocol.StewardPrincipalID); err != nil {
+		return ProvisionResult{}, err
+	}
+	homeActor, err := e.principalActor(ctx, home.ID, protocol.RootPrincipalID)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	homeCall := func(word lagoon.Word, payload any) (lagoon.Reply, error) {
+		return e.submitter.Submit(ctx, lagoon.SubmitIn{Source: home.ID, Sender: homeActor, RequestID: uuid.NewString(), Word: word, Payload: payload})
+	}
+	codexID := lagoon.HomeCodexDeclID(protocol.RootPrincipalID)
+	if _, err := homeCall(lagoon.WordDeclRegister, lagoon.DeclRegister{ID: codexID, Name: "home-codex", Class: "codex", Config: json.RawMessage(`{}`), Visibility: "private"}); err != nil {
+		return ProvisionResult{}, err
+	}
+	if err := e.introduce(ctx, home.ID, protocol.RootPrincipalID, codexID, ""); err != nil {
+		return ProvisionResult{}, err
+	}
+	device, ok, err := e.registry.GetDevice(ctx, protocol.LocalDeviceID)
+	if err != nil || !ok {
+		return ProvisionResult{}, errors.Join(err, errors.New("local device missing"))
+	}
+	return ProvisionResult{HomeChannelID: home.ID, DeviceID: device.ID, DeviceKey: device.Key}, nil
+}
+
+func (e *Engine) principalActor(ctx context.Context, ch channel.ID, principal string) (actor.ActorID, error) {
+	deadline := time.NewTicker(50 * time.Millisecond)
+	defer deadline.Stop()
+	for {
+		if bundle, ok := e.host.Acquire(ch); ok {
+			id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+			if err != nil {
+				return "", err
+			}
+			if found {
+				return id, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline.C:
+		}
+	}
+}
+func (e *Engine) waitChannel(ctx context.Context, ch channel.ID) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, ok := e.host.Acquire(ch); ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+func (e *Engine) introduce(ctx context.Context, ch channel.ID, principal, declID, ownPrincipal string) error {
+	bundle, ok := e.host.Acquire(ch)
+	if !ok {
+		return errors.New("channel unavailable")
+	}
+	sender, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+	if err != nil || !found {
+		return errors.Join(err, errors.New("principal is not a member"))
+	}
+	slot, ok := bundle.Gateway().SubjectSlotFor(sender)
+	if !ok {
+		return errors.New("subject slot unavailable")
+	}
+	payload := map[string]any{"kind": "agent", "decl_id": declID}
+	if ownPrincipal != "" {
+		payload["principal"] = ownPrincipal
+	}
+	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(ch), ID: uuid.NewString(), MsgType: "channel.introduce_actor", Kind: "request", Audience: []string{string(actor.SystemActorID)}, Visibility: "public", Payload: mustJSON(payload)})
+	if err != nil {
+		return err
+	}
+	if _, err := slot.Deliver(ctx, frame); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		ids, err := bundle.View().DeclaredInstances(ctx, declID)
+		if err == nil && len(ids) == 1 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (e *Engine) Ready() <-chan struct{} { return e.ready }
-
-// BoundAddr is the listener's ACTUAL address (":0" resolved to a real port).
-// Valid only after Ready is closed; callers must synchronize via Ready.
-// Anything dialing the engine must use this, never the configured address
-// string.
-func (e *Engine) BoundAddr() string { return e.boundAddr }
-
-// ProvisionLocalNode provisions the node against the booted (not yet
-// listening) engine. The caller resolves the spec from the node home (token
-// path, the device home's identity claim) and persists the resulting identity
-// back — the engine never touches device storage.
-func (e *Engine) ProvisionLocalNode(ctx context.Context, spec app.ProvisionSpec) (app.ProvisionResult, error) {
-	return e.app.ProvisionLocalNode(ctx, spec)
-}
-
-// RotateOwnerToken rotates the local automation credential (`--init`'s minimal
-// bootstrap; the same primitive ProvisionLocalNode runs first).
-func (e *Engine) RotateOwnerToken(ctx context.Context, tokenPath string) error {
-	_, err := app.BootstrapOwnerToken(ctx, e.processDB.DB, tokenPath)
-	return err
-}
-
-// Serve binds the listen address (closing Ready), runs the HTTP entry until
-// ctx is done or the entry fails, then runs the ordered graceful teardown.
-// EVERY return path has torn the engine down — signal, runtime failure, even
-// a bind failure (Ready stays open then) — so "Serve returned" always means
-// "nothing is left running"; callers never clean up engine internals.
+func (e *Engine) BoundAddr() string      { return e.boundAddr }
 func (e *Engine) Serve(ctx context.Context) error {
 	ln, err := net.Listen("tcp", e.cfg.Addr)
 	if err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		return errors.Join(err, gracefulShutdown(shutdownCtx, e.logger, e.app, e.gw, e.processDB))
+		_ = e.Close(context.Background())
+		return err
 	}
-	// Register the HTTP server BEFORE announcing ready or spawning the loop:
-	// from here on, a teardown's Shutdown always reaches the server — no
-	// window where a late-scheduled goroutine starts serving after teardown
-	// already ran ("Serve returned ⇒ nothing left running" must hold on every
-	// interleaving).
-	run := e.app.PrepareServe(ln)
+	e.server = &http.Server{Handler: e.handler}
 	e.boundAddr = ln.Addr().String()
 	close(e.ready)
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- run() }()
-
+	done := make(chan error, 1)
+	go func() {
+		err := e.server.Serve(ln)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		done <- err
+	}()
 	select {
-	case err := <-serveErr:
-		// Serve returned before ctx ended — a startup/runtime failure. The
-		// entry is dead but everything Boot started (gateway, channel host,
-		// db) is not: run the SAME ordered teardown, so no caller ever
-		// inherits half-open resources and "process death as cleanup".
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		return errors.Join(err, gracefulShutdown(shutdownCtx, e.logger, e.app, e.gw, e.processDB))
+	case err := <-done:
+		_ = e.Close(context.Background())
+		return err
 	case <-ctx.Done():
-		e.logger.Info("server: signal received, shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		shutdownErr := gracefulShutdown(shutdownCtx, e.logger, e.app, e.gw, e.processDB)
-		// Join the serve goroutine before returning: Shutdown closed the
-		// listener, so the loop's exit is imminent — but "imminent" is not
-		// "returned", and the invariant is about EVERY goroutine this call
-		// started, not just the resources it closed.
-		return errors.Join(shutdownErr, <-serveErr)
+		shutdownErr := e.server.Shutdown(shutdownCtx)
+		serveErr := <-done
+		return errors.Join(shutdownErr, serveErr, e.Close(shutdownCtx))
 	}
 }
-
-// Close tears down a booted engine that never served (a provision failure
-// between Boot and Serve): the same ordered teardown — the HTTP drain no-ops
-// with no listener — so the db is cleanly closed before any caller cleanup
-// touches its files.
 func (e *Engine) Close(ctx context.Context) error {
-	return gracefulShutdown(ctx, e.logger, e.app, e.gw, e.processDB)
-}
-
-// appShutdowner is the graceful-teardown surface gracefulShutdown drives (App
-// satisfies it). Close takes the same shutdown budget as the drain: every step
-// spends from one purse, and a step that exhausts it abandons its stragglers
-// with an account instead of holding the process for the supervisor's KILL.
-type appShutdowner interface {
-	Shutdown(context.Context) error
-	Close(context.Context) error
-}
-
-// gracefulShutdown runs the ordered teardown — the order IS the semantics: ①
-// drain the HTTP entry (stop accepting, finish in-flight), ② silence the gateway
-// (关站全序: 停在场圈 → close every session → join read pumps → 等已获准递交归零 —
-// gateway先静默 before ChannelHost, 连接模型勘误期 §3.2 / DoD-9), ③ close space
-// workers and ChannelHost (the substrate behind the entry), ④ close the app db.
-// Each step logs before it runs so the order is assertable. All run even if an
-// earlier one errors; errors are joined.
-func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner, gw io.Closer, db io.Closer) error {
-	logger.Info("server: shutdown step 1/4: draining http")
-	e1 := a.Shutdown(ctx)
-	logger.Info("server: shutdown step 2/4: silencing gateway")
-	e2 := gw.Close()
-	logger.Info("server: shutdown step 3/4: closing space workers and channel host")
-	e3 := a.Close(ctx)
-	logger.Info("server: shutdown step 4/4: closing app db")
-	e4 := db.Close()
-	return errors.Join(e1, e2, e3, e4)
-}
-
-// gatewayResolver bridges the app's own entitlement DTO into the gateway's
-// EntitlementResolver seam (连接模型勘误期 §3.2: app → drivers is fenced, so the
-// assembly root maps DTO→DTO). The app resolves each principal's memberships;
-// the bridge is a pure field-for-field carry.
-func gatewayResolver(a *app.App) gateway.EntitlementResolver {
-	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
-		routes, failed, err := a.EntitlementSnapshot(ctx, principal)
-		if err != nil {
-			return nil, nil, err
+	e.closeOnce.Do(func() {
+		if e.server != nil {
+			e.closeErr = errors.Join(e.closeErr, e.server.Shutdown(ctx))
 		}
-		gr := make([]gateway.Route, 0, len(routes))
-		for _, r := range routes {
-			gr = append(gr, gateway.Route{
-				Channel:   r.Channel,
-				Bundle:    r.Bundle,
-				SubjectID: r.SubjectID,
-			})
+		if e.gateway != nil {
+			e.closeErr = errors.Join(e.closeErr, e.gateway.Close())
 		}
-		return gr, failed, nil
+		if e.daemonHost != nil {
+			e.closeErr = errors.Join(e.closeErr, e.daemonHost.Close(ctx))
+		}
+		if e.host != nil {
+			e.closeErr = errors.Join(e.closeErr, e.host.Close(ctx))
+		}
+		if e.registry != nil {
+			e.closeErr = errors.Join(e.closeErr, e.registry.Close())
+		}
 	})
+	return e.closeErr
 }
+func (e *Engine) fail(err error) error { _ = e.Close(context.Background()); return err }
+func decodeValue(in, out any) bool {
+	raw, err := json.Marshal(in)
+	return err == nil && json.Unmarshal(raw, out) == nil
+}
+func mustJSON(v any) json.RawMessage { raw, _ := json.Marshal(v); return raw }
 
-func gatewayObserverResolver(a *app.App) gateway.ObserverResolver {
-	return gateway.ObserverResolverFunc(func(ctx context.Context, principal string, chID channel.ID) (gateway.ObserverRoute, string, error) {
-		route, reason, err := a.ResolveObservation(ctx, principal, chID)
-		if err != nil || reason != "" {
-			return gateway.ObserverRoute{}, reason, err
-		}
-		return gateway.ObserverRoute{Channel: route.Channel, Bundle: route.Bundle, Reader: route.Reader}, "", nil
-	})
-}
+var _ io.Closer = (*gateway.Gateway)(nil)

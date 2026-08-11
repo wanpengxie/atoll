@@ -139,8 +139,9 @@ func (a IdentityAdmission) Valid() bool {
 // authorization and by door policy (owner derivation) — never a whole record,
 // never a general authority.
 type ActorFacts struct {
-	Kind      actor.Kind
-	Principal string
+	Kind         actor.Kind
+	Principal    string
+	SourceDeclID string
 }
 
 // ActiveIdentity answers "who is a member right now". It deliberately carries

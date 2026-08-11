@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
-	"github.com/wanpengxie/atoll/platform/internal/humancell"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -36,14 +35,14 @@ type viewAuthority interface {
 }
 
 type View struct {
-	visible      storespec.VisibleMessageQuery
-	authority    viewAuthority
-	presence     presence.View
-	actors       *actorSystem
-	nowMs        func() int64
-	resources    storespec.ResourceReadStore
-	defaultAgent *defaultAgentFold
-	bindings     storespec.DaemonBindingReader
+	visible   storespec.VisibleMessageQuery
+	authority viewAuthority
+	presence  presence.View
+	actors    *actorSystem
+	nowMs     func() int64
+	resources storespec.ResourceReadStore
+	bindings  BindingReader
+	channelID channel.ID
 
 	ownerPrincipal string
 }
@@ -60,8 +59,8 @@ func (h *Home) View() View {
 		actors:         h.actors,
 		nowMs:          h.nowMs,
 		resources:      h.resourceRead,
-		defaultAgent:   h.defaultAgent,
-		bindings:       h.bindings,
+		bindings:       h.registryBindings,
+		channelID:      h.channelID,
 		ownerPrincipal: h.ownerPrincipal,
 	}
 }
@@ -178,20 +177,9 @@ func (v View) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.Act
 		return channelspec.ActorFacts{}, found, err
 	}
 	return channelspec.ActorFacts{
-		Principal: facts.Principal, Kind: facts.Kind, Active: true,
+		Principal: facts.Principal, SourceDeclID: facts.SourceDeclID,
+		Kind: facts.Kind, Active: true,
 	}, true, nil
-}
-
-func (v View) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
-	_ = ctx
-	switch snapshot := v.defaultAgent.snapshot(); snapshot.State {
-	case humancell.RoutingConfigured:
-		return snapshot.Target, true, nil
-	case humancell.RoutingUnset:
-		return "", false, nil
-	default:
-		return "", false, channelspec.ErrDefaultAgentUnavailable
-	}
 }
 
 // ResolvePrincipal turns a login principal into the member behind it in THIS
@@ -248,7 +236,7 @@ func (v View) HasDeclaredInstance(ctx context.Context, declID string) (bool, err
 }
 
 func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {
-	return v.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
+	return v.bindings.IsBound(ctx, v.channelID, daemonID)
 }
 
 // OwnerPrincipal returns the channel owner straight from the immutable genesis

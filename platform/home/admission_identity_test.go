@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -27,8 +26,9 @@ func openAdmissionHome(t *testing.T, name string) *Home {
 	h, err := Open(Config{
 		ChannelID:            channel.ID(name),
 		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver:  routingResolver{},
+		CompositionResolver:  emptyCompositionResolver{},
 		IntroductionResolver: inertIntroductionResolver{},
+		RegistryBindings:     emptyBindingReader{},
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 	})
@@ -64,9 +64,7 @@ func TestAdmittingTheSamePrincipalTwiceIsOneIdentity(t *testing.T) {
 	h := openAdmissionHome(t, "admission-idempotent")
 	ctx := context.Background()
 
-	first, err := h.opEntry.Admit(ctx, channelspec.AdmitRequest{
-		Ref: "admit:1", Principal: "carol",
-	})
+	first, err := h.opEntry.admit(ctx, "carol")
 	if err != nil || first.ActorID == "" {
 		t.Fatalf("first admit: %+v err=%v", first, err)
 	}
@@ -74,9 +72,7 @@ func TestAdmittingTheSamePrincipalTwiceIsOneIdentity(t *testing.T) {
 		t.Fatal("the first admission of a principal did not report a creation")
 	}
 
-	second, err := h.opEntry.Admit(ctx, channelspec.AdmitRequest{
-		Ref: "admit:2", Principal: "carol",
-	})
+	second, err := h.opEntry.admit(ctx, "carol")
 	if err != nil {
 		t.Fatalf("second admit: %v", err)
 	}
@@ -97,9 +93,7 @@ func TestAdmittingTheSamePrincipalTwiceIsOneIdentity(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			result, err := h.opEntry.Admit(ctx, channelspec.AdmitRequest{
-				Ref: "admit:storm:" + string(rune('a'+i)), Principal: "carol",
-			})
+			result, err := h.opEntry.admit(ctx, "carol")
 			if err != nil {
 				failures <- err
 				return
@@ -128,9 +122,7 @@ func TestAdmittingTheSamePrincipalTwiceIsOneIdentity(t *testing.T) {
 	if held := admissionHumanRoster(t, h, "carol"); len(held) != 1 || held[0] != first.ActorID {
 		t.Fatalf("carol holds %v in the roster, want exactly [%s]", held, first.ActorID)
 	}
-	other, err := h.opEntry.Admit(ctx, channelspec.AdmitRequest{
-		Ref: "admit:dave", Principal: "dave",
-	})
+	other, err := h.opEntry.admit(ctx, "dave")
 	if err != nil || other.ActorID == "" {
 		t.Fatalf("admit dave: %+v err=%v", other, err)
 	}
@@ -162,9 +154,7 @@ func TestReadmittingARemovedPrincipalMintsABrandNewIdentity(t *testing.T) {
 	h := openAdmissionHome(t, "admission-rebirth")
 	ctx := context.Background()
 
-	first, err := h.opEntry.Admit(ctx, channelspec.AdmitRequest{
-		Ref: "admit:erin", Principal: "erin",
-	})
+	first, err := h.opEntry.admit(ctx, "erin")
 	if err != nil || first.ActorID == "" {
 		t.Fatalf("admit erin: %+v err=%v", first, err)
 	}
@@ -180,8 +170,8 @@ func TestReadmittingARemovedPrincipalMintsABrandNewIdentity(t *testing.T) {
 		t.Fatalf("first identity state create: %+v err=%v", out, err)
 	}
 
-	result, err := h.opEntry.Remove(ctx, channelspec.RemoveRequest{
-		Ref: "remove:erin", Target: dead, InitiatorActorID: dead,
+	result, err := h.opEntry.remove(ctx, removeRequest{
+		Target: dead, InitiatorActorID: dead,
 	})
 	if err != nil {
 		t.Fatalf("remove erin: %v", err)
@@ -193,9 +183,7 @@ func TestReadmittingARemovedPrincipalMintsABrandNewIdentity(t *testing.T) {
 		t.Fatalf("the removed identity active=%v err=%v", active, err)
 	}
 
-	second, err := h.opEntry.Admit(ctx, channelspec.AdmitRequest{
-		Ref: "readmit:erin", Principal: "erin",
-	})
+	second, err := h.opEntry.admit(ctx, "erin")
 	if err != nil || second.ActorID == "" {
 		t.Fatalf("re-admit erin: %+v err=%v", second, err)
 	}

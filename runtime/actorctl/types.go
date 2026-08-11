@@ -4,10 +4,10 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -55,6 +55,7 @@ type AdmitResult = channel.AdmitResult
 type IntroduceRequest struct {
 	DeclID     string
 	Kind       actor.Kind
+	Principal  string
 	Definition storespec.ActorDefinition
 	Placement  storespec.Placement
 }

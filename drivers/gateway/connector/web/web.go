@@ -29,16 +29,15 @@ const (
 )
 
 // Connector is the web方言 adapter over a gateway. One per process; the assembly
-// root constructs it with the gateway and the app injects ServeWeb behind an
-// app-defined interface (app → drivers is forbidden, so cmd/server bridges).
+// root constructs it with the gateway and injects ServeWeb behind a local interface.
 type Connector struct {
 	gw              *gateway.Gateway
 	contractVersion string
 	upgrader        websocket.Upgrader
 }
 
-// New builds a web connector over gw. The app-owned contract version is
-// supplied by the assembly root so drivers never import the app layer.
+// New builds a web connector over gw. The contract version is supplied by the
+// assembly root.
 func New(gw *gateway.Gateway, contractVersion string) *Connector {
 	if contractVersion == "" {
 		panic("web connector: contract version is required")
@@ -62,7 +61,7 @@ func New(gw *gateway.Gateway, contractVersion string) *Connector {
 }
 
 // ServeWeb upgrades one authenticated connection and runs the gateway session
-// (连接模型勘误期: 连接即人). The app membrane has only resolved session→principal —
+// (连接模型勘误期: 连接即人). The portal has only resolved session→principal —
 // there is NO connection-level channel ACL, because channel eligibility is a
 // per-frame/per-batch fact the gateway resolves live (户籍 ∪ 读资格 via the injected
 // EntitlementResolver). The opening frame MUST be an attach, but it names no channel:

@@ -137,8 +137,8 @@ func validateDraft(in storespec.ActorDraft) error {
 	if in.Kind == actor.KindHuman && in.SourceDeclID != "" {
 		return errors.New("store: human admission cannot carry declaration source")
 	}
-	if in.Kind != actor.KindHuman && in.Principal != "" {
-		return errors.New("store: only human admissions may carry a login principal")
+	if in.Kind == actor.KindTool && in.Principal != "" {
+		return errors.New("store: tool admissions cannot carry a principal")
 	}
 	if (in.Kind == actor.KindAgent || in.Kind == actor.KindTool) && in.SourceDeclID == "" {
 		return errors.New("store: declaration-backed admission source required")

@@ -121,7 +121,7 @@ func failWall(t *testing.T, violations []string, rule, fix string) {
 // 表外的一级目录出现（无论作为 importer 还是被 import）一律红——新目录必须
 // 显式入表，入表即过 review。
 //
-//	protocol ◄─ runtime ◄─ lib ◄─ platform ◄─ registry ◄─ {drivers, app} ◄─ cmd
+//	protocol ◄─ runtime ◄─ lib ◄─ platform ◄─ registry ◄─ drivers ◄─ cmd
 var layerAllowlist = map[string][]string{
 	"protocol": {},
 	"runtime":  {"protocol"},
@@ -129,8 +129,7 @@ var layerAllowlist = map[string][]string{
 	"platform": {"protocol", "runtime", "lib"},
 	"registry": {"protocol", "platform"},
 	"drivers":  {"protocol", "runtime", "lib", "platform", "registry"},
-	"app":      {"protocol", "platform", "registry"},
-	"cmd":      {"protocol", "runtime", "lib", "platform", "registry", "app", "drivers"},
+	"cmd":      {"protocol", "runtime", "lib", "platform", "registry", "drivers"},
 	"e2e":      {}, // 纯测试目录，无生产文件；占位使其入表
 	// scripts = demo/工具脚本层，恒零内部依赖：demo 就是"第一个第三方壳"，
 	// 只许说契约语言（HTTP/ws + 生成 schema）——它 import 不到内部包这件事
@@ -314,8 +313,9 @@ func TestKernelContractLeavesConfined(t *testing.T) {
 		"经 accessdoor/harness.Pen/契约叶走，恒不直连底座；白名单确需扩时在本表登记并说明谁批的。")
 }
 
-// TestDriversUsePlatformExportFaceOnly —— drivers 消费 platform 恒经五个出口
-// 脸（正向枚举）：platform 根、subjectgate、channelhost、channelspec、compute
+// TestDriversUsePlatformExportFaceOnly —— drivers 消费 platform 恒经具名出口
+// 脸（正向枚举）。lagoon 是门厅的身份/注册合同，daemonhost 是
+// /compute 服务端接入面，两者与 subjectgate 对称。
 // （设备载体出口脸，与 subjectgate 之于人对称，2026-08-05 登记）。
 // platform/internal 树外本由编译器拦，此处防的是出口脸清单被悄悄扩大。
 func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
@@ -324,6 +324,8 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		"platform/subjectgate": true,
 		"platform/channelhost": true,
 		"platform/channelspec": true,
+		"platform/lagoon":      true,
+		"platform/daemonhost":  true,
 		// compute = 设备载体的出口脸（/compute 链的 daemon 侧运行时）。登记于
 		// 2026-08-05 devicehost 入 drivers 层（此前同一 import 住 cmd/daemon，
 		// 墙不覆盖 cmd）：消费者轴是"设备"，与 subjectgate 之于"人"对称。
@@ -345,7 +347,7 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		}
 	}
 	failWall(t, bad,
-		"drivers 只许经 platform 五出口脸（platform 根 / subjectgate / channelhost / channelspec / compute）。",
+		"drivers 只许经已登记的 platform 出口脸。",
 		"要新的 platform 能力就在出口脸上加导出方法；确需扩脸时在本表登记。")
 }
 

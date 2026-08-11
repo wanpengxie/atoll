@@ -36,7 +36,7 @@ type Deps struct {
 //     singleton: id IS the resource).
 type InstanceSpec struct {
 	ID actor.ActorID
-	// Config is THE per-instance config injection point — the app-rewire spec's
+	// Config is THE per-instance config injection point — the composition spec's
 	// "ctx.Config" (K2=a/S8). It is NOT a new runtime surface; the constructor
 	// closure captures it into its Proc Def (Constructor(spec,deps) → Def →
 	// New() per incarnation; see

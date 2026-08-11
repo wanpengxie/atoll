@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -118,7 +117,6 @@ func finishTransition[T any](
 	a *actorSystem,
 	transition actorctl.Transition[T],
 	err error,
-	births ...channelspec.RelationDelta,
 ) (T, error) {
 	if err != nil {
 		return transition.Result, err
@@ -137,47 +135,17 @@ func finishTransition[T any](
 	if transition.Reconcile.Server || len(transition.Reconcile.Peers) != 0 {
 		a.home.pokeReconcile()
 	}
-	deltas := append([]channelspec.RelationDelta(nil), births...)
-	for _, fact := range transition.EndedFacts {
-		if fact.Principal != "" {
-			deltas = append(deltas, channelspec.RelationDelta{
-				Kind:      channelspec.RelationLeft,
-				Principal: fact.Principal, ActorID: fact.ID,
-			})
-		}
-		if fact.SourceDeclID != "" {
-			deltas = append(deltas, channelspec.RelationDelta{
-				Kind:   channelspec.RelationInstanceRemoved,
-				DeclID: fact.SourceDeclID, ActorID: fact.ID,
-			})
-		}
-	}
-	a.home.emitRelations(deltas...)
 	return transition.Result, nil
 }
 
 func (a *actorSystem) Admit(ctx context.Context, request actorctl.AdmitRequest) (actorctl.AdmitResult, error) {
 	t, err := a.home.controller.Admit(ctx, request)
-	var birth []channelspec.RelationDelta
-	if err == nil && t.Result.Created {
-		birth = append(birth, channelspec.RelationDelta{
-			Kind:      channelspec.RelationJoined,
-			Principal: request.Principal, ActorID: t.Result.ActorID,
-		})
-	}
-	return finishTransition(a, t, err, birth...)
+	return finishTransition(a, t, err)
 }
 
 func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (channel.IntroduceResult, error) {
 	t, err := a.home.controller.Introduce(ctx, request)
-	var birth []channelspec.RelationDelta
-	if err == nil && t.Result.Created {
-		birth = append(birth, channelspec.RelationDelta{
-			Kind:   channelspec.RelationIntroduced,
-			DeclID: request.DeclID, ActorID: t.Result.ActorID,
-		})
-	}
-	return finishTransition(a, t, err, birth...)
+	return finishTransition(a, t, err)
 }
 
 func (a *actorSystem) Fork(ctx context.Context, request actorctl.ForkRequest) (actorctl.ForkResult, error) {

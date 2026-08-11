@@ -90,21 +90,6 @@ func (h *Home) announceEnded(
 	}
 }
 
-// announceAudit narrates one completed management operation. Same discipline:
-// narration, never a ledger a machine reads.
-func (h *Home) announceAudit(ctx context.Context, operation string, detail map[string]any) {
-	if h == nil || h.systemPen == nil {
-		return
-	}
-	payload := map[string]any{"operation": operation}
-	for k, v := range detail {
-		payload[k] = v
-	}
-	h.writeNarration(ctx, sysOpAuditType, payload)
-}
-
-const sysOpAuditType = "sysop_completed"
-
 func (h *Home) writeNarration(ctx context.Context, typ string, payload map[string]any) {
 	if err := h.emitSystemEvent(ctx, typ, payload); err != nil {
 		h.logger.Warn("platform.narration.dropped",

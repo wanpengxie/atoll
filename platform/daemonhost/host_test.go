@@ -452,55 +452,13 @@ func TestEnsureLaneRetiresOldExactObjectWithoutDeletingReplacement(t *testing.T)
 	if replacement == nil {
 		t.Fatal("old lane retirement deleted the replacement row")
 	}
-	if replacement.stream.Gen != g2.Gen || replacement.stream.Retired() {
-		t.Fatalf("current row = (%q, retired=%v), replacement = %q",
-			replacement.stream.Gen, replacement.stream.Retired(), g2.Gen)
+	// A concurrent level reconcile may already have superseded g2 with an even
+	// newer live lane. The invariant is that g1's delayed retirement cannot
+	// delete or retire whichever replacement is current.
+	if replacement.stream.Gen == g1.Gen || replacement.stream.Retired() {
+		t.Fatalf("current row = (%q, retired=%v), retired old = %q, observed replacement = %q",
+			replacement.stream.Gen, replacement.stream.Retired(), g1.Gen, g2.Gen)
 	}
-}
-
-func TestRetireLane_DeletesRowSynchronously(t *testing.T) {
-	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
-	carrier := dialTestCarrier(t, host)
-	host.Scan()
-	lane := adoptAndSuperviseTestLane(t, carrier)
-	waitFor(t, func() bool { return len(host.LaneView("daemon-a")) == 1 })
-
-	host.RetireLane("daemon-a", "a")
-	if got := host.LaneView("daemon-a"); len(got) != 0 {
-		t.Fatalf("retire returned before deleting the exact row: %+v", got)
-	}
-	waitFor(t, lane.Retired)
-	if !host.DaemonOnline("daemon-a") {
-		t.Fatal("logical lane retirement did not stay local to the lane")
-	}
-	waitFor(t, func() bool { return host.RetirementCount("daemon-a", "a") == 1 })
-}
-
-func TestReconcile_EnsuresLaneRegardlessOfCompartmentState(t *testing.T) {
-	host := New(Config{ScanInterval: time.Hour})
-	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
-	carrier := dialTestCarrier(t, host)
-	host.Scan()
-	first := adoptAndSuperviseTestLane(t, carrier)
-	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "a") })
-	host.RetireLane("daemon-a", "a")
-	<-first.Done()
-	if host.LaneAttached("daemon-a", "a") {
-		t.Fatal("retired row still answered attached")
-	}
-	host.Scan()
-	second := adoptAndSuperviseTestLane(t, carrier)
-	if second.Gen == first.Gen {
-		t.Fatal("scan did not mint a fresh lane generation")
-	}
-	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "a") })
 }
 
 // TestUnboundCoordinateLeavesTheSnapshotAndNothingElse pins that revocation is

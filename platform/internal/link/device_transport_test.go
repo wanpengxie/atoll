@@ -64,7 +64,7 @@ func (c *blockingLaneConn) SetReadDeadline(time.Time) error {
 }
 func (*blockingLaneConn) SetWriteDeadline(time.Time) error { return nil }
 
-func TestRetireLaneLogicalDecisionPrecedesPhysicalClose(t *testing.T) {
+func TestLaneRetirementLogicalDecisionPrecedesPhysicalClose(t *testing.T) {
 	conn := newBlockingLaneConn()
 	lane := newLaneStream(nil, channel.ID("a"), LaneGeneration("g1"), conn)
 	var retired atomic.Bool
@@ -138,7 +138,7 @@ func TestLaneDecoderPreservesBackToBackFrames(t *testing.T) {
 	}
 }
 
-func TestRetireLaneIsExactObjectAndIdempotent(t *testing.T) {
+func TestLaneRetirementIsExactObjectAndIdempotent(t *testing.T) {
 	firstLocal, firstRemote := net.Pipe()
 	secondLocal, secondRemote := net.Pipe()
 	defer firstRemote.Close()

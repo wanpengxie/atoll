@@ -127,31 +127,13 @@ func humanDescribe(id string) introspect.Describe {
 	}
 }
 
-// Deps is the frame interpreter's injected read-only face: request lookup/open
-// checks, cancellation hint, and the default-routing fold plus its active and
-// present predicates. No capability of its own — every write goes through the
-// cell's own Sys verbs.
+// Deps is the frame interpreter's injected read-only face. No capability of
+// its own: every write goes through the cell's own Sys verbs.
 type Deps struct {
 	Self       actor.ActorID
 	Requests   RequestLookup
 	OpenCheck  func(ctx context.Context, receiver actor.ActorID, reqID message.ID) (bool, error)
 	CancelHint func(target actor.ActorID, requestID message.ID)
-	Routing    func() RoutingSnapshot
-	IsActive   func(context.Context, actor.ActorID) (bool, error)
-	Present    func(actor.ActorID) bool
-}
-
-type RoutingState uint8
-
-const (
-	RoutingUnset RoutingState = iota
-	RoutingConfigured
-	RoutingUnavailable
-)
-
-type RoutingSnapshot struct {
-	State  RoutingState
-	Target actor.ActorID
 }
 
 // RequestLookup is the from-log recovery seam (cs.Requests satisfies it).
@@ -258,25 +240,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 		aud = append(aud, actor.ActorID(a))
 	}
 	if kind == message.KindRequest && len(aud) == 0 {
-		if deps.Routing == nil {
-			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
-		}
-		snapshot := deps.Routing()
-		if snapshot.State == RoutingUnset {
-			return errFrame(f, subjectgate.CodeRoutingUnavailable, "未设置默认应答者，请设置或指名收件人")
-		}
-		if snapshot.State != RoutingConfigured || snapshot.Target == "" ||
-			deps.IsActive == nil || deps.Present == nil {
-			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
-		}
-		active, activeErr := deps.IsActive(context.Background(), snapshot.Target)
-		if activeErr != nil {
-			return errFrame(f, subjectgate.CodeUnavailable, activeErr.Error())
-		}
-		if !active || !deps.Present(snapshot.Target) {
-			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
-		}
-		aud = append(aud, snapshot.Target)
+		return errFrame(f, subjectgate.CodeRoutingUnavailable, "request must name at least one recipient")
 	}
 	// Two kinds, two verbs — the dispatch the deleted SubjectWriteSpec used to
 	// hide behind one call. An event carries no deadline (nothing waits on it),
@@ -465,7 +429,7 @@ func interpretAfter(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
 	if err := f.DecodePayload(&p); err != nil {
 		return prepErr(subjectgate.CodeBadPayload, err.Error())
 	}
-	// Input bounds (期12 v0.4, migrated from the app edge to the driver — the error
+	// Input bounds (期12 v0.4, migrated from the old edge to the driver — the error
 	// vocabulary is the driver's): the schedule engine treats a past FireAt as "fire
 	// now", so a non-positive / overflow duration would be a legal immediate trigger.
 	// Refuse it as bad_payload (裁决8 平面词). No upper cap (abuse hardening is the

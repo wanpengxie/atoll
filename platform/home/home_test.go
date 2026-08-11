@@ -2,12 +2,10 @@ package home_test
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
 
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -29,16 +27,6 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 			t.Fatalf("concurrent Close: %v", err)
 		}
 	}
-	if _, err := home.SystemOps(h).Admit(context.Background(), channelspec.AdmitRequest{
-		Ref: "late-admit", Principal: "late",
-	}); !isUnavailable(err) {
-		t.Fatalf("Admit after Close = %v", err)
-	}
-	if _, err := home.SystemOps(h).Remove(context.Background(), channelspec.RemoveRequest{
-		Ref: "late-remove", Target: "late", InitiatorActorID: "late",
-	}); !isUnavailable(err) {
-		t.Fatalf("Remove after Close = %v", err)
-	}
 	wake, unsubscribe := home.GatewaySubscribe(h)
 	unsubscribe()
 	select {
@@ -51,18 +39,13 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 	}
 }
 
-func isUnavailable(err error) bool {
-	var opErr *channelspec.OperationError
-	return errors.As(err, &opErr) && opErr.Code == channelspec.ErrCodeChannelUnavailable
-}
-
 const testChannelID = channel.ID("test-home")
 
 // openTestHome assembles a Home for testing.
 func openTestHome(t *testing.T) *home.Home {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true})
+	h, err := home.Open(completeHomeTestConfig(home.Config{ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true}))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -84,54 +67,18 @@ func TestView_ActorFacts_KernelIsNotAMember(t *testing.T) {
 	}
 }
 
-// TestAdmit_CellLessMember admits a human member (the pure-membership
-// primitive, no cell) and confirms it surfaces in the actor roster. The record
-// carries no transport binding at all — binding is a physical connection
-// projection and left the value domain.
-func TestAdmit_CellLessMember(t *testing.T) {
-	h := openTestHome(t)
-	ctx := context.Background()
-	result, err := home.SystemOps(h).Admit(ctx, channelspec.AdmitRequest{
-		Ref: "admit-alice", Principal: "alice",
-	})
-	if err != nil {
-		t.Fatalf("Admit: %v", err)
-	}
-	id := result.ActorID
-	roster, err := h.View().HumanRoster(ctx)
-	if err != nil {
-		t.Fatalf("HumanRoster: %v", err)
-	}
-	var found bool
-	for _, entry := range roster {
-		if entry.ActorID == id {
-			found = true
-			if entry.Principal != "alice" {
-				t.Errorf("admitted member = %+v", entry)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("cell-less member %s not in roster", id)
-	}
-	facts, ok, err := h.View().ActorFacts(ctx, id)
-	if err != nil || !ok || facts.Kind != actor.KindHuman {
-		t.Fatalf("admitted member facts = %+v ok=%v err=%v", facts, ok, err)
-	}
-}
-
 // TestOpen_RestartOverPersistentDB verifies a second Open over the SAME db file
 // (a home restart) succeeds and restores the durable membership image.
 func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h1, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true, BootstrapOwnerPrincipal: "restart-owner"})
+	h1, err := home.Open(completeHomeTestConfig(home.Config{ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true, BootstrapOwnerPrincipal: "restart-owner"}))
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
 	if err := home.Shutdown(h1); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	h2, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, MustExistDB: true})
+	h2, err := home.Open(completeHomeTestConfig(home.Config{ChannelID: testChannelID, DBPath: dbPath, MustExistDB: true}))
 	if err != nil {
 		t.Fatalf("restart Open over existing DB: %v", err)
 	}

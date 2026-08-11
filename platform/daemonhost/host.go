@@ -1338,22 +1338,6 @@ func (h *Host) RevokeDaemon(daemonID string) {
 	h.beginCarrierShutdown(carrier)
 }
 
-func (h *Host) RetireLane(daemonID, chID string) {
-	h.mu.RLock()
-	row := h.daemons[daemonID]
-	var carrier *carrierRow
-	if row != nil {
-		carrier = row.current
-	}
-	h.mu.RUnlock()
-	if carrier != nil {
-		id := channel.ID(chID)
-		unlock := carrier.lockCoord(id)
-		carrier.retireLane(id)
-		unlock()
-	}
-}
-
 func (h *Host) PokePlan(daemonID, chID string) {
 	if lane := h.currentLane(daemonID, channel.ID(chID)); lane != nil {
 		_ = lane.stream.Send(link.LaneFrame{Kind: link.LanePlanPoke})

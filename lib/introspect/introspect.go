@@ -65,7 +65,7 @@ type DescribeRequest struct {
 // PUSHes (PublishObs) to surface its external device's liveness — a best-effort,
 // advisory hint, NEVER authoritative reachability (that stays send→terminal).
 // Opaque to substrate/platform (they enforce structure, not vocabulary); shared by the publishing adapter
-// and the consuming app/view ONLY. **Absence of any value = unknown, NOT offline**
+// and the consuming view ONLY. **Absence of any value = unknown, NOT offline**
 // — many devices have no liveness signal, so an adapter that cannot observe simply
 // never publishes.
 const ObsDevicePresence = "device_presence"

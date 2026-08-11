@@ -12,14 +12,18 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -36,6 +40,21 @@ func (gatewayTestCompositionResolver) ResolveDeclaration(context.Context, channe
 }
 func (gatewayTestCompositionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
+}
+
+type gatewayTestBindings struct{}
+
+func (gatewayTestBindings) IsBound(context.Context, channel.ID, string) (bool, error) {
+	return false, nil
+}
+func (gatewayTestBindings) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
+	return nil, nil
+}
+func (gatewayTestBindings) ListChannels(context.Context) ([]lagoon.ChannelRow, error) {
+	return nil, nil
+}
+func (gatewayTestBindings) GetChannelDesired(context.Context, channel.ID) (lagoon.ChannelRow, bool, error) {
+	return lagoon.ChannelRow{}, false, nil
 }
 
 // logCapture is a slog.Handler that records every emitted message (for telemetry
@@ -274,34 +293,89 @@ func (h *testChannel) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool)
 func (h *testChannel) View() channelhost.View { return h.Bundle.View() }
 
 func (h *testChannel) Admit(ctx context.Context, _ actor.Kind, principal string) (actor.ActorID, error) {
-	result, err := h.SysOp().Admit(ctx, channelspec.AdmitRequest{Ref: "gateway-test:admit:" + principal, Principal: principal})
-	return result.ActorID, err
+	err := h.submitOperate(ctx, "channel.introduce_actor", map[string]any{"kind": "human", "principal": principal})
+	if err != nil {
+		return "", err
+	}
+	for {
+		id, found, err := h.View().ResolvePrincipal(ctx, principal)
+		if err != nil || found {
+			return id, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
 
 func (h *testChannel) Remove(ctx context.Context, id actor.ActorID) error {
 	if h.ownerID == "" {
 		return context.Canceled
 	}
-	_, err := h.SysOp().Remove(ctx, channelspec.RemoveRequest{Ref: "gateway-test:remove:" + string(id), Target: id, InitiatorActorID: h.ownerID})
-	if err == nil {
-		h.extras.Remove(id)
+	if err := h.submitOperate(ctx, "channel.remove_actor", map[string]any{"instance_id": id}); err != nil {
+		return err
 	}
-	return err
+	for {
+		facts, found, err := h.View().ActorFacts(ctx, id)
+		if err != nil || !found || !facts.Active {
+			h.extras.Remove(id)
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func (h *testChannel) submitOperate(ctx context.Context, typ string, payload any) error {
+	slot, ok := h.Bundle.Gateway().SubjectSlotFor(h.ownerID)
+	if !ok {
+		return errors.New("owner subject slot unavailable")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{
+		ChannelID: string(h.channelID), ID: uuid.NewString(), MsgType: typ, Kind: "request",
+		Audience: []string{string(actor.SystemActorID)}, Visibility: "public", Payload: raw,
+	})
+	if err != nil {
+		return err
+	}
+	deliverCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var result subjectgate.FrameResult
+	for {
+		result, err = slot.Deliver(deliverCtx, frame)
+		if !errors.Is(err, subjectgate.ErrNoOccupant) {
+			break
+		}
+		select {
+		case <-deliverCtx.Done():
+			return deliverCtx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if result.Frame.Type != subjectgate.FrameReceipt {
+		var failure subjectgate.ErrorPayload
+		_ = result.Frame.DecodePayload(&failure)
+		return fmt.Errorf("operate frame rejected: %s: %s", failure.Code, failure.Detail)
+	}
+	return nil
 }
 
 func openTestChannel(t *testing.T, chID channel.ID, owner, member string, memberKind actor.Kind, wired *Gateway) (*testChannel, actor.ActorID) {
 	t.Helper()
-	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}, IntroductionResolver: gatewayTestCompositionResolver{}}
-	if wired != nil {
-		deps.OnRelationChange = func(_ channel.ID, deltas []channelspec.RelationDelta) {
-			for _, delta := range deltas {
-				if delta.Principal != "" {
-					wired.Poke(delta.Principal)
-				}
-			}
-		}
-	}
-	host, err := channelhost.New(t.TempDir(), deps)
+	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}, IntroductionResolver: gatewayTestCompositionResolver{}, RegistryBindings: gatewayTestBindings{}}
+	host, err := channelhost.New(t.TempDir(), gatewayTestBindings{}, deps)
 	if err != nil {
 		t.Fatal(err)
 	}

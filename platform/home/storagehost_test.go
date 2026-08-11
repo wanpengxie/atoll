@@ -107,7 +107,6 @@ func (fixedRoutes) OpenTransfer(
 }
 func (fixedRoutes) AttachedDaemons(string) []string  { return nil }
 func (fixedRoutes) LaneAttached(string, string) bool { return false }
-func (fixedRoutes) RetireLane(string, string)        {}
 
 var _ platform.DaemonRoutes = fixedRoutes{}
 

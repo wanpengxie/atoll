@@ -23,14 +23,13 @@ type Route struct {
 	SubjectID actor.ActorID
 }
 
-// EntitlementResolver is the app-domain seam (injected by the assembly root, spec
+// EntitlementResolver is the policy seam (injected by the assembly root, spec
 // §3.2 EntitlementResolver 注入缝): given a principal it returns the full set of
 // channels that principal holds MEMBERSHIP in. Temporary observations resolve
 // independently through ObserverResolver. This method also returns per-channel
 // failures and an err for a whole-snapshot failure. The interface is
-// defined HERE (drivers/gateway) and implemented app-side, bridged through
-// cmd/server — so drivers never imports app (archtest 围栏), mirroring the WSGateway/
-// Routing seam shape.
+// defined HERE (drivers/gateway) and implemented by the assembly root, mirroring the WSGateway/
+// entitlement seam shape.
 //
 // Contract (spec §3.2):
 //   - routes = every entitled channel; a channel absent from routes AND from failed
@@ -58,8 +57,8 @@ type ObserverRoute struct {
 	Reader  channel.Reader
 }
 
-// ObserverResolver evaluates app-owned public-observation policy without
-// making gateway import app. reason is a stable wire reason when denied.
+// ObserverResolver evaluates injected public-observation policy. reason is a
+// stable wire reason when denied.
 type ObserverResolver interface {
 	ResolveObservation(ctx context.Context, principal string, channelID channel.ID) (route ObserverRoute, reason string, err error)
 }

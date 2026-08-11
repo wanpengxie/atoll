@@ -88,6 +88,7 @@ func (c *Controller) Introduce(
 	}
 	record, err := c.store.Insert(ctx, storespec.ActorDraft{
 		Kind:         request.Kind,
+		Principal:    request.Principal,
 		SourceDeclID: request.DeclID,
 		CreatedAt:    c.nowMs(),
 		Definition:   request.Definition,

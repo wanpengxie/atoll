@@ -15,7 +15,7 @@ import (
 // gates on Admit()) — so an actor never receives a bare, ungated handle.
 //
 // Caps is CAPABILITIES ONLY. Per-instance CONFIG (registry.InstanceSpec.Config,
-// the app-rewire spec's "ctx.Config") is deliberately NOT a member here: config
+// the composition spec's "ctx.Config") is deliberately NOT a member here: config
 // is an independent parameter the constructor closure captures, not a
 // substrate-minted authority (S-P16 红线). Adding a Config field to this struct
 // would collapse that distinction — archtest.TestConfigNotInCaps trips on it.

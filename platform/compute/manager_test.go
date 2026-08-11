@@ -721,12 +721,13 @@ func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 		t.Cleanup(func() { _ = host.Close(context.Background()) })
 		var bound atomic.Bool
 		bound.Store(true)
-		host.Register("a", 1, platform.DaemonMembrane{
+		membrane := platform.DaemonMembrane{
 			Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 				return nil, nil
 			},
 			IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
-		})
+		}
+		host.Register("a", 1, membrane)
 		var builds atomic.Int32
 		closeEntered := make(chan struct{})
 		closeRelease := make(chan struct{})
@@ -764,8 +765,9 @@ func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 		bound.Store(true)
 		host.Scan()
 		if replacePending {
-			host.RetireLane("daemon-a", "a")
-			host.Scan()
+			// A Home generation replacement passively retires the old lane;
+			// there is no command-shaped lane retirement surface.
+			host.Register("a", 2, membrane)
 		}
 		if !finalBound {
 			bound.Store(false)
@@ -806,13 +808,16 @@ func TestLaneRetirementPreservesCompartmentAndPullsFullPlan(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var pulls atomic.Int32
-	host.Register("a", 1, platform.DaemonMembrane{
+	var bound atomic.Bool
+	bound.Store(true)
+	membrane := platform.DaemonMembrane{
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pulls.Add(1)
 			return nil, nil
 		},
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
+		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
+	}
+	host.Register("a", 1, membrane)
 	var builds, closes atomic.Int32
 	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
 		builds.Add(1)
@@ -828,9 +833,7 @@ func TestLaneRetirementPreservesCompartmentAndPullsFullPlan(t *testing.T) {
 		host.Scan()
 		return host.LaneAttached("daemon-a", "a") && pulls.Load() >= 1
 	})
-	host.RetireLane("daemon-a", "a")
-	waitCompute(t, func() bool { return len(host.LaneView("daemon-a")) == 0 })
-	host.Scan()
+	host.Register("a", 2, membrane)
 	waitCompute(t, func() bool {
 		return host.LaneAttached("daemon-a", "a") && pulls.Load() >= 2
 	})
@@ -846,10 +849,13 @@ func TestLongCompartmentBuildSurvivesLaneChurnWithoutDoubleBuild(t *testing.T) {
 		Present:      testPresent("channel-a", "a", "b"),
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	var bound atomic.Bool
+	bound.Store(true)
+	membrane := platform.DaemonMembrane{
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
+		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
+	}
+	host.Register("a", 1, membrane)
 	buildEntered := make(chan struct{})
 	buildRelease := make(chan struct{})
 	var builds atomic.Int32
@@ -867,8 +873,7 @@ func TestLongCompartmentBuildSurvivesLaneChurnWithoutDoubleBuild(t *testing.T) {
 		t.Fatal("compartment build did not start")
 	}
 	for i := 0; i < 3; i++ {
-		host.RetireLane("daemon-a", "a")
-		host.Scan()
+		host.Register("a", uint64(i+2), membrane)
 	}
 	time.Sleep(50 * time.Millisecond)
 	if builds.Load() != 1 {
@@ -927,7 +932,10 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(releaseA) }) })
 	var pullsB atomic.Int32
-	host.Register("a", 1, platform.DaemonMembrane{
+	var boundA, boundB atomic.Bool
+	boundA.Store(true)
+	boundB.Store(true)
+	membraneA := platform.DaemonMembrane{
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			if blockA.Load() {
 				entered.Do(func() { close(enteredA) })
@@ -935,15 +943,17 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 			}
 			return nil, nil
 		},
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
-	host.Register("b", 1, platform.DaemonMembrane{
+		IsBound: func(context.Context, string) (bool, error) { return boundA.Load(), nil },
+	}
+	membraneB := platform.DaemonMembrane{
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pullsB.Add(1)
 			return nil, nil
 		},
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
+		IsBound: func(context.Context, string) (bool, error) { return boundB.Load(), nil },
+	}
+	host.Register("a", 1, membraneA)
+	host.Register("b", 1, membraneB)
 	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
 		return CompartmentResources{Factories: emptyFactories{}}, nil
 	})
@@ -954,15 +964,13 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 	})
 	blockA.Store(true)
 	baselineB := pullsB.Load()
-	host.RetireLane("daemon-a", "a")
-	host.Scan()
+	host.Register("a", 2, membraneA)
 	select {
 	case <-enteredA:
 	case <-time.After(2 * time.Second):
 		t.Fatal("A rebind did not enter blocked plan pull")
 	}
-	host.RetireLane("daemon-a", "b")
-	host.Scan()
+	host.Register("b", 2, membraneB)
 	waitCompute(t, func() bool { return pullsB.Load() > baselineB })
 	release.Do(func() { close(releaseA) })
 }

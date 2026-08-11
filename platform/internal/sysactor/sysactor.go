@@ -51,6 +51,7 @@ type SystemActor struct {
 		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
 	}
 	logger *slog.Logger
+	calls  *CallPort
 }
 
 // Deps bundles the channel services the system actor needs.
@@ -69,6 +70,7 @@ type Deps struct {
 		MaxSeq(context.Context) (int64, error)
 		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
 	}
+	Calls *CallPort
 }
 
 // New constructs the channel system actor's process state (exported so a
@@ -90,6 +92,7 @@ func New(deps Deps) *SystemActor {
 		operate:   deps.Operate,
 		logbook:   deps.Logbook,
 		logger:    logger,
+		calls:     deps.Calls,
 	}
 }
 
@@ -107,6 +110,9 @@ func Def(deps Deps) actorbase.Def {
 // run is the Proc body (spec §1.6): loop sys.Recv() until the cell dies or
 // Stop is requested.
 func (s *SystemActor) run(sys actorbase.Sys) error {
+	if s.calls != nil {
+		go s.calls.serve(sys)
+	}
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
@@ -135,7 +141,7 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		case platform.TypeLogbookRecent:
 			s.respondLogbookRecent(sys, msg)
 			return
-		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor, TypeSetDefaultAgent:
+		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor:
 			// Channel operate face (NP-1=c): in-gate control plane. Permission +
 			// routing here; the injected executor does the intent write + Home call.
 			s.handleOperate(sys, msg)

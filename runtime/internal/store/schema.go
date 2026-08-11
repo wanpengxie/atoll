@@ -53,10 +53,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
   ON messages(parent_id)
   WHERE kind = 'response' AND is_terminal = 1;
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_sysop_completed_correlation
-  ON messages(correlation_id)
-  WHERE kind = 'event' AND type = 'sysop_completed';
-
 -- (v2: actor_cursors table removed. A per-actor durable consumption offset is
 -- NOT substrate truth: only a log-PULL consumer that must resume gap-free needs
 -- one, and that offset is the consumer's own bookkeeping (it knows where it left
@@ -103,13 +99,6 @@ CREATE TABLE IF NOT EXISTS channel_genesis (
   parent_channel_id  TEXT,
   initiator_principal TEXT,
   created_at         INTEGER NOT NULL
-);
-
--- Channel-local daemon binding truth. Live link attachment is deliberately a
--- separate observation maintained by the link acceptor.
-CREATE TABLE IF NOT EXISTS channel_daemon_bindings (
-  daemon_id   TEXT PRIMARY KEY,
-  attached_at INTEGER NOT NULL
 );
 
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
@@ -277,7 +266,6 @@ func ChannelLocalTables() []string {
 		"messages",
 		"actor_registry",
 		"channel_genesis",
-		"channel_daemon_bindings",
 		"resources",
 		"resource_reservations",
 		"resource_tombstones",

@@ -10,17 +10,15 @@ import (
 )
 
 var (
-	// ErrDefaultAgentUnavailable distinguishes a corrupt/unreadable authoritative
-	// routing fold from the ordinary Unset state returned as found=false.
-	ErrDefaultAgentUnavailable = errors.New("channel: default agent unavailable")
-	ErrDeclarationNotFound     = errors.New("channel: declaration not found")
-	ErrDigestMismatch          = errors.New("channel: snapshot digest mismatch")
+	ErrDeclarationNotFound = errors.New("channel: declaration not found")
+	ErrDigestMismatch      = errors.New("channel: snapshot digest mismatch")
 )
 
 type ActorFacts struct {
-	Principal string     `json:"principal"`
-	Kind      actor.Kind `json:"kind"`
-	Active    bool       `json:"active"`
+	Principal    string     `json:"principal"`
+	SourceDeclID string     `json:"source_decl_id,omitempty"`
+	Kind         actor.Kind `json:"kind"`
+	Active       bool       `json:"active"`
 }
 
 // HumanRosterEntry is one row of the channel's human membership roster — the
@@ -119,56 +117,4 @@ func (e *OperationError) Error() string {
 		return string(e.Code)
 	}
 	return string(e.Code) + ": " + e.Detail
-}
-
-type AdmitRequest struct {
-	Ref       string `json:"ref"`
-	Principal string `json:"principal"`
-}
-
-type IntroduceRequest struct {
-	Ref              string        `json:"ref"`
-	DeclID           string        `json:"decl_id"`
-	InitiatorActorID actor.ActorID `json:"initiator_actor_id"`
-}
-
-type RemoveRequest struct {
-	Ref              string        `json:"ref"`
-	Target           actor.ActorID `json:"target"`
-	InitiatorActorID actor.ActorID `json:"initiator_actor_id"`
-}
-
-type DaemonRequest struct {
-	Ref      string `json:"ref"`
-	DaemonID string `json:"daemon_id"`
-}
-
-type BindingResult struct {
-	Bound            bool            `json:"bound"`
-	ClearedInstances []actor.ActorID `json:"cleared_instances,omitempty"`
-}
-
-type RelationKind string
-
-const (
-	RelationJoined          RelationKind = "joined"
-	RelationLeft            RelationKind = "left"
-	RelationIntroduced      RelationKind = "introduced"
-	RelationInstanceRemoved RelationKind = "instance_removed"
-	RelationBound           RelationKind = "bound"
-	RelationUnbound         RelationKind = "unbound"
-	RelationGone            RelationKind = "gone"
-)
-
-// RelationDelta is the complete fact emitted at the membrane commit boundary.
-// Reset marks the first item of a full-channel snapshot; following positive
-// deltas are the complete replacement set for that channel.
-type RelationDelta struct {
-	Kind      RelationKind  `json:"kind,omitempty"`
-	ChannelID channel.ID    `json:"channel_id"`
-	Principal string        `json:"principal,omitempty"`
-	ActorID   actor.ActorID `json:"actor_id,omitempty"`
-	DeclID    string        `json:"decl_id,omitempty"`
-	DaemonID  string        `json:"daemon_id,omitempty"`
-	Reset     bool          `json:"reset,omitempty"`
 }

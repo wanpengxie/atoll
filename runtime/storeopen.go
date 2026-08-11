@@ -26,7 +26,6 @@ type ChannelStores struct {
 	// store is reachable only through the Controller's commands.
 	Actors       storespec.ActorRegistryStore
 	Genesis      storespec.GenesisStore
-	Bindings     storespec.DaemonBindingStore
 	ResourceRead storespec.ResourceReadStore
 
 	// Principals is the principal-axis read face (LookupActivePrincipal — the
@@ -103,7 +102,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Requests:     cs.Requests,
 		Actors:       cs.Actors,
 		Genesis:      cs.Genesis,
-		Bindings:     cs.Bindings,
 		ResourceRead: cs.ResourceRead,
 		Principals:   cs.Principals,
 		Assembly: AssemblyPorts{

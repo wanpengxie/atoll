@@ -29,9 +29,9 @@ import (
 
 // humanCellFactory is the platform's built-in home-side human body. user域
 // supply is platform internal政 — a per-channel human member's authority lives
-// only in this channel's registry (the app cannot enumerate it), so the reconcile
+// only in this channel's registry (the assembly cannot enumerate it), so the reconcile
 // ring keeps a live human cell up whenever the member is admitted, without any
-// app-injected factory.
+// assembly-injected factory.
 //
 // Proc shape (through the actorbase engine, NOT a raw actorrt.Actor implementer —
 // archtest wall): TWO input faces run concurrently (标准型, design §5.2) —
@@ -92,12 +92,6 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 			Requests:   h.requests,
 			OpenCheck:  h.isRequestOpen,
 			CancelHint: h.cancelRequest,
-			Routing:    h.defaultAgent.snapshot,
-			IsActive:   h.controller.IsActive,
-			Present: func(target actor.ActorID) bool {
-				_, live := h.View().Stat(target)
-				return live
-			},
 		}
 		token := humancell.WirePresenceSelfReport(sys, slot)
 		frames, incarnation, release := slot.AttachInterpreter()

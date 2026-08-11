@@ -150,7 +150,7 @@ func TestReconcileClosureCarriesARealRemovalToAReceiverUnavailableTerminal(t *te
 		t.Fatal("the request did not become open truth against its receiver")
 	}
 
-	if err := removeThroughSysOp(h, ctx, receiver); err != nil {
+	if err := removeActorForTest(h, ctx, receiver); err != nil {
 		t.Fatalf("remove the receiver: %v", err)
 	}
 
@@ -207,7 +207,7 @@ func TestReconcileClosureSparesLiveReceiversAndAuthorsAtMostOneTerminal(t *testi
 		t.Fatalf("a live receiver's caller was closed: %+v", terminals)
 	}
 
-	if err := removeThroughSysOp(h, ctx, receiver); err != nil {
+	if err := removeActorForTest(h, ctx, receiver); err != nil {
 		t.Fatalf("remove the receiver: %v", err)
 	}
 	h.reconcileSweep(ctx)
@@ -251,7 +251,7 @@ func TestReconcileClosureRecordsAWriteFaultAndClosesOnTheNextSweep(t *testing.T)
 	request := closureCall(t, h, caller, receiver)
 
 	closureStopReconcileLoop(t, h)
-	if err := removeThroughSysOp(h, ctx, receiver); err != nil {
+	if err := removeActorForTest(h, ctx, receiver); err != nil {
 		t.Fatalf("remove the receiver: %v", err)
 	}
 

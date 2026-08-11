@@ -295,10 +295,10 @@ func TestDueTimerAcrossTheCloseWindowFiresExactlyOnce(t *testing.T) {
 	// The mutation gate stands BEFORE the teardown tail, not after it: while the
 	// closer is still parked at the top of the block, member words are already
 	// refused with the retryable channel-unavailable verdict.
-	if _, err := admitThroughSysOp(h, ctx, actor.KindHuman, "late-joiner"); !isChannelUnavailableForTest(err) {
+	if _, err := introduceHumanForTest(h, ctx, actor.KindHuman, "late-joiner"); !isChannelUnavailableForTest(err) {
 		t.Fatalf("Admit inside the close window = %v, want channel_unavailable", err)
 	}
-	if err := removeThroughSysOp(h, ctx, armed.actorID); !isChannelUnavailableForTest(err) {
+	if err := removeActorForTest(h, ctx, armed.actorID); !isChannelUnavailableForTest(err) {
 		t.Fatalf("Remove inside the close window = %v, want channel_unavailable", err)
 	}
 

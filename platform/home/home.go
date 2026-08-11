@@ -1,6 +1,7 @@
 package home
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"sync"
@@ -8,9 +9,10 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
+	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -45,8 +47,22 @@ type Config struct {
 	IntroductionResolver IntroductionResolver
 	Clock                schedule.Clock
 	ReservationTimeout   time.Duration
-	OnRelationChange     func(channelpkg.ID, []channelspec.RelationDelta)
 	DaemonRoutes         platform.DaemonRoutes
+	RegistryBindings     BindingReader
+}
+
+type BindingReader interface {
+	IsBound(context.Context, channelpkg.ID, string) (bool, error)
+	ListBoundDevices(context.Context, channelpkg.ID) ([]lagoon.DeviceRow, error)
+}
+
+type unavailableBindingReader struct{}
+
+func (unavailableBindingReader) IsBound(context.Context, channelpkg.ID, string) (bool, error) {
+	return false, errors.New("platform: registry binding reader unavailable")
+}
+func (unavailableBindingReader) ListBoundDevices(context.Context, channelpkg.ID) ([]lagoon.DeviceRow, error) {
+	return nil, errors.New("platform: registry binding reader unavailable")
 }
 
 // Home is the channel composition root. Runtime organs are held as peers;
@@ -75,14 +91,13 @@ type Home struct {
 	// where they are handed to the organs that own them and then go out of
 	// scope. Home cannot reach a write path around the harness pen, the
 	// Controller ledger or an organ door because it does not hold one.
-	query        storespec.MessageQuery
-	visible      storespec.VisibleMessageQuery
-	expiry       storespec.ExpiryQuery
-	requests     storespec.RequestLookup
-	bindings     storespec.DaemonBindingStore
-	defaultAgent *defaultAgentFold
-	resourceRead storespec.ResourceReadStore
-	closeStore   func() error
+	query            storespec.MessageQuery
+	visible          storespec.VisibleMessageQuery
+	expiry           storespec.ExpiryQuery
+	requests         storespec.RequestLookup
+	registryBindings BindingReader
+	resourceRead     storespec.ResourceReadStore
+	closeStore       func() error
 
 	// The two harness capabilities are held apart, exactly as they are handed
 	// out: minter goes to the three components that mint pens, admittedWriter
@@ -101,14 +116,13 @@ type Home struct {
 	subjectgate    *subjectgate.Registry
 	factories      ActorFactoryResolver
 	opEntry        *opEntry
+	callPort       *sysactor.CallPort
 
 	systemPen    harness.Pen
 	expiryCursor storespec.ExpiryCursor
 
-	logger           *slog.Logger
-	nowMs            func() int64
-	onRelationChange func(channelpkg.ID, []channelspec.RelationDelta)
-
+	logger        *slog.Logger
+	nowMs         func() int64
 	reconcileStop func()
 	reconcileDone chan struct{}
 	pokeCh        chan struct{}
