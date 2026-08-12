@@ -45,6 +45,15 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if cfg.ChannelID == "" {
 		return nil, errors.New("platform: ChannelID required")
 	}
+	// The name is the channel's place on disk, so it is required wherever a
+	// daemon can be asked to lay bytes down. Its spelling is the registry's
+	// business: a name that could not be minted cannot arrive here.
+	if cfg.ChannelName == "" {
+		if cfg.DaemonRoutes != nil {
+			return nil, errors.New("platform: ChannelName required with daemon routes")
+		}
+		cfg.ChannelName = string(cfg.ChannelID)
+	}
 	if cfg.CompositionResolver == nil {
 		return nil, errors.New("platform: CompositionResolver required")
 	}
@@ -56,7 +65,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 
 	h := &Home{
-		channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{}),
+		channelID: cfg.ChannelID, channelName: cfg.ChannelName, logger: logger, closeDone: make(chan struct{}),
 		nowMs:        func() int64 { return time.Now().UnixMilli() },
 		daemonRoutes: cfg.DaemonRoutes,
 		subjectgate:  subjectgate.NewRegistry(),
@@ -100,7 +109,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if h.registryBindings == nil {
 		h.registryBindings = unavailableBindingReader{}
 	}
-	h.resourceRead = cs.ResourceRead
 
 	if cfg.Bootstrap && cfg.Genesis != nil {
 		if err := cs.Genesis.CreateGenesis(ctx, *cfg.Genesis); err != nil {
@@ -142,22 +150,19 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// the capability bundles and the remote ingress, and nothing else. They are
 	// locals for the same reason cs is — a door kept on Home is a door every
 	// method in this package can knock on.
-	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
+	access, err := accessdoor.NewAssembly(accessdoor.Deps{
 		Registry:        cs.Assembly.Resources,
 		Drivers:         accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
 		Authority:       h.actors,
 		State:           cs.Assembly.State,
 		ChannelID:       cfg.ChannelID,
-		StorageMounts:   daemonStorageMounts{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
-		StorageControl:  daemonStorageControl{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
-		TransferControl: daemonTransferControl{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
+		ChannelName:     cfg.ChannelName,
+		StorageMounts:   daemonStorageMounts{routes: cfg.DaemonRoutes, bindings: cfg.RegistryBindings, directory: cfg.DeviceDirectory, chID: cfg.ChannelID},
+		Files:           daemonFiles{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
+		TransferControl: daemonTransferControl{issuer: cfg.DataPlaneIssuer, chID: cfg.ChannelID},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build access door: %w", err)
-	}
-	h.outbox = resourceOutbox{
-		ResourceOutbox: cs.Assembly.Resources,
-		completion:     completion,
 	}
 	h.minter, h.admittedWriter, err = harness.New(harness.Deps{
 		ChannelID: cfg.ChannelID, Log: cs.Log, Presence: h.actors,
@@ -308,10 +313,8 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.sweepSubjectSlots(ctx)
 
-	storageAuthority := homeStorageHostControl{
-		outbox: h.outbox, timeout: cfg.ReservationTimeout, logger: logger,
-	}
 	h.daemonMembrane = platform.DaemonMembrane{
+		ChannelName:     h.channelName,
 		Ingress:         remoteIngress,
 		AuthorizeAttach: h.actors.AuthorizeAttach,
 		AttachBinding:   h.actors.AttachBinding,
@@ -327,7 +330,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		},
 		ObserveDown:   h.presenceFold.OnRemoteDown,
 		CancelRequest: h.handleCancelUpstream,
-		Storage:       storageAuthority,
 		Plan:          h.planForDaemon,
 		IsBound: func(ctx context.Context, daemonID string) (bool, error) {
 			return h.registryBindings.IsBound(ctx, h.channelID, daemonID)

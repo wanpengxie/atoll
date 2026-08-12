@@ -66,7 +66,7 @@ func (*blockingLaneConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestLaneRetirementLogicalDecisionPrecedesPhysicalClose(t *testing.T) {
 	conn := newBlockingLaneConn()
-	lane := newLaneStream(nil, channel.ID("a"), LaneGeneration("g1"), conn)
+	lane := newLaneStream(nil, channel.ID("a"), "", LaneGeneration("g1"), conn)
 	var retired atomic.Bool
 	lane.SetRetire(func(exact *LaneStream) {
 		if exact != lane {
@@ -115,7 +115,7 @@ func TestLaneRetirementLogicalDecisionPrecedesPhysicalClose(t *testing.T) {
 func TestLaneDecoderPreservesBackToBackFrames(t *testing.T) {
 	left, right := net.Pipe()
 	defer right.Close()
-	lane := newLaneStream(nil, "a", "g1", left)
+	lane := newLaneStream(nil, "a", "", "g1", left)
 	defer func() {
 		lane.RetireLogical()
 		lane.CollectPhysical()
@@ -143,8 +143,8 @@ func TestLaneRetirementIsExactObjectAndIdempotent(t *testing.T) {
 	secondLocal, secondRemote := net.Pipe()
 	defer firstRemote.Close()
 	defer secondRemote.Close()
-	g1 := newLaneStream(nil, "a", "g1", firstLocal)
-	g2 := newLaneStream(nil, "a", "g2", secondLocal)
+	g1 := newLaneStream(nil, "a", "", "g1", firstLocal)
+	g2 := newLaneStream(nil, "a", "", "g2", secondLocal)
 	current := g2
 	g1.SetRetire(func(exact *LaneStream) {
 		if current == exact {
@@ -215,8 +215,8 @@ func TestClosedWireVocabularyRejectsSmuggledPayloads(t *testing.T) {
 		t.Fatal("compartment plan named an empty channel")
 	}
 	if err := (LaneFrame{
-		Kind: LaneAllocRequest, RequestID: "outer",
-		AllocRequest: &AllocRequest{RequestID: "inner", Coord: "coord"},
+		Kind: LaneFileRequest, RequestID: "outer",
+		FileRequest: &FileRequest{RequestID: "inner", Op: FileStat, Path: "a"},
 	}).Validate(); err == nil {
 		t.Fatal("lane frame accepted mismatched correlation ids")
 	}
@@ -225,21 +225,32 @@ func TestClosedWireVocabularyRejectsSmuggledPayloads(t *testing.T) {
 	}).Validate(); err == nil {
 		t.Fatal("plan_poke accepted an unrelated payload")
 	}
-	// "It succeeded" and "it was never attempted" are mutually exclusive, and
-	// the home acts on them in opposite directions — retry versus land. A frame
-	// asserting both would let one of the two be silently dropped by whichever
-	// side the reader happens to check first.
 	if err := (LaneFrame{
-		Kind: LaneAllocReply, RequestID: "r",
-		AllocReply: &AllocReply{RequestID: "r", OK: true, NotReady: true},
+		Kind: LaneFileReply, RequestID: "r",
+		FileReply: &FileReply{RequestID: "r", OK: false},
 	}).Validate(); err == nil {
-		t.Fatal("alloc_reply claimed success and not-attempted at once")
+		t.Fatal("failed file reply omitted its reason")
 	}
-	if err := (LaneFrame{
-		Kind: LaneReclaimReply, RequestID: "r",
-		ReclaimReply: &ReclaimReply{RequestID: "r", OK: true, NotReady: true},
-	}).Validate(); err == nil {
-		t.Fatal("reclaim_reply claimed success and not-attempted at once")
+}
+
+// The lane control stream is the only header that carries the channel name,
+// and it must carry one: the daemon has nowhere to put bytes without it. The
+// name's spelling is not re-judged here — names are minted in exactly one
+// place, and a segment that could escape its root is refused by the path
+// builder that consumes it.
+func TestLaneControlCarriesQualifiedChannelNameOnly(t *testing.T) {
+	valid := DeviceStreamHeader{Kind: DeviceStreamLaneControl, Channel: "channel-id", ChannelName: "c0.proj-x.backend", LaneGen: "g1"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid lane header: %v", err)
+	}
+	missing := valid
+	missing.ChannelName = ""
+	if err := missing.Validate(); err == nil {
+		t.Error("lane accepted a header with no channel name")
+	}
+	storage := DeviceStreamHeader{Kind: DeviceStreamStorage, Channel: "channel-id", ChannelName: "c0.proj-x", LaneGen: "g1"}
+	if err := storage.Validate(); err == nil {
+		t.Fatal("storage sibling accepted a second copy of the channel name")
 	}
 }
 
@@ -312,7 +323,7 @@ func (*serialWriteConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestLaneConcurrentWritersUseOneDeadlineOwner(t *testing.T) {
 	conn := &serialWriteConn{}
-	lane := newLaneStream(nil, "a", "g1", conn)
+	lane := newLaneStream(nil, "a", "", "g1", conn)
 	var group sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		group.Add(1)
@@ -361,7 +372,7 @@ func TestBoundedControlDecoderRejectsOversizedFrameAndPreservesBoundaries(t *tes
 	}
 	conn := &serialWriteConn{}
 	carrier := newRawCarrier(nil, conn, nil)
-	lane := newLaneStream(carrier, "a", "g1", conn)
+	lane := newLaneStream(carrier, "a", "", "g1", conn)
 	if carrier.spineDecoder.max != maxControlFrameBytes ||
 		lane.decoder.max != maxControlFrameBytes {
 		t.Fatalf("production decoder limits: spine=%d lane=%d want=%d",

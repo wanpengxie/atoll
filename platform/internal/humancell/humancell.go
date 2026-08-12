@@ -160,9 +160,9 @@ func InterpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, frame
 
 // interpretFrame drives one upstream business frame onto the cell's own caps and
 // returns the receipt (or error) frame. attach is a gateway control frame (handled
-// north of the cell) — it is unexpected here. The frame's channel_id (business
-// frames carry a required one, 连接模型勘误期 v2) is the gateway's concern — this
-// body only消费 the payload's action fields, never校验 channel归属.
+// north of the cell) — it is unexpected here. For file resources the gateway
+// derives the channel from the address; for kv it uses the required channel_id.
+// This body consumes only the payload's action fields after that routing decision.
 //
 // (The绑定世代提交守卫 was整删 with the client-visible binding axis, 连接模型勘误期 §3.3-c
 // A案: there is no client generation to re-verify at the commit point — the write
@@ -473,6 +473,10 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 	switch p.Op {
 	// --- write ops ---
 	case subjectgate.ResCreate:
+		if p.Address != "" {
+			out, err := rh.CreateFileDecided(resource.ResourceID(p.Address), p.WithContent)
+			return resourceOutcomeFrameFor(f, out, err)
+		}
 		out, err := rh.Create(rid, p.Args)
 		return resourceOutcomeFrameFor(f, out, err)
 	case subjectgate.ResWrite:

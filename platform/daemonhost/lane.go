@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 )
 
@@ -32,16 +31,20 @@ type serverLane struct {
 	// syscall — can freeze without freezing plan traffic. It shares this
 	// lane's generation and has no lifecycle of its own: admitted only against
 	// this exact lane, retired with it, and its death retires the lane.
-	storage   *link.LaneStream
-	pending   map[string]chan link.LaneFrame
-	actors    map[uint64]func()
-	nextActor uint64
+	storage      *link.LaneStream
+	pending      map[string]chan link.LaneFrame
+	actors       map[uint64]func()
+	nextActor    uint64
+	exchanges    map[uint64]net.Conn
+	nextExchange uint64
+	exchangeWG   sync.WaitGroup
 }
 
 func newServerLane(carrier *carrierRow, stream *link.LaneStream, membrane membraneRow) *serverLane {
 	return &serverLane{
 		carrier: carrier, stream: stream, membrane: membrane,
 		pending: make(map[string]chan link.LaneFrame), actors: make(map[uint64]func()),
+		exchanges: make(map[uint64]net.Conn),
 	}
 }
 
@@ -84,90 +87,7 @@ func (l *serverLane) readLoop() {
 			if l.stream.Send(link.PlanLaneReply(frame.RequestID, actors, err)) != nil {
 				return
 			}
-		case link.LaneCommitted:
-			request := frame.Committed
-			if request == nil || l.membrane.bundle.Storage == nil {
-				return
-			}
-			found, lost, err := l.membrane.bundle.Storage.Committed(
-				l.carrier.host.ctx, l.carrier.daemonID, request.ReservationID)
-			reply := &link.CommittedReply{RequestID: request.RequestID, Found: found, Lost: lost}
-			if err != nil {
-				reply.Reason = err.Error()
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneCommittedReply, RequestID: request.RequestID, CommittedReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneReclaimAck:
-			request := frame.ReclaimAck
-			if request == nil || l.membrane.bundle.Storage == nil {
-				return
-			}
-			found, err := l.membrane.bundle.Storage.ReclaimAck(
-				l.carrier.host.ctx, l.carrier.daemonID, request.TombstoneID)
-			reply := &link.ReclaimAckReply{RequestID: request.RequestID, Found: found}
-			if err != nil {
-				reply.Reason = err.Error()
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneReclaimAckReply, RequestID: request.RequestID, ReclaimAckReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneReconcilePull:
-			request := frame.ReconcilePull
-			if request == nil || l.membrane.bundle.Storage == nil {
-				return
-			}
-			resources, reservations, tombstones, err := l.membrane.bundle.Storage.ReconcilePull(
-				l.carrier.host.ctx, l.carrier.daemonID, request.ActiveCoords)
-			reply := &link.ReconcilePullReply{RequestID: request.RequestID}
-			for _, row := range resources {
-				reply.Resources = append(reply.Resources, link.ReconcileResource{Coord: row.Coord})
-			}
-			for _, row := range reservations {
-				reply.PendingReservations = append(reply.PendingReservations, link.ReconcileReservation{
-					ReservationID: row.ReservationID, Coord: row.Coord,
-				})
-			}
-			for _, row := range tombstones {
-				reply.PendingTombstones = append(reply.PendingTombstones, link.ReconcileTombstone{
-					TombstoneID: row.TombstoneID, Coord: row.Coord,
-				})
-			}
-			if err != nil {
-				reply.Reason = err.Error()
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneReconcilePullReply, RequestID: request.RequestID, ReconcilePullReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneResolveCoord:
-			request := frame.ResolveCoord
-			if request == nil {
-				return
-			}
-			ticket, ok := l.carrier.host.resolveTransfer(
-				l.carrier.daemonID, string(l.stream.Channel), request.Token)
-			reply := &link.ResolveCoordReply{
-				RequestID: request.RequestID, OK: ok,
-			}
-			if ok {
-				reply.Coord, reply.Mode = ticket.coord, ticket.mode
-				reply.ReservationID = ticket.reservationID
-			} else {
-				reply.Reason = "unknown or unauthorized transfer token"
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneResolveCoordReply, RequestID: request.RequestID,
-				ResolveCoordReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneResolveCoordReply:
+		case link.LaneFileReply:
 			l.deliver(frame.RequestID, frame)
 		default:
 			// Alloc and reclaim replies belong on the storage sibling now; one
@@ -207,6 +127,41 @@ func (l *serverLane) acceptActor(conn net.Conn) {
 	}()
 }
 
+func (l *serverLane) trackExchange(conn net.Conn) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.retired || l.stream.Retired() {
+		return nil, false
+	}
+	l.nextExchange++
+	id := l.nextExchange
+	l.exchanges[id] = conn
+	l.exchangeWG.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			delete(l.exchanges, id)
+			l.mu.Unlock()
+			l.exchangeWG.Done()
+		})
+	}, true
+}
+
+func (l *serverLane) acceptExchange(conn net.Conn) {
+	cleanup, ok := l.trackExchange(conn)
+	if !ok {
+		_ = conn.Close()
+		return
+	}
+	defer cleanup()
+	if l.carrier.host.dataPlane == nil {
+		_ = conn.Close()
+		return
+	}
+	l.carrier.host.dataPlane.ServeExchange(l.carrier.host.ctx, l.stream.Channel, conn)
+}
+
 func (l *serverLane) retireLogical() {
 	if l == nil {
 		return
@@ -215,15 +170,24 @@ func (l *serverLane) retireLogical() {
 		l.mu.Lock()
 		l.retired = true
 		pending := l.pending
+		exchanges := l.exchanges
 		l.pending = make(map[string]chan link.LaneFrame)
+		l.exchanges = make(map[uint64]net.Conn)
 		l.mu.Unlock()
 		l.carrier.mu.Lock()
 		l.carrier.retirements[l.stream.Channel]++
 		l.carrier.mu.Unlock()
-		l.stream.RetireLogical()
 		for _, waiter := range pending {
 			close(waiter)
 		}
+		for _, conn := range exchanges {
+			_ = conn.Close()
+		}
+		l.exchangeWG.Wait()
+		// Retiring the physical lane invokes markStreamRetired synchronously.
+		// Do it only after children have joined, so that callback cannot wait
+		// on work this same stack still needs to close.
+		l.stream.RetireLogical()
 	})
 }
 
@@ -231,8 +195,10 @@ func (l *serverLane) markStreamRetired() {
 	l.mu.Lock()
 	l.retired = true
 	storage := l.storage
+	exchanges := l.exchanges
 	pending := l.pending
 	l.pending = make(map[string]chan link.LaneFrame)
+	l.exchanges = make(map[uint64]net.Conn)
 	l.mu.Unlock()
 	// The pair shares one generation: half a pair routes storage into nowhere,
 	// so the lane's retirement takes the storage sibling with it. Its reader
@@ -243,6 +209,10 @@ func (l *serverLane) markStreamRetired() {
 	for _, waiter := range pending {
 		close(waiter)
 	}
+	for _, conn := range exchanges {
+		_ = conn.Close()
+	}
+	l.exchangeWG.Wait()
 }
 
 // attachStorage installs the device-opened storage sibling. One per lane: a
@@ -276,7 +246,7 @@ func (l *serverLane) storageLoop(stream *link.LaneStream) {
 			return
 		}
 		switch frame.Kind {
-		case link.LaneAllocReply, link.LaneReclaimReply:
+		case link.LaneFileReply:
 			l.deliver(frame.RequestID, frame)
 		default:
 			return
@@ -318,11 +288,8 @@ func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame)
 	}
 	id := uuid.NewString()
 	frame.RequestID = id
-	switch {
-	case frame.AllocRequest != nil:
-		frame.AllocRequest.RequestID = id
-	case frame.ReclaimRequest != nil:
-		frame.ReclaimRequest.RequestID = id
+	if frame.FileRequest != nil {
+		frame.FileRequest.RequestID = id
 	}
 	waiter := make(chan link.LaneFrame, 1)
 	l.mu.Lock()
@@ -336,7 +303,7 @@ func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame)
 		// Half-open pair: the lane is admitted but the device has not opened
 		// its storage sibling yet. Nothing was attempted, so the verdict is
 		// the same as an unbuilt compartment — retry later, not a refusal.
-		return link.LaneFrame{}, fmt.Errorf("%w: storage stream not yet open", platform.ErrDaemonNotReady)
+		return link.LaneFrame{}, ErrLaneUnavailable
 	}
 	l.pending[id] = waiter
 	l.mu.Unlock()
@@ -367,41 +334,18 @@ func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame)
 	}
 }
 
-func (l *serverLane) alloc(ctx context.Context, coord string, dir bool) error {
+func (l *serverLane) file(ctx context.Context, op, path string) (link.FileReply, error) {
 	reply, err := l.storageRoundTrip(ctx, link.LaneFrame{
-		Kind:         link.LaneAllocRequest,
-		AllocRequest: &link.AllocRequest{Coord: coord, Dir: dir},
+		Kind: link.LaneFileRequest, FileRequest: &link.FileRequest{Op: op, Path: path},
 	})
 	if err != nil {
-		return err
+		return link.FileReply{}, err
 	}
-	if reply.AllocReply == nil {
-		return errors.New("daemonhost: malformed alloc reply")
+	if reply.FileReply == nil {
+		return link.FileReply{}, errors.New("daemonhost: malformed file reply")
 	}
-	if reply.AllocReply.NotReady {
-		return fmt.Errorf("%w: %s", platform.ErrDaemonNotReady, reply.AllocReply.Reason)
+	if !reply.FileReply.OK {
+		return *reply.FileReply, errors.New(reply.FileReply.Reason)
 	}
-	if !reply.AllocReply.OK {
-		return errors.New(reply.AllocReply.Reason)
-	}
-	return nil
-}
-
-func (l *serverLane) reclaim(ctx context.Context, coord string) error {
-	reply, err := l.storageRoundTrip(ctx, link.LaneFrame{
-		Kind: link.LaneReclaimRequest, ReclaimRequest: &link.ReclaimRequest{Coord: coord},
-	})
-	if err != nil {
-		return err
-	}
-	if reply.ReclaimReply == nil {
-		return errors.New("daemonhost: malformed reclaim reply")
-	}
-	if reply.ReclaimReply.NotReady {
-		return fmt.Errorf("%w: %s", platform.ErrDaemonNotReady, reply.ReclaimReply.Reason)
-	}
-	if !reply.ReclaimReply.OK {
-		return errors.New(reply.ReclaimReply.Reason)
-	}
-	return nil
+	return *reply.FileReply, nil
 }

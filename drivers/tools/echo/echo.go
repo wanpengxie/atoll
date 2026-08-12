@@ -25,13 +25,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -61,6 +64,12 @@ const (
 	// TypeCountdownAbort cancels every armed countdown: timer dismantled,
 	// each held account settled with a cancelled failure terminal.
 	TypeCountdownAbort = "countdown.abort"
+	// TypeFileRead/Write/Create are the dev/test actor's resource-capability
+	// probes. They intentionally use only sys.Resource's public file face, so
+	// system tests exercise the same local/remote handles as any real actor.
+	TypeFileRead   = "echo.file_read"
+	TypeFileWrite  = "echo.file_write"
+	TypeFileCreate = "echo.file_create"
 )
 
 // stateKeyLast is the actor-scoped durable state locus (server-backed,
@@ -190,10 +199,131 @@ func run(sys actorbase.Sys, cfg Config) error {
 			}
 			_, _ = sys.Reply(msg, "ok")
 
+		case TypeFileRead:
+			handleFileRead(sys, msg)
+
+		case TypeFileWrite:
+			handleFileWrite(sys, msg)
+
+		case TypeFileCreate:
+			handleFileCreate(sys, msg)
+
 		default:
 			_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("echo actor does not handle %s", msg.Type))
 		}
 	}
+}
+
+type filePayload struct {
+	Address string `json:"address"`
+	Content string `json:"content,omitempty"`
+}
+
+func decodeFilePayload(sys actorbase.Sys, msg actorbase.Msg) (filePayload, bool) {
+	var payload filePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Address == "" {
+		_, _ = sys.Fail(msg, "payload_invalid", "want {address, content?}")
+		return filePayload{}, false
+	}
+	return payload, true
+}
+
+func failFile(sys actorbase.Sys, msg actorbase.Msg, err error) {
+	_, _ = sys.Fail(msg, "resource_error", err.Error())
+}
+
+func handleFileRead(sys actorbase.Sys, msg actorbase.Msg) {
+	payload, ok := decodeFilePayload(sys, msg)
+	if !ok {
+		return
+	}
+	fa, out, err := sys.Resource().Open(resource.ResourceID(payload.Address), access.OpRead)
+	if err != nil {
+		failFile(sys, msg, err)
+		return
+	}
+	if !out.Accepted() {
+		failFile(sys, msg, fmt.Errorf("resource rejected: %s", out.RejectReason))
+		return
+	}
+	reader, ok := fa.Reader()
+	if !ok {
+		failFile(sys, msg, errors.New("file read unavailable"))
+		return
+	}
+	defer reader.Close()
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		failFile(sys, msg, err)
+		return
+	}
+	_, _ = sys.Reply(msg, map[string]any{
+		"content": string(content), "size": len(content), "redeem": fileRedeemKind(fa),
+	})
+}
+
+func handleFileWrite(sys actorbase.Sys, msg actorbase.Msg) {
+	payload, ok := decodeFilePayload(sys, msg)
+	if !ok {
+		return
+	}
+	fa, out, err := sys.Resource().Open(resource.ResourceID(payload.Address), access.OpWrite)
+	if err != nil {
+		failFile(sys, msg, err)
+		return
+	}
+	if !out.Accepted() {
+		failFile(sys, msg, fmt.Errorf("resource rejected: %s", out.RejectReason))
+		return
+	}
+	writeFileReply(sys, msg, fa, []byte(payload.Content))
+}
+
+func handleFileCreate(sys actorbase.Sys, msg actorbase.Msg) {
+	payload, ok := decodeFilePayload(sys, msg)
+	if !ok {
+		return
+	}
+	fa, out, err := sys.Resource().CreateFile(resource.ResourceID(payload.Address), true)
+	if err != nil {
+		failFile(sys, msg, err)
+		return
+	}
+	if !out.Accepted() {
+		failFile(sys, msg, fmt.Errorf("resource rejected: %s", out.RejectReason))
+		return
+	}
+	writeFileReply(sys, msg, fa, []byte(payload.Content))
+}
+
+func writeFileReply(sys actorbase.Sys, msg actorbase.Msg, fa accessdoor.FileAccess, content []byte) {
+	writer, ok := fa.Writer()
+	if !ok {
+		failFile(sys, msg, errors.New("file write unavailable"))
+		return
+	}
+	if _, err := writer.Write(content); err != nil {
+		_ = writer.Abort()
+		failFile(sys, msg, err)
+		return
+	}
+	if err := writer.Commit(); err != nil {
+		failFile(sys, msg, err)
+		return
+	}
+	_, _ = sys.Reply(msg, map[string]any{
+		"ok": true, "size": len(content), "redeem": fileRedeemKind(fa),
+	})
+}
+
+func fileRedeemKind(fa accessdoor.FileAccess) string {
+	if fa.Local != nil {
+		return "local"
+	}
+	if fa.Remote != nil {
+		return "remote"
+	}
+	return ""
 }
 
 // handleStart walks the capability face in one pass. Its account does NOT

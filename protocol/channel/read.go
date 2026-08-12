@@ -1,11 +1,6 @@
 package channel
 
-import (
-	"io"
-
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/resource"
-)
+import "github.com/wanpengxie/atoll/protocol/actor"
 
 type ReaderMode string
 
@@ -32,30 +27,4 @@ func (r Reader) Valid() bool {
 	default:
 		return false
 	}
-}
-
-type ResourceListQuery struct {
-	Prefix string `json:"prefix,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
-	Cursor string `json:"cursor,omitempty"`
-}
-
-type ResourceMeta struct {
-	ID                resource.ResourceID `json:"id"`
-	Kind              string              `json:"kind"`
-	CreatedBy         actor.ActorID       `json:"created_by"`
-	CreatedAt         int64               `json:"created_at"`
-	PlacementKind     string              `json:"placement_kind,omitempty"`
-	PlacementDaemonID string              `json:"placement_daemon_id,omitempty"`
-	Dir               bool                `json:"dir,omitempty"`
-}
-
-type ResourcePage struct {
-	Items []ResourceMeta `json:"items"`
-	Next  string         `json:"next,omitempty"`
-}
-
-type ResourceFetch struct {
-	Meta ResourceMeta
-	Body io.ReadCloser
 }

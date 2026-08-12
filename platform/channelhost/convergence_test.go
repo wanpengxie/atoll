@@ -75,7 +75,7 @@ func TestRebuildKeepsGenesisLineageAfterCurrentParentChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.provisionGenesis(context.Background(), genesis); err != nil {
+	if err := first.provisionGenesis(context.Background(), genesis, row.QualifiedName); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(context.Background()); err != nil {
@@ -117,7 +117,7 @@ func desiredRow(t *testing.T, id channel.ID) regspec.ChannelRow {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return regspec.ChannelRow{ID: id, ParentID: protocol.C0ChannelID, Name: string(id), Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
+	return regspec.ChannelRow{ID: id, ParentID: protocol.C0ChannelID, Name: string(id), QualifiedName: "c0.test", Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
 }
 
 func newConvergingHost(t *testing.T, registry RegistryReader) *ChannelHost {
@@ -200,27 +200,65 @@ func TestSlowScanRepairsDroppedEdge(t *testing.T) {
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if _, ok := h.Acquire(row.ID); ok {
-			registry.retire(row.ID) // also deliberately drops the retire edge
-			for time.Now().Before(deadline) {
-				if _, ok := h.Acquire(row.ID); !ok {
-					return
-				}
-				time.Sleep(5 * time.Millisecond)
-			}
-			t.Fatal("authoritative scan did not destroy a retired channel after a lost edge")
+			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("authoritative scan did not repair a completely lost edge")
 }
 
+// Retirement ends the run. A retired channel that kept its Home open would hold
+// its database open, keep firing its own timers, and never give the seat back —
+// so convergence has to close it. What retirement must NOT do is touch bytes:
+// the channel's directory on every daemon is the user's own disk, and no
+// cross-machine deletion is ever coordinated (pinned end-to-end by
+// TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes).
+func TestRetiredDesiredRowReleasesItsRunningInstance(t *testing.T) {
+	registry := newDesiredRegistry()
+	var membraneCloses atomic.Int64
+	h, err := New(t.TempDir(), registry, HomeDeps{
+		CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{},
+		OnMembraneClose: func(channel.ID, uint64) { membraneCloses.Add(1) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close(context.Background()) })
+	row := desiredRow(t, "retire-releases-run")
+	registry.put(row)
+	if err := h.StartConvergence(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.Acquire(row.ID); !ok {
+		t.Fatal("present channel did not open")
+	}
+	registry.retire(row.ID)
+	if err := h.reconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.Acquire(row.ID); ok {
+		t.Fatal("retired channel kept serving")
+	}
+	if membraneCloses.Load() != 1 {
+		t.Fatalf("membrane closes=%d, want exactly one", membraneCloses.Load())
+	}
+	// Convergence keeps seeing the retired row; closing an already-closed
+	// channel must stay a no-op rather than re-announcing the edge.
+	if err := h.reconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if membraneCloses.Load() != 1 {
+		t.Fatalf("repeated reconcile re-closed the membrane: %d", membraneCloses.Load())
+	}
+}
+
 func TestOrphanSweepProtectsOnlyC0(t *testing.T) {
 	registry := newDesiredRegistry()
 	h := newConvergingHost(t, registry)
-	if err := h.provisionGenesis(context.Background(), genesisSpec("orphan")); err != nil {
+	if err := h.provisionGenesis(context.Background(), genesisSpec("orphan"), "c0.orphan"); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.provisionGenesis(context.Background(), genesisSpec(protocol.C0ChannelID)); err != nil {
+	if err := h.provisionGenesis(context.Background(), genesisSpec(protocol.C0ChannelID), "c0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.StartConvergence(); err != nil {

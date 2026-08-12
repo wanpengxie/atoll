@@ -123,7 +123,7 @@ func TestCompartmentBuildsAndClosesOnlyByExplicitCommand(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -179,7 +179,7 @@ func TestOneCarrierServicesTwoCompartmentsAndDetachIsLocal(t *testing.T) {
 	boundA.Store(true)
 	boundB.Store(true)
 	membrane := func(bound *atomic.Bool) platform.DaemonMembrane {
-		return platform.DaemonMembrane{
+		return platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 			IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 		}
@@ -285,8 +285,13 @@ func TestDaemonRootLockHelper(t *testing.T) {
 
 func TestCoordinatePathRejectsEscapeAndKeepsDaemonTreesDistinct(t *testing.T) {
 	base := t.TempDir()
-	if _, err := coordinatePath(base, "../escape"); err == nil {
-		t.Fatal("path traversal coordinate accepted")
+	// This is the sole defence for a channel directory name arriving over the
+	// wire: the name's alphabet is judged once at minting, and anything that
+	// could reach outside its root has to die here.
+	for _, coordinate := range []string{"../escape", "c0/proj-x", "a\\b", "", ".", "/abs"} {
+		if _, err := coordinatePath(base, coordinate); err == nil {
+			t.Errorf("coordinate %q accepted", coordinate)
+		}
 	}
 	a, err := coordinatePath(base, "daemon-a")
 	if err != nil {
@@ -306,6 +311,43 @@ func TestCoordinatePathRejectsEscapeAndKeepsDaemonTreesDistinct(t *testing.T) {
 	}
 	if err := ensureDirectory(symlink); err == nil {
 		t.Fatal("workspace symlink accepted as a compartment directory")
+	}
+}
+
+func TestParentAndChildChannelDirectoriesAreFlatOnDifferentDaemons(t *testing.T) {
+	parentRoot := filepath.Join(t.TempDir(), "channels")
+	childRoot := filepath.Join(t.TempDir(), "channels")
+	if err := ensureDirectory(parentRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDirectory(childRoot); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := coordinatePath(parentRoot, "c0.proj-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := coordinatePath(childRoot, "c0.proj-x.backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDirectory(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDirectory(child); err != nil {
+		t.Fatal(err)
+	}
+	for root, want := range map[string]string{parentRoot: "c0.proj-x", childRoot: "c0.proj-x.backend"} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != want {
+			t.Fatalf("%s entries=%v, want only %q", root, entries, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(childRoot, "c0.proj-x")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child daemon has an intermediate parent shell: %v", err)
 	}
 }
 
@@ -462,7 +504,7 @@ func TestPlanSnapshotTimeoutPreservesCompartmentsAndDropsWaiter(t *testing.T) {
 	manager := newCompartmentManager(
 		context.Background(), Config{}, slog.New(slog.DiscardHandler),
 	)
-	cell := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	cell := &compartment{manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{})}
 	manager.cells["a"] = cell
 	if _, ok := manager.pullPlanSnapshot(carrier); ok {
 		t.Fatal("silent peer produced a snapshot")
@@ -551,7 +593,7 @@ func TestLanePlanPokePullsFreshPlan(t *testing.T) {
 		Present:      testPresent("a"),
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pulls.Add(1)
 			return nil, nil
@@ -586,7 +628,7 @@ func TestChannelDeletedWhileOfflineIsRetiredOnReconnect(t *testing.T) {
 		},
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -622,7 +664,7 @@ func TestUnjudgeableChannelKeepsTheCompartment(t *testing.T) {
 		Present:      testPresent("a"),
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -660,7 +702,7 @@ func TestCompartment_RebuildsAfterCloseWhenRebound(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -721,7 +763,7 @@ func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 		t.Cleanup(func() { _ = host.Close(context.Background()) })
 		var bound atomic.Bool
 		bound.Store(true)
-		membrane := platform.DaemonMembrane{
+		membrane := platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 				return nil, nil
 			},
@@ -810,7 +852,7 @@ func TestLaneRetirementPreservesCompartmentAndPullsFullPlan(t *testing.T) {
 	var pulls atomic.Int32
 	var bound atomic.Bool
 	bound.Store(true)
-	membrane := platform.DaemonMembrane{
+	membrane := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pulls.Add(1)
 			return nil, nil
@@ -851,7 +893,7 @@ func TestLongCompartmentBuildSurvivesLaneChurnWithoutDoubleBuild(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	membrane := platform.DaemonMembrane{
+	membrane := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	}
@@ -890,7 +932,7 @@ func TestBlockedCompartmentDoesNotStarveSibling(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	for _, id := range []string{"a", "b"} {
-		host.Register(channel.ID(id), 1, platform.DaemonMembrane{
+		host.Register(channel.ID(id), 1, platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 			IsBound: func(context.Context, string) (bool, error) { return true, nil },
 		})
@@ -935,7 +977,7 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 	var boundA, boundB atomic.Bool
 	boundA.Store(true)
 	boundB.Store(true)
-	membraneA := platform.DaemonMembrane{
+	membraneA := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			if blockA.Load() {
 				entered.Do(func() { close(enteredA) })
@@ -945,7 +987,7 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 		},
 		IsBound: func(context.Context, string) (bool, error) { return boundA.Load(), nil },
 	}
-	membraneB := platform.DaemonMembrane{
+	membraneB := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pullsB.Add(1)
 			return nil, nil
@@ -983,7 +1025,7 @@ func TestCondemnedCompartmentNeverBuildsSecondResourceSet(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -1030,7 +1072,7 @@ func TestCompartmentFaultRetriesInPlaceAndBecomesReady(t *testing.T) {
 		Present:      testPresent("channel-a", "a", "b"),
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -1064,11 +1106,11 @@ func TestSnapshotRetirementIsExactObject(t *testing.T) {
 	manager := newCompartmentManager(
 		context.Background(), Config{}, slog.New(slog.DiscardHandler),
 	)
-	condemned := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	condemned := &compartment{manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{})}
 	manager.cells["a"] = condemned
 
 	// The rebind: a different compartment now occupies this coordinate.
-	replacement := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	replacement := &compartment{manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{})}
 	manager.cells["a"] = replacement
 
 	manager.closeExactCompartment(condemned)
@@ -1122,7 +1164,7 @@ func newLaneAdmissionFixture(t *testing.T) *laneAdmissionFixture {
 	carrier := &link.ClientCarrier{}
 	manager.carrier = carrier
 	cell := &compartment{
-		manager: manager, chID: "a",
+		manager: manager, chID: "a", chName: "c0.a",
 		stopBuild: make(chan struct{}),
 		buildDone: make(chan struct{}),
 	}
@@ -1141,7 +1183,7 @@ func newLaneAdmissionFixture(t *testing.T) *laneAdmissionFixture {
 	) (*link.LaneStream, error) {
 		local, remote := net.Pipe()
 		stream, err := link.AdoptLane(carrier, link.DeviceStreamHeader{
-			Kind: link.DeviceStreamLaneControl, Channel: chID, LaneGen: gen,
+			Kind: link.DeviceStreamLaneControl, Channel: chID, ChannelName: "c0.test", LaneGen: gen,
 		}, local)
 		if err != nil {
 			return nil, err
@@ -1203,7 +1245,7 @@ func (f *laneAdmissionFixture) lanePeer(
 	local, remote := net.Pipe()
 	f.t.Cleanup(func() { _ = remote.Close() })
 	stream, err := link.AdoptLane(carrier, link.DeviceStreamHeader{
-		Kind: link.DeviceStreamLaneControl, Channel: "a", LaneGen: gen,
+		Kind: link.DeviceStreamLaneControl, Channel: "a", ChannelName: "c0.a", LaneGen: gen,
 	}, local)
 	if err != nil {
 		f.t.Fatalf("adopt lane %q: %v", gen, err)
@@ -1219,427 +1261,85 @@ func (f *laneAdmissionFixture) slots() (lane, pending *clientLane) {
 	return f.cell.lane, f.cell.pending
 }
 
-type bindableStorage struct{}
-
-func (bindableStorage) Alloc(string, bool) error { return nil }
-func (bindableStorage) Reconcile(context.Context, []StorageResourceCoord,
-	[]StorageReservationCoord, []StorageTombstoneCoord, StorageReclaimAckFunc) {
-}
-func (bindableStorage) ActiveWriteCoords() []string { return nil }
-
-// wedgeableStorage blocks its first Alloc until released — the shape of a
-// mkdir parked on a dead network mount.
-type wedgeableStorage struct {
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (s *wedgeableStorage) Alloc(string, bool) error {
-	s.once.Do(func() { close(s.entered) })
-	<-s.release
-	return nil
-}
-func (s *wedgeableStorage) Reconcile(context.Context, []StorageResourceCoord,
-	[]StorageReservationCoord, []StorageTombstoneCoord, StorageReclaimAckFunc) {
-}
-func (s *wedgeableStorage) ActiveWriteCoords() []string { return nil }
-
-// countingAuthority counts the server-side storage RPCs the device's pump
-// keeps making over the lane.
-type countingAuthority struct{ pulls atomic.Int32 }
-
-func (a *countingAuthority) Committed(context.Context, string, string) (bool, bool, error) {
-	return false, false, nil
-}
-func (a *countingAuthority) ReclaimAck(context.Context, string, string) (bool, error) {
-	return false, nil
-}
-func (a *countingAuthority) ReconcilePull(context.Context, string, []string) (
-	[]platform.StorageResourceCoord, []platform.StorageReservationCoord,
-	[]platform.StorageTombstoneCoord, error,
-) {
-	a.pulls.Add(1)
-	return nil, nil, nil, nil
-}
-
-// TestWedgedStorageExecutorDoesNotBlockLaneTraffic pins the queue split: a
-// storage call parked inside its syscall freezes only the storage sibling,
-// while the lane — plan replies, pokes, the pump's storage RPCs — keeps
-// flowing. Before the split both rode one stream with one reader, and a dead
-// disk silenced the channel's whole instruction face.
-func TestWedgedStorageExecutorDoesNotBlockLaneTraffic(t *testing.T) {
-	authority := &countingAuthority{}
-	host := daemonhost.New(daemonhost.Config{
-		ScanInterval: time.Hour,
-		Present:      testPresent("channel-a", "a", "b"),
-	})
-	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
-		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-		Storage: authority,
-	})
-	storage := &wedgeableStorage{
-		entered: make(chan struct{}), release: make(chan struct{}),
-	}
-	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
-		return CompartmentResources{
-			Factories: emptyFactories{}, StorageHost: storage,
-		}, nil
-	}, func(cfg *Config) { cfg.ScrubberInterval = 20 * time.Millisecond })
-	t.Cleanup(func() { close(storage.release) })
-
-	// Wedge the executor: retry until an alloc actually reaches it — earlier
-	// attempts answer NotReady while the compartment is still building.
-	go func() {
-		for {
-			select {
-			case <-storage.entered:
-				return
-			default:
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			_ = host.SendAlloc(ctx, "daemon-a", "a", "coord-wedged", true)
-			cancel()
-		}
-	}()
-	select {
-	case <-storage.entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the alloc under test never reached the storage executor")
-	}
-
-	baseline := authority.pulls.Load()
-	waitCompute(t, func() bool { return authority.pulls.Load() >= baseline+2 })
-}
-
-// TestWedgedStorageReaderDoesNotHoldRunHostage pins the bounded teardown: a
-// storage call parked in a syscall no cancellation reaches must not keep Run
-// from returning past its close budget, and the abandonment account must name
-// the parked call from the stall ledger — an exit that said only "timed out"
-// would leave the operator diffing logs for the culprit.
-// TestWedgedBuildIsCountedInTheCloseAccount pins the close contract onto the
-// build worker: a BuildCompartment that ignores every stop signal must not be
-// invisible to the final join — the close answers ErrCloseAbandoned with the
-// worker in its account instead of pretending clean with nil.
-func TestWedgedBuildIsCountedInTheCloseAccount(t *testing.T) {
-	previousBudget := computeCloseBudget
-	computeCloseBudget = 300 * time.Millisecond
-	previousJoin := compartmentJoinTimeout
-	compartmentJoinTimeout = 100 * time.Millisecond
-	t.Cleanup(func() {
-		computeCloseBudget = previousBudget
-		compartmentJoinTimeout = previousJoin
-	})
-
-	host := daemonhost.New(daemonhost.Config{
-		ScanInterval: time.Hour,
-		Present:      testPresent("channel-a", "a", "b"),
-	})
-	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("channel-a", 1, platform.DaemonMembrane{
-		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
-	}))
-	t.Cleanup(server.Close)
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var enteredOnce sync.Once
-	t.Cleanup(func() { close(release) })
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	home := t.TempDir()
-	go func() {
-		done <- Run(ctx, Config{
-			ServerWS:   "ws" + strings.TrimPrefix(server.URL, "http"),
-			Credential: "secret", AtollHome: home,
-			BuildCompartment: func(string, string) (CompartmentResources, error) {
-				enteredOnce.Do(func() { close(entered) })
-				<-release
-				// The straggler unwinds through the error path, which stops at
-				// the closing check without touching any seam the test cleanup
-				// is about to restore.
-				return CompartmentResources{}, errors.New("wedge released during teardown")
-			},
-		})
-	}()
-	select {
-	case <-entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the build under test never started")
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrCloseAbandoned) {
-			t.Fatalf("close over a wedged build answered %v, want ErrCloseAbandoned", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("close never answered while the build was wedged")
-	}
-}
-
-func TestWedgedStorageReaderDoesNotHoldRunHostage(t *testing.T) {
-	previous := computeCloseBudget
-	computeCloseBudget = 200 * time.Millisecond
-	t.Cleanup(func() { computeCloseBudget = previous })
-
-	host := daemonhost.New(daemonhost.Config{
-		ScanInterval: time.Hour,
-		Present:      testPresent("channel-a", "a", "b"),
-	})
-	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
-		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
-		IsBound: func(context.Context, string) (bool, error) { return true, nil },
-	})
-	storage := &wedgeableStorage{
-		entered: make(chan struct{}), release: make(chan struct{}),
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
-	}))
-	t.Cleanup(server.Close)
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	runExited := make(chan struct{})
-	home := t.TempDir()
-	go func() {
-		defer close(runExited)
-		done <- Run(ctx, Config{
-			ServerWS:   "ws" + strings.TrimPrefix(server.URL, "http"),
-			Credential: "secret", AtollHome: home,
-			BuildCompartment: func(string, string) (CompartmentResources, error) {
-				return CompartmentResources{
-					Factories: emptyFactories{}, StorageHost: storage,
-				}, nil
-			},
-		})
-	}()
-	var releaseOnce sync.Once
-	t.Cleanup(func() {
-		cancel()
-		releaseOnce.Do(func() { close(storage.release) })
-		select {
-		case <-runExited:
-		case <-time.After(5 * time.Second):
-			t.Error("compute did not join even after the wedge released")
-		}
-	})
-
-	go func() {
-		for {
-			select {
-			case <-storage.entered:
-				return
-			default:
-			}
-			allocCtx, allocCancel := context.WithTimeout(context.Background(), time.Second)
-			_ = host.SendAlloc(allocCtx, "daemon-a", "a", "coord-wedged", true)
-			allocCancel()
-		}
-	}()
-	select {
-	case <-storage.entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the alloc under test never reached the storage executor")
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrCloseAbandoned) {
-			t.Fatalf("Run returned %v, want the abandonment account", err)
-		}
-		if !strings.Contains(err.Error(), "alloc") ||
-			!strings.Contains(err.Error(), "coord-wedged") {
-			t.Fatalf("account=%q, want the parked call named", err.Error())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("a wedged storage reader held Run past its close budget")
-	}
-	releaseOnce.Do(func() { close(storage.release) })
-}
-
-// TestStorageStallSweepNamesTheFrozenCall pins the detection half: a storage
-// call inside its syscall past the threshold is named by the sweep — channel,
-// operation, coordinate — and a completed one is not. The call cannot be
-// recalled, so being named is the entire protection.
-func TestStorageStallSweepNamesTheFrozenCall(t *testing.T) {
-	previous := storageStallThreshold
-	storageStallThreshold = time.Millisecond
-	t.Cleanup(func() { storageStallThreshold = previous })
-	var logs strings.Builder
-	manager := newCompartmentManager(
-		context.Background(), Config{}, slog.New(slog.NewTextHandler(&logs, nil)),
-	)
-	mark := manager.beginStorageOp("a", "alloc", "coord-frozen")
-	time.Sleep(5 * time.Millisecond)
-	manager.sweepStorageStalls()
-	if !strings.Contains(logs.String(), "storage_call_stalled") ||
-		!strings.Contains(logs.String(), "coord-frozen") {
-		t.Fatalf("stalled call was not named: %q", logs.String())
-	}
-	manager.endStorageOp(mark)
-	logs.Reset()
-	manager.sweepStorageStalls()
-	if strings.Contains(logs.String(), "storage_call_stalled") {
-		t.Fatalf("completed call still reported: %q", logs.String())
-	}
-}
-
-// TestUnboundLaneAnswersNotReadyRatherThanRefusing pins that a lane with no
-// compartment behind it reports that it attempted nothing, instead of issuing a
-// refusal it never made.
-//
-// The invariant: a device answers for what it decided. A lane carries frames
-// from the moment it is admitted, and its compartment is built afterwards — a
-// build that retries with backoff, so the gap can be minutes — so the home can
-// and does arrive during it. If that arrival produces a plain !OK, the home
-// reads a verdict where the device formed none, and the create it was serving
-// dies instead of being retried once the compartment is up.
-//
-// Both halves are here on purpose: the unbound one alone would still pass for
-// an implementation that answered not_ready unconditionally.
-func TestUnboundLaneAnswersNotReadyRatherThanRefusing(t *testing.T) {
-	ask := func(t *testing.T, bind bool) link.AllocReply {
-		t.Helper()
-		fixture := newLaneAdmissionFixture(t)
-		lane, _ := fixture.lanePeer(fixture.carrier, "0198f000-0000-7000-8000-00000000000a")
-		fixture.manager.acceptLane(lane)
-		if installed, _ := fixture.slots(); installed != lane {
-			t.Fatalf("lane was not admitted, nothing is reading")
-		}
-		if bind {
-			// Exactly what bindLane installs.
-			lane.mu.Lock()
-			lane.storage = bindableStorage{}
-			lane.bound = true
-			lane.mu.Unlock()
-		}
-		// Storage instructions ride the lane's storage sibling, not the lane.
-		peer := fixture.storagePeer(lane.stream.Gen)
-		if err := json.NewEncoder(peer).Encode(link.LaneFrame{
-			Kind:      link.LaneAllocRequest,
-			RequestID: "r",
-			AllocRequest: &link.AllocRequest{
-				RequestID: "r", Coord: "c",
-			},
-		}); err != nil {
-			t.Fatalf("send alloc_request: %v", err)
-		}
-		var frame link.LaneFrame
-		if err := json.NewDecoder(peer).Decode(&frame); err != nil {
-			t.Fatalf("read alloc_reply: %v", err)
-		}
-		if frame.AllocReply == nil {
-			t.Fatalf("reply carried no alloc_reply: %+v", frame)
-		}
-		if err := frame.Validate(); err != nil {
-			t.Fatalf("device sent an invalid reply: %v", err)
-		}
-		return *frame.AllocReply
-	}
-
-	t.Run("unbound lane attempted nothing", func(t *testing.T) {
-		reply := ask(t, false)
-		if !reply.NotReady {
-			t.Fatalf("not_ready=false: the device reported a refusal it never made (%+v)", reply)
-		}
-		if reply.OK {
-			t.Fatalf("ok=true on an unbound lane: %+v", reply)
-		}
-	})
-
-	t.Run("bound lane answers for what it did", func(t *testing.T) {
-		reply := ask(t, true)
-		if reply.NotReady {
-			t.Fatalf("not_ready=true after binding: %+v", reply)
-		}
-		if !reply.OK {
-			t.Fatalf("ok=false after binding: %+v", reply)
-		}
-	})
-}
-
-// TestLaneReadsBoundResourcesUnderTheLaneLock pins that the lane reader and
-// bindLane agree on a lock for the resources bindLane installs.
-//
-// The invariant: a lane starts reading the moment it is admitted, and its
-// resources are installed afterwards — immediately for an already-built
-// compartment, only after a successful build (which retries with backoff, so
-// possibly minutes later) for a new one. The reader's reads are therefore
-// always concurrent with that write, and unsynchronized reads of an interface
-// value can observe a half-written one.
-//
-// This cannot be raised to a compiler guarantee: Go has no way to require that
-// a field be read under a particular mutex. It is pinned by putting real
-// alloc/reclaim traffic on a lane while a bindLane-shaped write lands, and
-// letting the race detector adjudicate.
-func TestLaneReadsBoundResourcesUnderTheLaneLock(t *testing.T) {
+func TestClientLaneRetirementClosesTrackedExchanges(t *testing.T) {
 	fixture := newLaneAdmissionFixture(t)
-	lane, _ := fixture.lanePeer(fixture.carrier, "0198f000-0000-7000-8000-000000000001")
-
-	fixture.manager.acceptLane(lane)
-	if installed, _ := fixture.slots(); installed != lane {
-		t.Fatalf("lane was not admitted, nothing is reading")
+	lane := fixture.lane(fixture.carrier, link.LaneGeneration("00000000-0000-7000-8000-000000000001"))
+	local, peer := net.Pipe()
+	defer peer.Close()
+	cleanup, ok := lane.trackExchange(local)
+	if !ok {
+		t.Fatal("exchange was not tracked")
 	}
-	// Storage instructions ride the lane's storage sibling, not the lane.
-	peer := fixture.storagePeer(lane.stream.Gen)
-
-	start := make(chan struct{})
-	rounds := 0
-	traffic := make(chan struct{})
+	joined := make(chan struct{})
 	go func() {
-		defer close(traffic)
-		encoder, decoder := json.NewEncoder(peer), json.NewDecoder(peer)
-		<-start
-		for range 200 {
-			if encoder.Encode(link.LaneFrame{
-				Kind:      link.LaneAllocRequest,
-				RequestID: "r",
-				AllocRequest: &link.AllocRequest{
-					RequestID: "r", Coord: "c",
-				},
-			}) != nil {
-				return
-			}
-			var reply link.LaneFrame
-			if decoder.Decode(&reply) != nil {
-				return
-			}
-			rounds++
-		}
+		_, _ = local.Read(make([]byte, 1))
+		cleanup()
+		close(joined)
 	}()
-
-	// Exactly the write bindLane performs, in its own goroutine exactly as
-	// acceptLane spawns it.
-	go func() {
-		<-start
-		lane.mu.Lock()
-		lane.storage = bindableStorage{}
-		lane.mu.Unlock()
-	}()
-
-	close(start)
-	<-traffic
-	// Without this the test passes vacuously when a malformed frame makes the
-	// reader hang up before it ever reaches the resource read.
-	if rounds == 0 {
-		t.Fatalf("no alloc round trip completed, the read under test never ran")
+	lane.retireLogical()
+	select {
+	case <-joined:
+	default:
+		t.Fatal("lane retirement returned before the exchange handler joined")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := peer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("peer remained open after exact lane retirement")
 	}
 }
 
-// TestLaneAdmissionOrdersByGeneration is the deterministic form of the
-// arrival-order hazard: two lanes for one coordinate are opened by the server
-// in a known order, each header is parsed by its own worker, and they can
-// therefore reach admission in either order.
+func TestClientLaneProductionDialRegistersExchangeForRetirement(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	lane := fixture.lane(fixture.carrier, link.LaneGeneration("00000000-0000-7000-8000-000000000011"))
+
+	previousOpen := openClientExchange
+	var peer net.Conn
+	openClientExchange = func(
+		_ context.Context, carrier *link.ClientCarrier, chID channel.ID, gen link.LaneGeneration,
+	) (net.Conn, error) {
+		if carrier != lane.carrier || chID != lane.stream.Channel || gen != lane.stream.Gen {
+			t.Fatalf("dial coordinates = (%p,%q,%q), want exact lane", carrier, chID, gen)
+		}
+		local, remote := net.Pipe()
+		peer = remote
+		return local, nil
+	}
+	t.Cleanup(func() {
+		openClientExchange = previousOpen
+		if peer != nil {
+			_ = peer.Close()
+		}
+	})
+
+	conn, err := lane.openExchange(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane.mu.Lock()
+	tracked := len(lane.exchanges)
+	lane.mu.Unlock()
+	if tracked != 1 {
+		t.Fatalf("tracked exchanges = %d, want 1 immediately after production dial", tracked)
+	}
+
+	joined := make(chan struct{})
+	go func() {
+		_, _ = conn.Read(make([]byte, 1))
+		_ = conn.Close()
+		close(joined)
+	}()
+	lane.retireLogical()
+	select {
+	case <-joined:
+	default:
+		t.Fatal("lane retirement returned before the production-dialed exchange joined")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := peer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("production-dialed exchange remained open after exact lane retirement")
+	}
+}
+
 func TestLaneAdmissionOrdersByGeneration(t *testing.T) {
 	t.Run("out of order arrival is refused", func(t *testing.T) {
 		fixture := newLaneAdmissionFixture(t)
@@ -1785,7 +1485,7 @@ func TestLaneFromAStaleCarrierCreatesNoCompartment(t *testing.T) {
 	t.Cleanup(func() { _ = remote.Close() })
 	staleCarrier := &link.ClientCarrier{}
 	stream, err := link.AdoptLane(staleCarrier, link.DeviceStreamHeader{
-		Kind: link.DeviceStreamLaneControl, Channel: "unserved", LaneGen: openedThird,
+		Kind: link.DeviceStreamLaneControl, Channel: "unserved", ChannelName: "c0.unserved", LaneGen: openedThird,
 	}, local)
 	if err != nil {
 		t.Fatalf("adopt lane: %v", err)
@@ -1830,39 +1530,6 @@ func TestCarrierDownClearsTheGenerationWatermark(t *testing.T) {
 // lane before retiring it, which is exactly what makes laneDown's exact-lane
 // guard skip — so each of those paths owns the forwarder unbind it disarmed,
 // or the disconnect window fails every pump pass through a dead lane.
-func TestClearingTheLaneUnbindsTheStorageForwarderOnEveryPath(t *testing.T) {
-	bindForwarder := func(fixture *laneAdmissionFixture) *storageHostForwarder {
-		lane := fixture.lane(fixture.carrier, openedFirst)
-		fixture.manager.acceptLane(lane)
-		fwd := newStorageHostForwarder(nil, nil, 0)
-		fwd.Rebind(lane)
-		fixture.cell.mu.Lock()
-		fixture.cell.storage = fwd
-		fixture.cell.mu.Unlock()
-		return fwd
-	}
-	t.Run("carrier down", func(t *testing.T) {
-		fixture := newLaneAdmissionFixture(t)
-		fwd := bindForwarder(fixture)
-
-		fixture.manager.carrierDown(fixture.carrier)
-
-		if fwd.current() != nil {
-			t.Fatal("carrier down left the forwarder bound to the dead lane")
-		}
-	})
-	t.Run("condemn", func(t *testing.T) {
-		fixture := newLaneAdmissionFixture(t)
-		fwd := bindForwarder(fixture)
-
-		fixture.cell.condemn("test")
-
-		if fwd.current() != nil {
-			t.Fatal("condemn left the forwarder bound to the dead lane")
-		}
-	})
-}
-
 func TestInFlightRPCsRetireWithTheirExactLane(t *testing.T) {
 	lane := &clientLane{pending: make(map[string]chan link.LaneFrame)}
 	before := make(chan link.LaneFrame, 1)
@@ -1931,7 +1598,7 @@ func TestGoneSendFailureDoesNotBlockCompartmentRemoval(t *testing.T) {
 		cells: make(map[string]*compartment),
 	}
 	cell := &compartment{
-		manager: manager, chID: "a", closing: true, closeStarted: true,
+		manager: manager, chID: "a", chName: "c0.a", closing: true, closeStarted: true,
 		stopBuild: make(chan struct{}),
 	}
 	manager.cells["a"] = cell
@@ -2083,12 +1750,10 @@ func TestCompartmentRollbackAndClosePreserveTeardownOrder(t *testing.T) {
 				manager := newCompartmentManager(
 					context.Background(), Config{}, slog.New(slog.DiscardHandler),
 				)
-				storageDone := make(chan struct{})
-				close(storageDone)
 				cell := &compartment{
-					manager: manager, chID: "a", stopBuild: make(chan struct{}),
+					manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{}),
 					host: host, outbound: outbound, cancel: cancel,
-					resources: resources, storageDone: storageDone,
+					resources: resources,
 				}
 				manager.cells["a"] = cell
 				cell.close()
@@ -2135,7 +1800,7 @@ func TestCompartmentBuildRollsBackFactorylessResources(t *testing.T) {
 			manager.root = t.TempDir()
 			manager.daemonID = "daemon-a"
 			cell := &compartment{
-				manager: manager, chID: "a", stopBuild: make(chan struct{}),
+				manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{}),
 			}
 			manager.cells["a"] = cell
 			err := cell.build()
@@ -2171,7 +1836,7 @@ func TestTeardownStepsWithoutCancellationStayInsideTheJoinBudget(t *testing.T) {
 		context.Background(), Config{}, slog.New(slog.DiscardHandler),
 	)
 	cell := &compartment{
-		manager: manager, chID: "a", stopBuild: make(chan struct{}),
+		manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{}),
 		resources: CompartmentResources{Close: func() error { <-release; return nil }},
 	}
 	manager.cells["a"] = cell
@@ -2223,7 +1888,7 @@ func TestOverrunningBuildThatSettlesCleanFreesTheCoordinate(t *testing.T) {
 	manager.root = t.TempDir()
 	manager.daemonID = "daemon-a"
 	cell := &compartment{
-		manager: manager, chID: "a",
+		manager: manager, chID: "a", chName: "c0.a",
 		stopBuild: make(chan struct{}), buildDone: make(chan struct{}),
 	}
 	manager.cells["a"] = cell
@@ -2281,7 +1946,7 @@ func TestOverrunningBuildWhoseRollbackFailsStaysOutOfService(t *testing.T) {
 	manager.root = t.TempDir()
 	manager.daemonID = "daemon-a"
 	cell := &compartment{
-		manager: manager, chID: "a",
+		manager: manager, chID: "a", chName: "c0.a",
 		stopBuild: make(chan struct{}), buildDone: make(chan struct{}),
 	}
 	manager.cells["a"] = cell

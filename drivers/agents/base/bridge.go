@@ -73,14 +73,15 @@ func (b *channelResourceBridge) Invoke(ctx context.Context, scope effectcap.Scop
 		if !out.Accepted() {
 			return runtimeproto.ResourceResult{Error: string(out.RejectReason)}
 		}
-		if fa.Local == nil || fa.Local.Write == nil {
-			return runtimeproto.ResourceResult{Error: "local write unavailable"}
+		writer, ok := fa.Writer()
+		if !ok {
+			return runtimeproto.ResourceResult{Error: "file write unavailable"}
 		}
-		if _, err = fa.Local.Write.Write(in.Payload); err != nil {
-			_ = fa.Local.Write.Abort()
+		if _, err = writer.Write(in.Payload); err != nil {
+			_ = writer.Abort()
 			return runtimeproto.ResourceResult{Error: err.Error()}
 		}
-		if err = fa.Local.Write.Commit(); err != nil {
+		if err = writer.Commit(); err != nil {
 			return runtimeproto.ResourceResult{Error: err.Error()}
 		}
 		return runtimeproto.ResourceResult{Payload: json.RawMessage(`{"ok":true}`)}
@@ -101,11 +102,12 @@ func (b *channelResourceBridge) Invoke(ctx context.Context, scope effectcap.Scop
 		if !out.Accepted() {
 			return runtimeproto.ResourceResult{Error: string(out.RejectReason)}
 		}
-		if fa.Local == nil || fa.Local.Read == nil {
-			return runtimeproto.ResourceResult{Error: "local read unavailable"}
+		reader, ok := fa.Reader()
+		if !ok {
+			return runtimeproto.ResourceResult{Error: "file read unavailable"}
 		}
-		defer fa.Local.Read.Close()
-		raw, err := io.ReadAll(fa.Local.Read)
+		defer reader.Close()
+		raw, err := io.ReadAll(reader)
 		if err != nil {
 			return runtimeproto.ResourceResult{Error: err.Error()}
 		}

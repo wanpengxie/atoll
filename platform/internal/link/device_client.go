@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -22,9 +21,12 @@ type ClientActorLane struct {
 	Carrier *ClientCarrier
 	Lane    *LaneStream
 	Host    *actorhost.HostSupervisor
-	Control DeviceLaneControl
 	Files   LocalFileOpener
-	Logger  *slog.Logger
+	// DialExchange opens an exchange already registered as a child of this
+	// exact lane. The compute owner supplies it; callers must not dial the
+	// carrier directly because that would escape lane retirement and joining.
+	DialExchange func(context.Context) (io.ReadWriteCloser, error)
+	Logger       *slog.Logger
 }
 
 type actorStream struct {
@@ -86,7 +88,7 @@ func (l *ClientActorLane) OpenActorStream(
 		Arms: RawActorArms{
 			Pen: writer, Access: &remoteResourceHandle{
 				relay:    accessRelay,
-				redeemer: &deviceFileRedeemer{control: l.Control, files: l.Files},
+				redeemer: &deviceFileRedeemer{files: l.Files, dial: l.DialExchange},
 			},
 			State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
 			Schedule: &remoteScheduleHandle{relay: scheduleRelay}, Lifecycle: lifecycle,
@@ -97,54 +99,54 @@ func (l *ClientActorLane) OpenActorStream(
 	return newDeviceActorStream(resource), nil
 }
 
-type DeviceLaneControl interface {
-	ResolveCoord(context.Context, string) (ResolveCoordReply, error)
-	SendCommitted(context.Context, string) (CommittedReply, error)
-}
-
 type deviceFileRedeemer struct {
-	control DeviceLaneControl
-	files   LocalFileOpener
+	files LocalFileOpener
+	dial  func(context.Context) (io.ReadWriteCloser, error)
 }
 
 func (r *deviceFileRedeemer) redeemFileRoute(
 	ctx context.Context,
 	route accessdoor.FileRoute,
 ) (accessdoor.FileAccess, error) {
-	if r.control == nil || r.files == nil {
-		return accessdoor.FileAccess{}, errors.New("link: file route unavailable")
-	}
-	reply, err := r.control.ResolveCoord(ctx, route.Token)
-	if err != nil {
-		return accessdoor.FileAccess{}, err
-	}
-	if !reply.OK {
-		return accessdoor.FileAccess{}, fileRouteErr("resolve coord: %s", reply.Reason)
-	}
-	if route.Dir {
-		root, err := r.files.OpenDir(reply.Coord)
+	if route.Redeem == accessdoor.FileRedeemRemote {
+		if r.dial == nil {
+			return accessdoor.FileAccess{}, errors.New("link: remote file route unavailable")
+		}
+		conn, err := r.dial(ctx)
 		if err != nil {
 			return accessdoor.FileAccess{}, err
 		}
-		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Dir: root}}, nil
+		if err := WriteExchangeControl(conn, ExchangeTicketHeader{Ticket: route.Token}); err != nil {
+			_ = conn.Close()
+			return accessdoor.FileAccess{}, err
+		}
+		switch route.Mode {
+		case access.OpRead:
+			return accessdoor.FileAccess{Remote: &accessdoor.RemoteFile{Read: &remoteExchangeReader{reader: NewExchangeReader(conn)}}}, nil
+		case access.OpWrite:
+			return accessdoor.FileAccess{Remote: &accessdoor.RemoteFile{Write: &remoteExchangeWriter{handle: NewExchangeWriteHandle(conn)}}}, nil
+		default:
+			_ = conn.Close()
+			return accessdoor.FileAccess{}, fileRouteErr("unknown mode %q", route.Mode)
+		}
+	}
+	if route.Redeem != accessdoor.FileRedeemLocal {
+		return accessdoor.FileAccess{}, errors.New("link: unknown file redemption route")
+	}
+	if r.files == nil || route.Path == "" {
+		return accessdoor.FileAccess{}, errors.New("link: file route unavailable")
 	}
 	switch route.Mode {
 	case access.OpRead:
-		handle, err := r.files.OpenRead(reply.Coord)
+		handle, err := r.files.OpenRead(route.Path)
 		if err != nil {
 			return accessdoor.FileAccess{}, err
 		}
 		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Read: handle}}, nil
 	case access.OpWrite:
-		handle, err := r.files.OpenWrite(reply.Coord)
+		handle, err := r.files.OpenWrite(route.Path)
 		if err != nil {
 			return accessdoor.FileAccess{}, err
-		}
-		if reply.ReservationID != "" {
-			handle = &deviceCommittingWrite{
-				LocalWriteHandle: handle, control: r.control, files: r.files,
-				reservationID: reply.ReservationID, coord: reply.Coord,
-			}
 		}
 		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Write: handle}}, nil
 	default:
@@ -152,30 +154,26 @@ func (r *deviceFileRedeemer) redeemFileRoute(
 	}
 }
 
-type deviceCommittingWrite struct {
-	accessdoor.LocalWriteHandle
-	control       DeviceLaneControl
-	files         LocalFileOpener
-	reservationID string
-	coord         string
-}
+type remoteExchangeReader struct{ reader *ExchangeReader }
 
-func (h *deviceCommittingWrite) Commit() error {
-	if err := h.LocalWriteHandle.Commit(); err != nil {
-		return err
+func (r *remoteExchangeReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	return n, mapExchangeError(err)
+}
+func (r *remoteExchangeReader) Close() error { return r.reader.Close() }
+
+type remoteExchangeWriter struct{ handle *ExchangeWriteHandle }
+
+func (w *remoteExchangeWriter) Write(p []byte) (int, error) { return w.handle.Write(p) }
+func (w *remoteExchangeWriter) Commit() error               { return mapExchangeError(w.handle.Commit()) }
+func (w *remoteExchangeWriter) Abort() error                { return w.handle.Abort() }
+
+func mapExchangeError(err error) error {
+	var terminal *ExchangeTerminalError
+	if errors.As(err, &terminal) && terminal.Code == "host_offline" {
+		return accessdoor.NewHostOfflineError(terminal.Detail)
 	}
-	reply, err := h.control.SendCommitted(context.Background(), h.reservationID)
-	if err != nil {
-		return fmt.Errorf("link: committed outcome unknown: %w", err)
-	}
-	if reply.Reason != "" && !reply.Lost {
-		return errors.New(reply.Reason)
-	}
-	if reply.Lost {
-		_ = h.files.ReclaimCoord(h.coord)
-		return errors.New("link: create reservation lost")
-	}
-	return nil
+	return err
 }
 
 type DeviceActorStream struct {

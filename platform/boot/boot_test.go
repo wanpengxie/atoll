@@ -59,6 +59,13 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT installed_at FROM atoll_install WHERE id=1`).Scan(&installedAt); err != nil || installedAt != stamp.UnixMilli() {
 		t.Fatalf("marker=%d err=%v", installedAt, err)
 	}
+	var localDeviceName string
+	if err := db.QueryRowContext(ctx, `SELECT name FROM devices WHERE id=?`, protocol.LocalDeviceID).Scan(&localDeviceName); err != nil {
+		t.Fatal(err)
+	}
+	if err := lagoon.ValidateName(localDeviceName); err != nil {
+		t.Fatalf("boot minted invalid local device name %q: %v", localDeviceName, err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}

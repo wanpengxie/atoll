@@ -17,7 +17,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -81,7 +80,7 @@ func TestLaneTermination_RetiresLaneOnly(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -136,7 +135,7 @@ func TestLaneAttachedAnswersFromThisHostsLedgerOnly(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -166,7 +165,7 @@ func TestLaneAttachedAnswersFromThisHostsLedgerOnly(t *testing.T) {
 func TestMembraneGenerationCASRejectsLateCallbacks(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close(context.Background())
-	bundle := platform.DaemonMembrane{
+	bundle := platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}
 	host.Register("a", 2, bundle)
@@ -272,7 +271,7 @@ func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	bundle := platform.DaemonMembrane{
+	bundle := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}
@@ -344,7 +343,7 @@ func TestSnapshotAnswerSpendsOneBudgetAcrossAllChannels(t *testing.T) {
 	})
 	defer host.Close(context.Background())
 	for _, chID := range present {
-		host.Register(chID, 1, platform.DaemonMembrane{
+		host.Register(chID, 1, platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan: func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 			IsBound: func(context.Context, string) (bool, error) {
 				<-release
@@ -413,7 +412,7 @@ func containsChannel(ids []channel.ID, want channel.ID) bool {
 func TestEnsureLaneRetiresOldExactObjectWithoutDeletingReplacement(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close(context.Background())
-	bundle := platform.DaemonMembrane{
+	bundle := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}
@@ -475,7 +474,7 @@ func TestUnboundCoordinateLeavesTheSnapshotAndNothingElse(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -510,7 +509,7 @@ func TestUnjudgeableCoordinateIsNamedUnknownAndNeverOmitted(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -639,7 +638,7 @@ func TestDuplicateCurrentIsRetryableAndKeepsIncumbent(t *testing.T) {
 func TestCoordinateBookkeepingReclaimsIdleEntries(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -699,52 +698,6 @@ func TestCoordinateGateSerializesAndReclaims(t *testing.T) {
 	}
 }
 
-func TestOpenTransfer_TTLReclaimsAbandonedTokens(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	host := New(Config{
-		ScanInterval: time.Hour,
-		Now:          func() time.Time { return now },
-	})
-	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	carrier := &carrierRow{
-		lanes: map[channel.ID]*serverLane{"a": {}},
-	}
-	host.mu.Lock()
-	host.daemons["daemon-a"] = &daemonRow{current: carrier}
-	host.mu.Unlock()
-	t.Cleanup(func() {
-		host.mu.Lock()
-		delete(host.daemons, "daemon-a")
-		host.mu.Unlock()
-	})
-
-	abandoned, err := host.OpenTransfer(
-		context.Background(), "daemon-a", "a", "coord-a", access.OpRead, "",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(transferTicketTTL)
-	current, err := host.OpenTransfer(
-		context.Background(), "daemon-a", "a", "coord-b", access.OpRead, "",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	host.mu.RLock()
-	_, abandonedPresent := host.transfers[abandoned]
-	_, currentPresent := host.transfers[current]
-	count := len(host.transfers)
-	host.mu.RUnlock()
-	if abandonedPresent {
-		t.Fatal("abandoned transfer survived its TTL")
-	}
-	if !currentPresent || count != 1 {
-		t.Fatalf("transfer table after mint-time GC: current=%v count=%d", currentPresent, count)
-	}
-}
-
 func TestCoordinateExecutorsDoNotLetBlockedABarB(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
@@ -752,14 +705,14 @@ func TestCoordinateExecutorsDoNotLetBlockedABarB(t *testing.T) {
 	release := make(chan struct{})
 	var enterOnce, releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) {
 			enterOnce.Do(func() { close(entered) })
 			<-release
 			return true, nil
 		},
 	})
-	host.Register("b", 1, platform.DaemonMembrane{
+	host.Register("b", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -920,7 +873,7 @@ func TestBlockedSnapshotAnswerDoesNotStallTheLease(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) {
 			once.Do(func() { close(entered) })
@@ -1105,7 +1058,7 @@ func newWedgedLaneHost(t *testing.T, cfg Config) *wedgedLaneHost {
 		wedged.unblock()
 		_ = host.Close(context.Background())
 	})
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			once.Do(func() { close(entered) })
 			<-release
@@ -1269,7 +1222,7 @@ func TestFailedLaneOpenReturnsItsPhysicalTicket(t *testing.T) {
 		coordLocks:  make(map[channel.ID]*coordGate),
 		coordTasks:  make(map[channel.ID]*coordTask),
 	}
-	membrane := membraneRow{generation: 1, bundle: platform.DaemonMembrane{
+	membrane := membraneRow{generation: 1, bundle: platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}}
 	for i := 0; i < 4; i++ {

@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/boot"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -41,20 +42,24 @@ type Config struct {
 }
 
 type Engine struct {
-	cfg        Config
-	logger     *slog.Logger
-	registry   *lagoon.Registry
-	host       *channelhost.ChannelHost
-	daemonHost *daemonhost.Host
-	gateway    *gateway.Gateway
-	sessions   *gateway.SessionStore
-	submitter  lagoon.Submitter
-	handler    http.Handler
-	server     *http.Server
-	ready      chan struct{}
-	boundAddr  string
-	closeOnce  sync.Once
-	closeErr   error
+	cfg            Config
+	logger         *slog.Logger
+	registry       *lagoon.Registry
+	host           *channelhost.ChannelHost
+	daemonHost     *daemonhost.Host
+	dataIssuer     dataplane.Issuer
+	dataRedeemer   dataplane.Redeemer
+	dataBinder     dataplane.Binder
+	closeDataPlane func(context.Context) error
+	gateway        *gateway.Gateway
+	sessions       *gateway.SessionStore
+	submitter      lagoon.Submitter
+	handler        http.Handler
+	server         *http.Server
+	ready          chan struct{}
+	boundAddr      string
+	closeOnce      sync.Once
+	closeErr       error
 	// provisionTimeout is fixed in production and narrowed only by package tests.
 	provisionTimeout time.Duration
 }
@@ -83,6 +88,9 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		if change.Principal != "" && gatewayEdge != nil {
 			gatewayEdge.Poke(change.Principal)
 		}
+		if change.AllPrincipals && gatewayEdge != nil {
+			gatewayEdge.PokeAll()
+		}
 	})
 	if err != nil {
 		return nil, err
@@ -96,7 +104,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	}
 	host = e.host
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
-	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("open c0: %w", err))
 	}
 	c0, ok := e.host.Acquire(protocol.C0ChannelID)
@@ -118,7 +126,8 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if err := e.host.Close(context.Background()); err != nil {
 		return nil, e.fail(fmt.Errorf("close init c0: %w", err))
 	}
-	e.daemonHost = daemonhost.New(daemonhost.Config{Logger: logger, Present: func(ctx context.Context) ([]channel.ID, error) {
+	e.dataIssuer, e.dataRedeemer, e.dataBinder, e.closeDataPlane = dataplane.New()
+	e.daemonHost = daemonhost.New(daemonhost.Config{Logger: logger, DataPlane: e.dataRedeemer, Present: func(ctx context.Context) ([]channel.ID, error) {
 		rows, err := e.registry.ListPresentChannels(ctx)
 		out := make([]channel.ID, len(rows))
 		for i, row := range rows {
@@ -135,12 +144,17 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		}
 		return daemonhost.DaemonAlive
 	}})
+	if err := e.dataBinder.BindHostStreamOpener(e.daemonHost); err != nil {
+		return nil, e.fail(fmt.Errorf("bind dataplane host streams: %w", err))
+	}
 	e.host, err = channelhost.New(cfg.ChannelDBDir, e.registry, channelhost.HomeDeps{
 		CompositionResolver:  resolver,
 		IntroductionResolver: resolver,
 		RegistryBindings:     e.registry,
 		Logger:               logger,
 		DaemonRoutes:         e.daemonHost,
+		DataPlaneIssuer:      e.dataIssuer,
+		DeviceDirectory:      e.registry,
 		OnMembraneOpen: func(ch channel.ID, generation uint64, membrane platform.DaemonMembrane) {
 			e.daemonHost.Register(ch, generation, membrane)
 			row, ok, err := e.registry.GetChannelDesired(context.Background(), ch)
@@ -159,7 +173,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	}
 	host = e.host
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
-	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("reopen c0 after init: %w", err))
 	}
 	c0, ok = e.host.Acquire(protocol.C0ChannelID)
@@ -174,12 +188,12 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		return nil, e.fail(err)
 	}
 	gatewayEdge = e.gateway
+	p := portal.New(portal.Config{Registry: e.registry, Submitter: e.submitter, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, ContractVersion: contractVersion})
+	e.handler = p
+	e.gateway.Start()
 	if err := e.host.StartConvergence(); err != nil {
 		return nil, e.fail(err)
 	}
-	e.gateway.Start()
-	p := portal.New(portal.Config{Registry: e.registry, Submitter: e.submitter, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, ContractVersion: contractVersion})
-	e.handler = p
 	return e, nil
 }
 
@@ -251,7 +265,7 @@ func (e *Engine) resolveEntitlements(ctx context.Context, principal string) ([]g
 			continue
 		}
 		if found {
-			routes = append(routes, gateway.Route{Channel: row.ID, Bundle: bundle, SubjectID: id})
+			routes = append(routes, gateway.Route{Channel: row.ID, ChannelName: row.QualifiedName, Bundle: bundle, SubjectID: id})
 		}
 	}
 	return routes, failed, nil
@@ -472,17 +486,26 @@ func (e *Engine) Serve(ctx context.Context) error {
 }
 func (e *Engine) Close(ctx context.Context) error {
 	e.closeOnce.Do(func() {
+		if e.host != nil {
+			e.closeErr = errors.Join(e.closeErr, e.host.StopConvergence(ctx))
+		}
 		if e.server != nil {
 			e.closeErr = errors.Join(e.closeErr, e.server.Shutdown(ctx))
 		}
 		if e.gateway != nil {
 			e.closeErr = errors.Join(e.closeErr, e.gateway.Close())
 		}
+		if e.host != nil {
+			e.closeErr = errors.Join(e.closeErr, e.host.Close(ctx))
+		}
+		if e.dataBinder != nil {
+			e.dataBinder.UnbindHostStreamOpener()
+		}
 		if e.daemonHost != nil {
 			e.closeErr = errors.Join(e.closeErr, e.daemonHost.Close(ctx))
 		}
-		if e.host != nil {
-			e.closeErr = errors.Join(e.closeErr, e.host.Close(ctx))
+		if e.closeDataPlane != nil {
+			e.closeErr = errors.Join(e.closeErr, e.closeDataPlane(ctx))
 		}
 		if e.registry != nil {
 			e.closeErr = errors.Join(e.closeErr, e.registry.Close())

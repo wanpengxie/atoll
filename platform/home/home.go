@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
@@ -19,7 +20,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
-	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
@@ -32,8 +32,9 @@ var (
 )
 
 type Config struct {
-	ChannelID channelpkg.ID
-	DBPath    string
+	ChannelID   channelpkg.ID
+	ChannelName string
+	DBPath      string
 
 	Genesis         *storespec.ChannelGenesis
 	ExpectedGenesis *storespec.ChannelGenesis
@@ -49,9 +50,14 @@ type Config struct {
 	CompositionResolver  CompositionResolver
 	IntroductionResolver IntroductionResolver
 	Clock                schedule.Clock
-	ReservationTimeout   time.Duration
 	DaemonRoutes         platform.DaemonRoutes
+	DataPlaneIssuer      dataplane.Issuer
+	DeviceDirectory      DeviceDirectory
 	RegistryBindings     BindingReader
+}
+
+type DeviceDirectory interface {
+	ResolveDeviceName(context.Context, string) (id string, present bool, found bool, err error)
 }
 
 type BindingReader interface {
@@ -71,9 +77,10 @@ func (unavailableBindingReader) ListBoundDeviceIDs(context.Context, channelpkg.I
 // Home is the channel composition root. Runtime organs are held as peers;
 // actorSystem is only the Platform workflow facade over them.
 type Home struct {
-	channelID channelpkg.ID
-	actors    *actorSystem
-	resolver  IntroductionResolver
+	channelID   channelpkg.ID
+	channelName string
+	actors      *actorSystem
+	resolver    IntroductionResolver
 	// ownerPrincipal is the channel's one owner pointer, read once from the
 	// immutable genesis. It is the sole source of every owner judgement.
 	ownerPrincipal string
@@ -99,7 +106,6 @@ type Home struct {
 	expiry           storespec.ExpiryQuery
 	requests         storespec.RequestLookup
 	registryBindings BindingReader
-	resourceRead     storespec.ResourceReadStore
 	closeStore       func() error
 
 	// The two harness capabilities are held apart, exactly as they are handed
@@ -107,7 +113,6 @@ type Home struct {
 	// goes to timer fire and nowhere else. Home writes through neither.
 	minter         harness.Minter
 	admittedWriter harness.AdmittedWriter
-	outbox         resourcespec.ResourceOutbox
 	stateHandles   accessdoor.StateHandleResolver
 	engine         *schedule.Engine
 

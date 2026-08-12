@@ -66,10 +66,6 @@ func registrarCall(t *testing.T, eng *Engine, sender actor.ActorID, source chann
 	if err != nil || len(targets) != 1 {
 		return lagoon.Reply{}, errors.Join(err, errors.New("target seat unavailable"))
 	}
-	slot, ok := bundle.Gateway().SubjectSlotFor(sender)
-	if !ok {
-		return lagoon.Reply{}, errors.New("sender slot unavailable")
-	}
 	requestID := message.ID(uuid.NewString())
 	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{
 		ChannelID: string(source), ID: string(requestID), MsgType: string(word), Kind: "request",
@@ -78,7 +74,22 @@ func registrarCall(t *testing.T, eng *Engine, sender actor.ActorID, source chann
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
-	result, err := slot.Deliver(ctx, frame)
+	var result subjectgate.FrameResult
+	for {
+		slot, ok := bundle.Gateway().SubjectSlotFor(sender)
+		if !ok {
+			return lagoon.Reply{}, errors.New("sender slot unavailable")
+		}
+		result, err = slot.Deliver(ctx, frame)
+		if !errors.Is(err, subjectgate.ErrNoOccupant) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return lagoon.Reply{}, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
@@ -233,7 +244,7 @@ func TestChannelCreateReplayRepairsItsResidualDefaultBinding(t *testing.T) {
 	}
 }
 
-func TestRetireReparentsChildrenAndKeepsTombstone(t *testing.T) {
+func TestRetireRejectsActiveChildrenAndKeepsLedgerRows(t *testing.T) {
 	eng, db, root := bootRegistrarTest(t)
 	_ = createChannelForTest(t, eng, root, "child", protocol.C0ChannelID)
 	parent := createChannelForTest(t, eng, root, "parent", protocol.C0ChannelID)
@@ -241,16 +252,22 @@ func TestRetireReparentsChildrenAndKeepsTombstone(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO decl_overlays(decl_id,channel_id,config_json,updated_at) VALUES(?,?,?,?)`, lagoon.SpaceToolDeclID, parent.ID, `{}`, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelRetire, lagoon.ChannelRetire{ChannelID: parent.ID}); err != nil {
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelRetire, lagoon.ChannelRetire{ChannelID: parent.ID}); err == nil {
+		t.Fatal("retired a channel with an active child")
+	}
+	unchanged, ok, err := eng.registry.GetChannelDesired(context.Background(), parent.ID)
+	if err != nil || !ok || unchanged.Status != regspec.ChannelPresent {
+		t.Fatalf("parent row=%+v ok=%v err=%v", unchanged, ok, err)
+	}
+	stillChild, ok, err := eng.registry.GetChannelDesired(context.Background(), child.ID)
+	if err != nil || !ok || stillChild.ParentID != parent.ID {
+		t.Fatalf("child row=%+v ok=%v err=%v", stillChild, ok, err)
+	}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelRetire, lagoon.ChannelRetire{ChannelID: child.ID}); err != nil {
 		t.Fatal(err)
 	}
-	retired, ok, err := eng.registry.GetChannelDesired(context.Background(), parent.ID)
-	if err != nil || !ok || retired.Status != regspec.ChannelRetired {
-		t.Fatalf("retired row=%+v ok=%v err=%v", retired, ok, err)
-	}
-	reparented, ok, err := eng.registry.GetChannelDesired(context.Background(), child.ID)
-	if err != nil || !ok || reparented.ParentID != protocol.C0ChannelID {
-		t.Fatalf("child row=%+v ok=%v err=%v", reparented, ok, err)
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelRetire, lagoon.ChannelRetire{ChannelID: parent.ID}); err != nil {
+		t.Fatal(err)
 	}
 	for label, query := range map[string]string{
 		"binding": `SELECT count(*) FROM bindings WHERE channel_id=?`,
@@ -260,6 +277,12 @@ func TestRetireReparentsChildrenAndKeepsTombstone(t *testing.T) {
 		if err := db.QueryRow(query, parent.ID).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("retire removed %s: count=%d err=%v", label, count, err)
 		}
+	}
+	// The rule above — a parent with live children cannot retire — only holds
+	// if the reverse is closed too. Retiring first and hanging a child on the
+	// retired parent afterwards would walk straight around it.
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelCreate, lagoon.ChannelCreate{Name: "late-child", Parent: parent.ID}); err == nil {
+		t.Fatal("created a live child under a retired parent")
 	}
 }
 
@@ -302,6 +325,29 @@ func TestCreateReplayAfterDetachDoesNotRestoreBinding(t *testing.T) {
 	}
 }
 
+func TestChannelCreateUsesSharedNameLawAtEveryBoundary(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	for _, name := range []string{"z", strings.Repeat("z", 63)} {
+		if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelCreate, lagoon.ChannelCreate{Name: name, Parent: protocol.C0ChannelID}); err != nil {
+			t.Errorf("valid channel name %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{"", strings.Repeat("z", 64), "-z", "z-", "Z", "z.z"} {
+		if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelCreate, lagoon.ChannelCreate{Name: name, Parent: protocol.C0ChannelID}); err == nil {
+			t.Errorf("invalid channel name %q accepted", name)
+		}
+	}
+}
+
+func TestChannelCreateReturnsDottedQualifiedName(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	parent := createChannelForTest(t, eng, root, "proj-x", protocol.C0ChannelID)
+	child := createChannelForTest(t, eng, root, "backend", parent.ID)
+	if parent.QualifiedName != "c0.proj-x" || child.QualifiedName != "c0.proj-x.backend" {
+		t.Fatalf("qualified names parent=%q child=%q", parent.QualifiedName, child.QualifiedName)
+	}
+}
+
 func TestCreateReplayRejectsAmbiguousMatchesAndDoesNotReuseTombstone(t *testing.T) {
 	t.Run("ambiguous natural key", func(t *testing.T) {
 		eng, db, root := bootRegistrarTest(t)
@@ -315,15 +361,14 @@ func TestCreateReplayRejectsAmbiguousMatchesAndDoesNotReuseTombstone(t *testing.
 			t.Fatalf("ambiguous create error=%v", err)
 		}
 	})
-	t.Run("retired name is a new birth", func(t *testing.T) {
+	t.Run("retired name remains reserved", func(t *testing.T) {
 		eng, _, root := bootRegistrarTest(t)
 		first := createChannelForTest(t, eng, root, "reborn", protocol.C0ChannelID)
 		if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelRetire, lagoon.ChannelRetire{ChannelID: first.ID}); err != nil {
 			t.Fatal(err)
 		}
-		second := createChannelForTest(t, eng, root, "reborn", protocol.C0ChannelID)
-		if second.ID == first.ID {
-			t.Fatal("channel.create reused a retired row")
+		if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelCreate, lagoon.ChannelCreate{Name: "reborn", Parent: protocol.C0ChannelID}); err == nil {
+			t.Fatal("channel.create reused a retired sibling name")
 		}
 	})
 }
@@ -643,7 +688,7 @@ func TestCredentialSetRejectsAgentAndAllowsHuman(t *testing.T) {
 	}
 }
 
-func TestDeviceMintAndClaimMissAreIntentionallyNonIdempotent(t *testing.T) {
+func TestDeviceNamesAreUniqueAndClaimsCarryTheTrueName(t *testing.T) {
 	eng, _, root := bootRegistrarTest(t)
 	mint := func(word lagoon.Word, payload any) regspec.DeviceRow {
 		t.Helper()
@@ -658,18 +703,29 @@ func TestDeviceMintAndClaimMissAreIntentionallyNonIdempotent(t *testing.T) {
 		return row
 	}
 	first := mint(lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"})
-	second := mint(lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"})
-	if first.ID == second.ID {
-		t.Fatal("device.mint replay reused an identity")
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"}); err == nil {
+		t.Fatal("duplicate device name was accepted")
 	}
-	missOne := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing"})
-	missTwo := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing"})
-	if missOne.ID == missTwo.ID {
-		t.Fatal("claim miss replay reused its residual mint")
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceRetire, lagoon.DeviceRetire{DeviceID: first.ID}); err != nil {
+		t.Fatal(err)
 	}
-	hit := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: first.ID})
-	if hit.ID != first.ID {
-		t.Fatalf("owned claim hit returned %s, want %s", hit.ID, first.ID)
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"}); err == nil {
+		t.Fatal("retired device name was reused")
+	}
+	miss := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing", Name: "claimed-box"})
+	if miss.Name != "claimed-box" {
+		t.Fatalf("claim minted name %q", miss.Name)
+	}
+	second := mint(lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "second-box"})
+	hit := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: second.ID, Name: "second-box"})
+	if hit.ID != second.ID {
+		t.Fatalf("owned claim hit returned %s, want %s", hit.ID, second.ID)
+	}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: second.ID, Name: "wrong"}); err == nil {
+		t.Fatal("claim with a mismatched name was accepted")
+	}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing"}); err == nil {
+		t.Fatal("nameless claim was accepted")
 	}
 }
 

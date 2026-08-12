@@ -329,6 +329,7 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		// lagoon 合同一起构成出口脸，数据访问仍恒经 lagoon。
 		"platform/lagoon/regspec": true,
 		"platform/daemonhost":     true,
+		"platform/dataplane":      true,
 		// compute = 设备载体的出口脸（/compute 链的 daemon 侧运行时）。登记于
 		// 2026-08-05 devicehost 入 drivers 层（此前同一 import 住 cmd/daemon，
 		// 墙不覆盖 cmd）：消费者轴是"设备"，与 subjectgate 之于"人"对称。
@@ -354,7 +355,7 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		"要新的 platform 能力就在出口脸上加导出方法；确需扩脸时在本表登记。")
 }
 
-// TestResourceAccessNeverSelfSigns —— 资源访问票据恒是"服务端追踪、单次兑换"
+// TestResourceAccessNeverSelfSigns —— 资源访问票据恒是"服务端追踪、TTL 内可重复兑换"
 // 的不透明值：accessdoor 全树与 link 的三个票据文件恒不 import 签名/MAC 原语。
 // 一旦引入 hmac/ed25519，票据就能变成离线自验证、可重放的东西——泄漏一个
 // token 从"下一次兑换失败"升级成"永久通行证"。
@@ -386,6 +387,6 @@ func TestResourceAccessNeverSelfSigns(t *testing.T) {
 		}
 	}
 	failWall(t, bad,
-		"资源访问路径恒不引入签名/MAC 原语，票据恒为服务端追踪的不透明单次值。",
-		"要防伪造，靠服务端记账与单次兑换，恒不靠把票据变成可离线验证的自证物。")
+		"资源访问路径恒不引入签名/MAC 原语，票据恒为服务端追踪、TTL 内可重复兑换的不透明值。",
+		"要防伪造，靠服务端记账与 TTL 内重复兑换，恒不靠把票据变成可离线验证的自证物。")
 }

@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-release test lint check-activity-types dev clean e2e-loop
+.PHONY: install build build-go build-release test test-full test-strict lint check-activity-types check-data-plane-scope dev clean e2e-loop
 
 # server/daemon ship namespaced (atoll-server / atoll-daemon); the entry
 # command itself is plain `atoll` — its own name IS the namespace.
@@ -45,7 +45,7 @@ test:
 	go test -tags atolltestfast -short -race ./...
 
 # test-full — 收口门（合 main 前 / 批次终审前）：一个不跳全量跑。
-test-full:
+test-full: check-data-plane-scope
 	go test -tags atolltestfast -race ./...
 
 # test-strict — 不带任何测试加速 tag 的全真档（怀疑加速档掩盖了
@@ -66,6 +66,9 @@ lint: check-activity-types
 check-activity-types:
 	./scripts/check-activity-types.sh
 	./scripts/check-activity-types.sh --self-test
+
+check-data-plane-scope:
+	./scripts/check-data-plane-scope.sh
 
 # ----------------------------------------------------------------------------
 # dev — 起 server(API-only) 于 /tmp/atoll-dev。首启自动安装（root 密码见日志），

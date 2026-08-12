@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -45,6 +46,9 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	}
 	if !rootExists || !localExists {
 		return errors.New("lagoon: installation identity incomplete")
+	}
+	if err := ValidateName(string(protocol.C0ChannelID)); err != nil {
+		return fmt.Errorf("lagoon: invalid c0 channel name: %w", err)
 	}
 	now := r.now().UnixMilli()
 	if err := r.registry.store.UpsertSteward(ctx, protocol.StewardPrincipalID, now); err != nil {
@@ -382,9 +386,11 @@ func (r *Registrar) createChannel(ctx context.Context, owner string, source chan
 }
 
 func (r *Registrar) createChannelRows(ctx context.Context, owner string, source channel.ID, p ChannelCreate) (regspec.ChannelRow, bool, error) {
-	p.Name = strings.TrimSpace(p.Name)
 	if p.Name == "" {
 		return regspec.ChannelRow{}, false, invalid("name required")
+	}
+	if err := ValidateName(p.Name); err != nil {
+		return regspec.ChannelRow{}, false, invalid(err.Error())
 	}
 	parent := p.Parent
 	if parent == "" {
@@ -393,19 +399,28 @@ func (r *Registrar) createChannelRows(ctx context.Context, owner string, source 
 	if parent == "" {
 		return regspec.ChannelRow{}, false, invalid("parent required")
 	}
-	parentPresent, err := r.registry.store.PresentChannelExists(ctx, parent)
+	// A retired parent still has a row, and its name stays reserved — but it can
+	// no longer gain children. Otherwise retirement's one rule (a parent with
+	// live children cannot retire) could be walked around by retiring first and
+	// hanging the child afterwards.
+	parentRow, parentFound, err := r.registry.GetChannelDesired(ctx, parent)
 	if err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
-	if !parentPresent {
+	if !parentFound || parentRow.Status != regspec.ChannelPresent {
 		return regspec.ChannelRow{}, false, notFound("parent channel")
 	}
-	matches, err := r.registry.store.FindPresentChannels(ctx, parent, p.Name)
+	qualified, err := JoinName(parentRow.QualifiedName, p.Name)
+	if err != nil {
+		return regspec.ChannelRow{}, false, err
+	}
+	matches, err := r.registry.store.FindChannels(ctx, parent, p.Name)
 	if err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
 	if len(matches) > 0 {
-		if len(matches) == 1 && matches[0].OwnerPrincipal == owner {
+		if len(matches) == 1 && matches[0].Status == regspec.ChannelPresent && matches[0].OwnerPrincipal == owner {
+			matches[0].QualifiedName = qualified
 			return matches[0], false, nil
 		}
 		return regspec.ChannelRow{}, false, conflict("sibling channel name already exists")
@@ -421,7 +436,7 @@ func (r *Registrar) createChannelRows(ctx context.Context, owner string, source 
 	if err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
-	row := regspec.ChannelRow{ID: id, ParentID: parent, Name: p.Name, Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: owner, Spec: raw, CreatedAt: now}
+	row := regspec.ChannelRow{ID: id, ParentID: parent, Name: p.Name, QualifiedName: qualified, Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: owner, Spec: raw, CreatedAt: now}
 	if err := r.registry.store.InsertChannel(ctx, row); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
@@ -438,7 +453,7 @@ func (r *Registrar) retireChannel(ctx context.Context, principal string, p Chann
 	if p.ChannelID == protocol.C0ChannelID {
 		return regspec.ChannelRow{}, reserved("c0 cannot be retired")
 	}
-	row, found, err := r.registry.store.GetChannel(ctx, p.ChannelID)
+	row, found, err := r.registry.GetChannelDesired(ctx, p.ChannelID)
 	if !found && err == nil {
 		return regspec.ChannelRow{}, notFound("channel")
 	}
@@ -451,16 +466,21 @@ func (r *Registrar) retireChannel(ctx context.Context, principal string, p Chann
 	if row.Status == regspec.ChannelRetired {
 		return row, nil
 	}
-	if err := r.registry.store.ReparentPresentChildren(ctx, p.ChannelID, row.ParentID); err != nil {
+	hasPresentChild, err := r.registry.store.PresentChildExists(ctx, p.ChannelID)
+	if err != nil {
 		return regspec.ChannelRow{}, err
+	}
+	if hasPresentChild {
+		return regspec.ChannelRow{}, conflict("channel has active child channels")
 	}
 	if err := r.registry.store.UpdateChannelStatus(ctx, p.ChannelID, regspec.ChannelRetired); err != nil {
 		return regspec.ChannelRow{}, err
 	}
 	row.Status = regspec.ChannelRetired
 	if r.registry.onCommit != nil {
-		r.registry.onCommit(Change{ChannelID: p.ChannelID})
-		r.registry.onCommit(Change{AllChannels: true})
+		// This is an in-process entitlement edge only; it never enters the
+		// ChannelHost/daemon reconciliation path.
+		r.registry.onCommit(Change{AllPrincipals: true})
 	}
 	return row, nil
 }
@@ -473,6 +493,11 @@ func (r *Registrar) registerPrincipal(ctx context.Context, p PrincipalRegister) 
 	id := strings.TrimSpace(p.ID)
 	if id == protocol.RootPrincipalID {
 		return regspec.PrincipalRow{}, reserved("root principal id is reserved")
+	}
+	if id != "" {
+		if err := ValidateName(id); err != nil {
+			return regspec.PrincipalRow{}, invalid(err.Error())
+		}
 	}
 	now := r.now().UnixMilli()
 	var row regspec.PrincipalRow
@@ -796,9 +821,13 @@ func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p Overl
 }
 
 func (r *Registrar) mintDevice(ctx context.Context, owner, name string) (regspec.DeviceRow, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return regspec.DeviceRow{}, invalid("name required")
+	if err := ValidateName(name); err != nil {
+		return regspec.DeviceRow{}, invalid(err.Error())
+	}
+	if _, found, err := r.registry.GetDeviceByName(ctx, name); err != nil {
+		return regspec.DeviceRow{}, err
+	} else if found {
+		return regspec.DeviceRow{}, conflict("device name already exists")
 	}
 	row := regspec.DeviceRow{ID: uuid.NewString(), OwnerPrincipal: owner, Name: name, Key: uuid.NewString(), Status: regspec.DevicePresent, CreatedAt: r.now().UnixMilli()}
 	err := r.registry.store.InsertDevice(ctx, row)
@@ -806,16 +835,24 @@ func (r *Registrar) mintDevice(ctx context.Context, owner, name string) (regspec
 }
 
 func (r *Registrar) claimDevice(ctx context.Context, owner string, p DeviceClaim) (regspec.DeviceRow, error) {
+	if err := ValidateName(p.Name); err != nil {
+		return regspec.DeviceRow{}, invalid(err.Error())
+	}
 	if p.DeviceID != "" {
 		row, ok, err := r.registry.GetDevice(ctx, p.DeviceID)
 		if err != nil {
 			return regspec.DeviceRow{}, err
 		}
-		if ok && row.Status == regspec.DevicePresent && row.OwnerPrincipal == owner {
-			return row, nil
+		if ok {
+			if row.Name != p.Name {
+				return regspec.DeviceRow{}, conflict("device name does not match claimed device")
+			}
+			if row.Status == regspec.DevicePresent && row.OwnerPrincipal == owner {
+				return row, nil
+			}
 		}
 	}
-	return r.mintDevice(ctx, owner, "claimed-device")
+	return r.mintDevice(ctx, owner, p.Name)
 }
 
 func (r *Registrar) retireDevice(ctx context.Context, owner string, p DeviceRetire) (regspec.DeviceRow, error) {

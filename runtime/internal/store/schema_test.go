@@ -55,9 +55,7 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 
 // ChannelLocalTables enumerates exactly the surviving channel-local tables:
 // the message log, the actor registry, the access plane's channel-scoped
-// resources + the create/delete outbox's two server-side
-// durable halves (resource_reservations + resource_tombstones, 期11 spec
-// §1.3), the actor-scoped state locus actor_state, and the identity-level
+// kv-only resources, the actor-scoped state locus actor_state, and the identity-level
 // pending-timer control plane timers. There is no resource_grants table:
 // authorization is membrane-uniform (PM-D1), judged from membership facts +
 // created_by — per-object grants structurally cannot exist.
@@ -66,13 +64,11 @@ func TestChannelLocalTables_Set(t *testing.T) {
 		"messages":       true,
 		"actor_registry": true,
 
-		"channel_genesis":       true,
-		"resources":             true,
-		"resource_reservations": true,
-		"resource_tombstones":   true,
-		"actor_state":           true,
-		"timers":                true,
-		"timer_dead":            true,
+		"channel_genesis": true,
+		"resources":       true,
+		"actor_state":     true,
+		"timers":          true,
+		"timer_dead":      true,
 	}
 	if len(store.ChannelLocalTables()) != len(want) {
 		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables(), want)

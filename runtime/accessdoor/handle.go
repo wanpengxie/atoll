@@ -79,8 +79,7 @@ type ResourceAccessHandle interface {
 
 	// Stat projects id's owner-root-or-any-grant-visible metadata + caller's effective ops
 	// (§3.6). Never Operation-gated (Stat is a Query method, not a grantable
-	// verb) and never carries PlacementCoord (StatMeta is a separate,
-	// coord-less projection type — see query.go).
+	// verb).
 	Stat(ctx context.Context, id resource.ResourceID) (StatResult, error)
 
 	// List enumerates channel-scoped resources this caller can see (owner root
@@ -270,19 +269,16 @@ func (h rejectedResourceHandle) Redeem(context.Context, FileRoute) (FileAccess, 
 // day-1 KindKV driver must be present (op=create hardcodes KindKV, so a missing
 // one would otherwise surface only when someone first creates).
 func New(deps Deps) (AccessMinter, error) {
-	minter, _, err := NewAssembly(deps)
-	return minter, err
+	return NewAssembly(deps)
 }
 
-// NewAssembly constructs the caller-facing minter and the asynchronous
-// completion face over the same door and therefore the same resource gate.
-func NewAssembly(deps Deps) (AccessMinter, ResourceCompletion, error) {
+func NewAssembly(deps Deps) (AccessMinter, error) {
 	if deps.Registry == nil || deps.Drivers == nil || deps.Authority == nil || deps.State == nil {
-		return nil, nil, errors.New("accessdoor: Deps incomplete")
+		return nil, errors.New("accessdoor: Deps incomplete")
 	}
 	if deps.Drivers[resourcespec.KindKV] == nil {
-		return nil, nil, errors.New("accessdoor: KindKV driver missing")
+		return nil, errors.New("accessdoor: KindKV driver missing")
 	}
 	d := &door{deps: deps}
-	return &minter{door: d}, resourceCompletion{door: d}, nil
+	return &minter{door: d}, nil
 }

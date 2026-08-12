@@ -8,21 +8,8 @@ package resourcespec
 // review), not a protocol revision, and NOT an open extension point for domain
 // code.
 //
-// The naming axis is the DOOR-BACK IMPLEMENTATION VARIANT (mechanical: byte
-// size / at-rest encryption / storage locus), NOT the use case. kind is a
-// durable persisted value (the resources.kind column), so the implementation
-// name never lies about the bytes behind it; use case lives in an id naming
-// convention instead (the Unix /etc pattern). The kind axis belongs ONLY to
-// the channel-scoped locus (this table): actor-scoped state has NO kind — it
-// lives in a structurally separate locus (StateStore / the actor_state table,
-// keyed by owner), where scope is expressed by structure and day-1 has a
-// single mechanical shape, so no kind column exists there to route.
-//
-// 期11 (resource 轴完备化) closes the day-1 set at exactly {KindKV, KindFile}
-// — file lands additively on this axis (a value + a, so far daemon-side-only,
-// driver) precisely because its mechanical difference (daemon-local bytes vs
-// inline bytes) is now real; secret remains future additive when ITS
-// mechanical difference (at-rest encryption) becomes real.
+// Kind selects the create call's byte locus. Only KindKV is persisted in the
+// resources table; KindFile is routed directly from its daemon URI.
 type ResourceKind string
 
 const (
@@ -42,16 +29,8 @@ const (
 	// the wire) is additive, not a correction of this one.
 	KindKV ResourceKind = "kv"
 
-	// KindFile is the daemon-local file driver (期11 §1): bytes live on one
-	// daemon's physical disk (ResourceMeta.PlacementKind=PlacementDaemonLocal),
-	// addressed by an opaque placement_coord the owning
-	// daemon's Streamer interprets — never inline in the resources row (its
-	// bytes column stays NULL for this kind, same "resolved but not stored here"
-	// shape as an empty kv row, different reason). The byte-realizing Driver (Allocator/
-	// Streamer, §4, a LATER daemon-runtime addition) is not required for this
-	// kind's closed-set membership or ingress validation to exist — a kind can
-	// be a legal name before anything creates one, the same way a protocol
-	// Operation can be parsed before every executor exists.
+	// KindFile routes an address straight to the named daemon's channel
+	// directory. It never creates a resources row.
 	KindFile ResourceKind = "file"
 )
 

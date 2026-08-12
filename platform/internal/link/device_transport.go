@@ -248,7 +248,7 @@ const (
 	DeviceStreamCarrier     DeviceStreamKind = "carrier"
 	DeviceStreamLaneControl DeviceStreamKind = "lane_control"
 	// DeviceStreamStorage is a lane's storage sibling: the stream that carries
-	// the server's storage instructions (alloc/reclaim) and nothing else. It is
+	// the server's file metadata instructions and nothing else. It is
 	// its own stream because its consumer is the one reader that legitimately
 	// blocks — those instructions end in filesystem syscalls no context can
 	// recall — and a queue must ride a single physical dependency: a dead disk
@@ -257,23 +257,31 @@ const (
 	// admitted only against that exact lane and dies with it.
 	DeviceStreamStorage DeviceStreamKind = "storage"
 	DeviceStreamActor   DeviceStreamKind = "actor"
+	// DeviceStreamExchange carries one file-byte redemption. It is an exact-
+	// lane child and therefore always carries channel plus lane generation.
+	DeviceStreamExchange DeviceStreamKind = "exchange"
 )
 
 type DeviceStreamHeader struct {
 	Kind         DeviceStreamKind `json:"kind"`
 	ProtoVersion int              `json:"proto_version,omitempty"`
 	Channel      channel.ID       `json:"channel,omitempty"`
+	ChannelName  string           `json:"channel_name,omitempty"`
 	LaneGen      LaneGeneration   `json:"lane_gen,omitempty"`
 }
 
 func (h DeviceStreamHeader) Validate() error {
 	switch h.Kind {
 	case DeviceStreamCarrier:
-		if h.ProtoVersion <= 0 || h.Channel != "" || h.LaneGen != "" {
+		if h.ProtoVersion <= 0 || h.Channel != "" || h.ChannelName != "" || h.LaneGen != "" {
 			return errors.New("link: malformed carrier stream header")
 		}
-	case DeviceStreamLaneControl, DeviceStreamStorage, DeviceStreamActor:
-		if h.ProtoVersion != 0 || h.Channel == "" || h.LaneGen == "" {
+	case DeviceStreamLaneControl:
+		if h.ProtoVersion != 0 || h.Channel == "" || h.LaneGen == "" || h.ChannelName == "" {
+			return fmt.Errorf("link: malformed %s stream header", h.Kind)
+		}
+	case DeviceStreamStorage, DeviceStreamActor, DeviceStreamExchange:
+		if h.ProtoVersion != 0 || h.Channel == "" || h.ChannelName != "" || h.LaneGen == "" {
 			return fmt.Errorf("link: malformed %s stream header", h.Kind)
 		}
 	default:
@@ -380,37 +388,17 @@ type LaneFrame struct {
 	Kind      string `json:"kind"`
 	RequestID string `json:"request_id,omitempty"`
 
-	PlanReply          *PlanReply           `json:"plan_reply,omitempty"`
-	AllocRequest       *AllocRequest        `json:"alloc_request,omitempty"`
-	AllocReply         *AllocReply          `json:"alloc_reply,omitempty"`
-	Committed          *Committed           `json:"committed,omitempty"`
-	CommittedReply     *CommittedReply      `json:"committed_reply,omitempty"`
-	ReclaimAck         *ReclaimAck          `json:"reclaim_ack,omitempty"`
-	ReclaimAckReply    *ReclaimAckReply     `json:"reclaim_ack_reply,omitempty"`
-	ReconcilePull      *ReconcilePull       `json:"reconcile_pull,omitempty"`
-	ReconcilePullReply *ReconcilePullReply  `json:"reconcile_pull_reply,omitempty"`
-	ReclaimRequest     *ReclaimRequest      `json:"reclaim_request,omitempty"`
-	ReclaimReply       *ReclaimReply        `json:"reclaim_reply,omitempty"`
-	ResolveCoord       *ResolveCoordRequest `json:"resolve_coord,omitempty"`
-	ResolveCoordReply  *ResolveCoordReply   `json:"resolve_coord_reply,omitempty"`
+	PlanReply   *PlanReply   `json:"plan_reply,omitempty"`
+	FileRequest *FileRequest `json:"file_request,omitempty"`
+	FileReply   *FileReply   `json:"file_reply,omitempty"`
 }
 
 const (
-	LanePlanPull           = "plan_pull"
-	LanePlanReply          = "plan_reply"
-	LanePlanPoke           = "plan_poke"
-	LaneAllocRequest       = "alloc_request"
-	LaneAllocReply         = "alloc_reply"
-	LaneCommitted          = "committed"
-	LaneCommittedReply     = "committed_reply"
-	LaneReclaimAck         = "reclaim_ack"
-	LaneReclaimAckReply    = "reclaim_ack_reply"
-	LaneReconcilePull      = "reconcile_pull"
-	LaneReconcilePullReply = "reconcile_pull_reply"
-	LaneReclaimRequest     = "reclaim_request"
-	LaneReclaimReply       = "reclaim_reply"
-	LaneResolveCoord       = "resolve_coord"
-	LaneResolveCoordReply  = "resolve_coord_reply"
+	LanePlanPull    = "plan_pull"
+	LanePlanReply   = "plan_reply"
+	LanePlanPoke    = "plan_poke"
+	LaneFileRequest = "file_request"
+	LaneFileReply   = "file_reply"
 )
 
 func PlanLaneReply(requestID string, actors []platform.PlanActor, err error) LaneFrame {
@@ -442,66 +430,16 @@ func (f LaneFrame) Validate() error {
 			return errors.New("link: malformed plan_poke")
 		}
 		return nil
-	case LaneAllocRequest:
-		if f.AllocRequest == nil || payloads != 1 {
-			return errors.New("link: alloc_request payload required")
+	case LaneFileRequest:
+		if f.FileRequest == nil || payloads != 1 {
+			return errors.New("link: file_request payload required")
 		}
-		return validateRequestID(f.RequestID, f.AllocRequest.RequestID, f.AllocRequest.validate())
-	case LaneAllocReply:
-		if f.AllocReply == nil || payloads != 1 {
-			return errors.New("link: alloc_reply payload required")
+		return validateRequestID(f.RequestID, f.FileRequest.RequestID, f.FileRequest.validate())
+	case LaneFileReply:
+		if f.FileReply == nil || payloads != 1 {
+			return errors.New("link: file_reply payload required")
 		}
-		return validateRequestID(f.RequestID, f.AllocReply.RequestID, f.AllocReply.validate())
-	case LaneCommitted:
-		if f.Committed == nil || payloads != 1 {
-			return errors.New("link: committed payload required")
-		}
-		return validateRequestID(f.RequestID, f.Committed.RequestID, f.Committed.validate())
-	case LaneCommittedReply:
-		if f.CommittedReply == nil || payloads != 1 {
-			return errors.New("link: committed_reply payload required")
-		}
-		return validateRequestID(f.RequestID, f.CommittedReply.RequestID, f.CommittedReply.validate())
-	case LaneReclaimAck:
-		if f.ReclaimAck == nil || payloads != 1 {
-			return errors.New("link: reclaim_ack payload required")
-		}
-		return validateRequestID(f.RequestID, f.ReclaimAck.RequestID, f.ReclaimAck.validate())
-	case LaneReclaimAckReply:
-		if f.ReclaimAckReply == nil || payloads != 1 {
-			return errors.New("link: reclaim_ack_reply payload required")
-		}
-		return validateRequestID(f.RequestID, f.ReclaimAckReply.RequestID, f.ReclaimAckReply.validate())
-	case LaneReconcilePull:
-		if f.ReconcilePull == nil || payloads != 1 {
-			return errors.New("link: reconcile_pull payload required")
-		}
-		return validateRequestID(f.RequestID, f.ReconcilePull.RequestID, f.ReconcilePull.validate())
-	case LaneReconcilePullReply:
-		if f.ReconcilePullReply == nil || payloads != 1 {
-			return errors.New("link: reconcile_pull_reply payload required")
-		}
-		return validateRequestID(f.RequestID, f.ReconcilePullReply.RequestID, f.ReconcilePullReply.validate())
-	case LaneReclaimRequest:
-		if f.ReclaimRequest == nil || payloads != 1 {
-			return errors.New("link: reclaim_request payload required")
-		}
-		return validateRequestID(f.RequestID, f.ReclaimRequest.RequestID, f.ReclaimRequest.validate())
-	case LaneReclaimReply:
-		if f.ReclaimReply == nil || payloads != 1 {
-			return errors.New("link: reclaim_reply payload required")
-		}
-		return validateRequestID(f.RequestID, f.ReclaimReply.RequestID, f.ReclaimReply.validate())
-	case LaneResolveCoord:
-		if f.ResolveCoord == nil || payloads != 1 {
-			return errors.New("link: resolve_coord payload required")
-		}
-		return validateRequestID(f.RequestID, f.ResolveCoord.RequestID, f.ResolveCoord.validate())
-	case LaneResolveCoordReply:
-		if f.ResolveCoordReply == nil || payloads != 1 {
-			return errors.New("link: resolve_coord_reply payload required")
-		}
-		return validateRequestID(f.RequestID, f.ResolveCoordReply.RequestID, f.ResolveCoordReply.validate())
+		return validateRequestID(f.RequestID, f.FileReply.RequestID, f.FileReply.validate())
 	default:
 		return fmt.Errorf("link: unknown lane frame kind %q", f.Kind)
 	}
@@ -510,11 +448,7 @@ func (f LaneFrame) Validate() error {
 func (f LaneFrame) payloadCount() int {
 	count := 0
 	for _, present := range []bool{
-		f.PlanReply != nil, f.AllocRequest != nil, f.AllocReply != nil,
-		f.Committed != nil, f.CommittedReply != nil, f.ReclaimAck != nil,
-		f.ReclaimAckReply != nil, f.ReconcilePull != nil, f.ReconcilePullReply != nil,
-		f.ReclaimRequest != nil, f.ReclaimReply != nil, f.ResolveCoord != nil,
-		f.ResolveCoordReply != nil,
+		f.PlanReply != nil, f.FileRequest != nil, f.FileReply != nil,
 	} {
 		if present {
 			count++
@@ -855,14 +789,14 @@ func NewLaneGeneration() LaneGeneration {
 	return LaneGeneration(id.String())
 }
 
-func (c *ServerCarrier) OpenLane(ctx context.Context, chID channel.ID, generation LaneGeneration) (*LaneStream, error) {
+func (c *ServerCarrier) OpenLane(ctx context.Context, chID channel.ID, channelName string, generation LaneGeneration) (*LaneStream, error) {
 	conn, err := c.open(ctx, DeviceStreamHeader{
-		Kind: DeviceStreamLaneControl, Channel: chID, LaneGen: generation,
+		Kind: DeviceStreamLaneControl, Channel: chID, ChannelName: channelName, LaneGen: generation,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return newLaneStream(c.rawCarrier, chID, generation, conn), nil
+	return newLaneStream(c.rawCarrier, chID, channelName, generation, conn), nil
 }
 
 // OpenStorage opens the storage sibling of an admitted lane, keyed by that
@@ -878,7 +812,7 @@ func (c *ClientCarrier) OpenStorage(ctx context.Context, chID channel.ID, genera
 	if err != nil {
 		return nil, err
 	}
-	return newLaneStream(c.rawCarrier, chID, generation, conn), nil
+	return newLaneStream(c.rawCarrier, chID, "", generation, conn), nil
 }
 
 func (c *ClientCarrier) OpenActor(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
@@ -889,6 +823,14 @@ func (c *ClientCarrier) OpenActor(ctx context.Context, chID channel.ID, generati
 		return nil, err
 	}
 	return newActorStreamConn(conn, c.logger), nil
+}
+
+func (c *ClientCarrier) OpenExchange(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
+	return c.open(ctx, DeviceStreamHeader{Kind: DeviceStreamExchange, Channel: chID, LaneGen: generation})
+}
+
+func (c *ServerCarrier) OpenExchange(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
+	return c.open(ctx, DeviceStreamHeader{Kind: DeviceStreamExchange, Channel: chID, LaneGen: generation})
 }
 
 func (c *ServerCarrier) AcceptStream() (net.Conn, DeviceStreamHeader, error) {
@@ -908,11 +850,12 @@ func (c *ClientCarrier) ServeStreams(handle func(net.Conn, DeviceStreamHeader)) 
 }
 
 type LaneStream struct {
-	carrier *rawCarrier
-	Channel channel.ID
-	Gen     LaneGeneration
-	conn    net.Conn
-	decoder *boundedJSONDecoder
+	carrier     *rawCarrier
+	Channel     channel.ID
+	ChannelName string
+	Gen         LaneGeneration
+	conn        net.Conn
+	decoder     *boundedJSONDecoder
 
 	sendMu       sync.Mutex
 	retired      atomic.Bool
@@ -923,9 +866,9 @@ type LaneStream struct {
 	onRetire     func(*LaneStream)
 }
 
-func newLaneStream(carrier *rawCarrier, chID channel.ID, generation LaneGeneration, conn net.Conn) *LaneStream {
+func newLaneStream(carrier *rawCarrier, chID channel.ID, channelName string, generation LaneGeneration, conn net.Conn) *LaneStream {
 	return &LaneStream{
-		carrier: carrier, Channel: chID, Gen: generation, conn: conn,
+		carrier: carrier, Channel: chID, ChannelName: channelName, Gen: generation, conn: conn,
 		decoder: newBoundedJSONDecoder(conn, maxControlFrameBytes),
 		done:    make(chan struct{}), physicalDone: make(chan struct{}),
 	}
@@ -939,7 +882,7 @@ func AdoptLane(carrier *ClientCarrier, header DeviceStreamHeader, conn net.Conn)
 		}
 		return nil, errors.New("link: malformed lane stream")
 	}
-	return newLaneStream(carrier.rawCarrier, header.Channel, header.LaneGen, conn), nil
+	return newLaneStream(carrier.rawCarrier, header.Channel, header.ChannelName, header.LaneGen, conn), nil
 }
 
 // AdoptStorage wraps a device-opened storage stream on the server side.
@@ -951,7 +894,7 @@ func AdoptStorage(carrier *ServerCarrier, header DeviceStreamHeader, conn net.Co
 		}
 		return nil, errors.New("link: malformed storage stream")
 	}
-	return newLaneStream(carrier.rawCarrier, header.Channel, header.LaneGen, conn), nil
+	return newLaneStream(carrier.rawCarrier, header.Channel, "", header.LaneGen, conn), nil
 }
 
 func (l *LaneStream) SetRetire(fn func(*LaneStream)) { l.onRetire = fn }

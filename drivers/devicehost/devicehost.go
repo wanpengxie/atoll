@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"path/filepath"
 
 	"github.com/wanpengxie/atoll/drivers/devicehost/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
@@ -43,8 +42,7 @@ func Run(ctx context.Context, cfg Config) error {
 		Logger:     cfg.Logger,
 		OnAttached: cfg.OnAttached,
 		BuildCompartment: func(chID, workspaceDir string) (compute.CompartmentResources, error) {
-			daemonRoot := filepath.Dir(filepath.Dir(workspaceDir))
-			sh, err := storagehost.Open(daemonRoot, chID, cfg.Logger.With("channel", chID))
+			sh, err := storagehost.Open(workspaceDir)
 			if err != nil {
 				return compute.CompartmentResources{}, err
 			}
@@ -54,7 +52,7 @@ func Run(ctx context.Context, cfg Config) error {
 					chID: chID, wsRoot: workspaceDir, deviceName: cfg.DeviceName,
 					logger: cfg.Logger.With("channel", chID),
 				},
-				StorageHost: adapter, LocalFileOpener: adapter, Close: sh.Close,
+				LocalFileOpener: adapter, Close: sh.Close,
 			}, nil
 		},
 	})

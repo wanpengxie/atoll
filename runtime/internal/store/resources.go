@@ -10,27 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// resourceRegistry implements resourcespec.Registry over the channel-local
-// sqlite (resources + resource_reservations +
-// resource_tombstones), the plane-2 dual of actorRegistry: it is the
-// object-existence truth the door consults and
-// mutates, PLUS the create/delete outbox's server-side durable halves (期11
-// spec §1.3). Bound to one channel database (access is channel-scoped).
-// Authorization is NOT stored here: it is membrane-uniform (PM-D1), judged
-// at the door from membership facts + created_by (PM-D3).
 type resourceRegistry struct {
-	db *sql.DB
-	// nowMs stamps created_at/reserved_at/deleted_at. Injectable (tests pin
-	// it) — the rest of the registry is clock-free.
+	db    *sql.DB
 	nowMs func() int64
 }
 
@@ -38,104 +24,34 @@ func newResourceRegistry(db *sql.DB) *resourceRegistry {
 	return &resourceRegistry{db: db, nowMs: func() int64 { return time.Now().UnixMilli() }}
 }
 
-// placementKindFor derives the public placement projection from the durable
-// resource kind. placement_kind is intentionally not persisted: there is no
-// independent placement choice in the current architecture.
-func placementKindFor(kind resourcespec.ResourceKind) resourcespec.PlacementKind {
-	if kind == resourcespec.KindFile {
-		return resourcespec.PlacementDaemonLocal
-	}
-	return ""
-}
-
-// Resolve reads back existence + full routing/audit meta. kind is returned as
-// the raw persisted value with NO closed-set parse (unlike actor_kind):
-// ResourceKind is a runtime routing key, and
-// whether a kind resolves to a registered driver is the door's question, not
-// a poison-row guard here.
 func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
-	const q = `SELECT kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir
-	             FROM resources WHERE resource_id=?`
-	var kind, placementDaemonID, placementCoord, createdBy string
+	var kind, createdBy string
 	var createdAt int64
-	var isDir bool
-	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &isDir,
-	)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT kind, created_by, created_at FROM resources WHERE resource_id=?`, string(id),
+	).Scan(&kind, &createdBy, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return resourcespec.ResourceMeta{}, false, nil
 	}
 	if err != nil {
 		return resourcespec.ResourceMeta{}, false, fmt.Errorf("store: resource resolve %q: %w", id, err)
 	}
-	return resourcespec.ResourceMeta{
-		Kind:              resourcespec.ResourceKind(kind),
-		CreatedAt:         createdAt,
-		PlacementKind:     placementKindFor(resourcespec.ResourceKind(kind)),
-		PlacementDaemonID: placementDaemonID,
-		PlacementCoord:    placementCoord,
-		CreatedBy:         actor.ActorID(createdBy),
-		Dir:               isDir,
-	}, true, nil
+	return resourcespec.ResourceMeta{Kind: resourcespec.ResourceKind(kind), CreatedBy: actor.ActorID(createdBy), CreatedAt: createdAt}, true, nil
 }
 
-// Create is op=create's atomic birth event for the IMMEDIATE-landing path
-// (kv, and content-less file creates). See createResourceTx for the shared
-// atomic-insert half CommitReservation also drives.
-func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error {
-	if id == "" {
-		return errors.New("store: resource create: empty id")
+func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, initial []byte) error {
+	if id == "" || creator == "" {
+		return errors.New("store: resource create: id and creator required")
 	}
-	if creator == "" {
-		return errors.New("store: resource create: empty creator")
-	}
-	tx, err := r.db.BeginTx(ctx, nil)
+	res, err := r.db.ExecContext(ctx,
+		`INSERT INTO resources (resource_id, kind, bytes, created_by, created_at) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(resource_id) DO NOTHING`, string(id), string(kind), initial, string(creator), r.nowMs())
 	if err != nil {
-		return fmt.Errorf("store: resource create begin: %w", err)
+		return fmt.Errorf("store: resource create %q: %w", id, err)
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Create is the kv / with-content-less immediate landing entry point;
-	// direct Create is day-1 only ever kv (a file always routes through
-	// ReserveCreate+CommitReservation), which is never directory-shaped —
-	// so dir is unconditionally false here.
-	if err := r.createResourceTx(ctx, tx, id, kind, creator, placementDaemonID, placementCoord, initial, false); err != nil {
-		return err // resourcespec.ErrAlreadyExists or a wrapped infra error
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: resource create commit: %w", err)
-	}
-	return nil
-}
-
-// createResourceTx is Create's and CommitReservation's SHARED atomic-birth
-// half: the existence row (all columns),
-// inside the CALLER's transaction (Create starts+commits its own;
-// CommitReservation folds it into the reservation-consuming transaction so
-// landing and reservation-deletion stay one atomic event, 期11 spec §1.7).
-// No grant write: authorization is membrane-uniform (PM-D1); the creator's
-// delete-right is the created_by column itself (PM-D3).
-// Returns resourcespec.ErrAlreadyExists on collision, decided INSIDE this
-// INSERT ... ON CONFLICT DO NOTHING (the race window never has a
-// resolve-then-create gap) — the caller decides what the collision means (a
-// plain failure for direct Create; "lost the race" for CommitReservation).
-func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, dir bool) error {
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO resources (resource_id, kind, bytes, placement_daemon_id, placement_coord, created_by, created_at, is_dir)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(resource_id) DO NOTHING`,
-		string(id), string(kind), initial, placementDaemonID, placementCoord, string(creator), r.nowMs(), dir,
-	)
-	if err != nil {
-		return fmt.Errorf("store: resource create insert %q: %w", id, err)
-	}
-	// RowsAffected==0 means the id already existed (ON CONFLICT DO NOTHING) — the
-	// collision verdict, decided inside the transaction. A RowsAffected FAILURE is
-	// surfaced as its own error — never fabricated into an already_exists verdict.
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("store: resource create rows-affected %q: %w", id, err)
+		return fmt.Errorf("store: resource create rows %q: %w", id, err)
 	}
 	if n == 0 {
 		return resourcespec.ErrAlreadyExists
@@ -143,487 +59,29 @@ func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id 
 	return nil
 }
 
-// ReserveCreate is create-outbox's server-side write-ahead half (§1.7): a
-// fresh reservation_id per call (uuid, so no collision to arbitrate — unlike
-// resource_id, reservation identity is never client-proposed).
-func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
-	if id == "" {
-		return "", errors.New("store: resource reserve-create: empty id")
-	}
-	if creator == "" {
-		return "", errors.New("store: resource reserve-create: empty creator")
-	}
-	reservationID := uuid.NewString()
-	now := r.nowMs()
-	// last_progress_at seeds to the SAME stamp as reserved_at (期11 S1): a
-	// freshly-minted reservation starts "alive as of right now", identical
-	// to the pre-S1 reserved_at-only behavior until something bumps it —
-	// SweepExpiredReservations judging a never-touched row is unchanged.
-	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, is_dir, last_progress_at)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), now, dir, now,
-	); err != nil {
-		return "", fmt.Errorf("store: resource reserve-create %q: %w", id, err)
-	}
-	return reservationID, nil
-}
-
-// CommitReservation is create-outbox's landing half (§1.7). See the
-// resourcespec.Registry doc for the found/err contract.
-func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID string) (resourcespec.LandedResource, bool, error) {
-	if reservationID == "" {
-		return resourcespec.LandedResource{}, false, errors.New("store: commit reservation: empty reservation id")
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var resourceID, kind, placementDaemonID, placementCoord, createdBy string
-	var isDir bool
-	err = tx.QueryRowContext(ctx,
-		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, is_dir
-		   FROM resource_reservations WHERE reservation_id=?`,
-		reservationID,
-	).Scan(&resourceID, &kind, &placementDaemonID, &placementCoord, &createdBy, &isDir)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Already committed (an earlier replay landed and deleted it) or never
-		// existed: Committed is level-triggered and MUST be replay-safe — a
-		// clean no-op, not an error.
-		if cerr := tx.Commit(); cerr != nil {
-			return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation no-op commit: %w", cerr)
-		}
-		return resourcespec.LandedResource{}, false, nil
-	}
-	if err != nil {
-		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation lookup %q: %w", reservationID, err)
-	}
-
-	createErr := r.createResourceTx(ctx, tx,
-		resource.ResourceID(resourceID), resourcespec.ResourceKind(kind), actor.ActorID(createdBy),
-		placementDaemonID, placementCoord, nil, isDir,
-	)
-	if createErr != nil && !errors.Is(createErr, resourcespec.ErrAlreadyExists) {
-		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation create %q: %w", resourceID, createErr)
-	}
-
-	// Either way (won or lost the race) THIS reservation is consumed — delete
-	// it in the SAME transaction: the success path deletes on landing; the
-	// losing side of a same-resource_id race deletes too, never left
-	// dangling (§1.7's three-triggers account, trigger ①/②).
-	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_reservations WHERE reservation_id=?`, reservationID); err != nil {
-		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation delete %q: %w", reservationID, err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation commit: %w", err)
-	}
-
-	if errors.Is(createErr, resourcespec.ErrAlreadyExists) {
-		return resourcespec.LandedResource{}, true, resourcespec.ErrReservationLost
-	}
-	return resourcespec.LandedResource{ID: resource.ResourceID(resourceID), CreatedBy: actor.ActorID(createdBy)}, true, nil
-}
-
-// ReservationDaemon reads back one reservation's placement_daemon_id only —
-// the §4.7 sender-auth read (see resourcespec.Registry's doc). found=false
-// when the row is already gone (committed/lost/swept), a clean non-error.
-func (r *resourceRegistry) ReservationDaemon(ctx context.Context, reservationID string) (string, bool, error) {
-	var daemonID string
-	err := r.db.QueryRowContext(ctx,
-		`SELECT placement_daemon_id FROM resource_reservations WHERE reservation_id=?`, reservationID,
-	).Scan(&daemonID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("store: reservation daemon %q: %w", reservationID, err)
-	}
-	return daemonID, true, nil
-}
-
-// TombstoneDaemon is ReservationDaemon's delete-side mirror.
-func (r *resourceRegistry) TombstoneDaemon(ctx context.Context, tombstoneID string) (string, bool, error) {
-	var daemonID string
-	err := r.db.QueryRowContext(ctx,
-		`SELECT daemon_id FROM resource_tombstones WHERE tombstone_id=?`, tombstoneID,
-	).Scan(&daemonID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("store: tombstone daemon %q: %w", tombstoneID, err)
-	}
-	return daemonID, true, nil
-}
-
-// ListReservationsByDaemon returns every pending reservation whose
-// placement_daemon_id == daemonID, oldest first — §4.7 ReconcilePull's
-// "挂起 reservation" answer, pre-filtered server-side (a daemon's
-// ReconcilePull never sees another daemon's rows, §4.7's read-side
-// extension of the sender-auth discipline).
-func (r *resourceRegistry) ListReservationsByDaemon(ctx context.Context, daemonID string) ([]resourcespec.ReservationRow, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, last_progress_at
-		   FROM resource_reservations WHERE placement_daemon_id=? ORDER BY reserved_at, reservation_id`,
-		daemonID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store: list reservations by daemon %q: %w", daemonID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []resourcespec.ReservationRow
-	for rows.Next() {
-		var row resourcespec.ReservationRow
-		var resID, kind, createdBy string
-		if err := rows.Scan(&row.ReservationID, &resID, &kind, &row.PlacementDaemonID, &row.PlacementCoord, &createdBy, &row.ReservedAt, &row.LastProgressAt); err != nil {
-			return nil, fmt.Errorf("store: list reservations by daemon scan %q: %w", daemonID, err)
-		}
-		row.ResourceID = resource.ResourceID(resID)
-		row.Kind = resourcespec.ResourceKind(kind)
-		row.CreatedBy = actor.ActorID(createdBy)
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list reservations by daemon rows %q: %w", daemonID, err)
-	}
-	return out, nil
-}
-
-// ListTombstonesByDaemon is ListReservationsByDaemon's delete-side mirror —
-// §4.7 ReconcilePull's "待收 tombstone" answer.
-func (r *resourceRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID string) ([]resourcespec.TombstoneRow, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at
-		   FROM resource_tombstones WHERE daemon_id=? ORDER BY deleted_at, tombstone_id`,
-		daemonID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store: list tombstones by daemon %q: %w", daemonID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []resourcespec.TombstoneRow
-	for rows.Next() {
-		var row resourcespec.TombstoneRow
-		var resID, kind string
-		if err := rows.Scan(&row.TombstoneID, &resID, &row.DaemonID, &row.PlacementCoord, &kind, &row.DeletedAt); err != nil {
-			return nil, fmt.Errorf("store: list tombstones by daemon scan %q: %w", daemonID, err)
-		}
-		row.ResourceID = resource.ResourceID(resID)
-		row.Kind = resourcespec.ResourceKind(kind)
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list tombstones by daemon rows %q: %w", daemonID, err)
-	}
-	return out, nil
-}
-
-// ListByPlacementDaemon returns every LANDED resource row whose
-// placement_daemon_id == daemonID — §4.7 ReconcilePull's "应有资源清单"
-// answer (the Scrubber's registry-side half of registry↔directory
-// reconciliation).
-func (r *resourceRegistry) ListByPlacementDaemon(ctx context.Context, daemonID string) ([]resourcespec.ResourceRow, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at
-		   FROM resources WHERE placement_daemon_id=? ORDER BY created_at, resource_id`,
-		daemonID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store: list by placement daemon %q: %w", daemonID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []resourcespec.ResourceRow
-	for rows.Next() {
-		var id, kind, placementDaemonID, placementCoord, createdBy string
-		var createdAt int64
-		if err := rows.Scan(&id, &kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt); err != nil {
-			return nil, fmt.Errorf("store: list by placement daemon scan %q: %w", daemonID, err)
-		}
-		out = append(out, resourcespec.ResourceRow{
-			ID: resource.ResourceID(id),
-			Meta: resourcespec.ResourceMeta{
-				Kind:              resourcespec.ResourceKind(kind),
-				CreatedAt:         createdAt,
-				PlacementKind:     placementKindFor(resourcespec.ResourceKind(kind)),
-				PlacementDaemonID: placementDaemonID,
-				PlacementCoord:    placementCoord,
-				CreatedBy:         actor.ActorID(createdBy),
-			},
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list by placement daemon rows %q: %w", daemonID, err)
-	}
-	return out, nil
-}
-
-// SweepExpiredReservations deletes every resource_reservations row belonging
-// to daemonID whose last_progress_at < cutoffMs, returning the swept rows
-// (§1.7's third reservation-deletion trigger, 期11 S1-narrowed from
-// reserved_at to last_progress_at — see ReservationRow.LastProgressAt's doc:
-// the server ages out a reservation whose placement daemon has gone quiet
-// long enough, not merely one that has been slow-but-alive since birth).
-// Select-then-delete in one transaction (same shape as CommitReservation's
-// own lookup-then-mutate), so a row cannot be swept out from under a
-// Committed that lands concurrently — either this transaction's DELETE
-// commits first (Committed's later CommitReservation then sees the row
-// already gone, a clean no-op) or CommitReservation's own transaction
-// commits first (this sweep's SELECT simply does not see it).
-func (r *resourceRegistry) SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]resourcespec.ReservationRow, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("store: sweep expired reservations begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Every inactive reservation is eligible for the age sweep; there is no
-	// daemon-side landed phase or hidden completion replay.
-	rows, err := tx.QueryContext(ctx,
-		`SELECT reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, last_progress_at
-		   FROM resource_reservations WHERE placement_daemon_id=? AND last_progress_at<? ORDER BY reserved_at, reservation_id`,
-		daemonID, cutoffMs,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store: sweep expired reservations select %q: %w", daemonID, err)
-	}
-	var out []resourcespec.ReservationRow
-	for rows.Next() {
-		var row resourcespec.ReservationRow
-		var resID, kind, createdBy string
-		if err := rows.Scan(&row.ReservationID, &resID, &kind, &row.PlacementDaemonID, &row.PlacementCoord, &createdBy, &row.ReservedAt, &row.LastProgressAt); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("store: sweep expired reservations scan %q: %w", daemonID, err)
-		}
-		row.ResourceID = resource.ResourceID(resID)
-		row.Kind = resourcespec.ResourceKind(kind)
-		row.CreatedBy = actor.ActorID(createdBy)
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("store: sweep expired reservations rows %q: %w", daemonID, err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("store: sweep expired reservations close %q: %w", daemonID, err)
-	}
-
-	for _, row := range out {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM resource_reservations WHERE reservation_id=?`, row.ReservationID); err != nil {
-			return nil, fmt.Errorf("store: sweep expired reservations delete %q: %w", row.ReservationID, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: sweep expired reservations commit: %w", err)
-	}
-	return out, nil
-}
-
-// TouchReservationsByCoords bumps last_progress_at=atMs for every currently-
-// pending reservation belonging to daemonID WHOSE placement_coord is in
-// coords (期11 review 收窄修复 — see resourcespec.Registry.
-// TouchReservationsByCoords's doc for why "daemon in touch at all" is the
-// wrong liveness granularity). A plain bulk UPDATE, not a select-then-mutate
-// transaction: unlike SweepExpiredReservations this never deletes a row, so
-// there is no race window to close — a reservation that lands
-// (CommitReservation) or gets lost concurrently simply vanishes from this
-// UPDATE's WHERE match, no different from any other concurrent writer racing
-// a wide predicate.
-//
-// An empty coords touches ZERO rows — this is NOT "no filter" degrading to
-// the old by-daemon behavior, it is the honest answer to "this daemon
-// currently has no active writes" (a daemon with only abandoned reservations
-// and nothing open must bump nothing, or age-sweep could never catch up).
-func (r *resourceRegistry) TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error {
-	if len(coords) == 0 {
-		return nil
-	}
-	placeholders := make([]string, len(coords))
-	args := make([]any, 0, len(coords)+2)
-	args = append(args, atMs, daemonID)
-	for i, c := range coords {
-		placeholders[i] = "?"
-		args = append(args, c)
-	}
-	query := fmt.Sprintf(
-		`UPDATE resource_reservations SET last_progress_at=? WHERE placement_daemon_id=? AND placement_coord IN (%s)`,
-		strings.Join(placeholders, ","),
-	)
-	if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
-		return fmt.Errorf("store: touch reservations by coords %q: %w", daemonID, err)
-	}
-	return nil
-}
-
-// Delete removes the resource row in one transaction. The
-// byte-collection time-order is KIND-DEPENDENT (期11 spec §1 item 8):
-//   - kv: bytes live inline, so removing the row removes the bytes — no
-//     tombstone, same shape as before.
-//   - file: ROW-FIRST-BYTES-LAST — this reads the row (kind + placement)
-//     inside the SAME transaction, writes a resource_tombstones
-//     row from those values, then deletes the resource row. The
-//     daemon-side Reclaimer (§4, a later addition) collects the bytes
-//     asynchronously afterward. In the normal domain, "a visible row always
-//     points at valid bytes" holds: the row disappears FIRST. A retired-daemon
-//     stranded row is the explicit exception and remains owner-visible for
-//     manual deletion.
-//
-// supersedePendingReservationsTx is Delete's #C helper: inside the caller's
-// transaction, for every still-pending reservation on id, write a
-// resource_tombstones row for its coord (so the daemon's ordinary
-// ReconcilePull Reclaimer collects the orphaned live/<coord> bytes — the SAME
-// delete-outbox reclaim path a resource delete already uses, no new
-// mechanism) then delete the reservation row. Reservations are always file
-// kind, so the tombstone's kind is fixed. A reservation whose write
-// handle is still open when this runs will, on its eventual Commit, hit
-// CommitReservation's found=false no-op — the row is already gone here.
-func (r *resourceRegistry) supersedePendingReservationsTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID) error {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT reservation_id, placement_daemon_id, placement_coord FROM resource_reservations WHERE resource_id=?`,
-		string(id),
-	)
-	if err != nil {
-		return fmt.Errorf("store: supersede reservations select %q: %w", id, err)
-	}
-	type pending struct{ reservationID, daemonID, coord string }
-	var supers []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.reservationID, &p.daemonID, &p.coord); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("store: supersede reservations scan %q: %w", id, err)
-		}
-		supers = append(supers, p)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("store: supersede reservations rows %q: %w", id, err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("store: supersede reservations close %q: %w", id, err)
-	}
-
-	for _, p := range supers {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at)
-			   VALUES (?, ?, ?, ?, ?, ?)`,
-			uuid.NewString(), string(id), p.daemonID, p.coord, string(resourcespec.KindFile), r.nowMs(),
-		); err != nil {
-			return fmt.Errorf("store: supersede reservations tombstone %q: %w", p.reservationID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM resource_reservations WHERE reservation_id=?`, p.reservationID); err != nil {
-			return fmt.Errorf("store: supersede reservations delete %q: %w", p.reservationID, err)
-		}
-	}
-	return nil
-}
-
 func (r *resourceRegistry) Delete(ctx context.Context, id resource.ResourceID) error {
-	tx, err := r.db.BeginTx(ctx, nil)
+	_, err := r.db.ExecContext(ctx, `DELETE FROM resources WHERE resource_id=?`, string(id))
 	if err != nil {
-		return fmt.Errorf("store: resource delete begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// SUPERSEDED terminal (期11 review §2.5 #C): a Delete on this resource_id
-	// also kills any still-pending reservation for the SAME id and reclaims its
-	// coord. Without this, a write handle held open forever keeps its coord
-	// "active" (TouchReservationsByCoords bumps it every ReconcilePull, so the
-	// age-sweep never fires); across a delete/recreate cycle its straggler
-	// Committed would later find the id free and silently REBUILD it with the
-	// original creator/coord — a resurrection with no fresh OpCreate
-	// authorization. Deleting the reservation row here is the "straggler 落地时
-	//发现已被 delete，拒绝落 row" guard: CommitReservation's own lookup then
-	// returns found=false (a clean replay-safe no-op), never re-landing the id.
-	// Runs FIRST (even when the resource row itself is already gone — an
-	// idempotent re-delete still supersedes any lingering reservation).
-	if err := r.supersedePendingReservationsTx(ctx, tx, id); err != nil {
-		return err
-	}
-
-	var kind, placementDaemonID, placementCoord string
-	err = tx.QueryRowContext(ctx,
-		`SELECT kind, placement_daemon_id, placement_coord FROM resources WHERE resource_id=?`,
-		string(id),
-	).Scan(&kind, &placementDaemonID, &placementCoord)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Already gone: delete is idempotent, retryable, no cross-call
-		// atomicity needed (only create does, for its controller-grab window).
-		if cerr := tx.Commit(); cerr != nil {
-			return fmt.Errorf("store: resource delete no-op commit: %w", cerr)
-		}
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("store: resource delete read %q: %w", id, err)
-	}
-
-	if kind == string(resourcespec.KindFile) {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at)
-			   VALUES (?, ?, ?, ?, ?, ?)`,
-			uuid.NewString(), string(id), placementDaemonID, placementCoord, kind, r.nowMs(),
-		); err != nil {
-			return fmt.Errorf("store: resource delete tombstone %q: %w", id, err)
-		}
-	}
-	// kv: bytes live inline in the row itself — deleting the row IS deleting
-	// the bytes, no tombstone.
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM resources WHERE resource_id=?`, string(id)); err != nil {
-		return fmt.Errorf("store: resource delete row %q: %w", id, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: resource delete commit: %w", err)
+		return fmt.Errorf("store: resource delete %q: %w", id, err)
 	}
 	return nil
 }
 
-// ClearTombstone deletes one resource_tombstones row (the Reclaimer's
-// ReclaimAck closure, §4.7's fourth frame). found=false, err=nil when
-// already gone — replay-safe like CommitReservation.
-func (r *resourceRegistry) ClearTombstone(ctx context.Context, tombstoneID string) (bool, error) {
-	if tombstoneID == "" {
-		return false, errors.New("store: clear tombstone: empty tombstone id")
-	}
-	res, err := r.db.ExecContext(ctx, `DELETE FROM resource_tombstones WHERE tombstone_id=?`, tombstoneID)
-	if err != nil {
-		return false, fmt.Errorf("store: clear tombstone %q: %w", tombstoneID, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("store: clear tombstone rows-affected %q: %w", tombstoneID, err)
-	}
-	return n > 0, nil
-}
-
-// List enumerates resources in stable (created_at, resource_id) order — a
-// raw range scan, no authorization filtering (the door's job, §3.7). See the
-// resourcespec.Registry doc for the prefix/limit/cursor contract.
 func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, cursor string) ([]resourcespec.ResourceRow, string, error) {
 	if limit <= 0 {
 		return nil, "", errors.New("store: resource list: limit must be positive")
 	}
-
 	var afterCreatedAt int64
 	var afterID string
 	if cursor != "" {
 		var ok bool
 		afterCreatedAt, afterID, ok = decodeListCursor(cursor)
 		if !ok {
-			return nil, "", fmt.Errorf("store: resource list: malformed cursor %q: %w", cursor, resourcespec.ErrMalformedCursor)
+			return nil, "", fmt.Errorf("store: resource list: %w", resourcespec.ErrMalformedCursor)
 		}
 	}
-
-	q := `SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir
-	        FROM resources
-	       WHERE (created_at > ? OR (created_at = ? AND resource_id > ?))`
+	q := `SELECT resource_id, kind, created_by, created_at FROM resources
+	      WHERE (created_at > ? OR (created_at = ? AND resource_id > ?))`
 	args := []any{afterCreatedAt, afterCreatedAt, afterID}
 	if like, ok := likePrefix(prefix); ok {
 		q += ` AND resource_id LIKE ? ESCAPE '\'`
@@ -631,109 +89,41 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 	}
 	q += ` ORDER BY created_at, resource_id LIMIT ?`
 	args = append(args, limit)
-
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("store: resource list query: %w", err)
+		return nil, "", fmt.Errorf("store: resource list: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
+	defer rows.Close()
 	var out []resourcespec.ResourceRow
-	var lastCreatedAt int64
+	var lastAt int64
 	var lastID string
-	n := 0
 	for rows.Next() {
-		var id, kind, placementDaemonID, placementCoord, createdBy string
-		var createdAt int64
-		var dir bool
-		if err := rows.Scan(&id, &kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &dir); err != nil {
-			return nil, "", fmt.Errorf("store: resource list scan: %w", err)
+		var id, kind, createdBy string
+		if err := rows.Scan(&id, &kind, &createdBy, &lastAt); err != nil {
+			return nil, "", err
 		}
-		out = append(out, resourcespec.ResourceRow{
-			ID: resource.ResourceID(id),
-			Meta: resourcespec.ResourceMeta{
-				Kind:              resourcespec.ResourceKind(kind),
-				CreatedAt:         createdAt,
-				PlacementKind:     placementKindFor(resourcespec.ResourceKind(kind)),
-				PlacementDaemonID: placementDaemonID,
-				PlacementCoord:    placementCoord,
-				CreatedBy:         actor.ActorID(createdBy),
-				Dir:               dir,
-			},
-		})
-		lastCreatedAt, lastID = createdAt, id
-		n++
+		lastID = id
+		out = append(out, resourcespec.ResourceRow{ID: resource.ResourceID(id), Meta: resourcespec.ResourceMeta{
+			Kind: resourcespec.ResourceKind(kind), CreatedBy: actor.ActorID(createdBy), CreatedAt: lastAt,
+		}})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("store: resource list rows: %w", err)
+		return nil, "", err
 	}
-
-	nextCursor := ""
-	if n == limit {
-		// A full page was scanned — there MAY be more; the cursor encodes the
-		// last SCANNED row's key (== last returned row's key here, since this
-		// layer never filters), not "the last visible row" (that distinction
-		// matters one layer up, at the door's membership-filtered projection, §3.7).
-		nextCursor = encodeListCursor(lastCreatedAt, lastID)
+	next := ""
+	if len(out) == limit {
+		next = encodeListCursor(lastAt, lastID)
 	}
-	return out, nextCursor, nil
+	return out, next, nil
 }
 
-func publicResourceMeta(id resource.ResourceID, meta resourcespec.ResourceMeta) channel.ResourceMeta {
-	return channel.ResourceMeta{
-		ID: id, Kind: string(meta.Kind), CreatedBy: meta.CreatedBy, CreatedAt: meta.CreatedAt,
-		PlacementKind: string(meta.PlacementKind), PlacementDaemonID: meta.PlacementDaemonID, Dir: meta.Dir,
-	}
-}
-
-func (r *resourceRegistry) ListReadable(ctx context.Context, q channel.ResourceListQuery) (channel.ResourcePage, error) {
-	limit := q.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-	rows, next, err := r.List(ctx, q.Prefix, limit, q.Cursor)
-	if err != nil {
-		return channel.ResourcePage{}, err
-	}
-	out := channel.ResourcePage{Items: make([]channel.ResourceMeta, 0, len(rows)), Next: next}
-	for _, row := range rows {
-		out.Items = append(out.Items, publicResourceMeta(row.ID, row.Meta))
-	}
-	return out, nil
-}
-
-func (r *resourceRegistry) StatReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, bool, error) {
-	meta, found, err := r.Resolve(ctx, id)
-	if err != nil || !found {
-		return channel.ResourceMeta{}, found, err
-	}
-	return publicResourceMeta(id, meta), true, nil
-}
-
-func (r *resourceRegistry) FetchReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, []byte, bool, error) {
-	meta, found, err := r.Resolve(ctx, id)
-	if err != nil || !found {
-		return channel.ResourceMeta{}, nil, found, err
-	}
-	if meta.Kind != resourcespec.KindKV {
-		return publicResourceMeta(id, meta), nil, true, storespec.ErrResourceCapabilityUnavailable
-	}
-	value, _, err := newKVDriver(r.db).Read(ctx, id)
-	return publicResourceMeta(id, meta), value, true, err
-}
-
-// likePrefix turns a plain resource_id prefix into a LIKE pattern, escaping
-// the two SQL wildcard characters (and the escape character itself) so a raw
-// '%'/'_' in an id acts as a literal, never a glob. ok=false for the empty
-// prefix (no filter).
 func likePrefix(prefix string) (string, bool) {
 	if prefix == "" {
 		return "", false
 	}
 	var b strings.Builder
 	for _, ch := range prefix {
-		switch ch {
-		case '\\', '%', '_':
+		if ch == '\\' || ch == '%' || ch == '_' {
 			b.WriteByte('\\')
 		}
 		b.WriteRune(ch)
@@ -742,16 +132,11 @@ func likePrefix(prefix string) (string, bool) {
 	return b.String(), true
 }
 
-// encodeListCursor / decodeListCursor are List's OWN opaque pagination
-// token: base64 of "<created_at>\x00<resource_id>" — the last SCANNED row's
-// composite sort key. NUL-delimited (not a printable separator) so a
-// resource_id containing any printable character round-trips exactly.
 func encodeListCursor(createdAt int64, id string) string {
-	raw := strconv.FormatInt(createdAt, 10) + "\x00" + id
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(createdAt, 10) + "\x00" + id))
 }
 
-func decodeListCursor(cursor string) (createdAt int64, id string, ok bool) {
+func decodeListCursor(cursor string) (int64, string, bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
 		return 0, "", false
@@ -761,36 +146,17 @@ func decodeListCursor(cursor string) (createdAt int64, id string, ok bool) {
 		return 0, "", false
 	}
 	n, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return 0, "", false
-	}
-	return n, parts[1], true
+	return n, parts[1], err == nil
 }
 
-// kvDriver implements resourcespec.Driver for KindKV — the day-1 channel-scoped
-// inline-byte driver, operating on the resources.bytes column.
-type kvDriver struct {
-	db *sql.DB
-}
+type kvDriver struct{ db *sql.DB }
 
-func newKVDriver(db *sql.DB) *kvDriver {
-	return &kvDriver{db: db}
-}
+func newKVDriver(db *sql.DB) *kvDriver { return &kvDriver{db: db} }
 
-// Read returns the current bytes. found == false is resolved-but-empty (a LEGAL
-// outcome, not a failure): a NULL bytes column — or, defensively, a vanished
-// row — reads back as found=false with nil value. The row-vs-empty distinction
-// the door cares about is drawn earlier, at Resolve (a missing row is
-// resource_not_found before the driver is ever called).
 func (d *kvDriver) Read(ctx context.Context, id resource.ResourceID) ([]byte, bool, error) {
-	// bytes IS NULL is selected explicitly: a zero-length blob scans back as a
-	// nil []byte just like NULL does, so the Go value alone cannot distinguish
-	// present-but-empty (found=true, proto: legal and distinct) from no-operand
-	// NULL (found=false).
-	const q = `SELECT bytes, bytes IS NULL FROM resources WHERE resource_id=?`
 	var raw []byte
 	var isNull bool
-	err := d.db.QueryRowContext(ctx, q, string(id)).Scan(&raw, &isNull)
+	err := d.db.QueryRowContext(ctx, `SELECT bytes, bytes IS NULL FROM resources WHERE resource_id=?`, string(id)).Scan(&raw, &isNull)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -806,36 +172,19 @@ func (d *kvDriver) Read(ctx context.Context, id resource.ResourceID) ([]byte, bo
 	return raw, true, nil
 }
 
-// Write overwrites existing content (PUT semantics, naturally idempotent). The
-// door reaches Write only after Resolve confirms existence, but the row can die
-// in the resolve→execute window (no transaction spans the door's stages), so a
-// zero-row UPDATE is surfaced as an error — an honest driver_error verdict —
-// rather than a silent success against a vanished resource.
 func (d *kvDriver) Write(ctx context.Context, id resource.ResourceID, value []byte) error {
 	res, err := d.db.ExecContext(ctx, `UPDATE resources SET bytes=? WHERE resource_id=?`, value, string(id))
 	if err != nil {
 		return fmt.Errorf("store: kv write %q: %w", id, err)
 	}
 	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("store: kv write rows-affected %q: %w", id, err)
-	}
-	if n == 0 {
-		return fmt.Errorf("store: kv write %q: resource vanished mid-invocation", id)
+	if err != nil || n == 0 {
+		return fmt.Errorf("store: kv write %q: resource vanished", id)
 	}
 	return nil
 }
 
-// Delete is a no-op: KindKV bytes live INLINE in the resources row, so removing
-// the row (Registry.Delete) removes the bytes too. This orchestration slot earns
-// its keep only for a future external-byte driver whose bytes live outside the
-// row; for inline kv there is nothing to remove here.
-func (d *kvDriver) Delete(ctx context.Context, id resource.ResourceID) error {
-	return nil
-}
+func (d *kvDriver) Delete(context.Context, resource.ResourceID) error { return nil }
 
-var (
-	_ resourcespec.Registry       = (*resourceRegistry)(nil)
-	_ resourcespec.ResourceOutbox = (*resourceRegistry)(nil)
-	_ resourcespec.Driver         = (*kvDriver)(nil)
-)
+var _ resourcespec.Registry = (*resourceRegistry)(nil)
+var _ resourcespec.Driver = (*kvDriver)(nil)

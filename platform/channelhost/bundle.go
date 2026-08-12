@@ -9,7 +9,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -41,13 +40,6 @@ type View interface {
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
 	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 	IsBound(context.Context, string) (bool, error)
-	Resources() ResourceReadView
-}
-
-type ResourceReadView interface {
-	List(context.Context, channel.Reader, channel.ResourceListQuery) (channel.ResourcePage, error)
-	Stat(context.Context, channel.Reader, resource.ResourceID) (channel.ResourceMeta, error)
-	Fetch(context.Context, channel.Reader, resource.ResourceID) (channel.ResourceFetch, error)
 }
 
 type bundle struct {
@@ -99,19 +91,4 @@ func (a viewAdapter) ActorFacts(ctx context.Context, id actor.ActorID) (channels
 
 func (a viewAdapter) IsBound(ctx context.Context, id string) (bool, error) {
 	return a.home.View().IsBound(ctx, id)
-}
-func (a viewAdapter) Resources() ResourceReadView {
-	return resourceViewAdapter{a.home.View().Resources()}
-}
-
-type resourceViewAdapter struct{ view home.ResourceView }
-
-func (a resourceViewAdapter) List(ctx context.Context, as channel.Reader, q channel.ResourceListQuery) (channel.ResourcePage, error) {
-	return a.view.List(ctx, as, q)
-}
-func (a resourceViewAdapter) Stat(ctx context.Context, as channel.Reader, id resource.ResourceID) (channel.ResourceMeta, error) {
-	return a.view.Stat(ctx, as, id)
-}
-func (a resourceViewAdapter) Fetch(ctx context.Context, as channel.Reader, id resource.ResourceID) (channel.ResourceFetch, error) {
-	return a.view.Fetch(ctx, as, id)
 }

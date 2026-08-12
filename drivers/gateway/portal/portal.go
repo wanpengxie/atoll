@@ -7,14 +7,20 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -27,6 +33,7 @@ type Config struct {
 	Sessions        *gateway.SessionStore
 	Gateway         *gateway.Gateway
 	DaemonHost      *daemonhost.Host
+	DataPlane       dataplane.Redeemer
 	ContractVersion string
 }
 type Portal struct {
@@ -42,11 +49,96 @@ func New(cfg Config) *Portal {
 	p.mux.HandleFunc("POST /api/identity/logout", p.logout)
 	p.mux.HandleFunc("GET /ws", p.serveWS)
 	p.mux.HandleFunc("GET /compute", p.compute)
+	p.mux.HandleFunc("GET /files/", p.files)
+	p.mux.HandleFunc("PUT /files/", p.files)
 	p.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	p.mux.HandleFunc("/", p.fallback)
 	return p
 }
+
+func (p *Portal) files(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.DataPlane == nil {
+		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), "data plane unavailable")
+		return
+	}
+	escapedPath := r.URL.EscapedPath()
+	const prefix = "/files/"
+	if !strings.HasPrefix(escapedPath, prefix) {
+		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), "invalid file address")
+		return
+	}
+	escaped := strings.TrimPrefix(escapedPath, prefix)
+	address, err := url.PathUnescape(escaped)
+	if err != nil || escaped == "" || url.PathEscape(address) != escaped {
+		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), "non-canonical file address encoding")
+		return
+	}
+	parsed, err := accessdoor.ParseFileAddress(address)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), err.Error())
+		return
+	}
+	ticket := r.URL.Query().Get("t")
+	if ticket == "" {
+		writeError(w, http.StatusForbidden, string(codeNotAuthenticated), "file ticket required")
+		return
+	}
+	mode := access.OpRead
+	if r.Method == http.MethodPut {
+		mode = access.OpWrite
+	} else {
+		filename := path.Base(parsed.Path)
+		w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+url.PathEscape(filename))
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	tracked := &trackingResponseWriter{ResponseWriter: w}
+	if err := p.cfg.DataPlane.ServeHTTP(r.Context(), resource.ResourceID(address), ticket, mode, tracked, r.Body); err != nil {
+		if tracked.wrote {
+			panic(http.ErrAbortHandler)
+		}
+		status := http.StatusBadGateway
+		if errors.Is(err, dataplane.ErrInvalidTicket) {
+			status = http.StatusForbidden
+		} else if errors.Is(err, dataplane.ErrHostOffline) {
+			status = http.StatusServiceUnavailable
+			var offline *dataplane.HostOfflineError
+			if errors.As(err, &offline) {
+				err = accessdoor.NewHostOfflineError(offline.Host)
+			} else {
+				err = accessdoor.NewHostOfflineError(parsed.Host)
+			}
+		}
+		writeError(w, status, string(codeUnavailable), err.Error())
+		return
+	}
+	if r.Method == http.MethodPut && !tracked.wrote {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type trackingResponseWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *trackingResponseWriter) Write(p []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *trackingResponseWriter) WriteHeader(status int) {
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(status)
+}
 func (p *Portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.EscapedPath(), "/files/") {
+		if r.Method == http.MethodGet || r.Method == http.MethodPut {
+			p.files(w, r)
+		} else {
+			writeError(w, http.StatusMethodNotAllowed, string(codeNotFound), "method not allowed")
+		}
+		return
+	}
 	p.mux.ServeHTTP(w, r)
 }
 

@@ -49,6 +49,7 @@ type ChannelRow struct {
 	ID             channel.ID      `json:"id"`
 	ParentID       channel.ID      `json:"parent_id,omitempty"`
 	Name           string          `json:"name"`
+	QualifiedName  string          `json:"qualified_name"`
 	Type           string          `json:"type"`
 	Status         ChannelStatus   `json:"status"`
 	OwnerPrincipal string          `json:"owner_principal"`

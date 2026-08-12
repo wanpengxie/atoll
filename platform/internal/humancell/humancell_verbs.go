@@ -81,6 +81,14 @@ func resourceOutcomeFrame(out accessdoor.Outcome, err error, receipt frameBuild,
 			o.Value = raw
 		}
 	}
+	if out.Route != nil {
+		o.Ticket = out.Route.Token
+		if out.Route.Redeem == accessdoor.FileRedeemLocal {
+			o.Redeem = "local"
+		} else {
+			o.Redeem = "http"
+		}
+	}
 	return receipt(o)
 }
 

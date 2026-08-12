@@ -23,9 +23,8 @@ type ChannelStores struct {
 	// assembly. Platform threads it there and keeps nothing: this bundle lives
 	// in one function body and is never stored, so after assembly the actor
 	// store is reachable only through the Controller's commands.
-	Actors       storespec.ActorRegistryStore
-	Genesis      storespec.GenesisStore
-	ResourceRead storespec.ResourceReadStore
+	Actors  storespec.ActorRegistryStore
+	Genesis storespec.GenesisStore
 
 	// Principals is the principal-axis read face (LookupActivePrincipal — the
 	// admission path's "which active instance embodies this subject" query),
@@ -93,15 +92,14 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	}
 
 	return &ChannelStores{
-		Log:          cs.Log,
-		Query:        cs.Query,
-		Visible:      cs.Visible,
-		Expiry:       cs.Expiry,
-		Requests:     cs.Requests,
-		Actors:       cs.Actors,
-		Genesis:      cs.Genesis,
-		ResourceRead: cs.ResourceRead,
-		Principals:   cs.Principals,
+		Log:        cs.Log,
+		Query:      cs.Query,
+		Visible:    cs.Visible,
+		Expiry:     cs.Expiry,
+		Requests:   cs.Requests,
+		Actors:     cs.Actors,
+		Genesis:    cs.Genesis,
+		Principals: cs.Principals,
 		Assembly: AssemblyPorts{
 			Resources: cs.Resources,
 			KV:        cs.KVDriver,

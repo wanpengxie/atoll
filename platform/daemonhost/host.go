@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,8 +20,8 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -31,7 +32,6 @@ const (
 	defaultFactTimeout     = 2 * time.Second
 	defaultLaneOpenTimeout = 10 * time.Second
 	defaultDiagnosticTTL   = 10 * time.Minute
-	transferTicketTTL      = 10 * time.Minute
 	diagnosticCapacity     = 64
 )
 
@@ -78,6 +78,7 @@ type Config struct {
 	Present      func(context.Context) ([]channel.ID, error)
 	DaemonFact   func(context.Context, string) DaemonFact
 	Now          func() time.Time
+	DataPlane    dataplane.Redeemer
 }
 
 // Compartment existence is the device's own physical fact and this host keeps
@@ -189,7 +190,7 @@ type Host struct {
 	daemons          map[string]*daemonRow
 	membranes        map[channel.ID]membraneRow
 	retiredMembranes map[channel.ID]uint64
-	transfers        map[string]transferTicket
+	dataPlane        dataplane.Redeemer
 	wg               sync.WaitGroup
 	upgrader         websocket.Upgrader
 
@@ -215,7 +216,7 @@ func New(cfg Config) *Host {
 		logger: cfg.Logger, cfg: cfg, ctx: ctx, cancel: cancel,
 		daemons: make(map[string]*daemonRow), membranes: make(map[channel.ID]membraneRow),
 		retiredMembranes: make(map[channel.ID]uint64),
-		transfers:        make(map[string]transferTicket),
+		dataPlane:        cfg.DataPlane,
 		upgrader:         websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 	}
 	h.wg.Add(1)
@@ -790,7 +791,7 @@ func (h *Host) acceptStream(
 		_ = carrier.wire.Close()
 		return
 	}
-	if header.Kind != link.DeviceStreamActor && header.Kind != link.DeviceStreamStorage {
+	if header.Kind != link.DeviceStreamActor && header.Kind != link.DeviceStreamStorage && header.Kind != link.DeviceStreamExchange {
 		_ = conn.Close()
 		return
 	}
@@ -808,6 +809,10 @@ func (h *Host) acceptStream(
 	carrier.mu.Unlock()
 	if !current {
 		_ = conn.Close()
+		return
+	}
+	if header.Kind == link.DeviceStreamExchange {
+		lane.acceptExchange(conn)
 		return
 	}
 	lane.acceptActor(conn)
@@ -1153,7 +1158,7 @@ func (c *carrierRow) ensureLane(chID channel.ID, membrane membraneRow) {
 	c.mu.Unlock()
 	generation := link.NewLaneGeneration()
 	ctx, cancel := context.WithTimeout(c.host.ctx, defaultLaneOpenTimeout)
-	stream, err := c.wire.OpenLane(ctx, chID, generation)
+	stream, err := c.wire.OpenLane(ctx, chID, membrane.bundle.ChannelName, generation)
 	cancel()
 	if err != nil {
 		c.returnReader()
@@ -1360,78 +1365,86 @@ func (h *Host) currentLane(daemonID string, chID channel.ID) *serverLane {
 	return carrier.lanes[chID]
 }
 
-func (h *Host) SendAlloc(ctx context.Context, daemonID, chID, coord string, dir bool) error {
+func (h *Host) file(ctx context.Context, daemonID, chID, op, path string) (link.FileReply, error) {
 	lane := h.currentLane(daemonID, channel.ID(chID))
 	if lane == nil {
-		return ErrLaneUnavailable
+		return link.FileReply{}, ErrLaneUnavailable
 	}
-	return lane.alloc(ctx, coord, dir)
+	return lane.file(ctx, op, path)
 }
 
-func (h *Host) SendReclaim(ctx context.Context, daemonID, chID, coord string) error {
-	lane := h.currentLane(daemonID, channel.ID(chID))
+func (h *Host) FileCreate(ctx context.Context, daemonID, chID, path string) error {
+	_, err := h.file(ctx, daemonID, chID, link.FileCreate, path)
+	return err
+}
+func (h *Host) FileDelete(ctx context.Context, daemonID, chID, path string) error {
+	_, err := h.file(ctx, daemonID, chID, link.FileDelete, path)
+	return err
+}
+func (h *Host) FileStat(ctx context.Context, daemonID, chID, path string) (platform.DaemonFileInfo, bool, error) {
+	reply, err := h.file(ctx, daemonID, chID, link.FileStat, path)
+	if err != nil || !reply.Found || len(reply.Entries) == 0 {
+		return platform.DaemonFileInfo{}, reply.Found, err
+	}
+	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, Size: reply.Entries[0].Size}, true, nil
+}
+func (h *Host) FileList(ctx context.Context, daemonID, chID, path string) ([]platform.DaemonFileInfo, error) {
+	reply, err := h.file(ctx, daemonID, chID, link.FileList, path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]platform.DaemonFileInfo, 0, len(reply.Entries))
+	for _, row := range reply.Entries {
+		out = append(out, platform.DaemonFileInfo{Path: row.Path, Size: row.Size})
+	}
+	return out, nil
+}
+
+func (h *Host) Online(daemonID string, chID channel.ID) bool {
+	return h.currentLane(daemonID, chID) != nil
+}
+
+func (h *Host) OpenHost(ctx context.Context, ticket dataplane.Ticket) (io.ReadWriteCloser, error) {
+	lane := h.currentLane(ticket.HostID, ticket.ChannelID)
 	if lane == nil {
-		return ErrLaneUnavailable
+		return nil, dataplane.ErrHostOffline
 	}
-	return lane.reclaim(ctx, coord)
-}
-
-type transferTicket struct {
-	daemonID, chID, coord, reservationID string
-	mode                                 access.Operation
-	expires                              time.Time
-}
-
-func (h *Host) OpenTransfer(
-	_ context.Context,
-	daemonID, chID, coord string,
-	mode access.Operation,
-	reservationID string,
-) (string, error) {
-	if coord == "" || (mode != access.OpRead && mode != access.OpWrite) ||
-		h.currentLane(daemonID, channel.ID(chID)) == nil {
-		return "", ErrLaneUnavailable
-	}
-	token := uuid.NewString()
-	now := h.now()
-	h.mu.Lock()
-	h.sweepExpiredTransfersLocked(now)
-	h.transfers[token] = transferTicket{
-		daemonID: daemonID, chID: chID, coord: coord, mode: mode,
-		reservationID: reservationID, expires: now.Add(transferTicketTTL),
-	}
-	h.mu.Unlock()
-	return token, nil
-}
-
-func (h *Host) resolveTransfer(daemonID, chID, token string) (transferTicket, bool) {
-	now := h.now()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	ticket, ok := h.transfers[token]
-	if !ok || ticket.daemonID != daemonID || ticket.chID != chID ||
-		transferTicketExpired(ticket, now) {
-		if ok && transferTicketExpired(ticket, now) {
-			delete(h.transfers, token)
+	conn, err := lane.carrier.wire.OpenExchange(ctx, ticket.ChannelID, lane.stream.Gen)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		return transferTicket{}, false
+		return nil, dataplane.ErrHostOffline
 	}
-	return ticket, true
+	cleanup, ok := lane.trackExchange(conn)
+	if !ok {
+		_ = conn.Close()
+		return nil, dataplane.ErrHostOffline
+	}
+	tracked := &trackedExchange{ReadWriteCloser: conn, cleanup: cleanup}
+	if ticket.Path == "" {
+		_ = tracked.Close()
+		return nil, errors.New("daemonhost: ticket carries no file path")
+	}
+	if err := link.WriteExchangeControl(tracked, link.ExchangeHostHeader{
+		Path: ticket.Path, Mode: ticket.Mode,
+	}); err != nil {
+		_ = tracked.Close()
+		return nil, err
+	}
+	return tracked, nil
 }
 
-func transferTicketExpired(ticket transferTicket, now time.Time) bool {
-	return !now.Before(ticket.expires)
+type trackedExchange struct {
+	io.ReadWriteCloser
+	once    sync.Once
+	cleanup func()
 }
 
-// sweepExpiredTransfersLocked bounds the table to tickets minted within one
-// TTL window. Mint-time GC needs no extra goroutine and reclaims tickets that
-// were opened but never redeemed.
-func (h *Host) sweepExpiredTransfersLocked(now time.Time) {
-	for token, ticket := range h.transfers {
-		if transferTicketExpired(ticket, now) {
-			delete(h.transfers, token)
-		}
-	}
+func (c *trackedExchange) Close() error {
+	err := c.ReadWriteCloser.Close()
+	c.once.Do(c.cleanup)
+	return err
 }
 
 // Close tears the host down under the caller's budget. Cancelling first is

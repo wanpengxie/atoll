@@ -398,7 +398,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 		t.Fatal(err)
 	}
 	desired := gatewayTestBindings{rows: []regspec.ChannelRow{{
-		ID: chID, Name: string(chID), Type: "group", Status: regspec.ChannelPresent,
+		ID: chID, Name: string(chID), QualifiedName: "c0.test", Type: "group", Status: regspec.ChannelPresent,
 		OwnerPrincipal: owner, Spec: raw, CreatedAt: genesis.CreatedAt,
 	}}}
 	host, err := channelhost.New(t.TempDir(), desired, deps)
@@ -408,7 +408,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	if err := host.StartConvergence(); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Open(context.Background(), channelhost.OpenSpec{ChannelID: chID, ExpectedType: "group"}); err != nil {
+	if err := host.Open(context.Background(), channelhost.OpenSpec{ChannelID: chID, ChannelName: "c0.test", ExpectedType: "group"}); err != nil {
 		t.Fatal(err)
 	}
 	bundle, ok := host.Acquire(chID)
@@ -466,7 +466,7 @@ func newTestGateway(t testing.TB, cfg Config, set settings) *Gateway {
 
 // memberRoute builds a member Route to a channel bundle's admitted subject.
 func memberRoute(chID channel.ID, h *testChannel, subj actor.ActorID, now time.Time) Route {
-	return Route{Channel: chID, Bundle: h, SubjectID: subj}
+	return Route{Channel: chID, ChannelName: "c0.test", Bundle: h, SubjectID: subj}
 }
 
 // mkBusiness builds a business frame of type typ carrying channel_id=cid (empty cid →
