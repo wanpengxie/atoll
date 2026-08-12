@@ -56,7 +56,7 @@ func main() {
 	ws := flag.String("server", "", "server WS url; first run / rebind — persisted in home (default: the home's registered server)")
 	key := flag.String("key", "", "api key; first run / rebind — persisted in home (default: the home's registered key)")
 	name := flag.String("name", "", "device display name; default: hostname")
-	home := flag.String("home", defaultDeviceHome(), "device home: identity + channel workspaces + resource trees (home 模型: 一个 home=一个逻辑设备)")
+	home := flag.String("home", defaultDeviceHome(), "device home: identity + channel directories (home 模型: 一个 home=一个逻辑设备)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

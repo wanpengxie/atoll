@@ -6,7 +6,7 @@ import (
 )
 
 // channelRoot is the one physical channel directory. Agent work and file
-// access use this exact root; there is no resource or staging sibling.
+// access use this exact root; there is no sibling data tree.
 type channelRoot struct{ root *os.Root }
 
 func openChannelRoot(path string) (*channelRoot, error) {

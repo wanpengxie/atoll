@@ -35,9 +35,6 @@ type filePlaneStub struct {
 func (f *filePlaneStub) Resolve(channel.ID, string) (dataplane.Ticket, error) {
 	return dataplane.Ticket{}, errors.New("unused")
 }
-func (f *filePlaneStub) ResolveLocal(string, channel.ID, string) (dataplane.Ticket, error) {
-	return dataplane.Ticket{}, errors.New("unused")
-}
 func (f *filePlaneStub) ServeExchange(context.Context, channel.ID, io.ReadWriteCloser) {}
 func (f *filePlaneStub) ServeHTTP(_ context.Context, address resource.ResourceID, ticket string, mode access.Operation, dst io.Writer, src io.Reader) error {
 	f.address, f.ticket, f.mode = address, ticket, mode

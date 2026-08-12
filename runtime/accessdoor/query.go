@@ -91,6 +91,8 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 		if _, err := resourcespec.ParseFileAddress(string(id)); err != nil {
 			return fmt.Errorf("%w: %v", ErrMalformed, err)
 		}
+	} else if _, err := resourcespec.ParseFileAddress(string(id)); err == nil {
+		return fmt.Errorf("%w: kv id must not be a file address", ErrMalformed)
 	}
 	return nil
 }
@@ -200,10 +202,6 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		rows, err := d.deps.Files.List(ctx, mount.DaemonID, prefix)
 		if err != nil {
 			return ListPage{}, err
-		}
-		limit := normalizeListLimit(q.Limit)
-		if len(rows) > limit {
-			rows = rows[:limit]
 		}
 		entries := make([]ListEntry, 0, len(rows))
 		for _, row := range rows {

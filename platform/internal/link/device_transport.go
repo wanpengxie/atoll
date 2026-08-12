@@ -248,7 +248,7 @@ const (
 	DeviceStreamCarrier     DeviceStreamKind = "carrier"
 	DeviceStreamLaneControl DeviceStreamKind = "lane_control"
 	// DeviceStreamStorage is a lane's storage sibling: the stream that carries
-	// the server's storage instructions (alloc/reclaim) and nothing else. It is
+	// the server's file metadata instructions and nothing else. It is
 	// its own stream because its consumer is the one reader that legitimately
 	// blocks — those instructions end in filesystem syscalls no context can
 	// recall — and a queue must ride a single physical dependency: a dead disk

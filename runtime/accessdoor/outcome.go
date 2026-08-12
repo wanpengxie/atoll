@@ -20,7 +20,7 @@ type Outcome struct {
 	// authorization product (期11 spec §5 item 0/§3.4) — set ONLY on an
 	// accepted outcome for a file-kind byte-access request, nil otherwise
 	// (kv ops never populate it; Value stays kv's carrier, unchanged). It is
-	// NEVER bytes and NEVER a coord (§8.1/§8.9 red lines) — see FileRoute's
+	// NEVER bytes and NEVER an internal file handle — see FileRoute's
 	// own doc for exactly what it carries and why.
 	Route *FileRoute
 }

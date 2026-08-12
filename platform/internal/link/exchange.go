@@ -239,7 +239,7 @@ func (r *ExchangeReader) Close() error {
 	return r.conn.Close()
 }
 
-// ExchangeWriteHandle is the remote sibling of a local staging handle.
+// ExchangeWriteHandle is the remote file-write handle.
 type ExchangeWriteHandle struct {
 	conn io.ReadWriteCloser
 	mu   sync.Mutex
