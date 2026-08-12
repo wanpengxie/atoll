@@ -54,7 +54,7 @@ type Slot struct {
 	// C5; re-add only together with an actual reader.)
 	mu sync.Mutex
 
-	// Layer-3 (presence axis), written ONLY by PublishLevel/PublishCurrent/
+	// Layer-3 (presence axis), written ONLY by publishLevel/PublishCurrent/
 	// ForgetEpoch/Forget.
 	presence presenceState
 	// edgeSeq is the slot-minted monotonic edge cursor (10 移位: the序号 is
@@ -117,9 +117,10 @@ func newSlot() *Slot {
 	}
 }
 
-// PublishLevel publishes a new presence edge for epoch (the ONLY layer-3 writer
-// besides PublishCurrent/ForgetEpoch/Forget). edgeSeq is slot-minted (self-
-// bootstrapping monotonic cursor). Dedup/ordering (build spec §S2):
+// publishLevel publishes a new presence edge for epoch unconditionally.
+// The production door is PublishCurrent (idempotent form); this raw form has
+// no external producer and stays unexported for the in-package mechanism
+// tests of edge semantics. Dedup/ordering (build spec §S2):
 //   - same or first epoch: a new edge is minted (slot mints a strictly greater seq);
 //   - new (greater) epoch: the old testimony is REVOKED (observers see Live=false)
 //     then the new value is snapshotted and delivered;
@@ -127,7 +128,7 @@ func newSlot() *Slot {
 //
 // It returns whether the edge was applied (a stale epoch returns false). Observers
 // are notified under the slot lock so edges are totally ordered.
-func (s *Slot) PublishLevel(epoch int64, level Level) bool {
+func (s *Slot) publishLevel(epoch int64, level Level) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.publishLocked(epoch, level)
@@ -136,7 +137,7 @@ func (s *Slot) PublishLevel(epoch int64, level Level) bool {
 // PublishCurrent is the idempotent re-publish (§3.2 幂等补发): if the slot's
 // current testimony already equals (epoch, level), it is a no-op (zero notify,
 // zero edge advance) so re-reporting the current aggregate每轮 never惊扰 the
-// observer. Otherwise it publishes like PublishLevel.
+// observer. Otherwise it publishes a new presence edge.
 func (s *Slot) PublishCurrent(epoch int64, level Level) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

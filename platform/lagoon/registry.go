@@ -92,10 +92,6 @@ func (r *Registry) IsBound(ctx context.Context, ch channel.ID, device string) (b
 	return r.store.IsBound(ctx, ch, device)
 }
 
-func (r *Registry) ListBoundDevices(ctx context.Context, ch channel.ID) ([]regspec.DeviceRow, error) {
-	return r.store.ListBoundDevices(ctx, ch)
-}
-
 // ListBoundDeviceIDs is the narrow placement boundary used by channel homes;
 // device credentials and other registry columns never cross it.
 func (r *Registry) ListBoundDeviceIDs(ctx context.Context, ch channel.ID) ([]string, error) {

@@ -1,7 +1,7 @@
 package registry
 
 // ActivityType is a composition-level durable phase-event type. The registry below is
-// the single vocabulary source used by producers and contract generation.
+// the single vocabulary source for producers.
 type ActivityType string
 
 const (
@@ -55,24 +55,3 @@ type ActivityToolEndedPayload struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
-// ActivityDecl binds one durable wire type to its payload shape. Payload is a
-// zero value used only for deterministic JSON Schema generation.
-type ActivityDecl struct {
-	Type       ActivityType
-	SchemaName string
-	Payload    any
-}
-
-var activityTypes = [...]ActivityDecl{
-	{ActivityTurnStarted, "ActivityTurnStartedPayload", ActivityTurnStartedPayload{}},
-	{ActivityTurnEnded, "ActivityTurnEndedPayload", ActivityTurnEndedPayload{}},
-	{ActivityToolStarted, "ActivityToolStartedPayload", ActivityToolStartedPayload{}},
-	{ActivityToolEnded, "ActivityToolEndedPayload", ActivityToolEndedPayload{}},
-}
-
-// ActivityTypes returns a copy of the additive activity vocabulary.
-func ActivityTypes() []ActivityDecl {
-	out := make([]ActivityDecl, len(activityTypes))
-	copy(out, activityTypes[:])
-	return out
-}

@@ -35,7 +35,7 @@
 // and Driver (bytes) contracts — never their implementation, and RE-EXPORTS
 // the resourcespec types downstream needs by shape (CreateSpec, KindKV) as
 // type aliases / consts, so nothing outside the runtime tree ever imports
-// resourcespec directly (archtest's TestResourcespecImportedOnlyWithinRuntime).
+// resourcespec directly.
 //
 // Not in scope of this package:
 //

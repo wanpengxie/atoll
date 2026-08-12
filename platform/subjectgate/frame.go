@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 )
 
@@ -53,8 +52,8 @@ const (
 //     real path is the gateway session ledger writing the slot DIRECTLY
 //     (same process) — it never crosses this wire. If a remote connector ever
 //     needs presence over the wire, re-add as ONE vertical slice: frame const
-//     + payload type + knownFrameTypes entry + producer (gateway session
-//     edge) + interpreter dispatch, landing together.
+//     + payload type + producer (gateway session edge) + interpreter
+//     dispatch, landing together.
 //   - "notify" (+NotifyPayload{ReqID, MsgType, Summary}): the notify feature
 //     itself was never built. Same rule: const + payload + both sides'
 //     dispatch tables land as one slice with the feature, not ahead of it.
@@ -81,41 +80,6 @@ const (
 //     connection has no身份色 — eligibility is a per-frame/per-batch fact, and
 //     an eligibility refusal is uniformly forbidden (表①).
 
-// FrameDirection labels which side of the link may produce a frame type.
-type FrameDirection string
-
-const (
-	DirUpstream   FrameDirection = "upstream"
-	DirDownstream FrameDirection = "downstream"
-)
-
-// knownFrameTypes is the SINGLE machine registry of the frame table: every
-// wire frame type and the direction that owns it. Schema generation
-// The wire contract derives its frame lists from FrameTypesByDirection — never a
-// second hand-written copy (codegen has one source). Envelope parsing
-// deliberately does not reject values outside it: downstream growth must
-// remain readable by older clients.
-var knownFrameTypes = map[FrameType]FrameDirection{
-	FrameAttach: DirUpstream, FrameSubmit: DirUpstream, FrameResolve: DirUpstream,
-	FrameCancel: DirUpstream, FrameAfter: DirUpstream, FrameCancelTimer: DirUpstream,
-	FrameResource: DirUpstream, FrameObserve: DirUpstream, FrameUnobserve: DirUpstream,
-	FrameFeed: DirDownstream, FrameReceipt: DirDownstream, FrameError: DirDownstream,
-	FrameObserveEnded: DirDownstream,
-}
-
-// FrameTypesByDirection returns the sorted frame-type names owned by dir — the
-// one source the schema generator consumes.
-func FrameTypesByDirection(dir FrameDirection) []string {
-	var out []string
-	for t, d := range knownFrameTypes {
-		if d == dir {
-			out = append(out, string(t))
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // Error-code closed set (build spec 表①; 裁决8 平面词律): an error frame's `code`
 // is ALWAYS a single flat word — never a nested write_rejected(code=x) form. A
 // WriteRejected surfaces its harness reason verbatim as the code, so this set is
@@ -140,23 +104,6 @@ const (
 	// axis — see the retired-words note by the FrameType consts. Eligibility
 	// refusal is uniformly CodeForbidden.)
 )
-
-var errorCodes = [...]string{
-	CodeBadPayload, CodeNotInAudience, CodeUnauthorizedSender,
-	CodeAlreadyClosed, CodeRequestNotFound, CodeInvalidDecision,
-	CodeUnavailable, CodeRoutingUnavailable, CodeIdempotencyConflict,
-	CodeNowMember, CodeChannelNotFound, CodeChannelUnavailable, CodeCapabilityUnavailable,
-	CodeForbidden, CodeClosed,
-}
-
-// ErrorCodes returns the websocket error vocabulary in stable declaration
-// order. Downstream schemas expose it as known values, never as an enum, so
-// older clients retain their unknown-code fallback as the set grows.
-func ErrorCodes() []string {
-	out := make([]string, len(errorCodes))
-	copy(out, errorCodes[:])
-	return out
-}
 
 // ErrUnknownFrameType is ParseUpstreamFrame's verdict for a frame_type outside
 // the closed upstream set. The lenient ParseEnvelope/ParseDownstream never

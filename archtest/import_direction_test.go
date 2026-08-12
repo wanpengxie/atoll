@@ -325,7 +325,10 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		"platform/channelhost": true,
 		"platform/channelspec": true,
 		"platform/lagoon":      true,
-		"platform/daemonhost":  true,
+		// regspec = registry 行型的公开叶包（承载体批 2026-08-12）：类型随
+		// lagoon 合同一起构成出口脸，数据访问仍恒经 lagoon。
+		"platform/lagoon/regspec": true,
+		"platform/daemonhost":     true,
 		// compute = 设备载体的出口脸（/compute 链的 daemon 侧运行时）。登记于
 		// 2026-08-05 devicehost 入 drivers 层（此前同一 import 住 cmd/daemon，
 		// 墙不覆盖 cmd）：消费者轴是"设备"，与 subjectgate 之于"人"对称。

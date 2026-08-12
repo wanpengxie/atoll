@@ -18,7 +18,7 @@ import (
 // the composition spec's "ctx.Config") is deliberately NOT a member here: config
 // is an independent parameter the constructor closure captures, not a
 // substrate-minted authority (S-P16 红线). Adding a Config field to this struct
-// would collapse that distinction — archtest.TestConfigNotInCaps trips on it.
+// would collapse that distinction.
 type Caps struct {
 	// Pen is the plane-1 truth-write capability (append messages AS this actor).
 	// The pen holds the run authority and gates every Write with Admit().

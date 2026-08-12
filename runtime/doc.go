@@ -29,10 +29,9 @@
 // Boundary rules and their enforcement:
 //
 //   - runtime/* MAY import protocol/* and runtime/* (self).
-//   - protocol/* MUST NOT import runtime/* — mechanically enforced by
-//     archtest.TestProtocolPurityAndDirection (direction + purity locks).
+//   - protocol/* MUST NOT import runtime/*.
 //   - This root package is PURE ASSEMBLY (storeopen/scheduleopen) and may
-//     only be imported by platform — archtest.TestRuntimeAssemblyConfinedToPlatform.
+//     only be imported by platform.
 //
 // TODO(lint-rebuild): the one residual unmechanised edge is runtime/* → lib//
 // composition-root back-flow for lib leaf packages that do not themselves depend on

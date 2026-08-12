@@ -49,9 +49,8 @@ type StorageAllocSpec struct {
 // §4.7 daemon control-RPC handler platform assembly builds
 // (homeStorageHostControl over the Platform-owned resource outbox) — the SAME
 // purity-wall pattern CreateSpec/KindKV already draw (handle.go): nothing
-// outside the runtime tree may import resourcespec directly
-// (archtest.TestResourcespecImportedOnlyWithinRuntime), so platform reaches
-// this contract only through these aliases.
+// outside the runtime tree may import resourcespec directly, so platform
+// reaches this contract only through these aliases.
 type (
 	ResourceOutbox = resourcespec.ResourceOutbox
 	ReservationRow = resourcespec.ReservationRow

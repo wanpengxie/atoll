@@ -17,7 +17,7 @@ name: CI
 #   - banned-word policy (no dogfood / MCP / 1studio / lightcone), formerly
 #     scripts/lint-banned-words.sh.
 #
-# Scope: single root go module + pnpm workspaces (ui + xhs extension).
+# Scope: single root go module.
 
 on:
   push:
@@ -46,24 +46,6 @@ jobs:
         with:
           go-version: '1.25'
           cache: false
-
-      - name: setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: setup pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: '9'
-
-      - name: cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/pnpm/store
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-
 
       - name: make install
         run: make install

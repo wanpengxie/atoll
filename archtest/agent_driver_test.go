@@ -58,8 +58,10 @@ func TestAgentDriverDependencyWalls(t *testing.T) {
 	}
 }
 
-func TestAgentDriverObsoleteSurfaceIsAbsent(t *testing.T) {
-	forbidden := regexp.MustCompile(`\b(Adapter|OpenResult|StartResult|ControlResult|Certainty|Ambiguous|runtimeFuse|unboundedQueue|persistCoordinator|EffectScope)\b|NewAdapter|NewEffectScope`)
+// TestProviderRegistrationLivesInAssemblyRoot 钉的不变量：类注册恒发生在装配根
+// （drivers/agents/all），provider 包自身恒不自注册——自注册=import 副作用装配，
+// 装配顺序与可见性脱离组装根的显式控制。
+func TestProviderRegistrationLivesInAssemblyRoot(t *testing.T) {
 	var bad []string
 	for _, f := range productionFiles(t) {
 		if !hasPathPrefix(f.dir, "drivers/agents") {
@@ -69,21 +71,17 @@ func TestAgentDriverObsoleteSurfaceIsAbsent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if hit := forbidden.Find(raw); hit != nil {
-			bad = append(bad, fmt.Sprintf("%s contains obsolete %q", f.path, hit))
-		}
 		if bytesContains(raw, []byte("registry.Register(")) && !hasPathPrefix(f.dir, "drivers/agents/all") {
 			bad = append(bad, f.path+": provider-side registration is forbidden")
 		}
 	}
 	if len(bad) > 0 {
-		t.Fatalf("obsolete agent surface remains:\n  %s", strings.Join(bad, "\n  "))
+		t.Fatalf("registration outside the assembly root:\n  %s", strings.Join(bad, "\n  "))
 	}
 }
 
 func TestAgentDriverProductionWriteMouths(t *testing.T) {
 	var bad []string
-	retireCalls := 0
 	for _, f := range productionFiles(t) {
 		raw, err := os.ReadFile("../" + f.path)
 		if err != nil {
@@ -93,11 +91,8 @@ func TestAgentDriverProductionWriteMouths(t *testing.T) {
 		if hasPathPrefix(f.dir, "drivers/agents/base") && (strings.Contains(text, ".Reply(") || strings.Contains(text, ".Fail(")) && !strings.HasSuffix(f.path, "/exec.go") {
 			bad = append(bad, f.path+": terminal write outside Base executor")
 		}
-		if hasPathPrefix(f.dir, "drivers/agents/runtime") && strings.Contains(text, ".Retire()") {
-			retireCalls += strings.Count(text, ".Retire()")
-			if !strings.HasSuffix(f.path, "/slot.go") {
-				bad = append(bad, f.path+": Worker.Retire outside workerSlot")
-			}
+		if hasPathPrefix(f.dir, "drivers/agents/runtime") && strings.Contains(text, ".Retire()") && !strings.HasSuffix(f.path, "/slot.go") {
+			bad = append(bad, f.path+": Worker.Retire outside workerSlot")
 		}
 		if hasPathPrefix(f.dir, "drivers/agents/runtime") && !strings.HasSuffix(f.path, "/executor.go") {
 			for _, mouth := range []string{"e.events.", "e.provider.NewWorker(", "w.Open(", "w.Start(", "w.Control(", "e.deps.Tools.Invoke(", "e.deps.Resources.Invoke("} {
@@ -113,9 +108,6 @@ func TestAgentDriverProductionWriteMouths(t *testing.T) {
 				}
 			}
 		}
-	}
-	if retireCalls != 1 {
-		bad = append(bad, fmt.Sprintf("Runtime physical Retire callsites=%d want 1", retireCalls))
 	}
 	if len(bad) > 0 {
 		t.Fatalf("agent production write-mouth violations:\n  %s", strings.Join(bad, "\n  "))

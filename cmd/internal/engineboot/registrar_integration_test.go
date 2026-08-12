@@ -354,8 +354,8 @@ func TestRetiredDeviceIsExcludedFromEffectiveBindings(t *testing.T) {
 	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceRetire, lagoon.DeviceRetire{DeviceID: second.ID}); err != nil {
 		t.Fatal(err)
 	}
-	bound, err := eng.registry.ListBoundDevices(context.Background(), created.ID)
-	if err != nil || len(bound) != 1 || bound[0].ID != protocol.LocalDeviceID {
+	bound, err := eng.registry.ListBoundDeviceIDs(context.Background(), created.ID)
+	if err != nil || len(bound) != 1 || bound[0] != protocol.LocalDeviceID {
 		t.Fatalf("effective bindings=%+v err=%v", bound, err)
 	}
 	if yes, err := eng.registry.IsBound(context.Background(), created.ID, second.ID); err != nil || yes {

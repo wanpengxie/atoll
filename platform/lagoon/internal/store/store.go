@@ -204,24 +204,6 @@ func (s *Store) IsBound(ctx context.Context, ch channel.ID, device string) (bool
 	return ok, err
 }
 
-func (s *Store) ListBoundDevices(ctx context.Context, ch channel.ID) ([]regspec.DeviceRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+deviceColumns+`
-		FROM bindings JOIN devices ON devices.id=bindings.device_id
-		WHERE bindings.channel_id=? AND devices.status='present' ORDER BY devices.id`, ch)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []regspec.DeviceRow
-	for rows.Next() {
-		row, err := scanDevice(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
-}
 
 func (s *Store) ListBoundDeviceIDs(ctx context.Context, ch channel.ID) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT devices.id

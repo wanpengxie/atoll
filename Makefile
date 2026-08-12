@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-release test lint check-activity-types dev dev-init dev-reopen dev-server clean e2e-loop
+.PHONY: install build build-go build-release test lint check-activity-types dev clean e2e-loop
 
 # server/daemon ship namespaced (atoll-server / atoll-daemon); the entry
 # command itself is plain `atoll` — its own name IS the namespace.
@@ -68,32 +68,12 @@ check-activity-types:
 	./scripts/check-activity-types.sh --self-test
 
 # ----------------------------------------------------------------------------
-# dev — 起 server(API-only)。web UI 在独立仓库 atoll-web:
-#   make dev UI_DIST=../atoll-web/dist  连本地构建好的 UI
-#   UI dev server 在 atoll-web 仓里 pnpm dev
+# dev — 起 server(API-only) 于 /tmp/atoll-dev。首启自动安装（root 密码见日志），
+# 重复运行恒重开同一个 home。web UI 在独立仓库 atoll-web（连同一个 API）。
 # ----------------------------------------------------------------------------
-dev: build-go dev-reopen
-
-dev-init: build-go
-	@mkdir -p /tmp/atoll-dev/channels
-	@echo "[dev] initializing server on :8832"
-	@bin/atoll-server \
-	  --db /tmp/atoll-dev/app.db \
-	  --channel-db-dir /tmp/atoll-dev/channels \
-	  --addr :8832 \
-	  --init \
-	  --ui-dist "$(UI_DIST)" &
-
-dev-reopen:
-	@mkdir -p /tmp/atoll-dev/channels
-	@echo "[dev] reopening server on :8832"
-	@bin/atoll-server \
-	  --db /tmp/atoll-dev/app.db \
-	  --channel-db-dir /tmp/atoll-dev/channels \
-	  --addr :8832 \
-	  --ui-dist "$(UI_DIST)" &
-
-dev-server: dev-reopen
+dev: build-go
+	@echo "[dev] server on :8832 (home: /tmp/atoll-dev/server)"
+	@bin/atoll-server --home /tmp/atoll-dev/server --addr :8832 &
 
 # ----------------------------------------------------------------------------
 # clean — 删 build 产物（不动用户数据）

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Event-landing gate (D8 third gate). Invariant: every activity.* type on the
-# wire is registered in registry/activity.go (the ONE vocabulary source that
-# also drives contract schema generation) — an unregistered type is a phantom
-# event no shell/schema knows about. Violation = contract附件 silently missing
-# a type consumers already receive. Not compiler-provable because the wire
-# value is a string: producers могут hand-write a literal, so the gate greps for
-# exactly that. Allowlist entries require reason/owner/expires and fail when
-# expired.
+# Event-landing gate. Invariant: every activity.* type on the wire is
+# registered in registry/activity.go (the one vocabulary source) — an
+# unregistered type is a phantom event no consumer knows about. Not
+# compiler-provable because the wire value is a string: producers can
+# hand-write a literal, so the gate greps for exactly that. Allowlist
+# entries require reason/owner/expires and fail when expired.
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"

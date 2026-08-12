@@ -21,8 +21,7 @@ type ChannelStores struct {
 	Requests storespec.RequestLookup
 	// Actors is the durable actor-record face handed to runtime/actorstore at
 	// assembly. Platform threads it there and keeps nothing: this bundle lives
-	// in one function body and is never stored (archtest
-	// TestAssemblyBundleNeverOutlivesItsFunction), so after assembly the actor
+	// in one function body and is never stored, so after assembly the actor
 	// store is reachable only through the Controller's commands.
 	Actors       storespec.ActorRegistryStore
 	Genesis      storespec.GenesisStore
@@ -81,8 +80,7 @@ type OpenChannelOptions struct {
 // (which confines the raw *sql.DB). It is the channel-store ASSEMBLY surface —
 // the returned ChannelStores.Log/Membership are raw write capabilities that
 // bypass the harness gate, so assembly is confined to platform: only the
-// platform tree may import this package (enforced by
-// archtest.TestRuntimeAssemblyConfinedToPlatform). channelID is the channel
+// platform tree may import this package. channelID is the channel
 // scope the membership control plane binds to (its mirror events carry this id,
 // never a per-call arg).
 func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenChannelOptions) (*ChannelStores, error) {

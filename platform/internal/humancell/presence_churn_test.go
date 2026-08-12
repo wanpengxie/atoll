@@ -42,7 +42,7 @@ func TestPresenceChurnFirstCallbackSelfReportOnIncarnation(t *testing.T) {
 	// incarnation 1 wires and observes an online edge.
 	fs1 := &fakeSys{}
 	tok1 := WirePresenceSelfReport(fs1, slot)
-	slot.PublishLevel(1, subjectgate.LevelOnline)
+	slot.PublishCurrent(1, subjectgate.LevelOnline)
 	if got := obsLevels(t, fs1); len(got) != 1 || !got[0] {
 		t.Fatalf("incarnation 1 obs = %v, want [online]", got)
 	}
@@ -72,7 +72,7 @@ func TestPresenceChurnOldObserverCannotUnmountNew(t *testing.T) {
 	slot.RemoveObserver(tok1)
 
 	// A fresh edge must still reach incarnation 2.
-	slot.PublishLevel(1, subjectgate.LevelOnline)
+	slot.PublishCurrent(1, subjectgate.LevelOnline)
 	if got := obsLevels(t, fs2); len(got) != 1 || !got[0] {
 		t.Fatalf("live incarnation obs = %v, want [online] (stale RemoveObserver must not have unmounted it)", got)
 	}
@@ -90,7 +90,7 @@ func TestPresenceChurnForgetNotSelfRetracted(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	fs := &fakeSys{}
 	_ = WirePresenceSelfReport(fs, slot)
-	slot.PublishLevel(1, subjectgate.LevelOnline)
+	slot.PublishCurrent(1, subjectgate.LevelOnline)
 
 	before := len(fs.obs)
 	slot.Forget() // revocation (Live=false) — the cell must not self-report anything.
@@ -119,14 +119,14 @@ func TestPresenceChurnEpochRevokeNotSelfReported(t *testing.T) {
 	fs := &fakeSys{}
 	_ = WirePresenceSelfReport(fs, slot)
 
-	slot.PublishLevel(1, subjectgate.LevelOnline) // online (self-reported)
+	slot.PublishCurrent(1, subjectgate.LevelOnline) // online (self-reported)
 	if got := obsLevels(t, fs); len(got) != 1 || !got[0] {
 		t.Fatalf("after online obs = %v, want [online]", got)
 	}
 
 	// New epoch offline: the observer sees revoke(old, Live=false, skipped) then
 	// deliver(offline, Live=true, self-reported).
-	slot.PublishLevel(2, subjectgate.LevelOffline)
+	slot.PublishCurrent(2, subjectgate.LevelOffline)
 	got := obsLevels(t, fs)
 	if len(got) != 2 || !got[0] || got[1] {
 		t.Fatalf("after new-epoch offline obs = %v, want [online, offline] (revoke not self-reported, new level is)", got)

@@ -237,12 +237,6 @@ func EncodeError(err error) (string, string) {
 	return "unknown", err.Error()
 }
 
-// DownPayload is the bound actor's death notification — the host turns it into a
-// down edge (the actor is implicit — the connection IS that actor).
-type DownPayload struct {
-	Reason string `json:"reason,omitempty"`
-}
-
 // ObsPayload carries one actor-source obs snapshot the bound actor pushed (the
 // actor is implicit — the connection IS that actor). Kind + Value are OPAQUE: the
 // wire forwards them, never interprets. Value is raw opaque bytes (the adapter's

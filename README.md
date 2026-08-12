@@ -128,18 +128,20 @@ the disk layout is identical, so a node started with `atoll up` can be split
 later with zero migration:
 
 ```bash
-# server (holds truth for all channels; --init creates the database on first run)
-bin/atoll-server --init --home ~/.atoll/server --addr 127.0.0.1:8832
+# server (holds truth for all channels; installs itself on first run — the
+# generated root password is printed to the log)
+bin/atoll-server --home ~/.atoll/server --addr 127.0.0.1:8832
 
-# daemon (compute host) — first run registers: mint an api-key via the API
-# (POST /api/daemons), later runs start bare (identity persists in the home)
-bin/atoll-daemon --home ~/.atoll/device --server "ws://127.0.0.1:8832/compute" --key <api-key>
+# daemon (compute host) — first run binds with a device key (minted by
+# `atoll up` provisioning, or via the device.mint space word); later runs
+# start bare (identity persists in the home)
+bin/atoll-daemon --home ~/.atoll/device --server "ws://127.0.0.1:8832/compute" --key <device-key>
 
 # tests
 make test
 ```
 
-The web UI lives in a separate repository and is served via `--ui-dist`.
+The web UI lives in a separate repository and talks to the same portal API.
 
 ## Writing an actor
 

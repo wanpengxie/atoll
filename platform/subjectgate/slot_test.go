@@ -10,16 +10,16 @@ import (
 const testID = "human:alice"
 
 // TestPublishLevelMintsMonotonicEdgeSeq pins the连接模型勘误期 form: edgeSeq is
-// slot-minted (not client-supplied), so every same-or-greater-epoch PublishLevel
+// slot-minted (not client-supplied), so every same-or-greater-epoch publish
 // applies with a strictly-increasing seq; a lesser epoch is stale-dropped.
 func TestPublishLevelMintsMonotonicEdgeSeq(t *testing.T) {
 	s := newSlot()
 	var got []PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
-	if !s.PublishLevel(1, LevelOnline) {
+	if !s.publishLevel(1, LevelOnline) {
 		t.Fatal("first edge should apply")
 	}
-	if !s.PublishLevel(1, LevelOffline) {
+	if !s.publishLevel(1, LevelOffline) {
 		t.Fatal("a same-epoch edge applies with a slot-minted greater seq")
 	}
 	if len(got) != 2 {
@@ -28,7 +28,7 @@ func TestPublishLevelMintsMonotonicEdgeSeq(t *testing.T) {
 	if got[1].EdgeSeq <= got[0].EdgeSeq {
 		t.Fatalf("slot-minted edgeSeq must strictly increase: %d then %d", got[0].EdgeSeq, got[1].EdgeSeq)
 	}
-	if s.PublishLevel(0, LevelOnline) {
+	if s.publishLevel(0, LevelOnline) {
 		t.Fatal("a lesser epoch must be dropped (stale gateway)")
 	}
 }
@@ -61,14 +61,14 @@ func TestPublishCurrentIdempotent(t *testing.T) {
 // slot lock, in-order with every subsequent edge.
 func TestRegisterObserverDeliversCurrentFirst(t *testing.T) {
 	s := newSlot()
-	s.PublishLevel(3, LevelOnline)
+	s.publishLevel(3, LevelOnline)
 	var got []PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
 	if len(got) != 1 || !got[0].Live || got[0].Level != LevelOnline || got[0].Epoch != 3 {
 		t.Fatalf("RegisterObserver must deliver the current value as its first callback, got %+v", got)
 	}
 	// A new epoch follows in order: revoke(epoch3) then snapshot(epoch4).
-	s.PublishLevel(4, LevelOffline)
+	s.publishLevel(4, LevelOffline)
 	if len(got) != 3 || got[1].Live || got[1].Epoch != 3 || !got[2].Live || got[2].Epoch != 4 {
 		t.Fatalf("want snapshot then revoke(3)+snapshot(4), got %+v", got)
 	}
@@ -91,16 +91,16 @@ func TestPublishLevelNewEpochRevokeThenSnapshot(t *testing.T) {
 	s := newSlot()
 	var got []PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
-	s.PublishLevel(1, LevelOnline)
+	s.publishLevel(1, LevelOnline)
 	got = nil
-	if !s.PublishLevel(2, LevelOnline) {
+	if !s.publishLevel(2, LevelOnline) {
 		t.Fatal("new epoch should apply")
 	}
 	if len(got) != 2 || got[0].Live || got[0].Epoch != 1 || !got[1].Live || got[1].Epoch != 2 {
 		t.Fatalf("want revoke(epoch1) then snapshot(epoch2), got %+v", got)
 	}
 	// A lesser epoch is stale.
-	if s.PublishLevel(1, LevelOffline) {
+	if s.publishLevel(1, LevelOffline) {
 		t.Fatal("stale (lesser) epoch must be dropped")
 	}
 }
@@ -115,7 +115,7 @@ func TestObserverPointerGenerationRemoval(t *testing.T) {
 	s.RegisterObserver("new", func(PresenceUpdate) { newFired++ })
 	// The old cell tears down and摘除 with ITS token.
 	s.RemoveObserver("old")
-	s.PublishLevel(1, LevelOnline)
+	s.publishLevel(1, LevelOnline)
 	if newFired != 1 {
 		t.Fatalf("new observer should still receive edges after old摘除: %d", newFired)
 	}
@@ -126,7 +126,7 @@ func TestForgetRevokesAndFoldsUnknown(t *testing.T) {
 	s := newSlot()
 	var last PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { last = u })
-	s.PublishLevel(1, LevelOnline)
+	s.publishLevel(1, LevelOnline)
 	s.Forget()
 	if last.Live {
 		t.Fatal("Forget should deliver a revocation")
@@ -144,7 +144,7 @@ func TestForgetEpochConditional(t *testing.T) {
 	fired := 0
 	var last PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { last = u; fired++ })
-	s.PublishLevel(5, LevelOnline)
+	s.publishLevel(5, LevelOnline)
 	before := fired
 	s.ForgetEpoch(4) // different epoch → no-op
 	if fired != before {

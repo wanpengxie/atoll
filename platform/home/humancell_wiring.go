@@ -22,7 +22,7 @@ import (
 // The subjectgate seam's ensure/lookup/remove methods also live in this file.
 // drives a subject's per-identity slot through these Home methods. The slot
 // itself is *subjectgate.Slot — the在场与递交接头盒; its exported methods
-// (PublishLevel/PublishCurrent/ForgetEpoch/Forget/Deliver) are the gateway's
+// (PublishCurrent/ForgetEpoch/Forget/Deliver) are the gateway's
 // controlled面. Home hands out the slot handle, never the internal Registry
 // object — the organ-bag red line (surface_test) stays intact: these three are
 // capability methods, not bare-accessor leaks.

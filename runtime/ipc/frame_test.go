@@ -69,7 +69,7 @@ func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 	defer client.Close()
 
 	frames := []Frame{
-		{Kind: KindDetach, Payload: mustMarshal(t, DownPayload{Reason: "ctx cancelled"})},
+		{Kind: KindDetach, Payload: json.RawMessage(`{"reason":"ctx cancelled"}`)},
 		{Kind: KindDeliverResult, Payload: mustMarshal(t, DeliverResultPayload{
 			EnvelopeID: message.ID("m-9"), Outcome: "not_hosted", Detail: "no cell",
 		})},
@@ -93,10 +93,8 @@ func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 	if d0.Kind != KindDetach {
 		t.Fatalf("frame 0 kind = %q, want detach", d0.Kind)
 	}
-	var dp0 DownPayload
-	mustUnmarshal(t, d0.Payload, &dp0)
-	if dp0.Reason != "ctx cancelled" {
-		t.Fatalf("detach reason = %q, want ctx cancelled", dp0.Reason)
+	if string(d0.Payload) != `{"reason":"ctx cancelled"}` {
+		t.Fatalf("detach payload = %s, want opaque reason carried verbatim", d0.Payload)
 	}
 
 	d1, err := rc.Read()
@@ -240,12 +238,10 @@ func TestRoundTripPerKind(t *testing.T) {
 		},
 		{
 			name:  "down",
-			frame: Frame{Kind: KindDown, Payload: mustMarshal(t, DownPayload{Reason: "panic: nil map"})},
+			frame: Frame{Kind: KindDown, Payload: json.RawMessage(`{"reason":"panic: nil map"}`)},
 			check: func(t *testing.T, got Frame) {
-				var p DownPayload
-				mustUnmarshal(t, got.Payload, &p)
-				if p.Reason != "panic: nil map" {
-					t.Errorf("reason = %q", p.Reason)
+				if string(got.Payload) != `{"reason":"panic: nil map"}` {
+					t.Errorf("payload = %s", got.Payload)
 				}
 			},
 		},

@@ -1,30 +1,18 @@
-node_modules/
 .codex
 .claude
 docs/dev
 docs/
 atoll-site/
 dist/
-# T5 xhs CLI dev build product (adapters/device/xhs/cli)
-/coagent-xhs
-# root cli build artifact (go build -o cli ./cmd/cli)
-/cli
 # go build output binaries
-/server
-/daemon
-/worker
 /bin/
+bin/
 *.local.*
 .logs/
 .env
 .coagent-local/
-bin/
-.go-arch-lint.yml
 .dalek/
 .dev-secrets/
-
-# UI build artifacts: chrome extension zip is staged here by `make extension-zip`
-ui/public/downloads/
 /.cache/
 *.err.log
 output/*

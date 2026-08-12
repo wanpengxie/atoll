@@ -41,8 +41,7 @@ type chain struct {
 // Construction-confined to platform: a write engine built outside the platform
 // assembly has no commit signal (store OnCommit), closure reconciler, or
 // down-watcher wiring — a half-wired write gate. New/Deps may therefore only
-// be referenced by the platform tree (enforced by
-// archtest.TestHarnessConstructionConfinedToPlatform); downstream speaks the
+// be referenced by the platform tree; downstream speaks the
 // harness.Pen / WriteResult seam, never builds the engine itself.
 // New returns the two capabilities separately because they ARE separate: the
 // minter mints self-judging pens, the writer performs one write under a verdict

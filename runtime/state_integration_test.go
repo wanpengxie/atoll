@@ -22,19 +22,19 @@ import (
 // as inert, unreachable data — §5.5).
 //
 // State handles are actor-scoped: the reachable set is structurally ≡ {owner}.
-// Birth nevertheless requires that owner to be active, so every slice that creates
+// Birth nevertheless requires that owner to be active, so every test that creates
 // state seeds its owner first. After birth, actor-scoped read/write/delete still do
 // not consult membership per operation; that absence remains the scope law.
 
-// ---- slice 1: privacy by structure -----------------------------------------
+// ---- privacy by structure ---------------------------------------------------
 
-// TestStateSlice1_PrivacyByStructure: two owners A and B each hold an actor-scoped
+// TestStatePrivacyByStructure: two owners A and B each hold an actor-scoped
 // handle; B reading A's id gets resource_not_found (the id is simply not in B's
 // namespace), NOT access_denied. The negative assertion is load-bearing: the
 // collapsed branch NEVER produces access_denied — there is no possible world in
 // which the owner is denied its own namespace, so an access_denied here would be a
 // lie the door structurally cannot tell.
-func TestStateSlice1_PrivacyByStructure(t *testing.T) {
+func TestStatePrivacyByStructure(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
@@ -66,13 +66,13 @@ func TestStateSlice1_PrivacyByStructure(t *testing.T) {
 	expectStateNotFoundNotDenied(t, "B delete A's id", out, err)
 }
 
-// ---- slice 2: ingress order + op distinctions --------------------
+// ---- ingress order + op distinctions ----------------------------------------
 
-// TestStateSlice2_IngressOrderAndOpDistinctions pins the actor-scoped
+// TestStateIngressOrderAndOpDistinctions pins the actor-scoped
 // ingress order and the collapsed op verdicts through the assembled handle. The
 // two signal classes stay distinct: ErrMalformed (wire-shape fault) and the
 // RESOLVE-stage verdicts (already_exists / resource_not_found).
-func TestStateSlice2_IngressOrderAndOpDistinctions(t *testing.T) {
+func TestStateIngressOrderAndOpDistinctions(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
@@ -110,9 +110,9 @@ func TestStateSlice2_IngressOrderAndOpDistinctions(t *testing.T) {
 	expectReason(t, "repeat delete idempotent", out, err, access.ResourceNotFound)
 }
 
-// ---- slice 2b: empty bytes vs resolved-but-empty ---------------------------
+// ---- empty bytes vs resolved-but-empty --------------------------------------
 
-// TestStateSlice2b_EmptyBytes: the NULL-vs-empty distinction survives the round
+// TestStateEmptyBytesVsAbsent: the NULL-vs-empty distinction survives the round
 // trip through the real sqlite BLOB column. create(nil) stores a row
 // with a NULL bytes column = resolved-but-empty → read returns an accepted
 // Outcome{Found:false, Value:nil}; create([]byte{}) stores an empty non-nil blob
@@ -123,7 +123,7 @@ func TestStateSlice2_IngressOrderAndOpDistinctions(t *testing.T) {
 // each to the correct Found bit end-to-end. No deviation from spec observed: the mattn
 // sqlite driver stores a nil []byte arg as NULL and an []byte{} arg as an empty
 // blob, and `bytes IS NULL` reads them back apart.
-func TestStateSlice2b_EmptyBytes(t *testing.T) {
+func TestStateEmptyBytesVsAbsent(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
@@ -165,9 +165,9 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 	}
 }
 
-// ---- slice 3: WHICH-data = identity ----------------------------------------
+// ---- WHICH-data = identity ---------------------------------------------------
 
-// TestStateSlice3_WhichDataIsIdentity: state DATA is keyed by identity (ActorID),
+// TestStateDataKeyedByIdentity: state DATA is keyed by identity (ActorID),
 // not by any per-handle/per-incarnation token. Two separate MintState calls for
 // the SAME owner return handles that read the SAME bytes — the handle carries no
 // incarnation state.
@@ -178,7 +178,7 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 // phase — it does NOT exist in the current contract layer. A second MintState
 // reading the same bytes here must NOT be read as "the WHEN half is built":
 // there simply is no validity dimension on the current handle at all.
-func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
+func TestStateDataKeyedByIdentity(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
@@ -197,16 +197,16 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 	expectBytes(t, "gen-2 checkpoint value", out, v)
 }
 
-// ---- slice 4: deregister touches records only -------------------------------
+// ---- deregister touches records only -----------------------------------------
 
-// TestStateSlice4_DeregisterTouchesRecordsOnly: deregistering an owner flips
+// TestStateDeregisterTouchesRecordsOnly: deregistering an owner flips
 // exactly one thing — its registry row. Its actor-scoped state rows stay as
 // inert data (ActorIDs are never reused and every belonging is keyed by
 // ActorID, so nobody can reach them), and correctness is carried by the
 // admission gate, which now refuses the dead owner at the door. The
 // channel-scoped plane is non-lossy for the opposite reason: its output is
 // shared collaboration truth.
-func TestStateSlice4_DeregisterTouchesRecordsOnly(t *testing.T) {
+func TestStateDeregisterTouchesRecordsOnly(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 	A := seedMember(t, cs, actor.ActorID("A"))
@@ -244,14 +244,14 @@ func TestStateSlice4_DeregisterTouchesRecordsOnly(t *testing.T) {
 	}
 }
 
-// ---- slice 5: two loci mutually invisible ----------------------------------
+// ---- two loci mutually invisible ---------------------------------------------
 
-// TestStateSlice5_TwoLociMutuallyInvisible: the actor-scoped locus (actor_state)
+// TestStateTwoLociMutuallyInvisible: the actor-scoped locus (actor_state)
 // and the channel-scoped locus (resources) are structurally separate homes — the
 // scope law lives in WHICH table, not a column. A channel-scoped handle reading an
 // id that only exists in state gets resource_not_found, and vice versa; the same id
 // string may live independently in both loci as two distinct rows.
-func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
+func TestStateTwoLociMutuallyInvisible(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
@@ -288,7 +288,7 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 	expectBytes(t, "channel dup value", out, []byte("chan-value"))
 }
 
-// (slice 6 — driver_error evidence — lives in accessdoor/state_test.go
+// (driver_error evidence lives in accessdoor/state_test.go
 // (TestInvokeActorScopedDriverError), where the fake family already exists: verdict
 // mapping is a door branch behaviour, a unit concern, not an integration path.
 // Keeping a fake-injected copy here would grow a third parallel fake family.)
