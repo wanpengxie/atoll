@@ -16,7 +16,8 @@ This is the universal invocation primitive — every adapter (browser automation
 device controllers) and every sub-agent is reached through this single tool.
 
 Workflow:
-  1. Call list_actors first to see who is in the channel (thin directory: no types).
+  1. Call list_actors first to see who is in the channel (thin directory:
+     actor_id, kind, present, uptime_ms, and optional device; no types).
   2. Call describe_actor for the chosen actor's skill doc and full type list.
   3. Call describe_type when you need payload_example, payload_fields, notes, or
      adapter-specific error codes for the selected type.
@@ -45,7 +46,7 @@ wait parameter:
   "properties": {
     "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs or agent:research-assistant. Look up via list_actors."},
     "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimi.command. MUST be a request-allowed type for the chosen actor."},
-    "payload": {"type": "object", "description": "Type-specific payload. Shape is per-adapter convention; consult list_actors output for hints."},
+    "payload": {"type": "object", "description": "Type-specific payload. Consult describe_type for its documented shape."},
     "wait": {"type": "boolean", "description": "Optional. Omit for bounded fast-path (final inline within ~15s, else ack). true = wait up to the request deadline (sync). false = return ack immediately without waiting (fan-out)."}
   },
   "required": ["actor_id", "type"]

@@ -15,6 +15,8 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type Registrar struct {
@@ -92,10 +94,9 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 }
 
 type forwardedRequest struct {
-	Source      SourceRef       `json:"source"`
-	Initiator   string          `json:"initiator,omitempty"`
-	Application bool            `json:"application,omitempty"`
-	Payload     json.RawMessage `json:"payload"`
+	Source    SourceRef       `json:"source"`
+	Initiator string          `json:"initiator,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 func Def(registrar *Registrar) actorbase.Def {
@@ -129,14 +130,13 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 	var principal string
 	source := SourceRef{ChannelID: msg.ChannelID, RequestID: string(msg.ID)}
 	payload := json.RawMessage(append([]byte(nil), msg.Payload...))
-	application := false
 	if msg.Sender.ID == actor.SystemActorID {
 		var f forwardedRequest
 		if err := json.Unmarshal(msg.Payload, &f); err != nil || f.Source.ChannelID == "" || f.Source.RequestID == "" {
 			_, _ = sys.Fail(msg, string(CodeInvalidArgs), "invalid forwarded request")
 			return
 		}
-		principal, source, payload, application = f.Initiator, f.Source, f.Payload, f.Application
+		principal, source, payload = f.Initiator, f.Source, f.Payload
 	} else {
 		if r.facts == nil {
 			_, _ = sys.Fail(msg, string(CodePermissionDenied), "initiator unavailable")
@@ -154,11 +154,11 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		principal = facts.Principal
 	}
 	if word == WordPrincipalRegister {
-		if !application || principal != "" {
+		if principal != "" {
 			_, _ = sys.Fail(msg, string(CodePermissionDenied), "registration requires the anonymous application entrance")
 			return
 		}
-	} else if application || principal == "" {
+	} else if principal == "" {
 		_, _ = sys.Fail(msg, string(CodePermissionDenied), "authenticated principal required")
 		return
 	}
@@ -172,7 +172,12 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		return
 	}
-	_, _ = sys.Reply(msg, Reply{Word: word, Value: value, Source: source})
+	rawValue, err := json.Marshal(value)
+	if err != nil {
+		_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
+		return
+	}
+	_, _ = sys.Reply(msg, Reply{Word: word, Value: rawValue, Source: source})
 }
 
 func knownWord(word Word) bool {
@@ -488,7 +493,7 @@ func (r *Registrar) registerPrincipal(ctx context.Context, p PrincipalRegister) 
 	now := r.now().UnixMilli()
 	row := PrincipalRow{ID: id, Kind: actor.KindHuman, Email: p.Email, DisplayName: p.DisplayName, Status: PrincipalPresent, CreatedAt: now}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,?,?,?,?,?)`, row.ID, row.Kind, row.Email, nullableText(row.DisplayName), row.Status, row.CreatedAt); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isPrincipalConflict(err) {
 			return PrincipalRow{}, conflict("email or principal already exists")
 		}
 		return PrincipalRow{}, err
@@ -512,6 +517,19 @@ func (r *Registrar) registerPrincipal(ctx context.Context, p PrincipalRegister) 
 	return row, nil
 }
 
+func isPrincipalConflict(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code() {
+	case sqlite3.SQLITE_CONSTRAINT_UNIQUE, sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
+		return true
+	default:
+		return false
+	}
+}
+
 func (r *Registrar) retirePrincipal(ctx context.Context, caller string, p PrincipalRetire) (PrincipalRow, error) {
 	if p.PrincipalID == "" {
 		return PrincipalRow{}, invalid("principal_id required")
@@ -527,12 +545,7 @@ func (r *Registrar) retirePrincipal(ctx context.Context, caller string, p Princi
 }
 
 func (r *Registrar) updatePrincipalStatus(ctx context.Context, id string, status PrincipalStatus) (PrincipalRow, error) {
-	tx, err := r.registry.db.BeginTx(ctx, nil)
-	if err != nil {
-		return PrincipalRow{}, err
-	}
-	defer tx.Rollback()
-	row, err := scanPrincipal(tx.QueryRowContext(ctx, `SELECT id,kind,email,display_name,status,created_at FROM principals WHERE id=?`, id))
+	row, err := scanPrincipal(r.registry.db.QueryRowContext(ctx, `SELECT id,kind,email,display_name,status,created_at FROM principals WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return PrincipalRow{}, notFound("principal")
 	}
@@ -542,13 +555,10 @@ func (r *Registrar) updatePrincipalStatus(ctx context.Context, id string, status
 	if row.Status == status {
 		return row, nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE principals SET status=? WHERE id=?`, status, id); err != nil {
+	if _, err := r.registry.db.ExecContext(ctx, `UPDATE principals SET status=? WHERE id=?`, status, id); err != nil {
 		return PrincipalRow{}, err
 	}
 	row.Status = status
-	if err := tx.Commit(); err != nil {
-		return PrincipalRow{}, err
-	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{Principal: id})
 	}
@@ -562,13 +572,8 @@ func (r *Registrar) setCredential(ctx context.Context, caller string, p Credenti
 	if caller != p.PrincipalID && caller != protocol.RootPrincipalID {
 		return CredentialReply{}, denied("principal or root required")
 	}
-	tx, err := r.registry.db.BeginTx(ctx, nil)
-	if err != nil {
-		return CredentialReply{}, err
-	}
-	defer tx.Rollback()
 	var principalKind actor.Kind
-	err = tx.QueryRowContext(ctx, `SELECT kind FROM principals WHERE id=?`, p.PrincipalID).Scan(&principalKind)
+	err := r.registry.db.QueryRowContext(ctx, `SELECT kind FROM principals WHERE id=?`, p.PrincipalID).Scan(&principalKind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CredentialReply{}, notFound("principal")
 	}
@@ -581,7 +586,7 @@ func (r *Registrar) setCredential(ctx context.Context, caller string, p Credenti
 	var storedHash string
 	var status CredentialStatus
 	var rotatedAt int64
-	err = tx.QueryRowContext(ctx, `SELECT secret_hash,status,rotated_at FROM credentials WHERE principal_id=? AND kind='password'`, p.PrincipalID).Scan(&storedHash, &status, &rotatedAt)
+	err = r.registry.db.QueryRowContext(ctx, `SELECT secret_hash,status,rotated_at FROM credentials WHERE principal_id=? AND kind='password'`, p.PrincipalID).Scan(&storedHash, &status, &rotatedAt)
 	if err == nil && storedHash == p.SecretHash && status == CredentialActive {
 		return CredentialReply{PrincipalID: p.PrincipalID, Kind: "password", Status: status, RotatedAt: rotatedAt}, nil
 	}
@@ -589,10 +594,7 @@ func (r *Registrar) setCredential(ctx context.Context, caller string, p Credenti
 		return CredentialReply{}, err
 	}
 	now := r.now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?) ON CONFLICT(principal_id,kind) DO UPDATE SET secret_hash=excluded.secret_hash,status='active',rotated_at=excluded.rotated_at`, p.PrincipalID, p.SecretHash, now); err != nil {
-		return CredentialReply{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	if _, err := r.registry.db.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?) ON CONFLICT(principal_id,kind) DO UPDATE SET secret_hash=excluded.secret_hash,status='active',rotated_at=excluded.rotated_at`, p.PrincipalID, p.SecretHash, now); err != nil {
 		return CredentialReply{}, err
 	}
 	return CredentialReply{PrincipalID: p.PrincipalID, Kind: "password", Status: CredentialActive, RotatedAt: now}, nil
@@ -621,12 +623,7 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 		return DeclRow{}, invalid(err.Error())
 	}
 	now := r.now().UnixMilli()
-	tx, err := r.registry.db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeclRow{}, err
-	}
-	defer tx.Rollback()
-	existing, err := scanDecl(tx.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
+	existing, err := scanDecl(r.registry.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
 	if err == nil {
 		if existing.Status == DeclPresent && existing.Name == p.Name && existing.Owner == owner && existing.DefaultClass == p.Class && existing.Visibility == p.Visibility && jsonEqual(existing.Config, p.Config) {
 			return existing, nil
@@ -637,10 +634,7 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 		return DeclRow{}, err
 	}
 	row := DeclRow{ID: p.ID, Name: p.Name, Owner: owner, DefaultClass: p.Class, Config: cloneJSON(p.Config), Status: DeclPresent, Visibility: p.Visibility, CreatedAt: now, UpdatedAt: now}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,'present',?,?,?)`, row.ID, row.Name, row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.CreatedAt, row.UpdatedAt); err != nil {
-		return DeclRow{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	if _, err := r.registry.db.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,'present',?,?,?)`, row.ID, row.Name, row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.CreatedAt, row.UpdatedAt); err != nil {
 		return DeclRow{}, err
 	}
 	if r.registry.onCommit != nil {
@@ -653,12 +647,7 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (De
 	if p.ID == "" {
 		return DeclRow{}, invalid("id required")
 	}
-	tx, err := r.registry.db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeclRow{}, err
-	}
-	defer tx.Rollback()
-	row, err := scanDecl(tx.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
+	row, err := scanDecl(r.registry.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeclRow{}, notFound("declaration")
 	}
@@ -713,10 +702,7 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (De
 		return before, nil
 	}
 	row.UpdatedAt = r.now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `UPDATE decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE id=?`, row.Name, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.UpdatedAt, row.ID); err != nil {
-		return DeclRow{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	if _, err := r.registry.db.ExecContext(ctx, `UPDATE decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE id=?`, row.Name, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.UpdatedAt, row.ID); err != nil {
 		return DeclRow{}, err
 	}
 	if r.registry.onCommit != nil {
@@ -729,12 +715,7 @@ func (r *Registrar) revokeDecl(ctx context.Context, caller string, p DeclRevoke)
 	if p.ID == "" {
 		return DeclRow{}, invalid("id required")
 	}
-	tx, err := r.registry.db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeclRow{}, err
-	}
-	defer tx.Rollback()
-	row, err := scanDecl(tx.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
+	row, err := scanDecl(r.registry.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeclRow{}, notFound("declaration")
 	}
@@ -752,10 +733,7 @@ func (r *Registrar) revokeDecl(ctx context.Context, caller string, p DeclRevoke)
 	}
 	row.Status = DeclRevoked
 	row.UpdatedAt = r.now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `UPDATE decls SET status='revoked',updated_at=? WHERE id=?`, row.UpdatedAt, row.ID); err != nil {
-		return DeclRow{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	if _, err := r.registry.db.ExecContext(ctx, `UPDATE decls SET status='revoked',updated_at=? WHERE id=?`, row.UpdatedAt, row.ID); err != nil {
 		return DeclRow{}, err
 	}
 	if r.registry.onCommit != nil {
@@ -899,11 +877,11 @@ func (r *Registrar) attachDevice(ctx context.Context, owner string, source chann
 }
 
 func (r *Registrar) detachDevice(ctx context.Context, owner string, source channel.ID, p DeviceBinding) (Confirmation, error) {
-	if p.DeviceID == protocol.LocalDeviceID {
-		return Confirmation{}, reserved("local device cannot be detached")
-	}
 	if err := r.authorizeBinding(ctx, owner, source, p); err != nil {
 		return Confirmation{}, err
+	}
+	if p.DeviceID == protocol.LocalDeviceID {
+		return Confirmation{}, reserved("local device cannot be detached")
 	}
 	if _, err := r.registry.db.ExecContext(ctx, `DELETE FROM bindings WHERE channel_id=? AND device_id=?`, p.ChannelID, p.DeviceID); err != nil {
 		return Confirmation{}, err
@@ -1084,7 +1062,7 @@ func (s *submitter) SubmitApplication(ctx context.Context, word Word, payload an
 		return Reply{}, invalid("payload is not encodable")
 	}
 	ref := SourceRef{ChannelID: protocol.C0ChannelID, RequestID: uuid.NewString()}
-	raw, err := s.caller.CallRegistrar(ctx, word, forwardedRequest{Source: ref, Application: true, Payload: rawPayload})
+	raw, err := s.caller.CallRegistrar(ctx, word, forwardedRequest{Source: ref, Payload: rawPayload})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return Reply{}, &Error{Code: CodeResultUnknown, Detail: ref.String()}

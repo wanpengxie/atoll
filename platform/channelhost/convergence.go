@@ -76,10 +76,10 @@ func (h *ChannelHost) StartConvergence() error {
 	return h.reconcileAll(c.ctx)
 }
 
-func (h *ChannelHost) stopConvergence() {
+func (h *ChannelHost) stopConvergence(ctx context.Context) error {
 	c := h.convergence
 	if c == nil {
-		return
+		return nil
 	}
 	c.stop.Do(func() {
 		c.mu.Lock()
@@ -87,12 +87,16 @@ func (h *ChannelHost) stopConvergence() {
 		started := c.started
 		c.mu.Unlock()
 		c.cancel()
-		if started {
-			<-c.done
-		} else {
+		if !started {
 			close(c.done)
 		}
 	})
+	select {
+	case <-c.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // RegistryChanged is the storage module's post-commit edge. The value carries
@@ -118,8 +122,16 @@ func (h *ChannelHost) convergenceLoop() {
 	defer close(c.done)
 	fullTicker := time.NewTicker(c.fullScan)
 	retryTicker := time.NewTicker(c.edgeDelay)
+	edgeTimer := time.NewTimer(c.edgeDelay)
+	if !edgeTimer.Stop() {
+		<-edgeTimer.C
+	}
+	var edgeC <-chan time.Time
+	pending := make(map[channel.ID]struct{})
+	pendingFull := false
 	defer fullTicker.Stop()
 	defer retryTicker.Stop()
+	defer edgeTimer.Stop()
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -131,19 +143,35 @@ func (h *ChannelHost) convergenceLoop() {
 		case <-retryTicker.C:
 			h.retryDue()
 		case id := <-c.wake:
-			timer := time.NewTimer(c.edgeDelay)
-			select {
-			case <-c.ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
 			if id == "" {
+				pendingFull = true
+				clear(pending)
+			} else if !pendingFull {
+				pending[id] = struct{}{}
+			}
+			if edgeC == nil {
+				edgeTimer.Reset(c.edgeDelay)
+				edgeC = edgeTimer.C
+			}
+		case <-edgeC:
+			edgeC = nil
+			if pendingFull {
+				pendingFull = false
+				clear(pending)
 				if err := h.reconcileAll(c.ctx); err != nil {
 					h.logger.Warn("channelhost edge full reconcile failed", "err", err)
 				}
-			} else if err := h.reconcileID(c.ctx, id); err != nil {
-				h.logger.Warn("channelhost edge reconcile failed", "channel", id, "err", err)
+				continue
+			}
+			ids := make([]channel.ID, 0, len(pending))
+			for id := range pending {
+				ids = append(ids, id)
+			}
+			clear(pending)
+			for _, id := range ids {
+				if err := h.reconcileID(c.ctx, id); err != nil {
+					h.logger.Warn("channelhost edge reconcile failed", "channel", id, "err", err)
+				}
 			}
 		}
 	}
@@ -286,9 +314,6 @@ func provisionFromRow(row lagoon.ChannelRow) (ProvisionSpec, error) {
 	var desired lagoon.GenesisSpec
 	if err := json.Unmarshal(row.Spec, &desired); err != nil {
 		return ProvisionSpec{}, errors.Join(ErrSchemaIncompatible, err)
-	}
-	if desired.ChannelID != row.ID || desired.Type != row.Type || desired.OwnerPrincipal != row.OwnerPrincipal || desired.CreatedAt != row.CreatedAt || desired.ParentID != row.ParentID {
-		return ProvisionSpec{}, errors.Join(ErrSchemaIncompatible, errors.New("channelhost: registry row and genesis spec disagree"))
 	}
 	spec := ProvisionSpec{ChannelID: desired.ChannelID, Type: desired.Type, OwnerPrincipal: desired.OwnerPrincipal, CreatedAt: desired.CreatedAt}
 	if desired.ParentID != "" {

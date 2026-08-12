@@ -161,8 +161,7 @@ func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
 }
 
 func csResourcesCreateForTest(cs *testAccessChannel, id resource.ResourceID, daemonID, coord string) error {
-	return rawResourceRegistryForTest(cs).Create(context.Background(), id, resourcespec.KindFile, actor.SystemActorID, daemonID, coord, nil,
-		resourcespec.ResourceBirthPlan{})
+	return rawResourceRegistryForTest(cs).Create(context.Background(), id, resourcespec.KindFile, actor.SystemActorID, daemonID, coord, nil)
 }
 
 func rawResourceRegistryForTest(cs *testAccessChannel) resourcespec.Registry {

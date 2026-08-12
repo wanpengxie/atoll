@@ -217,6 +217,27 @@ func (r *Registry) ListBoundDevices(ctx context.Context, ch channel.ID) ([]Devic
 	return out, rows.Err()
 }
 
+// ListBoundDeviceIDs is the narrow placement boundary used by channel homes;
+// device credentials and other registry columns never cross it.
+func (r *Registry) ListBoundDeviceIDs(ctx context.Context, ch channel.ID) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT d.id
+		FROM bindings b JOIN devices d ON d.id=b.device_id
+		WHERE b.channel_id=? AND d.status='present' ORDER BY d.id`, ch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (r *Registry) listPrincipals(ctx context.Context) ([]PrincipalRow, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id,kind,email,display_name,status,created_at FROM principals WHERE status='present' ORDER BY id`)
 	if err != nil {
@@ -253,10 +274,13 @@ func scanPrincipal(s scanner) (PrincipalRow, error) {
 	var kind string
 	var email, display sql.NullString
 	err := s.Scan(&row.ID, &kind, &email, &display, &row.Status, &row.CreatedAt)
-	if parsed, ok := actor.ParseKind(kind); ok {
-		row.Kind = parsed
-	} else if err == nil {
-		err = fmt.Errorf("lagoon: invalid principal kind %q", kind)
+	switch actor.Kind(kind) {
+	case actor.KindHuman, actor.KindAgent:
+		row.Kind = actor.Kind(kind)
+	default:
+		if err == nil {
+			err = fmt.Errorf("lagoon: invalid principal kind %q", kind)
+		}
 	}
 	if email.Valid {
 		row.Email = email.String

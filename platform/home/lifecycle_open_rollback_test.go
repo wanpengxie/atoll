@@ -3,6 +3,7 @@ package home
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -157,7 +158,7 @@ func TestNormalOpenRejectsGenesisWithoutAnOwnerPrincipal(t *testing.T) {
 		_ = h.closeInternal("test")
 		t.Fatal("an ownerless channel opened normally")
 	}
-	if err == nil || !strings.Contains(err.Error(), "carries no owner principal") {
+	if !errors.Is(err, ErrOwnerInvariant) {
 		t.Fatalf("Open over an ownerless genesis = %v, want the owner-pointer rejection", err)
 	}
 }

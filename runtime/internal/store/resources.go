@@ -54,13 +54,13 @@ func placementKindFor(kind resourcespec.ResourceKind) resourcespec.PlacementKind
 // whether a kind resolves to a registered driver is the door's question, not
 // a poison-row guard here.
 func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
-	const q = `SELECT kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir, COALESCE(source_channel_id,''), COALESCE(source_resource_id,'')
+	const q = `SELECT kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir
 	             FROM resources WHERE resource_id=?`
-	var kind, placementDaemonID, placementCoord, createdBy, sourceChannelID, sourceResourceID string
+	var kind, placementDaemonID, placementCoord, createdBy string
 	var createdAt int64
 	var isDir bool
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &isDir, &sourceChannelID, &sourceResourceID,
+		&kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &isDir,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return resourcespec.ResourceMeta{}, false, nil
@@ -76,25 +76,19 @@ func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) 
 		PlacementCoord:    placementCoord,
 		CreatedBy:         actor.ActorID(createdBy),
 		Dir:               isDir,
-		SourceChannelID:   channel.ID(sourceChannelID),
-		SourceResourceID:  resource.ResourceID(sourceResourceID),
 	}, true, nil
 }
 
 // Create is op=create's atomic birth event for the IMMEDIATE-landing path
 // (kv, and content-less file creates). See createResourceTx for the shared
 // atomic-insert half CommitReservation also drives.
-func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth resourcespec.ResourceBirthPlan) error {
+func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error {
 	if id == "" {
 		return errors.New("store: resource create: empty id")
 	}
 	if creator == "" {
 		return errors.New("store: resource create: empty creator")
 	}
-	if !birth.Valid() {
-		return errors.New("store: resource create: invalid source provenance")
-	}
-
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: resource create begin: %w", err)
@@ -105,7 +99,7 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 	// direct Create is day-1 only ever kv (a file always routes through
 	// ReserveCreate+CommitReservation), which is never directory-shaped —
 	// so dir is unconditionally false here.
-	if err := r.createResourceTx(ctx, tx, id, kind, creator, placementDaemonID, placementCoord, initial, false, birth); err != nil {
+	if err := r.createResourceTx(ctx, tx, id, kind, creator, placementDaemonID, placementCoord, initial, false); err != nil {
 		return err // resourcespec.ErrAlreadyExists or a wrapped infra error
 	}
 
@@ -126,12 +120,12 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 // INSERT ... ON CONFLICT DO NOTHING (the race window never has a
 // resolve-then-create gap) — the caller decides what the collision means (a
 // plain failure for direct Create; "lost the race" for CommitReservation).
-func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, dir bool, birth resourcespec.ResourceBirthPlan) error {
+func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, dir bool) error {
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO resources (resource_id, kind, bytes, placement_daemon_id, placement_coord, created_by, source_channel_id, source_resource_id, created_at, is_dir)
-		   VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?)
+		`INSERT INTO resources (resource_id, kind, bytes, placement_daemon_id, placement_coord, created_by, created_at, is_dir)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(resource_id) DO NOTHING`,
-		string(id), string(kind), initial, placementDaemonID, placementCoord, string(creator), string(birth.SourceChannelID), string(birth.SourceResourceID), r.nowMs(), dir,
+		string(id), string(kind), initial, placementDaemonID, placementCoord, string(creator), r.nowMs(), dir,
 	)
 	if err != nil {
 		return fmt.Errorf("store: resource create insert %q: %w", id, err)
@@ -152,15 +146,12 @@ func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id 
 // ReserveCreate is create-outbox's server-side write-ahead half (§1.7): a
 // fresh reservation_id per call (uuid, so no collision to arbitrate — unlike
 // resource_id, reservation identity is never client-proposed).
-func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth resourcespec.ResourceBirthPlan) (string, error) {
+func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
 	if id == "" {
 		return "", errors.New("store: resource reserve-create: empty id")
 	}
 	if creator == "" {
 		return "", errors.New("store: resource reserve-create: empty creator")
-	}
-	if !birth.Valid() {
-		return "", errors.New("store: resource reserve-create: invalid source provenance")
 	}
 	reservationID := uuid.NewString()
 	now := r.nowMs()
@@ -169,9 +160,9 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 	// to the pre-S1 reserved_at-only behavior until something bumps it —
 	// SweepExpiredReservations judging a never-touched row is unchanged.
 	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, source_channel_id, source_resource_id, reserved_at, is_dir, last_progress_at)
-		   VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?, ?)`,
-		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), string(birth.SourceChannelID), string(birth.SourceResourceID), now, dir, now,
+		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, is_dir, last_progress_at)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), now, dir, now,
 	); err != nil {
 		return "", fmt.Errorf("store: resource reserve-create %q: %w", id, err)
 	}
@@ -191,14 +182,13 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var resourceID, kind, placementDaemonID, placementCoord, createdBy, sourceChannelID, sourceResourceID string
+	var resourceID, kind, placementDaemonID, placementCoord, createdBy string
 	var isDir bool
 	err = tx.QueryRowContext(ctx,
-		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by,
-		        COALESCE(source_channel_id,''), COALESCE(source_resource_id,''), is_dir
+		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, is_dir
 		   FROM resource_reservations WHERE reservation_id=?`,
 		reservationID,
-	).Scan(&resourceID, &kind, &placementDaemonID, &placementCoord, &createdBy, &sourceChannelID, &sourceResourceID, &isDir)
+	).Scan(&resourceID, &kind, &placementDaemonID, &placementCoord, &createdBy, &isDir)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already committed (an earlier replay landed and deleted it) or never
 		// existed: Committed is level-triggered and MUST be replay-safe — a
@@ -212,13 +202,9 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation lookup %q: %w", reservationID, err)
 	}
 
-	birth := resourcespec.ResourceBirthPlan{
-		SourceChannelID:  channel.ID(sourceChannelID),
-		SourceResourceID: resource.ResourceID(sourceResourceID),
-	}
 	createErr := r.createResourceTx(ctx, tx,
 		resource.ResourceID(resourceID), resourcespec.ResourceKind(kind), actor.ActorID(createdBy),
-		placementDaemonID, placementCoord, nil, isDir, birth,
+		placementDaemonID, placementCoord, nil, isDir,
 	)
 	if createErr != nil && !errors.Is(createErr, resourcespec.ErrAlreadyExists) {
 		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation create %q: %w", resourceID, createErr)
@@ -635,8 +621,7 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 		}
 	}
 
-	q := `SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir,
-	             COALESCE(source_channel_id,''), COALESCE(source_resource_id,'')
+	q := `SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir
 	        FROM resources
 	       WHERE (created_at > ? OR (created_at = ? AND resource_id > ?))`
 	args := []any{afterCreatedAt, afterCreatedAt, afterID}
@@ -659,10 +644,9 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 	n := 0
 	for rows.Next() {
 		var id, kind, placementDaemonID, placementCoord, createdBy string
-		var sourceChannelID, sourceResourceID string
 		var createdAt int64
 		var dir bool
-		if err := rows.Scan(&id, &kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &dir, &sourceChannelID, &sourceResourceID); err != nil {
+		if err := rows.Scan(&id, &kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &dir); err != nil {
 			return nil, "", fmt.Errorf("store: resource list scan: %w", err)
 		}
 		out = append(out, resourcespec.ResourceRow{
@@ -675,8 +659,6 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 				PlacementCoord:    placementCoord,
 				CreatedBy:         actor.ActorID(createdBy),
 				Dir:               dir,
-				SourceChannelID:   channel.ID(sourceChannelID),
-				SourceResourceID:  resource.ResourceID(sourceResourceID),
 			},
 		})
 		lastCreatedAt, lastID = createdAt, id
@@ -701,7 +683,6 @@ func publicResourceMeta(id resource.ResourceID, meta resourcespec.ResourceMeta) 
 	return channel.ResourceMeta{
 		ID: id, Kind: string(meta.Kind), CreatedBy: meta.CreatedBy, CreatedAt: meta.CreatedAt,
 		PlacementKind: string(meta.PlacementKind), PlacementDaemonID: meta.PlacementDaemonID, Dir: meta.Dir,
-		SourceChannelID: meta.SourceChannelID, SourceResourceID: meta.SourceResourceID,
 	}
 }
 

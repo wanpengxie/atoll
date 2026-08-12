@@ -154,7 +154,7 @@ func (s *Session) StartFeed() {
 	closed := s.closed
 	s.mu.Unlock()
 	if closed {
-		s.gw.unregisterPump()
+		s.teardownSubs()
 		return
 	}
 	go s.runFeed()
@@ -241,21 +241,22 @@ func (s *Session) beginDeliver() bool {
 
 func (s *Session) endDeliver() { s.gw.delivering.Done() }
 
+func (s *Session) teardownSubs() {
+	for ch, sub := range s.subs {
+		sub.cancel()
+		delete(s.subs, ch)
+	}
+	s.Close()
+	// Pump registration retires LAST. Gateway.Close's join covers all teardown.
+	s.gw.unregisterPump()
+}
+
 // runFeed is the read pump AND the entitlement reconcile loop (spec §3.2 收敛对象甲):
 // resolve → converge subscriptions → pump each active channel one batch (round-robin,
 // 公平) → 积压续跑 or wait on ctx/wake/sweep/Home-signals. On exit it closes every
 // subscription, the lane, untracks the pump, and closes the session.
 func (s *Session) runFeed() {
-	defer func() {
-		for _, sub := range s.subs {
-			sub.cancel()
-		}
-		s.Close()
-		// Pump registration retires LAST. Gateway.Close's join must cover the whole
-		// deferred teardown (subscription cancel + Session.Close), not merely the read
-		// loop body; otherwise TempDir/Home cleanup can race this tail.
-		s.gw.unregisterPump()
-	}()
+	defer s.teardownSubs()
 
 	s.dirty.Store(true) // initial-dirty
 	var sweep timer
@@ -415,7 +416,10 @@ func (s *Session) reconcile() {
 	// Defend against a faulty resolver returning after Close. Once the session lifetime
 	// is canceled, never create/refresh subscriptions from that stale return;
 	// StartFeed's post-reconcile latch check will retire the pump registration.
-	if s.ctx.Err() != nil {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
 		return
 	}
 	// Anchor success/failure at CHECK COMPLETION, not before the resolver call. A

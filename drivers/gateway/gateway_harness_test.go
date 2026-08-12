@@ -47,7 +47,7 @@ type gatewayTestBindings struct{}
 func (gatewayTestBindings) IsBound(context.Context, channel.ID, string) (bool, error) {
 	return false, nil
 }
-func (gatewayTestBindings) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
+func (gatewayTestBindings) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
 	return nil, nil
 }
 func (gatewayTestBindings) ListChannels(context.Context) ([]lagoon.ChannelRow, error) {

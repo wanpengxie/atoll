@@ -27,7 +27,7 @@ type testResolver struct {
 type testBindings struct{}
 
 func (testBindings) IsBound(context.Context, channel.ID, string) (bool, error) { return false, nil }
-func (testBindings) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
+func (testBindings) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
 	return nil, nil
 }
 func (testBindings) ListChannels(context.Context) ([]lagoon.ChannelRow, error) { return nil, nil }

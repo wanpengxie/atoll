@@ -374,7 +374,7 @@ func validateGenesis(ctx context.Context, genesis storespec.GenesisStore, cfg Co
 		return fmt.Errorf("platform: read channel genesis: %w", err)
 	}
 	if !found || got.ChannelID != cfg.ExpectedGenesis.ChannelID || got.Type != cfg.ExpectedGenesis.Type {
-		return errors.New("platform: schema incompatible: channel genesis mismatch")
+		return fmt.Errorf("platform: channel genesis mismatch: %w", ErrSchemaMismatch)
 	}
 	return nil
 }
@@ -446,7 +446,7 @@ func readOwnerPrincipal(ctx context.Context, store storespec.GenesisStore) (stri
 		return "", nil
 	}
 	if genesis.OwnerPrincipal == "" {
-		return "", errors.New("platform: channel genesis carries no owner principal")
+		return "", fmt.Errorf("platform: channel genesis carries no owner principal: %w", ErrOwnerInvariant)
 	}
 	return genesis.OwnerPrincipal, nil
 }

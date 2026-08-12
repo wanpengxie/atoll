@@ -136,8 +136,6 @@ CREATE TABLE IF NOT EXISTS resources (
   placement_daemon_id   TEXT NOT NULL DEFAULT '', -- explicit routing column: which daemon's Streamer holds the bytes; '' for kv
   placement_coord       TEXT NOT NULL DEFAULT '', -- opaque storage handle, server-registry-generated (§1.6); '' for kv; NEVER crosses Stat/List to a caller (§3.6 red line, enforced one layer up)
   created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; AUTHORIZATION PREDICATE since PM-D3 (op=delete = creator ∨ channel owner root, judged at the door) and the audit record it always was; read/write never consult it (membrane-uniform, PM-D1)
-  source_channel_id     TEXT,
-  source_resource_id    TEXT,
   created_at            INTEGER NOT NULL,
   is_dir                INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- file BYTE-SHAPE bit (the inode's S_IFDIR analogue): 1 = directory-shaped file resource (workspace, bytes = a whole tree委托真fs, Open→os.Root lease句柄), 0 = regular blob (Open→single-file staging句柄) / kv (always 0). Structural boolean integrity, KEEPS its CHECK (same discipline as is_terminal); this is the door's Open ROUTING truth, read at resolve, never a leaf the daemon re-derives from disk
 );
@@ -162,8 +160,6 @@ CREATE TABLE IF NOT EXISTS resource_reservations (
   placement_daemon_id  TEXT NOT NULL DEFAULT '',
   placement_coord      TEXT NOT NULL DEFAULT '',
   created_by           TEXT NOT NULL,           -- door-authenticated creator (never daemon-reported)
-  source_channel_id    TEXT,
-  source_resource_id   TEXT,
   reserved_at          INTEGER NOT NULL,
   is_dir               INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)), -- carried write-ahead so CommitReservation lands the resources row with the correct byte-shape bit (a content-less dir create's shape must survive the ReserveCreate→AllocRequest→Committed round trip; daemon reports no truth, §1.3)
   last_progress_at     INTEGER NOT NULL DEFAULT 0 -- most-recent activity stamp for the in-flight transfer

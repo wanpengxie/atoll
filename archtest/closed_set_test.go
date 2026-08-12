@@ -121,7 +121,7 @@ var channelProtocolExportSurface = []string{
 	// types
 	"ID", "Reader", "ReaderMode", "AdmitResult", "IntroduceResult", "RemoveResult",
 	"Placement", "PlacementKind", "ResourceListQuery", "ResourceMeta", "ResourcePage",
-	"ResourceRef", "ResourceFetch",
+	"ResourceFetch",
 	// funcs
 	"CanonicalJSON", "Digest",
 	// vars

@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
-	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -26,7 +25,11 @@ import (
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
 )
 
-var ErrClosed = errors.New("platform: channel home is closed")
+var (
+	ErrClosed         = errors.New("platform: channel home is closed")
+	ErrOwnerInvariant = errors.New("platform: channel owner invariant")
+	ErrSchemaMismatch = errors.New("platform: channel schema mismatch")
+)
 
 type Config struct {
 	ChannelID channelpkg.ID
@@ -53,7 +56,7 @@ type Config struct {
 
 type BindingReader interface {
 	IsBound(context.Context, channelpkg.ID, string) (bool, error)
-	ListBoundDevices(context.Context, channelpkg.ID) ([]lagoon.DeviceRow, error)
+	ListBoundDeviceIDs(context.Context, channelpkg.ID) ([]string, error)
 }
 
 type unavailableBindingReader struct{}
@@ -61,7 +64,7 @@ type unavailableBindingReader struct{}
 func (unavailableBindingReader) IsBound(context.Context, channelpkg.ID, string) (bool, error) {
 	return false, errors.New("platform: registry binding reader unavailable")
 }
-func (unavailableBindingReader) ListBoundDevices(context.Context, channelpkg.ID) ([]lagoon.DeviceRow, error) {
+func (unavailableBindingReader) ListBoundDeviceIDs(context.Context, channelpkg.ID) ([]string, error) {
 	return nil, errors.New("platform: registry binding reader unavailable")
 }
 

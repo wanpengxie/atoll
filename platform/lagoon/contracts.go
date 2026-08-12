@@ -4,8 +4,11 @@
 package lagoon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -289,9 +292,22 @@ type ChannelCandidates struct {
 }
 
 type Reply struct {
-	Word   Word      `json:"word"`
-	Value  any       `json:"value,omitempty"`
-	Source SourceRef `json:"source,omitempty"`
+	Word   Word            `json:"word"`
+	Value  json.RawMessage `json:"value,omitempty"`
+	Source SourceRef       `json:"source,omitempty"`
+}
+
+func (r Reply) DecodeValue(out any) error {
+	if len(r.Value) == 0 {
+		return errors.New("lagoon: reply has no value")
+	}
+	if string(bytes.TrimSpace(r.Value)) == "null" {
+		return errors.New("lagoon: reply value is null")
+	}
+	if err := json.Unmarshal(r.Value, out); err != nil {
+		return fmt.Errorf("lagoon: decode reply value: %w", err)
+	}
+	return nil
 }
 
 type SubmitIn struct {

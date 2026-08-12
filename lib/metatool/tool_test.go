@@ -1,8 +1,26 @@
 package metatool
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestActorDiscoveryDescriptionsMatchCatalogFields(t *testing.T) {
+	for name, description := range map[string]string{
+		"list_actors":    ListActorsSpec.Description,
+		"describe_actor": DescribeActorSpec.Description,
+		"call_actor":     CallActorSpec.Description,
+	} {
+		if strings.Contains(description, "binding") {
+			t.Fatalf("%s still promises the removed binding field", name)
+		}
+	}
+	for _, field := range []string{"actor_id", "kind", "present", "uptime_ms", "device"} {
+		if !strings.Contains(ListActorsSpec.Description, field) || !strings.Contains(CallActorSpec.Description, field) {
+			t.Fatalf("actor discovery descriptions omit %q", field)
+		}
+	}
+}
 
 func TestPayloadHintWithActorAndType(t *testing.T) {
 	hint := payloadHint("tool:xhs", "xhs.publish")

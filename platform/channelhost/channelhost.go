@@ -132,6 +132,7 @@ type ChannelHost struct {
 	logger      *slog.Logger
 	registry    RegistryReader
 	convergence *convergenceState
+	shutdown    func(*home.Home, context.Context) error
 
 	mu      sync.RWMutex
 	closed  bool
@@ -177,7 +178,11 @@ func New(root string, registry RegistryReader, deps HomeDeps) (*ChannelHost, err
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	h := &ChannelHost{root: root, deps: deps, logger: logger, registry: registry, entries: make(map[channel.ID]*entry), locks: make(map[channel.ID]*sync.Mutex)}
+	h := &ChannelHost{
+		root: root, deps: deps, logger: logger, registry: registry,
+		entries: make(map[channel.ID]*entry), locks: make(map[channel.ID]*sync.Mutex),
+		shutdown: home.ShutdownWithin,
+	}
 	h.convergence = newConvergenceState()
 	return h, nil
 }
@@ -369,10 +374,10 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	// cross-check it against.
 	homeInstance, err := h.openHome(spec.ChannelID, main, false, &genesis, "", nil)
 	if err != nil {
-		if strings.Contains(err.Error(), "owner principal") {
+		if errors.Is(err, home.ErrOwnerInvariant) {
 			return errors.Join(ErrOwnerInvariant, err)
 		}
-		if strings.Contains(err.Error(), "schema incompatible") {
+		if errors.Is(err, home.ErrSchemaMismatch) {
 			return errors.Join(ErrSchemaIncompatible, err)
 		}
 		return err
@@ -433,7 +438,7 @@ func (h *ChannelHost) Acquire(id channel.ID) (Bundle, bool) {
 	return &bundle{home: entry.home, generation: entry.generation}, true
 }
 
-func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
+func (h *ChannelHost) Destroy(ctx context.Context, id channel.ID) error {
 	lock := h.idLock(id)
 	lock.Lock()
 	if err := h.checkOpen(); err != nil {
@@ -485,7 +490,7 @@ func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
 		// home.Shutdown is a slow IO operation and stays outside h.mu, but the
 		// entry state flip is a mutated field Acquire reads under h.mu.RLock, so
 		// the flip is always performed under h.mu.
-		if err := home.Shutdown(current.home); err != nil {
+		if err := h.shutdown(current.home, ctx); err != nil {
 			return fmt.Errorf("channelhost: close before seal: %w", err)
 		}
 		h.mu.Lock()
@@ -591,7 +596,6 @@ func (h *ChannelHost) checkOpen() error {
 // exactly those — and its store close keeps running in the background, where
 // process death is what finally reclaims it.
 func (h *ChannelHost) Close(ctx context.Context) error {
-	h.stopConvergence()
 	h.mu.Lock()
 	h.closed = true
 	entries := make(map[channel.ID]*entry, len(h.entries))
@@ -605,12 +609,15 @@ func (h *ChannelHost) Close(ctx context.Context) error {
 		}
 	}
 	h.mu.Unlock()
+	var errs []error
+	if err := h.stopConvergence(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("channelhost: stop convergence: %w", err))
+	}
 	if h.deps.OnMembraneClose != nil {
 		for id, generation := range notifications {
 			h.deps.OnMembraneClose(id, generation)
 		}
 	}
-	var errs []error
 	for id, entry := range entries {
 		// Share the per-ID lock with the three lifecycle verbs so an in-flight
 		// Destroy on the same channel cannot rename a database file whose Home
@@ -628,7 +635,7 @@ func (h *ChannelHost) Close(ctx context.Context) error {
 			// Only a clean shutdown marks the entry closed: a failed Home close
 			// stays honestly un-closed (Home's owner-join/teardown/store close
 			// sequence is retryable; never fake terminal state on an error).
-			if err := home.ShutdownWithin(entry.home, ctx); err != nil {
+			if err := h.shutdown(entry.home, ctx); err != nil {
 				failed = true
 				errs = append(errs, fmt.Errorf("channelhost: close %s: %w", id, err))
 			} else {

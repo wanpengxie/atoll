@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -30,6 +31,18 @@ type registrarSysStub struct {
 	actorbase.Sys
 	code   string
 	detail string
+}
+
+type principalScanner struct{ kind string }
+
+func (s principalScanner) Scan(dest ...any) error {
+	*dest[0].(*string) = "principal"
+	*dest[1].(*string) = s.kind
+	*dest[2].(*sql.NullString) = sql.NullString{}
+	*dest[3].(*sql.NullString) = sql.NullString{}
+	*dest[4].(*PrincipalStatus) = PrincipalPresent
+	*dest[5].(*int64) = 1
+	return nil
 }
 
 func (s *registrarSysStub) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
@@ -58,7 +71,8 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	if _, err := db.Exec(`DROP TABLE decls`); err != nil {
 		t.Fatal(err)
 	}
-	r := NewRegistrar(&Registry{db: db}, nil, nil)
+	commits := 0
+	r := NewRegistrar(&Registry{db: db, onCommit: func(Change) { commits++ }}, nil, nil)
 	_, err = r.editDecl(context.Background(), "root", DeclEdit{ID: "decl"})
 	if err == nil {
 		t.Fatal("decl.edit succeeded after its table was removed")
@@ -69,6 +83,32 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no such table") {
 		t.Fatalf("query error was not propagated: %v", err)
+	}
+	if commits != 0 {
+		t.Fatalf("failed write emitted %d onCommit callbacks", commits)
+	}
+}
+
+func TestDetachAuthorizesBeforeRevealingLocalDeviceReservation(t *testing.T) {
+	r := NewRegistrar(&Registry{}, nil, nil)
+	_, err := r.detachDevice(context.Background(), "alice", "source", DeviceBinding{ChannelID: "other", DeviceID: protocol.LocalDeviceID})
+	var lagoonErr *Error
+	if !errors.As(err, &lagoonErr) || lagoonErr.Code != CodePermissionDenied {
+		t.Fatalf("cross-channel local detach error=%v, want permission_denied", err)
+	}
+}
+
+func TestScanPrincipalAcceptsOnlyHumanAndAgentKinds(t *testing.T) {
+	for _, kind := range []actor.Kind{actor.KindHuman, actor.KindAgent} {
+		row, err := scanPrincipal(principalScanner{kind: string(kind)})
+		if err != nil || row.Kind != kind {
+			t.Fatalf("kind %q scanned as (%q,%v)", kind, row.Kind, err)
+		}
+	}
+	for _, kind := range []actor.Kind{actor.KindTool, actor.KindSystem} {
+		if _, err := scanPrincipal(principalScanner{kind: string(kind)}); err == nil {
+			t.Fatalf("principal kind %q was accepted", kind)
+		}
 	}
 }
 

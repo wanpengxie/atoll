@@ -151,9 +151,6 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 	if !resourcespec.ValidKind(spec.Kind) {
 		return fmt.Errorf("%w: create kind %q not in the closed set", ErrMalformed, spec.Kind)
 	}
-	if (spec.SourceChannelID == "") != (spec.SourceResourceID == "") {
-		return fmt.Errorf("%w: create source must include both channel_id and resource_id", ErrMalformed)
-	}
 	if spec.Dir && spec.WithContent {
 		// A directory carries no content — the combination is a conflicting
 		// declaration, not silently resolved either way (期11 spec §1.5:
@@ -193,14 +190,9 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	if !facts.Active {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
-	birth := resourcespec.ResourceBirthPlan{
-		SourceChannelID:  spec.SourceChannelID,
-		SourceResourceID: spec.SourceResourceID,
-	}
-
 	switch spec.Kind {
 	case resourcespec.KindKV:
-		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial, birth); err != nil {
+		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial); err != nil {
 			return createVerdict(ctx, err)
 		}
 		return Outcome{}, nil
@@ -219,7 +211,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		if cerr != nil {
 			return Outcome{}, cerr
 		}
-		reservationID, rerr := d.deps.Registry.ReserveCreate(ctx, id, resourcespec.KindFile, caller, daemonID, coord, spec.Dir, birth)
+		reservationID, rerr := d.deps.Registry.ReserveCreate(ctx, id, resourcespec.KindFile, caller, daemonID, coord, spec.Dir)
 		if rerr != nil {
 			return Outcome{}, rerr
 		}

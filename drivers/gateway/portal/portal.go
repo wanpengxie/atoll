@@ -52,9 +52,9 @@ func (p *Portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/ws", "/compute", "/healthz":
-		writeError(w, http.StatusMethodNotAllowed, string(lagoon.CodeNotFound), "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, string(codeNotFound), "method not allowed")
 	default:
-		writeError(w, http.StatusNotFound, string(lagoon.CodeNotFound), "route not found")
+		writeError(w, http.StatusNotFound, string(codeNotFound), "route not found")
 	}
 }
 
@@ -70,12 +70,12 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Email = strings.TrimSpace(in.Email)
 	if in.Email == "" || in.Password == "" {
-		writeError(w, 400, "invalid_args", "email and password required")
+		writeError(w, 400, string(codeInvalidArgs), "email and password required")
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
 	if err != nil {
-		writeError(w, 500, "internal_error", err.Error())
+		writeError(w, 500, string(codeInternalError), err.Error())
 		return
 	}
 	reply, err := p.cfg.Submitter.SubmitApplication(r.Context(), lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
@@ -84,8 +84,8 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var principal lagoon.PrincipalRow
-	if !decodeValue(reply.Value, &principal) {
-		writeError(w, 500, "internal_error", "invalid registrar reply")
+	if err := reply.DecodeValue(&principal); err != nil {
+		writeError(w, 500, string(codeInternalError), "invalid registrar reply: "+err.Error())
 		return
 	}
 	p.setSession(w, principal.ID)
@@ -101,16 +101,16 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Email = strings.TrimSpace(in.Email)
 	if in.Email == "" || in.Password == "" {
-		writeError(w, 400, "invalid_args", "email and password required")
+		writeError(w, 400, string(codeInvalidArgs), "email and password required")
 		return
 	}
 	principal, ok, err := p.cfg.Registry.VerifyCredential(r.Context(), in.Email, in.Password)
 	if err != nil {
-		writeError(w, 503, "unavailable", err.Error())
+		writeError(w, 503, string(codeUnavailable), err.Error())
 		return
 	}
 	if !ok {
-		writeError(w, 401, "invalid_credentials", "invalid credentials")
+		writeError(w, 401, string(codeInvalidCredentials), "invalid credentials")
 		return
 	}
 	p.setSession(w, principal)
@@ -126,7 +126,7 @@ func (p *Portal) logout(w http.ResponseWriter, r *http.Request) {
 func (p *Portal) serveWS(w http.ResponseWriter, r *http.Request) {
 	principal, ok := p.authenticate(r)
 	if !ok {
-		writeError(w, 401, "not_authenticated", "invalid session")
+		writeError(w, 401, string(codeNotAuthenticated), "invalid session")
 		return
 	}
 	p.ws.ServeWeb(w, r, principal)
@@ -134,16 +134,16 @@ func (p *Portal) serveWS(w http.ResponseWriter, r *http.Request) {
 func (p *Portal) compute(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		writeError(w, 400, "bad_payload", "malformed bearer authorization")
+		writeError(w, 400, string(codeBadPayload), "malformed bearer authorization")
 		return
 	}
 	id, ok, err := p.cfg.Registry.ResolveDeviceKey(r.Context(), strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")))
 	if err != nil {
-		writeError(w, 503, "unavailable", err.Error())
+		writeError(w, 503, string(codeUnavailable), err.Error())
 		return
 	}
 	if !ok {
-		writeError(w, 401, "not_authenticated", "invalid device credential")
+		writeError(w, 401, string(codeNotAuthenticated), "invalid device credential")
 		return
 	}
 	p.cfg.DaemonHost.Serve(w, r, id)
@@ -166,22 +166,17 @@ func requestToken(r *http.Request) string {
 	return ""
 }
 func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	d.DisallowUnknownFields()
+	d := json.NewDecoder(r.Body)
 	if err := d.Decode(out); err != nil {
-		writeError(w, 400, "invalid_args", err.Error())
+		writeError(w, 400, string(codeInvalidArgs), err.Error())
 		return false
 	}
 	var trailing any
 	if err := d.Decode(&trailing); !errors.Is(err, io.EOF) {
-		writeError(w, 400, "invalid_args", "request body must contain one JSON value")
+		writeError(w, 400, string(codeInvalidArgs), "request body must contain one JSON value")
 		return false
 	}
 	return true
-}
-func decodeValue(in, out any) bool {
-	raw, err := json.Marshal(in)
-	return err == nil && json.Unmarshal(raw, out) == nil
 }
 func writeLagoonError(w http.ResponseWriter, err error) {
 	var le *lagoon.Error
@@ -194,10 +189,15 @@ func writeLagoonError(w http.ResponseWriter, err error) {
 		} else if le.Code == lagoon.CodeResultUnknown {
 			status = 504
 		}
-		writeError(w, status, string(le.Code), le.Detail)
+		code, ok := mapLagoonCode(le.Code)
+		if !ok {
+			writeError(w, 500, string(codeInternalError), le.Detail)
+			return
+		}
+		writeError(w, status, string(code), le.Detail)
 		return
 	}
-	writeError(w, 500, "internal_error", err.Error())
+	writeError(w, 500, string(codeInternalError), err.Error())
 }
 func writeError(w http.ResponseWriter, status int, code, detail string) {
 	writeJSON(w, status, map[string]string{"code": code, "detail": detail})

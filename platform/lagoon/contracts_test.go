@@ -45,6 +45,25 @@ func TestCredentialReplyCannotExposeHash(t *testing.T) {
 	}
 }
 
+func TestReplyDecodeValueRejectsMissingNullAndMalformed(t *testing.T) {
+	for name, reply := range map[string]Reply{
+		"missing":   {},
+		"null":      {Value: json.RawMessage(`null`)},
+		"malformed": {Value: json.RawMessage(`{"id":`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out PrincipalRow
+			if err := reply.DecodeValue(&out); err == nil {
+				t.Fatal("invalid value decoded successfully")
+			}
+		})
+	}
+	var out PrincipalRow
+	if err := (Reply{Value: json.RawMessage(`{"id":"alice"}`)}).DecodeValue(&out); err != nil || out.ID != "alice" {
+		t.Fatalf("valid value=(%+v,%v)", out, err)
+	}
+}
+
 func TestRegistryExportedSurfaceContainsNoMutationVerb(t *testing.T) {
 	typ := reflect.TypeOf((*Registry)(nil))
 	for i := 0; i < typ.NumMethod(); i++ {

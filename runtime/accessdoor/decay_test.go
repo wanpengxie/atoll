@@ -72,7 +72,7 @@ func newDecayDoor(cs *store.ChannelStores) *door {
 // delete predicate — resourcespec.Registry.Create's own contract).
 func seedResource(t *testing.T, cs *store.ChannelStores, id resource.ResourceID, creator actor.ActorID) {
 	t.Helper()
-	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", nil, resourcespec.ResourceBirthPlan{}); err != nil {
+	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", nil); err != nil {
 		t.Fatalf("seed resource %q: %v", id, err)
 	}
 }

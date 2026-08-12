@@ -100,7 +100,7 @@ func (h *Home) resolveIntroduction(
 // resolveDaemonPlacement picks the placement host for a declaration-backed
 // actor: the first bound daemon.
 func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement, error) {
-	bound, err := h.registryBindings.ListBoundDevices(ctx, h.channelID)
+	bound, err := h.registryBindings.ListBoundDeviceIDs(ctx, h.channelID)
 	if err != nil {
 		return storespec.Placement{}, err
 	}
@@ -109,5 +109,5 @@ func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement,
 			Code: channelspec.ErrCodeInvalidDesiredHost, Detail: "daemon is not bound to this channel",
 		}
 	}
-	return storespec.NewDaemonPlacement(bound[0].ID)
+	return storespec.NewDaemonPlacement(bound[0])
 }

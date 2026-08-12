@@ -2,7 +2,6 @@ package lagoon
 
 import (
 	"context"
-	"encoding/json"
 )
 
 type spaceOpsBinder struct{ submitter Submitter }
@@ -24,11 +23,7 @@ func (o *boundSpaceOps) call(ctx context.Context, word Word, payload any, out an
 	if err != nil {
 		return err
 	}
-	raw, err := json.Marshal(reply.Value)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(raw, out)
+	return reply.DecodeValue(out)
 }
 func (o *boundSpaceOps) CreateChannel(ctx context.Context, p ChannelCreate) (v ChannelRow, e error) {
 	e = o.call(ctx, WordChannelCreate, p, &v)

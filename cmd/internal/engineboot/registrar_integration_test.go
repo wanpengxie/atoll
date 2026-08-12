@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ func createChannelForTest(t *testing.T, eng *Engine, root actor.ActorID, name st
 		t.Fatal(err)
 	}
 	var row lagoon.ChannelRow
-	if !decodeValue(reply.Value, &row) {
+	if reply.DecodeValue(&row) != nil {
 		t.Fatalf("invalid channel reply: %#v", reply.Value)
 	}
 	return row
@@ -137,7 +138,7 @@ func TestCreateReplayAfterDetachDoesNotRestoreBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	var device lagoon.DeviceRow
-	if !decodeValue(mintedReply.Value, &device) {
+	if mintedReply.DecodeValue(&device) != nil {
 		t.Fatalf("invalid mint reply: %#v", mintedReply.Value)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -202,7 +203,7 @@ func TestRetiredDeviceIsExcludedFromEffectiveBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	var second lagoon.DeviceRow
-	if !decodeValue(mintedReply.Value, &second) {
+	if mintedReply.DecodeValue(&second) != nil {
 		t.Fatalf("invalid mint reply: %#v", mintedReply.Value)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -262,7 +263,7 @@ func TestOrdinaryDeclarationEditAndRevokeRemainAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	var revoked lagoon.DeclRow
-	if !decodeValue(reply.Value, &revoked) || revoked.Status != lagoon.DeclRevoked {
+	if reply.DecodeValue(&revoked) != nil || revoked.Status != lagoon.DeclRevoked {
 		t.Fatalf("invalid revoke reply: %#v", reply.Value)
 	}
 }
@@ -285,10 +286,20 @@ func TestRegisterConflictDoesNotMintSessionShapedSuccess(t *testing.T) {
 	if _, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, register); err != nil {
 		t.Fatal(err)
 	}
-	_, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, register)
-	var lagoonErr *lagoon.Error
-	if !errors.As(err, &lagoonErr) || lagoonErr.Code != lagoon.CodeConflictExists {
-		t.Fatalf("duplicate register error=%v", err)
+	for _, tc := range []struct {
+		name string
+		in   lagoon.PrincipalRegister
+	}{
+		{name: "duplicate email unique", in: lagoon.PrincipalRegister{ID: "bob", Email: register.Email, SecretHash: "hash"}},
+		{name: "duplicate explicit id primary key", in: lagoon.PrincipalRegister{ID: register.ID, Email: "other@example.test", SecretHash: "hash"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, tc.in)
+			var lagoonErr *lagoon.Error
+			if !errors.As(err, &lagoonErr) || lagoonErr.Code != lagoon.CodeConflictExists {
+				t.Fatalf("duplicate register error=%v", err)
+			}
+		})
 	}
 }
 
@@ -299,7 +310,7 @@ func TestRegisterHomeEventuallyServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var principal lagoon.PrincipalRow
-	if !decodeValue(reply.Value, &principal) || principal.ID != "alice" {
+	if reply.DecodeValue(&principal) != nil || principal.ID != "alice" {
 		t.Fatalf("invalid register reply: %#v", reply.Value)
 	}
 	rows, err := eng.registry.ListPresentChannels(context.Background())
@@ -335,7 +346,7 @@ func TestMembraneOpenPokesOwnerSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	var principal lagoon.PrincipalRow
-	if !decodeValue(reply.Value, &principal) {
+	if reply.DecodeValue(&principal) != nil {
 		t.Fatalf("invalid register reply: %#v", reply.Value)
 	}
 	home := homeChannelForTest(t, eng, principal.ID)
@@ -369,7 +380,7 @@ func registerHumanForTest(t *testing.T, eng *Engine, id string) lagoon.Principal
 		t.Fatal(err)
 	}
 	var principal lagoon.PrincipalRow
-	if !decodeValue(reply.Value, &principal) {
+	if reply.DecodeValue(&principal) != nil {
 		t.Fatalf("invalid register reply: %#v", reply.Value)
 	}
 	home := homeChannelForTest(t, eng, principal.ID)
@@ -487,7 +498,7 @@ func TestCredentialSetRejectsAgentAndAllowsHuman(t *testing.T) {
 		t.Fatal(err)
 	}
 	var credential lagoon.CredentialReply
-	if !decodeValue(reply.Value, &credential) || credential.PrincipalID != protocol.RootPrincipalID || credential.Status != lagoon.CredentialActive {
+	if reply.DecodeValue(&credential) != nil || credential.PrincipalID != protocol.RootPrincipalID || credential.Status != lagoon.CredentialActive {
 		t.Fatalf("human credential reply=%#v", reply.Value)
 	}
 	var stored string
@@ -508,7 +519,7 @@ func TestDeviceMintAndClaimMissAreIntentionallyNonIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 		var row lagoon.DeviceRow
-		if !decodeValue(reply.Value, &row) {
+		if reply.DecodeValue(&row) != nil {
 			t.Fatalf("invalid device reply: %#v", reply.Value)
 		}
 		return row
@@ -537,7 +548,7 @@ func TestRetryableWritesReturnExistingValues(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !decodeValue(reply.Value, out) {
+		if reply.DecodeValue(out) != nil {
 			t.Fatalf("invalid %s reply: %#v", word, reply.Value)
 		}
 	}
@@ -571,13 +582,13 @@ func TestRetryableWritesReturnExistingValues(t *testing.T) {
 	input := lagoon.OverlaySet{DeclID: declInput.ID, ChannelID: created.ID, Config: json.RawMessage(`{}`)}
 	var overlayOne, overlayTwo lagoon.OverlayRow
 	reply, err := registrarCall(t, eng, member, created.ID, lagoon.WordOverlaySet, input)
-	if err != nil || !decodeValue(reply.Value, &overlayOne) {
+	if err != nil || reply.DecodeValue(&overlayOne) != nil {
 		t.Fatalf("first overlay reply=%#v err=%v", reply.Value, err)
 	}
 	time.Sleep(2 * time.Millisecond)
 	input.Config = json.RawMessage(`{ }`)
 	reply, err = registrarCall(t, eng, member, created.ID, lagoon.WordOverlaySet, input)
-	if err != nil || !decodeValue(reply.Value, &overlayTwo) {
+	if err != nil || reply.DecodeValue(&overlayTwo) != nil {
 		t.Fatalf("second overlay reply=%#v err=%v", reply.Value, err)
 	}
 	if overlayOne.UpdatedAt != overlayTwo.UpdatedAt {
@@ -632,6 +643,45 @@ func TestProvisionLocalNodeReplaysThroughRegistrar(t *testing.T) {
 	if bound, err := eng.registry.IsBound(ctx, first.HomeChannelID, protocol.LocalDeviceID); err != nil || !bound {
 		t.Fatalf("home local binding=%v err=%v", bound, err)
 	}
+}
+
+func TestProvisionWaitsFailFastWithStepAndTerminalReasons(t *testing.T) {
+	eng, _, _ := bootRegistrarTest(t)
+
+	t.Run("channel timeout", func(t *testing.T) {
+		eng.provisionTimeout = 50 * time.Millisecond
+		started := time.Now()
+		err := eng.waitChannel(context.Background(), "never-created")
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "wait for channel") {
+			t.Fatalf("waitChannel error=%v", err)
+		}
+		if time.Since(started) > time.Second {
+			t.Fatal("waitChannel did not fail fast")
+		}
+	})
+
+	t.Run("principal timeout", func(t *testing.T) {
+		eng.provisionTimeout = 50 * time.Millisecond
+		err := func() error {
+			_, err := eng.principalActor(context.Background(), protocol.C0ChannelID, "never-member")
+			return err
+		}()
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "wait for principal") {
+			t.Fatalf("principalActor error=%v", err)
+		}
+	})
+
+	t.Run("introduce rejection", func(t *testing.T) {
+		eng.provisionTimeout = 2 * time.Second
+		started := time.Now()
+		err := eng.introduce(context.Background(), protocol.C0ChannelID, protocol.RootPrincipalID, "missing-declaration", "")
+		if err == nil || !strings.Contains(err.Error(), "rejected") {
+			t.Fatalf("introduce error=%v", err)
+		}
+		if time.Since(started) >= eng.provisionTimeout {
+			t.Fatalf("explicit rejection waited for timeout: %v", err)
+		}
+	})
 }
 
 func TestStartupRepairsFixedRegistryRowsWithoutTouchingCredential(t *testing.T) {

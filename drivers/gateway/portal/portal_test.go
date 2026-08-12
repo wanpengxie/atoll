@@ -41,7 +41,7 @@ func TestRegisterConflictNeverMintsSession(t *testing.T) {
 
 func TestRegisterSuccessMintsInMemorySession(t *testing.T) {
 	sessions := gateway.NewSessionStore()
-	p := New(Config{ContractVersion: "test", Submitter: submitterStub{reply: lagoon.Reply{Value: lagoon.PrincipalRow{ID: "alice"}}}, Sessions: sessions})
+	p := New(Config{ContractVersion: "test", Submitter: submitterStub{reply: lagoon.Reply{Value: json.RawMessage(`{"id":"alice"}`)}}, Sessions: sessions})
 	req := httptest.NewRequest(http.MethodPost, "/api/identity/register", strings.NewReader(`{"id":"alice","email":"alice@example.test","password":"secret"}`))
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
@@ -55,6 +55,40 @@ func TestRegisterSuccessMintsInMemorySession(t *testing.T) {
 	principal, ok := sessions.Verify(cookies[0].Value)
 	if !ok || principal != "alice" {
 		t.Fatalf("session=(%q,%v)", principal, ok)
+	}
+}
+
+func TestRegisterMissingReplyValueNeverMintsSession(t *testing.T) {
+	sessions := gateway.NewSessionStore()
+	p := New(Config{ContractVersion: "test", Submitter: submitterStub{reply: lagoon.Reply{}}, Sessions: sessions})
+	req := httptest.NewRequest(http.MethodPost, "/api/identity/register", strings.NewReader(`{"email":"alice@example.test","password":"secret"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("missing reply value minted cookies: %+v", rec.Result().Cookies())
+	}
+}
+
+func TestRegisterAllowsUnknownFieldsButRejectsTrailingDocument(t *testing.T) {
+	p := New(Config{ContractVersion: "test", Submitter: submitterStub{reply: lagoon.Reply{Value: json.RawMessage(`{"id":"alice"}`)}}, Sessions: gateway.NewSessionStore()})
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "unknown field", body: `{"email":"alice@example.test","password":"secret","future_option":true}`, want: http.StatusCreated},
+		{name: "trailing document", body: `{"email":"alice@example.test","password":"secret"} {}`, want: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/identity/register", strings.NewReader(tc.body)))
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
 	}
 }
 

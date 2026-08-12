@@ -25,9 +25,11 @@ import (
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 const shutdownTimeout = 30 * time.Second
+const provisionStepTimeout = 30 * time.Second
 const contractVersion = "5"
 
 type Config struct {
@@ -52,6 +54,8 @@ type Engine struct {
 	boundAddr  string
 	closeOnce  sync.Once
 	closeErr   error
+	// provisionTimeout is fixed in production and narrowed only by package tests.
+	provisionTimeout time.Duration
 }
 
 func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
@@ -68,7 +72,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if installed.Installed && installed.RootPassword != "" {
 		logger.Info("atoll installed", "root_password", installed.RootPassword)
 	}
-	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.NewSessionStore()}
+	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.NewSessionStore(), provisionTimeout: provisionStepTimeout}
 	var host *channelhost.ChannelHost
 	var gatewayEdge *gateway.Gateway
 	e.registry, err = lagoon.Open(installed.RegistryDBPath, func(change lagoon.Change) {
@@ -161,20 +165,62 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if !ok {
 		return nil, e.fail(errors.New("reopened c0 did not publish"))
 	}
-	e.submitter = lagoon.NewSubmitter(c0.RegistrarCaller(), sourceFacts{host: e.host}, e.registry)
+	e.submitter = lagoon.NewSubmitter(c0RegistrarCaller{bundle: c0}, sourceFacts{host: e.host}, e.registry)
 	resolver.binder = lagoon.NewSpaceOps(e.submitter)
-	if err := e.host.StartConvergence(); err != nil {
-		return nil, e.fail(err)
-	}
 	e.gateway, err = gateway.New(gateway.Config{Resolver: gateway.ResolverFunc(e.resolveEntitlements), Logger: logger})
 	if err != nil {
 		return nil, e.fail(err)
 	}
 	gatewayEdge = e.gateway
+	if err := e.host.StartConvergence(); err != nil {
+		return nil, e.fail(err)
+	}
 	e.gateway.Start()
 	p := portal.New(portal.Config{Registry: e.registry, Submitter: e.submitter, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, ContractVersion: contractVersion})
 	e.handler = p
 	return e, nil
+}
+
+type c0RegistrarCaller struct{ bundle channelhost.Bundle }
+
+func (c c0RegistrarCaller) CallRegistrar(ctx context.Context, word lagoon.Word, payload any) (json.RawMessage, error) {
+	if c.bundle == nil {
+		return nil, errors.New("lagoon: c0 bundle unavailable")
+	}
+	ids, err := c.bundle.View().DeclaredInstances(ctx, lagoon.RegistrarSeatDeclID)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) != 1 {
+		return nil, errors.New("lagoon: registrar seat unavailable")
+	}
+	raw, err := c.bundle.Call().Call(ctx, ids[0], string(word), payload)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRegistrarTerminal(raw)
+}
+
+func decodeRegistrarTerminal(raw json.RawMessage) (json.RawMessage, error) {
+	var terminal struct {
+		Status    string `json:"status"`
+		ErrorCode string `json:"error_code"`
+		Detail    string `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &terminal); err != nil {
+		return nil, fmt.Errorf("lagoon: decode registrar terminal: %w", err)
+	}
+	switch terminal.Status {
+	case message.StatusCompleted:
+		return append(json.RawMessage(nil), raw...), nil
+	case message.StatusFailed:
+		if terminal.ErrorCode != "" {
+			return nil, &lagoon.Error{Code: lagoon.ErrorCode(terminal.ErrorCode), Detail: terminal.Detail}
+		}
+		return nil, errors.New("lagoon: registrar call failed")
+	default:
+		return nil, fmt.Errorf("lagoon: unknown registrar terminal status %q", terminal.Status)
+	}
 }
 
 func (e *Engine) resolveEntitlements(ctx context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
@@ -231,8 +277,8 @@ func (e *Engine) ProvisionLocalNode(ctx context.Context) (ProvisionResult, error
 		return ProvisionResult{}, err
 	}
 	var home lagoon.ChannelRow
-	if !decodeValue(reply.Value, &home) {
-		return ProvisionResult{}, errors.New("provision: invalid home reply")
+	if err := reply.DecodeValue(&home); err != nil {
+		return ProvisionResult{}, fmt.Errorf("provision: invalid home reply: %w", err)
 	}
 	if err := e.waitChannel(ctx, home.ID); err != nil {
 		return ProvisionResult{}, err
@@ -266,11 +312,13 @@ func (e *Engine) ProvisionLocalNode(ctx context.Context) (ProvisionResult, error
 }
 
 func (e *Engine) principalActor(ctx context.Context, ch channel.ID, principal string) (actor.ActorID, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, e.provisionWait())
+	defer cancel()
 	deadline := time.NewTicker(50 * time.Millisecond)
 	defer deadline.Stop()
 	for {
 		if bundle, ok := e.host.Acquire(ch); ok {
-			id, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+			id, found, err := bundle.View().ResolvePrincipal(waitCtx, principal)
 			if err != nil {
 				return "", err
 			}
@@ -279,13 +327,15 @@ func (e *Engine) principalActor(ctx context.Context, ch channel.ID, principal st
 			}
 		}
 		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
+		case <-waitCtx.Done():
+			return "", fmt.Errorf("provision: wait for principal %q in channel %q: %w", principal, ch, waitCtx.Err())
 		case <-deadline.C:
 		}
 	}
 }
 func (e *Engine) waitChannel(ctx context.Context, ch channel.ID) error {
+	waitCtx, cancel := context.WithTimeout(ctx, e.provisionWait())
+	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -293,18 +343,20 @@ func (e *Engine) waitChannel(ctx context.Context, ch channel.ID) error {
 			return nil
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
+			return fmt.Errorf("provision: wait for channel %q: %w", ch, waitCtx.Err())
 		case <-ticker.C:
 		}
 	}
 }
 func (e *Engine) introduce(ctx context.Context, ch channel.ID, principal, declID, ownPrincipal string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, e.provisionWait())
+	defer cancel()
 	bundle, ok := e.host.Acquire(ch)
 	if !ok {
 		return errors.New("channel unavailable")
 	}
-	sender, found, err := bundle.View().ResolvePrincipal(ctx, principal)
+	sender, found, err := bundle.View().ResolvePrincipal(waitCtx, principal)
 	if err != nil || !found {
 		return errors.Join(err, errors.New("principal is not a member"))
 	}
@@ -316,26 +368,73 @@ func (e *Engine) introduce(ctx context.Context, ch channel.ID, principal, declID
 	if ownPrincipal != "" {
 		payload["principal"] = ownPrincipal
 	}
-	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(ch), ID: uuid.NewString(), MsgType: "channel.introduce_actor", Kind: "request", Audience: []string{string(actor.SystemActorID)}, Visibility: "public", Payload: mustJSON(payload)})
+	requestID := message.ID(uuid.NewString())
+	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(ch), ID: string(requestID), MsgType: "channel.introduce_actor", Kind: "request", Audience: []string{string(actor.SystemActorID)}, Visibility: "public", Payload: mustJSON(payload)})
 	if err != nil {
 		return err
 	}
-	if _, err := slot.Deliver(ctx, frame); err != nil {
+	if _, err := slot.Deliver(waitCtx, frame); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
+	reader := channel.Reader{ActorID: sender, Mode: channel.ReaderMember}
+	var cursor int64
 	for {
-		ids, err := bundle.View().DeclaredInstances(ctx, declID)
-		if err == nil && len(ids) == 1 {
+		ids, err := bundle.View().DeclaredInstances(waitCtx, declID)
+		if err != nil {
+			return fmt.Errorf("provision: inspect introduced declaration %q: %w", declID, err)
+		}
+		if len(ids) == 1 {
 			return nil
 		}
+		if len(ids) > 1 {
+			return fmt.Errorf("provision: declaration %q has %d instances, want one", declID, len(ids))
+		}
+		rows, next, err := bundle.View().ReadVisibleAfterSeq(waitCtx, reader, cursor, 256)
+		if err != nil {
+			return fmt.Errorf("provision: read introduce terminal for %q: %w", declID, err)
+		}
+		cursor = next
+		for _, row := range rows {
+			if !row.IsTerminal || row.Envelope.Kind != message.KindResponse || row.Envelope.ParentID != requestID {
+				continue
+			}
+			var terminal struct {
+				Status    string `json:"status"`
+				ErrorCode string `json:"error_code"`
+				Detail    string `json:"detail"`
+			}
+			if err := json.Unmarshal(row.Envelope.Payload, &terminal); err != nil {
+				return fmt.Errorf("provision: decode introduce terminal for %q: %w", declID, err)
+			}
+			switch terminal.Status {
+			case message.StatusCompleted:
+				// The terminal is only a wake; the value check above remains the
+				// success condition and also handles idempotent replay.
+			case message.StatusFailed:
+				ids, err := bundle.View().DeclaredInstances(waitCtx, declID)
+				if err == nil && len(ids) == 1 {
+					return nil
+				}
+				return fmt.Errorf("provision: introduce %q rejected (%s): %s", declID, terminal.ErrorCode, terminal.Detail)
+			default:
+				return fmt.Errorf("provision: introduce %q returned unknown terminal status %q", declID, terminal.Status)
+			}
+		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
+			return fmt.Errorf("provision: wait for declaration %q instance: %w", declID, waitCtx.Err())
 		case <-ticker.C:
 		}
 	}
+}
+
+func (e *Engine) provisionWait() time.Duration {
+	if e.provisionTimeout > 0 {
+		return e.provisionTimeout
+	}
+	return provisionStepTimeout
 }
 
 func (e *Engine) Ready() <-chan struct{} { return e.ready }
@@ -390,10 +489,6 @@ func (e *Engine) Close(ctx context.Context) error {
 	return e.closeErr
 }
 func (e *Engine) fail(err error) error { _ = e.Close(context.Background()); return err }
-func decodeValue(in, out any) bool {
-	raw, err := json.Marshal(in)
-	return err == nil && json.Unmarshal(raw, out) == nil
-}
-func mustJSON(v any) json.RawMessage { raw, _ := json.Marshal(v); return raw }
+func mustJSON(v any) json.RawMessage   { raw, _ := json.Marshal(v); return raw }
 
 var _ io.Closer = (*gateway.Gateway)(nil)

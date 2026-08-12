@@ -7,7 +7,6 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
-	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -32,7 +31,7 @@ type emptyBindingReader struct{}
 func (emptyBindingReader) IsBound(context.Context, channel.ID, string) (bool, error) {
 	return false, nil
 }
-func (emptyBindingReader) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
+func (emptyBindingReader) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
 	return nil, nil
 }
 

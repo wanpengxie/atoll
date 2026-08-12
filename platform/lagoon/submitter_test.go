@@ -24,7 +24,7 @@ func (c *callerStub) CallRegistrar(_ context.Context, word Word, payload any) (j
 	if c.err != nil {
 		return nil, c.err
 	}
-	reply, _ := json.Marshal(Reply{Word: word, Value: map[string]bool{"ok": true}, Source: c.payload.Source})
+	reply, _ := json.Marshal(Reply{Word: word, Value: json.RawMessage(`{"ok":true}`), Source: c.payload.Source})
 	return reply, nil
 }
 

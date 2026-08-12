@@ -27,8 +27,14 @@ func NewSessionStore() *SessionStore {
 func (s *SessionStore) Mint(principal string, ttl time.Duration) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
+	for token, entry := range s.entries {
+		if !now.Before(entry.expires) {
+			delete(s.entries, token)
+		}
+	}
 	token := uuid.NewString()
-	s.entries[token] = sessionEntry{principal: principal, expires: s.now().Add(ttl)}
+	s.entries[token] = sessionEntry{principal: principal, expires: now.Add(ttl)}
 	return token
 }
 func (s *SessionStore) Verify(token string) (string, bool) {

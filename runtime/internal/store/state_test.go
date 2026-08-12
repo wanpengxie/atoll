@@ -262,7 +262,7 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 	f := openStateFixture(t)
 
 	a := mustInsertActor(t, f.reg, "a")
-	if err := f.res.Create(ctx, "kv:doc", "kv", a, "", "", []byte("resource"), resourcespec.ResourceBirthPlan{}); err != nil {
+	if err := f.res.Create(ctx, "kv:doc", "kv", a, "", "", []byte("resource")); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 	if err := endActorForTest(ctx, f.reg, a, 1000); err != nil {

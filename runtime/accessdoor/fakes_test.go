@@ -62,7 +62,6 @@ type createCall struct {
 	creator                           actor.ActorID
 	placementDaemonID, placementCoord string
 	initial                           []byte
-	birth                             resourcespec.ResourceBirthPlan
 }
 
 func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
@@ -70,12 +69,12 @@ func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (res
 	return r.resolveMeta, r.resolveExists, r.resolveErr
 }
 
-func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth resourcespec.ResourceBirthPlan) error {
+func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error {
 	r.calls++
 	r.createCalls = append(r.createCalls, createCall{
 		id: id, kind: kind, creator: creator,
 		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
-		initial: initial, birth: birth,
+		initial: initial,
 	})
 	return r.createErr
 }
@@ -84,11 +83,11 @@ func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind 
 // routing (door.create's file-kind branch, query.go) — canned per-call so a
 // test can drive the reservation/commit sequence a content-less file create
 // runs through.
-func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth resourcespec.ResourceBirthPlan) (string, error) {
+func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
 	r.calls++
 	r.reserveCreateCalls = append(r.reserveCreateCalls, createCall{
 		id: id, kind: kind, creator: creator,
-		placementDaemonID: placementDaemonID, placementCoord: placementCoord, birth: birth,
+		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
 	})
 	if r.reserveCreateErr != nil {
 		return "", r.reserveCreateErr

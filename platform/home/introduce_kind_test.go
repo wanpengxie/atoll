@@ -10,7 +10,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
-	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -41,8 +40,8 @@ func (kindResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool
 type oneBindingReader struct{}
 
 func (oneBindingReader) IsBound(context.Context, channel.ID, string) (bool, error) { return true, nil }
-func (oneBindingReader) ListBoundDevices(context.Context, channel.ID) ([]lagoon.DeviceRow, error) {
-	return []lagoon.DeviceRow{{ID: "device-1", Status: lagoon.DevicePresent}}, nil
+func (oneBindingReader) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
+	return []string{"device-1"}, nil
 }
 
 func openKindHome(t *testing.T) (*Home, actor.ActorID) {
@@ -62,6 +61,25 @@ func openKindHome(t *testing.T) (*Home, actor.ActorID) {
 		t.Fatalf("resolve alice: found=%v err=%v", found, err)
 	}
 	return h, alice
+}
+
+func TestIntroduceAllowsUnknownFieldsButRejectsTrailingDocument(t *testing.T) {
+	h, _ := openKindHome(t)
+	for _, tc := range []struct {
+		name    string
+		payload json.RawMessage
+		wantErr bool
+	}{
+		{name: "unknown field", payload: json.RawMessage(`{"kind":"human","principal":"future-human","future_option":true}`)},
+		{name: "trailing document", payload: json.RawMessage(`{"kind":"human","principal":"second-human"} {}`), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.opEntry.Execute(context.Background(), sysactor.TypeIntroduceActor, sysactor.OperateRequest{Payload: tc.payload})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Execute error=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 func executeIntroduce(h *Home, sender actor.ActorID, payload string) (any, error) {

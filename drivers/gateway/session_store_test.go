@@ -39,3 +39,22 @@ func TestSessionStoreIsMemoryOnlyAndExpires(t *testing.T) {
 		t.Fatal("a new process store recovered an old token")
 	}
 }
+
+func TestMintSweepsAllExpiredSessions(t *testing.T) {
+	now := time.Unix(100, 0)
+	store := NewSessionStore()
+	store.now = func() time.Time { return now }
+	for i := 0; i < 3; i++ {
+		store.Mint("expired", time.Minute)
+	}
+	now = now.Add(time.Minute)
+	live := store.Mint("live", time.Hour)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.entries) != 1 {
+		t.Fatalf("Mint left %d entries, want only the new live session", len(store.entries))
+	}
+	if _, ok := store.entries[live]; !ok {
+		t.Fatal("Mint sweep removed the newly minted session")
+	}
+}

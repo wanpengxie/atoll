@@ -192,7 +192,6 @@ func badIntroduce(detail string) *sysactor.OperateError {
 
 func decodeStrict(raw json.RawMessage, out any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
 		return err
 	}

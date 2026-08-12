@@ -172,7 +172,7 @@ func TestEndingAnActorLeavesItsResourceRowsUntouched(t *testing.T) {
 	registry := stores.Assembly.Resources
 
 	if err := registry.Create(ctx, deathCutResource, resourcespec.KindKV,
-		creator, "", "", []byte(`"work product"`), resourcespec.ResourceBirthPlan{}); err != nil {
+		creator, "", "", []byte(`"work product"`)); err != nil {
 		t.Fatalf("create the resource: %v", err)
 	}
 	before, exists, err := registry.Resolve(ctx, deathCutResource)

@@ -37,7 +37,7 @@
 //
 // This package is pure Go + protocol/message + introspect + behavior +
 // actorbase (the JobTable interface it drives) — it never imports an engine SDK
-// or any LLM-SDK types. The engine binding layer lives in agent/base, which builds
+// or any LLM-SDK types. The engine binding layer lives in drivers/agents/base, which builds
 // one Exec from the incarnation's Sys and wraps each tool into the engine's own
 // tool surface.
 package metatool

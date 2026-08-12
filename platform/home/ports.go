@@ -19,8 +19,7 @@ func Shutdown(h *Home) error { return h.closeInternal("normal") }
 // Home's own per-barrier defaults. This is the process-shutdown entry: one
 // shared deadline bounds every join across every Home, and whatever refuses
 // to leave in time is abandoned with its account in the returned error.
-// Lifecycle verbs keep using Shutdown — their request context's cancellation
-// must not be able to abandon a rollback.
+// Lifecycle verbs that carry an explicit caller budget use this path too.
 func ShutdownWithin(h *Home, ctx context.Context) error {
 	return h.closeInternalUnder("normal", ctx)
 }

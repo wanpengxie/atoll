@@ -48,8 +48,6 @@ type ResourceMeta struct {
 	PlacementKind     string              `json:"placement_kind,omitempty"`
 	PlacementDaemonID string              `json:"placement_daemon_id,omitempty"`
 	Dir               bool                `json:"dir,omitempty"`
-	SourceChannelID   ID                  `json:"source_channel_id,omitempty"`
-	SourceResourceID  resource.ResourceID `json:"source_resource_id,omitempty"`
 }
 
 type ResourcePage struct {
@@ -60,9 +58,4 @@ type ResourcePage struct {
 type ResourceFetch struct {
 	Meta ResourceMeta
 	Body io.ReadCloser
-}
-
-type ResourceRef struct {
-	ChannelID  ID                  `json:"channel_id"`
-	ResourceID resource.ResourceID `json:"resource_id"`
 }

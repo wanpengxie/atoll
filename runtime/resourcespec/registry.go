@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
@@ -90,9 +89,7 @@ type ResourceMeta struct {
 	// hands out the single-file staging→rename write句柄 (§3.9'). Declared by
 	// the creator at birth (CreateSpec.Dir), stored here, read at Resolve —
 	// NEVER re-derived by the daemon statting the disk (daemon holds no truth).
-	Dir              bool
-	SourceChannelID  channel.ID
-	SourceResourceID resource.ResourceID
+	Dir bool
 }
 
 // ReservationRow is one create-outbox reservation (期11 spec §1.3's
@@ -140,21 +137,9 @@ type ResourceRow struct {
 	Meta ResourceMeta
 }
 
-// ResourceBirthPlan carries only stable resource provenance. Authorization has
-// one shape for every actor identity: birth atomically installs the creator's
-// full-rights grant. Actor storage home is deliberately absent.
-type ResourceBirthPlan struct {
-	SourceChannelID  channel.ID
-	SourceResourceID resource.ResourceID
-}
-
 type LandedResource struct {
 	ID        resource.ResourceID
 	CreatedBy actor.ActorID
-}
-
-func (p ResourceBirthPlan) Valid() bool {
-	return (p.SourceChannelID == "") == (p.SourceResourceID == "")
 }
 
 // Registry is the R (authorization relation) + resource-existence contract —
@@ -186,7 +171,7 @@ type Registry interface {
 	// kv's inline value; always nil for file (its bytes never ride this
 	// param — a with-content file create lands via ReserveCreate +
 	// CommitReservation instead, never this method).
-	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth ResourceBirthPlan) error
+	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error
 
 	// ReserveCreate is the create-outbox's SERVER-side write-ahead half
 	// (§1.3/§1.7, for a with-content file create ONLY — kv and
@@ -204,7 +189,7 @@ type Registry interface {
 	// so the landed resources row carries it (the door's later Open routing
 	// reads it, §丁12). Always false for a with-content create (dir+with_content
 	// is an ingress-rejected combination — a directory carries no byte stream).
-	ReserveCreate(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth ResourceBirthPlan) (reservationID string, err error)
+	ReserveCreate(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (reservationID string, err error)
 
 	// CommitReservation is create-outbox's landing half (driven by the
 	// daemon's Committed(reservation_id) RPC, §4.7): looks up reservationID,

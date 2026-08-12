@@ -22,7 +22,7 @@ import (
 //
 // Exec bundles those two faces with the wait-policy config the tool convention
 // needs (the fast-path window is a UX cap, not the substrate deadline). It is
-// built once per incarnation from Sys (agent/base.ExecFace) and shared by every
+// built once per incarnation from Sys (drivers/agents/base.ExecFace) and shared by every
 // turn; the per-turn RuntimeContext is threaded separately (the curTurn/RC 合一).
 type Exec struct {
 	// Jobs is the cross-turn out-station account (the engine's JobTable — the
@@ -51,7 +51,7 @@ type Exec struct {
 // CallFunc is the synchronous request+await-final face the introspection
 // queries drive: build+emit spec as a kind=request, block up to window for its
 // final response, return it (ok=false = no final within the window / no
-// answer). The one implementation wraps sys.Call+Pending.Wait (agent/base).
+// answer). The one implementation wraps sys.Call+Pending.Wait (drivers/agents/base).
 type CallFunc func(ctx context.Context, spec behavior.RequestSpec, window time.Duration) (*message.Envelope, bool, error)
 
 // now returns wall time, defaulting to time.Now if the Clock is unset (a test

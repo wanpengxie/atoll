@@ -3,8 +3,11 @@ package channelhost
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 type desiredRegistry struct {
 	mu   sync.RWMutex
 	rows map[channel.ID]lagoon.ChannelRow
+	gets atomic.Int64
 }
 
 func newDesiredRegistry() *desiredRegistry {
@@ -47,10 +51,65 @@ func (r *desiredRegistry) ListChannels(context.Context) ([]lagoon.ChannelRow, er
 }
 
 func (r *desiredRegistry) GetChannelDesired(_ context.Context, id channel.ID) (lagoon.ChannelRow, bool, error) {
+	r.gets.Add(1)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	row, ok := r.rows[id]
 	return row, ok, nil
+}
+
+func TestRebuildKeepsGenesisLineageAfterCurrentParentChanges(t *testing.T) {
+	root := t.TempDir()
+	registry := newDesiredRegistry()
+	row := desiredRow(t, "reattached-child")
+	row.ParentID = "retired-parent"
+	var genesis lagoon.GenesisSpec
+	if err := json.Unmarshal(row.Spec, &genesis); err != nil {
+		t.Fatal(err)
+	}
+	genesis.ParentID = row.ParentID
+	row.Spec, _ = json.Marshal(genesis)
+
+	first, err := New(root, registry, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := provisionFromRow(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Provision(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	path, err := DBPath(root, row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retiring the old parent changes only the directory's current parent. The
+	// immutable genesis JSON deliberately keeps the child's original lineage.
+	row.ParentID = protocol.C0ChannelID
+	registry.put(row)
+	second, err := New(root, registry, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
+	if err := second.StartConvergence(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := second.Acquire(row.ID); !ok {
+		t.Fatal("reattached child was not rebuilt from its genesis lineage")
+	}
+	if state, tracked := second.convergence.retries[row.ID]; tracked && state.permanent {
+		t.Fatalf("reattached child entered permanent stop set: %+v", state)
+	}
 }
 
 func desiredRow(t *testing.T, id channel.ID) lagoon.ChannelRow {
@@ -105,6 +164,30 @@ func TestRegistryChangeQueuesFastReconcile(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("post-commit edge did not open the channel through fast reconciliation")
+}
+
+func TestRegistryChangeBurstPaysOneEdgeDelay(t *testing.T) {
+	registry := newDesiredRegistry()
+	h := newConvergingHost(t, registry)
+	h.convergence.edgeDelay = 50 * time.Millisecond
+	if err := h.StartConvergence(); err != nil {
+		t.Fatal(err)
+	}
+	const count = 8
+	started := time.Now()
+	for i := 0; i < count; i++ {
+		h.RegistryChanged(lagoon.Change{ChannelID: channel.ID(fmt.Sprintf("burst-%d", i))})
+	}
+	deadline := started.Add(2 * time.Second)
+	for registry.gets.Load() < count && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := registry.gets.Load(); got < count {
+		t.Fatalf("processed %d/%d burst IDs", got, count)
+	}
+	if elapsed := time.Since(started); elapsed >= 4*h.convergence.edgeDelay {
+		t.Fatalf("burst paid serial edge delays: elapsed=%v delay=%v", elapsed, h.convergence.edgeDelay)
+	}
 }
 
 func TestSlowScanRepairsDroppedEdge(t *testing.T) {

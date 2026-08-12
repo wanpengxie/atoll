@@ -11,10 +11,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+type blockingSubscribeHitch struct {
+	base     channelhost.GatewayHitch
+	entered  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
+}
+
+func (h blockingSubscribeHitch) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool) {
+	return h.base.SubjectSlotFor(id)
+}
+
+func (h blockingSubscribeHitch) Subscribe() (<-chan struct{}, func()) {
+	notify, cancel := h.base.Subscribe()
+	close(h.entered)
+	<-h.release
+	return notify, func() {
+		cancel()
+		h.canceled <- struct{}{}
+	}
+}
+
+type blockingSubscribeBundle struct {
+	channelhost.Bundle
+	hitch channelhost.GatewayHitch
+}
+
+func (b blockingSubscribeBundle) Gateway() channelhost.GatewayHitch { return b.hitch }
 
 // TestLateStartFeedRefused (DoD-7⑨ 迟启泵 barrier): a session that seats, then the
 // gateway Closes, then calls StartFeed → the pump is refused (beginFeed sees closed)
@@ -283,6 +312,53 @@ func TestSessionClosedThenStartFeedRefused(t *testing.T) {
 	}
 	if s.beginFeed() {
 		t.Fatal("beginFeed must refuse once the SESSION itself is closed (统一会话闸 session half)")
+	}
+}
+
+func TestStartFeedClosedAfterRealSubscriptionTearsItDown(t *testing.T) {
+	clk := newClock()
+	homeChannel, _ := openHome(t, "sub-close", "alice")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	canceled := make(chan struct{}, 1)
+	bundle := blockingSubscribeBundle{
+		Bundle: homeChannel,
+		hitch: blockingSubscribeHitch{
+			base: homeChannel.Gateway(), entered: entered, release: release, canceled: canceled,
+		},
+	}
+	resolver := ResolverFunc(func(context.Context, string) ([]Route, []channel.ID, error) {
+		return []Route{{Channel: "sub-close", Bundle: bundle, SubjectID: homeChannel.memberID}}, nil, nil
+	})
+	g := newTestGateway(t, Config{Resolver: resolver}, settings{clock: clk})
+	s, err := g.Attach("alice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	go func() {
+		s.StartFeed()
+		close(started)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartFeed did not establish a real route subscription")
+	}
+	s.Close()
+	close(release)
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartFeed did not return after close")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("early StartFeed return leaked its subscription")
+	}
+	if len(s.subs) != 0 || g.registeredPumps.Load() != 0 {
+		t.Fatalf("teardown left subs=%d registered_pumps=%d", len(s.subs), g.registeredPumps.Load())
 	}
 }
 
