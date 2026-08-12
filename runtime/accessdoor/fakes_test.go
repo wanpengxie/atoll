@@ -2,216 +2,90 @@ package accessdoor
 
 import (
 	"context"
-	"errors"
+	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// fakeRegistry is a configurable resourcespec.Registry stub. Every method reads a
-// canned result / error field so a test can drive one decision-tree branch at a
-// time; the mutating methods record their calls for assertion.
+type createCall struct {
+	id      resource.ResourceID
+	kind    resourcespec.ResourceKind
+	creator actor.ActorID
+	initial []byte
+}
+
 type fakeRegistry struct {
-	resolveMeta   resourcespec.ResourceMeta
-	resolveExists bool
-	resolveErr    error
-
-	createErr   error
-	createCalls []createCall
-
-	reserveCreateID         string
-	reserveCreateErr        error
-	reserveCreateCalls      []createCall
-	commitReservationFound  bool
-	commitReservationLanded resourcespec.LandedResource
-	commitReservationErr    error
-	commitReservationCalls  []string
-	clearTombstoneFound     bool
-	clearTombstoneErr       error
-
-	deleteErr   error
-	deleteCalls []resource.ResourceID
-
-	// listRows/listNextCursor/listErr back List — canned per §3.7's door
-	// tests (Stat/List projection).
+	resolveMeta    resourcespec.ResourceMeta
+	resolveExists  bool
+	resolveErr     error
+	createErr      error
+	createCalls    []createCall
+	deleteErr      error
+	deleteCalls    []resource.ResourceID
 	listRows       []resourcespec.ResourceRow
 	listNextCursor string
 	listErr        error
-	listCalls      []listCall
-
-	// calls is the total method-invocation count across every method — the
-	// actor-scoped negative assertion ("the collapsed branch consults no Registry")
-	// asserts this stays zero.
-	calls int
+	calls          int
 }
 
-type listCall struct {
-	prefix string
-	limit  int
-	cursor string
-}
-
-type createCall struct {
-	id                                resource.ResourceID
-	kind                              resourcespec.ResourceKind
-	creator                           actor.ActorID
-	placementDaemonID, placementCoord string
-	initial                           []byte
-}
-
-func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
+func (r *fakeRegistry) Resolve(context.Context, resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
 	r.calls++
 	return r.resolveMeta, r.resolveExists, r.resolveErr
 }
-
-func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error {
+func (r *fakeRegistry) Create(_ context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, initial []byte) error {
 	r.calls++
-	r.createCalls = append(r.createCalls, createCall{
-		id: id, kind: kind, creator: creator,
-		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
-		initial: initial,
-	})
+	r.createCalls = append(r.createCalls, createCall{id: id, kind: kind, creator: creator, initial: initial})
 	return r.createErr
 }
-
-// ReserveCreate / CommitReservation / ClearTombstone back §4's placement
-// routing (door.create's file-kind branch, query.go) — canned per-call so a
-// test can drive the reservation/commit sequence a content-less file create
-// runs through.
-func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
-	r.calls++
-	r.reserveCreateCalls = append(r.reserveCreateCalls, createCall{
-		id: id, kind: kind, creator: creator,
-		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
-	})
-	if r.reserveCreateErr != nil {
-		return "", r.reserveCreateErr
-	}
-	id2 := r.reserveCreateID
-	if id2 == "" {
-		id2 = "reservation-1"
-	}
-	return id2, nil
-}
-
-func (r *fakeRegistry) CommitReservation(ctx context.Context, reservationID string) (resourcespec.LandedResource, bool, error) {
-	r.calls++
-	r.commitReservationCalls = append(r.commitReservationCalls, reservationID)
-	return r.commitReservationLanded, r.commitReservationFound, r.commitReservationErr
-}
-
-func (r *fakeRegistry) ClearTombstone(ctx context.Context, tombstoneID string) (bool, error) {
-	r.calls++
-	return r.clearTombstoneFound, r.clearTombstoneErr
-}
-
-// ReservationDaemon / TombstoneDaemon / ListReservationsByDaemon /
-// ListTombstonesByDaemon / ListByPlacementDaemon back §4.7's daemon
-// control-RPC handlers (platform, not this door) — no accessdoor caller
-// exercises them, stubbed purely for interface compliance.
-func (r *fakeRegistry) ReservationDaemon(ctx context.Context, reservationID string) (string, bool, error) {
-	r.calls++
-	return "", false, errors.New("fakeRegistry: ReservationDaemon not wired (no accessdoor caller)")
-}
-
-func (r *fakeRegistry) TombstoneDaemon(ctx context.Context, tombstoneID string) (string, bool, error) {
-	r.calls++
-	return "", false, errors.New("fakeRegistry: TombstoneDaemon not wired (no accessdoor caller)")
-}
-
-func (r *fakeRegistry) ListReservationsByDaemon(ctx context.Context, daemonID string) ([]resourcespec.ReservationRow, error) {
-	r.calls++
-	return nil, errors.New("fakeRegistry: ListReservationsByDaemon not wired (no accessdoor caller)")
-}
-
-func (r *fakeRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID string) ([]resourcespec.TombstoneRow, error) {
-	r.calls++
-	return nil, errors.New("fakeRegistry: ListTombstonesByDaemon not wired (no accessdoor caller)")
-}
-
-func (r *fakeRegistry) ListByPlacementDaemon(ctx context.Context, daemonID string) ([]resourcespec.ResourceRow, error) {
-	r.calls++
-	return nil, errors.New("fakeRegistry: ListByPlacementDaemon not wired (no accessdoor caller)")
-}
-
-func (r *fakeRegistry) SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]resourcespec.ReservationRow, error) {
-	r.calls++
-	return nil, errors.New("fakeRegistry: SweepExpiredReservations not wired (no accessdoor caller)")
-}
-
-func (r *fakeRegistry) TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error {
-	r.calls++
-	return errors.New("fakeRegistry: TouchReservationsByCoords not wired (no accessdoor caller)")
-}
-
-// List is §3.7's door-level consumer (door.list, query.go): canned rows +
-// nextCursor let a test drive the membership projection over MULTIPLE rows
-// in one call.
-func (r *fakeRegistry) List(ctx context.Context, prefix string, limit int, cursor string) ([]resourcespec.ResourceRow, string, error) {
-	r.calls++
-	r.listCalls = append(r.listCalls, listCall{prefix: prefix, limit: limit, cursor: cursor})
-	return r.listRows, r.listNextCursor, r.listErr
-}
-
-func (r *fakeRegistry) Delete(ctx context.Context, id resource.ResourceID) error {
+func (r *fakeRegistry) Delete(_ context.Context, id resource.ResourceID) error {
 	r.calls++
 	r.deleteCalls = append(r.deleteCalls, id)
 	return r.deleteErr
 }
+func (r *fakeRegistry) List(context.Context, string, int, string) ([]resourcespec.ResourceRow, string, error) {
+	r.calls++
+	return r.listRows, r.listNextCursor, r.listErr
+}
 
-// fakeDriver is a configurable resourcespec.Driver stub.
 type fakeDriver struct {
-	readValue []byte
-	readFound bool
-	readErr   error
-
-	writeErr   error
-	writeCalls [][]byte
-
+	readValue   []byte
+	readFound   bool
+	readErr     error
+	writeErr    error
+	writeCalls  [][]byte
 	deleteErr   error
 	deleteCalls int
 }
 
-func (d *fakeDriver) Read(ctx context.Context, id resource.ResourceID) ([]byte, bool, error) {
+func (d *fakeDriver) Read(context.Context, resource.ResourceID) ([]byte, bool, error) {
 	return d.readValue, d.readFound, d.readErr
 }
-
-func (d *fakeDriver) Write(ctx context.Context, id resource.ResourceID, value []byte) error {
+func (d *fakeDriver) Write(_ context.Context, _ resource.ResourceID, value []byte) error {
 	d.writeCalls = append(d.writeCalls, value)
 	return d.writeErr
 }
-
-func (d *fakeDriver) Delete(ctx context.Context, id resource.ResourceID) error {
+func (d *fakeDriver) Delete(context.Context, resource.ResourceID) error {
 	d.deleteCalls++
 	return d.deleteErr
 }
 
-// fakeMembership is a configurable resource-policy projection. calls counts
-// every invocation — the actor-scoped negative assertion ("the collapsed
-// branch checks no membership") asserts it stays zero.
 type fakeMembership struct {
-	isMember bool
-	isOwner  bool
-	err      error
-	calls    int
-
-	// lookupHost/lookupFound/lookupErr model the caller's current daemon for
-	// local-versus-remote ticket routing. lookupCalls records every caller id.
+	isMember    bool
+	isOwner     bool
+	err         error
+	calls       int
 	lookupHost  string
 	lookupFound bool
 	lookupErr   error
 	lookupCalls []actor.ActorID
 }
 
-func (m *fakeMembership) ResourceActorFacts(
-	_ context.Context,
-	id actor.ActorID,
-) (storespec.ResourceActorFacts, error) {
+func (m *fakeMembership) ResourceActorFacts(_ context.Context, id actor.ActorID) (storespec.ResourceActorFacts, error) {
 	m.calls++
 	m.lookupCalls = append(m.lookupCalls, id)
 	if m.err != nil {
@@ -224,208 +98,65 @@ func (m *fakeMembership) ResourceActorFacts(
 	if m.lookupFound {
 		host = m.lookupHost
 	}
-	return storespec.ResourceActorFacts{
-		Active:               m.isMember || m.lookupFound,
-		Owner:                m.isOwner,
-		PreferredStorageHost: host,
-	}, nil
+	return storespec.ResourceActorFacts{Active: m.isMember || m.lookupFound, Owner: m.isOwner, PreferredStorageHost: host}, nil
 }
 
-// accessAuthority is the live A-level authority a door mints against. Tests
-// weld one per caller exactly as the assembly does.
-func accessAuthority(id actor.ActorID) capauth.Authority {
-	return liveAuthority{id: id}
-}
+func accessAuthority(id actor.ActorID) capauth.Authority { return liveAuthority{id: id} }
 
-func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {
-	m.calls++
-	return m.isMember, m.err
-}
-
-func (m *fakeMembership) Lookup(ctx context.Context, id actor.ActorID) (string, bool, error) {
-	m.calls++
-	m.lookupCalls = append(m.lookupCalls, id)
-	return m.lookupHost, m.lookupFound, m.lookupErr
-}
-
-// fakeStorageMounts is a configurable StorageMounts stub (§4.3 placement
-// chain ③④'s mount-table input).
-type fakeStorageMounts struct {
-	mounts []StorageMount
-	err    error
-	calls  int
-}
-
-func (f *fakeStorageMounts) ResolveStorageDaemon(ctx context.Context, chID channel.ID, name string) (StorageMount, bool, error) {
-	f.calls++
-	if f.err != nil {
-		return StorageMount{}, false, f.err
-	}
-	for _, mount := range f.mounts {
-		if mount.Name == name || (mount.Name == "" && mount.DaemonID == name) {
-			mount.Name = name
-			return mount, true, nil
-		}
-	}
-	return StorageMount{}, false, nil
-}
-
-// fakeStorageControl is a configurable StorageControl stub — records every
-// AllocRequest a test's door.create drives so the placement/coord/dir it was
-// asked to allocate can be asserted.
-type fakeStorageControl struct {
-	err          error
-	calls        []allocCall
-	reclaimErr   error
-	reclaimCalls []reclaimCall
-}
-
-type allocCall struct {
-	daemonID string
-	spec     StorageAllocSpec
-}
-
-type reclaimCall struct {
-	daemonID string
-	coord    string
-}
-
-func (f *fakeStorageControl) AllocRequest(ctx context.Context, daemonID string, spec StorageAllocSpec) error {
-	f.calls = append(f.calls, allocCall{daemonID: daemonID, spec: spec})
-	return f.err
-}
-
-func (f *fakeStorageControl) ReclaimRequest(ctx context.Context, daemonID string, coord string) error {
-	f.reclaimCalls = append(f.reclaimCalls, reclaimCall{daemonID: daemonID, coord: coord})
-	return f.reclaimErr
-}
-
-// fakeTransferControl is a configurable TransferControl stub (§5 item 0's file
-// byte-route ticket mint) — records every IssueTransfer call so a test can
-// assert the exact (targetDaemonID, coord, mode, reservationID) the door
-// routed.
-type fakeTransferControl struct {
-	ticket string
-	err    error
-	calls  []openTransferCall
-}
-
-type openTransferCall struct {
-	resourceID     resource.ResourceID
-	targetDaemonID string
-	targetName     string
-	callerDaemonID string
-	coord          string
-	mode           access.Operation
-	reservationID  string
-	dir            bool
-}
-
-func (f *fakeTransferControl) IssueTransfer(ctx context.Context, resourceID resource.ResourceID, targetDaemonID, targetName, callerDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (string, FileRedeem, error) {
-	f.calls = append(f.calls, openTransferCall{resourceID: resourceID, targetDaemonID: targetDaemonID, targetName: targetName, callerDaemonID: callerDaemonID, coord: coord, mode: mode, reservationID: reservationID, dir: dir})
-	if f.err != nil {
-		return "", "", f.err
-	}
-	redeem := FileRedeemRemote
-	if callerDaemonID == targetDaemonID {
-		redeem = FileRedeemLocal
-	}
-	return f.ticket, redeem, nil
-}
-
-// fakeStateStore is a configurable resourcespec.StateStore stub. Every method
-// reads canned result/error fields so a test can drive one collapsed-branch
-// decision at a time; each records its calls (owner/id/bytes) for assertion.
 type fakeStateStore struct {
-	createErr   error
-	createCalls []stateCall
-
-	readValue   []byte
-	readPresent bool
-	readErr     error
-	readCalls   []stateCall
-
-	writePresent bool
-	writeErr     error
-	writeCalls   []stateCall
-
+	createErr     error
+	createCalls   []stateCall
+	readValue     []byte
+	readPresent   bool
+	readErr       error
+	readCalls     []stateCall
+	writePresent  bool
+	writeErr      error
+	writeCalls    []stateCall
 	deletePresent bool
 	deleteErr     error
 	deleteCalls   []stateCall
 }
-
 type stateCall struct {
 	owner actor.ActorID
 	id    resource.ResourceID
 	bytes []byte
 }
 
-func (s *fakeStateStore) Create(ctx context.Context, owner actor.ActorID, id resource.ResourceID, initial []byte) error {
-	s.createCalls = append(s.createCalls, stateCall{owner: owner, id: id, bytes: initial})
+func (s *fakeStateStore) Create(_ context.Context, owner actor.ActorID, id resource.ResourceID, b []byte) error {
+	s.createCalls = append(s.createCalls, stateCall{owner, id, b})
 	return s.createErr
 }
-
-func (s *fakeStateStore) Read(ctx context.Context, owner actor.ActorID, id resource.ResourceID) ([]byte, bool, error) {
+func (s *fakeStateStore) Read(_ context.Context, owner actor.ActorID, id resource.ResourceID) ([]byte, bool, error) {
 	s.readCalls = append(s.readCalls, stateCall{owner: owner, id: id})
 	return s.readValue, s.readPresent, s.readErr
 }
-
-func (s *fakeStateStore) Write(ctx context.Context, owner actor.ActorID, id resource.ResourceID, value []byte) (bool, error) {
-	s.writeCalls = append(s.writeCalls, stateCall{owner: owner, id: id, bytes: value})
+func (s *fakeStateStore) Write(_ context.Context, owner actor.ActorID, id resource.ResourceID, b []byte) (bool, error) {
+	s.writeCalls = append(s.writeCalls, stateCall{owner, id, b})
 	return s.writePresent, s.writeErr
 }
-
-func (s *fakeStateStore) Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (bool, error) {
+func (s *fakeStateStore) Delete(_ context.Context, owner actor.ActorID, id resource.ResourceID) (bool, error) {
 	s.deleteCalls = append(s.deleteCalls, stateCall{owner: owner, id: id})
 	return s.deletePresent, s.deleteErr
 }
 
-// metaKV is the ResourceMeta Resolve returns for the day-1 kind.
 func metaKV() resourcespec.ResourceMeta {
 	return resourcespec.ResourceMeta{Kind: resourcespec.KindKV, CreatedAt: 1}
 }
 
-// metaKVBy is metaKV with an explicit creator — the PM-D3 delete predicate
-// (CreatedBy) a delete-path test pins.
-func metaKVBy(creator actor.ActorID) resourcespec.ResourceMeta {
-	m := metaKV()
-	m.CreatedBy = creator
-	return m
-}
-
-// newDoor builds a bare door directly (the package's own test may reach past the
-// sealed Minter to drive invoke branch-by-branch). The driver is registered under
-// KindKV, the day-1 kind Resolve returns.
-func newDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership) *door {
-	return &door{deps: Deps{
-		Registry:  reg,
-		Drivers:   DriverTable{resourcespec.KindKV: drv},
-		Authority: mem,
-		State:     &fakeStateStore{},
-	}}
-}
-
-// newFileDoor builds a bare door with the file-kind placement Deps wired
-// (§4.3: StorageMounts + StorageControl + ChannelID), on top of newDoor's
-// baseline — the constructor query_test.go's placement-chain tests use.
-func newFileDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership, mounts *fakeStorageMounts, ctl *fakeStorageControl, chID channel.ID) *door {
-	d := newDoor(reg, drv, mem)
-	d.deps.StorageMounts = mounts
-	d.deps.StorageControl = ctl
-	d.deps.ChannelID = chID
-	d.deps.TransferControl = &fakeTransferControl{ticket: "fake-transfer-ticket"}
-	return d
-}
-
-// newStateDoor builds a bare door wired for the actor-scoped branch. The Registry
-// and Membership fakes are present so the collapsed branch's negative assertions
-// (it consults neither) can inspect their call counts — a wired-but-untouched
-// collaborator is the point of the assertion.
 func newStateDoor(st *fakeStateStore, reg *fakeRegistry, mem *fakeMembership) *door {
-	return &door{deps: Deps{
-		Registry:  reg,
-		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Authority: mem,
-		State:     st,
-	}}
+	return &door{deps: Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: mem, State: st}}
+}
+
+func mustAccept(t *testing.T, out Outcome, err error) {
+	t.Helper()
+	if err != nil || !out.Accepted() {
+		t.Fatalf("out=%+v err=%v", out, err)
+	}
+}
+func mustVerdict(t *testing.T, out Outcome, err error, want access.FailureReason) {
+	t.Helper()
+	if err != nil || out.RejectReason != want {
+		t.Fatalf("out=%+v err=%v want=%v", out, err, want)
+	}
 }

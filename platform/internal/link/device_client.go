@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -22,7 +21,6 @@ type ClientActorLane struct {
 	Carrier *ClientCarrier
 	Lane    *LaneStream
 	Host    *actorhost.HostSupervisor
-	Control DeviceLaneControl
 	Files   LocalFileOpener
 	// DialExchange opens an exchange already registered as a child of this
 	// exact lane. The compute owner supplies it; callers must not dial the
@@ -90,7 +88,7 @@ func (l *ClientActorLane) OpenActorStream(
 		Arms: RawActorArms{
 			Pen: writer, Access: &remoteResourceHandle{
 				relay:    accessRelay,
-				redeemer: &deviceFileRedeemer{control: l.Control, files: l.Files, dial: l.DialExchange},
+				redeemer: &deviceFileRedeemer{files: l.Files, dial: l.DialExchange},
 			},
 			State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
 			Schedule: &remoteScheduleHandle{relay: scheduleRelay}, Lifecycle: lifecycle,
@@ -101,15 +99,9 @@ func (l *ClientActorLane) OpenActorStream(
 	return newDeviceActorStream(resource), nil
 }
 
-type DeviceLaneControl interface {
-	ResolveCoord(context.Context, string) (ResolveCoordReply, error)
-	SendCommitted(context.Context, string, string) (CommittedReply, error)
-}
-
 type deviceFileRedeemer struct {
-	control DeviceLaneControl
-	files   LocalFileOpener
-	dial    func(context.Context) (io.ReadWriteCloser, error)
+	files LocalFileOpener
+	dial  func(context.Context) (io.ReadWriteCloser, error)
 }
 
 func (r *deviceFileRedeemer) redeemFileRoute(
@@ -117,7 +109,7 @@ func (r *deviceFileRedeemer) redeemFileRoute(
 	route accessdoor.FileRoute,
 ) (accessdoor.FileAccess, error) {
 	if route.Redeem == accessdoor.FileRedeemRemote {
-		if route.Dir || r.dial == nil {
+		if r.dial == nil {
 			return accessdoor.FileAccess{}, errors.New("link: remote file route unavailable")
 		}
 		conn, err := r.dial(ctx)
@@ -141,44 +133,24 @@ func (r *deviceFileRedeemer) redeemFileRoute(
 	if route.Redeem != accessdoor.FileRedeemLocal {
 		return accessdoor.FileAccess{}, errors.New("link: unknown file redemption route")
 	}
-	if r.control == nil || r.files == nil {
+	if r.files == nil || route.Path == "" {
 		return accessdoor.FileAccess{}, errors.New("link: file route unavailable")
 	}
-	reply, err := r.control.ResolveCoord(ctx, route.Token)
-	if err != nil {
-		return accessdoor.FileAccess{}, err
-	}
-	if !reply.OK {
-		return accessdoor.FileAccess{}, fileRouteErr("resolve coord: %s", reply.Reason)
-	}
-	if reply.Dir {
-		root, err := r.files.OpenDir(reply.Coord)
-		if err != nil {
-			return accessdoor.FileAccess{}, err
-		}
-		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Dir: root}}, nil
-	}
-	switch reply.Mode {
+	switch route.Mode {
 	case access.OpRead:
-		handle, err := r.files.OpenRead(reply.Coord)
+		handle, err := r.files.OpenRead(route.Path)
 		if err != nil {
 			return accessdoor.FileAccess{}, err
 		}
 		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Read: handle}}, nil
 	case access.OpWrite:
-		handle, err := r.files.OpenWrite(reply.Coord)
+		handle, err := r.files.OpenWrite(route.Path)
 		if err != nil {
 			return accessdoor.FileAccess{}, err
 		}
-		if reply.ReservationID != "" {
-			handle = &deviceCommittingWrite{
-				WriteHandle: handle, control: r.control, files: r.files,
-				reservationID: reply.ReservationID, ticket: route.Token, coord: reply.Coord,
-			}
-		}
 		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Write: handle}}, nil
 	default:
-		return accessdoor.FileAccess{}, fileRouteErr("unknown mode %q", reply.Mode)
+		return accessdoor.FileAccess{}, fileRouteErr("unknown mode %q", route.Mode)
 	}
 }
 
@@ -202,36 +174,6 @@ func mapExchangeError(err error) error {
 		return accessdoor.NewHostOfflineError(terminal.Detail)
 	}
 	return err
-}
-
-type deviceCommittingWrite struct {
-	accessdoor.WriteHandle
-	control       DeviceLaneControl
-	files         LocalFileOpener
-	reservationID string
-	ticket        string
-	coord         string
-}
-
-func (h *deviceCommittingWrite) Commit() error {
-	if err := h.WriteHandle.Commit(); err != nil {
-		return err
-	}
-	reply, err := h.control.SendCommitted(context.Background(), h.reservationID, h.ticket)
-	if err != nil {
-		return fmt.Errorf("link: committed outcome unknown: %w", err)
-	}
-	if reply.Reason != "" && !reply.Lost {
-		return errors.New(reply.Reason)
-	}
-	if !reply.Found {
-		return errors.New("link: create completion identity not found")
-	}
-	if reply.Lost {
-		_ = h.files.ReclaimCoord(h.coord)
-		return errors.New("link: create reservation lost")
-	}
-	return nil
 }
 
 type DeviceActorStream struct {

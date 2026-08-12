@@ -215,8 +215,8 @@ func TestClosedWireVocabularyRejectsSmuggledPayloads(t *testing.T) {
 		t.Fatal("compartment plan named an empty channel")
 	}
 	if err := (LaneFrame{
-		Kind: LaneAllocRequest, RequestID: "outer",
-		AllocRequest: &AllocRequest{RequestID: "inner", Coord: "coord"},
+		Kind: LaneFileRequest, RequestID: "outer",
+		FileRequest: &FileRequest{RequestID: "inner", Op: FileStat, Path: "a"},
 	}).Validate(); err == nil {
 		t.Fatal("lane frame accepted mismatched correlation ids")
 	}
@@ -225,21 +225,11 @@ func TestClosedWireVocabularyRejectsSmuggledPayloads(t *testing.T) {
 	}).Validate(); err == nil {
 		t.Fatal("plan_poke accepted an unrelated payload")
 	}
-	// "It succeeded" and "it was never attempted" are mutually exclusive, and
-	// the home acts on them in opposite directions — retry versus land. A frame
-	// asserting both would let one of the two be silently dropped by whichever
-	// side the reader happens to check first.
 	if err := (LaneFrame{
-		Kind: LaneAllocReply, RequestID: "r",
-		AllocReply: &AllocReply{RequestID: "r", OK: true, NotReady: true},
+		Kind: LaneFileReply, RequestID: "r",
+		FileReply: &FileReply{RequestID: "r", OK: false},
 	}).Validate(); err == nil {
-		t.Fatal("alloc_reply claimed success and not-attempted at once")
-	}
-	if err := (LaneFrame{
-		Kind: LaneReclaimReply, RequestID: "r",
-		ReclaimReply: &ReclaimReply{RequestID: "r", OK: true, NotReady: true},
-	}).Validate(); err == nil {
-		t.Fatal("reclaim_reply claimed success and not-attempted at once")
+		t.Fatal("failed file reply omitted its reason")
 	}
 }
 

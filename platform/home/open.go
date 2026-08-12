@@ -141,22 +141,18 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// the capability bundles and the remote ingress, and nothing else. They are
 	// locals for the same reason cs is — a door kept on Home is a door every
 	// method in this package can knock on.
-	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
+	access, err := accessdoor.NewAssembly(accessdoor.Deps{
 		Registry:        cs.Assembly.Resources,
 		Drivers:         accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
 		Authority:       h.actors,
 		State:           cs.Assembly.State,
 		ChannelID:       cfg.ChannelID,
 		StorageMounts:   daemonStorageMounts{routes: cfg.DaemonRoutes, bindings: cfg.RegistryBindings, directory: cfg.DeviceDirectory, chID: cfg.ChannelID},
-		StorageControl:  daemonStorageControl{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
+		Files:           daemonFiles{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
 		TransferControl: daemonTransferControl{issuer: cfg.DataPlaneIssuer, chID: cfg.ChannelID},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build access door: %w", err)
-	}
-	h.outbox = resourceOutbox{
-		ResourceOutbox: cs.Assembly.Resources,
-		completion:     completion,
 	}
 	h.minter, h.admittedWriter, err = harness.New(harness.Deps{
 		ChannelID: cfg.ChannelID, Log: cs.Log, Presence: h.actors,
@@ -307,9 +303,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.sweepSubjectSlots(ctx)
 
-	storageAuthority := homeStorageHostControl{
-		outbox: h.outbox, timeout: cfg.ReservationTimeout, logger: logger,
-	}
 	h.daemonMembrane = platform.DaemonMembrane{
 		Ingress:         remoteIngress,
 		AuthorizeAttach: h.actors.AuthorizeAttach,
@@ -326,7 +319,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		},
 		ObserveDown:   h.presenceFold.OnRemoteDown,
 		CancelRequest: h.handleCancelUpstream,
-		Storage:       storageAuthority,
 		Plan:          h.planForDaemon,
 		IsBound: func(ctx context.Context, daemonID string) (bool, error) {
 			return h.registryBindings.IsBound(ctx, h.channelID, daemonID)

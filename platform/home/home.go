@@ -20,7 +20,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
-	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
@@ -50,7 +49,6 @@ type Config struct {
 	CompositionResolver  CompositionResolver
 	IntroductionResolver IntroductionResolver
 	Clock                schedule.Clock
-	ReservationTimeout   time.Duration
 	DaemonRoutes         platform.DaemonRoutes
 	DataPlaneIssuer      dataplane.Issuer
 	DeviceDirectory      DeviceDirectory
@@ -113,7 +111,6 @@ type Home struct {
 	// goes to timer fire and nowhere else. Home writes through neither.
 	minter         harness.Minter
 	admittedWriter harness.AdmittedWriter
-	outbox         resourcespec.ResourceOutbox
 	stateHandles   accessdoor.StateHandleResolver
 	engine         *schedule.Engine
 

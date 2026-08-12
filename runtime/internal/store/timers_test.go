@@ -504,7 +504,7 @@ func TestTimer_DeregisterLeavesAuthorTimersInert(t *testing.T) {
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t2", AuthorID: "actor:a", FireAt: 2000, Type: "wake", CreatedAt: 1})
 	mustInsertActor(t, f.reg, "actor:b")
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t3", AuthorID: "actor:b", FireAt: 1000, Type: "wake", CreatedAt: 1})
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource")); err != nil {
+	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", []byte("resource")); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 

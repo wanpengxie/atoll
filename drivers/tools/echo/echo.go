@@ -284,7 +284,7 @@ func handleFileCreate(sys actorbase.Sys, msg actorbase.Msg) {
 	if !ok {
 		return
 	}
-	fa, out, err := sys.Resource().CreateFile(resource.ResourceID(payload.Address), false, true)
+	fa, out, err := sys.Resource().CreateFile(resource.ResourceID(payload.Address), true)
 	if err != nil {
 		failFile(sys, msg, err)
 		return

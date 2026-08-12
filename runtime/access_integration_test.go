@@ -118,78 +118,15 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	expectBytes(t, "E read value", out, v1)
 }
 
-func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
-	ctx := context.Background()
-	cs := openAccessChannel(t)
-	record, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
-		Kind: actor.KindHuman, Principal: "channel-owner",
-		Definition: storespec.ActorDefinition{Class: "human"},
-		Placement:  storespec.NewServerPlacement(), CreatedAt: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Owner-ness is a door judgement over the genesis pointer, so the fixture
-	// names the owner explicitly rather than reading a bit off the record.
-	cs.markOwner(record.ID)
-	owner := cs.Access.MintAuthority(identityAuthority{id: record.ID})
-	const rid resource.ResourceID = "file:stranded"
-	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "orphan-coord"); err != nil {
-		t.Fatal(err)
-	}
-	// The stranded row was created by the system actor — the owner is NOT its
-	// creator, so this delete goes through PM-D3's owner-root 兜底 half, the
-	// exact authority that makes a stranded row a removable end state.
-	page, err := owner.List(ctx, accessdoor.ListQuery{})
-	if err != nil || len(page.Entries) != 1 || page.Entries[0].ID != rid {
-		t.Fatalf("owner List stranded = (%+v,%v)", page, err)
-	}
-	out, err := owner.Invoke(ctx, access.OpDelete, rid, nil)
-	expectAccepted(t, "owner deletes stranded resource", out, err)
-	page, err = owner.List(ctx, accessdoor.ListQuery{})
-	if err != nil || len(page.Entries) != 0 {
-		t.Fatalf("owner List after recovery = (%+v,%v)", page, err)
-	}
-	tombstones, err := cs.Outbox.ListTombstonesByDaemon(ctx, "retired-daemon")
-	if err != nil || len(tombstones) != 1 {
-		t.Fatalf("tombstones = (%+v,%v)", tombstones, err)
-	}
-	// The inert tombstone is an outbox obligation, not a namespace lock.
-	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "replacement-coord"); err != nil {
-		t.Fatalf("inert tombstone blocked fresh birth: %v", err)
-	}
-}
-
-func csResourcesCreateForTest(cs *testAccessChannel, id resource.ResourceID, daemonID, coord string) error {
-	return rawResourceRegistryForTest(cs).Create(context.Background(), id, resourcespec.KindFile, actor.SystemActorID, daemonID, coord, nil)
-}
-
-func rawResourceRegistryForTest(cs *testAccessChannel) resourcespec.Registry {
-	return cs.Assembly.Resources
-}
-
 // ---- helpers ----
 
 type testAccessChannel struct {
 	*ChannelStores
 	Access accessdoor.AccessMinter
-	Outbox resourcespec.ResourceOutbox
 	owner  *actor.ActorID
 }
 
 func (c *testAccessChannel) markOwner(id actor.ActorID) { *c.owner = id }
-
-type testResourceOutbox struct {
-	resourcespec.ResourceOutbox
-	completion accessdoor.ResourceCompletion
-}
-
-func (o testResourceOutbox) CommitReservation(
-	ctx context.Context,
-	id string,
-) (resourcespec.LandedResource, bool, error) {
-	return o.completion.CommitReservation(ctx, id)
-}
 
 func openAccessChannel(t *testing.T) *testAccessChannel {
 	t.Helper()
@@ -201,7 +138,7 @@ func openAccessChannel(t *testing.T) *testAccessChannel {
 	}
 	owner := new(actor.ActorID)
 	authority := testAccessAuthority{declared: cs.Actors, owner: owner}
-	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
+	access, err := accessdoor.NewAssembly(accessdoor.Deps{
 		Registry:  cs.Assembly.Resources,
 		Drivers:   accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
 		Authority: authority,
@@ -215,11 +152,7 @@ func openAccessChannel(t *testing.T) *testAccessChannel {
 	return &testAccessChannel{
 		ChannelStores: cs,
 		Access:        access,
-		Outbox: testResourceOutbox{
-			ResourceOutbox: cs.Assembly.Resources,
-			completion:     completion,
-		},
-		owner: owner,
+		owner:         owner,
 	}
 }
 

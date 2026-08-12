@@ -18,9 +18,8 @@ type ExchangeTicketHeader struct {
 }
 
 type ExchangeHostHeader struct {
-	Coord         string           `json:"coord"`
-	Mode          access.Operation `json:"mode"`
-	ReservationID string           `json:"reservation_id"`
+	Path string           `json:"path"`
+	Mode access.Operation `json:"mode"`
 }
 
 type ExchangeStatus struct {

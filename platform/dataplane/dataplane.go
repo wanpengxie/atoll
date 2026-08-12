@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,12 +23,11 @@ import (
 const TicketTTL = 10 * time.Minute
 
 var (
-	ErrClosed          = errors.New("dataplane: closed")
-	ErrNotBound        = errors.New("dataplane: host stream opener not bound")
-	ErrAlreadyBound    = errors.New("dataplane: host stream opener already bound")
-	ErrInvalidTicket   = errors.New("dataplane: invalid or expired ticket")
-	ErrRemoteDirectory = errors.New("dataplane: directory resources cannot be transferred remotely")
-	ErrHostOffline     = errors.New("dataplane: host offline")
+	ErrClosed        = errors.New("dataplane: closed")
+	ErrNotBound      = errors.New("dataplane: host stream opener not bound")
+	ErrAlreadyBound  = errors.New("dataplane: host stream opener already bound")
+	ErrInvalidTicket = errors.New("dataplane: invalid or expired ticket")
+	ErrHostOffline   = errors.New("dataplane: host offline")
 )
 
 type HostOfflineError struct{ Host string }
@@ -36,43 +37,24 @@ func (e *HostOfflineError) Unwrap() error { return ErrHostOffline }
 
 func NewHostOfflineError(host string) error { return &HostOfflineError{Host: host} }
 
-type Route string
-
-const (
-	RouteLocal  Route = "local"
-	RouteRemote Route = "remote"
-)
-
 type Ticket struct {
-	Token         string
-	ResourceID    resource.ResourceID
-	ChannelID     channel.ID
-	Mode          access.Operation
-	HostID        string
-	HostName      string
-	CallerHostID  string
-	Coord         string
-	Dir           bool
-	ReservationID string
-	Route         Route
-	Expires       time.Time
+	ChannelID channel.ID
+	Address   resource.ResourceID
+	Mode      access.Operation
+	HostID    string
+	Expires   time.Time
 }
 
 type IssueSpec struct {
-	ResourceID    resource.ResourceID
-	ChannelID     channel.ID
-	Mode          access.Operation
-	HostID        string
-	HostName      string
-	CallerHostID  string
-	Coord         string
-	Dir           bool
-	ReservationID string
+	Address   resource.ResourceID
+	ChannelID channel.ID
+	Mode      access.Operation
+	HostID    string
+	HostName  string
 }
 
 type Grant struct {
 	Ticket string
-	Route  Route
 }
 
 type Issuer interface {
@@ -81,7 +63,6 @@ type Issuer interface {
 
 type Redeemer interface {
 	Resolve(channel.ID, string) (Ticket, error)
-	ResolveLocal(string, channel.ID, string) (Ticket, error)
 	ServeExchange(context.Context, channel.ID, io.ReadWriteCloser)
 	ServeHTTP(context.Context, resource.ResourceID, string, access.Operation, io.Writer, io.Reader) error
 }
@@ -96,7 +77,6 @@ type Binder interface {
 type HostStreamOpener interface {
 	Online(string, channel.ID) bool
 	OpenHost(context.Context, Ticket) (io.ReadWriteCloser, error)
-	Complete(context.Context, Ticket) error
 }
 
 type plane struct {
@@ -145,8 +125,8 @@ func (b binder) UnbindHostStreamOpener() {
 }
 
 func (i issuer) Issue(_ context.Context, spec IssueSpec) (Grant, error) {
-	if spec.ResourceID == "" || spec.ChannelID == "" || spec.HostID == "" || spec.HostName == "" ||
-		spec.Coord == "" || (spec.Mode != access.OpRead && spec.Mode != access.OpWrite) {
+	if spec.Address == "" || spec.ChannelID == "" || spec.HostID == "" || spec.HostName == "" ||
+		(spec.Mode != access.OpRead && spec.Mode != access.OpWrite) {
 		return Grant{}, errors.New("dataplane: invalid issue spec")
 	}
 	i.p.mu.Lock()
@@ -160,34 +140,19 @@ func (i issuer) Issue(_ context.Context, spec IssueSpec) (Grant, error) {
 	if !i.p.opener.Online(spec.HostID, spec.ChannelID) {
 		return Grant{}, NewHostOfflineError(spec.HostName)
 	}
-	route := RouteRemote
-	if spec.CallerHostID != "" && spec.CallerHostID == spec.HostID {
-		route = RouteLocal
-	}
-	if spec.Dir && route != RouteLocal {
-		return Grant{}, ErrRemoteDirectory
-	}
 	now := i.p.now()
 	i.p.sweepLocked(now)
 	token := uuid.NewString()
-	i.p.tickets[token] = Ticket{
-		Token: token, ResourceID: spec.ResourceID, ChannelID: spec.ChannelID, Mode: spec.Mode,
-		HostID: spec.HostID, HostName: spec.HostName, CallerHostID: spec.CallerHostID,
-		Coord: spec.Coord, Dir: spec.Dir, ReservationID: spec.ReservationID,
-		Route: route, Expires: now.Add(TicketTTL),
-	}
-	return Grant{Ticket: token, Route: route}, nil
+	i.p.tickets[token] = Ticket{Address: spec.Address, ChannelID: spec.ChannelID, Mode: spec.Mode,
+		HostID: spec.HostID, Expires: now.Add(TicketTTL)}
+	return Grant{Ticket: token}, nil
 }
 
 func (r redeemer) Resolve(ch channel.ID, token string) (Ticket, error) {
 	return r.p.resolve(ch, token, "")
 }
 
-func (r redeemer) ResolveLocal(hostID string, ch channel.ID, token string) (Ticket, error) {
-	return r.p.resolve(ch, token, hostID)
-}
-
-func (p *plane) resolve(ch channel.ID, token, localHost string) (Ticket, error) {
+func (p *plane) resolve(ch channel.ID, token, _ string) (Ticket, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -195,8 +160,7 @@ func (p *plane) resolve(ch channel.ID, token, localHost string) (Ticket, error) 
 	}
 	now := p.now()
 	ticket, ok := p.tickets[token]
-	if !ok || ticket.ChannelID != ch || !now.Before(ticket.Expires) ||
-		(localHost != "" && (ticket.HostID != localHost || ticket.Route != RouteLocal)) {
+	if !ok || ticket.ChannelID != ch || !now.Before(ticket.Expires) {
 		if ok && !now.Before(ticket.Expires) {
 			delete(p.tickets, token)
 		}
@@ -232,9 +196,17 @@ func (p *plane) openerFor(ticket Ticket) (HostStreamOpener, error) {
 		return nil, ErrNotBound
 	}
 	if !p.opener.Online(ticket.HostID, ticket.ChannelID) {
-		return nil, NewHostOfflineError(ticket.HostName)
+		return nil, NewHostOfflineError(ticketHost(ticket))
 	}
 	return p.opener, nil
+}
+
+func ticketHost(ticket Ticket) string {
+	u, err := url.Parse(string(ticket.Address))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(u.Host)
 }
 
 func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.ReadWriteCloser) {
@@ -267,7 +239,7 @@ func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.Re
 	opener, err := r.p.openerFor(ticket)
 	if err != nil {
 		if errors.Is(err, ErrHostOffline) {
-			_ = link.WriteExchangeControl(caller, link.ExchangeStatus{OK: false, Code: "host_offline", Detail: ticket.HostName})
+			_ = link.WriteExchangeControl(caller, link.ExchangeStatus{OK: false, Code: "host_offline", Detail: ticketHost(ticket)})
 			return
 		}
 		fail(errorCode(err), err)
@@ -276,7 +248,7 @@ func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.Re
 	host, err := opener.OpenHost(ctx, ticket)
 	if err != nil {
 		if errors.Is(err, ErrHostOffline) {
-			_ = link.WriteExchangeControl(caller, link.ExchangeStatus{OK: false, Code: "host_offline", Detail: ticket.HostName})
+			_ = link.WriteExchangeControl(caller, link.ExchangeStatus{OK: false, Code: "host_offline", Detail: ticketHost(ticket)})
 			return
 		}
 		fail(errorCode(err), err)
@@ -314,13 +286,6 @@ func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.Re
 			status = link.ExchangeStatus{OK: false, Code: "transfer_failed", Detail: err.Error()}
 		} else if status.OK && !segmentEnded.Load() {
 			status = link.ExchangeStatus{OK: false, Code: "protocol_error", Detail: "host sent success before the byte-segment terminator"}
-		} else if status.OK && ticket.ReservationID != "" {
-			completionTicket, resolveErr := r.Resolve(ticket.ChannelID, head.Ticket)
-			if resolveErr != nil {
-				status = link.ExchangeStatus{OK: false, Code: "commit_failed", Detail: resolveErr.Error()}
-			} else if completeErr := opener.Complete(ctx, completionTicket); completeErr != nil {
-				status = link.ExchangeStatus{OK: false, Code: "commit_failed", Detail: completeErr.Error()}
-			}
 		}
 		if writeErr := link.WriteExchangeControl(caller, status); err == nil {
 			err = writeErr
@@ -350,7 +315,7 @@ func (r redeemer) ServeHTTP(ctx context.Context, address resource.ResourceID, to
 	if err != nil {
 		return err
 	}
-	if ticket.ResourceID != address || ticket.Mode != mode || ticket.Dir {
+	if ticket.Address != address || ticket.Mode != mode {
 		return ErrInvalidTicket
 	}
 	opener, err := r.p.openerFor(ticket)
@@ -401,13 +366,6 @@ func (r redeemer) ServeHTTP(ctx context.Context, address resource.ResourceID, to
 	}
 	if writeErr != nil {
 		return writeErr
-	}
-	if ticket.ReservationID != "" {
-		completionTicket, err := r.p.resolveAny(token)
-		if err != nil {
-			return err
-		}
-		return opener.Complete(ctx, completionTicket)
 	}
 	return nil
 }

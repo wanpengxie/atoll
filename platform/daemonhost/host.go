@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1365,20 +1367,39 @@ func (h *Host) currentLane(daemonID string, chID channel.ID) *serverLane {
 	return carrier.lanes[chID]
 }
 
-func (h *Host) SendAlloc(ctx context.Context, daemonID, chID, coord string, dir bool) error {
+func (h *Host) file(ctx context.Context, daemonID, chID, op, path string) (link.FileReply, error) {
 	lane := h.currentLane(daemonID, channel.ID(chID))
 	if lane == nil {
-		return ErrLaneUnavailable
+		return link.FileReply{}, ErrLaneUnavailable
 	}
-	return lane.alloc(ctx, coord, dir)
+	return lane.file(ctx, op, path)
 }
 
-func (h *Host) SendReclaim(ctx context.Context, daemonID, chID, coord string) error {
-	lane := h.currentLane(daemonID, channel.ID(chID))
-	if lane == nil {
-		return ErrLaneUnavailable
+func (h *Host) FileCreate(ctx context.Context, daemonID, chID, path string) error {
+	_, err := h.file(ctx, daemonID, chID, link.FileCreate, path)
+	return err
+}
+func (h *Host) FileDelete(ctx context.Context, daemonID, chID, path string) error {
+	_, err := h.file(ctx, daemonID, chID, link.FileDelete, path)
+	return err
+}
+func (h *Host) FileStat(ctx context.Context, daemonID, chID, path string) (platform.DaemonFileInfo, bool, error) {
+	reply, err := h.file(ctx, daemonID, chID, link.FileStat, path)
+	if err != nil || !reply.Found || len(reply.Entries) == 0 {
+		return platform.DaemonFileInfo{}, reply.Found, err
 	}
-	return lane.reclaim(ctx, coord)
+	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, Size: reply.Entries[0].Size}, true, nil
+}
+func (h *Host) FileList(ctx context.Context, daemonID, chID, path string) ([]platform.DaemonFileInfo, error) {
+	reply, err := h.file(ctx, daemonID, chID, link.FileList, path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]platform.DaemonFileInfo, 0, len(reply.Entries))
+	for _, row := range reply.Entries {
+		out = append(out, platform.DaemonFileInfo{Path: row.Path, Size: row.Size})
+	}
+	return out, nil
 }
 
 func (h *Host) Online(daemonID string, chID channel.ID) bool {
@@ -1388,49 +1409,33 @@ func (h *Host) Online(daemonID string, chID channel.ID) bool {
 func (h *Host) OpenHost(ctx context.Context, ticket dataplane.Ticket) (io.ReadWriteCloser, error) {
 	lane := h.currentLane(ticket.HostID, ticket.ChannelID)
 	if lane == nil {
-		return nil, dataplane.NewHostOfflineError(ticket.HostName)
+		return nil, dataplane.ErrHostOffline
 	}
 	conn, err := lane.carrier.wire.OpenExchange(ctx, ticket.ChannelID, lane.stream.Gen)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, dataplane.NewHostOfflineError(ticket.HostName)
+		return nil, dataplane.ErrHostOffline
 	}
 	cleanup, ok := lane.trackExchange(conn)
 	if !ok {
 		_ = conn.Close()
-		return nil, dataplane.NewHostOfflineError(ticket.HostName)
+		return nil, dataplane.ErrHostOffline
 	}
 	tracked := &trackedExchange{ReadWriteCloser: conn, cleanup: cleanup}
+	address, err := url.Parse(string(ticket.Address))
+	if err != nil || address.Path == "" {
+		_ = tracked.Close()
+		return nil, errors.New("daemonhost: malformed file address")
+	}
 	if err := link.WriteExchangeControl(tracked, link.ExchangeHostHeader{
-		Coord: ticket.Coord, Mode: ticket.Mode, ReservationID: ticket.ReservationID,
+		Path: strings.TrimPrefix(address.Path, "/"), Mode: ticket.Mode,
 	}); err != nil {
 		_ = tracked.Close()
 		return nil, err
 	}
 	return tracked, nil
-}
-
-func (h *Host) Complete(ctx context.Context, ticket dataplane.Ticket) error {
-	lane := h.currentLane(ticket.HostID, ticket.ChannelID)
-	if lane == nil || lane.membrane.bundle.Storage == nil {
-		return dataplane.NewHostOfflineError(ticket.HostName)
-	}
-	found, lost, err := lane.membrane.bundle.Storage.Committed(ctx, ticket.HostID, platform.StorageCommitExpectation{
-		ResourceID: string(ticket.ResourceID), DaemonID: ticket.HostID,
-		Coord: ticket.Coord, ReservationID: ticket.ReservationID,
-	})
-	if err != nil {
-		return err
-	}
-	if lost {
-		return errors.New("daemonhost: create reservation lost")
-	}
-	if !found {
-		return errors.New("daemonhost: create completion identity not found")
-	}
-	return nil
 }
 
 type trackedExchange struct {

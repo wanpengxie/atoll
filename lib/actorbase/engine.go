@@ -828,11 +828,11 @@ func (r resourceAdapter) Open(id resource.ResourceID, mode access.Operation) (ac
 	return r.h.Open(r.ctx(), id, mode)
 }
 
-func (r resourceAdapter) CreateFile(id resource.ResourceID, dir bool, withContent bool) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+func (r resourceAdapter) CreateFile(id resource.ResourceID, withContent bool) (accessdoor.FileAccess, accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
 	}
-	out, err := r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindFile, Dir: dir, WithContent: withContent}, nil)
+	out, err := r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindFile, WithContent: withContent}, nil)
 	if err != nil || !withContent || !out.Accepted() || out.Route == nil {
 		return accessdoor.FileAccess{}, out, err
 	}
@@ -840,11 +840,11 @@ func (r resourceAdapter) CreateFile(id resource.ResourceID, dir bool, withConten
 	return fa, out, rerr
 }
 
-func (r resourceAdapter) CreateFileDecided(id resource.ResourceID, dir bool, withContent bool) (accessdoor.Outcome, error) {
+func (r resourceAdapter) CreateFileDecided(id resource.ResourceID, withContent bool) (accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindFile, Dir: dir, WithContent: withContent}, nil)
+	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindFile, WithContent: withContent}, nil)
 }
 
 type stateAdapter struct {

@@ -182,10 +182,8 @@ type compartment struct {
 	resources     CompartmentResources
 	host          *actorhost.HostSupervisor
 	outbound      *DaemonOutbound
-	storage       *storageHostForwarder
 	runtimeCtx    context.Context
 	cancel        context.CancelFunc
-	storageDone   chan struct{}
 	buildDone     chan struct{}
 	stopBuild     chan struct{}
 	stopOnce      sync.Once
@@ -451,18 +449,18 @@ func serveHostExchange(conn io.ReadWriteCloser, lane *clientLane) {
 		_ = link.WriteExchangeControl(conn, link.ExchangeStatus{OK: false, Code: code, Detail: detail})
 	}
 	var head link.ExchangeHostHeader
-	if err := link.ReadExchangeControl(conn, &head); err != nil || head.Coord == "" {
+	if err := link.ReadExchangeControl(conn, &head); err != nil || head.Path == "" {
 		fail("protocol_error", err)
 		return
 	}
-	files, _, bound := lane.boundResources()
+	files, bound := lane.boundResources()
 	if !bound || files == nil {
 		fail("storage_unavailable", errors.New("compute: storage unavailable"))
 		return
 	}
 	switch head.Mode {
 	case access.OpRead:
-		handle, err := files.OpenRead(head.Coord)
+		handle, err := files.OpenRead(head.Path)
 		if err != nil {
 			fail("open_failed", err)
 			return
@@ -473,7 +471,7 @@ func serveHostExchange(conn io.ReadWriteCloser, lane *clientLane) {
 		}
 		_ = link.WriteExchangeControl(conn, link.ExchangeStatus{OK: true})
 	case access.OpWrite:
-		handle, err := files.OpenWrite(head.Coord)
+		handle, err := files.OpenWrite(head.Path)
 		if err != nil {
 			fail("open_failed", err)
 			return
@@ -649,15 +647,11 @@ func (m *compartmentManager) carrierDown(exact *link.ClientCarrier) {
 		// next carrier's generations are minted by a different lane series and
 		// are not comparable with this one, so the coordinate starts over.
 		cell.latestLaneGen = ""
-		storage := cell.storage
 		cell.mu.Unlock()
 		// Same ownership transfer as condemn: nulling cell.lane disarms
 		// laneDown's exact-lane guard, so the forwarder unbind happens here —
 		// the disconnect window skips quietly instead of failing every pump
 		// pass through the dead lane until the next carrier binds.
-		if lane != nil && storage != nil {
-			storage.Rebind(nil)
-		}
 		if lane != nil {
 			lane.retireLogical()
 		}
@@ -879,11 +873,11 @@ func (c *compartment) build() (retErr error) {
 	root := c.manager.root
 	daemonID := c.manager.daemonID
 	c.manager.mu.Unlock()
-	workspaceRoot := filepath.Join(root, "workspace")
-	if err := ensureDirectory(workspaceRoot); err != nil {
+	channelsRoot := filepath.Join(root, "channels")
+	if err := ensureDirectory(channelsRoot); err != nil {
 		return err
 	}
-	workspace, err := coordinatePath(workspaceRoot, c.chID)
+	workspace, err := coordinatePath(channelsRoot, c.chID)
 	if err != nil {
 		return err
 	}
@@ -920,8 +914,6 @@ func (c *compartment) build() (retErr error) {
 		}
 		return errors.Join(err, rollbackErr)
 	}
-	storage := newStorageHostForwarder(
-		resources.StorageHost, c.manager.logger, c.manager.cfg.ScrubberInterval)
 	c.mu.Lock()
 	if c.closing || c.condemned {
 		c.mu.Unlock()
@@ -932,16 +924,10 @@ func (c *compartment) build() (retErr error) {
 		return errors.Join(errors.New("compute: compartment closed during build"), rollbackErr)
 	}
 	c.resources, c.runtimeCtx, c.cancel = resources, runtimeCtx, cancel
-	c.host, c.outbound, c.storage = host, outbound, storage
+	c.host, c.outbound = host, outbound
 	lane := c.lane
 	c.state, c.reason = "ready", ""
-	storageDone := make(chan struct{})
-	c.storageDone = storageDone
 	c.mu.Unlock()
-	go func() {
-		defer close(storageDone)
-		storage.pump(runtimeCtx)
-	}()
 	c.declare("ready", "")
 	if lane != nil {
 		c.bindLane(lane)
@@ -1018,15 +1004,11 @@ func (c *compartment) condemn(reason string) {
 	c.lane = nil
 	pending := c.pending
 	c.pending = nil
-	storage := c.storage
 	c.mu.Unlock()
 	// Clearing c.lane above is exactly what makes laneDown's exact-lane guard
 	// skip, so the forwarder unbind laneDown owns falls to this path: a
 	// condemned coordinate's forwarder must not keep pulling through a dead
 	// lane it also keeps alive.
-	if lane != nil && storage != nil {
-		storage.Rebind(nil)
-	}
 	if lane != nil {
 		lane.retireLogical()
 	}
@@ -1055,13 +1037,12 @@ func (c *compartment) bindLane(lane *clientLane) {
 		c.mu.Unlock()
 		return
 	}
-	host, outbound, storage := c.host, c.outbound, c.storage
+	host, outbound := c.host, c.outbound
 	resources := c.resources
 	c.mu.Unlock()
 	lane.setHost(host)
 	lane.mu.Lock()
 	lane.local = resources.LocalFileOpener
-	lane.storage = resources.StorageHost
 	lane.outbound = outbound
 	lane.bound = true
 	lane.mu.Unlock()
@@ -1085,7 +1066,6 @@ func (c *compartment) bindLane(lane *clientLane) {
 		lane.retireLogical()
 		return
 	}
-	storage.Rebind(lane)
 	host.Wake()
 	outbound.Wake()
 }
@@ -1102,7 +1082,6 @@ func (c *compartment) laneDown(exact *clientLane) {
 		return
 	}
 	c.lane = nil
-	storage := c.storage
 	c.mu.Unlock()
 	// The forwarder must not keep pulling through the retired lane: unbinding
 	// lets the pump skip quietly until the next lane binds, instead of failing
@@ -1110,9 +1089,6 @@ func (c *compartment) laneDown(exact *clientLane) {
 	// guard above is what makes this safe against a replacement: a newer
 	// lane's binding never gets overwritten, because its predecessor's
 	// laneDown already returned at the guard.
-	if storage != nil {
-		storage.Rebind(nil)
-	}
 }
 
 // declare records this compartment's state locally and sends nothing. The
@@ -1156,7 +1132,6 @@ func (c *compartment) close() {
 	c.mu.Lock()
 	outbound, host, cancel := c.outbound, c.host, c.cancel
 	resources := c.resources
-	storageDone := c.storageDone
 	lane := c.lane
 	c.lane = nil
 	c.mu.Unlock()
@@ -1173,13 +1148,6 @@ func (c *compartment) close() {
 	}
 	if cancel != nil {
 		cancel()
-	}
-	if storageDone != nil {
-		select {
-		case <-storageDone:
-		case <-ctx.Done():
-			closeErr = errors.Join(closeErr, errors.New("compute: storage pump join timeout"))
-		}
 	}
 	if resources.Close != nil {
 		closeErr = errors.Join(closeErr,
@@ -1277,7 +1245,6 @@ type clientLane struct {
 	// standing verdict, while not-yet-bound is the absence of one.
 	bound    bool
 	local    LocalFileOpener
-	storage  StorageHost
 	outbound *DaemonOutbound
 }
 
@@ -1293,7 +1260,7 @@ func (s *laneSession) OpenActorStream(
 	s.lane.mu.Unlock()
 	client := &link.ClientActorLane{
 		Carrier: s.lane.carrier, Lane: s.lane.stream, Host: host,
-		Control: s.lane, Files: files, DialExchange: s.lane.openExchange,
+		Files: files, DialExchange: s.lane.openExchange,
 		Logger: s.lane.manager.logger,
 	}
 	stream, err := client.OpenActorStream(ctx, id, key)
@@ -1388,10 +1355,10 @@ func (l *clientLane) setHost(host *actorhost.HostSupervisor) {
 // afterwards (immediately for an already-built compartment, only after the
 // build succeeds for a new one) — so every read from the reader's side is
 // concurrent with that write and must take the lane's lock.
-func (l *clientLane) boundResources() (LocalFileOpener, StorageHost, bool) {
+func (l *clientLane) boundResources() (LocalFileOpener, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.local, l.storage, l.bound
+	return l.local, l.bound
 }
 func (l *clientLane) setRetire(fn func(*clientLane)) {
 	l.mu.Lock()
@@ -1480,9 +1447,7 @@ func (l *clientLane) readLoop() {
 			return
 		}
 		switch frame.Kind {
-		case link.LanePlanReply, link.LaneCommittedReply,
-			link.LaneReclaimAckReply, link.LaneReconcilePullReply,
-			link.LaneResolveCoordReply:
+		case link.LanePlanReply, link.LaneFileReply:
 			l.deliver(frame.RequestID, frame)
 		case link.LanePlanPoke:
 			select {
@@ -1526,7 +1491,7 @@ func (l *clientLane) openStorage() {
 }
 
 // storageLoop executes the server's storage instructions. This is the one
-// reader in the device that legitimately blocks: Alloc and ReclaimCoord end in
+// reader in the device that legitimately blocks: file requests end in
 // filesystem syscalls no context can recall. That is exactly why they ride
 // their own stream — a dead disk freezes this loop and nothing else; plan
 // replies and pokes keep flowing on the lane — and why every operation is
@@ -1547,61 +1512,50 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 			return
 		}
 		switch frame.Kind {
-		case link.LaneAllocRequest:
-			request := frame.AllocRequest
-			reply := &link.AllocReply{RequestID: frame.RequestID}
-			_, storage, bound := l.boundResources()
-			switch {
-			case request == nil:
-				reply.Reason = "compute: malformed alloc request"
-			case !bound:
-				// Nothing was attempted: this lane has no compartment behind it
-				// yet. Answering !OK alone would report a refusal this device
-				// never made.
-				reply.NotReady = true
-				reply.Reason = "compute: compartment not built yet"
-			case storage == nil:
-				reply.Reason = "compute: storage unavailable"
-			default:
-				mark := l.manager.beginStorageOp(string(stream.Channel), "alloc", request.Coord)
-				err := storage.Alloc(request.Coord, request.Dir)
-				l.manager.endStorageOp(mark)
-				if err != nil {
-					reply.Reason = err.Error()
-				} else {
-					reply.OK = true
+		case link.LaneFileRequest:
+			request := frame.FileRequest
+			reply := &link.FileReply{RequestID: frame.RequestID}
+			files, bound := l.boundResources()
+			if request == nil {
+				reply.Reason = "compute: malformed file request"
+			} else if !bound || files == nil {
+				reply.Reason = "compute: channel files unavailable"
+			} else {
+				mark := l.manager.beginStorageOp(string(stream.Channel), request.Op, request.Path)
+				switch request.Op {
+				case link.FileCreate:
+					reply.OK = files.Create(request.Path) == nil
+					if !reply.OK {
+						reply.Reason = "compute: create failed"
+					}
+				case link.FileDelete:
+					err := files.Delete(request.Path)
+					reply.OK = err == nil
+					if err != nil {
+						reply.Reason = err.Error()
+					}
+				case link.FileStat:
+					info, found, err := files.Stat(request.Path)
+					reply.OK, reply.Found = err == nil, found
+					if err != nil {
+						reply.Reason = err.Error()
+					} else if found {
+						reply.Entries = []link.FileEntry{{Path: info.Path, Size: info.Size}}
+					}
+				case link.FileList:
+					rows, err := files.List(request.Path)
+					reply.OK = err == nil
+					if err != nil {
+						reply.Reason = err.Error()
+					} else {
+						for _, row := range rows {
+							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, Size: row.Size})
+						}
+					}
 				}
-			}
-			if stream.Send(link.LaneFrame{
-				Kind: link.LaneAllocReply, RequestID: frame.RequestID, AllocReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneReclaimRequest:
-			request := frame.ReclaimRequest
-			reply := &link.ReclaimReply{RequestID: frame.RequestID}
-			local, _, bound := l.boundResources()
-			switch {
-			case request == nil:
-				reply.Reason = "compute: malformed reclaim request"
-			case !bound:
-				reply.NotReady = true
-				reply.Reason = "compute: compartment not built yet"
-			case local == nil:
-				reply.Reason = "compute: storage unavailable"
-			default:
-				mark := l.manager.beginStorageOp(string(stream.Channel), "reclaim", request.Coord)
-				err := local.ReclaimCoord(request.Coord)
 				l.manager.endStorageOp(mark)
-				if err != nil {
-					reply.Reason = err.Error()
-				} else {
-					reply.OK = true
-				}
 			}
-			if stream.Send(link.LaneFrame{
-				Kind: link.LaneReclaimReply, RequestID: frame.RequestID, ReclaimReply: reply,
-			}) != nil {
+			if stream.Send(link.LaneFrame{Kind: link.LaneFileReply, RequestID: frame.RequestID, FileReply: reply}) != nil {
 				return
 			}
 		default:
@@ -1660,15 +1614,8 @@ func (l *clientLane) roundTrip(ctx context.Context, frame link.LaneFrame) (link.
 	}
 	id := uuid.NewString()
 	frame.RequestID = id
-	switch {
-	case frame.Committed != nil:
-		frame.Committed.RequestID = id
-	case frame.ReclaimAck != nil:
-		frame.ReclaimAck.RequestID = id
-	case frame.ReconcilePull != nil:
-		frame.ReconcilePull.RequestID = id
-	case frame.ResolveCoord != nil:
-		frame.ResolveCoord.RequestID = id
+	if frame.FileRequest != nil {
+		frame.FileRequest.RequestID = id
 	}
 	waiter := make(chan link.LaneFrame, 1)
 	l.mu.Lock()
@@ -1737,47 +1684,3 @@ func (l *clientLane) pullPlan(ctx context.Context) ([]actorhost.Desired, error) 
 	}
 	return desired, nil
 }
-
-func (l *clientLane) SendCommitted(ctx context.Context, reservationID, ticket string) (link.CommittedReply, error) {
-	reply, err := l.roundTrip(ctx, link.LaneFrame{
-		Kind: link.LaneCommitted, Committed: &link.Committed{ReservationID: reservationID, Ticket: ticket},
-	})
-	if err != nil || reply.CommittedReply == nil {
-		return link.CommittedReply{}, errors.Join(err, errors.New("compute: outcome unknown"))
-	}
-	return *reply.CommittedReply, nil
-}
-
-func (l *clientLane) ResolveCoord(ctx context.Context, token string) (link.ResolveCoordReply, error) {
-	reply, err := l.roundTrip(ctx, link.LaneFrame{
-		Kind:         link.LaneResolveCoord,
-		ResolveCoord: &link.ResolveCoordRequest{Token: token},
-	})
-	if err != nil || reply.ResolveCoordReply == nil {
-		return link.ResolveCoordReply{}, err
-	}
-	return *reply.ResolveCoordReply, nil
-}
-
-func (l *clientLane) SendReclaimAck(ctx context.Context, tombstoneID string) (link.ReclaimAckReply, error) {
-	reply, err := l.roundTrip(ctx, link.LaneFrame{
-		Kind: link.LaneReclaimAck, ReclaimAck: &link.ReclaimAck{TombstoneID: tombstoneID},
-	})
-	if err != nil || reply.ReclaimAckReply == nil {
-		return link.ReclaimAckReply{}, err
-	}
-	return *reply.ReclaimAckReply, nil
-}
-
-func (l *clientLane) SendReconcilePull(ctx context.Context, active []string) (link.ReconcilePullReply, error) {
-	reply, err := l.roundTrip(ctx, link.LaneFrame{
-		Kind: link.LaneReconcilePull, ReconcilePull: &link.ReconcilePull{ActiveCoords: active},
-	})
-	if err != nil || reply.ReconcilePullReply == nil {
-		return link.ReconcilePullReply{}, err
-	}
-	return *reply.ReconcilePullReply, nil
-}
-
-var _ storageControlClient = (*clientLane)(nil)
-var _ link.DeviceLaneControl = (*clientLane)(nil)

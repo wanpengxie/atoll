@@ -118,8 +118,7 @@ type accessResponse struct {
 	// Route carries a file-kind Invocation/Create's byte-access
 	// authorization product (期11 spec §5 item 0) — nil for every kv
 	// response and every non-accepted file response. Never bytes, never a
-	// coord (accessdoor.FileRoute's own doc) — only Local/Token/Mode/
-	// ReservationID, all plain wire-safe values.
+	// Only redemption, token, path, and mode cross this control envelope.
 	Route *accessdoor.FileRoute `json:"route,omitempty"`
 
 	Stat *accessStatRespFields `json:"stat,omitempty"`
@@ -591,7 +590,7 @@ func (h *remoteResourceHandle) Open(ctx context.Context, id resource.ResourceID,
 // Redeem satisfies accessdoor.FileOpener: turns an ALREADY-obtained
 // accepted FileRoute (e.g. from Create(with_content=true)'s own Outcome —
 // Open cannot re-derive it via Invoke since the row does not exist yet)
-// into a live FileAccess. The actual mechanics (ResolveCoord + local open)
+// into a live FileAccess. The actual mechanics (direct local open)
 // live on the exact client lane because they need its current-lane RPC
 // state (the control-RPC arm, the injected LocalFileOpener) this thin wrapper
 // does not itself hold.

@@ -10,8 +10,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 )
 
@@ -89,103 +87,7 @@ func (l *serverLane) readLoop() {
 			if l.stream.Send(link.PlanLaneReply(frame.RequestID, actors, err)) != nil {
 				return
 			}
-		case link.LaneCommitted:
-			request := frame.Committed
-			if request == nil || l.membrane.bundle.Storage == nil {
-				return
-			}
-			var expected platform.StorageCommitExpectation
-			if l.carrier.host.dataPlane != nil {
-				ticket, terr := l.carrier.host.dataPlane.ResolveLocal(l.carrier.daemonID, l.stream.Channel, request.Ticket)
-				if terr == nil && ticket.ReservationID == request.ReservationID {
-					expected = platform.StorageCommitExpectation{ResourceID: string(ticket.ResourceID), DaemonID: ticket.HostID, Coord: ticket.Coord, ReservationID: ticket.ReservationID}
-				}
-			}
-			found, lost, err := l.membrane.bundle.Storage.Committed(
-				l.carrier.host.ctx, l.carrier.daemonID, expected)
-			reply := &link.CommittedReply{RequestID: request.RequestID, Found: found, Lost: lost}
-			if err != nil {
-				reply.Reason = err.Error()
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneCommittedReply, RequestID: request.RequestID, CommittedReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneReclaimAck:
-			request := frame.ReclaimAck
-			if request == nil || l.membrane.bundle.Storage == nil {
-				return
-			}
-			found, err := l.membrane.bundle.Storage.ReclaimAck(
-				l.carrier.host.ctx, l.carrier.daemonID, request.TombstoneID)
-			reply := &link.ReclaimAckReply{RequestID: request.RequestID, Found: found}
-			if err != nil {
-				reply.Reason = err.Error()
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneReclaimAckReply, RequestID: request.RequestID, ReclaimAckReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneReconcilePull:
-			request := frame.ReconcilePull
-			if request == nil || l.membrane.bundle.Storage == nil {
-				return
-			}
-			resources, reservations, tombstones, err := l.membrane.bundle.Storage.ReconcilePull(
-				l.carrier.host.ctx, l.carrier.daemonID, request.ActiveCoords)
-			reply := &link.ReconcilePullReply{RequestID: request.RequestID}
-			for _, row := range resources {
-				reply.Resources = append(reply.Resources, link.ReconcileResource{Coord: row.Coord})
-			}
-			for _, row := range reservations {
-				reply.PendingReservations = append(reply.PendingReservations, link.ReconcileReservation{
-					ReservationID: row.ReservationID, Coord: row.Coord,
-				})
-			}
-			for _, row := range tombstones {
-				reply.PendingTombstones = append(reply.PendingTombstones, link.ReconcileTombstone{
-					TombstoneID: row.TombstoneID, Coord: row.Coord,
-				})
-			}
-			if err != nil {
-				reply.Reason = err.Error()
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneReconcilePullReply, RequestID: request.RequestID, ReconcilePullReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneResolveCoord:
-			request := frame.ResolveCoord
-			if request == nil {
-				return
-			}
-			var ticket dataplane.Ticket
-			var resolveErr error
-			if l.carrier.host.dataPlane == nil {
-				resolveErr = errors.New("daemonhost: dataplane unavailable")
-			} else {
-				ticket, resolveErr = l.carrier.host.dataPlane.ResolveLocal(l.carrier.daemonID, l.stream.Channel, request.Token)
-			}
-			reply := &link.ResolveCoordReply{
-				RequestID: request.RequestID, OK: resolveErr == nil,
-			}
-			if resolveErr == nil {
-				reply.Coord, reply.Mode = ticket.Coord, ticket.Mode
-				reply.ReservationID = ticket.ReservationID
-				reply.Dir = ticket.Dir
-			} else {
-				reply.Reason = resolveErr.Error()
-			}
-			if l.stream.Send(link.LaneFrame{
-				Kind: link.LaneResolveCoordReply, RequestID: request.RequestID,
-				ResolveCoordReply: reply,
-			}) != nil {
-				return
-			}
-		case link.LaneResolveCoordReply:
+		case link.LaneFileReply:
 			l.deliver(frame.RequestID, frame)
 		default:
 			// Alloc and reclaim replies belong on the storage sibling now; one
@@ -344,7 +246,7 @@ func (l *serverLane) storageLoop(stream *link.LaneStream) {
 			return
 		}
 		switch frame.Kind {
-		case link.LaneAllocReply, link.LaneReclaimReply:
+		case link.LaneFileReply:
 			l.deliver(frame.RequestID, frame)
 		default:
 			return
@@ -386,11 +288,8 @@ func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame)
 	}
 	id := uuid.NewString()
 	frame.RequestID = id
-	switch {
-	case frame.AllocRequest != nil:
-		frame.AllocRequest.RequestID = id
-	case frame.ReclaimRequest != nil:
-		frame.ReclaimRequest.RequestID = id
+	if frame.FileRequest != nil {
+		frame.FileRequest.RequestID = id
 	}
 	waiter := make(chan link.LaneFrame, 1)
 	l.mu.Lock()
@@ -404,7 +303,7 @@ func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame)
 		// Half-open pair: the lane is admitted but the device has not opened
 		// its storage sibling yet. Nothing was attempted, so the verdict is
 		// the same as an unbuilt compartment — retry later, not a refusal.
-		return link.LaneFrame{}, fmt.Errorf("%w: storage stream not yet open", platform.ErrDaemonNotReady)
+		return link.LaneFrame{}, ErrLaneUnavailable
 	}
 	l.pending[id] = waiter
 	l.mu.Unlock()
@@ -435,41 +334,18 @@ func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame)
 	}
 }
 
-func (l *serverLane) alloc(ctx context.Context, coord string, dir bool) error {
+func (l *serverLane) file(ctx context.Context, op, path string) (link.FileReply, error) {
 	reply, err := l.storageRoundTrip(ctx, link.LaneFrame{
-		Kind:         link.LaneAllocRequest,
-		AllocRequest: &link.AllocRequest{Coord: coord, Dir: dir},
+		Kind: link.LaneFileRequest, FileRequest: &link.FileRequest{Op: op, Path: path},
 	})
 	if err != nil {
-		return err
+		return link.FileReply{}, err
 	}
-	if reply.AllocReply == nil {
-		return errors.New("daemonhost: malformed alloc reply")
+	if reply.FileReply == nil {
+		return link.FileReply{}, errors.New("daemonhost: malformed file reply")
 	}
-	if reply.AllocReply.NotReady {
-		return fmt.Errorf("%w: %s", platform.ErrDaemonNotReady, reply.AllocReply.Reason)
+	if !reply.FileReply.OK {
+		return *reply.FileReply, errors.New(reply.FileReply.Reason)
 	}
-	if !reply.AllocReply.OK {
-		return errors.New(reply.AllocReply.Reason)
-	}
-	return nil
-}
-
-func (l *serverLane) reclaim(ctx context.Context, coord string) error {
-	reply, err := l.storageRoundTrip(ctx, link.LaneFrame{
-		Kind: link.LaneReclaimRequest, ReclaimRequest: &link.ReclaimRequest{Coord: coord},
-	})
-	if err != nil {
-		return err
-	}
-	if reply.ReclaimReply == nil {
-		return errors.New("daemonhost: malformed reclaim reply")
-	}
-	if reply.ReclaimReply.NotReady {
-		return fmt.Errorf("%w: %s", platform.ErrDaemonNotReady, reply.ReclaimReply.Reason)
-	}
-	if !reply.ReclaimReply.OK {
-		return errors.New(reply.ReclaimReply.Reason)
-	}
-	return nil
+	return *reply.FileReply, nil
 }

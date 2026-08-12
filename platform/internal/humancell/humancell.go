@@ -474,7 +474,7 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 	// --- write ops ---
 	case subjectgate.ResCreate:
 		if p.Address != "" {
-			out, err := rh.CreateFileDecided(resource.ResourceID(p.Address), p.Dir, p.WithContent)
+			out, err := rh.CreateFileDecided(resource.ResourceID(p.Address), p.WithContent)
 			return resourceOutcomeFrameFor(f, out, err)
 		}
 		out, err := rh.Create(rid, p.Args)

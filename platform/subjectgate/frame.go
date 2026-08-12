@@ -395,7 +395,6 @@ type ResourcePayload struct {
 	Ops         []string        `json:"ops,omitempty"`
 	Query       *ResourceQuery  `json:"query,omitempty"`
 	Address     string          `json:"address,omitempty"`
-	Dir         bool            `json:"dir,omitempty"`
 	WithContent bool            `json:"with_content,omitempty"`
 }
 

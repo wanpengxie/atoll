@@ -42,7 +42,6 @@ type Config struct {
 	AtollHome        string
 	Logger           *slog.Logger
 	BuildCompartment CompartmentBuilder
-	ScrubberInterval time.Duration
 	// OnAttached, when set, is called with the server-assigned daemon id after
 	// every ACCEPTED carrier attach (initial and reconnect alike, same id).
 	// This is the one moment the daemon learns which daemons row it IS — the

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -58,6 +59,10 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("PUT status=%d body=%s\ndaemon log:\n%s", resp.StatusCode, putBody, tailLog(daemonLog, 100))
+	}
+	physical := filepath.Join(h.root, "file-host", "daemons", deviceID, "channels", c0ChannelID, "e2e", "report.bin")
+	if onDisk, err := os.ReadFile(physical); err != nil || !bytes.Equal(onDisk, want) {
+		t.Fatalf("channel tree bytes=%d err=%v, want collaboration bytes=%d", len(onDisk), err, len(want))
 	}
 
 	opened := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
@@ -139,24 +144,6 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 		t.Fatalf("remote create bytes=%q", got)
 	}
 
-	directory := "daemon://storage-node/e2e/workspace"
-	ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "create", "address": directory, "dir": true})
-	for _, tc := range []struct {
-		name    string
-		msgType string
-		payload map[string]any
-	}{
-		{name: "read", msgType: "echo.file_read", payload: map[string]any{"address": directory}},
-		{name: "write", msgType: "echo.file_write", payload: map[string]any{"address": directory, "content": "must-not-land"}},
-	} {
-		t.Run("remote directory "+tc.name, func(t *testing.T) {
-			_, directoryFailure, err := ws.tryRequest(c0ChannelID, tc.msgType, actorID, tc.payload)
-			if err == nil || !strings.Contains(fmt.Sprint(directoryFailure), "directory resources cannot be transferred remotely") {
-				t.Fatalf("remote directory %s result=%v err=%v", tc.name, directoryFailure, err)
-			}
-		})
-	}
-
 	// Mint while A is online, then redeem only after it is gone.
 	preissued := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
 	preissuedTicket := stringField(t, preissued, "ticket")
@@ -226,6 +213,18 @@ func TestColocatedActorFileCreateReadWriteUsesLocalRedemption(t *testing.T) {
 	read = ws.request(c0ChannelID, "echo.file_read", actorID, map[string]any{"address": address})
 	if read["content"] != "rewritten-locally" || read["redeem"] != "local" {
 		t.Fatalf("colocated final read reply=%v", read)
+	}
+	channelRoot := filepath.Join(h.root, "colocated-node", "daemons", deviceID, "channels", c0ChannelID)
+	physical := filepath.Join(channelRoot, "e2e", "local.bin")
+	if got, err := os.ReadFile(physical); err != nil || string(got) != "rewritten-locally" {
+		t.Fatalf("agent workspace file=%q err=%v", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(channelRoot, "e2e", "from-bash.txt"), []byte("bash-visible"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read = ws.request(c0ChannelID, "echo.file_read", actorID, map[string]any{"address": "daemon://colocated-node/e2e/from-bash.txt"})
+	if read["content"] != "bash-visible" || read["redeem"] != "local" {
+		t.Fatalf("file written in agent workdir was not the collaboration file: %v", read)
 	}
 }
 
