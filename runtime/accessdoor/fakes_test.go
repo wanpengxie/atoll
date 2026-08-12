@@ -200,9 +200,8 @@ type fakeMembership struct {
 	err      error
 	calls    int
 
-	// lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement chain ①'s
-	// creator-affinity read). lookupCalls records every caller id Lookup was
-	// asked about.
+	// lookupHost/lookupFound/lookupErr model the caller's current daemon for
+	// local-versus-remote ticket routing. lookupCalls records every caller id.
 	lookupHost  string
 	lookupFound bool
 	lookupErr   error
@@ -257,9 +256,18 @@ type fakeStorageMounts struct {
 	calls  int
 }
 
-func (f *fakeStorageMounts) ListStorageDaemons(ctx context.Context, chID channel.ID) ([]StorageMount, error) {
+func (f *fakeStorageMounts) ResolveStorageDaemon(ctx context.Context, chID channel.ID, name string) (StorageMount, bool, error) {
 	f.calls++
-	return f.mounts, f.err
+	if f.err != nil {
+		return StorageMount{}, false, f.err
+	}
+	for _, mount := range f.mounts {
+		if mount.Name == name || (mount.Name == "" && mount.DaemonID == name) {
+			mount.Name = name
+			return mount, true, nil
+		}
+	}
+	return StorageMount{}, false, nil
 }
 
 // fakeStorageControl is a configurable StorageControl stub — records every
@@ -293,7 +301,7 @@ func (f *fakeStorageControl) ReclaimRequest(ctx context.Context, daemonID string
 }
 
 // fakeTransferControl is a configurable TransferControl stub (§5 item 0's file
-// byte-route ticket mint) — records every OpenTransfer call so a test can
+// byte-route ticket mint) — records every IssueTransfer call so a test can
 // assert the exact (targetDaemonID, coord, mode, reservationID) the door
 // routed.
 type fakeTransferControl struct {
@@ -303,18 +311,26 @@ type fakeTransferControl struct {
 }
 
 type openTransferCall struct {
+	resourceID     resource.ResourceID
 	targetDaemonID string
+	targetName     string
+	callerDaemonID string
 	coord          string
 	mode           access.Operation
 	reservationID  string
+	dir            bool
 }
 
-func (f *fakeTransferControl) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
-	f.calls = append(f.calls, openTransferCall{targetDaemonID: targetDaemonID, coord: coord, mode: mode, reservationID: reservationID})
+func (f *fakeTransferControl) IssueTransfer(ctx context.Context, resourceID resource.ResourceID, targetDaemonID, targetName, callerDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (string, FileRedeem, error) {
+	f.calls = append(f.calls, openTransferCall{resourceID: resourceID, targetDaemonID: targetDaemonID, targetName: targetName, callerDaemonID: callerDaemonID, coord: coord, mode: mode, reservationID: reservationID, dir: dir})
 	if f.err != nil {
-		return "", f.err
+		return "", "", f.err
 	}
-	return f.ticket, nil
+	redeem := FileRedeemRemote
+	if callerDaemonID == targetDaemonID {
+		redeem = FileRedeemLocal
+	}
+	return f.ticket, redeem, nil
 }
 
 // fakeStateStore is a configurable resourcespec.StateStore stub. Every method

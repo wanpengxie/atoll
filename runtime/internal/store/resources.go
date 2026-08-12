@@ -13,10 +13,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // resourceRegistry implements resourcespec.Registry over the channel-local
@@ -677,49 +675,6 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 		nextCursor = encodeListCursor(lastCreatedAt, lastID)
 	}
 	return out, nextCursor, nil
-}
-
-func publicResourceMeta(id resource.ResourceID, meta resourcespec.ResourceMeta) channel.ResourceMeta {
-	return channel.ResourceMeta{
-		ID: id, Kind: string(meta.Kind), CreatedBy: meta.CreatedBy, CreatedAt: meta.CreatedAt,
-		PlacementKind: string(meta.PlacementKind), PlacementDaemonID: meta.PlacementDaemonID, Dir: meta.Dir,
-	}
-}
-
-func (r *resourceRegistry) ListReadable(ctx context.Context, q channel.ResourceListQuery) (channel.ResourcePage, error) {
-	limit := q.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-	rows, next, err := r.List(ctx, q.Prefix, limit, q.Cursor)
-	if err != nil {
-		return channel.ResourcePage{}, err
-	}
-	out := channel.ResourcePage{Items: make([]channel.ResourceMeta, 0, len(rows)), Next: next}
-	for _, row := range rows {
-		out.Items = append(out.Items, publicResourceMeta(row.ID, row.Meta))
-	}
-	return out, nil
-}
-
-func (r *resourceRegistry) StatReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, bool, error) {
-	meta, found, err := r.Resolve(ctx, id)
-	if err != nil || !found {
-		return channel.ResourceMeta{}, found, err
-	}
-	return publicResourceMeta(id, meta), true, nil
-}
-
-func (r *resourceRegistry) FetchReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, []byte, bool, error) {
-	meta, found, err := r.Resolve(ctx, id)
-	if err != nil || !found {
-		return channel.ResourceMeta{}, nil, found, err
-	}
-	if meta.Kind != resourcespec.KindKV {
-		return publicResourceMeta(id, meta), nil, true, storespec.ErrResourceCapabilityUnavailable
-	}
-	value, _, err := newKVDriver(r.db).Read(ctx, id)
-	return publicResourceMeta(id, meta), value, true, err
 }
 
 // likePrefix turns a plain resource_id prefix into a LIKE pattern, escaping

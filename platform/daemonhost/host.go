@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,8 +20,8 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -31,7 +32,6 @@ const (
 	defaultFactTimeout     = 2 * time.Second
 	defaultLaneOpenTimeout = 10 * time.Second
 	defaultDiagnosticTTL   = 10 * time.Minute
-	transferTicketTTL      = 10 * time.Minute
 	diagnosticCapacity     = 64
 )
 
@@ -78,6 +78,7 @@ type Config struct {
 	Present      func(context.Context) ([]channel.ID, error)
 	DaemonFact   func(context.Context, string) DaemonFact
 	Now          func() time.Time
+	DataPlane    dataplane.Redeemer
 }
 
 // Compartment existence is the device's own physical fact and this host keeps
@@ -189,7 +190,7 @@ type Host struct {
 	daemons          map[string]*daemonRow
 	membranes        map[channel.ID]membraneRow
 	retiredMembranes map[channel.ID]uint64
-	transfers        map[string]transferTicket
+	dataPlane        dataplane.Redeemer
 	wg               sync.WaitGroup
 	upgrader         websocket.Upgrader
 
@@ -215,7 +216,7 @@ func New(cfg Config) *Host {
 		logger: cfg.Logger, cfg: cfg, ctx: ctx, cancel: cancel,
 		daemons: make(map[string]*daemonRow), membranes: make(map[channel.ID]membraneRow),
 		retiredMembranes: make(map[channel.ID]uint64),
-		transfers:        make(map[string]transferTicket),
+		dataPlane:        cfg.DataPlane,
 		upgrader:         websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 	}
 	h.wg.Add(1)
@@ -790,7 +791,7 @@ func (h *Host) acceptStream(
 		_ = carrier.wire.Close()
 		return
 	}
-	if header.Kind != link.DeviceStreamActor && header.Kind != link.DeviceStreamStorage {
+	if header.Kind != link.DeviceStreamActor && header.Kind != link.DeviceStreamStorage && header.Kind != link.DeviceStreamExchange {
 		_ = conn.Close()
 		return
 	}
@@ -808,6 +809,10 @@ func (h *Host) acceptStream(
 	carrier.mu.Unlock()
 	if !current {
 		_ = conn.Close()
+		return
+	}
+	if header.Kind == link.DeviceStreamExchange {
+		lane.acceptExchange(conn)
 		return
 	}
 	lane.acceptActor(conn)
@@ -1376,62 +1381,68 @@ func (h *Host) SendReclaim(ctx context.Context, daemonID, chID, coord string) er
 	return lane.reclaim(ctx, coord)
 }
 
-type transferTicket struct {
-	daemonID, chID, coord, reservationID string
-	mode                                 access.Operation
-	expires                              time.Time
+func (h *Host) Online(daemonID string, chID channel.ID) bool {
+	return h.currentLane(daemonID, chID) != nil
 }
 
-func (h *Host) OpenTransfer(
-	_ context.Context,
-	daemonID, chID, coord string,
-	mode access.Operation,
-	reservationID string,
-) (string, error) {
-	if coord == "" || (mode != access.OpRead && mode != access.OpWrite) ||
-		h.currentLane(daemonID, channel.ID(chID)) == nil {
-		return "", ErrLaneUnavailable
+func (h *Host) OpenHost(ctx context.Context, ticket dataplane.Ticket) (io.ReadWriteCloser, error) {
+	lane := h.currentLane(ticket.HostID, ticket.ChannelID)
+	if lane == nil {
+		return nil, dataplane.NewHostOfflineError(ticket.HostName)
 	}
-	token := uuid.NewString()
-	now := h.now()
-	h.mu.Lock()
-	h.sweepExpiredTransfersLocked(now)
-	h.transfers[token] = transferTicket{
-		daemonID: daemonID, chID: chID, coord: coord, mode: mode,
-		reservationID: reservationID, expires: now.Add(transferTicketTTL),
-	}
-	h.mu.Unlock()
-	return token, nil
-}
-
-func (h *Host) resolveTransfer(daemonID, chID, token string) (transferTicket, bool) {
-	now := h.now()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	ticket, ok := h.transfers[token]
-	if !ok || ticket.daemonID != daemonID || ticket.chID != chID ||
-		transferTicketExpired(ticket, now) {
-		if ok && transferTicketExpired(ticket, now) {
-			delete(h.transfers, token)
+	conn, err := lane.carrier.wire.OpenExchange(ctx, ticket.ChannelID, lane.stream.Gen)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		return transferTicket{}, false
+		return nil, dataplane.NewHostOfflineError(ticket.HostName)
 	}
-	return ticket, true
+	cleanup, ok := lane.trackExchange(conn)
+	if !ok {
+		_ = conn.Close()
+		return nil, dataplane.NewHostOfflineError(ticket.HostName)
+	}
+	tracked := &trackedExchange{ReadWriteCloser: conn, cleanup: cleanup}
+	if err := link.WriteExchangeControl(tracked, link.ExchangeHostHeader{
+		Coord: ticket.Coord, Mode: ticket.Mode, ReservationID: ticket.ReservationID,
+	}); err != nil {
+		_ = tracked.Close()
+		return nil, err
+	}
+	return tracked, nil
 }
 
-func transferTicketExpired(ticket transferTicket, now time.Time) bool {
-	return !now.Before(ticket.expires)
+func (h *Host) Complete(ctx context.Context, ticket dataplane.Ticket) error {
+	lane := h.currentLane(ticket.HostID, ticket.ChannelID)
+	if lane == nil || lane.membrane.bundle.Storage == nil {
+		return dataplane.NewHostOfflineError(ticket.HostName)
+	}
+	found, lost, err := lane.membrane.bundle.Storage.Committed(ctx, ticket.HostID, platform.StorageCommitExpectation{
+		ResourceID: string(ticket.ResourceID), DaemonID: ticket.HostID,
+		Coord: ticket.Coord, ReservationID: ticket.ReservationID,
+	})
+	if err != nil {
+		return err
+	}
+	if lost {
+		return errors.New("daemonhost: create reservation lost")
+	}
+	if !found {
+		return errors.New("daemonhost: create completion identity not found")
+	}
+	return nil
 }
 
-// sweepExpiredTransfersLocked bounds the table to tickets minted within one
-// TTL window. Mint-time GC needs no extra goroutine and reclaims tickets that
-// were opened but never redeemed.
-func (h *Host) sweepExpiredTransfersLocked(now time.Time) {
-	for token, ticket := range h.transfers {
-		if transferTicketExpired(ticket, now) {
-			delete(h.transfers, token)
-		}
-	}
+type trackedExchange struct {
+	io.ReadWriteCloser
+	once    sync.Once
+	cleanup func()
+}
+
+func (c *trackedExchange) Close() error {
+	err := c.ReadWriteCloser.Close()
+	c.once.Do(c.cleanup)
+	return err
 }
 
 // Close tears the host down under the caller's budget. Cancelling first is

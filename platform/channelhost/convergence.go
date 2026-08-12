@@ -100,6 +100,13 @@ func (h *ChannelHost) stopConvergence(ctx context.Context) error {
 	}
 }
 
+// StopConvergence joins the registry reconciliation loop without closing any
+// serving Home. Engine shutdown uses this boundary to stop producers before
+// retiring the portal and then closing Homes in strict reverse build order.
+func (h *ChannelHost) StopConvergence(ctx context.Context) error {
+	return h.stopConvergence(ctx)
+}
+
 // RegistryChanged is the storage module's post-commit edge. The value carries
 // no command or row contents. Every edge is queued for the 250ms fast sweep,
 // while the 30s scan remains authoritative.

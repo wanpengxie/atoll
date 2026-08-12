@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -396,6 +398,10 @@ func (m *compartmentManager) acceptLanes(carrier *link.ClientCarrier) {
 			_ = carrier.Close()
 			return
 		}
+		if header.Kind == link.DeviceStreamExchange {
+			m.acceptExchange(carrier, conn, header)
+			return
+		}
 		laneStream, err := link.AdoptLane(carrier, header, conn)
 		if err != nil {
 			return
@@ -403,6 +409,88 @@ func (m *compartmentManager) acceptLanes(carrier *link.ClientCarrier) {
 		lane := newClientLane(m, carrier, laneStream)
 		m.acceptLane(lane)
 	})
+}
+
+func (m *compartmentManager) acceptExchange(carrier *link.ClientCarrier, conn net.Conn, header link.DeviceStreamHeader) {
+	if err := header.Validate(); err != nil {
+		_ = conn.Close()
+		return
+	}
+	m.mu.Lock()
+	cell := m.cells[string(header.Channel)]
+	currentCarrier := m.carrier == carrier
+	m.mu.Unlock()
+	if !currentCarrier || cell == nil {
+		_ = conn.Close()
+		return
+	}
+	cell.mu.Lock()
+	lane := cell.lane
+	current := lane != nil && lane.stream.Gen == header.LaneGen
+	cell.mu.Unlock()
+	if !current {
+		_ = conn.Close()
+		return
+	}
+	cleanup, ok := lane.trackExchange(conn)
+	if !ok {
+		_ = conn.Close()
+		return
+	}
+	defer cleanup()
+	defer conn.Close()
+	serveHostExchange(conn, lane)
+}
+
+func serveHostExchange(conn io.ReadWriteCloser, lane *clientLane) {
+	fail := func(code string, err error) {
+		detail := ""
+		if err != nil {
+			detail = err.Error()
+		}
+		_ = link.WriteExchangeControl(conn, link.ExchangeStatus{OK: false, Code: code, Detail: detail})
+	}
+	var head link.ExchangeHostHeader
+	if err := link.ReadExchangeControl(conn, &head); err != nil || head.Coord == "" {
+		fail("protocol_error", err)
+		return
+	}
+	files, _, bound := lane.boundResources()
+	if !bound || files == nil {
+		fail("storage_unavailable", errors.New("compute: storage unavailable"))
+		return
+	}
+	switch head.Mode {
+	case access.OpRead:
+		handle, err := files.OpenRead(head.Coord)
+		if err != nil {
+			fail("open_failed", err)
+			return
+		}
+		defer handle.Close()
+		if err := link.WriteExchangeBytes(conn, handle); err != nil {
+			return
+		}
+		_ = link.WriteExchangeControl(conn, link.ExchangeStatus{OK: true})
+	case access.OpWrite:
+		handle, err := files.OpenWrite(head.Coord)
+		if err != nil {
+			fail("open_failed", err)
+			return
+		}
+		if err := link.ReadExchangeBytes(handle, conn); err != nil {
+			_ = handle.Abort()
+			fail("transfer_failed", err)
+			return
+		}
+		if err := handle.Commit(); err != nil {
+			fail("commit_failed", err)
+			return
+		}
+		_ = link.WriteExchangeControl(conn, link.ExchangeStatus{OK: true})
+	default:
+		fail("protocol_error", fmt.Errorf("compute: unsupported exchange mode %q", head.Mode))
+	}
 }
 
 func (m *compartmentManager) acceptLane(lane *clientLane) {
@@ -1176,6 +1264,9 @@ type clientLane struct {
 	// generation. It has no lifecycle of its own: it dies with the lane and
 	// its death retires the lane.
 	storageStream *link.LaneStream
+	exchanges     map[uint64]net.Conn
+	nextExchange  uint64
+	exchangeWG    sync.WaitGroup
 	pending       map[string]chan link.LaneFrame
 	replan        chan struct{}
 	host          *actorhost.HostSupervisor
@@ -1222,10 +1313,32 @@ func newClientLane(
 	lane := &clientLane{
 		manager: manager, carrier: carrier, stream: stream,
 		pending: make(map[string]chan link.LaneFrame), replan: make(chan struct{}, 1),
+		exchanges: make(map[uint64]net.Conn),
 	}
 	stream.SetRetire(func(*link.LaneStream) { lane.markStreamRetired() })
 	lane.actorSession = &laneSession{lane: lane}
 	return lane
+}
+
+func (l *clientLane) trackExchange(conn net.Conn) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.retired || l.stream.Retired() {
+		return nil, false
+	}
+	l.nextExchange++
+	id := l.nextExchange
+	l.exchanges[id] = conn
+	l.exchangeWG.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			delete(l.exchanges, id)
+			l.mu.Unlock()
+			l.exchangeWG.Done()
+		})
+	}, true
 }
 
 func (l *clientLane) setHost(host *actorhost.HostSupervisor) {
@@ -1292,8 +1405,10 @@ func (l *clientLane) markStreamRetired() {
 		l.mu.Lock()
 		l.retired = true
 		storage := l.storageStream
+		exchanges := l.exchanges
 		pending := l.pending
 		l.pending = make(map[string]chan link.LaneFrame)
+		l.exchanges = make(map[uint64]net.Conn)
 		onRetire := l.onRetire
 		l.mu.Unlock()
 		// The pair shares one generation: the lane's retirement takes its
@@ -1305,6 +1420,10 @@ func (l *clientLane) markStreamRetired() {
 		for _, waiter := range pending {
 			close(waiter)
 		}
+		for _, conn := range exchanges {
+			_ = conn.Close()
+		}
+		l.exchangeWG.Wait()
 		if onRetire != nil {
 			onRetire(l)
 		}
@@ -1584,9 +1703,9 @@ func (l *clientLane) pullPlan(ctx context.Context) ([]actorhost.Desired, error) 
 	return desired, nil
 }
 
-func (l *clientLane) SendCommitted(ctx context.Context, reservationID string) (link.CommittedReply, error) {
+func (l *clientLane) SendCommitted(ctx context.Context, reservationID, ticket string) (link.CommittedReply, error) {
 	reply, err := l.roundTrip(ctx, link.LaneFrame{
-		Kind: link.LaneCommitted, Committed: &link.Committed{ReservationID: reservationID},
+		Kind: link.LaneCommitted, Committed: &link.Committed{ReservationID: reservationID, Ticket: ticket},
 	})
 	if err != nil || reply.CommittedReply == nil {
 		return link.CommittedReply{}, errors.Join(err, errors.New("compute: outcome unknown"))

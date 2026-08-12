@@ -23,46 +23,43 @@ type door struct {
 
 // resolveFileRoute computes OpRead/OpWrite(file)'s (and, via query.go's
 // create, a with_content create's write) byte-access authorization product
-// (期11 spec §3.4/§5 item 0). Byte access is SAME-DAEMON ONLY: the caller's
-// authoritative storage host must equal placementDaemonID, and the route it
-// gets back is a ticket the daemon resolves into a local handle over the
-// control-RPC ResolveCoord step (platform/internal/link) — zero byte-hop,
-// true zerocopy for the file bytes themselves.
-//
-// A caller on a DIFFERENT daemon than the file is refused outright with
-// ErrFileCapabilityUnavailable. There is no daemon-to-daemon byte transport in
-// this deployment: the evaluation baseline is one daemon in one trust domain
-// (transfer-lifecycle-spec's own "单 daemon = 所有字节本地"), so the relay that
-// used to serve this branch existed only for a deployment shape that does not
-// exist, with failure semantics (EOF-as-commit, dropped Lost verdicts) that
-// were never finished. An honest refusal beats a path whose only reachable
-// form is the unfinished one; re-introducing it when a multi-daemon
-// deployment is real is additive.
+// (期11 spec §3.4/§5 item 0). The product explicitly selects local redemption
+// or remote exchange. In both cases the server-side ledger remains
+// authoritative for mode, shape, coordinate and reservation.
 //
 // reservationID is "" for a plain OpRead/OpWrite (§3.5: no outbox involvement
 // — OpWrite never fires Committed) and the just-reserved id for a with-content
 // create's write route (§1.7).
-func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, placementDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (*FileRoute, error) {
+func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id resource.ResourceID, placementDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (*FileRoute, error) {
 	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
-	host := facts.PreferredStorageHost
-	if !facts.Active || host == "" || host != placementDaemonID {
-		return nil, fmt.Errorf("%w: file bytes are same-daemon only — caller host %q, file placed on %q",
-			ErrFileCapabilityUnavailable, host, placementDaemonID)
+	if !facts.Active {
+		return nil, ErrFileCapabilityUnavailable
+	}
+	address, err := resourcespec.ParseFileAddress(string(id))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	mount, err := d.choosePlacement(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	if mount.DaemonID != placementDaemonID {
+		return nil, fmt.Errorf("accessdoor: address host %q resolves to daemon %q, resource is placed on %q", address.Host, mount.DaemonID, placementDaemonID)
 	}
 	if d.deps.TransferControl == nil {
 		return nil, errors.New("accessdoor: file byte route not wired (Deps.TransferControl is nil)")
 	}
-	token, terr := d.deps.TransferControl.OpenTransfer(ctx, placementDaemonID, coord, mode, reservationID)
+	token, redeem, terr := d.deps.TransferControl.IssueTransfer(ctx, id, placementDaemonID, address.Host, facts.PreferredStorageHost, coord, mode, reservationID, dir)
 	if terr != nil {
 		return nil, terr
 	}
-	if token == "" {
+	if token == "" || (redeem != FileRedeemLocal && redeem != FileRedeemRemote) {
 		return nil, errors.New("accessdoor: transfer control minted an empty ticket")
 	}
-	return &FileRoute{Token: token, Mode: mode, ReservationID: reservationID, Dir: dir}, nil
+	return &FileRoute{Token: token, Mode: mode, ReservationID: reservationID, Redeem: redeem, Dir: dir}, nil
 }
 
 // driver resolves a kind to its Driver, returning a Go error when none is
@@ -133,7 +130,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			// Driver dispatch (file has no Driver — Allocator/Streamer, a
 			// structurally different shape, realize its bytes, §4). The
 			// accepted outcome carries a FileRoute (§5), never bytes.
-			route, rerr := d.resolveFileRoute(ctx, caller, meta.PlacementDaemonID, meta.PlacementCoord, access.OpRead, "", meta.Dir)
+			route, rerr := d.resolveFileRoute(ctx, caller, id, meta.PlacementDaemonID, meta.PlacementCoord, access.OpRead, "", meta.Dir)
 			if rerr != nil {
 				return Outcome{}, rerr
 			}
@@ -155,7 +152,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			// outbox / Committed (§3.5: "不走create-outbox、不发Committed、
 			//不碰Registry.Create") — reservationID stays "" so the daemon
 			// side's write-completion (fsync+rename) fires no control RPC.
-			route, rerr := d.resolveFileRoute(ctx, caller, meta.PlacementDaemonID, meta.PlacementCoord, access.OpWrite, "", meta.Dir)
+			route, rerr := d.resolveFileRoute(ctx, caller, id, meta.PlacementDaemonID, meta.PlacementCoord, access.OpWrite, "", meta.Dir)
 			if rerr != nil {
 				return Outcome{}, rerr
 			}

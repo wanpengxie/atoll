@@ -1219,6 +1219,33 @@ func (f *laneAdmissionFixture) slots() (lane, pending *clientLane) {
 	return f.cell.lane, f.cell.pending
 }
 
+func TestClientLaneRetirementClosesTrackedExchanges(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	lane := fixture.lane(fixture.carrier, link.LaneGeneration("00000000-0000-7000-8000-000000000001"))
+	local, peer := net.Pipe()
+	defer peer.Close()
+	cleanup, ok := lane.trackExchange(local)
+	if !ok {
+		t.Fatal("exchange was not tracked")
+	}
+	joined := make(chan struct{})
+	go func() {
+		_, _ = local.Read(make([]byte, 1))
+		cleanup()
+		close(joined)
+	}()
+	lane.retireLogical()
+	select {
+	case <-joined:
+	default:
+		t.Fatal("lane retirement returned before the exchange handler joined")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := peer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("peer remained open after exact lane retirement")
+	}
+}
+
 type bindableStorage struct{}
 
 func (bindableStorage) Alloc(string, bool) error { return nil }
@@ -1249,7 +1276,7 @@ func (s *wedgeableStorage) ActiveWriteCoords() []string { return nil }
 // keeps making over the lane.
 type countingAuthority struct{ pulls atomic.Int32 }
 
-func (a *countingAuthority) Committed(context.Context, string, string) (bool, bool, error) {
+func (a *countingAuthority) Committed(context.Context, string, platform.StorageCommitExpectation) (bool, bool, error) {
 	return false, false, nil
 }
 func (a *countingAuthority) ReclaimAck(context.Context, string, string) (bool, error) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
@@ -51,7 +52,13 @@ type Config struct {
 	Clock                schedule.Clock
 	ReservationTimeout   time.Duration
 	DaemonRoutes         platform.DaemonRoutes
+	DataPlaneIssuer      dataplane.Issuer
+	DeviceDirectory      DeviceDirectory
 	RegistryBindings     BindingReader
+}
+
+type DeviceDirectory interface {
+	ResolveDeviceName(context.Context, string) (id string, present bool, found bool, err error)
 }
 
 type BindingReader interface {
@@ -99,7 +106,6 @@ type Home struct {
 	expiry           storespec.ExpiryQuery
 	requests         storespec.RequestLookup
 	registryBindings BindingReader
-	resourceRead     storespec.ResourceReadStore
 	closeStore       func() error
 
 	// The two harness capabilities are held apart, exactly as they are handed

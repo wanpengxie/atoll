@@ -65,13 +65,13 @@ func (a storageHostAdapter) ActiveWriteCoords() []string {
 // *storagehost.Host, its Streamer facet rather than its Allocator/Scrubber
 // facet. *storagehost.ReadHandle already has Read/Seek/Close
 // (io.ReadSeekCloser); *storagehost.WriteHandle already has Write/Commit/
-// Abort (accessdoor.LocalWriteHandle) — both satisfy the target interfaces
+// Abort (accessdoor.WriteHandle) — both satisfy the target interfaces
 // structurally, no further wrapping needed.
 func (a storageHostAdapter) OpenRead(coord string) (io.ReadSeekCloser, error) {
 	return a.host.OpenRead(coord)
 }
 
-func (a storageHostAdapter) OpenWrite(coord string) (accessdoor.LocalWriteHandle, error) {
+func (a storageHostAdapter) OpenWrite(coord string) (accessdoor.WriteHandle, error) {
 	return a.host.OpenWrite(coord)
 }
 

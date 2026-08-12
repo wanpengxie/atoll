@@ -54,6 +54,7 @@ type AllocReply struct {
 type Committed struct {
 	RequestID     string `json:"request_id"`
 	ReservationID string `json:"reservation_id"`
+	Ticket        string `json:"ticket"`
 }
 
 // CommittedReply is home→daemon: CommitReservation's outcome relayed back —
@@ -198,7 +199,10 @@ func (m Committed) validate() error {
 	if err := requiredControlField("committed.request_id", m.RequestID); err != nil {
 		return err
 	}
-	return requiredControlField("committed.reservation_id", m.ReservationID)
+	if err := requiredControlField("committed.reservation_id", m.ReservationID); err != nil {
+		return err
+	}
+	return requiredControlField("committed.ticket", m.Ticket)
 }
 
 func (m CommittedReply) validate() error {

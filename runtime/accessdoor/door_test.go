@@ -116,7 +116,7 @@ func TestDoorCreate(t *testing.T) {
 	t.Run("file kind fails honestly when placement Deps are unwired", func(t *testing.T) {
 		reg := &fakeRegistry{}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
-		_, err := d.create(t.Context(), "a", "r1", resourcespec.CreateSpec{Kind: resourcespec.KindFile}, nil)
+		_, err := d.create(t.Context(), "a", "daemon://daemon-1/r1", resourcespec.CreateSpec{Kind: resourcespec.KindFile}, nil)
 		if err == nil {
 			t.Fatalf("expected a Go error when Deps.StorageMounts is nil")
 		}
@@ -144,13 +144,13 @@ func TestChannelOwnerRootAuthorizesEveryObjectOperation(t *testing.T) {
 	}
 }
 
-// --- file-kind create: placement chain wiring (期11 §4) ---
+// --- file-kind create: address-directed placement wiring ---
 
 func TestDoorCreateFileKindPlacement(t *testing.T) {
 	fileSpec := resourcespec.CreateSpec{Kind: resourcespec.KindFile}
 	fileSpecWithContent := resourcespec.CreateSpec{Kind: resourcespec.KindFile, WithContent: true}
 
-	t.Run("creator affinity (chain ①) picks the creator's own online host", func(t *testing.T) {
+	t.Run("address host is authoritative when the creator runs there", func(t *testing.T) {
 		reg := &fakeRegistry{commitReservationFound: true}
 		mem := &fakeMembership{isMember: true, lookupHost: "daemon-1", lookupFound: true}
 		mounts := &fakeStorageMounts{mounts: []StorageMount{
@@ -160,7 +160,7 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		ctl := &fakeStorageControl{}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		out, err := d.create(t.Context(), "a", "daemon://daemon-1/r1", fileSpec, nil)
 		mustAccept(t, out, err)
 
 		if len(ctl.calls) != 1 || ctl.calls[0].daemonID != "daemon-1" {
@@ -177,28 +177,28 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		}
 	})
 
-	t.Run("unique online candidate (chain ③) when creator has no host", func(t *testing.T) {
+	t.Run("address host is authoritative for a home-placed creator", func(t *testing.T) {
 		reg := &fakeRegistry{commitReservationFound: true}
 		mem := &fakeMembership{isMember: true} // no host: home-placed / human creator
 		mounts := &fakeStorageMounts{mounts: []StorageMount{{DaemonID: "solo-daemon", Online: true}}}
 		ctl := &fakeStorageControl{}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		out, err := d.create(t.Context(), "a", "daemon://solo-daemon/r1", fileSpec, nil)
 		mustAccept(t, out, err)
 		if len(ctl.calls) != 1 || ctl.calls[0].daemonID != "solo-daemon" {
 			t.Fatalf("AllocRequest calls = %+v, want exactly one to solo-daemon", ctl.calls)
 		}
 	})
 
-	t.Run("chain ④ zero online daemons is an honest ErrNoStoragePlacement", func(t *testing.T) {
+	t.Run("unresolved explicit host is an honest ErrNoStoragePlacement", func(t *testing.T) {
 		reg := &fakeRegistry{}
 		mem := &fakeMembership{isMember: true}
 		mounts := &fakeStorageMounts{}
 		ctl := &fakeStorageControl{}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		_, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		_, err := d.create(t.Context(), "a", "daemon://daemon-1/r1", fileSpec, nil)
 		if !errors.Is(err, ErrNoStoragePlacement) {
 			t.Fatalf("err = %v, want ErrNoStoragePlacement", err)
 		}
@@ -207,8 +207,8 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		}
 	})
 
-	t.Run("chain ④ multiple online daemons with no creator affinity is ambiguous", func(t *testing.T) {
-		reg := &fakeRegistry{}
+	t.Run("the address chooses one daemon even when several are online", func(t *testing.T) {
+		reg := &fakeRegistry{commitReservationFound: true}
 		mem := &fakeMembership{isMember: true}
 		mounts := &fakeStorageMounts{mounts: []StorageMount{
 			{DaemonID: "daemon-1", Online: true},
@@ -217,9 +217,10 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		ctl := &fakeStorageControl{}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		_, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
-		if !errors.Is(err, ErrAmbiguousStoragePlacement) {
-			t.Fatalf("err = %v, want ErrAmbiguousStoragePlacement", err)
+		out, err := d.create(t.Context(), "a", "daemon://daemon-1/r1", fileSpec, nil)
+		mustAccept(t, out, err)
+		if len(ctl.calls) != 1 || ctl.calls[0].daemonID != "daemon-1" {
+			t.Fatalf("AllocRequest calls = %+v, want address-selected daemon-1", ctl.calls)
 		}
 	})
 
@@ -230,7 +231,7 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		ctl := &fakeStorageControl{err: errors.New("daemon unreachable")}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		_, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		_, err := d.create(t.Context(), "a", "daemon://d1/r1", fileSpec, nil)
 		if err == nil {
 			t.Fatal("expected a Go error when AllocRequest fails")
 		}
@@ -246,7 +247,7 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		ctl := &fakeStorageControl{}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		out, err := d.create(t.Context(), "a", "daemon://daemon-1/r1", fileSpec, nil)
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -280,7 +281,7 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		ctl := &fakeStorageControl{}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		out, err := d.create(t.Context(), "a", "daemon://daemon-1/r1", fileSpec, nil)
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -299,7 +300,7 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		ctl := &fakeStorageControl{}
 		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
 
-		out, err := d.create(t.Context(), "a", "r1", fileSpecWithContent, nil)
+		out, err := d.create(t.Context(), "a", "daemon://daemon-1/r1", fileSpecWithContent, nil)
 		if err != nil {
 			t.Fatalf("unexpected error %v", err)
 		}
@@ -508,20 +509,25 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 // kind branch: file read/write through Invoke never touches a Driver (file
 // structurally has none — its bytes are realized by the daemon-side
 // Allocator/Streamer, §4) and never carries bytes on Outcome.Value (§8.1) —
-// an accepted outcome carries a FileRoute instead. A route exists ONLY for a
-// caller on the file's own daemon; every other caller is refused, since this
-// deployment has no daemon-to-daemon byte transport.
+// an accepted outcome carries a FileRoute instead. The route explicitly
+// selects local redemption or remote exchange from the caller/host identity.
 func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	meta := resourcespec.ResourceMeta{Kind: resourcespec.KindFile, PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"}
+	routed := func(mem *fakeMembership, transfers *fakeTransferControl) *door {
+		d := newDoor(&fakeRegistry{resolveExists: true, resolveMeta: meta}, &fakeDriver{}, mem)
+		d.deps.StorageMounts = &fakeStorageMounts{mounts: []StorageMount{{DaemonID: "daemon-1", Name: "daemon-1", Online: true}}}
+		if transfers != nil {
+			d.deps.TransferControl = transfers
+		}
+		return d
+	}
 
 	t.Run("same-daemon caller gets a route, no bytes on Value", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
 		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
 		transfers := &fakeTransferControl{ticket: "ticket-local"}
-		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.TransferControl = transfers
+		d := routed(mem, transfers)
 		for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
-			out, err := d.invoke(context.Background(), "a", op, "r1", nil)
+			out, err := d.invoke(context.Background(), "a", op, "daemon://daemon-1/r1", nil)
 			if err != nil {
 				t.Fatalf("op %q: unexpected error %v", op, err)
 			}
@@ -540,67 +546,51 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 			if out.Route.Token != "ticket-local" {
 				t.Fatalf("op %q: route ticket = %q, want the minted ticket", op, out.Route.Token)
 			}
+			if out.Route.Redeem != FileRedeemLocal {
+				t.Fatalf("op %q: redeem=%q, want local", op, out.Route.Redeem)
+			}
 		}
 		if len(transfers.calls) != 2 {
-			t.Fatalf("OpenTransfer calls = %d, want 2 (one per op)", len(transfers.calls))
+			t.Fatalf("IssueTransfer calls = %d, want 2 (one per op)", len(transfers.calls))
 		}
 		if transfers.calls[0].targetDaemonID != "daemon-1" || transfers.calls[0].coord != "coord-1" {
-			t.Fatalf("OpenTransfer call = %+v, want target=daemon-1 coord=coord-1", transfers.calls[0])
+			t.Fatalf("IssueTransfer call = %+v, want target=daemon-1 coord=coord-1", transfers.calls[0])
 		}
 	})
 
-	// Byte access is same-daemon only. A caller elsewhere is refused with
-	// capability_unavailable and NO route — never a route whose only possible
-	// redemption is a transport this deployment does not have.
-	t.Run("caller on another daemon is refused, no route minted", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
+	t.Run("caller on another daemon gets a remote route", func(t *testing.T) {
 		mem := &fakeMembership{lookupHost: "daemon-2", lookupFound: true}
-		transfers := &fakeTransferControl{ticket: "never-minted"}
-		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.TransferControl = transfers
+		transfers := &fakeTransferControl{ticket: "ticket-remote"}
+		d := routed(mem, transfers)
 
-		out, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil)
-		if !errors.Is(err, ErrFileCapabilityUnavailable) {
-			t.Fatalf("err = %v, want ErrFileCapabilityUnavailable", err)
-		}
-		if out.Route != nil {
-			t.Fatalf("a refused caller must get no route, got %+v", out.Route)
-		}
-		if len(transfers.calls) != 0 {
-			t.Fatalf("a refused caller must mint nothing, got %+v", transfers.calls)
+		out, err := d.invoke(context.Background(), "a", access.OpRead, "daemon://daemon-1/r1", nil)
+		if err != nil || out.Route == nil || out.Route.Redeem != FileRedeemRemote {
+			t.Fatalf("out=%+v err=%v, want remote route", out, err)
 		}
 	})
 
-	t.Run("home-hosted caller (no storage host) is refused the same way", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
+	t.Run("home-hosted caller gets the remote redemption shape", func(t *testing.T) {
 		mem := &fakeMembership{isMember: true} // member, but lookupFound: false — no storage host
-		transfers := &fakeTransferControl{ticket: "never-minted"}
-		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.TransferControl = transfers
+		transfers := &fakeTransferControl{ticket: "ticket-http"}
+		d := routed(mem, transfers)
 
-		_, err := d.invoke(context.Background(), "a", access.OpWrite, "r1", nil)
-		if !errors.Is(err, ErrFileCapabilityUnavailable) {
-			t.Fatalf("err = %v, want ErrFileCapabilityUnavailable", err)
-		}
-		if len(transfers.calls) != 0 {
-			t.Fatalf("a refused caller must mint nothing, got %+v", transfers.calls)
+		out, err := d.invoke(context.Background(), "a", access.OpWrite, "daemon://daemon-1/r1", nil)
+		if err != nil || out.Route == nil || out.Route.Redeem != FileRedeemRemote {
+			t.Fatalf("out=%+v err=%v, want remote route", out, err)
 		}
 	})
 
 	t.Run("an empty ticket fails closed", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
 		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
-		d := newDoor(reg, &fakeDriver{}, mem)
-		d.deps.TransferControl = &fakeTransferControl{}
-		if _, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil); err == nil {
+		d := routed(mem, &fakeTransferControl{})
+		if _, err := d.invoke(context.Background(), "a", access.OpRead, "daemon://daemon-1/r1", nil); err == nil {
 			t.Fatal("an empty ticket was accepted")
 		}
 	})
 
 	t.Run("nil Deps.TransferControl is an honest Go error, never a fabricated route", func(t *testing.T) {
-		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{lookupHost: "daemon-1", lookupFound: true})
-		_, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil)
+		d := routed(&fakeMembership{lookupHost: "daemon-1", lookupFound: true}, nil)
+		_, err := d.invoke(context.Background(), "a", access.OpRead, "daemon://daemon-1/r1", nil)
 		if err == nil {
 			t.Fatal("expected a Go error when Deps.TransferControl is nil")
 		}

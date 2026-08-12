@@ -473,6 +473,10 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 	switch p.Op {
 	// --- write ops ---
 	case subjectgate.ResCreate:
+		if p.Address != "" {
+			out, err := rh.CreateFileDecided(resource.ResourceID(p.Address), p.Dir, p.WithContent)
+			return resourceOutcomeFrameFor(f, out, err)
+		}
 		out, err := rh.Create(rid, p.Args)
 		return resourceOutcomeFrameFor(f, out, err)
 	case subjectgate.ResWrite:

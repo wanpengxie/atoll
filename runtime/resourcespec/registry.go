@@ -356,6 +356,7 @@ type Registry interface {
 // automatically (Go structural typing) — runtime/storeopen.go re-exports the
 // SAME value under this narrower type, never a second implementation.
 type ResourceOutbox interface {
+	Resolve(ctx context.Context, id resource.ResourceID) (ResourceMeta, bool, error)
 	CommitReservation(ctx context.Context, reservationID string) (landed LandedResource, found bool, err error)
 	ClearTombstone(ctx context.Context, tombstoneID string) (found bool, err error)
 	ReservationDaemon(ctx context.Context, reservationID string) (daemonID string, found bool, err error)

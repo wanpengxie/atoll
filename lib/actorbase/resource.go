@@ -51,13 +51,10 @@ type ResourceHandle interface {
 	// id, Read/Write would only ever surface an authorization Route with no
 	// bytes attached (§8.1: file content never rides Outcome.Value) —
 	// Open is the actual entry point a Proc author calls for file bytes,
-	// redeeming that Route into a live FileAccess (a local os.Root-scoped
-	// handle) in one call. The call face is unconditionally present
-	// regardless of placement (FileOpener is embedded in
-	// ResourceAccessHandle, no type assertion): a caller on the file's own
-	// daemon opens it locally; anyone else — a home-hosted caller, or an
-	// actor on a different daemon — gets an honest capability_unavailable
-	// outcome, since bytes never cross machines.
+	// redeeming that Route into a live FileAccess in one call. The call face is
+	// unconditionally present regardless of placement: a caller on the file's
+	// own daemon receives a local handle, while an actor on another daemon
+	// receives the same Reader/Writer face over the lane exchange.
 	Open(id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error)
 
 	// CreateFile is file kind's own create verb (期11 spec §1.5): dir=true
@@ -67,11 +64,15 @@ type ResourceHandle interface {
 	// bytes into (dir=true+withContent=true is rejected — a directory
 	// carries no content, §1.5's ingress gate). The content-less paths land
 	// synchronously (FileAccess is zero, nothing left to write); the
-	// with-content path's FileAccess.Local write handle must be
+	// with-content path's unified FileAccess writer must be
 	// Write()'d then Commit()'d (or Abort()'d) by the caller — mirrors
 	// Open's own redemption contract exactly, since both ride the SAME
 	// Outcome.Route carrier (§5 item 0).
 	CreateFile(id resource.ResourceID, dir bool, withContent bool) (accessdoor.FileAccess, accessdoor.Outcome, error)
+	// CreateFileDecided asks the door to authorize and reserve a file create
+	// but deliberately leaves ticket redemption to the caller (the human HTTP
+	// byte leg uses this form).
+	CreateFileDecided(id resource.ResourceID, dir bool, withContent bool) (accessdoor.Outcome, error)
 }
 
 // StateHandle is sys.State()'s thin wrap over the actor-scoped (collapsed)

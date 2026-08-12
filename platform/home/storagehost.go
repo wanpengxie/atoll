@@ -20,8 +20,10 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/protocol/access"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
@@ -39,20 +41,25 @@ func (o resourceOutbox) CommitReservation(
 }
 
 type daemonStorageMounts struct {
-	routes platform.DaemonRoutes
-	chID   channelpkg.ID
+	routes    platform.DaemonRoutes
+	bindings  BindingReader
+	directory DeviceDirectory
+	chID      channelpkg.ID
 }
 
-func (m daemonStorageMounts) ListStorageDaemons(context.Context, channelpkg.ID) ([]accessdoor.StorageMount, error) {
-	if m.routes == nil {
-		return nil, nil
+func (m daemonStorageMounts) ResolveStorageDaemon(ctx context.Context, ch channelpkg.ID, name string) (accessdoor.StorageMount, bool, error) {
+	if m.routes == nil || m.bindings == nil || m.directory == nil {
+		return accessdoor.StorageMount{}, false, nil
 	}
-	ids := m.routes.AttachedDaemons(string(m.chID))
-	out := make([]accessdoor.StorageMount, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, accessdoor.StorageMount{DaemonID: id, Online: true})
+	id, present, found, err := m.directory.ResolveDeviceName(ctx, name)
+	if err != nil || !found || !present {
+		return accessdoor.StorageMount{}, false, err
 	}
-	return out, nil
+	bound, err := m.bindings.IsBound(ctx, ch, id)
+	if err != nil || !bound {
+		return accessdoor.StorageMount{}, false, err
+	}
+	return accessdoor.StorageMount{DaemonID: id, Name: name, Online: m.routes.LaneAttached(id, string(ch))}, true, nil
 }
 
 // daemonStorageControl routes AllocRequest through the space-owned daemon
@@ -92,15 +99,31 @@ func (c daemonStorageControl) ReclaimRequest(ctx context.Context, daemonID strin
 
 // daemonTransferControl mints a transfer ticket in the space daemon host.
 type daemonTransferControl struct {
-	routes platform.DaemonRoutes
+	issuer dataplane.Issuer
 	chID   channelpkg.ID
 }
 
-func (c daemonTransferControl) OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
-	if c.routes == nil {
-		return "", errors.New("platform: daemon routes unavailable")
+func (c daemonTransferControl) IssueTransfer(ctx context.Context, resourceID resource.ResourceID, targetDaemonID, targetDaemonName, callerDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (string, accessdoor.FileRedeem, error) {
+	if c.issuer == nil {
+		return "", "", errors.New("platform: dataplane issuer unavailable")
 	}
-	return c.routes.OpenTransfer(ctx, targetDaemonID, string(c.chID), coord, mode, reservationID)
+	grant, err := c.issuer.Issue(ctx, dataplane.IssueSpec{
+		ResourceID: resourceID, ChannelID: c.chID, Mode: mode,
+		HostID: targetDaemonID, HostName: targetDaemonName, CallerHostID: callerDaemonID,
+		Coord: coord, Dir: dir, ReservationID: reservationID,
+	})
+	if err != nil {
+		var offline *dataplane.HostOfflineError
+		if errors.As(err, &offline) {
+			return "", "", accessdoor.NewHostOfflineError(offline.Host)
+		}
+		return "", "", err
+	}
+	redeem := accessdoor.FileRedeemRemote
+	if grant.Route == dataplane.RouteLocal {
+		redeem = accessdoor.FileRedeemLocal
+	}
+	return grant.Ticket, redeem, nil
 }
 
 // homeStorageHostControl implements link.StorageHostControl over
@@ -164,21 +187,31 @@ func (h homeStorageHostControl) nowFn() func() time.Time {
 // daemon id its named reservation/tombstone actually belongs to.
 var errSenderDaemonMismatch = errors.New("platform: control RPC sender does not match the placement daemon")
 
-func (h homeStorageHostControl) Committed(ctx context.Context, senderDaemonID, reservationID string) (found, lost bool, err error) {
-	placementDaemonID, exists, err := h.outbox.ReservationDaemon(ctx, reservationID)
+func (h homeStorageHostControl) Committed(ctx context.Context, senderDaemonID string, expected platform.StorageCommitExpectation) (found, lost bool, err error) {
+	if expected.ReservationID == "" || expected.ResourceID == "" || expected.DaemonID == "" || expected.Coord == "" {
+		return false, false, errors.New("platform: incomplete commit expectation")
+	}
+	if expected.DaemonID != senderDaemonID {
+		return false, false, fmt.Errorf("%w: ticket belongs to %q, sender is %q", errSenderDaemonMismatch, expected.DaemonID, senderDaemonID)
+	}
+	placementDaemonID, exists, err := h.outbox.ReservationDaemon(ctx, expected.ReservationID)
 	if err != nil {
 		return false, false, err
 	}
 	if !exists {
-		// Already committed by an earlier replay, lost a race and already
-		// cleaned up, or swept by the server's own §1.7 timeout sweep — a
-		// clean no-op, level-triggered replay-safety (§4.7's own words).
-		return false, false, nil
+		meta, landed, rerr := h.outbox.Resolve(ctx, resource.ResourceID(expected.ResourceID))
+		if rerr != nil {
+			return false, false, rerr
+		}
+		if landed && meta.PlacementDaemonID == expected.DaemonID && meta.PlacementCoord == expected.Coord {
+			return true, false, nil
+		}
+		return false, false, errors.New("platform: create reservation missing and landed resource identity does not match ticket")
 	}
 	if placementDaemonID != senderDaemonID {
-		return false, false, fmt.Errorf("%w: reservation %q belongs to %q, sender is %q", errSenderDaemonMismatch, reservationID, placementDaemonID, senderDaemonID)
+		return false, false, fmt.Errorf("%w: reservation %q belongs to %q, sender is %q", errSenderDaemonMismatch, expected.ReservationID, placementDaemonID, senderDaemonID)
 	}
-	_, landed, cerr := h.outbox.CommitReservation(ctx, reservationID)
+	_, landed, cerr := h.outbox.CommitReservation(ctx, expected.ReservationID)
 	if cerr != nil {
 		if errors.Is(cerr, accessdoor.ErrReservationLost) {
 			return landed, true, nil

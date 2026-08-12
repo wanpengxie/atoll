@@ -257,6 +257,9 @@ const (
 	// admitted only against that exact lane and dies with it.
 	DeviceStreamStorage DeviceStreamKind = "storage"
 	DeviceStreamActor   DeviceStreamKind = "actor"
+	// DeviceStreamExchange carries one file-byte redemption. It is an exact-
+	// lane child and therefore always carries channel plus lane generation.
+	DeviceStreamExchange DeviceStreamKind = "exchange"
 )
 
 type DeviceStreamHeader struct {
@@ -272,7 +275,7 @@ func (h DeviceStreamHeader) Validate() error {
 		if h.ProtoVersion <= 0 || h.Channel != "" || h.LaneGen != "" {
 			return errors.New("link: malformed carrier stream header")
 		}
-	case DeviceStreamLaneControl, DeviceStreamStorage, DeviceStreamActor:
+	case DeviceStreamLaneControl, DeviceStreamStorage, DeviceStreamActor, DeviceStreamExchange:
 		if h.ProtoVersion != 0 || h.Channel == "" || h.LaneGen == "" {
 			return fmt.Errorf("link: malformed %s stream header", h.Kind)
 		}
@@ -889,6 +892,14 @@ func (c *ClientCarrier) OpenActor(ctx context.Context, chID channel.ID, generati
 		return nil, err
 	}
 	return newActorStreamConn(conn, c.logger), nil
+}
+
+func (c *ClientCarrier) OpenExchange(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
+	return c.open(ctx, DeviceStreamHeader{Kind: DeviceStreamExchange, Channel: chID, LaneGen: generation})
+}
+
+func (c *ServerCarrier) OpenExchange(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
+	return c.open(ctx, DeviceStreamHeader{Kind: DeviceStreamExchange, Channel: chID, LaneGen: generation})
 }
 
 func (c *ServerCarrier) AcceptStream() (net.Conn, DeviceStreamHeader, error) {

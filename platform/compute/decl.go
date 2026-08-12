@@ -54,7 +54,7 @@ type CompartmentBuilder func(
 // the compartment builder boundary with no adapter needed.
 type LocalFileOpener interface {
 	OpenRead(coord string) (io.ReadSeekCloser, error)
-	OpenWrite(coord string) (accessdoor.LocalWriteHandle, error)
+	OpenWrite(coord string) (accessdoor.WriteHandle, error)
 	// OpenDir opens coord as a directory-shaped resource's SUBTREE lease (期11
 	// 丁12) — an os.Root confined to live/<coord>, surfaced behind
 	// accessdoor.LocalDirHandle (the os.Root TYPE stays inside drivers/devicehost

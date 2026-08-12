@@ -11,14 +11,12 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // openResourceReg opens a fresh temp-dir channel sqlite with the full DDL
@@ -134,22 +132,6 @@ func TestResource_CreateFilePersistsRoute(t *testing.T) {
 	// later addition, §4), but the row's own bytes column must stay NULL.
 	if val, found, err := kvOf(reg).Read(ctx, "file:doc"); err != nil || found || val != nil {
 		t.Errorf("file row bytes column: found=%v val=%q err=%v, want found=false nil (bytes live at placement_coord, never inline)", found, val, err)
-	}
-}
-
-func TestResource_FetchDaemonHostedFileReportsCapabilityUnavailable(t *testing.T) {
-	ctx := context.Background()
-	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "file:remote", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil); err != nil {
-		t.Fatalf("Create file: %v", err)
-	}
-
-	meta, body, found, err := reg.FetchReadable(ctx, "file:remote")
-	if !found || meta.ID != "file:remote" || meta.Kind != string(resourcespec.KindFile) {
-		t.Fatalf("FetchReadable metadata=%+v found=%v", meta, found)
-	}
-	if body != nil || !errors.Is(err, storespec.ErrResourceCapabilityUnavailable) {
-		t.Fatalf("FetchReadable body=%q err=%v, want typed capability unavailable", body, err)
 	}
 }
 

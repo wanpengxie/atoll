@@ -15,21 +15,21 @@ import (
 // tree with no entry is an assembly defect (a Go error), never a verdict.
 type DriverTable map[resourcespec.ResourceKind]resourcespec.Driver
 
-// StorageMount is one channel-ready daemon's storage-placement candidacy —
-// §4.3 policy chain ③④'s raw input.
+// StorageMount is the current resolution of one address host name.
 type StorageMount struct {
 	DaemonID string
+	Name     string
 	Online   bool
 }
 
-// StorageMounts is placement routing's mount-table Dep (期11 spec §4.3): "which
-// daemons are bound to this channel and currently have a ready service lane".
+// StorageMounts resolves an address host name to its immutable daemon ID and
+// current channel-lane readiness.
 // The runtime tree DEFINES this contract; platform assembly FILLS it
 // (injected from the space daemon host's positive-ready lane view —
 // injection-point discipline: "注入点契约 runtime 定,实现填充下游做"). This
 // package never imports a composition root to answer it itself.
 type StorageMounts interface {
-	ListStorageDaemons(ctx context.Context, channelID channel.ID) ([]StorageMount, error)
+	ResolveStorageDaemon(ctx context.Context, channelID channel.ID, name string) (StorageMount, bool, error)
 }
 
 // StorageAllocSpec is one AllocRequest's payload (期11 spec §4.7's first
@@ -81,8 +81,8 @@ var ErrReservationLost = resourcespec.ErrReservationLost
 var ErrStorageNotReady = errors.New("accessdoor: storage daemon not ready for this channel")
 
 // StorageControl is the door's send-half of the daemon control-RPC plane
-// (期11 spec §4.7): having chosen a placement daemon from StorageMounts plus
-// ActorAuthority placement and generated a coord (resourcespec.GenerateCoord), the
+// (期11 spec §4.7): having resolved the address host through StorageMounts and
+// generated a coord (resourcespec.GenerateCoord), the
 // door hands the ALLOCATION intent to whichever party owns the live
 // connection to that daemon — platform assembly, never this package, which
 // has no notion of a link/wire. AllocRequest blocks until the daemon's
@@ -127,11 +127,10 @@ type Deps struct {
 	Authority storespec.ResourceActorAuthority
 	State     resourcespec.StateStore
 
-	// ChannelID is this door's own channel scope (§4.3: "门缺...Deps增ChannelID
-	// 字段, channel-scoped门绑单频道") — StorageMounts.ListStorageDaemons's
-	// argument, and StorageAllocSpec's own channel stamp.
+	// ChannelID is this door's own channel scope: the name-resolution context
+	// and StorageAllocSpec's channel stamp.
 	ChannelID channel.ID
-	// StorageMounts answers placement chain ③④'s "which daemons, which online".
+	// StorageMounts resolves the mandatory host segment on every use.
 	StorageMounts StorageMounts
 	// StorageControl issues the chosen placement's AllocRequest.
 	StorageControl StorageControl

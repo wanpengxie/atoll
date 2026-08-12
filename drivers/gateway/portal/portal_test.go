@@ -4,18 +4,52 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/wanpengxie/atoll/drivers/gateway"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 type submitterStub struct {
 	reply lagoon.Reply
 	err   error
+}
+
+type filePlaneStub struct {
+	address resource.ResourceID
+	ticket  string
+	mode    access.Operation
+	body    []byte
+	err     error
+}
+
+func (f *filePlaneStub) Resolve(channel.ID, string) (dataplane.Ticket, error) {
+	return dataplane.Ticket{}, errors.New("unused")
+}
+func (f *filePlaneStub) ResolveLocal(string, channel.ID, string) (dataplane.Ticket, error) {
+	return dataplane.Ticket{}, errors.New("unused")
+}
+func (f *filePlaneStub) ServeExchange(context.Context, channel.ID, io.ReadWriteCloser) {}
+func (f *filePlaneStub) ServeHTTP(_ context.Context, address resource.ResourceID, ticket string, mode access.Operation, dst io.Writer, src io.Reader) error {
+	f.address, f.ticket, f.mode = address, ticket, mode
+	if f.err != nil {
+		return f.err
+	}
+	if mode == access.OpRead {
+		_, _ = dst.Write(f.body)
+	} else {
+		f.body, _ = io.ReadAll(src)
+	}
+	return nil
 }
 
 func (s submitterStub) Submit(context.Context, lagoon.SubmitIn) (lagoon.Reply, error) {
@@ -142,5 +176,45 @@ func TestFallbacksReturnContractJSONWithoutCORS(t *testing.T) {
 				t.Fatalf("code=%q is outside the closed set", body["code"])
 			}
 		})
+	}
+}
+
+func TestFileRouteUsesOneCanonicalEncodedAddress(t *testing.T) {
+	address := "daemon://host/docs/report%20final.pdf"
+	plane := &filePlaneStub{body: []byte("payload")}
+	p := New(Config{DataPlane: plane, ContractVersion: "test"})
+	req := httptest.NewRequest(http.MethodGet, "/files/"+url.PathEscape(address)+"?t=ticket-a", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "payload" {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if plane.address != resource.ResourceID(address) || plane.ticket != "ticket-a" || plane.mode != access.OpRead {
+		t.Fatalf("plane call=(%q,%q,%q)", plane.address, plane.ticket, plane.mode)
+	}
+	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, "report%20final.pdf") {
+		t.Fatalf("content-disposition=%q", got)
+	}
+
+	for _, raw := range []string{
+		"/files/daemon://host/x?t=ticket-a",
+		"/files/" + strings.ReplaceAll(url.PathEscape(address), "%2F", "%2f") + "?t=ticket-a",
+	} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, raw, nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("non-canonical %q status=%d", raw, rec.Code)
+		}
+	}
+}
+
+func TestFilePutStreamsThroughRedeemer(t *testing.T) {
+	address := "daemon://host/docs/new.bin"
+	plane := &filePlaneStub{}
+	p := New(Config{DataPlane: plane, ContractVersion: "test"})
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/files/"+url.PathEscape(address)+"?t=write-ticket", strings.NewReader("bytes")))
+	if rec.Code != http.StatusNoContent || string(plane.body) != "bytes" || plane.mode != access.OpWrite {
+		t.Fatalf("status=%d body=%q mode=%q", rec.Code, plane.body, plane.mode)
 	}
 }

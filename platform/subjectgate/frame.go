@@ -387,13 +387,16 @@ type ResourceQuery struct {
 }
 
 type ResourcePayload struct {
-	ChannelID  string          `json:"channel_id"`
-	Op         ResourceOp      `json:"op"`
-	ResourceID string          `json:"resource_id"`
-	Args       json.RawMessage `json:"args,omitempty"`
-	Target     string          `json:"target,omitempty"`
-	Ops        []string        `json:"ops,omitempty"`
-	Query      *ResourceQuery  `json:"query,omitempty"`
+	ChannelID   string          `json:"channel_id"`
+	Op          ResourceOp      `json:"op"`
+	ResourceID  string          `json:"resource_id"`
+	Args        json.RawMessage `json:"args,omitempty"`
+	Target      string          `json:"target,omitempty"`
+	Ops         []string        `json:"ops,omitempty"`
+	Query       *ResourceQuery  `json:"query,omitempty"`
+	Address     string          `json:"address,omitempty"`
+	Dir         bool            `json:"dir,omitempty"`
+	WithContent bool            `json:"with_content,omitempty"`
 }
 
 // (PresencePayload retired with the "presence" frame word — see the retired-
@@ -475,6 +478,8 @@ type ResourceOutcome struct {
 	Status string          `json:"status"`
 	Detail string          `json:"detail,omitempty"`
 	Value  json.RawMessage `json:"value,omitempty"`
+	Ticket string          `json:"ticket,omitempty"`
+	Redeem string          `json:"redeem,omitempty"`
 }
 
 // ResourceStat is the resource-result form for stat.

@@ -1,17 +1,13 @@
 package home
 
 import (
-	"bytes"
 	"context"
-	"errors"
-	"io"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -40,7 +36,6 @@ type View struct {
 	presence  presence.View
 	actors    *actorSystem
 	nowMs     func() int64
-	resources storespec.ResourceReadStore
 	bindings  BindingReader
 	channelID channel.ID
 
@@ -58,20 +53,10 @@ func (h *Home) View() View {
 		presence:       presence.NewView(h.presenceFold, h.actors, h.actors),
 		actors:         h.actors,
 		nowMs:          h.nowMs,
-		resources:      h.resourceRead,
 		bindings:       h.registryBindings,
 		channelID:      h.channelID,
 		ownerPrincipal: h.ownerPrincipal,
 	}
-}
-
-type ResourceView struct {
-	store     storespec.ResourceReadStore
-	authority storespec.IdentityPresence
-}
-
-func (v View) Resources() ResourceView {
-	return ResourceView{store: v.resources, authority: v.authority}
 }
 
 // validateReader asks the one "is this legal right now" boolean question. A
@@ -91,44 +76,6 @@ func validateReader(ctx context.Context, authority storespec.IdentityPresence, a
 		return &channelspec.SpaceError{Code: channelspec.SpaceForbidden}
 	}
 	return nil
-}
-
-func (v ResourceView) List(ctx context.Context, as channel.Reader, q channel.ResourceListQuery) (channel.ResourcePage, error) {
-	if err := validateReader(ctx, v.authority, as); err != nil {
-		return channel.ResourcePage{}, err
-	}
-	return v.store.ListReadable(ctx, q)
-}
-
-func (v ResourceView) Stat(ctx context.Context, as channel.Reader, id resource.ResourceID) (channel.ResourceMeta, error) {
-	if err := validateReader(ctx, v.authority, as); err != nil {
-		return channel.ResourceMeta{}, err
-	}
-	meta, found, err := v.store.StatReadable(ctx, id)
-	if err != nil {
-		return channel.ResourceMeta{}, err
-	}
-	if !found {
-		return channel.ResourceMeta{}, &channelspec.SpaceError{Code: channelspec.SpaceResourceNotFound}
-	}
-	return meta, nil
-}
-
-func (v ResourceView) Fetch(ctx context.Context, as channel.Reader, id resource.ResourceID) (channel.ResourceFetch, error) {
-	if err := validateReader(ctx, v.authority, as); err != nil {
-		return channel.ResourceFetch{}, err
-	}
-	meta, value, found, err := v.store.FetchReadable(ctx, id)
-	if errors.Is(err, storespec.ErrResourceCapabilityUnavailable) {
-		return channel.ResourceFetch{}, &channelspec.SpaceError{Code: channelspec.SpaceCapabilityUnavailable}
-	}
-	if err != nil {
-		return channel.ResourceFetch{}, err
-	}
-	if !found {
-		return channel.ResourceFetch{}, &channelspec.SpaceError{Code: channelspec.SpaceResourceNotFound}
-	}
-	return channel.ResourceFetch{Meta: meta, Body: io.NopCloser(bytes.NewReader(value))}, nil
 }
 
 // Snapshot composes membership, current execution and testimony at read time. The

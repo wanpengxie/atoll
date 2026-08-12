@@ -796,9 +796,13 @@ func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p Overl
 }
 
 func (r *Registrar) mintDevice(ctx context.Context, owner, name string) (regspec.DeviceRow, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return regspec.DeviceRow{}, invalid("name required")
+	if err := ValidateDeviceName(name); err != nil {
+		return regspec.DeviceRow{}, invalid(err.Error())
+	}
+	if _, found, err := r.registry.GetDeviceByName(ctx, name); err != nil {
+		return regspec.DeviceRow{}, err
+	} else if found {
+		return regspec.DeviceRow{}, conflict("device name already exists")
 	}
 	row := regspec.DeviceRow{ID: uuid.NewString(), OwnerPrincipal: owner, Name: name, Key: uuid.NewString(), Status: regspec.DevicePresent, CreatedAt: r.now().UnixMilli()}
 	err := r.registry.store.InsertDevice(ctx, row)
@@ -806,16 +810,24 @@ func (r *Registrar) mintDevice(ctx context.Context, owner, name string) (regspec
 }
 
 func (r *Registrar) claimDevice(ctx context.Context, owner string, p DeviceClaim) (regspec.DeviceRow, error) {
+	if err := ValidateDeviceName(p.Name); err != nil {
+		return regspec.DeviceRow{}, invalid(err.Error())
+	}
 	if p.DeviceID != "" {
 		row, ok, err := r.registry.GetDevice(ctx, p.DeviceID)
 		if err != nil {
 			return regspec.DeviceRow{}, err
 		}
-		if ok && row.Status == regspec.DevicePresent && row.OwnerPrincipal == owner {
-			return row, nil
+		if ok {
+			if row.Name != p.Name {
+				return regspec.DeviceRow{}, conflict("device name does not match claimed device")
+			}
+			if row.Status == regspec.DevicePresent && row.OwnerPrincipal == owner {
+				return row, nil
+			}
 		}
 	}
-	return r.mintDevice(ctx, owner, "claimed-device")
+	return r.mintDevice(ctx, owner, p.Name)
 }
 
 func (r *Registrar) retireDevice(ctx context.Context, owner string, p DeviceRetire) (regspec.DeviceRow, error) {

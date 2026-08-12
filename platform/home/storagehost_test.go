@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
@@ -17,6 +17,9 @@ import (
 // homeStorageHostControl's sender-auth + outbox-completion tests drive it
 // one branch at a time.
 type fakeOutbox struct {
+	resolveMeta          resourcespec.ResourceMeta
+	resolveFound         bool
+	resolveErr           error
 	reservationDaemon    string
 	reservationFound     bool
 	reservationDaemonErr error
@@ -44,6 +47,10 @@ type fakeOutbox struct {
 
 	touchCalls []touchCall
 	touchErr   error
+}
+
+func (f *fakeOutbox) Resolve(context.Context, resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
+	return f.resolveMeta, f.resolveFound, f.resolveErr
 }
 
 type sweepCall struct {
@@ -100,13 +107,8 @@ func (r fixedRoutes) SendAlloc(context.Context, string, string, string, bool) er
 	return r.err
 }
 func (r fixedRoutes) SendReclaim(context.Context, string, string, string) error { return r.err }
-func (fixedRoutes) OpenTransfer(
-	context.Context, string, string, string, access.Operation, string,
-) (string, error) {
-	return "", nil
-}
-func (fixedRoutes) AttachedDaemons(string) []string  { return nil }
-func (fixedRoutes) LaneAttached(string, string) bool { return false }
+func (fixedRoutes) AttachedDaemons(string) []string                             { return nil }
+func (fixedRoutes) LaneAttached(string, string) bool                            { return false }
 
 var _ platform.DaemonRoutes = fixedRoutes{}
 
@@ -139,10 +141,11 @@ func TestStorageControlKeepsNotAttemptedDistinctFromRefused(t *testing.T) {
 }
 
 func TestHomeStorageHostControl_Committed_SenderAuth(t *testing.T) {
+	expected := platform.StorageCommitExpectation{ResourceID: "daemon://host/x", DaemonID: "daemon-1", Coord: "coord-1", ReservationID: "res-1"}
 	t.Run("matching sender lands the reservation", func(t *testing.T) {
 		ob := &fakeOutbox{reservationDaemon: "daemon-1", reservationFound: true, commitFound: true}
 		h := homeStorageHostControl{outbox: ob}
-		found, lost, err := h.Committed(t.Context(), "daemon-1", "res-1")
+		found, lost, err := h.Committed(t.Context(), "daemon-1", expected)
 		if err != nil || !found || lost {
 			t.Fatalf("Committed = (%v,%v,%v), want (true,false,nil)", found, lost, err)
 		}
@@ -154,7 +157,7 @@ func TestHomeStorageHostControl_Committed_SenderAuth(t *testing.T) {
 	t.Run("mismatched sender is rejected before touching the outbox", func(t *testing.T) {
 		ob := &fakeOutbox{reservationDaemon: "daemon-A", reservationFound: true}
 		h := homeStorageHostControl{outbox: ob}
-		_, _, err := h.Committed(t.Context(), "daemon-B", "res-1")
+		_, _, err := h.Committed(t.Context(), "daemon-B", expected)
 		if !errors.Is(err, errSenderDaemonMismatch) {
 			t.Fatalf("err = %v, want errSenderDaemonMismatch", err)
 		}
@@ -163,19 +166,28 @@ func TestHomeStorageHostControl_Committed_SenderAuth(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown reservation is a clean no-op, not an error", func(t *testing.T) {
-		ob := &fakeOutbox{reservationFound: false}
+	t.Run("swept reservation succeeds only when the landed identity matches", func(t *testing.T) {
+		ob := &fakeOutbox{reservationFound: false, resolveFound: true, resolveMeta: resourcespec.ResourceMeta{PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"}}
 		h := homeStorageHostControl{outbox: ob}
-		found, lost, err := h.Committed(t.Context(), "daemon-1", "res-gone")
-		if err != nil || found || lost {
-			t.Fatalf("Committed = (%v,%v,%v), want (false,false,nil)", found, lost, err)
+		found, lost, err := h.Committed(t.Context(), "daemon-1", expected)
+		if err != nil || !found || lost {
+			t.Fatalf("Committed = (%v,%v,%v), want (true,false,nil)", found, lost, err)
+		}
+	})
+
+	t.Run("swept reservation with a replacement coord fails honestly", func(t *testing.T) {
+		ob := &fakeOutbox{reservationFound: false, resolveFound: true, resolveMeta: resourcespec.ResourceMeta{PlacementDaemonID: "daemon-1", PlacementCoord: "other-coord"}}
+		h := homeStorageHostControl{outbox: ob}
+		found, lost, err := h.Committed(t.Context(), "daemon-1", expected)
+		if err == nil || found || lost {
+			t.Fatalf("Committed = (%v,%v,%v), want honest identity failure", found, lost, err)
 		}
 	})
 
 	t.Run("ErrReservationLost surfaces as lost=true, not a Go error", func(t *testing.T) {
 		ob := &fakeOutbox{reservationDaemon: "daemon-1", reservationFound: true, commitFound: true, commitErr: resourcespec.ErrReservationLost}
 		h := homeStorageHostControl{outbox: ob}
-		found, lost, err := h.Committed(t.Context(), "daemon-1", "res-1")
+		found, lost, err := h.Committed(t.Context(), "daemon-1", expected)
 		if err != nil || !found || !lost {
 			t.Fatalf("Committed = (%v,%v,%v), want (true,true,nil)", found, lost, err)
 		}

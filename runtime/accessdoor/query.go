@@ -164,6 +164,11 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 		// violation §8.1's "file 字节永不进控制面" red line names.
 		return fmt.Errorf("%w: create: kind=file must not carry initial bytes (file content never rides Create's initial param)", ErrMalformed)
 	}
+	if spec.Kind == resourcespec.KindFile {
+		if _, err := resourcespec.ParseFileAddress(string(id)); err != nil {
+			return fmt.Errorf("%w: %v", ErrMalformed, err)
+		}
+	}
 	return nil
 }
 
@@ -171,8 +176,8 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 
 // create runs the create decision tree under caller: kv lands immediately
 // (unchanged from the pre-§3 Invoke(OpCreate) branch, now living on its own
-// method); file kind uses the fully-wired StorageMounts plus ActorAuthority
-// placement chain and fails honestly if no unambiguous target is available.
+// method); file kind resolves the address's mandatory host through
+// StorageMounts and fails honestly if that exact target is unavailable.
 func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error) {
 	d.resourceGate.Lock()
 	defer d.resourceGate.Unlock()
@@ -198,15 +203,20 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		return Outcome{}, nil
 
 	case resourcespec.KindFile:
-		daemonID, perr := d.choosePlacement(ctx, caller)
+		address, perr := resourcespec.ParseFileAddress(string(id))
 		if perr != nil {
-			// Placement failure (no candidate / ambiguous / assembly gap) is
+			return Outcome{}, fmt.Errorf("%w: %v", ErrMalformed, perr)
+		}
+		mount, perr := d.choosePlacement(ctx, address)
+		if perr != nil {
+			// Placement failure (unknown/offline host or assembly gap) is
 			// an infra-shaped Go error, never a fabricated verdict — same
 			// discipline the earlier §3-era stub already established (a
 			// driver_error would falsely imply the resource's OWN driver
 			// failed, when in fact no placement was ever chosen to try).
 			return Outcome{}, perr
 		}
+		daemonID := mount.DaemonID
 		coord, cerr := resourcespec.GenerateCoord()
 		if cerr != nil {
 			return Outcome{}, cerr
@@ -223,14 +233,14 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 			// OpRead/OpWrite(file) uses (§3.5/§5) — the daemon side's post-
 			// rename fsync must additionally fire Committed(reservationID)
 			// (§1.7), which reservationID here carries through to the
-			// redeemed LocalWriteHandle/Stream. A daemon that never receives
+			// redeemed WriteHandle/Stream. A daemon that never receives
 			// this reservation's AllocRequest (in practice: never redeems
 			// the route at all) leaves it to the Scrubber's timeout sweep
 			// (§1.7's third trigger) — no cleanup needed here.
 			// with_content is dir=false by construction (dir && with_content is
 			// an ingressCreate-rejected combination) — a content-bearing create's
 			// write route is always the single-file staging path, never a dir lease.
-			route, rerr := d.resolveFileRoute(ctx, caller, daemonID, coord, access.OpWrite, reservationID, false)
+			route, rerr := d.resolveFileRoute(ctx, caller, id, daemonID, coord, access.OpWrite, reservationID, false)
 			if rerr != nil {
 				return Outcome{}, rerr
 			}

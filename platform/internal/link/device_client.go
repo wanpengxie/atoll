@@ -85,8 +85,10 @@ func (l *ClientActorLane) OpenActorStream(
 	resource := ActorStreamResource{
 		Arms: RawActorArms{
 			Pen: writer, Access: &remoteResourceHandle{
-				relay:    accessRelay,
-				redeemer: &deviceFileRedeemer{control: l.Control, files: l.Files},
+				relay: accessRelay,
+				redeemer: &deviceFileRedeemer{control: l.Control, files: l.Files, dial: func(ctx context.Context) (io.ReadWriteCloser, error) {
+					return l.Carrier.OpenExchange(ctx, l.Lane.Channel, l.Lane.Gen)
+				}},
 			},
 			State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
 			Schedule: &remoteScheduleHandle{relay: scheduleRelay}, Lifecycle: lifecycle,
@@ -99,18 +101,44 @@ func (l *ClientActorLane) OpenActorStream(
 
 type DeviceLaneControl interface {
 	ResolveCoord(context.Context, string) (ResolveCoordReply, error)
-	SendCommitted(context.Context, string) (CommittedReply, error)
+	SendCommitted(context.Context, string, string) (CommittedReply, error)
 }
 
 type deviceFileRedeemer struct {
 	control DeviceLaneControl
 	files   LocalFileOpener
+	dial    func(context.Context) (io.ReadWriteCloser, error)
 }
 
 func (r *deviceFileRedeemer) redeemFileRoute(
 	ctx context.Context,
 	route accessdoor.FileRoute,
 ) (accessdoor.FileAccess, error) {
+	if route.Redeem == accessdoor.FileRedeemRemote {
+		if route.Dir || r.dial == nil {
+			return accessdoor.FileAccess{}, errors.New("link: remote file route unavailable")
+		}
+		conn, err := r.dial(ctx)
+		if err != nil {
+			return accessdoor.FileAccess{}, err
+		}
+		if err := WriteExchangeControl(conn, ExchangeTicketHeader{Ticket: route.Token}); err != nil {
+			_ = conn.Close()
+			return accessdoor.FileAccess{}, err
+		}
+		switch route.Mode {
+		case access.OpRead:
+			return accessdoor.FileAccess{Remote: &accessdoor.RemoteFile{Read: &remoteExchangeReader{reader: NewExchangeReader(conn)}}}, nil
+		case access.OpWrite:
+			return accessdoor.FileAccess{Remote: &accessdoor.RemoteFile{Write: &remoteExchangeWriter{handle: NewExchangeWriteHandle(conn)}}}, nil
+		default:
+			_ = conn.Close()
+			return accessdoor.FileAccess{}, fileRouteErr("unknown mode %q", route.Mode)
+		}
+	}
+	if route.Redeem != accessdoor.FileRedeemLocal {
+		return accessdoor.FileAccess{}, errors.New("link: unknown file redemption route")
+	}
 	if r.control == nil || r.files == nil {
 		return accessdoor.FileAccess{}, errors.New("link: file route unavailable")
 	}
@@ -121,14 +149,14 @@ func (r *deviceFileRedeemer) redeemFileRoute(
 	if !reply.OK {
 		return accessdoor.FileAccess{}, fileRouteErr("resolve coord: %s", reply.Reason)
 	}
-	if route.Dir {
+	if reply.Dir {
 		root, err := r.files.OpenDir(reply.Coord)
 		if err != nil {
 			return accessdoor.FileAccess{}, err
 		}
 		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Dir: root}}, nil
 	}
-	switch route.Mode {
+	switch reply.Mode {
 	case access.OpRead:
 		handle, err := r.files.OpenRead(reply.Coord)
 		if err != nil {
@@ -142,29 +170,52 @@ func (r *deviceFileRedeemer) redeemFileRoute(
 		}
 		if reply.ReservationID != "" {
 			handle = &deviceCommittingWrite{
-				LocalWriteHandle: handle, control: r.control, files: r.files,
-				reservationID: reply.ReservationID, coord: reply.Coord,
+				WriteHandle: handle, control: r.control, files: r.files,
+				reservationID: reply.ReservationID, ticket: route.Token, coord: reply.Coord,
 			}
 		}
 		return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Write: handle}}, nil
 	default:
-		return accessdoor.FileAccess{}, fileRouteErr("unknown mode %q", route.Mode)
+		return accessdoor.FileAccess{}, fileRouteErr("unknown mode %q", reply.Mode)
 	}
 }
 
+type remoteExchangeReader struct{ reader *ExchangeReader }
+
+func (r *remoteExchangeReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	return n, mapExchangeError(err)
+}
+func (r *remoteExchangeReader) Close() error { return r.reader.Close() }
+
+type remoteExchangeWriter struct{ handle *ExchangeWriteHandle }
+
+func (w *remoteExchangeWriter) Write(p []byte) (int, error) { return w.handle.Write(p) }
+func (w *remoteExchangeWriter) Commit() error               { return mapExchangeError(w.handle.Commit()) }
+func (w *remoteExchangeWriter) Abort() error                { return w.handle.Abort() }
+
+func mapExchangeError(err error) error {
+	var terminal *ExchangeTerminalError
+	if errors.As(err, &terminal) && terminal.Code == "host_offline" {
+		return accessdoor.NewHostOfflineError(terminal.Detail)
+	}
+	return err
+}
+
 type deviceCommittingWrite struct {
-	accessdoor.LocalWriteHandle
+	accessdoor.WriteHandle
 	control       DeviceLaneControl
 	files         LocalFileOpener
 	reservationID string
+	ticket        string
 	coord         string
 }
 
 func (h *deviceCommittingWrite) Commit() error {
-	if err := h.LocalWriteHandle.Commit(); err != nil {
+	if err := h.WriteHandle.Commit(); err != nil {
 		return err
 	}
-	reply, err := h.control.SendCommitted(context.Background(), h.reservationID)
+	reply, err := h.control.SendCommitted(context.Background(), h.reservationID, h.ticket)
 	if err != nil {
 		return fmt.Errorf("link: committed outcome unknown: %w", err)
 	}

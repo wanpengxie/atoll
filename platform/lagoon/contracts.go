@@ -185,6 +185,7 @@ type DeviceMint struct {
 }
 type DeviceClaim struct {
 	DeviceID string `json:"device_id"`
+	Name     string `json:"name"`
 }
 type DeviceRetire struct {
 	DeviceID string `json:"device_id"`

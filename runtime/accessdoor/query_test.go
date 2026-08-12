@@ -311,8 +311,8 @@ func TestIngressCreate(t *testing.T) {
 		{name: "dir + with_content is a conflicting combo", id: "r1", spec: resourcespec.CreateSpec{Kind: resourcespec.KindFile, Dir: true, WithContent: true}, wantErr: true},
 		{name: "file with non-nil initial bytes", id: "r1", spec: resourcespec.CreateSpec{Kind: resourcespec.KindFile}, initial: []byte("smuggled"), wantErr: true},
 		{name: "well-formed kv", id: "r1", spec: resourcespec.CreateSpec{Kind: resourcespec.KindKV}, initial: []byte("v")},
-		{name: "well-formed empty file (dir)", id: "r1", spec: resourcespec.CreateSpec{Kind: resourcespec.KindFile, Dir: true}},
-		{name: "well-formed with-content file declaration", id: "r1", spec: resourcespec.CreateSpec{Kind: resourcespec.KindFile, WithContent: true}},
+		{name: "well-formed empty file (dir)", id: "daemon://host/r1", spec: resourcespec.CreateSpec{Kind: resourcespec.KindFile, Dir: true}},
+		{name: "well-formed with-content file declaration", id: "daemon://host/r1", spec: resourcespec.CreateSpec{Kind: resourcespec.KindFile, WithContent: true}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

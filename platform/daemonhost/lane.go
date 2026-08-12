@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 )
 
@@ -32,16 +33,20 @@ type serverLane struct {
 	// syscall — can freeze without freezing plan traffic. It shares this
 	// lane's generation and has no lifecycle of its own: admitted only against
 	// this exact lane, retired with it, and its death retires the lane.
-	storage   *link.LaneStream
-	pending   map[string]chan link.LaneFrame
-	actors    map[uint64]func()
-	nextActor uint64
+	storage      *link.LaneStream
+	pending      map[string]chan link.LaneFrame
+	actors       map[uint64]func()
+	nextActor    uint64
+	exchanges    map[uint64]net.Conn
+	nextExchange uint64
+	exchangeWG   sync.WaitGroup
 }
 
 func newServerLane(carrier *carrierRow, stream *link.LaneStream, membrane membraneRow) *serverLane {
 	return &serverLane{
 		carrier: carrier, stream: stream, membrane: membrane,
 		pending: make(map[string]chan link.LaneFrame), actors: make(map[uint64]func()),
+		exchanges: make(map[uint64]net.Conn),
 	}
 }
 
@@ -89,8 +94,15 @@ func (l *serverLane) readLoop() {
 			if request == nil || l.membrane.bundle.Storage == nil {
 				return
 			}
+			var expected platform.StorageCommitExpectation
+			if l.carrier.host.dataPlane != nil {
+				ticket, terr := l.carrier.host.dataPlane.ResolveLocal(l.carrier.daemonID, l.stream.Channel, request.Ticket)
+				if terr == nil && ticket.ReservationID == request.ReservationID {
+					expected = platform.StorageCommitExpectation{ResourceID: string(ticket.ResourceID), DaemonID: ticket.HostID, Coord: ticket.Coord, ReservationID: ticket.ReservationID}
+				}
+			}
 			found, lost, err := l.membrane.bundle.Storage.Committed(
-				l.carrier.host.ctx, l.carrier.daemonID, request.ReservationID)
+				l.carrier.host.ctx, l.carrier.daemonID, expected)
 			reply := &link.CommittedReply{RequestID: request.RequestID, Found: found, Lost: lost}
 			if err != nil {
 				reply.Reason = err.Error()
@@ -150,16 +162,22 @@ func (l *serverLane) readLoop() {
 			if request == nil {
 				return
 			}
-			ticket, ok := l.carrier.host.resolveTransfer(
-				l.carrier.daemonID, string(l.stream.Channel), request.Token)
-			reply := &link.ResolveCoordReply{
-				RequestID: request.RequestID, OK: ok,
-			}
-			if ok {
-				reply.Coord, reply.Mode = ticket.coord, ticket.mode
-				reply.ReservationID = ticket.reservationID
+			var ticket dataplane.Ticket
+			var resolveErr error
+			if l.carrier.host.dataPlane == nil {
+				resolveErr = errors.New("daemonhost: dataplane unavailable")
 			} else {
-				reply.Reason = "unknown or unauthorized transfer token"
+				ticket, resolveErr = l.carrier.host.dataPlane.ResolveLocal(l.carrier.daemonID, l.stream.Channel, request.Token)
+			}
+			reply := &link.ResolveCoordReply{
+				RequestID: request.RequestID, OK: resolveErr == nil,
+			}
+			if resolveErr == nil {
+				reply.Coord, reply.Mode = ticket.Coord, ticket.Mode
+				reply.ReservationID = ticket.ReservationID
+				reply.Dir = ticket.Dir
+			} else {
+				reply.Reason = resolveErr.Error()
 			}
 			if l.stream.Send(link.LaneFrame{
 				Kind: link.LaneResolveCoordReply, RequestID: request.RequestID,
@@ -207,6 +225,41 @@ func (l *serverLane) acceptActor(conn net.Conn) {
 	}()
 }
 
+func (l *serverLane) trackExchange(conn net.Conn) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.retired || l.stream.Retired() {
+		return nil, false
+	}
+	l.nextExchange++
+	id := l.nextExchange
+	l.exchanges[id] = conn
+	l.exchangeWG.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			delete(l.exchanges, id)
+			l.mu.Unlock()
+			l.exchangeWG.Done()
+		})
+	}, true
+}
+
+func (l *serverLane) acceptExchange(conn net.Conn) {
+	cleanup, ok := l.trackExchange(conn)
+	if !ok {
+		_ = conn.Close()
+		return
+	}
+	defer cleanup()
+	if l.carrier.host.dataPlane == nil {
+		_ = conn.Close()
+		return
+	}
+	l.carrier.host.dataPlane.ServeExchange(l.carrier.host.ctx, l.stream.Channel, conn)
+}
+
 func (l *serverLane) retireLogical() {
 	if l == nil {
 		return
@@ -215,15 +268,24 @@ func (l *serverLane) retireLogical() {
 		l.mu.Lock()
 		l.retired = true
 		pending := l.pending
+		exchanges := l.exchanges
 		l.pending = make(map[string]chan link.LaneFrame)
+		l.exchanges = make(map[uint64]net.Conn)
 		l.mu.Unlock()
 		l.carrier.mu.Lock()
 		l.carrier.retirements[l.stream.Channel]++
 		l.carrier.mu.Unlock()
-		l.stream.RetireLogical()
 		for _, waiter := range pending {
 			close(waiter)
 		}
+		for _, conn := range exchanges {
+			_ = conn.Close()
+		}
+		l.exchangeWG.Wait()
+		// Retiring the physical lane invokes markStreamRetired synchronously.
+		// Do it only after children have joined, so that callback cannot wait
+		// on work this same stack still needs to close.
+		l.stream.RetireLogical()
 	})
 }
 
@@ -231,8 +293,10 @@ func (l *serverLane) markStreamRetired() {
 	l.mu.Lock()
 	l.retired = true
 	storage := l.storage
+	exchanges := l.exchanges
 	pending := l.pending
 	l.pending = make(map[string]chan link.LaneFrame)
+	l.exchanges = make(map[uint64]net.Conn)
 	l.mu.Unlock()
 	// The pair shares one generation: half a pair routes storage into nowhere,
 	// so the lane's retirement takes the storage sibling with it. Its reader
@@ -243,6 +307,10 @@ func (l *serverLane) markStreamRetired() {
 	for _, waiter := range pending {
 		close(waiter)
 	}
+	for _, conn := range exchanges {
+		_ = conn.Close()
+	}
+	l.exchangeWG.Wait()
 }
 
 // attachStorage installs the device-opened storage sibling. One per lane: a

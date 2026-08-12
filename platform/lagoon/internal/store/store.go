@@ -204,7 +204,6 @@ func (s *Store) IsBound(ctx context.Context, ch channel.ID, device string) (bool
 	return ok, err
 }
 
-
 func (s *Store) ListBoundDeviceIDs(ctx context.Context, ch channel.ID) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT devices.id
 		FROM bindings JOIN devices ON devices.id=bindings.device_id
@@ -239,6 +238,15 @@ func (s *Store) ListDevices(ctx context.Context) ([]regspec.DeviceRow, error) {
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// GetDeviceByName includes retired rows: daemon names are never reusable.
+func (s *Store) GetDeviceByName(ctx context.Context, name string) (regspec.DeviceRow, bool, error) {
+	row, err := scanDevice(s.db.QueryRowContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE devices.name=? ORDER BY devices.created_at,devices.id LIMIT 1`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.DeviceRow{}, false, nil
+	}
+	return row, err == nil, err
 }
 
 func (s *Store) ListPrincipals(ctx context.Context) ([]regspec.PrincipalRow, error) {

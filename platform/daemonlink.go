@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -31,9 +30,16 @@ type DaemonMembrane struct {
 
 // DaemonStorageAuthority is the server-side authority used by one lane.
 type DaemonStorageAuthority interface {
-	Committed(context.Context, string, string) (bool, bool, error)
+	Committed(context.Context, string, StorageCommitExpectation) (bool, bool, error)
 	ReclaimAck(context.Context, string, string) (bool, error)
 	ReconcilePull(context.Context, string, []string) ([]StorageResourceCoord, []StorageReservationCoord, []StorageTombstoneCoord, error)
+}
+
+type StorageCommitExpectation struct {
+	ResourceID    string
+	DaemonID      string
+	Coord         string
+	ReservationID string
 }
 
 type StorageResourceCoord struct {
@@ -66,7 +72,6 @@ type DaemonRoutes interface {
 	PokePlan(string, string)
 	SendAlloc(context.Context, string, string, string, bool) error
 	SendReclaim(context.Context, string, string, string) error
-	OpenTransfer(context.Context, string, string, string, access.Operation, string) (string, error)
 	AttachedDaemons(string) []string
 	LaneAttached(string, string) bool
 }

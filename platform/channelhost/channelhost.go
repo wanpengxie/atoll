@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -72,6 +73,8 @@ type HomeDeps struct {
 	CompositionResolver  home.CompositionResolver
 	IntroductionResolver home.IntroductionResolver
 	DaemonRoutes         platform.DaemonRoutes
+	DataPlaneIssuer      dataplane.Issuer
+	DeviceDirectory      home.DeviceDirectory
 	RegistryBindings     home.BindingReader
 	OnMembraneOpen       func(channel.ID, uint64, platform.DaemonMembrane)
 	OnMembraneClose      func(channel.ID, uint64)
@@ -386,6 +389,8 @@ func (h *ChannelHost) openHome(
 		Logger: h.logger, BootstrapOwnerPrincipal: bootstrapOwner,
 		BootstrapDeclarations: bootstrapDeclarations,
 		DaemonRoutes:          h.deps.DaemonRoutes,
+		DataPlaneIssuer:       h.deps.DataPlaneIssuer,
+		DeviceDirectory:       h.deps.DeviceDirectory,
 		RegistryBindings:      h.deps.RegistryBindings,
 	}
 	if bootstrap {

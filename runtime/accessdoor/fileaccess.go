@@ -14,12 +14,10 @@ import (
 // item 0: "门单方裁决产物") carried on an accepted Outcome for
 // OpRead/OpWrite(file) and Create(file, with_content=true) — NEVER bytes,
 // NEVER a coord (§8.1/§8.9 red lines: the door hands out an authorization, not
-// a storage handle). Every route is same-daemon: the caller redeems Token into
-// a local handle via the daemon-side control-RPC (ResolveCoord). A caller whose
-// storage host is not the file's placement daemon gets no route at all — the
-// door refuses with ErrFileCapabilityUnavailable (see resolveFileRoute), since
-// this deployment has no daemon-to-daemon byte transport. Mode echoes the
-// requested direction so a generic caller need not re-derive it. ReservationID
+// a storage handle). A route selects local redemption when caller and storage
+// host coincide, otherwise remote redemption through the authenticated
+// daemon-to-daemon exchange. Mode echoes the requested direction so a generic
+// caller need not re-derive it. ReservationID
 // is set ONLY for Create(with_content=true)'s write route — the daemon side
 // must fire Committed(ReservationID) after its local fsync+rename (§1.7), never
 // for a plain OpWrite on an already-existing row (§3.5: "不走create-outbox、不发
@@ -28,6 +26,7 @@ type FileRoute struct {
 	Token         string
 	Mode          access.Operation
 	ReservationID string
+	Redeem        FileRedeem
 	// Dir is the byte-shape bit the door lifts off ResourceMeta.Dir (期11
 	// 丁12): the resource being opened is directory-shaped (a workspace), so
 	// its redemption hands out an os.Root SUBTREE lease (LocalDirHandle), NOT
@@ -35,13 +34,20 @@ type FileRoute struct {
 	Dir bool
 }
 
+type FileRedeem string
+
+const (
+	FileRedeemLocal  FileRedeem = "local"
+	FileRedeemRemote FileRedeem = "remote"
+)
+
 // LocalDirHandle is the write句柄's directory sibling (期11 丁12): a chroot-
 // confined subtree lease over a dir=true file resource's coord — the切线
 // 定理's "字节面委托真fs" on a workspace. The door hands this out for
-// Open(dir资源) instead of the single-file LocalWriteHandle; the daemon-side
+// Open(dir资源) instead of the single-file WriteHandle; the daemon-side
 // implementor is an *os.Root confined to live/<coord>, so every method here is
 // structurally satisfied by *os.Root without a wrapper (mirroring how
-// LocalWriteHandle/io.ReadSeekCloser are satisfied by the storagehost handles
+// WriteHandle/io.ReadSeekCloser are satisfied by the storagehost handles
 // directly). Unlike a single-file write there is NO Commit boundary: each
 // os.* call lands IMMEDIATELY in the real subtree (the design's "无 Commit
 // 边界——每个 os 操作立即生效"), because a directory is not staged-then-renamed
@@ -64,13 +70,13 @@ type LocalDirHandle interface {
 	Close() error
 }
 
-// LocalWriteHandle is the write-side local handle's shape (期11 spec §3.9'
+// WriteHandle is the write-side local handle's shape (期11 spec §3.9'
 // write句柄形): Write then exactly one of Commit (daemon fsync+rename to the
 // live coord, firing Committed(ReservationID) too when set) or Abort
 // (discard staging). Never a裸 handle to the final path — coord/path visibility
 // stays daemon-internal even for a same-machine caller (§3.4 coord-confinement
 // red line).
-type LocalWriteHandle interface {
+type WriteHandle interface {
 	io.Writer
 	Commit() error
 	Abort() error
@@ -102,18 +108,41 @@ type LocalWriteHandle interface {
 // every handle a dying Proc still held) is additive, not built here.
 type LocalFile struct {
 	Read  io.ReadSeekCloser
-	Write LocalWriteHandle
+	Write WriteHandle
 	Dir   LocalDirHandle
 }
 
-// FileAccess is the file byte-access product of a successfully-redeemed route
-// (期11 spec §3.9'). Local is populated on success; nil means the redemption
-// itself failed (see the error return alongside it). It stays a struct rather
-// than a bare *LocalFile so a second arm — a remote byte pipe, if a
-// multi-daemon deployment ever needs one — is an additive field, not a
-// signature change across every Proc author's call site.
+type RemoteFile struct {
+	Read  io.ReadCloser
+	Write WriteHandle
+}
+
+// FileAccess is the file byte-access product of a successfully-redeemed route.
+// Exactly one of Local and Remote is populated: Local exposes daemon-owned
+// handles; Remote exposes the framed byte exchange without leaking a coord.
 type FileAccess struct {
-	Local *LocalFile
+	Local  *LocalFile
+	Remote *RemoteFile
+}
+
+func (f FileAccess) Reader() (io.ReadCloser, bool) {
+	if f.Local != nil && f.Local.Read != nil {
+		return f.Local.Read, true
+	}
+	if f.Remote != nil && f.Remote.Read != nil {
+		return f.Remote.Read, true
+	}
+	return nil, false
+}
+
+func (f FileAccess) Writer() (WriteHandle, bool) {
+	if f.Local != nil && f.Local.Write != nil {
+		return f.Local.Write, true
+	}
+	if f.Remote != nil && f.Remote.Write != nil {
+		return f.Remote.Write, true
+	}
+	return nil, false
 }
 
 // FileOpener is the file byte-access capability's OWN interface — deliberately
@@ -150,14 +179,22 @@ type FileOpener interface {
 // but no byte-plane implementation is installed there.
 var ErrFileCapabilityUnavailable = errors.New("accessdoor: capability_unavailable")
 
-// TransferControl is the door's file-byte-route minting Dep (期11 spec §5 item
+// TransferControl is the door's file-byte-route minting dependency (期11 spec §5 item
 // 0's "门单方裁决产物"): having authorized a file OpRead/OpWrite or
 // with_content create, the door mints one opaque ticket — never a coord — and
 // hands the transport mechanics to whichever party owns the live connections
 // (platform assembly, mirroring StorageControl's own "this package has no
 // notion of a link/wire" doc). The ticket is read-only until expiry, so the
-// target daemon can retry a lost ResolveCoord reply; only the daemon the
-// transfer targets may resolve it (the platform-side sender-auth check).
+// target daemon can retry a lost exchange; authorization is checked again at
+// redemption against the bound channel, caller host, address, mode and shape.
 type TransferControl interface {
-	OpenTransfer(ctx context.Context, targetDaemonID, coord string, mode access.Operation, reservationID string) (string, error)
+	IssueTransfer(ctx context.Context, resourceID resource.ResourceID, targetDaemonID, targetDaemonName, callerDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (string, FileRedeem, error)
 }
+
+type HostOfflineError struct{ Host string }
+
+func (e *HostOfflineError) Error() string {
+	return "accessdoor: daemon host offline: " + e.Host
+}
+
+func NewHostOfflineError(host string) error { return &HostOfflineError{Host: host} }

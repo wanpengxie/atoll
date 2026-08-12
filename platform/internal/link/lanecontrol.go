@@ -17,6 +17,7 @@ type ResolveCoordReply struct {
 	Coord         string           `json:"coord,omitempty"`
 	Mode          access.Operation `json:"mode,omitempty"`
 	ReservationID string           `json:"reservation_id,omitempty"`
+	Dir           bool             `json:"dir,omitempty"`
 	Reason        string           `json:"reason,omitempty"`
 }
 

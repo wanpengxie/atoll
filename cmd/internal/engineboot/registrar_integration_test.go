@@ -66,10 +66,6 @@ func registrarCall(t *testing.T, eng *Engine, sender actor.ActorID, source chann
 	if err != nil || len(targets) != 1 {
 		return lagoon.Reply{}, errors.Join(err, errors.New("target seat unavailable"))
 	}
-	slot, ok := bundle.Gateway().SubjectSlotFor(sender)
-	if !ok {
-		return lagoon.Reply{}, errors.New("sender slot unavailable")
-	}
 	requestID := message.ID(uuid.NewString())
 	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{
 		ChannelID: string(source), ID: string(requestID), MsgType: string(word), Kind: "request",
@@ -78,7 +74,22 @@ func registrarCall(t *testing.T, eng *Engine, sender actor.ActorID, source chann
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
-	result, err := slot.Deliver(ctx, frame)
+	var result subjectgate.FrameResult
+	for {
+		slot, ok := bundle.Gateway().SubjectSlotFor(sender)
+		if !ok {
+			return lagoon.Reply{}, errors.New("sender slot unavailable")
+		}
+		result, err = slot.Deliver(ctx, frame)
+		if !errors.Is(err, subjectgate.ErrNoOccupant) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return lagoon.Reply{}, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
@@ -643,7 +654,7 @@ func TestCredentialSetRejectsAgentAndAllowsHuman(t *testing.T) {
 	}
 }
 
-func TestDeviceMintAndClaimMissAreIntentionallyNonIdempotent(t *testing.T) {
+func TestDeviceNamesAreUniqueAndClaimsCarryTheTrueName(t *testing.T) {
 	eng, _, root := bootRegistrarTest(t)
 	mint := func(word lagoon.Word, payload any) regspec.DeviceRow {
 		t.Helper()
@@ -658,18 +669,29 @@ func TestDeviceMintAndClaimMissAreIntentionallyNonIdempotent(t *testing.T) {
 		return row
 	}
 	first := mint(lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"})
-	second := mint(lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"})
-	if first.ID == second.ID {
-		t.Fatal("device.mint replay reused an identity")
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"}); err == nil {
+		t.Fatal("duplicate device name was accepted")
 	}
-	missOne := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing"})
-	missTwo := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing"})
-	if missOne.ID == missTwo.ID {
-		t.Fatal("claim miss replay reused its residual mint")
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceRetire, lagoon.DeviceRetire{DeviceID: first.ID}); err != nil {
+		t.Fatal(err)
 	}
-	hit := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: first.ID})
-	if hit.ID != first.ID {
-		t.Fatalf("owned claim hit returned %s, want %s", hit.ID, first.ID)
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "box"}); err == nil {
+		t.Fatal("retired device name was reused")
+	}
+	miss := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing", Name: "claimed-box"})
+	if miss.Name != "claimed-box" {
+		t.Fatalf("claim minted name %q", miss.Name)
+	}
+	second := mint(lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "second-box"})
+	hit := mint(lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: second.ID, Name: "second-box"})
+	if hit.ID != second.ID {
+		t.Fatalf("owned claim hit returned %s, want %s", hit.ID, second.ID)
+	}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: second.ID, Name: "wrong"}); err == nil {
+		t.Fatal("claim with a mismatched name was accepted")
+	}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceClaim, lagoon.DeviceClaim{DeviceID: "missing"}); err == nil {
+		t.Fatal("nameless claim was accepted")
 	}
 }
 

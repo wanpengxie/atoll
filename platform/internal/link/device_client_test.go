@@ -27,23 +27,23 @@ func (c *testDeviceLaneControl) ResolveCoord(_ context.Context, token string) (R
 	return c.resolveReply, c.resolveErr
 }
 
-func (c *testDeviceLaneControl) SendCommitted(_ context.Context, id string) (CommittedReply, error) {
+func (c *testDeviceLaneControl) SendCommitted(_ context.Context, id, ticket string) (CommittedReply, error) {
 	c.commits++
 	c.committedID = id
 	return c.commitReply, c.commitErr
 }
 
-type testLocalWriteHandle struct {
+type testWriteHandle struct {
 	commitErr error
 	commits   int
 }
 
-func (*testLocalWriteHandle) Write(p []byte) (int, error) { return len(p), nil }
-func (h *testLocalWriteHandle) Commit() error {
+func (*testWriteHandle) Write(p []byte) (int, error) { return len(p), nil }
+func (h *testWriteHandle) Commit() error {
 	h.commits++
 	return h.commitErr
 }
-func (*testLocalWriteHandle) Abort() error { return nil }
+func (*testWriteHandle) Abort() error { return nil }
 
 type testReadSeekCloser struct{ *strings.Reader }
 
@@ -65,7 +65,7 @@ func (*testLocalDir) Close() error                                        { retu
 
 type testLocalFileOpener struct {
 	read      io.ReadSeekCloser
-	write     accessdoor.LocalWriteHandle
+	write     accessdoor.WriteHandle
 	dir       accessdoor.LocalDirHandle
 	openErr   error
 	opened    string
@@ -77,7 +77,7 @@ func (o *testLocalFileOpener) OpenRead(coord string) (io.ReadSeekCloser, error) 
 	o.opened, o.openKind = coord, "read"
 	return o.read, o.openErr
 }
-func (o *testLocalFileOpener) OpenWrite(coord string) (accessdoor.LocalWriteHandle, error) {
+func (o *testLocalFileOpener) OpenWrite(coord string) (accessdoor.WriteHandle, error) {
 	o.opened, o.openKind = coord, "write"
 	return o.write, o.openErr
 }
@@ -124,11 +124,11 @@ func TestDeviceCommittingWritePreservesCommitOutcomeSemantics(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			local := &testLocalWriteHandle{commitErr: test.localErr}
+			local := &testWriteHandle{commitErr: test.localErr}
 			control := &testDeviceLaneControl{commitReply: test.reply, commitErr: test.sendErr}
 			files := &testLocalFileOpener{}
 			handle := &deviceCommittingWrite{
-				LocalWriteHandle: local, control: control, files: files,
+				WriteHandle: local, control: control, files: files,
 				reservationID: "reservation-a", coord: "coord-a",
 			}
 
@@ -172,7 +172,7 @@ func TestDeviceFileRedeemerRoutesOnlyAfterAuthorizedResolution(t *testing.T) {
 			{control: &testDeviceLaneControl{}},
 		} {
 			if _, err := redeemer.redeemFileRoute(
-				t.Context(), accessdoor.FileRoute{Token: "token-a", Mode: access.OpRead},
+				t.Context(), accessdoor.FileRoute{Redeem: accessdoor.FileRedeemLocal, Token: "token-a", Mode: access.OpRead},
 			); err == nil {
 				t.Fatal("redeemer accepted a missing capability")
 			}
@@ -185,7 +185,7 @@ func TestDeviceFileRedeemerRoutesOnlyAfterAuthorizedResolution(t *testing.T) {
 		}
 		files := &testLocalFileOpener{}
 		_, err := (&deviceFileRedeemer{control: control, files: files}).redeemFileRoute(
-			t.Context(), accessdoor.FileRoute{Token: "token-a", Mode: access.OpRead},
+			t.Context(), accessdoor.FileRoute{Redeem: accessdoor.FileRedeemLocal, Token: "token-a", Mode: access.OpRead},
 		)
 		if err == nil || files.openKind != "" {
 			t.Fatalf("rejected route error=%v local open=%q", err, files.openKind)
@@ -193,7 +193,7 @@ func TestDeviceFileRedeemerRoutesOnlyAfterAuthorizedResolution(t *testing.T) {
 	})
 
 	read := &testReadSeekCloser{Reader: strings.NewReader("bytes")}
-	write := &testLocalWriteHandle{}
+	write := &testWriteHandle{}
 	dir := &testLocalDir{}
 	for _, test := range []struct {
 		name       string
@@ -203,18 +203,18 @@ func TestDeviceFileRedeemerRoutesOnlyAfterAuthorizedResolution(t *testing.T) {
 		wantCommit bool
 	}{
 		{
-			name: "read", route: accessdoor.FileRoute{Token: "read-token", Mode: access.OpRead},
+			name: "read", route: accessdoor.FileRoute{Redeem: accessdoor.FileRedeemLocal, Token: "read-token", Mode: access.OpRead},
 			reply:    ResolveCoordReply{OK: true, Coord: "read-coord", Mode: access.OpRead},
 			wantKind: "read",
 		},
 		{
-			name: "plain write", route: accessdoor.FileRoute{Token: "write-token", Mode: access.OpWrite},
+			name: "plain write", route: accessdoor.FileRoute{Redeem: accessdoor.FileRedeemLocal, Token: "write-token", Mode: access.OpWrite},
 			reply:    ResolveCoordReply{OK: true, Coord: "write-coord", Mode: access.OpWrite},
 			wantKind: "write",
 		},
 		{
 			name:  "committing write",
-			route: accessdoor.FileRoute{Token: "create-token", Mode: access.OpWrite},
+			route: accessdoor.FileRoute{Redeem: accessdoor.FileRedeemLocal, Token: "create-token", Mode: access.OpWrite},
 			reply: ResolveCoordReply{
 				OK: true, Coord: "create-coord", Mode: access.OpWrite,
 				ReservationID: "reservation-a",
@@ -222,8 +222,8 @@ func TestDeviceFileRedeemerRoutesOnlyAfterAuthorizedResolution(t *testing.T) {
 			wantKind: "write", wantCommit: true,
 		},
 		{
-			name: "directory", route: accessdoor.FileRoute{Token: "dir-token", Mode: access.OpWrite, Dir: true},
-			reply:    ResolveCoordReply{OK: true, Coord: "dir-coord", Mode: access.OpWrite},
+			name: "directory", route: accessdoor.FileRoute{Redeem: accessdoor.FileRedeemLocal, Token: "dir-token", Mode: access.OpWrite, Dir: true},
+			reply:    ResolveCoordReply{OK: true, Coord: "dir-coord", Mode: access.OpWrite, Dir: true},
 			wantKind: "dir",
 		},
 	} {
@@ -250,16 +250,16 @@ func TestDeviceFileRedeemerRoutesOnlyAfterAuthorizedResolution(t *testing.T) {
 		})
 	}
 
-	t.Run("unknown mode is rejected after resolution", func(t *testing.T) {
+	t.Run("ledger reply mode overrides the route display field", func(t *testing.T) {
 		control := &testDeviceLaneControl{
 			resolveReply: ResolveCoordReply{OK: true, Coord: "coord-a", Mode: access.OpRead},
 		}
 		files := &testLocalFileOpener{}
-		_, err := (&deviceFileRedeemer{control: control, files: files}).redeemFileRoute(
-			t.Context(), accessdoor.FileRoute{Token: "token-a", Mode: access.Operation("execute")},
+		fa, err := (&deviceFileRedeemer{control: control, files: files}).redeemFileRoute(
+			t.Context(), accessdoor.FileRoute{Redeem: accessdoor.FileRedeemLocal, Token: "token-a", Mode: access.Operation("execute")},
 		)
-		if err == nil {
-			t.Fatal("unknown mode was accepted")
+		if err != nil || fa.Local == nil || files.openKind != "read" {
+			t.Fatalf("ledger-authoritative read = %+v kind=%q, %v", fa, files.openKind, err)
 		}
 	})
 }

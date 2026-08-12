@@ -37,10 +37,9 @@ type ChannelStores struct {
 	// reader never receives any membership write). Each face a consumer needs
 	// is its own explicit field over the one concrete actorRegistry; nothing
 	// downstream may type-assert one face back into another.
-	Principals   storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
-	Actors       storespec.ActorRegistryStore
-	Genesis      storespec.GenesisStore
-	ResourceRead storespec.ResourceReadStore
+	Principals storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
+	Actors     storespec.ActorRegistryStore
+	Genesis    storespec.GenesisStore
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
@@ -106,7 +105,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		State:      newStateStore(db),
 		timers:     newTimerStore(db, onCommit),
 	}
-	cs.ResourceRead = cs.Resources.(*resourceRegistry)
 	return cs, nil
 }
 

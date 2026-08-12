@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/ipc"
 )
@@ -27,6 +29,7 @@ type testStorageAuthority struct {
 	mu sync.Mutex
 
 	committedDaemon, reservation  string
+	commitExpected                platform.StorageCommitExpectation
 	committedFound, committedLost bool
 	committedErr                  error
 
@@ -43,11 +46,11 @@ type testStorageAuthority struct {
 }
 
 func (s *testStorageAuthority) Committed(
-	_ context.Context, daemonID, reservationID string,
+	_ context.Context, daemonID string, expected platform.StorageCommitExpectation,
 ) (bool, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.committedDaemon, s.reservation = daemonID, reservationID
+	s.committedDaemon, s.reservation, s.commitExpected = daemonID, expected.ReservationID, expected
 	return s.committedFound, s.committedLost, s.committedErr
 }
 
@@ -78,14 +81,20 @@ func (s *testStorageAuthority) ReconcilePull(
 func openBusinessTestLane(
 	t *testing.T,
 	membrane platform.DaemonMembrane,
-) (*Host, *link.ClientCarrier, *link.LaneStream) {
+) (*Host, *link.ClientCarrier, *link.LaneStream, dataplane.Issuer) {
 	t.Helper()
+	issuer, redeemer, binder, closePlane := dataplane.New()
 	host := New(Config{
 		ScanInterval: time.Hour,
+		DataPlane:    redeemer,
 		Present: func(context.Context) ([]channel.ID, error) {
 			return []channel.ID{"channel-a"}, nil
 		},
 	})
+	if err := binder.BindHostStreamOpener(host); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { binder.UnbindHostStreamOpener(); _ = closePlane(context.Background()) })
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	if membrane.IsBound == nil {
 		membrane.IsBound = func(context.Context, string) (bool, error) { return true, nil }
@@ -106,7 +115,7 @@ func openBusinessTestLane(
 		lane.CollectPhysical()
 	})
 	waitFor(t, func() bool { return host.LaneAttached("daemon-a", "channel-a") })
-	return host, carrier, lane
+	return host, carrier, lane, issuer
 }
 
 func laneRoundTrip(t *testing.T, lane *link.LaneStream, request link.LaneFrame) link.LaneFrame {
@@ -135,13 +144,21 @@ func TestLaneBusinessRequestsUseAuthenticatedCarrierAndReturnExactResults(t *tes
 	}
 	var plannedDaemon string
 	actors := []platform.PlanActor{{ActorID: "actor-a", Class: "class-a"}}
-	host, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{
+	_, _, lane, issuer := openBusinessTestLane(t, platform.DaemonMembrane{
 		Plan: func(_ context.Context, daemonID string) ([]platform.PlanActor, error) {
 			plannedDaemon = daemonID
 			return actors, nil
 		},
 		Storage: storage,
 	})
+	commitGrant, err := issuer.Issue(t.Context(), dataplane.IssueSpec{
+		ResourceID: resource.ResourceID("daemon://host/file"), ChannelID: "channel-a",
+		Mode: access.OpWrite, HostID: "daemon-a", HostName: "host", CallerHostID: "daemon-a",
+		Coord: "coord-commit", ReservationID: "reservation-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	plan := laneRoundTrip(t, lane, link.LaneFrame{
 		Kind: link.LanePlanPull, RequestID: "plan-a",
@@ -154,7 +171,7 @@ func TestLaneBusinessRequestsUseAuthenticatedCarrierAndReturnExactResults(t *tes
 	committed := laneRoundTrip(t, lane, link.LaneFrame{
 		Kind: link.LaneCommitted, RequestID: "committed-a",
 		Committed: &link.Committed{
-			RequestID: "committed-a", ReservationID: "reservation-a",
+			RequestID: "committed-a", ReservationID: "reservation-a", Ticket: commitGrant.Ticket,
 		},
 	})
 	if committed.CommittedReply == nil || !committed.CommittedReply.Found ||
@@ -195,16 +212,18 @@ func TestLaneBusinessRequestsUseAuthenticatedCarrierAndReturnExactResults(t *tes
 		t.Fatalf("reconcile authority=(%q,%v)", storage.reconcileDaemon, storage.activeCoords)
 	}
 
-	token, err := host.OpenTransfer(
-		t.Context(), "daemon-a", "channel-a", "coord-a", access.OpWrite, "reservation-z",
-	)
+	grant, err := issuer.Issue(t.Context(), dataplane.IssueSpec{
+		ResourceID: resource.ResourceID("daemon://host/other"), ChannelID: "channel-a",
+		Mode: access.OpWrite, HostID: "daemon-a", HostName: "host", CallerHostID: "daemon-a",
+		Coord: "coord-a", ReservationID: "reservation-z",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resolve := laneRoundTrip(t, lane, link.LaneFrame{
 		Kind: link.LaneResolveCoord, RequestID: "resolve-a",
 		ResolveCoord: &link.ResolveCoordRequest{
-			RequestID: "resolve-a", Token: token,
+			RequestID: "resolve-a", Token: grant.Ticket,
 		},
 	})
 	if resolve.ResolveCoordReply == nil || !resolve.ResolveCoordReply.OK ||
@@ -214,13 +233,40 @@ func TestLaneBusinessRequestsUseAuthenticatedCarrierAndReturnExactResults(t *tes
 	}
 }
 
+func TestServerLaneRetirementClosesTrackedExchanges(t *testing.T) {
+	host, _, _, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
+	lane := host.currentLane("daemon-a", "channel-a")
+	local, peer := net.Pipe()
+	defer peer.Close()
+	cleanup, ok := lane.trackExchange(local)
+	if !ok {
+		t.Fatal("exchange was not tracked")
+	}
+	joined := make(chan struct{})
+	go func() {
+		_, _ = local.Read(make([]byte, 1))
+		cleanup()
+		close(joined)
+	}()
+	lane.retireLogical()
+	select {
+	case <-joined:
+	default:
+		t.Fatal("lane retirement returned before the exchange handler joined")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := peer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("peer remained open after exact lane retirement")
+	}
+}
+
 func TestLaneBusinessFailuresStayDistinguishableFromEmptySuccess(t *testing.T) {
 	storage := &testStorageAuthority{
 		committedErr: errors.New("commit refused"),
 		reclaimErr:   errors.New("ack refused"),
 		reconcileErr: errors.New("snapshot unavailable"),
 	}
-	_, _, lane := openBusinessTestLane(t, platform.DaemonMembrane{
+	_, _, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			return nil, errors.New("plan unavailable")
 		},
@@ -243,7 +289,7 @@ func TestLaneBusinessFailuresStayDistinguishableFromEmptySuccess(t *testing.T) {
 			request: link.LaneFrame{
 				Kind: link.LaneCommitted, RequestID: "commit-error",
 				Committed: &link.Committed{
-					RequestID: "commit-error", ReservationID: "reservation-a",
+					RequestID: "commit-error", ReservationID: "reservation-a", Ticket: "invalid-ticket",
 				},
 			},
 			reason: func(frame link.LaneFrame) string { return frame.CommittedReply.Reason },
@@ -293,7 +339,7 @@ func hostLaneStillCurrent(lane *link.LaneStream) bool {
 // the live lane it does not belong to.
 func TestStorageSiblingSharesItsLaneLifecycle(t *testing.T) {
 	t.Run("lane retirement takes the sibling", func(t *testing.T) {
-		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		host, carrier, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
 		storage := openTestStorageSibling(t, host, carrier, lane)
 		lane.RetireLogical()
 		lane.CollectPhysical()
@@ -301,7 +347,7 @@ func TestStorageSiblingSharesItsLaneLifecycle(t *testing.T) {
 	})
 
 	t.Run("sibling death retires the lane", func(t *testing.T) {
-		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		host, carrier, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
 		storage := openTestStorageSibling(t, host, carrier, lane)
 		storage.RetireLogical()
 		storage.CollectPhysical()
@@ -310,7 +356,7 @@ func TestStorageSiblingSharesItsLaneLifecycle(t *testing.T) {
 	})
 
 	t.Run("a sibling for a spent generation is refused", func(t *testing.T) {
-		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		host, carrier, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
 		openTestStorageSibling(t, host, carrier, lane)
 		bogus, err := carrier.OpenStorage(
 			context.Background(), "channel-a", link.LaneGeneration("0198f000-0000-7000-8000-00000000dead"))
@@ -439,7 +485,7 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+			host, carrier, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
 			storage := openTestStorageSibling(t, host, carrier, lane)
 			deviceDone := make(chan error, 1)
 			go func() {
@@ -508,7 +554,7 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 			},
 		} {
 			t.Run(test.name, func(t *testing.T) {
-				host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+				host, carrier, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
 				storage := openTestStorageSibling(t, host, carrier, lane)
 				deviceDone := make(chan error, 1)
 				go func() {
@@ -533,7 +579,7 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 		// or the guard above would hold for an implementation that returned it
 		// unconditionally.
 		t.Run("a ready daemon does not carry the sentinel", func(t *testing.T) {
-			host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+			host, carrier, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
 			storage := openTestStorageSibling(t, host, carrier, lane)
 			deviceDone := make(chan error, 1)
 			go func() {
@@ -563,7 +609,7 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 		previous := laneRPCTimeout
 		laneRPCTimeout = 30 * time.Millisecond
 		t.Cleanup(func() { laneRPCTimeout = previous })
-		host, carrier, lane := openBusinessTestLane(t, platform.DaemonMembrane{})
+		host, carrier, lane, _ := openBusinessTestLane(t, platform.DaemonMembrane{})
 		storage := openTestStorageSibling(t, host, carrier, lane)
 		received := make(chan struct{})
 		go func() {
@@ -586,55 +632,6 @@ func TestServerStorageRequestsRoundTripFailureAndIndependentTimeout(t *testing.T
 			t.Fatal("request was never sent")
 		}
 	})
-}
-
-func TestTransferTicketAuthorizationPrecedesMutationAndIsIdempotent(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	host := New(Config{
-		ScanInterval: time.Hour,
-		Now:          func() time.Time { return now },
-	})
-	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.mu.Lock()
-	host.daemons["daemon-a"] = &daemonRow{current: &carrierRow{
-		lanes: map[channel.ID]*serverLane{"channel-a": {}},
-	}}
-	host.mu.Unlock()
-	t.Cleanup(func() {
-		host.mu.Lock()
-		delete(host.daemons, "daemon-a")
-		host.mu.Unlock()
-	})
-	token, err := host.OpenTransfer(
-		t.Context(), "daemon-a", "channel-a", "coord-a", access.OpRead, "",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, wrong := range []struct{ daemon, channel string }{
-		{daemon: "daemon-b", channel: "channel-a"},
-		{daemon: "daemon-a", channel: "channel-b"},
-	} {
-		if _, ok := host.resolveTransfer(wrong.daemon, wrong.channel, token); ok {
-			t.Fatalf("unauthorized transfer resolved for (%q,%q)", wrong.daemon, wrong.channel)
-		}
-	}
-	for i := 0; i < 2; i++ {
-		ticket, ok := host.resolveTransfer("daemon-a", "channel-a", token)
-		if !ok || ticket.coord != "coord-a" {
-			t.Fatalf("authorized resolve %d=(%+v,%v)", i, ticket, ok)
-		}
-	}
-	now = now.Add(transferTicketTTL)
-	if _, ok := host.resolveTransfer("daemon-a", "channel-a", token); ok {
-		t.Fatal("expired transfer resolved")
-	}
-	host.mu.RLock()
-	_, retained := host.transfers[token]
-	host.mu.RUnlock()
-	if retained {
-		t.Fatal("expired transfer was not deleted at redemption")
-	}
 }
 
 func TestNonCooperativePlatformCallbacksStayBoundedAndUnknown(t *testing.T) {

@@ -62,7 +62,7 @@ func TestMain(m *testing.M) {
 		name string
 		pkg  string
 	}{{"atoll-server", "./cmd/server"}, {"atoll-daemon", "./cmd/daemon"}} {
-		cmd := exec.Command("go", "build", "-o", filepath.Join(dir, target.name), target.pkg)
+		cmd := exec.Command("go", "build", "-race", "-o", filepath.Join(dir, target.name), target.pkg)
 		cmd.Dir = root
 		cmd.Env = os.Environ()
 		if out, buildErr := cmd.CombinedOutput(); buildErr != nil {
@@ -471,6 +471,32 @@ func (c *wsClient) request(channelID, msgType, audience string, payload any) map
 		c.t.Fatalf("request %s failed: %v", msgType, err)
 	}
 	return body
+}
+
+func (c *wsClient) resource(payload map[string]any) map[string]any {
+	c.t.Helper()
+	out, err := c.tryResource(payload)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return out
+}
+
+func (c *wsClient) tryResource(payload map[string]any) (map[string]any, error) {
+	wireRef++
+	ref := fmt.Sprintf("resource-%d", wireRef)
+	if err := c.conn.WriteJSON(wireFrame("resource", ref, payload)); err != nil {
+		return nil, err
+	}
+	ack := c.awaitAck(ref, 10*time.Second)
+	if ack["frame_type"] == "error" {
+		return nil, fmt.Errorf("resource request rejected: %v", ack["payload"])
+	}
+	out, _ := ack["payload"].(map[string]any)
+	if out["status"] != "ok" {
+		return out, fmt.Errorf("resource outcome=%v", out)
+	}
+	return out, nil
 }
 
 func (c *wsClient) requestWithID(channelID, msgType, audience string, payload any) (string, map[string]any) {

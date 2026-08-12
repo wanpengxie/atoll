@@ -100,7 +100,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if h.registryBindings == nil {
 		h.registryBindings = unavailableBindingReader{}
 	}
-	h.resourceRead = cs.ResourceRead
 
 	if cfg.Bootstrap && cfg.Genesis != nil {
 		if err := cs.Genesis.CreateGenesis(ctx, *cfg.Genesis); err != nil {
@@ -148,9 +147,9 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		Authority:       h.actors,
 		State:           cs.Assembly.State,
 		ChannelID:       cfg.ChannelID,
-		StorageMounts:   daemonStorageMounts{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
+		StorageMounts:   daemonStorageMounts{routes: cfg.DaemonRoutes, bindings: cfg.RegistryBindings, directory: cfg.DeviceDirectory, chID: cfg.ChannelID},
 		StorageControl:  daemonStorageControl{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
-		TransferControl: daemonTransferControl{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
+		TransferControl: daemonTransferControl{issuer: cfg.DataPlaneIssuer, chID: cfg.ChannelID},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build access door: %w", err)

@@ -17,7 +17,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -696,52 +695,6 @@ func TestCoordinateGateSerializesAndReclaims(t *testing.T) {
 	carrier.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("coordinate gate map retained %d idle entries", remaining)
-	}
-}
-
-func TestOpenTransfer_TTLReclaimsAbandonedTokens(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	host := New(Config{
-		ScanInterval: time.Hour,
-		Now:          func() time.Time { return now },
-	})
-	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	carrier := &carrierRow{
-		lanes: map[channel.ID]*serverLane{"a": {}},
-	}
-	host.mu.Lock()
-	host.daemons["daemon-a"] = &daemonRow{current: carrier}
-	host.mu.Unlock()
-	t.Cleanup(func() {
-		host.mu.Lock()
-		delete(host.daemons, "daemon-a")
-		host.mu.Unlock()
-	})
-
-	abandoned, err := host.OpenTransfer(
-		context.Background(), "daemon-a", "a", "coord-a", access.OpRead, "",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(transferTicketTTL)
-	current, err := host.OpenTransfer(
-		context.Background(), "daemon-a", "a", "coord-b", access.OpRead, "",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	host.mu.RLock()
-	_, abandonedPresent := host.transfers[abandoned]
-	_, currentPresent := host.transfers[current]
-	count := len(host.transfers)
-	host.mu.RUnlock()
-	if abandonedPresent {
-		t.Fatal("abandoned transfer survived its TTL")
-	}
-	if !currentPresent || count != 1 {
-		t.Fatalf("transfer table after mint-time GC: current=%v count=%d", currentPresent, count)
 	}
 }
 

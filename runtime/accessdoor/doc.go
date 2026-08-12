@@ -52,12 +52,12 @@
 //     is the redemption capability, implemented one layer up by whichever
 //     avatar can actually reach live bytes (platform/internal/link's
 //     remoteResourceHandle, the daemon-hosted wire proxy — day-1's only
-//     implementor; a home-hosted caller has no local redemption path and is
-//     deferred alongside the rest of the human resource face, 债②). Invoke's
+//     implementor; the portal separately redeems browser tickets over HTTP).
+//     Invoke's
 //     file read/write branch and Create's with_content=true branch both
 //     funnel through door.resolveFileRoute (door.go) — the ONE decision point
-//     both share, which also refuses any caller not on the file's own daemon
-//     (byte access is same-daemon only).
+//     both share; its ticket selects local redemption or the authenticated
+//     cross-daemon exchange without exposing the placement coordinate.
 //     No file BYTE ever touches this package — Deps.TransferControl mints an
 //     opaque Token, never a coord, never a live handle.
 package accessdoor

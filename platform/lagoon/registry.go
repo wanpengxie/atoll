@@ -56,6 +56,15 @@ func (r *Registry) GetDevice(ctx context.Context, id string) (regspec.DeviceRow,
 	return r.store.GetDevice(ctx, id)
 }
 
+func (r *Registry) GetDeviceByName(ctx context.Context, name string) (regspec.DeviceRow, bool, error) {
+	return r.store.GetDeviceByName(ctx, name)
+}
+
+func (r *Registry) ResolveDeviceName(ctx context.Context, name string) (string, bool, bool, error) {
+	row, found, err := r.store.GetDeviceByName(ctx, name)
+	return row.ID, row.Status == regspec.DevicePresent, found, err
+}
+
 func (r *Registry) GetDeviceFact(ctx context.Context, id string) (regspec.DeviceStatus, bool, error) {
 	return r.store.GetDeviceStatus(ctx, id)
 }
