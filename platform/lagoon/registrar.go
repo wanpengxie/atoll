@@ -528,7 +528,13 @@ func (r *Registrar) updatePrincipalStatus(ctx context.Context, id string, status
 		return PrincipalRow{}, err
 	}
 	row.Status = status
-	return row, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return PrincipalRow{}, err
+	}
+	if r.registry.onCommit != nil {
+		r.registry.onCommit(Change{Principal: id})
+	}
+	return row, nil
 }
 
 func (r *Registrar) setCredential(ctx context.Context, caller string, p CredentialSet) (CredentialReply, error) {
@@ -543,6 +549,17 @@ func (r *Registrar) setCredential(ctx context.Context, caller string, p Credenti
 		return CredentialReply{}, err
 	}
 	defer tx.Rollback()
+	var principalKind actor.Kind
+	err = tx.QueryRowContext(ctx, `SELECT kind FROM principals WHERE id=?`, p.PrincipalID).Scan(&principalKind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CredentialReply{}, notFound("principal")
+	}
+	if err != nil {
+		return CredentialReply{}, err
+	}
+	if principalKind != actor.KindHuman {
+		return CredentialReply{}, denied("credentials require a human principal")
+	}
 	var storedHash string
 	var status CredentialStatus
 	var rotatedAt int64
@@ -552,15 +569,6 @@ func (r *Registrar) setCredential(ctx context.Context, caller string, p Credenti
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return CredentialReply{}, err
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		var principalExists bool
-		if scanErr := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM principals WHERE id=?)`, p.PrincipalID).Scan(&principalExists); scanErr != nil {
-			return CredentialReply{}, scanErr
-		}
-		if !principalExists {
-			return CredentialReply{}, notFound("principal")
-		}
 	}
 	now := r.now().UnixMilli()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?) ON CONFLICT(principal_id,kind) DO UPDATE SET secret_hash=excluded.secret_hash,status='active',rotated_at=excluded.rotated_at`, p.PrincipalID, p.SecretHash, now); err != nil {

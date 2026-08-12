@@ -9,11 +9,6 @@ set -euo pipefail
 # value is a string: producers могут hand-write a literal, so the gate greps for
 # exactly that. Allowlist entries require reason/owner/expires and fail when
 # expired.
-#
-# The agent.text scan below is a MIGRATION GUARD (not an invariant wall): the
-# batch-2/3 cutover retired the agent.text terminal form for base-wrapped
-# engines. REMOVAL CONDITION: delete that scan once the cutover commit is
-# merged and no pre-cutover branch remains open.
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -95,11 +90,6 @@ while IFS= read -r hit; do
   echo "[activity-types] producer uses a literal instead of registry constant: $hit" >&2
   failures=$((failures + 1))
 done < <(rg -n '"activity\.[a-z.]+"' --glob '*.go' --glob '!*_test.go' --glob '!registry/activity.go' || true)
-
-if rg -n '"agent\.text"' drivers/agents --glob '*.go' >/dev/null; then
-  echo "[activity-types] retired agent.text output type remains under drivers/agents" >&2
-  failures=$((failures + 1))
-fi
 
 if (( failures > 0 )); then
   echo "[activity-types] FAIL: $failures violation(s)" >&2

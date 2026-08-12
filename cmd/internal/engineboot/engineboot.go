@@ -69,9 +69,13 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	}
 	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.NewSessionStore()}
 	var host *channelhost.ChannelHost
+	var gatewayEdge *gateway.Gateway
 	e.registry, err = lagoon.Open(installed.C0DBPath, func(change lagoon.Change) {
-		if host != nil {
+		if host != nil && (change.ChannelID != "" || change.AllChannels) {
 			host.RegistryChanged(change)
+		}
+		if change.Principal != "" && gatewayEdge != nil {
+			gatewayEdge.Poke(change.Principal)
 		}
 	})
 	if err != nil {
@@ -147,6 +151,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if err != nil {
 		return nil, e.fail(err)
 	}
+	gatewayEdge = e.gateway
 	e.gateway.Start()
 	p := portal.New(portal.Config{Registry: e.registry, Submitter: e.submitter, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, ContractVersion: contractVersion})
 	e.handler = p
@@ -154,6 +159,13 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 }
 
 func (e *Engine) resolveEntitlements(ctx context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
+	status, ok, err := e.registry.GetPrincipalStatus(ctx, principal)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ok || status != lagoon.PrincipalPresent {
+		return nil, nil, nil
+	}
 	rows, err := e.registry.ListPresentChannels(ctx)
 	if err != nil {
 		return nil, nil, err

@@ -1,13 +1,15 @@
 package boot_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
-	"path/filepath"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/boot"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -115,10 +117,37 @@ func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
 	}
 }
 
-func TestEnsureRebuildsFileWithoutMarker(t *testing.T) {
+func TestEnsureRebuildsRegistryWithoutMarker(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	path, err := filepath.Abs(filepath.Join(root, "YzA.db"))
+	first, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "discarded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", first.C0DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM atoll_install WHERE id=1`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Installed {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestEnsureRebuildsPartialDatabaseWithoutInstallTable(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path, err := channelhost.DBPath(root, protocol.C0ChannelID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,12 +156,19 @@ func TestEnsureRebuildsFileWithoutMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`CREATE TABLE partial(x INTEGER)`); err != nil {
+		_ = db.Close()
 		t.Fatal(err)
 	}
-	_ = db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	result, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !result.Installed {
+		t.Fatalf("result=%+v", result)
 	}
 	db, err = sql.Open("sqlite", result.C0DBPath)
 	if err != nil {
@@ -140,11 +176,34 @@ func TestEnsureRebuildsFileWithoutMarker(t *testing.T) {
 	}
 	defer db.Close()
 	var partial int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='partial'`).Scan(&partial); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='partial'`).Scan(&partial); err != nil {
 		t.Fatal(err)
 	}
 	if partial != 0 {
 		t.Fatal("half-install residue survived rebuild")
+	}
+}
+
+func TestEnsurePreservesUnreadableDatabase(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path, err := channelhost.DBPath(root, protocol.C0ChannelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("not a sqlite database\x00with existing c0 data")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "must-not-be-used"}); err == nil {
+		t.Fatal("Ensure succeeded for an unreadable c0 database")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("unreadable c0 database changed: got %q, want %q", got, want)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -184,13 +185,19 @@ func hasMarker(ctx context.Context, path string) (bool, error) {
 	}
 	db, err := openSQLite(path)
 	if err != nil {
-		return false, nil
+		return false, err
 	}
 	defer db.Close()
 	var installed int
 	err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM atoll_install WHERE id=1)`).Scan(&installed)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return false, nil
+		}
+		return false, err
 	}
 	return installed == 1, nil
 }

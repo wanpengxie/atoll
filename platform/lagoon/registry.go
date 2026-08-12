@@ -17,6 +17,7 @@ import (
 
 type Change struct {
 	ChannelID   channel.ID
+	Principal   string
 	AllChannels bool
 }
 
@@ -86,6 +87,15 @@ func (r *Registry) GetDevice(ctx context.Context, id string) (DeviceRow, bool, e
 func (r *Registry) GetDeviceFact(ctx context.Context, id string) (DeviceStatus, bool, error) {
 	var status DeviceStatus
 	err := r.db.QueryRowContext(ctx, `SELECT status FROM devices WHERE id=?`, id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return status, err == nil, err
+}
+
+func (r *Registry) GetPrincipalStatus(ctx context.Context, id string) (PrincipalStatus, bool, error) {
+	var status PrincipalStatus
+	err := r.db.QueryRowContext(ctx, `SELECT status FROM principals WHERE id=?`, id).Scan(&status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

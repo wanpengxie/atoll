@@ -17,6 +17,7 @@ import (
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -246,6 +247,139 @@ func TestRegisterReturnsOnlyAfterHomeIsServing(t *testing.T) {
 		}
 	}
 	t.Fatal("registered principal has no home channel")
+}
+
+func registerHumanForTest(t *testing.T, eng *Engine, id string) lagoon.PrincipalRow {
+	t.Helper()
+	reply, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{
+		ID: id, Email: id + "@example.test", SecretHash: "hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var principal lagoon.PrincipalRow
+	if !decodeValue(reply.Value, &principal) {
+		t.Fatalf("invalid register reply: %#v", reply.Value)
+	}
+	return principal
+}
+
+func homeChannelForTest(t *testing.T, eng *Engine, principal string) channel.ID {
+	t.Helper()
+	rows, err := eng.registry.ListPresentChannels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.OwnerPrincipal == principal && row.ParentID == protocol.C0ChannelID && row.Name == principal {
+			return row.ID
+		}
+	}
+	t.Fatalf("principal %q has no home channel", principal)
+	return ""
+}
+
+func frameErrorCode(t *testing.T, frame subjectgate.Frame) string {
+	t.Helper()
+	if frame.Type != subjectgate.FrameError {
+		return ""
+	}
+	var payload subjectgate.ErrorPayload
+	if err := frame.DecodePayload(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Code
+}
+
+func TestRetiredPrincipalResolvesToNoEntitlements(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	principal := registerHumanForTest(t, eng, "retire-level")
+
+	routes, failed, err := eng.resolveEntitlements(context.Background(), principal.ID)
+	if err != nil || len(routes) == 0 || len(failed) != 0 {
+		t.Fatalf("present principal routes=%d failed=%v err=%v", len(routes), failed, err)
+	}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordPrincipalRetire, lagoon.PrincipalRetire{PrincipalID: principal.ID}); err != nil {
+		t.Fatal(err)
+	}
+	routes, failed, err = eng.resolveEntitlements(context.Background(), principal.ID)
+	if err != nil || len(routes) != 0 || len(failed) != 0 {
+		t.Fatalf("retired principal routes=%d failed=%v err=%v", len(routes), failed, err)
+	}
+}
+
+func TestRetirePokeConvergesExistingSessionEntitlements(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	principal := registerHumanForTest(t, eng, "retire-edge")
+	home := homeChannelForTest(t, eng, principal.ID)
+	session, err := eng.gateway.Attach(principal.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	session.StartFeed()
+
+	probe, err := subjectgate.NewFrame(subjectgate.FrameCancel, "retire-probe", subjectgate.CancelPayload{ChannelID: string(home), ReqID: "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := frameErrorCode(t, session.Upstream(probe)); code == subjectgate.CodeForbidden {
+		t.Fatal("present principal session started without its home route")
+	}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordPrincipalRetire, lagoon.PrincipalRetire{PrincipalID: principal.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The two-second bound is deliberately far below the 30-second sweep: this can
+	// only pass through the registrar onCommit -> Gateway.Poke edge.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if code := frameErrorCode(t, session.Upstream(probe)); code == subjectgate.CodeForbidden {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("retired principal session did not converge after commit poke")
+		case <-tick.C:
+		}
+	}
+}
+
+func TestCredentialSetRejectsAgentAndAllowsHuman(t *testing.T) {
+	eng, db, root := bootRegistrarTest(t)
+	setAgent := lagoon.CredentialSet{PrincipalID: protocol.StewardPrincipalID, SecretHash: "agent-hash"}
+	_, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordCredentialSet, setAgent)
+	var lagoonErr *lagoon.Error
+	if !errors.As(err, &lagoonErr) || lagoonErr.Code != lagoon.CodePermissionDenied {
+		t.Fatalf("agent credential.set error=%v", err)
+	}
+	var agentCredentials int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE principal_id=?`, protocol.StewardPrincipalID).Scan(&agentCredentials); err != nil {
+		t.Fatal(err)
+	}
+	if agentCredentials != 0 {
+		t.Fatalf("agent credentials rows=%d", agentCredentials)
+	}
+
+	setHuman := lagoon.CredentialSet{PrincipalID: protocol.RootPrincipalID, SecretHash: "human-hash"}
+	reply, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordCredentialSet, setHuman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var credential lagoon.CredentialReply
+	if !decodeValue(reply.Value, &credential) || credential.PrincipalID != protocol.RootPrincipalID || credential.Status != lagoon.CredentialActive {
+		t.Fatalf("human credential reply=%#v", reply.Value)
+	}
+	var stored string
+	if err := db.QueryRow(`SELECT secret_hash FROM credentials WHERE principal_id=? AND kind='password'`, protocol.RootPrincipalID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != setHuman.SecretHash {
+		t.Fatalf("human credential hash=%q", stored)
+	}
 }
 
 func TestDeviceMintAndClaimMissAreIntentionallyNonIdempotent(t *testing.T) {

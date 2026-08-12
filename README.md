@@ -99,12 +99,12 @@ platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word tabl
              channelhost/ (the channel contract surface the space talks to),
              spacetool/ (in-channel port for space requests), home/ (server-side
              channel-home assembly), daemonhost/ (space device carriers),
-             compute/ (daemon-side multi-compartment assembly), subjectgate/
-app/         reference space (identity, channel directory/lifecycle, declarations,
-             daemon tombstones, admission/lifecycle jobs, HTTP/WS)
+             compute/ (daemon-side multi-compartment assembly), subjectgate/,
+             lagoon/ (registry storage module + registrar), boot/ (one-shot
+             installer, sole registry DDL owner)
 drivers/     external-world drivers: tools/ (echo, device, kimi, xhs),
              agents/ (agent engine providers: codex, script),
-             gateway/ (human ingress)
+             gateway/ (human ingress; portal/ = identity doors + /ws + /compute)
 registry/    actor class registry (config → running actor)
 cmd/         binaries (server, daemon) + devtools
 archtest/    architecture enforcement tests (layer graph + closed sets)

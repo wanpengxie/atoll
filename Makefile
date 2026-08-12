@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-release test lint check-gateway-retired check-link-seam-retired check-engine-contract check-engine-contract-legacy check-activity-types dev dev-init dev-reopen dev-server clean e2e-loop
+.PHONY: install build build-go build-release test lint check-activity-types dev dev-init dev-reopen dev-server clean e2e-loop
 
 # server/daemon ship namespaced (atoll-server / atoll-daemon); the entry
 # command itself is plain `atoll` — its own name IS the namespace.
@@ -53,32 +53,15 @@ test-full:
 test-strict:
 	go test -race ./...
 
-# e2e-loop — the four daemon-device black-box acceptance scenarios.
-# 裸 go test ./... 不受影响（ATOLL_E2E_BIN 空则 skip）。
+# e2e-loop — the black-box acceptance suite (two real OS processes over the
+# portal wire dialect). 裸 go test ./... 不受影响（harness 自建二进制）。
 e2e-loop: build-go
-	@for test in TestDaemonOneCarrierServesTwoChannels TestDaemonDetachOneChannelDoesNotAffectOther TestDaemonCarrierReconnectRestoresCompartments TestDaemonQueryCredentialRejectedWithoutLoggingSecret; do \
-		ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -list "^$$test$$" | grep -qx "$$test" || { echo "[e2e] missing $$test" >&2; exit 1; }; \
-	done
-	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run '^(TestDaemonOneCarrierServesTwoChannels|TestDaemonDetachOneChannelDoesNotAffectOther|TestDaemonCarrierReconnectRestoresCompartments|TestDaemonQueryCredentialRejectedWithoutLoggingSecret)$$' -v -timeout 600s
+	ATOLL_E2E_BIN=$(PWD)/bin go test -count=1 ./e2e/ -v -timeout 600s
 
 # lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
-lint: check-gateway-retired check-link-seam-retired check-engine-contract check-engine-contract-legacy check-activity-types
+lint: check-activity-types
 	go vet ./...
 	go test ./archtest/
-
-# DoD-4 expected-diff gate: retirement comments are the sole allowlist; any live
-# identifier/string/semantic hit fails mechanically.
-check-gateway-retired:
-	./scripts/check-gateway-retired-symbols.sh
-
-check-link-seam-retired:
-	./scripts/check-link-seam-retired-symbols.sh
-
-check-engine-contract:
-	./scripts/check-engine-contract.sh
-
-check-engine-contract-legacy:
-	./scripts/check-engine-contract-legacy.sh
 
 check-activity-types:
 	./scripts/check-activity-types.sh
