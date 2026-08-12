@@ -315,7 +315,10 @@ func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.Re
 		} else if status.OK && !segmentEnded.Load() {
 			status = link.ExchangeStatus{OK: false, Code: "protocol_error", Detail: "host sent success before the byte-segment terminator"}
 		} else if status.OK && ticket.ReservationID != "" {
-			if completeErr := opener.Complete(ctx, ticket); completeErr != nil {
+			completionTicket, resolveErr := r.Resolve(ticket.ChannelID, head.Ticket)
+			if resolveErr != nil {
+				status = link.ExchangeStatus{OK: false, Code: "commit_failed", Detail: resolveErr.Error()}
+			} else if completeErr := opener.Complete(ctx, completionTicket); completeErr != nil {
 				status = link.ExchangeStatus{OK: false, Code: "commit_failed", Detail: completeErr.Error()}
 			}
 		}
@@ -400,7 +403,11 @@ func (r redeemer) ServeHTTP(ctx context.Context, address resource.ResourceID, to
 		return writeErr
 	}
 	if ticket.ReservationID != "" {
-		return opener.Complete(ctx, ticket)
+		completionTicket, err := r.p.resolveAny(token)
+		if err != nil {
+			return err
+		}
+		return opener.Complete(ctx, completionTicket)
 	}
 	return nil
 }

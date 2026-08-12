@@ -47,23 +47,21 @@ type AllocReply struct {
 
 // Committed is daemon→home: create-outbox's landing signal (§1.5/§1.7,
 // §4.7's second frame) — sent after the daemon's staging→fsync→rename
-// completes for a content-bearing create. It carries ONLY the reservation
-// id, never a creator (§1.7 P0-2: "daemon 不报 creator" — the daemon has no
-// truth to report one FROM; the home looks the door-authenticated creator
-// up in its OWN reservation row).
+// completes for a content-bearing create. It carries the reservation id and
+// the original opaque ticket, never a creator or a self-asserted resource
+// identity. The server resolves the ticket from its own ledger to recover the
+// expected resource name, host id, and coord.
 type Committed struct {
 	RequestID     string `json:"request_id"`
 	ReservationID string `json:"reservation_id"`
 	Ticket        string `json:"ticket"`
 }
 
-// CommittedReply is home→daemon: CommitReservation's outcome relayed back —
-// Found=false is Committed's replay-safe no-op (already landed, or the
-// reservation was lost to a same-resource_id race and already cleaned up by
-// the loser-cleanup path, §1.7's trigger ②); Lost=true (only meaningful when
-// Found=true) tells the daemon its own staged bytes are now orphaned (some
-// OTHER reservation landed the resource id first) and must be swept, never
-// retried.
+// CommittedReply is home→daemon: the identity-checked completion outcome.
+// Found=true means either this reservation landed or an exact replay already
+// landed the ticket's resource identity. Found=false is failure, never a
+// successful no-op. Lost=true (only meaningful when Found=true) tells the
+// daemon its staged bytes are orphaned because another reservation won.
 type CommittedReply struct {
 	RequestID string `json:"request_id"`
 	Found     bool   `json:"found"`

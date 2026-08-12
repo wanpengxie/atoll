@@ -194,7 +194,7 @@ func (r *ExchangeReader) Read(p []byte) (int, error) {
 	for r.remaining == 0 {
 		n, status, err := readExchangeChunkHeader(r.conn)
 		if err != nil {
-			return 0, err
+			return 0, exchangeReadError(err)
 		}
 		if status != nil {
 			r.done = true
@@ -205,7 +205,7 @@ func (r *ExchangeReader) Read(p []byte) (int, error) {
 		if r.remaining == 0 {
 			var status ExchangeStatus
 			if err := ReadExchangeControl(r.conn, &status); err != nil {
-				return 0, err
+				return 0, exchangeReadError(err)
 			}
 			r.done = true
 			_ = r.conn.Close()
@@ -220,7 +220,17 @@ func (r *ExchangeReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.conn.Read(p)
 	r.remaining -= uint32(n)
-	return n, err
+	return n, exchangeReadError(err)
+}
+
+// A transport EOF is never a successful READ terminal. The only ordinary EOF
+// ExchangeReader exposes is synthesized above after both the zero-length byte
+// terminator and an ok=true terminal frame have been consumed.
+func exchangeReadError(err error) error {
+	if errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 func (r *ExchangeReader) Close() error {

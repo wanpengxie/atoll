@@ -141,9 +141,20 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 
 	directory := "daemon://storage-node/e2e/workspace"
 	ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "create", "address": directory, "dir": true})
-	_, directoryFailure, err := ws.tryRequest(c0ChannelID, "echo.file_read", actorID, map[string]any{"address": directory})
-	if err == nil || !strings.Contains(fmt.Sprint(directoryFailure), "directory resources cannot be transferred remotely") {
-		t.Fatalf("remote directory result=%v err=%v", directoryFailure, err)
+	for _, tc := range []struct {
+		name    string
+		msgType string
+		payload map[string]any
+	}{
+		{name: "read", msgType: "echo.file_read", payload: map[string]any{"address": directory}},
+		{name: "write", msgType: "echo.file_write", payload: map[string]any{"address": directory, "content": "must-not-land"}},
+	} {
+		t.Run("remote directory "+tc.name, func(t *testing.T) {
+			_, directoryFailure, err := ws.tryRequest(c0ChannelID, tc.msgType, actorID, tc.payload)
+			if err == nil || !strings.Contains(fmt.Sprint(directoryFailure), "directory resources cannot be transferred remotely") {
+				t.Fatalf("remote directory %s result=%v err=%v", tc.name, directoryFailure, err)
+			}
+		})
 	}
 
 	// Mint while A is online, then redeem only after it is gone.
@@ -174,6 +185,47 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(fmt.Sprint(issueFailure), offlineText) {
 		t.Fatalf("issue-time offline result=%v err=%v", issueFailure, err)
+	}
+}
+
+func TestColocatedActorFileCreateReadWriteUsesLocalRedemption(t *testing.T) {
+	h := newHarness(t)
+	_, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
+	registrar := findTool(t, ws)
+	device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": "colocated-node"})
+	deviceID := stringField(t, device, "id")
+	deviceKey := stringField(t, device, "key")
+	registrarRequest(t, ws, registrar, "device.attach", map[string]any{"channel_id": c0ChannelID, "device_id": deviceID})
+	const declarationID = "colocated-file-probe"
+	registrarRequest(t, ws, registrar, "decl.register", map[string]any{
+		"id": declarationID, "name": "colocated file probe", "class": "echo",
+		"config": map[string]any{}, "visibility": "private",
+	})
+	introduced := ws.request(c0ChannelID, "channel.introduce_actor", systemActor, map[string]any{"kind": "tool", "decl_id": declarationID})
+	actorID := stringField(t, introduced, "instance_id")
+	daemonLog := filepath.Join(h.root, "logs", "colocated-node.log")
+	daemon := startProc(t, "colocated-node", filepath.Join(e2eBinDir, "atoll-daemon"), []string{
+		"--server", fmt.Sprintf("ws://127.0.0.1:%d/compute", h.port),
+		"--key", deviceKey, "--name", "colocated-node", "--home", filepath.Join(h.root, "colocated-node"),
+	}, h.env, filepath.Join(h.root, "work"), daemonLog)
+	waitActorPresence(t, ws, actorID, true, daemon, daemonLog)
+
+	address := "daemon://colocated-node/e2e/local.bin"
+	created := ws.request(c0ChannelID, "echo.file_create", actorID, map[string]any{"address": address, "content": "created-locally"})
+	if created["ok"] != true || created["redeem"] != "local" {
+		t.Fatalf("colocated create reply=%v\ndaemon log:\n%s", created, tailLog(daemonLog, 100))
+	}
+	read := ws.request(c0ChannelID, "echo.file_read", actorID, map[string]any{"address": address})
+	if read["content"] != "created-locally" || read["redeem"] != "local" {
+		t.Fatalf("colocated read reply=%v", read)
+	}
+	written := ws.request(c0ChannelID, "echo.file_write", actorID, map[string]any{"address": address, "content": "rewritten-locally"})
+	if written["ok"] != true || written["redeem"] != "local" {
+		t.Fatalf("colocated write reply=%v", written)
+	}
+	read = ws.request(c0ChannelID, "echo.file_read", actorID, map[string]any{"address": address})
+	if read["content"] != "rewritten-locally" || read["redeem"] != "local" {
+		t.Fatalf("colocated final read reply=%v", read)
 	}
 }
 

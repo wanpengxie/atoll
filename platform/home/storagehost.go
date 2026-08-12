@@ -211,14 +211,28 @@ func (h homeStorageHostControl) Committed(ctx context.Context, senderDaemonID st
 	if placementDaemonID != senderDaemonID {
 		return false, false, fmt.Errorf("%w: reservation %q belongs to %q, sender is %q", errSenderDaemonMismatch, expected.ReservationID, placementDaemonID, senderDaemonID)
 	}
-	_, landed, cerr := h.outbox.CommitReservation(ctx, expected.ReservationID)
+	_, found, cerr := h.outbox.CommitReservation(ctx, expected.ReservationID)
 	if cerr != nil {
 		if errors.Is(cerr, accessdoor.ErrReservationLost) {
-			return landed, true, nil
+			return found, true, nil
 		}
 		return false, false, cerr
 	}
-	return landed, false, nil
+	if found {
+		return true, false, nil
+	}
+	// The reservation can disappear after ReservationDaemon and before the
+	// transactional commit lookup. Recover the expected identity from the
+	// original ticket (the caller supplied expected) and accept only an exact
+	// replay of the resource that this reservation was meant to land.
+	meta, landed, rerr := h.outbox.Resolve(ctx, resource.ResourceID(expected.ResourceID))
+	if rerr != nil {
+		return false, false, rerr
+	}
+	if landed && meta.PlacementDaemonID == expected.DaemonID && meta.PlacementCoord == expected.Coord {
+		return true, false, nil
+	}
+	return false, false, errors.New("platform: create reservation disappeared before commit and landed resource identity does not match ticket")
 }
 
 func (h homeStorageHostControl) ReclaimAck(ctx context.Context, senderDaemonID, tombstoneID string) (bool, error) {

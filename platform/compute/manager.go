@@ -1293,7 +1293,8 @@ func (s *laneSession) OpenActorStream(
 	s.lane.mu.Unlock()
 	client := &link.ClientActorLane{
 		Carrier: s.lane.carrier, Lane: s.lane.stream, Host: host,
-		Control: s.lane, Files: files, Logger: s.lane.manager.logger,
+		Control: s.lane, Files: files, DialExchange: s.lane.openExchange,
+		Logger: s.lane.manager.logger,
 	}
 	stream, err := client.OpenActorStream(ctx, id, key)
 	if err != nil {
@@ -1339,6 +1340,40 @@ func (l *clientLane) trackExchange(conn net.Conn) (func(), bool) {
 			l.exchangeWG.Done()
 		})
 	}, true
+}
+
+var openClientExchange = func(
+	ctx context.Context, carrier *link.ClientCarrier, chID channel.ID, generation link.LaneGeneration,
+) (net.Conn, error) {
+	return carrier.OpenExchange(ctx, chID, generation)
+}
+
+func (l *clientLane) openExchange(ctx context.Context) (io.ReadWriteCloser, error) {
+	if l == nil || l.carrier == nil || l.stream == nil {
+		return nil, link.ErrInvalidPhysicalChild
+	}
+	conn, err := openClientExchange(ctx, l.carrier, l.stream.Channel, l.stream.Gen)
+	if err != nil {
+		return nil, err
+	}
+	cleanup, ok := l.trackExchange(conn)
+	if !ok {
+		_ = conn.Close()
+		return nil, link.ErrInvalidPhysicalChild
+	}
+	return &trackedClientExchange{ReadWriteCloser: conn, cleanup: cleanup}, nil
+}
+
+type trackedClientExchange struct {
+	io.ReadWriteCloser
+	once    sync.Once
+	cleanup func()
+}
+
+func (c *trackedClientExchange) Close() error {
+	err := c.ReadWriteCloser.Close()
+	c.once.Do(c.cleanup)
+	return err
 }
 
 func (l *clientLane) setHost(host *actorhost.HostSupervisor) {

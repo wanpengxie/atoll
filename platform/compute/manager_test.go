@@ -1246,6 +1246,58 @@ func TestClientLaneRetirementClosesTrackedExchanges(t *testing.T) {
 	}
 }
 
+func TestClientLaneProductionDialRegistersExchangeForRetirement(t *testing.T) {
+	fixture := newLaneAdmissionFixture(t)
+	lane := fixture.lane(fixture.carrier, link.LaneGeneration("00000000-0000-7000-8000-000000000011"))
+
+	previousOpen := openClientExchange
+	var peer net.Conn
+	openClientExchange = func(
+		_ context.Context, carrier *link.ClientCarrier, chID channel.ID, gen link.LaneGeneration,
+	) (net.Conn, error) {
+		if carrier != lane.carrier || chID != lane.stream.Channel || gen != lane.stream.Gen {
+			t.Fatalf("dial coordinates = (%p,%q,%q), want exact lane", carrier, chID, gen)
+		}
+		local, remote := net.Pipe()
+		peer = remote
+		return local, nil
+	}
+	t.Cleanup(func() {
+		openClientExchange = previousOpen
+		if peer != nil {
+			_ = peer.Close()
+		}
+	})
+
+	conn, err := lane.openExchange(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane.mu.Lock()
+	tracked := len(lane.exchanges)
+	lane.mu.Unlock()
+	if tracked != 1 {
+		t.Fatalf("tracked exchanges = %d, want 1 immediately after production dial", tracked)
+	}
+
+	joined := make(chan struct{})
+	go func() {
+		_, _ = conn.Read(make([]byte, 1))
+		_ = conn.Close()
+		close(joined)
+	}()
+	lane.retireLogical()
+	select {
+	case <-joined:
+	default:
+		t.Fatal("lane retirement returned before the production-dialed exchange joined")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := peer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("production-dialed exchange remained open after exact lane retirement")
+	}
+}
+
 type bindableStorage struct{}
 
 func (bindableStorage) Alloc(string, bool) error { return nil }

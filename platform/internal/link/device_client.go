@@ -24,7 +24,11 @@ type ClientActorLane struct {
 	Host    *actorhost.HostSupervisor
 	Control DeviceLaneControl
 	Files   LocalFileOpener
-	Logger  *slog.Logger
+	// DialExchange opens an exchange already registered as a child of this
+	// exact lane. The compute owner supplies it; callers must not dial the
+	// carrier directly because that would escape lane retirement and joining.
+	DialExchange func(context.Context) (io.ReadWriteCloser, error)
+	Logger       *slog.Logger
 }
 
 type actorStream struct {
@@ -85,10 +89,8 @@ func (l *ClientActorLane) OpenActorStream(
 	resource := ActorStreamResource{
 		Arms: RawActorArms{
 			Pen: writer, Access: &remoteResourceHandle{
-				relay: accessRelay,
-				redeemer: &deviceFileRedeemer{control: l.Control, files: l.Files, dial: func(ctx context.Context) (io.ReadWriteCloser, error) {
-					return l.Carrier.OpenExchange(ctx, l.Lane.Channel, l.Lane.Gen)
-				}},
+				relay:    accessRelay,
+				redeemer: &deviceFileRedeemer{control: l.Control, files: l.Files, dial: l.DialExchange},
 			},
 			State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
 			Schedule: &remoteScheduleHandle{relay: scheduleRelay}, Lifecycle: lifecycle,
@@ -221,6 +223,9 @@ func (h *deviceCommittingWrite) Commit() error {
 	}
 	if reply.Reason != "" && !reply.Lost {
 		return errors.New(reply.Reason)
+	}
+	if !reply.Found {
+		return errors.New("link: create completion identity not found")
 	}
 	if reply.Lost {
 		_ = h.files.ReclaimCoord(h.coord)

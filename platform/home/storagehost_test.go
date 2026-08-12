@@ -184,6 +184,34 @@ func TestHomeStorageHostControl_Committed_SenderAuth(t *testing.T) {
 		}
 	})
 
+	t.Run("reservation disappearing during commit without a landed row fails honestly", func(t *testing.T) {
+		ob := &fakeOutbox{
+			reservationDaemon: "daemon-1", reservationFound: true,
+			commitFound: false, resolveFound: false,
+		}
+		h := homeStorageHostControl{outbox: ob}
+		found, lost, err := h.Committed(t.Context(), "daemon-1", expected)
+		if err == nil || found || lost {
+			t.Fatalf("Committed = (%v,%v,%v), want honest missing-identity failure", found, lost, err)
+		}
+		if len(ob.commitCalls) != 1 {
+			t.Fatalf("CommitReservation calls = %v, want the raced commit attempt", ob.commitCalls)
+		}
+	})
+
+	t.Run("reservation disappearing during commit accepts an exact landed replay", func(t *testing.T) {
+		ob := &fakeOutbox{
+			reservationDaemon: "daemon-1", reservationFound: true,
+			commitFound: false, resolveFound: true,
+			resolveMeta: resourcespec.ResourceMeta{PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"},
+		}
+		h := homeStorageHostControl{outbox: ob}
+		found, lost, err := h.Committed(t.Context(), "daemon-1", expected)
+		if err != nil || !found || lost {
+			t.Fatalf("Committed = (%v,%v,%v), want exact replay success", found, lost, err)
+		}
+	})
+
 	t.Run("ErrReservationLost surfaces as lost=true, not a Go error", func(t *testing.T) {
 		ob := &fakeOutbox{reservationDaemon: "daemon-1", reservationFound: true, commitFound: true, commitErr: resourcespec.ErrReservationLost}
 		h := homeStorageHostControl{outbox: ob}

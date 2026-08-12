@@ -178,6 +178,68 @@ func TestRemoteReadAndWriteStateMachines(t *testing.T) {
 	})
 }
 
+func TestRemoteCreateRevalidatesOriginalTicketAtCompletion(t *testing.T) {
+	opened := make(chan struct{})
+	opener := &exchangeOpener{serve: func(conn io.ReadWriteCloser) {
+		defer conn.Close()
+		var head link.ExchangeHostHeader
+		if err := link.ReadExchangeControl(conn, &head); err != nil {
+			return
+		}
+		close(opened)
+		if err := link.ReadExchangeBytes(io.Discard, conn); err != nil {
+			return
+		}
+		// Let the relay publish its byte-segment-ended state before the host's
+		// success races back over the full-duplex stream.
+		time.Sleep(10 * time.Millisecond)
+		_ = link.WriteExchangeControl(conn, link.ExchangeStatus{OK: true})
+	}}
+	issue, redeem, bind, closePlane := New()
+	if err := bind.BindHostStreamOpener(opener); err != nil {
+		t.Fatal(err)
+	}
+	defer closePlane(context.Background())
+	grant, err := issue.Issue(t.Context(), IssueSpec{
+		ResourceID: "daemon://host/slow-create", ChannelID: "c", Mode: access.OpWrite,
+		HostID: "host-id", HostName: "host", CallerHostID: "other", Coord: "coord",
+		ReservationID: "reservation",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, server := net.Pipe()
+	go redeem.ServeExchange(t.Context(), "c", server)
+	if err := link.WriteExchangeControl(caller, link.ExchangeTicketHeader{Ticket: grant.Ticket}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-opened:
+	case <-time.After(time.Second):
+		t.Fatal("initial ticket redemption did not open the host leg")
+	}
+
+	p := issue.(issuer).p
+	p.mu.Lock()
+	ticket := p.tickets[grant.Ticket]
+	ticket.Expires = p.now()
+	p.tickets[grant.Ticket] = ticket
+	p.mu.Unlock()
+
+	handle := link.NewExchangeWriteHandle(caller)
+	if _, err := handle.Write([]byte("long-running upload")); err != nil {
+		t.Fatal(err)
+	}
+	err = handle.Commit()
+	var terminal *link.ExchangeTerminalError
+	if !errors.As(err, &terminal) || terminal.Code != "commit_failed" || terminal.Detail != ErrInvalidTicket.Error() {
+		t.Fatalf("Commit error = %v, want expired-ticket commit failure", err)
+	}
+	if opener.complete != 0 {
+		t.Fatalf("completion calls = %d, want 0 for an expired ticket", opener.complete)
+	}
+}
+
 func TestRemoteWriteForwardsEarlyHostFailureAndStopsUpload(t *testing.T) {
 	opener := &exchangeOpener{serve: func(conn io.ReadWriteCloser) {
 		defer conn.Close()

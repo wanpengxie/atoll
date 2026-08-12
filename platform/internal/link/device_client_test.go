@@ -110,7 +110,10 @@ func TestDeviceCommittingWritePreservesCommitOutcomeSemantics(t *testing.T) {
 			wantContains: "outcome unknown", wantSend: true,
 		},
 		{name: "found succeeds", reply: CommittedReply{Found: true}, wantSend: true},
-		{name: "not found is idempotent success", reply: CommittedReply{}, wantSend: true},
+		{
+			name: "not found fails honestly", reply: CommittedReply{},
+			wantContains: "completion identity not found", wantSend: true,
+		},
 		{
 			name:  "home rejection fails without reclaim",
 			reply: CommittedReply{Reason: homeFailure.Error()}, wantContains: homeFailure.Error(),

@@ -257,7 +257,9 @@ func handleFileRead(sys actorbase.Sys, msg actorbase.Msg) {
 		failFile(sys, msg, err)
 		return
 	}
-	_, _ = sys.Reply(msg, map[string]any{"content": string(content), "size": len(content)})
+	_, _ = sys.Reply(msg, map[string]any{
+		"content": string(content), "size": len(content), "redeem": fileRedeemKind(fa),
+	})
 }
 
 func handleFileWrite(sys actorbase.Sys, msg actorbase.Msg) {
@@ -309,7 +311,19 @@ func writeFileReply(sys actorbase.Sys, msg actorbase.Msg, fa accessdoor.FileAcce
 		failFile(sys, msg, err)
 		return
 	}
-	_, _ = sys.Reply(msg, map[string]any{"ok": true, "size": len(content)})
+	_, _ = sys.Reply(msg, map[string]any{
+		"ok": true, "size": len(content), "redeem": fileRedeemKind(fa),
+	})
+}
+
+func fileRedeemKind(fa accessdoor.FileAccess) string {
+	if fa.Local != nil {
+		return "local"
+	}
+	if fa.Remote != nil {
+		return "remote"
+	}
+	return ""
 }
 
 // handleStart walks the capability face in one pass. Its account does NOT

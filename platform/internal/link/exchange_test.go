@@ -43,6 +43,21 @@ func TestExchangeReaderRequiresSuccessfulTerminal(t *testing.T) {
 	}
 }
 
+func TestExchangeReaderReportsChunkBoundaryDisconnectAsTruncation(t *testing.T) {
+	left, right := net.Pipe()
+	go func() {
+		_ = WriteExchangeChunk(right, []byte("complete-chunk"))
+		_ = right.Close() // no zero-length terminator and no successful terminal
+	}()
+	got, err := io.ReadAll(NewExchangeReader(left))
+	if string(got) != "complete-chunk" {
+		t.Fatalf("bytes = %q", got)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("error = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
 func TestRelayExchangeBytesIsCutThrough(t *testing.T) {
 	sourceRead, sourceWrite := net.Pipe()
 	sinkRead, sinkWrite := net.Pipe()
