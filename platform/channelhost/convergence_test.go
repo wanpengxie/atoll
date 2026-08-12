@@ -74,16 +74,37 @@ func newConvergingHost(t *testing.T, registry RegistryReader) *ChannelHost {
 	return h
 }
 
-func TestRegistryChangeReconcilesBeforeReturning(t *testing.T) {
+func TestRegistryChangeDoesNotReconcileInline(t *testing.T) {
 	registry := newDesiredRegistry()
 	h := newConvergingHost(t, registry)
-	row := desiredRow(t, "synchronous-create")
+	row := desiredRow(t, "queued-only")
 	registry.put(row)
 
 	h.RegistryChanged(lagoon.Change{ChannelID: row.ID})
-	if _, ok := h.Acquire(row.ID); !ok {
-		t.Fatal("post-commit edge returned before the created channel was open")
+	if _, ok := h.Acquire(row.ID); ok {
+		t.Fatal("post-commit edge reconciled inline")
 	}
+}
+
+func TestRegistryChangeQueuesFastReconcile(t *testing.T) {
+	registry := newDesiredRegistry()
+	h := newConvergingHost(t, registry)
+	h.convergence.edgeDelay = 10 * time.Millisecond
+	if err := h.StartConvergence(); err != nil {
+		t.Fatal(err)
+	}
+	row := desiredRow(t, "edge-create")
+	registry.put(row)
+
+	h.RegistryChanged(lagoon.Change{ChannelID: row.ID})
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, ok := h.Acquire(row.ID); ok {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("post-commit edge did not open the channel through fast reconciliation")
 }
 
 func TestSlowScanRepairsDroppedEdge(t *testing.T) {

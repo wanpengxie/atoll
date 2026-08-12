@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -123,6 +124,36 @@ func TestOpenChannel_MustExistDoesNotCreateMissingPath(t *testing.T) {
 	}
 }
 
+func TestOpenChannel_MustExistRejectsEmptyDBBeforeDDL(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "empty.sqlite")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist accepted an empty DB and installed schema")
+	}
+	raw, err = sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var tables int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatalf("MustExist mutated empty DB: tables=%d", tables)
+	}
+}
+
 // A read-only open must have NO filesystem write side-effect: it never creates
 // the parent directory. A missing path surfaces as a clean open error, not a
 // silently-created dir.
@@ -172,4 +203,113 @@ func TestOpenChannel_MustExistReopenValid(t *testing.T) {
 		t.Fatalf("MustExist reopen of valid DB: %v", err)
 	}
 	_ = cs2.Close()
+}
+
+func TestOpenChannel_MustExistStaleSchemaFailsFast(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "stale.sqlite")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE unrelated (x INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist open of a DB missing the baseline schema must fail fast")
+	}
+}
+
+func TestOpenChannel_MustExistRejectsEverySchemaMismatchWithoutMutation(t *testing.T) {
+	replaceOne := func(old, replacement string) func(string) string {
+		return func(ddl string) string {
+			if strings.Count(ddl, old) != 1 {
+				t.Fatalf("schema test fixture expected one occurrence of %q", old)
+			}
+			return strings.Replace(ddl, old, replacement, 1)
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(string) string
+	}{
+		{"missing-message-column", replaceOne("  payload              TEXT NOT NULL,\n", "")},
+		{"wrong-message-column-type", replaceOne("  payload              TEXT NOT NULL,\n", "  payload              BLOB NOT NULL,\n")},
+		{"missing-message-unique-constraint", replaceOne("  id                   TEXT NOT NULL UNIQUE,\n", "  id                   TEXT NOT NULL,\n")},
+		{"missing-partial-index", replaceOne("CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';\n", "")},
+		{"extra-table", func(ddl string) string { return ddl + `CREATE TABLE retired_shadow (x INTEGER);` }},
+		{"retired-decl-versions-table", func(ddl string) string {
+			return ddl + `CREATE TABLE actor_decl_versions (actor_id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (actor_id, version));`
+		}},
+		{"retired-role-column", replaceOne(
+			"  principal          TEXT NOT NULL DEFAULT '', -- login identity only; declaration-backed actors normally leave it empty\n",
+			"  principal          TEXT NOT NULL DEFAULT '',\n  role               TEXT NOT NULL DEFAULT '',\n")},
+		{"retired-binding-column", replaceOne(
+			"  class              TEXT NOT NULL,\n",
+			"  class              TEXT NOT NULL,\n  actor_binding      TEXT,\n")},
+		{"extra-index", func(ddl string) string { return ddl + `CREATE INDEX retired_index ON messages(type);` }},
+		{"extra-view", func(ddl string) string { return ddl + `CREATE VIEW retired_view AS SELECT id FROM messages;` }},
+		{"extra-trigger", func(ddl string) string {
+			return ddl + `CREATE TRIGGER retired_trigger AFTER INSERT ON messages BEGIN SELECT 1; END;`
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "channel.sqlite")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, tc.mutate(store.ChannelLocalDDL)); err != nil {
+				_ = db.Close()
+				t.Fatalf("seed mismatched schema: %v", err)
+			}
+			before := schemaCatalog(t, db)
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if cs, err := store.OpenChannel(ctx, "C-test", path, store.OpenOptions{MustExist: true}, nil); err == nil {
+				_ = cs.Close()
+				t.Fatal("strict reopen accepted a mismatched channel schema")
+			}
+
+			db, err = sql.Open("sqlite", "file:"+path+"?mode=ro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if after := schemaCatalog(t, db); after != before {
+				t.Fatalf("failed strict reopen mutated schema:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
+func schemaCatalog(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.Query(`SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out strings.Builder
+	for rows.Next() {
+		var typ, name, ddl string
+		if err := rows.Scan(&typ, &name, &ddl); err != nil {
+			t.Fatal(err)
+		}
+		out.WriteString(typ)
+		out.WriteByte('\x00')
+		out.WriteString(name)
+		out.WriteByte('\x00')
+		out.WriteString(ddl)
+		out.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
 }

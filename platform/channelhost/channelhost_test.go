@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -207,6 +208,29 @@ func TestLifecycleTombstoneAndCensus(t *testing.T) {
 	}
 	if _, err := host.Provision(ctx, provisionSpec(id)); !errors.Is(err, ErrChannelRetired) {
 		t.Fatalf("retired id reprovision=%v", err)
+	}
+}
+
+func TestCensusDoesNotSeeSiblingRegistryDatabase(t *testing.T) {
+	parent := t.TempDir()
+	channelRoot := filepath.Join(parent, "channels")
+	host, err := New(channelRoot, testBindings{}, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close(context.Background())
+	registryPath := filepath.Join(parent, "registry.db")
+	const registryBytes = "registry-sentinel"
+	if err := os.WriteFile(registryPath, []byte(registryBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := host.Census(context.Background())
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("census included sibling registry: entries=%v err=%v", entries, err)
+	}
+	got, err := os.ReadFile(registryPath)
+	if err != nil || string(got) != registryBytes {
+		t.Fatalf("census touched sibling registry: bytes=%q err=%v", got, err)
 	}
 }
 

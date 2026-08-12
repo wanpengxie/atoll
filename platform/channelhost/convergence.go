@@ -96,26 +96,12 @@ func (h *ChannelHost) stopConvergence() {
 }
 
 // RegistryChanged is the storage module's post-commit edge. The value carries
-// no command or row contents. A target absent from the serving set receives one
-// immediate hand so channel.create can return with its physical channel open;
-// every edge is also queued for the 250ms fast sweep, while the 30s scan remains
-// authoritative.
+// no command or row contents. Every edge is queued for the 250ms fast sweep,
+// while the 30s scan remains authoritative.
 func (h *ChannelHost) RegistryChanged(change lagoon.Change) {
 	c := h.convergence
 	if c == nil {
 		return
-	}
-	if change.ChannelID != "" {
-		_, serving := h.Acquire(change.ChannelID)
-		// The synchronous hand belongs only to creation: an absent physical
-		// channel must open before the create/register reply. Existing channels
-		// (including c0) stay on the 250ms edge so the registrar can finish its
-		// response write without competing against its own Home store.
-		if !serving {
-			if err := h.reconcileID(c.ctx, change.ChannelID); err != nil && c.ctx.Err() == nil {
-				h.logger.Warn("channelhost immediate reconcile failed", "channel", change.ChannelID, "err", err)
-			}
-		}
 	}
 	id := change.ChannelID
 	if change.AllChannels {

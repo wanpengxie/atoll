@@ -15,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
-	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol"
@@ -31,10 +30,7 @@ func bootRegistrarTest(t *testing.T) (*Engine, *sql.DB, actor.ActorID) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Close(context.Background()) })
-	path, err := channelhost.DBPath(dir, protocol.C0ChannelID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(filepath.Dir(dir), "registry.db")
 	u := &url.URL{Scheme: "file", Path: path}
 	db, err := sql.Open("sqlite", u.String()+"?mode=rw&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -54,6 +50,14 @@ func registrarCall(t *testing.T, eng *Engine, sender actor.ActorID, source chann
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return eng.submitter.Submit(ctx, lagoon.SubmitIn{Source: source, Sender: sender, RequestID: uuid.NewString(), Word: word, Payload: payload})
+}
+
+func requireLagoonCode(t *testing.T, err error, want lagoon.ErrorCode) {
+	t.Helper()
+	var lagoonErr *lagoon.Error
+	if !errors.As(err, &lagoonErr) || lagoonErr.Code != want {
+		t.Fatalf("registrar error=%v, want code %s", err, want)
+	}
 }
 
 func createChannelForTest(t *testing.T, eng *Engine, root actor.ActorID, name string, parent channel.ID) lagoon.ChannelRow {
@@ -126,6 +130,14 @@ func TestRetireReparentsChildrenAndKeepsTombstone(t *testing.T) {
 func TestCreateReplayAfterDetachDoesNotRestoreBinding(t *testing.T) {
 	eng, _, root := bootRegistrarTest(t)
 	created := createChannelForTest(t, eng, root, "detached", protocol.C0ChannelID)
+	mintedReply, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceMint, lagoon.DeviceMint{Name: "detachable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var device lagoon.DeviceRow
+	if !decodeValue(mintedReply.Value, &device) {
+		t.Fatalf("invalid mint reply: %#v", mintedReply.Value)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := eng.waitChannel(ctx, created.ID); err != nil {
@@ -135,17 +147,21 @@ func TestCreateReplayAfterDetachDoesNotRestoreBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registrarCall(t, eng, homeRoot, created.ID, lagoon.WordDeviceDetach, lagoon.DeviceBinding{ChannelID: created.ID, DeviceID: protocol.LocalDeviceID}); err != nil {
+	binding := lagoon.DeviceBinding{ChannelID: created.ID, DeviceID: device.ID}
+	if _, err := registrarCall(t, eng, homeRoot, created.ID, lagoon.WordDeviceAttach, binding); err != nil {
 		t.Fatal(err)
 	}
-	if bound, err := eng.registry.IsBound(context.Background(), created.ID, protocol.LocalDeviceID); err != nil || bound {
+	if _, err := registrarCall(t, eng, homeRoot, created.ID, lagoon.WordDeviceDetach, binding); err != nil {
+		t.Fatal(err)
+	}
+	if bound, err := eng.registry.IsBound(context.Background(), created.ID, device.ID); err != nil || bound {
 		t.Fatalf("binding after detach=%v err=%v", bound, err)
 	}
 	replayed := createChannelForTest(t, eng, root, "detached", protocol.C0ChannelID)
 	if replayed.ID != created.ID {
 		t.Fatalf("replay returned %s, want %s", replayed.ID, created.ID)
 	}
-	if bound, err := eng.registry.IsBound(context.Background(), created.ID, protocol.LocalDeviceID); err != nil || bound {
+	if bound, err := eng.registry.IsBound(context.Background(), created.ID, device.ID); err != nil || bound {
 		t.Fatalf("create replay resurrected detached binding: bound=%v err=%v", bound, err)
 	}
 }
@@ -199,15 +215,65 @@ func TestRetiredDeviceIsExcludedFromEffectiveBindings(t *testing.T) {
 	if _, err := registrarCall(t, eng, homeRoot, created.ID, lagoon.WordDeviceAttach, lagoon.DeviceBinding{ChannelID: created.ID, DeviceID: second.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceRetire, lagoon.DeviceRetire{DeviceID: protocol.LocalDeviceID}); err != nil {
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceRetire, lagoon.DeviceRetire{DeviceID: second.ID}); err != nil {
 		t.Fatal(err)
 	}
 	bound, err := eng.registry.ListBoundDevices(context.Background(), created.ID)
-	if err != nil || len(bound) != 1 || bound[0].ID != second.ID {
+	if err != nil || len(bound) != 1 || bound[0].ID != protocol.LocalDeviceID {
 		t.Fatalf("effective bindings=%+v err=%v", bound, err)
 	}
-	if yes, err := eng.registry.IsBound(context.Background(), created.ID, protocol.LocalDeviceID); err != nil || yes {
+	if yes, err := eng.registry.IsBound(context.Background(), created.ID, second.ID); err != nil || yes {
 		t.Fatalf("retired device remained effectively bound: %v err=%v", yes, err)
+	}
+}
+
+func TestSpaceToolDeclarationMutationsAreReserved(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	name := "renamed"
+	visibility := "private"
+	for label, edit := range map[string]lagoon.DeclEdit{
+		"name":       {ID: lagoon.SpaceToolDeclID, Name: &name},
+		"config":     {ID: lagoon.SpaceToolDeclID, Config: json.RawMessage(`{"changed":true}`)},
+		"visibility": {ID: lagoon.SpaceToolDeclID, Visibility: &visibility},
+	} {
+		t.Run(label, func(t *testing.T) {
+			_, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeclEdit, edit)
+			requireLagoonCode(t, err, lagoon.CodeReserved)
+		})
+	}
+	_, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeclRevoke, lagoon.DeclRevoke{ID: lagoon.SpaceToolDeclID})
+	requireLagoonCode(t, err, lagoon.CodeReserved)
+}
+
+func TestOrdinaryDeclarationEditAndRevokeRemainAllowed(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	input := lagoon.DeclRegister{ID: "mutable-decl", Name: "mutable", Class: "codex", Config: json.RawMessage(`{}`), Visibility: "private"}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeclRegister, input); err != nil {
+		t.Fatal(err)
+	}
+	name := "edited"
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeclEdit, lagoon.DeclEdit{ID: input.ID, Name: &name}); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeclRevoke, lagoon.DeclRevoke{ID: input.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revoked lagoon.DeclRow
+	if !decodeValue(reply.Value, &revoked) || revoked.Status != lagoon.DeclRevoked {
+		t.Fatalf("invalid revoke reply: %#v", reply.Value)
+	}
+}
+
+func TestLocalDeviceRetireAndDetachAreReserved(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	_, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceRetire, lagoon.DeviceRetire{DeviceID: protocol.LocalDeviceID})
+	requireLagoonCode(t, err, lagoon.CodeReserved)
+	_, err = registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceDetach, lagoon.DeviceBinding{ChannelID: protocol.C0ChannelID, DeviceID: protocol.LocalDeviceID})
+	requireLagoonCode(t, err, lagoon.CodeReserved)
+	device, ok, err := eng.registry.GetDevice(context.Background(), protocol.LocalDeviceID)
+	if err != nil || !ok || device.Status != lagoon.DevicePresent {
+		t.Fatalf("local device row=%+v ok=%v err=%v", device, ok, err)
 	}
 }
 
@@ -224,7 +290,7 @@ func TestRegisterConflictDoesNotMintSessionShapedSuccess(t *testing.T) {
 	}
 }
 
-func TestRegisterReturnsOnlyAfterHomeIsServing(t *testing.T) {
+func TestRegisterHomeEventuallyServes(t *testing.T) {
 	eng, _, _ := bootRegistrarTest(t)
 	reply, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{ID: "alice", Email: "alice@example.test", SecretHash: "hash"})
 	if err != nil {
@@ -240,13 +306,56 @@ func TestRegisterReturnsOnlyAfterHomeIsServing(t *testing.T) {
 	}
 	for _, row := range rows {
 		if row.OwnerPrincipal == principal.ID && row.ParentID == protocol.C0ChannelID && row.Name == principal.ID {
-			if _, ok := eng.host.Acquire(row.ID); !ok {
-				t.Fatal("register returned before its home channel was serving")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := eng.waitChannel(ctx, row.ID); err != nil {
+				t.Fatalf("registered home did not become serving: %v", err)
 			}
 			return
 		}
 	}
 	t.Fatal("registered principal has no home channel")
+}
+
+func TestMembraneOpenPokesOwnerSession(t *testing.T) {
+	eng, _, _ := bootRegistrarTest(t)
+	session, err := eng.gateway.Attach("membrane-owner", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	session.StartFeed()
+
+	reply, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{
+		ID: "membrane-owner", Email: "membrane-owner@example.test", SecretHash: "hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var principal lagoon.PrincipalRow
+	if !decodeValue(reply.Value, &principal) {
+		t.Fatalf("invalid register reply: %#v", reply.Value)
+	}
+	home := homeChannelForTest(t, eng, principal.ID)
+	probe, err := subjectgate.NewFrame(subjectgate.FrameCancel, "membrane-probe", subjectgate.CancelPayload{ChannelID: string(home), ReqID: "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if code := frameErrorCode(t, session.Upstream(probe)); code != subjectgate.CodeForbidden && code != subjectgate.CodeUnavailable {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("owner session did not gain its home route after membrane open poke")
+		case <-tick.C:
+		}
+	}
 }
 
 func registerHumanForTest(t *testing.T, eng *Engine, id string) lagoon.PrincipalRow {
@@ -260,6 +369,12 @@ func registerHumanForTest(t *testing.T, eng *Engine, id string) lagoon.Principal
 	var principal lagoon.PrincipalRow
 	if !decodeValue(reply.Value, &principal) {
 		t.Fatalf("invalid register reply: %#v", reply.Value)
+	}
+	home := homeChannelForTest(t, eng, principal.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := eng.waitChannel(ctx, home); err != nil {
+		t.Fatalf("registered home did not become serving: %v", err)
 	}
 	return principal
 }
@@ -526,7 +641,7 @@ func TestStartupRepairsFixedRegistryRowsWithoutTouchingCredential(t *testing.T) 
 	if err := eng.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	path, _ := channelhost.DBPath(dir, protocol.C0ChannelID)
+	path := filepath.Join(filepath.Dir(dir), "registry.db")
 	u := &url.URL{Scheme: "file", Path: path}
 	db, err := sql.Open("sqlite", u.String()+"?mode=rw&_pragma=foreign_keys(1)")
 	if err != nil {

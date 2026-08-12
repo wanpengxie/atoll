@@ -31,9 +31,8 @@ type Registry struct {
 
 func Open(path string, onCommit func(Change)) (*Registry, error) {
 	u := &url.URL{Scheme: "file", Path: path}
-	// Registrar transactions share this file with c0's channel-store handle.
-	// Reserve write intent at BeginTx so contention waits under busy_timeout
-	// instead of failing a deferred read-to-write upgrade with SQLITE_BUSY.
+	// Reserve registrar write intent at BeginTx; registry owns its file and lock
+	// domain independently of every channel ledger.
 	db, err := sql.Open("sqlite", u.String()+"?mode=rw&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("lagoon: open registry: %w", err)

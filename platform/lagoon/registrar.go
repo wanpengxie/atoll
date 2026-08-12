@@ -647,6 +647,9 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (De
 	if err != nil {
 		return DeclRow{}, err
 	}
+	if row.DefaultClass == SpaceToolClass || row.ID == SpaceToolDeclID {
+		return DeclRow{}, reserved("space-tool declaration is reserved")
+	}
 	if row.Owner != caller && caller != protocol.RootPrincipalID {
 		return DeclRow{}, denied("declaration owner required")
 	}
@@ -716,6 +719,9 @@ func (r *Registrar) revokeDecl(ctx context.Context, caller string, p DeclRevoke)
 	}
 	if err != nil {
 		return DeclRow{}, err
+	}
+	if row.DefaultClass == SpaceToolClass || row.ID == SpaceToolDeclID {
+		return DeclRow{}, reserved("space-tool declaration is reserved")
 	}
 	if row.Owner != caller && caller != protocol.RootPrincipalID {
 		return DeclRow{}, denied("declaration owner required")
@@ -824,6 +830,9 @@ func (r *Registrar) retireDevice(ctx context.Context, owner string, p DeviceReti
 	if p.DeviceID == "" {
 		return DeviceRow{}, invalid("device_id required")
 	}
+	if p.DeviceID == protocol.LocalDeviceID {
+		return DeviceRow{}, reserved("local device cannot be retired")
+	}
 	row, ok, err := r.registry.GetDevice(ctx, p.DeviceID)
 	if err != nil {
 		return DeviceRow{}, err
@@ -869,6 +878,9 @@ func (r *Registrar) attachDevice(ctx context.Context, owner string, source chann
 }
 
 func (r *Registrar) detachDevice(ctx context.Context, owner string, source channel.ID, p DeviceBinding) (Confirmation, error) {
+	if p.DeviceID == protocol.LocalDeviceID {
+		return Confirmation{}, reserved("local device cannot be detached")
+	}
 	if err := r.authorizeBinding(ctx, owner, source, p); err != nil {
 		return Confirmation{}, err
 	}

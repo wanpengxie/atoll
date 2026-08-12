@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/portal"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/boot"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
@@ -70,7 +71,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.NewSessionStore()}
 	var host *channelhost.ChannelHost
 	var gatewayEdge *gateway.Gateway
-	e.registry, err = lagoon.Open(installed.C0DBPath, func(change lagoon.Change) {
+	e.registry, err = lagoon.Open(installed.RegistryDBPath, func(change lagoon.Change) {
 		if host != nil && (change.ChannelID != "" || change.AllChannels) {
 			host.RegistryChanged(change)
 		}
@@ -129,7 +130,25 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		}
 		return daemonhost.DaemonAlive
 	}})
-	e.host, err = channelhost.New(cfg.ChannelDBDir, e.registry, channelhost.HomeDeps{CompositionResolver: resolver, IntroductionResolver: resolver, RegistryBindings: e.registry, Logger: logger, DaemonRoutes: e.daemonHost, OnMembraneOpen: e.daemonHost.Register, OnMembraneClose: e.daemonHost.Unregister})
+	e.host, err = channelhost.New(cfg.ChannelDBDir, e.registry, channelhost.HomeDeps{
+		CompositionResolver:  resolver,
+		IntroductionResolver: resolver,
+		RegistryBindings:     e.registry,
+		Logger:               logger,
+		DaemonRoutes:         e.daemonHost,
+		OnMembraneOpen: func(ch channel.ID, generation uint64, membrane platform.DaemonMembrane) {
+			e.daemonHost.Register(ch, generation, membrane)
+			row, ok, err := e.registry.GetChannelDesired(context.Background(), ch)
+			if err != nil {
+				logger.Warn("channel owner lookup after membrane open failed", "channel", ch, "err", err)
+				return
+			}
+			if ok && gatewayEdge != nil {
+				gatewayEdge.Poke(row.OwnerPrincipal)
+			}
+		},
+		OnMembraneClose: e.daemonHost.Unregister,
+	})
 	if err != nil {
 		return nil, e.fail(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,10 +35,13 @@ type Config struct {
 }
 
 type Result struct {
-	C0DBPath     string
-	Installed    bool
-	RootPassword string
+	C0DBPath       string
+	RegistryDBPath string
+	Installed      bool
+	RootPassword   string
 }
+
+const registryDBName = "registry.db"
 
 var registryDDL = [...]string{
 	`CREATE TABLE channels (
@@ -87,21 +91,27 @@ var registryDDL = [...]string{
 }
 
 func Ensure(ctx context.Context, cfg Config) (Result, error) {
-	path, err := channelhost.DBPath(cfg.ChannelDir, protocol.C0ChannelID)
+	c0Path, err := channelhost.DBPath(cfg.ChannelDir, protocol.C0ChannelID)
 	if err != nil {
 		return Result{}, err
 	}
-	installed, err := hasMarker(ctx, path)
+	channelDir := filepath.Clean(cfg.ChannelDir)
+	registryParent := filepath.Dir(channelDir)
+	if registryParent == channelDir {
+		return Result{}, errors.New("boot: channel directory must have a distinct parent for registry database")
+	}
+	registryPath := filepath.Join(registryParent, registryDBName)
+	installed, err := hasMarker(ctx, registryPath)
 	if err != nil {
 		return Result{}, err
 	}
 	if installed {
-		if err := prepareStartup(ctx, path, time.Now()); err != nil {
+		if err := prepareStartup(ctx, c0Path, registryPath, time.Now()); err != nil {
 			return Result{}, err
 		}
-		return Result{C0DBPath: path}, nil
+		return Result{C0DBPath: c0Path, RegistryDBPath: registryPath}, nil
 	}
-	if err := removeUnpublished(path); err != nil {
+	if err := removeUnpublished(c0Path, registryPath); err != nil {
 		return Result{}, err
 	}
 	password := cfg.RootPassword
@@ -112,17 +122,17 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 	if cfg.Now != nil {
 		now = cfg.Now
 	}
-	if err := install(ctx, path, password, now()); err != nil {
+	if err := install(ctx, c0Path, registryPath, password, now()); err != nil {
 		return Result{}, err
 	}
-	return Result{C0DBPath: path, Installed: true, RootPassword: password}, nil
+	return Result{C0DBPath: c0Path, RegistryDBPath: registryPath, Installed: true, RootPassword: password}, nil
 }
 
 // prepareStartup verifies installation-only identities without rewriting any
 // credential or device row, and repairs the two c0 composition seats through
 // the ordinary channel actor store before the membrane is opened.
-func prepareStartup(ctx context.Context, path string, now time.Time) error {
-	db, err := openSQLite(path)
+func prepareStartup(ctx context.Context, c0Path, registryPath string, now time.Time) error {
+	db, err := openSQLite(registryPath, false)
 	if err != nil {
 		return err
 	}
@@ -149,7 +159,7 @@ func prepareStartup(ctx context.Context, path string, now time.Time) error {
 	if err := db.Close(); err != nil {
 		return err
 	}
-	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, path, runtime.OpenChannelOptions{MustExist: true})
+	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, c0Path, runtime.OpenChannelOptions{MustExist: true})
 	if err != nil {
 		return fmt.Errorf("boot: open installed c0: %w", err)
 	}
@@ -183,7 +193,7 @@ func hasMarker(ctx context.Context, path string) (bool, error) {
 	} else if err != nil {
 		return false, err
 	}
-	db, err := openSQLite(path)
+	db, err := openSQLite(path, false)
 	if err != nil {
 		return false, err
 	}
@@ -202,18 +212,20 @@ func hasMarker(ctx context.Context, path string) (bool, error) {
 	return installed == 1, nil
 }
 
-func removeUnpublished(path string) error {
-	for _, suffix := range []string{"", "-wal", "-shm", ".tombstone"} {
-		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("boot: remove half-installed c0: %w", err)
+func removeUnpublished(paths ...string) error {
+	for _, path := range paths {
+		for _, suffix := range []string{"", "-wal", "-shm", ".tombstone"} {
+			if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("boot: remove half-installed database %q: %w", path+suffix, err)
+			}
 		}
 	}
 	return nil
 }
 
-func install(ctx context.Context, path, password string, now time.Time) error {
+func install(ctx context.Context, c0Path, registryPath, password string, now time.Time) error {
 	stamp := now.UnixMilli()
-	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, path, runtime.OpenChannelOptions{})
+	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, c0Path, runtime.OpenChannelOptions{})
 	if err != nil {
 		return fmt.Errorf("boot: create c0: %w", err)
 	}
@@ -236,7 +248,7 @@ func install(ctx context.Context, path, password string, now time.Time) error {
 		return fmt.Errorf("boot: close c0 install phase: %w", err)
 	}
 
-	db, err := openSQLite(path)
+	db, err := openSQLite(registryPath, true)
 	if err != nil {
 		return err
 	}
@@ -279,10 +291,14 @@ func install(ctx context.Context, path, password string, now time.Time) error {
 	return nil
 }
 
-func openSQLite(path string) (*sql.DB, error) {
+func openSQLite(path string, create bool) (*sql.DB, error) {
 	u := &url.URL{Scheme: "file", Path: path}
+	mode := "rw"
+	if create {
+		mode = "rwc"
+	}
 	// Use the same write-intent posture as the running registry opener.
-	db, err := sql.Open("sqlite", u.String()+"?mode=rw&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
+	db, err := sql.Open("sqlite", u.String()+"?mode="+mode+"&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}

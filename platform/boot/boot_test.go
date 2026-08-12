@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,7 +16,9 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 	"golang.org/x/crypto/bcrypt"
 
 	_ "modernc.org/sqlite"
@@ -33,7 +38,13 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if boot.RegistryDDLCount() != 7 {
 		t.Fatalf("registry DDL count=%d", boot.RegistryDDLCount())
 	}
-	db, err := sql.Open("sqlite", result.C0DBPath)
+	if filepath.Dir(result.RegistryDBPath) == filepath.Clean(root) {
+		t.Fatalf("registry database lives inside channel directory: %s", result.RegistryDBPath)
+	}
+	if filepath.Dir(result.RegistryDBPath) != filepath.Dir(filepath.Clean(root)) {
+		t.Fatalf("registry database parent=%s, want channel-dir sibling under %s", filepath.Dir(result.RegistryDBPath), filepath.Dir(filepath.Clean(root)))
+	}
+	db, err := sql.Open("sqlite", result.RegistryDBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,9 +62,23 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	channelDB, err := sql.Open("sqlite", result.C0DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer channelDB.Close()
+	for _, table := range []string{"channels", "principals", "credentials", "decls", "decl_overlays", "devices", "bindings", "atoll_install"} {
+		var n int
+		if err := channelDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("registry table %s leaked into c0: count=%d err=%v", table, n, err)
+		}
+	}
+	if err := channelDB.Close(); err != nil {
+		t.Fatal(err)
+	}
 	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, result.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
 	if err != nil {
-		t.Fatalf("reopen c0 with registry tables: %v", err)
+		t.Fatalf("reopen pure c0: %v", err)
 	}
 	_ = cs.Close()
 }
@@ -66,7 +91,7 @@ func TestEnsureGeneratesRootPasswordWhenNotSupplied(t *testing.T) {
 	if !result.Installed || result.RootPassword == "" {
 		t.Fatalf("result=%+v", result)
 	}
-	db, err := sql.Open("sqlite", result.C0DBPath)
+	db, err := sql.Open("sqlite", result.RegistryDBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +112,7 @@ func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", first.C0DBPath)
+	db, err := sql.Open("sqlite", first.RegistryDBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +128,7 @@ func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
 	if second.Installed || second.RootPassword != "" {
 		t.Fatalf("startup reran installer: %+v", second)
 	}
-	db, err = sql.Open("sqlite", second.C0DBPath)
+	db, err = sql.Open("sqlite", second.RegistryDBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +149,7 @@ func TestEnsureRebuildsRegistryWithoutMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", first.C0DBPath)
+	db, err := sql.Open("sqlite", first.RegistryDBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,23 +169,31 @@ func TestEnsureRebuildsRegistryWithoutMarker(t *testing.T) {
 	}
 }
 
-func TestEnsureRebuildsPartialDatabaseWithoutInstallTable(t *testing.T) {
+func TestEnsureRebuildsBothDatabaseFamiliesWithoutInstallTable(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	path, err := channelhost.DBPath(root, protocol.C0ChannelID)
+	c0Path, err := channelhost.DBPath(root, protocol.C0ChannelID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE partial(x INTEGER)`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
+	registryPath := filepath.Join(filepath.Dir(root), "registry.db")
+	for _, path := range []string{c0Path, registryPath} {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE partial(x INTEGER)`); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if err := os.WriteFile(path+suffix, []byte("stale-sidecar"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 
 	result, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
@@ -170,40 +203,92 @@ func TestEnsureRebuildsPartialDatabaseWithoutInstallTable(t *testing.T) {
 	if !result.Installed {
 		t.Fatalf("result=%+v", result)
 	}
-	db, err = sql.Open("sqlite", result.C0DBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var partial int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='partial'`).Scan(&partial); err != nil {
-		t.Fatal(err)
-	}
-	if partial != 0 {
-		t.Fatal("half-install residue survived rebuild")
+	for _, path := range []string{result.C0DBPath, result.RegistryDBPath} {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var partial int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='partial'`).Scan(&partial); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if partial != 0 {
+			t.Fatalf("half-install residue survived rebuild in %s", path)
+		}
 	}
 }
 
 func TestEnsurePreservesUnreadableDatabase(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	path, err := channelhost.DBPath(root, protocol.C0ChannelID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []byte("not a sqlite database\x00with existing c0 data")
+	path := filepath.Join(filepath.Dir(root), "registry.db")
+	want := []byte("not a sqlite database\x00with existing registry data")
 	if err := os.WriteFile(path, want, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "must-not-be-used"}); err == nil {
-		t.Fatal("Ensure succeeded for an unreadable c0 database")
+		t.Fatal("Ensure succeeded for an unreadable registry database")
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("unreadable c0 database changed: got %q, want %q", got, want)
+		t.Fatalf("unreadable registry database changed: got %q, want %q", got, want)
+	}
+}
+
+func TestRegistryAndC0WritersDoNotShareSQLiteLockDomain(t *testing.T) {
+	ctx := context.Background()
+	installed, err := boot.Ensure(ctx, boot.Config{ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "root-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := lagoon.Open(installed.RegistryDBPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.Close()
+	registrar := lagoon.NewRegistrar(registry, nil, nil)
+	c0, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, installed.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c0.Close()
+
+	for i := 0; i < 64; i++ {
+		start := make(chan struct{})
+		done := make(chan error, 2)
+		go func() {
+			<-start
+			done <- registrar.ReconcileSystem(ctx)
+		}()
+		go func(i int) {
+			<-start
+			_, err := c0.Log.Append(ctx, &message.Envelope{
+				ID:         message.ID(fmt.Sprintf("lock-domain-%d", i)),
+				TS:         int64(i + 1),
+				TSReceived: int64(i + 1),
+				ChannelID:  protocol.C0ChannelID,
+				Sender:     message.Sender{Kind: actor.KindHuman, ID: "root-writer"},
+				Kind:       message.KindEvent,
+				Type:       "test.concurrent_write",
+				Payload:    json.RawMessage(`{}`),
+				Visibility: message.VisibilityPublic,
+				Audience:   message.Audience{actor.SystemActorID},
+			}, false, storespec.AppendMetadata{})
+			done <- err
+		}(i)
+		close(start)
+		for writer := 0; writer < 2; writer++ {
+			if err := <-done; err != nil {
+				t.Fatalf("concurrent registry/c0 write %d: %v", i, err)
+			}
+		}
 	}
 }
 
