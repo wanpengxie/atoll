@@ -90,7 +90,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		return nil, e.fail(err)
 	}
 	host = e.host
-	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host}, resolver)
+	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host, genesis: installed.C0Genesis}, resolver)
 	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("open c0: %w", err))
 	}
@@ -153,7 +153,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		return nil, e.fail(err)
 	}
 	host = e.host
-	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host}, resolver)
+	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host, genesis: installed.C0Genesis}, resolver)
 	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("reopen c0 after init: %w", err))
 	}

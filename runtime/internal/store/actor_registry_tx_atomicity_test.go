@@ -209,34 +209,69 @@ func TestActorRegistryInsert_CommitFaultDiscardsTheRow(t *testing.T) {
 	}
 }
 
-// The other half of the declared contract: once the birth committed, an
-// identical retry recovers the SAME identity by semantic key instead of
-// creating a second one — and writes nothing (no commit signal).
-func TestActorRegistryInsert_CommittedBirthReplaysBySemanticKey(t *testing.T) {
+// Once the birth committed, introduce is add-or-update by semantic key: it
+// keeps the identity and immutable birth fields while replacing the requested
+// principal, definition, and placement.
+func TestActorRegistryInsert_CommittedBirthUpdatesBySemanticKey(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
 
 	first := rig.mustInsert(agentDraft("decl:replay", "worker", 1000))
 	before := rig.commits
 
-	// A retry that differs in everything the semantic key does not cover.
-	replay, err := rig.reg.Insert(ctx, agentDraft("decl:replay", "other-class", 5000))
+	update := agentDraft("decl:replay", "other-class", 5000)
+	update.Principal = "steward"
+	update.Definition.Config = json.RawMessage(`{"v":2}`)
+	update.Placement, _ = storespec.NewDaemonPlacement("device:one")
+	replay, err := rig.reg.Insert(ctx, update)
 	if err != nil {
 		t.Fatalf("replay Insert: %v", err)
 	}
 	if replay.ID != first.ID {
 		t.Fatalf("replay id = %q, want the committed id %q", replay.ID, first.ID)
 	}
-	if replay.Definition.Class != "worker" || replay.CreatedAt != 1000 {
-		t.Fatalf("replay must return the committed record, got class=%q createdAt=%d",
-			replay.Definition.Class, replay.CreatedAt)
+	if replay.Principal != "steward" || replay.Definition.Class != "other-class" ||
+		string(replay.Definition.Config) != `{"v":2}` || replay.Placement != update.Placement {
+		t.Fatalf("replay did not return updated mutable fields: %+v", replay)
+	}
+	if replay.Kind != first.Kind || replay.SourceDeclID != first.SourceDeclID || replay.CreatedAt != first.CreatedAt {
+		t.Fatalf("replay changed immutable fields: first=%+v replay=%+v", first, replay)
 	}
 	if n := rig.rawRowCount(); n != 1 {
 		t.Fatalf("rows after replay = %d, want 1 (no second birth)", n)
 	}
-	if rig.commits != before {
-		t.Fatalf("replay fired the commit signal %d extra times, want 0 (it wrote nothing)",
-			rig.commits-before)
+	if rig.commits != before+1 {
+		t.Fatalf("update commit signals=%d want=1", rig.commits-before)
+	}
+	stored, found, err := rig.reg.LookupActive(ctx, first.ID)
+	if err != nil || !found || stored.Principal != "steward" || !stored.Definition.Equal(update.Definition) || stored.Placement != update.Placement {
+		t.Fatalf("stored update=%+v found=%v err=%v", stored, found, err)
+	}
+}
+
+func TestActorRegistryInsert_EqualReplayPreservesShape(t *testing.T) {
+	rig := newActorRegRig(t)
+	draft := agentDraft("decl:equal", "worker", 1000)
+	first := rig.mustInsert(draft)
+	replay := rig.mustInsert(draft)
+	if replay.ID != first.ID || replay.Kind != first.Kind || replay.Principal != first.Principal ||
+		replay.SourceDeclID != first.SourceDeclID || replay.CreatedAt != first.CreatedAt ||
+		!replay.Definition.Equal(first.Definition) || replay.Placement != first.Placement {
+		t.Fatalf("equal replay changed shape: first=%+v replay=%+v", first, replay)
+	}
+}
+
+func TestActorRegistryInsert_SourceKindConflictIsRejected(t *testing.T) {
+	rig := newActorRegRig(t)
+	first := rig.mustInsert(agentDraft("decl:kind", "worker", 1000))
+	conflict := agentDraft("decl:kind", "worker", 2000)
+	conflict.Kind = actor.KindTool
+	if _, err := rig.reg.Insert(context.Background(), conflict); err == nil {
+		t.Fatal("kind-changing introduce succeeded")
+	}
+	stored, found, err := rig.reg.LookupActive(context.Background(), first.ID)
+	if err != nil || !found || stored.Kind != actor.KindAgent {
+		t.Fatalf("kind conflict changed stored row: %+v found=%v err=%v", stored, found, err)
 	}
 }
 

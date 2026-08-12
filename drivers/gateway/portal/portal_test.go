@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -66,5 +67,46 @@ func TestRegisterRejectsMissingFieldsAndTrailingJSON(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("body=%q status=%d response=%s", body, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestFallbacksReturnContractJSONWithoutCORS(t *testing.T) {
+	p := New(Config{ContractVersion: "test", Submitter: submitterStub{}, Sessions: gateway.NewSessionStore()})
+	closed := map[string]bool{
+		string(lagoon.CodeInvalidArgs): true, string(lagoon.CodeNotFound): true,
+		string(lagoon.CodeConflictExists): true, string(lagoon.CodePermissionDenied): true,
+		string(lagoon.CodeReserved): true, string(lagoon.CodeResultUnknown): true,
+	}
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{name: "unknown path", method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
+		{name: "wrong method", method: http.MethodGet, path: "/api/identity/login", status: http.StatusMethodNotAllowed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.status, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("content-type=%q", got)
+			}
+			for _, header := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods"} {
+				if got := rec.Header().Get(header); got != "" {
+					t.Fatalf("%s=%q", header, got)
+				}
+			}
+			var body map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body is not JSON: %v (%s)", err, rec.Body.String())
+			}
+			if !closed[body["code"]] {
+				t.Fatalf("code=%q is outside the closed set", body["code"])
+			}
+		})
 	}
 }

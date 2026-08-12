@@ -47,7 +47,7 @@ func fail(sys actorbase.Sys, msg actorbase.Msg, err error) {
 		_, _ = sys.Fail(msg, string(le.Code), le.Detail)
 		return
 	}
-	_, _ = sys.Fail(msg, "internal_error", err.Error())
+	_, _ = sys.Fail(msg, string(lagoon.CodeResultUnknown), err.Error())
 }
 
 func handle(sys actorbase.Sys, binder lagoon.SpaceOpsBinder, msg actorbase.Msg) {

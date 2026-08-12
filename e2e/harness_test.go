@@ -466,7 +466,46 @@ func (c *wsClient) submit(channelID, msgType, kind string, audience []string, pa
 
 func (c *wsClient) request(channelID, msgType, audience string, payload any) map[string]any {
 	c.t.Helper()
-	id := c.submit(channelID, msgType, "request", []string{audience}, payload)
+	_, body, err := c.tryRequest(channelID, msgType, audience, payload)
+	if err != nil {
+		c.t.Fatalf("request %s failed: %v", msgType, err)
+	}
+	return body
+}
+
+func (c *wsClient) requestWithID(channelID, msgType, audience string, payload any) (string, map[string]any) {
+	c.t.Helper()
+	id, body, err := c.tryRequest(channelID, msgType, audience, payload)
+	if err != nil {
+		c.t.Fatalf("request %s failed: %v", msgType, err)
+	}
+	return id, body
+}
+
+func (c *wsClient) tryRequest(channelID, msgType, audience string, payload any) (string, map[string]any, error) {
+	c.t.Helper()
+	wireRef++
+	ref := fmt.Sprintf("submit-%d", wireRef)
+	body := map[string]any{
+		"channel_id": channelID,
+		"msg_type":   msgType,
+		"kind":       "request",
+		"visibility": "public",
+		"payload":    payload,
+		"audience":   []string{audience},
+	}
+	if err := c.conn.WriteJSON(wireFrame("submit", ref, body)); err != nil {
+		return "", nil, err
+	}
+	ack := c.awaitAck(ref, 10*time.Second)
+	if ack["frame_type"] == "error" {
+		return "", nil, fmt.Errorf("submit rejected: %v", ack["payload"])
+	}
+	receipt, _ := ack["payload"].(map[string]any)
+	id, _ := receipt["message_id"].(string)
+	if id == "" {
+		return "", nil, fmt.Errorf("submit receipt omitted message_id: %v", ack)
+	}
 	terminal := c.awaitEnvelope(func(envelope map[string]any) bool {
 		if envelope["kind"] != "response" || envelope["parent_id"] != id {
 			return false
@@ -474,11 +513,11 @@ func (c *wsClient) request(channelID, msgType, audience string, payload any) map
 		body, _ := envelope["payload"].(map[string]any)
 		return body["status"] == "completed" || body["status"] == "failed"
 	}, 30*time.Second)
-	body, _ := terminal["payload"].(map[string]any)
-	if body["status"] != "completed" {
-		c.t.Fatalf("request %s failed: %v", msgType, body)
+	terminalBody, _ := terminal["payload"].(map[string]any)
+	if terminalBody["status"] != "completed" {
+		return id, terminalBody, fmt.Errorf("terminal=%v", terminalBody)
 	}
-	return body
+	return id, terminalBody, nil
 }
 
 func rootClient(t *testing.T, h *harness, since map[string]int64) (*apiClient, *wsClient) {

@@ -199,9 +199,8 @@ func TestActorRegistryABA_MintStepsPastATombstonedName(t *testing.T) {
 	}
 }
 
-// While the predecessor is still ACTIVE, the same declaration deduplicates onto
-// it — no second identity. This is the negative pole of the ABA law: only death
-// releases the key.
+// While the predecessor is still ACTIVE, the same declaration updates it in
+// place — no second identity. Only death releases the key for a fresh birth.
 func TestActorRegistryABA_ActivePredecessorBlocksSecondIdentity(t *testing.T) {
 	rig := newActorRegRig(t)
 
@@ -212,5 +211,8 @@ func TestActorRegistryABA_ActivePredecessorBlocksSecondIdentity(t *testing.T) {
 	}
 	if n := rig.rawRowCount(); n != 1 {
 		t.Fatalf("actor_registry rows = %d, want 1", n)
+	}
+	if second.Definition.Class != "v2" || second.CreatedAt != first.CreatedAt {
+		t.Fatalf("active update=%+v, want v2 with original birth time %d", second, first.CreatedAt)
 	}
 }

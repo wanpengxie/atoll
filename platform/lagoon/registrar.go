@@ -53,12 +53,30 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Steward','present',?) ON CONFLICT(id) DO UPDATE SET kind='agent',email=NULL,display_name='Steward',status='present'`, protocol.StewardPrincipalID, now); err != nil {
 		return err
 	}
+	var c0Exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, protocol.C0ChannelID).Scan(&c0Exists); err != nil {
+		return err
+	}
 	spec := GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: now}
+	if !c0Exists {
+		genesis, ok := r.facts.(SystemGenesisResolver)
+		if !ok {
+			return errors.New("lagoon: c0 physical genesis unavailable")
+		}
+		var found bool
+		spec, found, err = genesis.SystemGenesis(ctx)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("lagoon: c0 physical genesis missing")
+		}
+	}
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?) ON CONFLICT(id) DO UPDATE SET parent_id=NULL,name=excluded.name,type='group',status='present',owner_principal=excluded.owner_principal`, protocol.C0ChannelID, protocol.C0ChannelID, protocol.RootPrincipalID, string(raw), now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?) ON CONFLICT(id) DO UPDATE SET parent_id=NULL,name=excluded.name,type='group',status='present',owner_principal=excluded.owner_principal`, protocol.C0ChannelID, protocol.C0ChannelID, protocol.RootPrincipalID, string(raw), spec.CreatedAt); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,'{}','present','public',?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,owner=excluded.owner,default_class=excluded.default_class,config_json='{}',status='present',visibility='public',updated_at=excluded.updated_at`, SpaceToolDeclID, "Space Tool", protocol.RootPrincipalID, SpaceToolClass, now, now); err != nil {
@@ -126,7 +144,7 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		facts, found, err := r.facts.ActorFacts(msg.Ctx(), msg.Sender.ID)
 		if err != nil {
-			_, _ = sys.Fail(msg, "internal_error", err.Error())
+			_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
 			return
 		}
 		if !found || !facts.Active || facts.Principal == "" {
@@ -150,7 +168,7 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		if errors.As(err, &le) {
 			_, _ = sys.Fail(msg, string(le.Code), le.Detail)
 		} else {
-			_, _ = sys.Fail(msg, "internal_error", err.Error())
+			_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
 		}
 		return
 	}
@@ -641,11 +659,14 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (De
 	}
 	defer tx.Rollback()
 	row, err := scanDecl(tx.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
-	if errors.Is(err, sql.ErrNoRows) || row.Status != DeclPresent {
+	if errors.Is(err, sql.ErrNoRows) {
 		return DeclRow{}, notFound("declaration")
 	}
 	if err != nil {
 		return DeclRow{}, err
+	}
+	if row.Status != DeclPresent {
+		return DeclRow{}, notFound("declaration")
 	}
 	if row.DefaultClass == SpaceToolClass || row.ID == SpaceToolDeclID {
 		return DeclRow{}, reserved("space-tool declaration is reserved")

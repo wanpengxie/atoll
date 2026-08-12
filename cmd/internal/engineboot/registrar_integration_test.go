@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol"
@@ -641,6 +643,31 @@ func TestStartupRepairsFixedRegistryRowsWithoutTouchingCredential(t *testing.T) 
 	if err := eng.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	c0Path, err := channelhost.DBPath(dir, protocol.C0ChannelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c0URL := &url.URL{Scheme: "file", Path: c0Path}
+	c0db, err := sql.Open("sqlite", c0URL.String()+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var physicalID, physicalType, physicalOwner string
+	var physicalParent, physicalInitiator sql.NullString
+	var physicalCreatedAt int64
+	if err := c0db.QueryRow(`SELECT channel_id,type,owner_principal,parent_channel_id,initiator_principal,created_at FROM channel_genesis`).Scan(
+		&physicalID, &physicalType, &physicalOwner, &physicalParent, &physicalInitiator, &physicalCreatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := c0db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	physical := lagoon.GenesisSpec{
+		ChannelID: channel.ID(physicalID), Type: physicalType, OwnerPrincipal: physicalOwner,
+		ParentID: channel.ID(physicalParent.String), InitiatorPrincipal: physicalInitiator.String,
+		CreatedAt: physicalCreatedAt,
+	}
 	path := filepath.Join(filepath.Dir(dir), "registry.db")
 	u := &url.URL{Scheme: "file", Path: path}
 	db, err := sql.Open("sqlite", u.String()+"?mode=rw&_pragma=foreign_keys(1)")
@@ -667,8 +694,16 @@ func TestStartupRepairsFixedRegistryRowsWithoutTouchingCredential(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer reopened.Close(context.Background())
-	if row, ok, err := reopened.registry.GetChannelDesired(context.Background(), protocol.C0ChannelID); err != nil || !ok || row.Status != lagoon.ChannelPresent {
+	row, ok, err := reopened.registry.GetChannelDesired(context.Background(), protocol.C0ChannelID)
+	if err != nil || !ok || row.Status != lagoon.ChannelPresent {
 		t.Fatalf("c0 row=%+v ok=%v err=%v", row, ok, err)
+	}
+	var rebuilt lagoon.GenesisSpec
+	if err := json.Unmarshal(row.Spec, &rebuilt); err != nil {
+		t.Fatalf("rebuilt c0 spec is not JSON: %v (%s)", err, row.Spec)
+	}
+	if row.CreatedAt != physical.CreatedAt || !reflect.DeepEqual(rebuilt, physical) {
+		t.Fatalf("rebuilt c0 genesis differs from physical ledger: row.created_at=%d spec=%+v physical=%+v", row.CreatedAt, rebuilt, physical)
 	}
 	if row, ok, err := reopened.registry.GetDecl(context.Background(), lagoon.SpaceToolDeclID); err != nil || !ok || row.Status != lagoon.DeclPresent {
 		t.Fatalf("space-tool row=%+v ok=%v err=%v", row, ok, err)

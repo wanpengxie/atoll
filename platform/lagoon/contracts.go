@@ -343,6 +343,10 @@ type ActorFactsResolver interface {
 	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 }
 
+type SystemGenesisResolver interface {
+	SystemGenesis(context.Context) (GenesisSpec, bool, error)
+}
+
 type ClassCatalog interface {
 	ValidateConfig(class string, config json.RawMessage) error
 	LookupClassKind(class string) (actor.Kind, bool)

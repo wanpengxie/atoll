@@ -42,17 +42,20 @@ func New(cfg Config) *Portal {
 	p.mux.HandleFunc("GET /ws", p.serveWS)
 	p.mux.HandleFunc("GET /compute", p.compute)
 	p.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
+	p.mux.HandleFunc("/", p.fallback)
 	return p
 }
 func (p *Portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	p.mux.ServeHTTP(w, r)
+}
+
+func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/ws", "/compute", "/healthz":
+		writeError(w, http.StatusMethodNotAllowed, string(lagoon.CodeNotFound), "method not allowed")
+	default:
+		writeError(w, http.StatusNotFound, string(lagoon.CodeNotFound), "route not found")
+	}
 }
 
 func (p *Portal) register(w http.ResponseWriter, r *http.Request) {

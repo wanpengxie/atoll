@@ -84,7 +84,10 @@ func (r *assemblyResolver) LookupClassKind(class string) (actor.Kind, bool) {
 	return classregistry.ClassKind(class)
 }
 
-type c0Facts struct{ host channelhost.LocalHost }
+type c0Facts struct {
+	host    channelhost.LocalHost
+	genesis lagoon.GenesisSpec
+}
 
 func (f c0Facts) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	bundle, ok := f.host.Acquire(protocol.C0ChannelID)
@@ -92,6 +95,10 @@ func (f c0Facts) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.
 		return channelspec.ActorFacts{}, false, errors.New("c0 unavailable")
 	}
 	return bundle.View().ActorFacts(ctx, id)
+}
+
+func (f c0Facts) SystemGenesis(context.Context) (lagoon.GenesisSpec, bool, error) {
+	return f.genesis, f.genesis.ChannelID != "", nil
 }
 
 type sourceFacts struct{ host channelhost.LocalHost }

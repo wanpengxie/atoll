@@ -224,6 +224,10 @@ func asOperateError(err error) error {
 		}
 	}
 	switch {
+	case errors.Is(err, actorctl.ErrInvalidMutation):
+		return &sysactor.OperateError{
+			Code: string(channelspec.ErrCodeBadPayload), Detail: err.Error(),
+		}
 	case errors.Is(err, actorctl.ErrInactive), errors.Is(err, actorctl.ErrStaleAttempt):
 		return &sysactor.OperateError{
 			Code: string(channelspec.ErrCodeMemberInactive), Detail: err.Error(),

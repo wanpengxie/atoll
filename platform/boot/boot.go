@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"golang.org/x/crypto/bcrypt"
@@ -37,6 +38,7 @@ type Config struct {
 type Result struct {
 	C0DBPath       string
 	RegistryDBPath string
+	C0Genesis      lagoon.GenesisSpec
 	Installed      bool
 	RootPassword   string
 }
@@ -109,7 +111,11 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 		if err := prepareStartup(ctx, c0Path, registryPath, time.Now()); err != nil {
 			return Result{}, err
 		}
-		return Result{C0DBPath: c0Path, RegistryDBPath: registryPath}, nil
+		genesis, err := readC0Genesis(ctx, c0Path)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{C0DBPath: c0Path, RegistryDBPath: registryPath, C0Genesis: genesis}, nil
 	}
 	if err := removeUnpublished(c0Path, registryPath); err != nil {
 		return Result{}, err
@@ -125,7 +131,34 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 	if err := install(ctx, c0Path, registryPath, password, now()); err != nil {
 		return Result{}, err
 	}
-	return Result{C0DBPath: c0Path, RegistryDBPath: registryPath, Installed: true, RootPassword: password}, nil
+	genesis, err := readC0Genesis(ctx, c0Path)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{C0DBPath: c0Path, RegistryDBPath: registryPath, C0Genesis: genesis, Installed: true, RootPassword: password}, nil
+}
+
+func readC0Genesis(ctx context.Context, path string) (lagoon.GenesisSpec, error) {
+	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, path, runtime.OpenChannelOptions{ReadOnly: true, MustExist: true})
+	if err != nil {
+		return lagoon.GenesisSpec{}, fmt.Errorf("boot: open c0 genesis: %w", err)
+	}
+	defer cs.Close()
+	physical, found, err := cs.Genesis.ReadGenesis(ctx)
+	if err != nil {
+		return lagoon.GenesisSpec{}, fmt.Errorf("boot: read c0 genesis: %w", err)
+	}
+	if !found {
+		return lagoon.GenesisSpec{}, errors.New("boot: c0 physical genesis missing")
+	}
+	return lagoon.GenesisSpec{
+		ChannelID:          channel.ID(physical.ChannelID),
+		Type:               physical.Type,
+		OwnerPrincipal:     physical.OwnerPrincipal,
+		CreatedAt:          physical.CreatedAt,
+		ParentID:           channel.ID(physical.ParentChannelID),
+		InitiatorPrincipal: physical.InitiatorPrincipal,
+	}, nil
 }
 
 // prepareStartup verifies installation-only identities without rewriting any

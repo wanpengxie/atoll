@@ -82,6 +82,11 @@ func (c *Controller) Introduce(
 	if request.DeclID == "" || request.Definition.Class == "" {
 		return Transition[channel.IntroduceResult]{}, ErrInvalidMutation
 	}
+	for _, value := range c.actors {
+		if value.Record.SourceDeclID == request.DeclID && value.Record.Kind != request.Kind {
+			return Transition[channel.IntroduceResult]{}, ErrInvalidMutation
+		}
+	}
 	key, err := mintAttempt()
 	if err != nil {
 		return Transition[channel.IntroduceResult]{}, err
@@ -97,11 +102,26 @@ func (c *Controller) Introduce(
 	if err != nil {
 		return Transition[channel.IntroduceResult]{}, err
 	}
-	created := c.publishLocked(record, key)
+	previous, existed := c.actors[record.ID]
+	created := !existed
+	runtimeChanged := existed && (!previous.Record.Definition.Equal(record.Definition) || previous.Record.Placement != record.Placement)
+	switch {
+	case created:
+		c.actors[record.ID] = managedActor{Record: record, Attempt: key}
+	case runtimeChanged:
+		c.actors[record.ID] = managedActor{Record: record, Attempt: key}
+	default:
+		// Principal attribution is a mutable fact even when the running body
+		// does not change. Preserve its term while publishing the new record.
+		c.actors[record.ID] = managedActor{Record: record, Attempt: previous.Attempt}
+	}
 	transition := Transition[channel.IntroduceResult]{
 		Result: channel.IntroduceResult{ActorID: record.ID, Created: created},
 	}
 	if created {
+		transition.Reconcile.add(record.Placement)
+	} else if runtimeChanged {
+		transition.Reconcile.add(previous.Record.Placement)
 		transition.Reconcile.add(record.Placement)
 	}
 	return transition, nil

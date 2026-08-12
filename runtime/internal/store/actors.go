@@ -146,10 +146,10 @@ func validateDraft(in storespec.ActorDraft) error {
 	return nil
 }
 
-// Insert is the whole declaration-class birth on ONE transaction bed: semantic
-// key replay lookup + id mint (with tombstone avoidance) + row insert. There is
-// no intermediate state — a crash at any point either leaves nothing (retry
-// starts over) or leaves everything (retry recovers the id by semantic key).
+// Insert is the whole add-or-update introduce on ONE transaction bed: semantic
+// key lookup updates the mutable fields of an active row; otherwise id mint
+// (with tombstone avoidance) and row insert create it. There is no intermediate
+// state — a crash leaves either the old row or the complete new value.
 func (r *actorRegistry) Insert(
 	ctx context.Context,
 	in storespec.ActorDraft,
@@ -173,6 +173,32 @@ func (r *actorRegistry) Insert(
 		}
 		return record, true, nil
 	}
+	updateExisting := func(record storespec.ActorRecord) (storespec.ActorRecord, error) {
+		if record.Kind != in.Kind {
+			return storespec.ActorRecord{}, fmt.Errorf("store: actor kind conflict: existing %q, requested %q", record.Kind, in.Kind)
+		}
+		var config any
+		if in.Definition.Config != nil {
+			config = string(in.Definition.Config)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE actor_registry
+			SET principal=?,class=?,config_json=?,placement=?,desired_host=?
+			WHERE actor_id=? AND deregistered_at IS NULL`,
+			in.Principal, in.Definition.Class, config, string(in.Placement.Kind), in.Placement.Host,
+			string(record.ID)); err != nil {
+			return storespec.ActorRecord{}, fmt.Errorf("store: actor update %q: %w", record.ID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return storespec.ActorRecord{}, fmt.Errorf("store: actor update commit: %w", err)
+		}
+		if r.onCommit != nil {
+			r.onCommit()
+		}
+		record.Principal = in.Principal
+		record.Definition = in.Definition.Clone()
+		record.Placement = in.Placement
+		return record, nil
+	}
 
 	switch {
 	case in.SourceDeclID != "":
@@ -182,7 +208,7 @@ func (r *actorRegistry) Insert(
 			return storespec.ActorRecord{}, err
 		}
 		if found {
-			return record, nil
+			return updateExisting(record)
 		}
 	case in.Principal != "":
 		record, found, err := lookupExisting(`SELECT `+actorRecordColumns+` FROM actor_registry
@@ -192,7 +218,7 @@ func (r *actorRegistry) Insert(
 			return storespec.ActorRecord{}, err
 		}
 		if found {
-			return record, nil
+			return updateExisting(record)
 		}
 	}
 

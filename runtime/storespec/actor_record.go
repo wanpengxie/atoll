@@ -224,8 +224,8 @@ type ChannelAuthority interface {
 type ActorRegistryStore interface {
 	LookupActive(context.Context, actor.ActorID) (ActorRecord, bool, error)
 	ListActive(context.Context) ([]ActorRecord, error)
-	// Insert commits one declaration-class birth as a single transaction:
-	// semantic-key replay lookup, id mint and row insert live on one bed.
+	// Insert commits one add-or-update introduction as a single transaction:
+	// semantic-key lookup/update or id mint/insert live on one bed.
 	Insert(context.Context, ActorDraft) (ActorRecord, error)
 	// UpdateDefinition overwrites the current definition of an active row.
 	UpdateDefinition(context.Context, actor.ActorID, ActorDefinition) (ActorRecord, error)
