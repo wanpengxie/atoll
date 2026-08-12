@@ -274,7 +274,8 @@ func install(ctx context.Context, path, password string, now time.Time) error {
 
 func openSQLite(path string) (*sql.DB, error) {
 	u := &url.URL{Scheme: "file", Path: path}
-	db, err := sql.Open("sqlite", u.String()+"?mode=rw&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	// Use the same write-intent posture as the running registry opener.
+	db, err := sql.Open("sqlite", u.String()+"?mode=rw&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
