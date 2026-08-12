@@ -36,9 +36,9 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 	}, h.env, filepath.Join(h.root, "work"), daemonLog)
 	waitActorPresence(t, ws, echoID, true, daemon, daemonLog)
 
-	address := "daemon://file-host/e2e/report.bin"
+	address := "daemon://file-host/c0/e2e/report.bin"
 	created := ws.resource(map[string]any{
-		"channel_id": c0ChannelID, "op": "create", "address": address,
+		"op": "create", "address": address,
 		"with_content": true,
 	})
 	ticket := stringField(t, created, "ticket")
@@ -65,7 +65,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 		t.Fatalf("channel tree bytes=%d err=%v, want collaboration bytes=%d", len(onDisk), err, len(want))
 	}
 
-	opened := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
+	opened := ws.resource(map[string]any{"op": "read", "resource_id": address})
 	readTicket := stringField(t, opened, "ticket")
 	resp, err = api.http.Get(h.base + "/files/" + url.PathEscape(address) + "?t=" + url.QueryEscape(readTicket))
 	if err != nil {
@@ -75,6 +75,127 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, want) {
 		t.Fatalf("GET status=%d bytes=%d want=%d\ndaemon log:\n%s", resp.StatusCode, len(got), len(want), tailLog(daemonLog, 100))
+	}
+}
+
+func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T) {
+	h := newHarness(t)
+	api, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
+	registrar := findTool(t, ws)
+	createdChannel := registrarRequest(t, ws, registrar, "channel.create", map[string]any{
+		"name": "archive", "parent": c0ChannelID,
+	})
+	channelID := stringField(t, createdChannel, "id")
+	qualified := stringField(t, createdChannel, "qualified_name")
+	if qualified != "c0.archive" {
+		t.Fatalf("qualified channel name=%q", qualified)
+	}
+	device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": "archive-host"})
+	deviceID := stringField(t, device, "id")
+	attachDevice(t, ws, channelID, deviceID)
+	daemonLog := filepath.Join(h.root, "logs", "archive-host.log")
+	daemon := startProc(t, "archive-host", filepath.Join(e2eBinDir, "atoll-daemon"), []string{
+		"--server", fmt.Sprintf("ws://127.0.0.1:%d/compute", h.port),
+		"--key", stringField(t, device, "key"), "--name", "archive-host", "--home", filepath.Join(h.root, "archive-host"),
+	}, h.env, filepath.Join(h.root, "work"), daemonLog)
+
+	address := "daemon://archive-host/c0.archive/docs/report.txt"
+	var outcome map[string]any
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if daemon.exited() {
+			t.Fatalf("archive daemon exited\n%s", tailLog(daemonLog, 100))
+		}
+		if opened, err := ws.tryResource(map[string]any{"op": "create", "address": address, "with_content": true}); err == nil {
+			outcome = opened
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if outcome == nil {
+		t.Fatalf("qualified channel file route did not become ready\n%s", tailLog(daemonLog, 100))
+	}
+	want := []byte("qualified-channel-bytes")
+	httpPutFile(t, api, h.base, address, stringField(t, outcome, "ticket"), want)
+	channelRoot := filepath.Join(h.root, "archive-host", "daemons", deviceID, "channels", qualified)
+	physical := filepath.Join(channelRoot, "docs", "report.txt")
+	if got, err := os.ReadFile(physical); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("qualified disk path bytes=%q err=%v", got, err)
+	}
+
+	reverse := filepath.Join(channelRoot, "docs", "from-disk.txt")
+	if err := os.WriteFile(reverse, []byte("disk-visible"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := httpReadFile(t, api, h.base, ws, "daemon://archive-host/c0.archive/docs/from-disk.txt"); string(got) != "disk-visible" {
+		t.Fatalf("reverse disk read=%q", got)
+	}
+	registrarRequest(t, ws, registrar, "channel.retire", map[string]any{"channel_id": channelID})
+	if got, err := os.ReadFile(physical); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("retirement changed ordinary file bytes=%q err=%v", got, err)
+	}
+	// Retirement keeps the bytes and ends the collaboration: the channel stops
+	// being a place its members can act in, so nothing can be asked of it any
+	// more. The files stay on disk as ordinary files for their owner to take.
+	retireDeadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, _, err := ws.tryRequest(channelID, "actor.list", systemActor, map[string]any{}); err != nil {
+			break
+		}
+		if time.Now().After(retireDeadline) {
+			t.Fatal("retired channel still accepts collaboration")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func TestParentAndChildChannelsStayFlatOnDifferentDaemons(t *testing.T) {
+	h := newHarness(t)
+	_, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
+	registrar := findTool(t, ws)
+	parent := registrarRequest(t, ws, registrar, "channel.create", map[string]any{"name": "project", "parent": c0ChannelID})
+	parentID := stringField(t, parent, "id")
+	child := registrarRequest(t, ws, registrar, "channel.create", map[string]any{"name": "backend", "parent": parentID})
+	childID := stringField(t, child, "id")
+
+	type daemonCase struct {
+		name, channelID, qualified string
+	}
+	cases := []daemonCase{{"parent-host", parentID, "c0.project"}, {"child-host", childID, "c0.project.backend"}}
+	var childChannels string
+	for _, tc := range cases {
+		device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": tc.name})
+		deviceID := stringField(t, device, "id")
+		attachDevice(t, ws, tc.channelID, deviceID)
+		logPath := filepath.Join(h.root, "logs", tc.name+".log")
+		proc := startProc(t, tc.name, filepath.Join(e2eBinDir, "atoll-daemon"), []string{
+			"--server", fmt.Sprintf("ws://127.0.0.1:%d/compute", h.port),
+			"--key", stringField(t, device, "key"), "--name", tc.name, "--home", filepath.Join(h.root, tc.name),
+		}, h.env, filepath.Join(h.root, "work"), logPath)
+		channelsRoot := filepath.Join(h.root, tc.name, "daemons", deviceID, "channels")
+		if tc.name == "child-host" {
+			childChannels = channelsRoot
+		}
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if proc.exited() {
+				t.Fatalf("%s exited\n%s", tc.name, tailLog(logPath, 100))
+			}
+			if info, err := os.Stat(filepath.Join(channelsRoot, tc.qualified)); err == nil && info.IsDir() {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		entries, err := os.ReadDir(channelsRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != tc.qualified {
+			t.Fatalf("%s channel directories=%v, want only %q", tc.name, entries, tc.qualified)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(childChannels, "c0.project")); !os.IsNotExist(err) {
+		t.Fatalf("child daemon contains parent shell: %v", err)
 	}
 }
 
@@ -114,9 +235,9 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 	}, h.env, filepath.Join(h.root, "work"), storageLog)
 	waitStorageReady(t, ws, storageDaemon, storageLog)
 
-	address := "daemon://storage-node/e2e/cross.bin"
+	address := "daemon://storage-node/c0/e2e/cross.bin"
 	original := "bytes-created-on-A"
-	created := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "create", "address": address, "with_content": true})
+	created := ws.resource(map[string]any{"op": "create", "address": address, "with_content": true})
 	httpPutFile(t, api, h.base, address, stringField(t, created, "ticket"), []byte(original))
 
 	// A hosts the file; the echo actor is pinned to B and reads through the
@@ -135,7 +256,7 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 		t.Fatalf("A bytes after B write=%q, want %q", got, rewritten)
 	}
 
-	createdByB := "daemon://storage-node/e2e/created-by-B.bin"
+	createdByB := "daemon://storage-node/c0/e2e/created-by-B.bin"
 	createReply := ws.request(c0ChannelID, "echo.file_create", actorID, map[string]any{"address": createdByB, "content": "created-remotely"})
 	if createReply["ok"] != true {
 		t.Fatalf("cross-device create reply=%v", createReply)
@@ -145,7 +266,7 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 	}
 
 	// Mint while A is online, then redeem only after it is gone.
-	preissued := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
+	preissued := ws.resource(map[string]any{"op": "read", "resource_id": address})
 	preissuedTicket := stringField(t, preissued, "ticket")
 	storageDaemon.kill9(t)
 
@@ -197,7 +318,7 @@ func TestColocatedActorFileCreateReadWriteUsesLocalRedemption(t *testing.T) {
 	}, h.env, filepath.Join(h.root, "work"), daemonLog)
 	waitActorPresence(t, ws, actorID, true, daemon, daemonLog)
 
-	address := "daemon://colocated-node/e2e/local.bin"
+	address := "daemon://colocated-node/c0/e2e/local.bin"
 	created := ws.request(c0ChannelID, "echo.file_create", actorID, map[string]any{"address": address, "content": "created-locally"})
 	if created["ok"] != true || created["redeem"] != "local" {
 		t.Fatalf("colocated create reply=%v\ndaemon log:\n%s", created, tailLog(daemonLog, 100))
@@ -222,7 +343,7 @@ func TestColocatedActorFileCreateReadWriteUsesLocalRedemption(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(channelRoot, "e2e", "from-bash.txt"), []byte("bash-visible"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	read = ws.request(c0ChannelID, "echo.file_read", actorID, map[string]any{"address": "daemon://colocated-node/e2e/from-bash.txt"})
+	read = ws.request(c0ChannelID, "echo.file_read", actorID, map[string]any{"address": "daemon://colocated-node/c0/e2e/from-bash.txt"})
 	if read["content"] != "bash-visible" || read["redeem"] != "local" {
 		t.Fatalf("file written in agent workdir was not the collaboration file: %v", read)
 	}
@@ -235,8 +356,8 @@ func waitStorageReady(t *testing.T, ws *wsClient, daemon *proc, logPath string) 
 		if daemon.exited() {
 			t.Fatalf("storage daemon exited while waiting for its lane\n%s", tailLog(logPath, 100))
 		}
-		address := fmt.Sprintf("daemon://storage-node/e2e/readiness-%d", attempt)
-		if _, err := ws.tryResource(map[string]any{"channel_id": c0ChannelID, "op": "create", "address": address}); err == nil {
+		address := fmt.Sprintf("daemon://storage-node/c0/e2e/readiness-%d", attempt)
+		if _, err := ws.tryResource(map[string]any{"op": "create", "address": address}); err == nil {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -265,7 +386,7 @@ func httpPutFile(t *testing.T, api *apiClient, base, address, ticket string, con
 
 func httpReadFile(t *testing.T, api *apiClient, base string, ws *wsClient, address string) []byte {
 	t.Helper()
-	opened := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
+	opened := ws.resource(map[string]any{"op": "read", "resource_id": address})
 	endpoint := base + "/files/" + url.PathEscape(address) + "?t=" + url.QueryEscape(stringField(t, opened, "ticket"))
 	resp, err := api.http.Get(endpoint)
 	if err != nil {

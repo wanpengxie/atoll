@@ -32,8 +32,9 @@ var (
 )
 
 type Config struct {
-	ChannelID channelpkg.ID
-	DBPath    string
+	ChannelID   channelpkg.ID
+	ChannelName string
+	DBPath      string
 
 	Genesis         *storespec.ChannelGenesis
 	ExpectedGenesis *storespec.ChannelGenesis
@@ -76,9 +77,10 @@ func (unavailableBindingReader) ListBoundDeviceIDs(context.Context, channelpkg.I
 // Home is the channel composition root. Runtime organs are held as peers;
 // actorSystem is only the Platform workflow facade over them.
 type Home struct {
-	channelID channelpkg.ID
-	actors    *actorSystem
-	resolver  IntroductionResolver
+	channelID   channelpkg.ID
+	channelName string
+	actors      *actorSystem
+	resolver    IntroductionResolver
 	// ownerPrincipal is the channel's one owner pointer, read once from the
 	// immutable genesis. It is the sole source of every owner judgement.
 	ownerPrincipal string

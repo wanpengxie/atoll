@@ -123,7 +123,7 @@ func TestCompartmentBuildsAndClosesOnlyByExplicitCommand(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -179,7 +179,7 @@ func TestOneCarrierServicesTwoCompartmentsAndDetachIsLocal(t *testing.T) {
 	boundA.Store(true)
 	boundB.Store(true)
 	membrane := func(bound *atomic.Bool) platform.DaemonMembrane {
-		return platform.DaemonMembrane{
+		return platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 			IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 		}
@@ -285,8 +285,13 @@ func TestDaemonRootLockHelper(t *testing.T) {
 
 func TestCoordinatePathRejectsEscapeAndKeepsDaemonTreesDistinct(t *testing.T) {
 	base := t.TempDir()
-	if _, err := coordinatePath(base, "../escape"); err == nil {
-		t.Fatal("path traversal coordinate accepted")
+	// This is the sole defence for a channel directory name arriving over the
+	// wire: the name's alphabet is judged once at minting, and anything that
+	// could reach outside its root has to die here.
+	for _, coordinate := range []string{"../escape", "c0/proj-x", "a\\b", "", ".", "/abs"} {
+		if _, err := coordinatePath(base, coordinate); err == nil {
+			t.Errorf("coordinate %q accepted", coordinate)
+		}
 	}
 	a, err := coordinatePath(base, "daemon-a")
 	if err != nil {
@@ -306,6 +311,43 @@ func TestCoordinatePathRejectsEscapeAndKeepsDaemonTreesDistinct(t *testing.T) {
 	}
 	if err := ensureDirectory(symlink); err == nil {
 		t.Fatal("workspace symlink accepted as a compartment directory")
+	}
+}
+
+func TestParentAndChildChannelDirectoriesAreFlatOnDifferentDaemons(t *testing.T) {
+	parentRoot := filepath.Join(t.TempDir(), "channels")
+	childRoot := filepath.Join(t.TempDir(), "channels")
+	if err := ensureDirectory(parentRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDirectory(childRoot); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := coordinatePath(parentRoot, "c0.proj-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := coordinatePath(childRoot, "c0.proj-x.backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDirectory(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDirectory(child); err != nil {
+		t.Fatal(err)
+	}
+	for root, want := range map[string]string{parentRoot: "c0.proj-x", childRoot: "c0.proj-x.backend"} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != want {
+			t.Fatalf("%s entries=%v, want only %q", root, entries, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(childRoot, "c0.proj-x")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child daemon has an intermediate parent shell: %v", err)
 	}
 }
 
@@ -462,7 +504,7 @@ func TestPlanSnapshotTimeoutPreservesCompartmentsAndDropsWaiter(t *testing.T) {
 	manager := newCompartmentManager(
 		context.Background(), Config{}, slog.New(slog.DiscardHandler),
 	)
-	cell := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	cell := &compartment{manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{})}
 	manager.cells["a"] = cell
 	if _, ok := manager.pullPlanSnapshot(carrier); ok {
 		t.Fatal("silent peer produced a snapshot")
@@ -551,7 +593,7 @@ func TestLanePlanPokePullsFreshPlan(t *testing.T) {
 		Present:      testPresent("a"),
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pulls.Add(1)
 			return nil, nil
@@ -586,7 +628,7 @@ func TestChannelDeletedWhileOfflineIsRetiredOnReconnect(t *testing.T) {
 		},
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -622,7 +664,7 @@ func TestUnjudgeableChannelKeepsTheCompartment(t *testing.T) {
 		Present:      testPresent("a"),
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -660,7 +702,7 @@ func TestCompartment_RebuildsAfterCloseWhenRebound(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -721,7 +763,7 @@ func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 		t.Cleanup(func() { _ = host.Close(context.Background()) })
 		var bound atomic.Bool
 		bound.Store(true)
-		membrane := platform.DaemonMembrane{
+		membrane := platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 				return nil, nil
 			},
@@ -810,7 +852,7 @@ func TestLaneRetirementPreservesCompartmentAndPullsFullPlan(t *testing.T) {
 	var pulls atomic.Int32
 	var bound atomic.Bool
 	bound.Store(true)
-	membrane := platform.DaemonMembrane{
+	membrane := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pulls.Add(1)
 			return nil, nil
@@ -851,7 +893,7 @@ func TestLongCompartmentBuildSurvivesLaneChurnWithoutDoubleBuild(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	membrane := platform.DaemonMembrane{
+	membrane := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	}
@@ -890,7 +932,7 @@ func TestBlockedCompartmentDoesNotStarveSibling(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	for _, id := range []string{"a", "b"} {
-		host.Register(channel.ID(id), 1, platform.DaemonMembrane{
+		host.Register(channel.ID(id), 1, platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 			IsBound: func(context.Context, string) (bool, error) { return true, nil },
 		})
@@ -935,7 +977,7 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 	var boundA, boundB atomic.Bool
 	boundA.Store(true)
 	boundB.Store(true)
-	membraneA := platform.DaemonMembrane{
+	membraneA := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			if blockA.Load() {
 				entered.Do(func() { close(enteredA) })
@@ -945,7 +987,7 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 		},
 		IsBound: func(context.Context, string) (bool, error) { return boundA.Load(), nil },
 	}
-	membraneB := platform.DaemonMembrane{
+	membraneB := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			pullsB.Add(1)
 			return nil, nil
@@ -983,7 +1025,7 @@ func TestCondemnedCompartmentNeverBuildsSecondResourceSet(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -1030,7 +1072,7 @@ func TestCompartmentFaultRetriesInPlaceAndBecomesReady(t *testing.T) {
 		Present:      testPresent("channel-a", "a", "b"),
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
@@ -1064,11 +1106,11 @@ func TestSnapshotRetirementIsExactObject(t *testing.T) {
 	manager := newCompartmentManager(
 		context.Background(), Config{}, slog.New(slog.DiscardHandler),
 	)
-	condemned := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	condemned := &compartment{manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{})}
 	manager.cells["a"] = condemned
 
 	// The rebind: a different compartment now occupies this coordinate.
-	replacement := &compartment{manager: manager, chID: "a", stopBuild: make(chan struct{})}
+	replacement := &compartment{manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{})}
 	manager.cells["a"] = replacement
 
 	manager.closeExactCompartment(condemned)
@@ -1122,7 +1164,7 @@ func newLaneAdmissionFixture(t *testing.T) *laneAdmissionFixture {
 	carrier := &link.ClientCarrier{}
 	manager.carrier = carrier
 	cell := &compartment{
-		manager: manager, chID: "a",
+		manager: manager, chID: "a", chName: "c0.a",
 		stopBuild: make(chan struct{}),
 		buildDone: make(chan struct{}),
 	}
@@ -1141,7 +1183,7 @@ func newLaneAdmissionFixture(t *testing.T) *laneAdmissionFixture {
 	) (*link.LaneStream, error) {
 		local, remote := net.Pipe()
 		stream, err := link.AdoptLane(carrier, link.DeviceStreamHeader{
-			Kind: link.DeviceStreamLaneControl, Channel: chID, LaneGen: gen,
+			Kind: link.DeviceStreamLaneControl, Channel: chID, ChannelName: "c0.test", LaneGen: gen,
 		}, local)
 		if err != nil {
 			return nil, err
@@ -1203,7 +1245,7 @@ func (f *laneAdmissionFixture) lanePeer(
 	local, remote := net.Pipe()
 	f.t.Cleanup(func() { _ = remote.Close() })
 	stream, err := link.AdoptLane(carrier, link.DeviceStreamHeader{
-		Kind: link.DeviceStreamLaneControl, Channel: "a", LaneGen: gen,
+		Kind: link.DeviceStreamLaneControl, Channel: "a", ChannelName: "c0.a", LaneGen: gen,
 	}, local)
 	if err != nil {
 		f.t.Fatalf("adopt lane %q: %v", gen, err)
@@ -1443,7 +1485,7 @@ func TestLaneFromAStaleCarrierCreatesNoCompartment(t *testing.T) {
 	t.Cleanup(func() { _ = remote.Close() })
 	staleCarrier := &link.ClientCarrier{}
 	stream, err := link.AdoptLane(staleCarrier, link.DeviceStreamHeader{
-		Kind: link.DeviceStreamLaneControl, Channel: "unserved", LaneGen: openedThird,
+		Kind: link.DeviceStreamLaneControl, Channel: "unserved", ChannelName: "c0.unserved", LaneGen: openedThird,
 	}, local)
 	if err != nil {
 		t.Fatalf("adopt lane: %v", err)
@@ -1556,7 +1598,7 @@ func TestGoneSendFailureDoesNotBlockCompartmentRemoval(t *testing.T) {
 		cells: make(map[string]*compartment),
 	}
 	cell := &compartment{
-		manager: manager, chID: "a", closing: true, closeStarted: true,
+		manager: manager, chID: "a", chName: "c0.a", closing: true, closeStarted: true,
 		stopBuild: make(chan struct{}),
 	}
 	manager.cells["a"] = cell
@@ -1709,7 +1751,7 @@ func TestCompartmentRollbackAndClosePreserveTeardownOrder(t *testing.T) {
 					context.Background(), Config{}, slog.New(slog.DiscardHandler),
 				)
 				cell := &compartment{
-					manager: manager, chID: "a", stopBuild: make(chan struct{}),
+					manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{}),
 					host: host, outbound: outbound, cancel: cancel,
 					resources: resources,
 				}
@@ -1758,7 +1800,7 @@ func TestCompartmentBuildRollsBackFactorylessResources(t *testing.T) {
 			manager.root = t.TempDir()
 			manager.daemonID = "daemon-a"
 			cell := &compartment{
-				manager: manager, chID: "a", stopBuild: make(chan struct{}),
+				manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{}),
 			}
 			manager.cells["a"] = cell
 			err := cell.build()
@@ -1794,7 +1836,7 @@ func TestTeardownStepsWithoutCancellationStayInsideTheJoinBudget(t *testing.T) {
 		context.Background(), Config{}, slog.New(slog.DiscardHandler),
 	)
 	cell := &compartment{
-		manager: manager, chID: "a", stopBuild: make(chan struct{}),
+		manager: manager, chID: "a", chName: "c0.a", stopBuild: make(chan struct{}),
 		resources: CompartmentResources{Close: func() error { <-release; return nil }},
 	}
 	manager.cells["a"] = cell
@@ -1846,7 +1888,7 @@ func TestOverrunningBuildThatSettlesCleanFreesTheCoordinate(t *testing.T) {
 	manager.root = t.TempDir()
 	manager.daemonID = "daemon-a"
 	cell := &compartment{
-		manager: manager, chID: "a",
+		manager: manager, chID: "a", chName: "c0.a",
 		stopBuild: make(chan struct{}), buildDone: make(chan struct{}),
 	}
 	manager.cells["a"] = cell
@@ -1904,7 +1946,7 @@ func TestOverrunningBuildWhoseRollbackFailsStaysOutOfService(t *testing.T) {
 	manager.root = t.TempDir()
 	manager.daemonID = "daemon-a"
 	cell := &compartment{
-		manager: manager, chID: "a",
+		manager: manager, chID: "a", chName: "c0.a",
 		stopBuild: make(chan struct{}), buildDone: make(chan struct{}),
 	}
 	manager.cells["a"] = cell

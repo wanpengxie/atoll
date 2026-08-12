@@ -47,6 +47,7 @@ type Deps struct {
 	State     resourcespec.StateStore
 
 	ChannelID       channel.ID
+	ChannelName     string
 	StorageMounts   StorageMounts
 	Files           FileControl
 	TransferControl TransferControl

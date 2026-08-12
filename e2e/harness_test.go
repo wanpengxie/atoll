@@ -572,6 +572,42 @@ func findTool(t *testing.T, ws *wsClient) string {
 	return ""
 }
 
+// awaitSpaceTool waits for a channel to publish its own space-tool and returns
+// its actor id. A channel that has just been created reaches its first serving
+// generation asynchronously, so the poll is part of the contract rather than a
+// convenience.
+func awaitSpaceTool(t *testing.T, ws *wsClient, channelID string) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, catalog, err := ws.tryRequest(channelID, "actor.list", systemActor, map[string]any{}); err == nil {
+			rows, _ := catalog["actors"].([]any)
+			for _, raw := range rows {
+				row, _ := raw.(map[string]any)
+				if row["kind"] == "tool" {
+					if id, _ := row["id"].(string); id != "" {
+						return id
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("channel %s never published its space-tool", channelID)
+	return ""
+}
+
+// attachDevice binds a device to a channel. Binding is requested from inside
+// the target channel through that channel's own space-tool: the registrar in
+// c0 cannot bind on another channel's behalf.
+func attachDevice(t *testing.T, ws *wsClient, channelID, deviceID string) {
+	t.Helper()
+	tool := awaitSpaceTool(t, ws, channelID)
+	ws.request(channelID, "device.attach", tool, map[string]any{
+		"channel_id": channelID, "device_id": deviceID,
+	})
+}
+
 // c0 seats the registrar itself. Its wire reply wraps the operation value in
 // {word,value,source}; per-channel space-tool actors unwrap that same result.
 func registrarRequest(t *testing.T, ws *wsClient, registrar, word string, payload any) map[string]any {

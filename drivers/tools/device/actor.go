@@ -17,8 +17,8 @@ import (
 
 // Actor is the generic device tool as an actorbase Proc (spec §1.6): entry =
 // birth, return = death. All file and exec operations are confined to
-// <root>/<channel-id>/ — one workspace subdirectory per channel, created on
-// first use. It holds no connection and arms no timer, so run() is a bare loop
+// <root> is already the compartment's one qualified channel directory. It
+// holds no connection and arms no timer, so run() is a bare loop
 // over sys.Recv() (echo's shape), with each delivery answered synchronously on
 // the worker goroutine through sys.Reply/sys.Fail.
 type Actor struct {
@@ -93,17 +93,17 @@ func (a *Actor) handle(msg actorbase.Msg) {
 	}
 }
 
-// channelWorkspace resolves (and lazily creates) the per-channel workspace
-// directory for the delivery's channel.
+// channelWorkspace returns the compartment root itself. The compute boundary
+// already selected the delivery's channel by its qualified name; adding the
+// opaque channel id here would create a second, nested channel directory.
 func (a *Actor) channelWorkspace(chID channel.ID) (string, error) {
 	if chID == "" {
 		return "", errors.New("envelope has no channel id")
 	}
-	ws := filepath.Join(a.root, string(chID))
-	if err := os.MkdirAll(ws, 0o755); err != nil {
+	if err := os.MkdirAll(a.root, 0o755); err != nil {
 		return "", fmt.Errorf("create workspace: %w", err)
 	}
-	return ws, nil
+	return a.root, nil
 }
 
 // resolvePath confines a caller-supplied relative path to the workspace.

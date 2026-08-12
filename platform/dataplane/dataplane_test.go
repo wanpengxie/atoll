@@ -59,8 +59,9 @@ func openTestPlane(t *testing.T, opener *testOpener) (Issuer, Redeemer) {
 func issueTestTicket(t *testing.T, issue Issuer, mode access.Operation) Grant {
 	t.Helper()
 	grant, err := issue.Issue(t.Context(), IssueSpec{
-		Address: "daemon://host/docs/a.txt", ChannelID: "channel-a", Mode: mode,
-		HostID: "daemon-a", HostName: "host",
+		Address: "daemon://host/c0.test/docs/a.txt", Path: "docs/a.txt",
+		ChannelID: "channel-a", Mode: mode,
+		HostID:    "daemon-a", HostName: "host",
 	})
 	if err != nil || grant.Ticket == "" {
 		t.Fatalf("Issue = (%+v, %v)", grant, err)
@@ -75,10 +76,15 @@ func TestTicketLedgerKeepsOnlyRemoteByteFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ticket.Address != "daemon://host/docs/a.txt" || ticket.HostID != "daemon-a" || ticket.Mode != access.OpRead {
+	if ticket.Address != "daemon://host/c0.test/docs/a.txt" || ticket.HostID != "daemon-a" || ticket.Mode != access.OpRead {
 		t.Fatalf("ticket=%+v", ticket)
 	}
-	want := []string{"ChannelID", "Address", "Mode", "HostID", "Expires"}
+	// Path is where those bytes live inside the channel's directory on that
+	// machine — a fact about the remote bytes, like the host and the mode.
+	if ticket.Path != "docs/a.txt" {
+		t.Fatalf("ticket path=%q", ticket.Path)
+	}
+	want := []string{"ChannelID", "Address", "Path", "Mode", "HostID", "Expires"}
 	typ := reflect.TypeOf(Ticket{})
 	got := make([]string, typ.NumField())
 	for i := range got {
@@ -117,8 +123,8 @@ func TestHTTPRedemptionRejectsAddressAndModeMismatch(t *testing.T) {
 		address resource.ResourceID
 		mode    access.Operation
 	}{
-		{name: "address", address: "daemon://host/docs/other.txt", mode: access.OpRead},
-		{name: "mode", address: "daemon://host/docs/a.txt", mode: access.OpWrite},
+		{name: "address", address: "daemon://host/c0.test/docs/other.txt", mode: access.OpRead},
+		{name: "mode", address: "daemon://host/c0.test/docs/a.txt", mode: access.OpWrite},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -136,7 +142,7 @@ func TestHostOpenFailureIsReturnedToHTTPAndExchangeCallers(t *testing.T) {
 
 	t.Run("HTTP", func(t *testing.T) {
 		grant := issueTestTicket(t, issue, access.OpRead)
-		err := redeem.ServeHTTP(t.Context(), "daemon://host/docs/a.txt", grant.Ticket, access.OpRead, io.Discard, nil)
+		err := redeem.ServeHTTP(t.Context(), "daemon://host/c0.test/docs/a.txt", grant.Ticket, access.OpRead, io.Discard, nil)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("ServeHTTP error = %v, want host open error", err)
 		}
@@ -260,7 +266,7 @@ func TestInterruptedHTTPWriteAfterPartialBytesNeverSucceeds(t *testing.T) {
 	issue, redeem := openTestPlane(t, opener)
 	grant := issueTestTicket(t, issue, access.OpWrite)
 	wantErr := errors.New("upload interrupted")
-	err := redeem.ServeHTTP(t.Context(), "daemon://host/docs/a.txt", grant.Ticket, access.OpWrite,
+	err := redeem.ServeHTTP(t.Context(), "daemon://host/c0.test/docs/a.txt", grant.Ticket, access.OpWrite,
 		io.Discard, &partialErrorReader{data: []byte("partial"), err: wantErr})
 	if err == nil {
 		t.Fatal("partially transferred write returned success")

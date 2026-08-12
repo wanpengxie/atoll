@@ -10,10 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1160,7 +1158,7 @@ func (c *carrierRow) ensureLane(chID channel.ID, membrane membraneRow) {
 	c.mu.Unlock()
 	generation := link.NewLaneGeneration()
 	ctx, cancel := context.WithTimeout(c.host.ctx, defaultLaneOpenTimeout)
-	stream, err := c.wire.OpenLane(ctx, chID, generation)
+	stream, err := c.wire.OpenLane(ctx, chID, membrane.bundle.ChannelName, generation)
 	cancel()
 	if err != nil {
 		c.returnReader()
@@ -1424,13 +1422,12 @@ func (h *Host) OpenHost(ctx context.Context, ticket dataplane.Ticket) (io.ReadWr
 		return nil, dataplane.ErrHostOffline
 	}
 	tracked := &trackedExchange{ReadWriteCloser: conn, cleanup: cleanup}
-	address, err := url.Parse(string(ticket.Address))
-	if err != nil || address.Path == "" {
+	if ticket.Path == "" {
 		_ = tracked.Close()
-		return nil, errors.New("daemonhost: malformed file address")
+		return nil, errors.New("daemonhost: ticket carries no file path")
 	}
 	if err := link.WriteExchangeControl(tracked, link.ExchangeHostHeader{
-		Path: strings.TrimPrefix(address.Path, "/"), Mode: ticket.Mode,
+		Path: ticket.Path, Mode: ticket.Mode,
 	}); err != nil {
 		_ = tracked.Close()
 		return nil, err

@@ -266,17 +266,22 @@ type DeviceStreamHeader struct {
 	Kind         DeviceStreamKind `json:"kind"`
 	ProtoVersion int              `json:"proto_version,omitempty"`
 	Channel      channel.ID       `json:"channel,omitempty"`
+	ChannelName  string           `json:"channel_name,omitempty"`
 	LaneGen      LaneGeneration   `json:"lane_gen,omitempty"`
 }
 
 func (h DeviceStreamHeader) Validate() error {
 	switch h.Kind {
 	case DeviceStreamCarrier:
-		if h.ProtoVersion <= 0 || h.Channel != "" || h.LaneGen != "" {
+		if h.ProtoVersion <= 0 || h.Channel != "" || h.ChannelName != "" || h.LaneGen != "" {
 			return errors.New("link: malformed carrier stream header")
 		}
-	case DeviceStreamLaneControl, DeviceStreamStorage, DeviceStreamActor, DeviceStreamExchange:
-		if h.ProtoVersion != 0 || h.Channel == "" || h.LaneGen == "" {
+	case DeviceStreamLaneControl:
+		if h.ProtoVersion != 0 || h.Channel == "" || h.LaneGen == "" || h.ChannelName == "" {
+			return fmt.Errorf("link: malformed %s stream header", h.Kind)
+		}
+	case DeviceStreamStorage, DeviceStreamActor, DeviceStreamExchange:
+		if h.ProtoVersion != 0 || h.Channel == "" || h.ChannelName != "" || h.LaneGen == "" {
 			return fmt.Errorf("link: malformed %s stream header", h.Kind)
 		}
 	default:
@@ -784,14 +789,14 @@ func NewLaneGeneration() LaneGeneration {
 	return LaneGeneration(id.String())
 }
 
-func (c *ServerCarrier) OpenLane(ctx context.Context, chID channel.ID, generation LaneGeneration) (*LaneStream, error) {
+func (c *ServerCarrier) OpenLane(ctx context.Context, chID channel.ID, channelName string, generation LaneGeneration) (*LaneStream, error) {
 	conn, err := c.open(ctx, DeviceStreamHeader{
-		Kind: DeviceStreamLaneControl, Channel: chID, LaneGen: generation,
+		Kind: DeviceStreamLaneControl, Channel: chID, ChannelName: channelName, LaneGen: generation,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return newLaneStream(c.rawCarrier, chID, generation, conn), nil
+	return newLaneStream(c.rawCarrier, chID, channelName, generation, conn), nil
 }
 
 // OpenStorage opens the storage sibling of an admitted lane, keyed by that
@@ -807,7 +812,7 @@ func (c *ClientCarrier) OpenStorage(ctx context.Context, chID channel.ID, genera
 	if err != nil {
 		return nil, err
 	}
-	return newLaneStream(c.rawCarrier, chID, generation, conn), nil
+	return newLaneStream(c.rawCarrier, chID, "", generation, conn), nil
 }
 
 func (c *ClientCarrier) OpenActor(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
@@ -845,11 +850,12 @@ func (c *ClientCarrier) ServeStreams(handle func(net.Conn, DeviceStreamHeader)) 
 }
 
 type LaneStream struct {
-	carrier *rawCarrier
-	Channel channel.ID
-	Gen     LaneGeneration
-	conn    net.Conn
-	decoder *boundedJSONDecoder
+	carrier     *rawCarrier
+	Channel     channel.ID
+	ChannelName string
+	Gen         LaneGeneration
+	conn        net.Conn
+	decoder     *boundedJSONDecoder
 
 	sendMu       sync.Mutex
 	retired      atomic.Bool
@@ -860,9 +866,9 @@ type LaneStream struct {
 	onRetire     func(*LaneStream)
 }
 
-func newLaneStream(carrier *rawCarrier, chID channel.ID, generation LaneGeneration, conn net.Conn) *LaneStream {
+func newLaneStream(carrier *rawCarrier, chID channel.ID, channelName string, generation LaneGeneration, conn net.Conn) *LaneStream {
 	return &LaneStream{
-		carrier: carrier, Channel: chID, Gen: generation, conn: conn,
+		carrier: carrier, Channel: chID, ChannelName: channelName, Gen: generation, conn: conn,
 		decoder: newBoundedJSONDecoder(conn, maxControlFrameBytes),
 		done:    make(chan struct{}), physicalDone: make(chan struct{}),
 	}
@@ -876,7 +882,7 @@ func AdoptLane(carrier *ClientCarrier, header DeviceStreamHeader, conn net.Conn)
 		}
 		return nil, errors.New("link: malformed lane stream")
 	}
-	return newLaneStream(carrier.rawCarrier, header.Channel, header.LaneGen, conn), nil
+	return newLaneStream(carrier.rawCarrier, header.Channel, header.ChannelName, header.LaneGen, conn), nil
 }
 
 // AdoptStorage wraps a device-opened storage stream on the server side.
@@ -888,7 +894,7 @@ func AdoptStorage(carrier *ServerCarrier, header DeviceStreamHeader, conn net.Co
 		}
 		return nil, errors.New("link: malformed storage stream")
 	}
-	return newLaneStream(carrier.rawCarrier, header.Channel, header.LaneGen, conn), nil
+	return newLaneStream(carrier.rawCarrier, header.Channel, "", header.LaneGen, conn), nil
 }
 
 func (l *LaneStream) SetRetire(fn func(*LaneStream)) { l.onRetire = fn }

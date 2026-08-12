@@ -10,6 +10,7 @@ import (
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 type daemonStorageMounts struct {
@@ -67,7 +68,15 @@ func (c daemonTransferControl) IssueTransfer(ctx context.Context, address resour
 	if c.issuer == nil {
 		return "", errors.New("platform: dataplane issuer unavailable")
 	}
-	grant, err := c.issuer.Issue(ctx, dataplane.IssueSpec{Address: address, ChannelID: c.chID, Mode: mode, HostID: targetID, HostName: targetName})
+	// The ticket carries the path the holder may touch, relative to the
+	// channel's own directory on that machine. It is resolved once, here, where
+	// the address is already understood — the redeeming side reads the ticket
+	// rather than parsing the address a second time.
+	parsed, err := resourcespec.ParseFileAddress(string(address))
+	if err != nil {
+		return "", err
+	}
+	grant, err := c.issuer.Issue(ctx, dataplane.IssueSpec{Address: address, Path: parsed.Path, ChannelID: c.chID, Mode: mode, HostID: targetID, HostName: targetName})
 	if err != nil {
 		var offline *dataplane.HostOfflineError
 		if errors.As(err, &offline) {

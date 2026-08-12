@@ -266,7 +266,7 @@ func TestEditUniqueness(t *testing.T) {
 }
 
 func TestExec(t *testing.T) {
-	sys, _ := startActor(t)
+	sys, root := startActor(t)
 
 	push := func(id string, payload ExecPayload) (string, string, map[string]json.RawMessage) {
 		msg := request(TypeExec, payload)
@@ -281,7 +281,7 @@ func TestExec(t *testing.T) {
 	}
 	var stdout string
 	_ = json.Unmarshal(raw["stdout"], &stdout)
-	if !strings.HasPrefix(stdout, "hello\n") || !strings.Contains(stdout, string(testChannel)) {
+	if !strings.HasPrefix(stdout, "hello\n") || !strings.Contains(stdout, root) {
 		t.Fatalf("stdout = %q; want hello + workspace cwd", stdout)
 	}
 

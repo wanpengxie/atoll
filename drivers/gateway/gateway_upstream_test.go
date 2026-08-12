@@ -75,6 +75,29 @@ func TestUpstreamSixFramesFourCodes(t *testing.T) {
 	}
 }
 
+func TestFileFrameRejectsChannelIDThatDisagreesWithAddress(t *testing.T) {
+	g := newTestGateway(t, Config{Resolver: newResolver()}, settings{clock: newClock()})
+	s, err := g.Attach("u", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.elig.Store(&eligState{
+		routes: map[channel.ID]Route{"channel-a": {Channel: "channel-a", ChannelName: "c0.test"}},
+		paused: map[channel.ID]struct{}{},
+	})
+	f, err := subjectgate.NewFrame(subjectgate.FrameResource, "r", subjectgate.ResourcePayload{
+		ChannelID: "channel-b", Op: subjectgate.ResRead,
+		ResourceID: "daemon://host/c0.test/docs/report.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := codeOf(t, s.Upstream(f)); code != subjectgate.CodeBadPayload {
+		t.Fatalf("mismatched channel_id code=%q, want %q", code, subjectgate.CodeBadPayload)
+	}
+}
+
 // Route is membership-only. A temporary ObserverRoute never enters the
 // upstream eligibility ledger, so it cannot deliver a business frame. The
 // absent half of 表① is covered above and in gateway_entitlement_test.go.

@@ -11,7 +11,7 @@
 //
 //   - protocol/actor    — actor identity (ActorID), the actor Kind closed set,
 //     Binding closed set, and the reserved-type closed sets.
-//   - protocol/channel  — channel ID type (opaque stable string).
+//   - protocol/channel  — opaque channel ID.
 //   - protocol/message  — envelope schema (14 wire content fields;
 //     sender flattened into sender.kind/sender.id), kind /
 //     visibility closed sets, and the terminal-failure reason

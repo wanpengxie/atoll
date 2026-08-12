@@ -52,6 +52,7 @@ type LocalHost interface {
 
 type OpenSpec struct {
 	ChannelID    channel.ID
+	ChannelName  string
 	ExpectedType string
 }
 
@@ -100,6 +101,7 @@ type entry struct {
 	// serving fast path re-checks ExpectedType against it instead of skipping
 	// the strict validation.
 	genesisType string
+	channelName string
 }
 
 type ChannelHost struct {
@@ -220,7 +222,10 @@ func (h *ChannelHost) idLock(id channel.ID) *sync.Mutex {
 	return lock
 }
 
-func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisSpec) error {
+// provisionGenesis takes the qualified name separately from the genesis spec:
+// genesis is the immutable creation snapshot, while a channel's name follows
+// its place in the tree and changes with a rename.
+func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisSpec, name string) error {
 	lock := h.idLock(spec.ChannelID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -229,6 +234,9 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	}
 	if spec.Type == "" || spec.OwnerPrincipal == "" || spec.CreatedAt <= 0 {
 		return errors.New("channelhost: invalid genesis spec")
+	}
+	if name == "" {
+		return errors.New("channelhost: qualified channel name required")
 	}
 	main, tombstone, err := h.paths(spec.ChannelID)
 	if err != nil {
@@ -270,7 +278,7 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 		})
 	}
 	homeInstance, err := h.openHome(
-		spec.ChannelID, main, true, &genesis,
+		spec.ChannelID, name, main, true, &genesis,
 		spec.OwnerPrincipal, bootstrapDeclarations,
 	)
 	if err != nil {
@@ -323,6 +331,9 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	if spec.ExpectedType == "" {
 		return errors.New("channelhost: expected type required")
 	}
+	if spec.ChannelName == "" {
+		return errors.New("channelhost: qualified channel name required")
+	}
 	main, tombstone, err := h.paths(spec.ChannelID)
 	if err != nil {
 		return err
@@ -337,6 +348,9 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 		if current.genesisType != spec.ExpectedType {
 			return errors.Join(ErrSchemaIncompatible, fmt.Errorf("channelhost: serving channel is type %q, directory expects %q", current.genesisType, spec.ExpectedType))
 		}
+		if current.channelName != spec.ChannelName {
+			return errors.Join(ErrSchemaIncompatible, errors.New("channelhost: serving channel name changed"))
+		}
 		return nil
 	}
 	if current != nil {
@@ -346,7 +360,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	// Owner has exactly one home — the immutable genesis pointer — so opening
 	// checks only that the pointer is present. There is no second account to
 	// cross-check it against.
-	homeInstance, err := h.openHome(spec.ChannelID, main, false, &genesis, "", nil)
+	homeInstance, err := h.openHome(spec.ChannelID, spec.ChannelName, main, false, &genesis, "", nil)
 	if err != nil {
 		if errors.Is(err, home.ErrOwnerInvariant) {
 			return errors.Join(ErrOwnerInvariant, err)
@@ -368,7 +382,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 		_ = home.Shutdown(homeInstance)
 		return nil
 	}
-	h.entries[spec.ChannelID] = &entry{home: homeInstance, generation: generation, state: stateServing, genesisType: spec.ExpectedType}
+	h.entries[spec.ChannelID] = &entry{home: homeInstance, generation: generation, state: stateServing, genesisType: spec.ExpectedType, channelName: spec.ChannelName}
 	h.mu.Unlock()
 	notifyGeneration = generation
 	notifyMembrane = home.DaemonMembrane(homeInstance)
@@ -377,6 +391,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 
 func (h *ChannelHost) openHome(
 	id channel.ID,
+	name string,
 	path string,
 	bootstrap bool,
 	genesis *storespec.ChannelGenesis,
@@ -384,7 +399,7 @@ func (h *ChannelHost) openHome(
 	bootstrapDeclarations []home.DeclareRequest,
 ) (*home.Home, error) {
 	config := home.Config{
-		ChannelID: id, DBPath: path, Bootstrap: bootstrap, MustExistDB: !bootstrap,
+		ChannelID: id, ChannelName: name, DBPath: path, Bootstrap: bootstrap, MustExistDB: !bootstrap,
 		CompositionResolver: h.deps.CompositionResolver, IntroductionResolver: h.deps.IntroductionResolver,
 		Logger: h.logger, BootstrapOwnerPrincipal: bootstrapOwner,
 		BootstrapDeclarations: bootstrapDeclarations,

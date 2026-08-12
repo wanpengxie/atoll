@@ -258,6 +258,9 @@ func removeUnpublished(paths ...string) error {
 
 func install(ctx context.Context, c0Path, registryPath, password string, now time.Time) error {
 	stamp := now.UnixMilli()
+	if err := lagoon.ValidateName(string(protocol.C0ChannelID)); err != nil {
+		return fmt.Errorf("boot: invalid c0 channel name: %w", err)
+	}
 	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, c0Path, runtime.OpenChannelOptions{})
 	if err != nil {
 		return fmt.Errorf("boot: create c0: %w", err)
@@ -316,7 +319,7 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 		return fmt.Errorf("boot: space-tool decl: %w", err)
 	}
 	const localDeviceName = "local-device"
-	if err := lagoon.ValidateDeviceName(localDeviceName); err != nil {
+	if err := lagoon.ValidateName(localDeviceName); err != nil {
 		return fmt.Errorf("boot: local device name: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO devices(id,owner_principal,name,key,status,created_at) VALUES(?,?,?,?,'present',?)`, protocol.LocalDeviceID, protocol.RootPrincipalID, localDeviceName, uuid.NewString(), stamp); err != nil {

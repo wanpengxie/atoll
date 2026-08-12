@@ -23,7 +23,7 @@ func newExchangeLifecycleLane(t *testing.T, carrier *carrierRow, generation link
 	t.Helper()
 	local, peer := net.Pipe()
 	stream, err := link.AdoptLane(&link.ClientCarrier{}, link.DeviceStreamHeader{
-		Kind: link.DeviceStreamLaneControl, Channel: "channel-a", LaneGen: generation,
+		Kind: link.DeviceStreamLaneControl, Channel: "channel-a", ChannelName: "c0.channel-a", LaneGen: generation,
 	}, local)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestServerLaneRetirementClosesExchangeAndWaitsForHandler(t *testing.T) {
 func TestServerLaneGenerationReplacementRetiresAndJoinsOldExchange(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	unbound := platform.DaemonMembrane{
+	unbound := platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return false, nil },
 	}
 	host.Register("channel-a", 1, unbound)

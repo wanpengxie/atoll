@@ -273,6 +273,24 @@ func (g *Gateway) Poke(principal string) {
 	g.kickPresence()
 }
 
+// PokeAll is the broadcast form of the same in-process dirty edge. Channel
+// retirement changes every member's entitlement set, while membership itself
+// lives behind each channel Home rather than in the registry.
+func (g *Gateway) PokeAll() {
+	g.mu.Lock()
+	var sessions []*Session
+	for _, entry := range g.entries {
+		for session := range entry.devices {
+			sessions = append(sessions, session)
+		}
+	}
+	g.mu.Unlock()
+	for _, session := range sessions {
+		session.markDirty()
+	}
+	g.kickPresence()
+}
+
 // kickPresence pokes the presence reconcile loop (non-blocking edge).
 func (g *Gateway) kickPresence() {
 	select {

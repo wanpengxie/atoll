@@ -12,6 +12,7 @@ import (
 
 type DaemonMembrane struct {
 	Generation      uint64
+	ChannelName     string
 	Ingress         remoteingress.RemoteIngress
 	AuthorizeAttach func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain) error
 	AttachBinding   func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error

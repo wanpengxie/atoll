@@ -111,7 +111,13 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		}
 		return Outcome{}, nil
 	}
-	address, _ := resourcespec.ParseFileAddress(string(id))
+	address, file, err := d.fileAddress(id)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if !file {
+		return Outcome{}, fmt.Errorf("%w: file address required", ErrMalformed)
+	}
 	mount, err := d.storageMount(ctx, address.Host)
 	if err != nil {
 		return Outcome{}, err
@@ -133,7 +139,11 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 }
 
 func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (StatResult, error) {
-	if address, err := resourcespec.ParseFileAddress(string(id)); err == nil {
+	address, file, addressErr := d.fileAddress(id)
+	if addressErr != nil {
+		return StatResult{}, addressErr
+	}
+	if file {
 		if _, err := d.authorizeMember(ctx, caller); err != nil {
 			return StatResult{Reject: QueryNotFound}, nil
 		}
@@ -171,41 +181,39 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 	return StatResult{Meta: StatMeta{Kind: meta.Kind, CreatedAt: meta.CreatedAt, CreatedBy: meta.CreatedBy}, Ops: ops}, nil
 }
 
-func fileListPrefix(raw string) (host, path string, ok bool) {
-	const head = "daemon://"
-	if !strings.HasPrefix(raw, head) {
-		return "", "", false
-	}
-	rest := strings.TrimPrefix(raw, head)
-	i := strings.IndexByte(rest, '/')
-	if i <= 0 {
-		return "", "", false
-	}
-	return rest[:i], rest[i+1:], true
-}
-
 func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (ListPage, error) {
-	if host, prefix, ok := fileListPrefix(q.Prefix); ok {
+	if strings.HasPrefix(q.Prefix, resourcespec.DaemonScheme+"://") {
+		prefix, err := resourcespec.ParseFilePrefix(q.Prefix)
+		if err != nil {
+			return ListPage{}, fmt.Errorf("%w: %v", ErrMalformed, err)
+		}
+		if d.deps.ChannelName == "" || prefix.Channel != d.deps.ChannelName {
+			return ListPage{}, fmt.Errorf("%w: file address names a different channel", ErrMalformed)
+		}
 		if q.Cursor != "" {
 			return ListPage{Reject: QueryBadCursor}, nil
 		}
 		if _, err := d.authorizeMember(ctx, caller); err != nil {
 			return ListPage{}, nil
 		}
-		mount, err := d.storageMount(ctx, host)
+		mount, err := d.storageMount(ctx, prefix.Host)
 		if err != nil {
 			return ListPage{}, err
 		}
 		if d.deps.Files == nil {
 			return ListPage{}, errors.New("accessdoor: file control unavailable")
 		}
-		rows, err := d.deps.Files.List(ctx, mount.DaemonID, prefix)
+		rows, err := d.deps.Files.List(ctx, mount.DaemonID, prefix.Path)
 		if err != nil {
 			return ListPage{}, err
 		}
 		entries := make([]ListEntry, 0, len(rows))
 		for _, row := range rows {
-			entries = append(entries, ListEntry{ID: resource.ResourceID("daemon://" + host + "/" + row.Path), Kind: resourcespec.KindFile, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}})
+			address, err := resourcespec.FormatFileAddress(resourcespec.FileAddress{Scheme: resourcespec.DaemonScheme, Host: prefix.Host, Channel: prefix.Channel, Path: row.Path})
+			if err != nil {
+				return ListPage{}, err
+			}
+			entries = append(entries, ListEntry{ID: resource.ResourceID(address), Kind: resourcespec.KindFile, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}})
 		}
 		return ListPage{Entries: entries}, nil
 	}

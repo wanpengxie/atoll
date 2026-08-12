@@ -191,6 +191,7 @@ func openDaemonForkChannel(
 	}
 	h, err := Open(Config{
 		ChannelID:            channelID,
+		ChannelName:          "c0.daemon-fork",
 		DBPath:               dbPath,
 		CompositionResolver:  emptyCompositionResolver{},
 		IntroductionResolver: inertIntroductionResolver{},

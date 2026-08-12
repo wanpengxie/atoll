@@ -26,7 +26,7 @@ func TestCreateKVRejectsFileAddressBeforeWritingRegistry(t *testing.T) {
 	}
 
 	_, err = minter.MintAuthority(accessAuthority("agent:a")).Create(
-		t.Context(), "daemon://laptop-a/docs/report.txt",
+		t.Context(), "daemon://laptop-a/c0.channel-a/docs/report.txt",
 		resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("value"),
 	)
 	if !errors.Is(err, ErrMalformed) {
@@ -61,12 +61,13 @@ func TestFileListReturnsEveryDiskEntryBeyondDefaultLimit(t *testing.T) {
 	d := &door{deps: Deps{
 		Authority:     &fakeMembership{isMember: true},
 		ChannelID:     "channel-a",
+		ChannelName:   "c0.channel-a",
 		StorageMounts: directMounts{},
 		Files:         files,
 	}}
 
 	page, err := d.list(t.Context(), actor.ActorID("agent:a"), ListQuery{
-		Prefix: "daemon://laptop-a/docs/",
+		Prefix: "daemon://laptop-a/c0.channel-a/docs/",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +82,7 @@ func TestFileListReturnsEveryDiskEntryBeyondDefaultLimit(t *testing.T) {
 		t.Fatalf("disk list call = (%q, %q)", files.daemonID, files.pathPrefix)
 	}
 	for i, entry := range page.Entries {
-		want := fmt.Sprintf("daemon://laptop-a/docs/%03d.txt", i)
+		want := fmt.Sprintf("daemon://laptop-a/c0.channel-a/docs/%03d.txt", i)
 		if string(entry.ID) != want || entry.Kind != resourcespec.KindFile {
 			t.Fatalf("entry[%d] = %+v, want id %q kind file", i, entry, want)
 		}

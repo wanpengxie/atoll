@@ -177,7 +177,7 @@ func TestFallbacksReturnContractJSONWithoutCORS(t *testing.T) {
 }
 
 func TestFileRouteUsesOneCanonicalEncodedAddress(t *testing.T) {
-	address := "daemon://host/docs/report%20final.pdf"
+	address := "daemon://host/c0/docs/report%20final.pdf"
 	plane := &filePlaneStub{body: []byte("payload")}
 	p := New(Config{DataPlane: plane, ContractVersion: "test"})
 	req := httptest.NewRequest(http.MethodGet, "/files/"+url.PathEscape(address)+"?t=ticket-a", nil)
@@ -194,7 +194,7 @@ func TestFileRouteUsesOneCanonicalEncodedAddress(t *testing.T) {
 	}
 
 	for _, raw := range []string{
-		"/files/daemon://host/x?t=ticket-a",
+		"/files/daemon://host/c0/x?t=ticket-a",
 		"/files/" + strings.ReplaceAll(url.PathEscape(address), "%2F", "%2f") + "?t=ticket-a",
 	} {
 		rec := httptest.NewRecorder()
@@ -206,7 +206,7 @@ func TestFileRouteUsesOneCanonicalEncodedAddress(t *testing.T) {
 }
 
 func TestFilePutStreamsThroughRedeemer(t *testing.T) {
-	address := "daemon://host/docs/new.bin"
+	address := "daemon://host/c0/docs/new.bin"
 	plane := &filePlaneStub{}
 	p := New(Config{DataPlane: plane, ContractVersion: "test"})
 	rec := httptest.NewRecorder()

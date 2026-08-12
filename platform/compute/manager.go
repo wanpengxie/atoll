@@ -155,6 +155,7 @@ func (m *compartmentManager) sweepStorageStalls() {
 type compartment struct {
 	manager *compartmentManager
 	chID    string
+	chName  string
 
 	mu           sync.Mutex
 	state        string
@@ -508,9 +509,14 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 	cell := m.cells[chID]
 	if cell == nil {
 		cell = &compartment{
-			manager: m, chID: chID, state: "building", stopBuild: make(chan struct{}),
+			manager: m, chID: chID, chName: lane.stream.ChannelName, state: "building", stopBuild: make(chan struct{}),
 		}
 		m.cells[chID] = cell
+	} else if cell.chName != lane.stream.ChannelName {
+		m.mu.Unlock()
+		lane.stream.RetireLogical()
+		lane.stream.CollectPhysical()
+		return
 	}
 	lane.setRetire(func(exact *clientLane) { cell.laneDown(exact) })
 	lane.mu.Lock()
@@ -877,7 +883,7 @@ func (c *compartment) build() (retErr error) {
 	if err := ensureDirectory(channelsRoot); err != nil {
 		return err
 	}
-	workspace, err := coordinatePath(channelsRoot, c.chID)
+	workspace, err := coordinatePath(channelsRoot, c.chName)
 	if err != nil {
 		return err
 	}

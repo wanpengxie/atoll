@@ -63,7 +63,7 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT name FROM devices WHERE id=?`, protocol.LocalDeviceID).Scan(&localDeviceName); err != nil {
 		t.Fatal(err)
 	}
-	if err := lagoon.ValidateDeviceName(localDeviceName); err != nil {
+	if err := lagoon.ValidateName(localDeviceName); err != nil {
 		t.Fatalf("boot minted invalid local device name %q: %v", localDeviceName, err)
 	}
 	if err := db.Close(); err != nil {

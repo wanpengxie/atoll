@@ -112,12 +112,14 @@ func (s *Store) ListChannels(ctx context.Context) ([]regspec.ChannelRow, error) 
 	return s.listChannels(ctx, `SELECT `+channelColumns+` FROM channels ORDER BY channels.id`)
 }
 
-func (s *Store) ListPresentChannels(ctx context.Context) ([]regspec.ChannelRow, error) {
-	return s.listChannels(ctx, `SELECT `+channelColumns+` FROM channels WHERE channels.status='present' ORDER BY channels.id`)
+func (s *Store) FindChannels(ctx context.Context, parent channel.ID, name string) ([]regspec.ChannelRow, error) {
+	return s.listChannels(ctx, `SELECT `+channelColumns+` FROM channels WHERE channels.parent_id=? AND channels.name=? ORDER BY channels.id`, parent, name)
 }
 
-func (s *Store) FindPresentChannels(ctx context.Context, parent channel.ID, name string) ([]regspec.ChannelRow, error) {
-	return s.listChannels(ctx, `SELECT `+channelColumns+` FROM channels WHERE channels.parent_id=? AND channels.name=? AND channels.status='present' ORDER BY channels.id`, parent, name)
+func (s *Store) PresentChildExists(ctx context.Context, parent channel.ID) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channels WHERE parent_id=? AND status='present')`, parent).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) listChannels(ctx context.Context, query string, args ...any) ([]regspec.ChannelRow, error) {
@@ -308,12 +310,6 @@ func (s *Store) ChannelExists(ctx context.Context, id channel.ID) (bool, error) 
 	return exists, err
 }
 
-func (s *Store) PresentChannelExists(ctx context.Context, id channel.ID) (bool, error) {
-	var exists bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channels WHERE id=? AND status='present')`, id).Scan(&exists)
-	return exists, err
-}
-
 func (s *Store) UpsertSteward(ctx context.Context, id string, at int64) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Steward','present',?) ON CONFLICT(id) DO UPDATE SET kind='agent',email=NULL,display_name='Steward',status='present'`, id, at)
 	return classify(err)
@@ -332,15 +328,6 @@ func (s *Store) UpsertSystemDecl(ctx context.Context, row regspec.DeclRow) error
 func (s *Store) InsertChannel(ctx context.Context, row regspec.ChannelRow) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, string(row.Spec), row.CreatedAt)
 	return classify(err)
-}
-
-func (s *Store) ReparentPresentChildren(ctx context.Context, id, parent channel.ID) error {
-	var value any
-	if parent != "" {
-		value = parent
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE channels SET parent_id=? WHERE parent_id=? AND status='present'`, value, id)
-	return err
 }
 
 func (s *Store) UpdateChannelStatus(ctx context.Context, id channel.ID, status regspec.ChannelStatus) error {

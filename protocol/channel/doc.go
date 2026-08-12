@@ -1,4 +1,3 @@
-// Package channel defines the channel-id type. Allocation strategy is outside
-// the kernel's scope; the kernel treats IDs as opaque stable strings (no
-// validation, normalization, or allocation).
+// Package channel defines the opaque channel-id type and the canonical dotted
+// qualified-name grammar. ID allocation remains outside the kernel's scope.
 package channel

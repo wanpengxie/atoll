@@ -2,6 +2,7 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -25,8 +26,8 @@ func (c *countingTransfers) IssueTransfer(context.Context, resource.ResourceID, 
 
 func TestColocatedFileRouteCarriesPathAndMintsNoTicket(t *testing.T) {
 	transfers := &countingTransfers{}
-	d := &door{deps: Deps{Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: &fakeMembership{lookupFound: true, lookupHost: "daemon-a"}, State: &fakeStateStore{}, ChannelID: "c", StorageMounts: directMounts{}, TransferControl: transfers}}
-	route, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://laptop-a/docs/report.txt", access.OpWrite)
+	d := &door{deps: Deps{Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: &fakeMembership{lookupFound: true, lookupHost: "daemon-a"}, State: &fakeStateStore{}, ChannelID: "c", ChannelName: "c0.c", StorageMounts: directMounts{}, TransferControl: transfers}}
+	route, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://laptop-a/c0.c/docs/report.txt", access.OpWrite)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,5 +36,20 @@ func TestColocatedFileRouteCarriesPathAndMintsNoTicket(t *testing.T) {
 	}
 	if transfers.calls != 0 {
 		t.Fatalf("ticket ledger writes=%d want 0", transfers.calls)
+	}
+}
+
+func TestFileDoorRejectsAddressForAnotherChannelBeforeMembership(t *testing.T) {
+	membership := &fakeMembership{lookupFound: true, lookupHost: "daemon-a"}
+	d := &door{deps: Deps{
+		Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: membership, State: &fakeStateStore{}, ChannelID: "channel-a", ChannelName: "c0.channel-a",
+		StorageMounts: directMounts{}, TransferControl: &countingTransfers{},
+	}}
+	if _, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://laptop-a/c0.channel-b/docs/report.txt", access.OpRead); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("mismatched address error=%v, want ErrMalformed", err)
+	}
+	if membership.calls != 0 {
+		t.Fatalf("membership consulted %d times before address-channel rejection", membership.calls)
 	}
 }

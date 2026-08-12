@@ -40,13 +40,18 @@ func NewHostOfflineError(host string) error { return &HostOfflineError{Host: hos
 type Ticket struct {
 	ChannelID channel.ID
 	Address   resource.ResourceID
-	Mode      access.Operation
-	HostID    string
-	Expires   time.Time
+	// Path is the file's location inside that channel's directory on the host
+	// machine — the address minus its host and channel segments. It is resolved
+	// once at issue time so the redeeming side never re-parses the address.
+	Path    string
+	Mode    access.Operation
+	HostID  string
+	Expires time.Time
 }
 
 type IssueSpec struct {
 	Address   resource.ResourceID
+	Path      string
 	ChannelID channel.ID
 	Mode      access.Operation
 	HostID    string
@@ -125,7 +130,7 @@ func (b binder) UnbindHostStreamOpener() {
 }
 
 func (i issuer) Issue(_ context.Context, spec IssueSpec) (Grant, error) {
-	if spec.Address == "" || spec.ChannelID == "" || spec.HostID == "" || spec.HostName == "" ||
+	if spec.Address == "" || spec.Path == "" || spec.ChannelID == "" || spec.HostID == "" || spec.HostName == "" ||
 		(spec.Mode != access.OpRead && spec.Mode != access.OpWrite) {
 		return Grant{}, errors.New("dataplane: invalid issue spec")
 	}
@@ -143,7 +148,7 @@ func (i issuer) Issue(_ context.Context, spec IssueSpec) (Grant, error) {
 	now := i.p.now()
 	i.p.sweepLocked(now)
 	token := uuid.NewString()
-	i.p.tickets[token] = Ticket{Address: spec.Address, ChannelID: spec.ChannelID, Mode: spec.Mode,
+	i.p.tickets[token] = Ticket{Address: spec.Address, Path: spec.Path, ChannelID: spec.ChannelID, Mode: spec.Mode,
 		HostID: spec.HostID, Expires: now.Add(TicketTTL)}
 	return Grant{Ticket: token}, nil
 }

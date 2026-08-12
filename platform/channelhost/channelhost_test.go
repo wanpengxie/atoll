@@ -63,10 +63,10 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	}
 	spec := genesisSpec("offline-declaration")
 	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
-	if err := host.provisionGenesis(ctx, spec); err != nil {
+	if err := host.provisionGenesis(ctx, spec, "c0.test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
+	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ChannelName: "c0.test", ExpectedType: spec.Type}); err != nil {
 		t.Fatal(err)
 	}
 	initial, ok := host.Acquire(spec.ChannelID)
@@ -87,7 +87,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close(context.Background())
-	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
+	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ChannelName: "c0.test", ExpectedType: spec.Type}); err != nil {
 		t.Fatal(err)
 	}
 	bundle, ok := reopened.Acquire(spec.ChannelID)
@@ -141,10 +141,10 @@ func TestMembraneUnregisterPrecedesHomeQuiesce(t *testing.T) {
 	}
 	defer host.Close(context.Background())
 	id := channel.ID("staged-close")
-	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id), "c0.test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); err != nil {
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ChannelName: "c0.test", ExpectedType: "group"}); err != nil {
 		t.Fatal(err)
 	}
 	opened, _ = host.Acquire(id)
@@ -169,11 +169,11 @@ func TestLifecycleTombstoneAndCensus(t *testing.T) {
 	ctx := context.Background()
 	host := newTestHost(t)
 	id := channel.ID("opaque/频道?id=1")
-	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id), "c0.test"); err != nil {
 		t.Fatal(err)
 	}
 	assertCensus(t, host, id, CensusPresent)
-	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); err != nil {
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ChannelName: "c0.test", ExpectedType: "group"}); err != nil {
 		t.Fatal(err)
 	}
 	bundle, ok := host.Acquire(id)
@@ -201,13 +201,13 @@ func TestLifecycleTombstoneAndCensus(t *testing.T) {
 	if _, err := os.Stat(main); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("live db survived tombstone: %v", err)
 	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); !errors.Is(err, ErrChannelNotFound) {
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ChannelName: "c0.test", ExpectedType: "group"}); !errors.Is(err, ErrChannelNotFound) {
 		t.Fatalf("Open retired=%v", err)
 	}
 	if err := host.Destroy(ctx, id); err != nil {
 		t.Fatalf("repeated destroy: %v", err)
 	}
-	if err := host.provisionGenesis(ctx, genesisSpec(id)); !errors.Is(err, ErrChannelRetired) {
+	if err := host.provisionGenesis(ctx, genesisSpec(id), "c0.test"); !errors.Is(err, ErrChannelRetired) {
 		t.Fatalf("retired id reprovision=%v", err)
 	}
 }
@@ -239,10 +239,10 @@ func TestOpenRejectsTypeOwnerAndCopiedIdentity(t *testing.T) {
 	ctx := context.Background()
 	host := newTestHost(t)
 	id := channel.ID("source")
-	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id), "c0.test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "other"}); !errors.Is(err, ErrSchemaIncompatible) {
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ChannelName: "c0.test", ExpectedType: "other"}); !errors.Is(err, ErrSchemaIncompatible) {
 		t.Fatalf("wrong type err=%v", err)
 	}
 	main, _, _ := host.paths(id)
@@ -256,7 +256,7 @@ func TestOpenRejectsTypeOwnerAndCopiedIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); !errors.Is(err, ErrOwnerInvariant) {
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ChannelName: "c0.test", ExpectedType: "group"}); !errors.Is(err, ErrOwnerInvariant) {
 		t.Fatalf("missing owner err=%v", err)
 	}
 
@@ -269,7 +269,7 @@ func TestOpenRejectsTypeOwnerAndCopiedIdentity(t *testing.T) {
 	if err := os.WriteFile(copyMain, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: copyID, ExpectedType: "group"}); !errors.Is(err, ErrSchemaIncompatible) {
+	if err := host.Open(ctx, OpenSpec{ChannelID: copyID, ChannelName: "c0.test", ExpectedType: "group"}); !errors.Is(err, ErrSchemaIncompatible) {
 		t.Fatalf("copied identity err=%v", err)
 	}
 }
@@ -278,10 +278,10 @@ func TestDestroyNoReplacePreservesExistingTombstone(t *testing.T) {
 	ctx := context.Background()
 	host := newTestHost(t)
 	id := channel.ID("no-replace")
-	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id), "c0.test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); err != nil {
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ChannelName: "c0.test", ExpectedType: "group"}); err != nil {
 		t.Fatal(err)
 	}
 	_, tombstone, _ := host.paths(id)
@@ -315,7 +315,7 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	spec.ParentID = "parent"
 	spec.InitiatorPrincipal = "owner"
 	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl", Kind: actor.KindAgent, Rendered: snapshot}}
-	if err := host.provisionGenesis(ctx, spec); err != nil {
+	if err := host.provisionGenesis(ctx, spec, "c0.test"); err != nil {
 		t.Fatal(err)
 	}
 	main, _, _ := host.paths("child")

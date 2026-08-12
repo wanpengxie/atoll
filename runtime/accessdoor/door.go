@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -12,6 +13,21 @@ import (
 )
 
 type door struct{ deps Deps }
+
+func (d *door) fileAddress(id resource.ResourceID) (resourcespec.FileAddress, bool, error) {
+	raw := string(id)
+	if !strings.HasPrefix(raw, resourcespec.DaemonScheme+"://") {
+		return resourcespec.FileAddress{}, false, nil
+	}
+	address, err := resourcespec.ParseFileAddress(raw)
+	if err != nil {
+		return resourcespec.FileAddress{}, true, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	if d.deps.ChannelName == "" || address.Channel != d.deps.ChannelName {
+		return resourcespec.FileAddress{}, true, fmt.Errorf("%w: file address names a different channel", ErrMalformed)
+	}
+	return address, true, nil
+}
 
 func (d *door) storageMount(ctx context.Context, host string) (StorageMount, error) {
 	if d.deps.StorageMounts == nil {
@@ -42,13 +58,16 @@ func (d *door) authorizeMember(ctx context.Context, caller actor.ActorID) (strin
 }
 
 func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id resource.ResourceID, mode access.Operation) (*FileRoute, error) {
-	callerHost, err := d.authorizeMember(ctx, caller)
+	address, file, err := d.fileAddress(id)
 	if err != nil {
 		return nil, err
 	}
-	address, err := resourcespec.ParseFileAddress(string(id))
+	if !file {
+		return nil, fmt.Errorf("%w: file address required", ErrMalformed)
+	}
+	callerHost, err := d.authorizeMember(ctx, caller)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+		return nil, err
 	}
 	mount, err := d.storageMount(ctx, address.Host)
 	if err != nil {
@@ -79,7 +98,11 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 }
 
 func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
-	if _, err := resourcespec.ParseFileAddress(string(id)); err == nil {
+	address, file, addressErr := d.fileAddress(id)
+	if addressErr != nil {
+		return Outcome{}, addressErr
+	}
+	if file {
 		if _, err := d.authorizeMember(ctx, caller); err != nil {
 			return Outcome{RejectReason: access.AccessDenied}, nil
 		}
@@ -94,7 +117,6 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			if d.deps.Files == nil {
 				return Outcome{}, errors.New("accessdoor: file control unavailable")
 			}
-			address, _ := resourcespec.ParseFileAddress(string(id))
 			mount, err := d.storageMount(ctx, address.Host)
 			if err != nil {
 				return Outcome{}, err

@@ -290,6 +290,11 @@ func (h *ChannelHost) reconcileRow(ctx context.Context, row regspec.ChannelRow) 
 		if row.ID == protocol.C0ChannelID {
 			return errors.Join(ErrChannelRetired, errors.New("channelhost: c0 cannot be retired"))
 		}
+		// Retirement leaves the bytes alone — the channel's directory on every
+		// daemon is the user's own disk and is never swept. It still has to end
+		// the running instance: a retired channel that keeps its Home open holds
+		// its database, keeps firing its timers, and never releases the seat.
+		// Destroy touches only the channel database, never a daemon directory.
 		return h.Destroy(ctx, row.ID)
 	}
 	if _, ok := h.Acquire(row.ID); ok {
@@ -298,7 +303,7 @@ func (h *ChannelHost) reconcileRow(ctx context.Context, row regspec.ChannelRow) 
 		h.Poke(row.ID)
 		return nil
 	}
-	err := h.Open(ctx, OpenSpec{ChannelID: row.ID, ExpectedType: row.Type})
+	err := h.Open(ctx, OpenSpec{ChannelID: row.ID, ChannelName: row.QualifiedName, ExpectedType: row.Type})
 	if err == nil {
 		return nil
 	}
@@ -312,8 +317,8 @@ func (h *ChannelHost) reconcileRow(ctx context.Context, row regspec.ChannelRow) 
 	if err := json.Unmarshal(row.Spec, &genesis); err != nil {
 		return errors.Join(ErrSchemaIncompatible, err)
 	}
-	if err := h.provisionGenesis(ctx, genesis); err != nil && !errors.Is(err, ErrServing) {
+	if err := h.provisionGenesis(ctx, genesis, row.QualifiedName); err != nil && !errors.Is(err, ErrServing) {
 		return err
 	}
-	return h.Open(ctx, OpenSpec{ChannelID: row.ID, ExpectedType: row.Type})
+	return h.Open(ctx, OpenSpec{ChannelID: row.ID, ChannelName: row.QualifiedName, ExpectedType: row.Type})
 }

@@ -80,7 +80,7 @@ func TestLaneTermination_RetiresLaneOnly(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -135,7 +135,7 @@ func TestLaneAttachedAnswersFromThisHostsLedgerOnly(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var bound atomic.Bool
 	bound.Store(true)
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
@@ -165,7 +165,7 @@ func TestLaneAttachedAnswersFromThisHostsLedgerOnly(t *testing.T) {
 func TestMembraneGenerationCASRejectsLateCallbacks(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close(context.Background())
-	bundle := platform.DaemonMembrane{
+	bundle := platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}
 	host.Register("a", 2, bundle)
@@ -271,7 +271,7 @@ func TestHomeReplacementRetiresLaneWithoutClosingCompartment(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	bundle := platform.DaemonMembrane{
+	bundle := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}
@@ -343,7 +343,7 @@ func TestSnapshotAnswerSpendsOneBudgetAcrossAllChannels(t *testing.T) {
 	})
 	defer host.Close(context.Background())
 	for _, chID := range present {
-		host.Register(chID, 1, platform.DaemonMembrane{
+		host.Register(chID, 1, platform.DaemonMembrane{ChannelName: "c0.test",
 			Plan: func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 			IsBound: func(context.Context, string) (bool, error) {
 				<-release
@@ -412,7 +412,7 @@ func containsChannel(ids []channel.ID, want channel.ID) bool {
 func TestEnsureLaneRetiresOldExactObjectWithoutDeletingReplacement(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close(context.Background())
-	bundle := platform.DaemonMembrane{
+	bundle := platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan:    func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}
@@ -474,7 +474,7 @@ func TestUnboundCoordinateLeavesTheSnapshotAndNothingElse(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -509,7 +509,7 @@ func TestUnjudgeableCoordinateIsNamedUnknownAndNeverOmitted(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -638,7 +638,7 @@ func TestDuplicateCurrentIsRetryableAndKeepsIncumbent(t *testing.T) {
 func TestCoordinateBookkeepingReclaimsIdleEntries(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close(context.Background())
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -705,14 +705,14 @@ func TestCoordinateExecutorsDoNotLetBlockedABarB(t *testing.T) {
 	release := make(chan struct{})
 	var enterOnce, releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) {
 			enterOnce.Do(func() { close(entered) })
 			<-release
 			return true, nil
 		},
 	})
-	host.Register("b", 1, platform.DaemonMembrane{
+	host.Register("b", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	})
 	carrier := dialTestCarrier(t, host)
@@ -873,7 +873,7 @@ func TestBlockedSnapshotAnswerDoesNotStallTheLease(t *testing.T) {
 		},
 	})
 	defer host.Close(context.Background())
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		IsBound: func(context.Context, string) (bool, error) {
 			once.Do(func() { close(entered) })
@@ -1058,7 +1058,7 @@ func newWedgedLaneHost(t *testing.T, cfg Config) *wedgedLaneHost {
 		wedged.unblock()
 		_ = host.Close(context.Background())
 	})
-	host.Register("channel-a", 1, platform.DaemonMembrane{
+	host.Register("channel-a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		Plan: func(context.Context, string) ([]platform.PlanActor, error) {
 			once.Do(func() { close(entered) })
 			<-release
@@ -1222,7 +1222,7 @@ func TestFailedLaneOpenReturnsItsPhysicalTicket(t *testing.T) {
 		coordLocks:  make(map[channel.ID]*coordGate),
 		coordTasks:  make(map[channel.ID]*coordTask),
 	}
-	membrane := membraneRow{generation: 1, bundle: platform.DaemonMembrane{
+	membrane := membraneRow{generation: 1, bundle: platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 	}}
 	for i := 0; i < 4; i++ {

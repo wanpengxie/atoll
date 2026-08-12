@@ -88,6 +88,9 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		if change.Principal != "" && gatewayEdge != nil {
 			gatewayEdge.Poke(change.Principal)
 		}
+		if change.AllPrincipals && gatewayEdge != nil {
+			gatewayEdge.PokeAll()
+		}
 	})
 	if err != nil {
 		return nil, err
@@ -101,7 +104,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	}
 	host = e.host
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
-	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("open c0: %w", err))
 	}
 	c0, ok := e.host.Acquire(protocol.C0ChannelID)
@@ -170,7 +173,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	}
 	host = e.host
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
-	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("reopen c0 after init: %w", err))
 	}
 	c0, ok = e.host.Acquire(protocol.C0ChannelID)
@@ -262,7 +265,7 @@ func (e *Engine) resolveEntitlements(ctx context.Context, principal string) ([]g
 			continue
 		}
 		if found {
-			routes = append(routes, gateway.Route{Channel: row.ID, Bundle: bundle, SubjectID: id})
+			routes = append(routes, gateway.Route{Channel: row.ID, ChannelName: row.QualifiedName, Bundle: bundle, SubjectID: id})
 		}
 	}
 	return routes, failed, nil

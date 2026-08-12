@@ -269,7 +269,7 @@ func TestActorAdmissionIsOwnedByTheLaneHeaderMembrane(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	var authA, authB atomic.Int32
 	attachedA := make(chan actor.ActorID, 1)
-	host.Register("a", 1, platform.DaemonMembrane{
+	host.Register("a", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 		AuthorizeAttach: func(id actor.ActorID, _ actorhost.AttemptKey, domain actorhost.ExecutionDomain) error {
 			authA.Add(1)
@@ -286,7 +286,7 @@ func TestActorAdmissionIsOwnedByTheLaneHeaderMembrane(t *testing.T) {
 			return nil
 		},
 	})
-	host.Register("b", 1, platform.DaemonMembrane{
+	host.Register("b", 1, platform.DaemonMembrane{ChannelName: "c0.test",
 		IsBound: func(context.Context, string) (bool, error) { return true, nil },
 		AuthorizeAttach: func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain) error {
 			authB.Add(1)
