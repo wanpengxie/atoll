@@ -6,15 +6,13 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wanpengxie/atoll/platform/channelspec"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 type callerStub struct {
 	err     error
 	word    Word
-	payload forwardedRequest
+	payload message.Envelope
 }
 
 func (c *callerStub) CallRegistrar(_ context.Context, word Word, payload any) (json.RawMessage, error) {
@@ -24,31 +22,26 @@ func (c *callerStub) CallRegistrar(_ context.Context, word Word, payload any) (j
 	if c.err != nil {
 		return nil, c.err
 	}
-	reply, _ := json.Marshal(Reply{Word: word, Value: json.RawMessage(`{"ok":true}`), Source: c.payload.Source})
+	reply, _ := json.Marshal(Reply{Word: word, Value: json.RawMessage(`{"ok":true}`), Source: SourceRef{ChannelID: c.payload.ChannelID, RequestID: string(c.payload.ID)}})
 	return reply, nil
 }
 
-type sourceFactsStub struct{ facts channelspec.ActorFacts }
-
-func (s sourceFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
-	return s.facts, true, nil
-}
-
-func TestSubmitSealsSourceAndAttribution(t *testing.T) {
+func TestSubmitCarriesSourceFactsForReceiverAttribution(t *testing.T) {
 	caller := &callerStub{}
-	s := NewSubmitter(caller, sourceFactsStub{facts: channelspec.ActorFacts{Principal: "alice", Kind: actor.KindHuman, Active: true}}, nil)
+	s := NewSubmitter(caller)
 	reply, err := s.Submit(context.Background(), SubmitIn{Source: "home", Sender: "human:alice", RequestID: "request-1", Word: WordChannelCreate, Payload: ChannelCreate{Name: "x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if caller.payload.Initiator != "alice" || caller.payload.Source != (SourceRef{ChannelID: "home", RequestID: "request-1"}) || reply.Source != caller.payload.Source {
+	wantSource := SourceRef{ChannelID: "home", RequestID: "request-1"}
+	if caller.payload.ChannelID != "home" || caller.payload.ID != "request-1" || caller.payload.Sender.ID != "human:alice" || reply.Source != wantSource {
 		t.Fatalf("forward=%+v reply=%+v", caller.payload, reply)
 	}
 }
 
 func TestSubmitDeadlineReturnsUnknownWithSourceAnchor(t *testing.T) {
 	caller := &callerStub{err: context.DeadlineExceeded}
-	s := NewSubmitter(caller, sourceFactsStub{facts: channelspec.ActorFacts{Principal: "alice", Active: true}}, nil)
+	s := NewSubmitter(caller)
 	_, err := s.Submit(context.Background(), SubmitIn{Source: "home", Sender: "human:alice", RequestID: "request-2", Word: WordChannelCreate, Payload: ChannelCreate{Name: "x"}})
 	var lagoonErr *Error
 	if !errors.As(err, &lagoonErr) || lagoonErr.Code != CodeResultUnknown || lagoonErr.Detail != "home:request-2" {
@@ -57,7 +50,7 @@ func TestSubmitDeadlineReturnsUnknownWithSourceAnchor(t *testing.T) {
 }
 
 func TestApplicationEntranceAcceptsOnlyRegister(t *testing.T) {
-	s := NewSubmitter(&callerStub{}, nil, nil)
+	s := NewSubmitter(&callerStub{})
 	if _, err := s.SubmitApplication(context.Background(), WordDeviceMint, DeviceMint{Name: "x"}); err == nil {
 		t.Fatal("application entrance accepted an authenticated word")
 	}

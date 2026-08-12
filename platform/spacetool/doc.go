@@ -1,3 +1,3 @@
-// Package spacetool implements the platform-standard channel member that
-// represents requests crossing out to a space through a neutral SpaceOps port.
+// Package spacetool forwards standard actor requests to c0's registrar and
+// returns through the ordinary actor reply verbs.
 package spacetool

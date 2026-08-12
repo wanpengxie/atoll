@@ -12,21 +12,22 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 type desiredRegistry struct {
 	mu   sync.RWMutex
-	rows map[channel.ID]lagoon.ChannelRow
+	rows map[channel.ID]regspec.ChannelRow
 	gets atomic.Int64
 }
 
 func newDesiredRegistry() *desiredRegistry {
-	return &desiredRegistry{rows: make(map[channel.ID]lagoon.ChannelRow)}
+	return &desiredRegistry{rows: make(map[channel.ID]regspec.ChannelRow)}
 }
 
-func (r *desiredRegistry) put(row lagoon.ChannelRow) {
+func (r *desiredRegistry) put(row regspec.ChannelRow) {
 	r.mu.Lock()
 	r.rows[row.ID] = row
 	r.mu.Unlock()
@@ -35,22 +36,22 @@ func (r *desiredRegistry) put(row lagoon.ChannelRow) {
 func (r *desiredRegistry) retire(id channel.ID) {
 	r.mu.Lock()
 	row := r.rows[id]
-	row.Status = lagoon.ChannelRetired
+	row.Status = regspec.ChannelRetired
 	r.rows[id] = row
 	r.mu.Unlock()
 }
 
-func (r *desiredRegistry) ListChannels(context.Context) ([]lagoon.ChannelRow, error) {
+func (r *desiredRegistry) ListChannels(context.Context) ([]regspec.ChannelRow, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]lagoon.ChannelRow, 0, len(r.rows))
+	out := make([]regspec.ChannelRow, 0, len(r.rows))
 	for _, row := range r.rows {
 		out = append(out, row)
 	}
 	return out, nil
 }
 
-func (r *desiredRegistry) GetChannelDesired(_ context.Context, id channel.ID) (lagoon.ChannelRow, bool, error) {
+func (r *desiredRegistry) GetChannelDesired(_ context.Context, id channel.ID) (regspec.ChannelRow, bool, error) {
 	r.gets.Add(1)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -74,11 +75,7 @@ func TestRebuildKeepsGenesisLineageAfterCurrentParentChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := provisionFromRow(row)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.Provision(context.Background(), spec); err != nil {
+	if err := first.provisionGenesis(context.Background(), genesis); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(context.Background()); err != nil {
@@ -112,7 +109,7 @@ func TestRebuildKeepsGenesisLineageAfterCurrentParentChanges(t *testing.T) {
 	}
 }
 
-func desiredRow(t *testing.T, id channel.ID) lagoon.ChannelRow {
+func desiredRow(t *testing.T, id channel.ID) regspec.ChannelRow {
 	t.Helper()
 	now := time.Now().UnixMilli()
 	spec := lagoon.GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now, ParentID: protocol.C0ChannelID, InitiatorPrincipal: "owner"}
@@ -120,7 +117,7 @@ func desiredRow(t *testing.T, id channel.ID) lagoon.ChannelRow {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return lagoon.ChannelRow{ID: id, ParentID: protocol.C0ChannelID, Name: string(id), Type: "group", Status: lagoon.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
+	return regspec.ChannelRow{ID: id, ParentID: protocol.C0ChannelID, Name: string(id), Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
 }
 
 func newConvergingHost(t *testing.T, registry RegistryReader) *ChannelHost {
@@ -220,10 +217,10 @@ func TestSlowScanRepairsDroppedEdge(t *testing.T) {
 func TestOrphanSweepProtectsOnlyC0(t *testing.T) {
 	registry := newDesiredRegistry()
 	h := newConvergingHost(t, registry)
-	if _, err := h.Provision(context.Background(), provisionSpec("orphan")); err != nil {
+	if err := h.provisionGenesis(context.Background(), genesisSpec("orphan")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.Provision(context.Background(), provisionSpec(protocol.C0ChannelID)); err != nil {
+	if err := h.provisionGenesis(context.Background(), genesisSpec(protocol.C0ChannelID)); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.StartConvergence(); err != nil {
@@ -248,7 +245,7 @@ func TestTransientConvergenceUsesExponentialBackoff(t *testing.T) {
 	}
 	// A missing c0 file is transient: installation/startup may still be making
 	// the well-known physical channel available.
-	row := lagoon.ChannelRow{ID: protocol.C0ChannelID, Name: string(protocol.C0ChannelID), Type: "group", Status: lagoon.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
+	row := regspec.ChannelRow{ID: protocol.C0ChannelID, Name: string(protocol.C0ChannelID), Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
 
 	if err := h.reconcileTracked(context.Background(), row); err == nil {
 		t.Fatal("missing c0 unexpectedly converged")

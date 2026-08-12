@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -21,8 +22,8 @@ const (
 // RegistryReader is the desired-state face ChannelHost reconciles against.
 // It deliberately exposes values only; the host cannot mutate registry truth.
 type RegistryReader interface {
-	ListChannels(context.Context) ([]lagoon.ChannelRow, error)
-	GetChannelDesired(context.Context, channel.ID) (lagoon.ChannelRow, bool, error)
+	ListChannels(context.Context) ([]regspec.ChannelRow, error)
+	GetChannelDesired(context.Context, channel.ID) (regspec.ChannelRow, bool, error)
 }
 
 type convergenceState struct {
@@ -182,7 +183,7 @@ func (h *ChannelHost) reconcileAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	known := make(map[channel.ID]lagoon.ChannelRow, len(rows))
+	known := make(map[channel.ID]regspec.ChannelRow, len(rows))
 	for _, row := range rows {
 		known[row.ID] = row
 		if err := h.reconcileTracked(ctx, row); err != nil {
@@ -220,7 +221,7 @@ func (h *ChannelHost) reconcileID(ctx context.Context, id channel.ID) error {
 	return h.reconcileTracked(ctx, row)
 }
 
-func (h *ChannelHost) reconcileTracked(ctx context.Context, row lagoon.ChannelRow) error {
+func (h *ChannelHost) reconcileTracked(ctx context.Context, row regspec.ChannelRow) error {
 	c := h.convergence
 	fingerprint := string(row.Status) + "\x00" + string(row.ParentID) + "\x00" + row.Type + "\x00" + row.OwnerPrincipal + "\x00" + string(row.Spec)
 	now := time.Now()
@@ -277,8 +278,8 @@ func permanentConvergenceError(err error) bool {
 	return errors.Is(err, ErrSchemaIncompatible) || errors.Is(err, ErrOwnerInvariant) || errors.Is(err, ErrInvalidChannelID) || errors.Is(err, ErrChannelRetired)
 }
 
-func (h *ChannelHost) reconcileRow(ctx context.Context, row lagoon.ChannelRow) error {
-	if row.Status == lagoon.ChannelRetired {
+func (h *ChannelHost) reconcileRow(ctx context.Context, row regspec.ChannelRow) error {
+	if row.Status == regspec.ChannelRetired {
 		if row.ID == protocol.C0ChannelID {
 			return errors.Join(ErrChannelRetired, errors.New("channelhost: c0 cannot be retired"))
 		}
@@ -300,27 +301,12 @@ func (h *ChannelHost) reconcileRow(ctx context.Context, row lagoon.ChannelRow) e
 	if row.ID == protocol.C0ChannelID {
 		return err
 	}
-	spec, err := provisionFromRow(row)
-	if err != nil {
-		return err
+	var genesis lagoon.GenesisSpec
+	if err := json.Unmarshal(row.Spec, &genesis); err != nil {
+		return errors.Join(ErrSchemaIncompatible, err)
 	}
-	if _, err := h.Provision(ctx, spec); err != nil && !errors.Is(err, ErrServing) {
+	if err := h.provisionGenesis(ctx, genesis); err != nil && !errors.Is(err, ErrServing) {
 		return err
 	}
 	return h.Open(ctx, OpenSpec{ChannelID: row.ID, ExpectedType: row.Type})
-}
-
-func provisionFromRow(row lagoon.ChannelRow) (ProvisionSpec, error) {
-	var desired lagoon.GenesisSpec
-	if err := json.Unmarshal(row.Spec, &desired); err != nil {
-		return ProvisionSpec{}, errors.Join(ErrSchemaIncompatible, err)
-	}
-	spec := ProvisionSpec{ChannelID: desired.ChannelID, Type: desired.Type, OwnerPrincipal: desired.OwnerPrincipal, CreatedAt: desired.CreatedAt}
-	if desired.ParentID != "" {
-		spec.Origin = &Origin{ParentChannelID: desired.ParentID, InitiatorPrincipal: desired.InitiatorPrincipal}
-	}
-	for _, decl := range desired.Declarations {
-		spec.GenesisDeclarations = append(spec.GenesisDeclarations, GenesisDeclaration{DeclID: decl.DeclID, Kind: decl.Kind, Rendered: decl.Rendered})
-	}
-	return spec, nil
 }

@@ -19,10 +19,12 @@ import (
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 func bootRegistrarTest(t *testing.T) (*Engine, *sql.DB, actor.ActorID) {
@@ -52,7 +54,71 @@ func registrarCall(t *testing.T, eng *Engine, sender actor.ActorID, source chann
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return eng.submitter.Submit(ctx, lagoon.SubmitIn{Source: source, Sender: sender, RequestID: uuid.NewString(), Word: word, Payload: payload})
+	bundle, ok := eng.host.Acquire(source)
+	if !ok {
+		return lagoon.Reply{}, errors.New("source channel unavailable")
+	}
+	declID := lagoon.SpaceToolDeclID
+	if source == protocol.C0ChannelID {
+		declID = lagoon.RegistrarSeatDeclID
+	}
+	targets, err := bundle.View().DeclaredInstances(ctx, declID)
+	if err != nil || len(targets) != 1 {
+		return lagoon.Reply{}, errors.Join(err, errors.New("target seat unavailable"))
+	}
+	slot, ok := bundle.Gateway().SubjectSlotFor(sender)
+	if !ok {
+		return lagoon.Reply{}, errors.New("sender slot unavailable")
+	}
+	requestID := message.ID(uuid.NewString())
+	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{
+		ChannelID: string(source), ID: string(requestID), MsgType: string(word), Kind: "request",
+		Audience: []string{string(targets[0])}, Visibility: "public", Payload: mustJSON(payload),
+	})
+	if err != nil {
+		return lagoon.Reply{}, err
+	}
+	result, err := slot.Deliver(ctx, frame)
+	if err != nil {
+		return lagoon.Reply{}, err
+	}
+	if result.Frame.Type != subjectgate.FrameReceipt {
+		return lagoon.Reply{}, errors.New("request frame rejected")
+	}
+	reader := channel.Reader{ActorID: sender, Mode: channel.ReaderMember}
+	var cursor int64
+	for {
+		rows, next, err := bundle.View().ReadVisibleAfterSeq(ctx, reader, cursor, 256)
+		if err != nil {
+			return lagoon.Reply{}, err
+		}
+		cursor = next
+		for _, row := range rows {
+			if !row.IsTerminal || row.Envelope.Kind != message.KindResponse || row.Envelope.ParentID != requestID {
+				continue
+			}
+			raw, err := decodeRegistrarTerminal(row.Envelope.Payload)
+			if err != nil {
+				return lagoon.Reply{}, err
+			}
+			if source == protocol.C0ChannelID {
+				var reply lagoon.Reply
+				if err := json.Unmarshal(raw, &reply); err != nil {
+					return lagoon.Reply{}, err
+				}
+				if err := reply.ValidValue(); err != nil {
+					return lagoon.Reply{}, err
+				}
+				return reply, nil
+			}
+			return lagoon.Reply{Value: raw}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return lagoon.Reply{}, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 func requireLagoonCode(t *testing.T, err error, want lagoon.ErrorCode) {
@@ -63,40 +129,107 @@ func requireLagoonCode(t *testing.T, err error, want lagoon.ErrorCode) {
 	}
 }
 
-func createChannelForTest(t *testing.T, eng *Engine, root actor.ActorID, name string, parent channel.ID) lagoon.ChannelRow {
+func createChannelForTest(t *testing.T, eng *Engine, root actor.ActorID, name string, parent channel.ID) regspec.ChannelRow {
 	t.Helper()
 	reply, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelCreate, lagoon.ChannelCreate{Name: name, Parent: parent})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var row lagoon.ChannelRow
+	var row regspec.ChannelRow
 	if reply.DecodeValue(&row) != nil {
 		t.Fatalf("invalid channel reply: %#v", reply.Value)
 	}
 	return row
 }
 
-func TestPrincipalRegisterRollsBackAllFourRows(t *testing.T) {
+func TestPrincipalRegisterLeavesCompletedRowsWhenDefaultBindingFails(t *testing.T) {
 	eng, db, _ := bootRegistrarTest(t)
+	local, ok, err := eng.registry.GetDevice(context.Background(), protocol.LocalDeviceID)
+	if err != nil || !ok {
+		t.Fatalf("local device before cut=%+v ok=%v err=%v", local, ok, err)
+	}
 	if _, err := db.Exec(`DELETE FROM devices WHERE id=?`, protocol.LocalDeviceID); err != nil {
 		t.Fatal(err)
 	}
-	_, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{
+	register := lagoon.PrincipalRegister{
 		ID: "alice", Email: "alice@example.test", SecretHash: "already-hashed", DisplayName: "Alice",
-	})
+	}
+	_, err = eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, register)
 	if err == nil {
 		t.Fatal("register succeeded without the default-binding device")
 	}
-	for label, query := range map[string]string{
-		"principal":  `SELECT count(*) FROM principals WHERE id='alice'`,
-		"credential": `SELECT count(*) FROM credentials WHERE principal_id='alice'`,
-		"home":       `SELECT count(*) FROM channels WHERE owner_principal='alice'`,
-		"binding":    `SELECT count(*) FROM bindings WHERE channel_id IN (SELECT id FROM channels WHERE owner_principal='alice')`,
+	for label, check := range map[string]struct {
+		query string
+		want  int
+	}{
+		"principal":  {`SELECT count(*) FROM principals WHERE id='alice'`, 1},
+		"credential": {`SELECT count(*) FROM credentials WHERE principal_id='alice'`, 1},
+		"home":       {`SELECT count(*) FROM channels WHERE owner_principal='alice'`, 1},
+		"binding":    {`SELECT count(*) FROM bindings WHERE channel_id IN (SELECT id FROM channels WHERE owner_principal='alice')`, 0},
 	} {
 		var count int
-		if scanErr := db.QueryRow(query).Scan(&count); scanErr != nil || count != 0 {
-			t.Fatalf("%s survived rollback: count=%d err=%v", label, count, scanErr)
+		if scanErr := db.QueryRow(check.query).Scan(&count); scanErr != nil || count != check.want {
+			t.Fatalf("%s residual count=%d, want %d (err=%v)", label, count, check.want, scanErr)
 		}
+	}
+	if _, err := db.Exec(`INSERT INTO devices(id,owner_principal,name,key,status,created_at) VALUES(?,?,?,?,?,?)`,
+		local.ID, local.OwnerPrincipal, local.Name, local.Key, local.Status, local.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, register)
+	if err != nil {
+		t.Fatalf("idempotent replay did not repair residual registration: %v", err)
+	}
+	var principal regspec.PrincipalRow
+	if err := reply.DecodeValue(&principal); err != nil || principal.ID != register.ID {
+		t.Fatalf("replay principal=%+v err=%v", principal, err)
+	}
+	var bindings int
+	if err := db.QueryRow(`SELECT count(*) FROM bindings WHERE channel_id IN (SELECT id FROM channels WHERE owner_principal='alice') AND device_id=?`, protocol.LocalDeviceID).Scan(&bindings); err != nil || bindings != 1 {
+		t.Fatalf("repaired binding count=%d err=%v", bindings, err)
+	}
+}
+
+func TestChannelCreateReplayRepairsItsResidualDefaultBinding(t *testing.T) {
+	eng, db, root := bootRegistrarTest(t)
+	local, ok, err := eng.registry.GetDevice(context.Background(), protocol.LocalDeviceID)
+	if err != nil || !ok {
+		t.Fatalf("local device before cut=%+v ok=%v err=%v", local, ok, err)
+	}
+	if _, err := db.Exec(`DELETE FROM devices WHERE id=?`, protocol.LocalDeviceID); err != nil {
+		t.Fatal(err)
+	}
+	input := lagoon.ChannelCreate{Name: "residual-channel", Parent: protocol.C0ChannelID}
+	if _, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelCreate, input); err == nil {
+		t.Fatal("channel.create succeeded without its default-binding device")
+	}
+	rows, err := eng.registry.ListChannels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var residual regspec.ChannelRow
+	for _, row := range rows {
+		if row.Name == input.Name {
+			residual = row
+		}
+	}
+	if residual.ID == "" {
+		t.Fatal("channel row did not remain after binding failure")
+	}
+	if _, err := db.Exec(`INSERT INTO devices(id,owner_principal,name,key,status,created_at) VALUES(?,?,?,?,?,?)`,
+		local.ID, local.OwnerPrincipal, local.Name, local.Key, local.Status, local.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordChannelCreate, input)
+	if err != nil {
+		t.Fatalf("idempotent replay did not repair residual channel: %v", err)
+	}
+	var repaired regspec.ChannelRow
+	if err := reply.DecodeValue(&repaired); err != nil || repaired.ID != residual.ID {
+		t.Fatalf("repaired channel=%+v residual=%+v err=%v", repaired, residual, err)
+	}
+	if bound, err := eng.registry.IsBound(context.Background(), repaired.ID, protocol.LocalDeviceID); err != nil || !bound {
+		t.Fatalf("repaired default binding=%v err=%v", bound, err)
 	}
 }
 
@@ -112,7 +245,7 @@ func TestRetireReparentsChildrenAndKeepsTombstone(t *testing.T) {
 		t.Fatal(err)
 	}
 	retired, ok, err := eng.registry.GetChannelDesired(context.Background(), parent.ID)
-	if err != nil || !ok || retired.Status != lagoon.ChannelRetired {
+	if err != nil || !ok || retired.Status != regspec.ChannelRetired {
 		t.Fatalf("retired row=%+v ok=%v err=%v", retired, ok, err)
 	}
 	reparented, ok, err := eng.registry.GetChannelDesired(context.Background(), child.ID)
@@ -137,7 +270,7 @@ func TestCreateReplayAfterDetachDoesNotRestoreBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var device lagoon.DeviceRow
+	var device regspec.DeviceRow
 	if mintedReply.DecodeValue(&device) != nil {
 		t.Fatalf("invalid mint reply: %#v", mintedReply.Value)
 	}
@@ -202,7 +335,7 @@ func TestRetiredDeviceIsExcludedFromEffectiveBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var second lagoon.DeviceRow
+	var second regspec.DeviceRow
 	if mintedReply.DecodeValue(&second) != nil {
 		t.Fatalf("invalid mint reply: %#v", mintedReply.Value)
 	}
@@ -262,8 +395,8 @@ func TestOrdinaryDeclarationEditAndRevokeRemainAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var revoked lagoon.DeclRow
-	if reply.DecodeValue(&revoked) != nil || revoked.Status != lagoon.DeclRevoked {
+	var revoked regspec.DeclRow
+	if reply.DecodeValue(&revoked) != nil || revoked.Status != regspec.DeclRevoked {
 		t.Fatalf("invalid revoke reply: %#v", reply.Value)
 	}
 }
@@ -275,7 +408,7 @@ func TestLocalDeviceRetireAndDetachAreReserved(t *testing.T) {
 	_, err = registrarCall(t, eng, root, protocol.C0ChannelID, lagoon.WordDeviceDetach, lagoon.DeviceBinding{ChannelID: protocol.C0ChannelID, DeviceID: protocol.LocalDeviceID})
 	requireLagoonCode(t, err, lagoon.CodeReserved)
 	device, ok, err := eng.registry.GetDevice(context.Background(), protocol.LocalDeviceID)
-	if err != nil || !ok || device.Status != lagoon.DevicePresent {
+	if err != nil || !ok || device.Status != regspec.DevicePresent {
 		t.Fatalf("local device row=%+v ok=%v err=%v", device, ok, err)
 	}
 }
@@ -309,7 +442,7 @@ func TestRegisterHomeEventuallyServes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var principal lagoon.PrincipalRow
+	var principal regspec.PrincipalRow
 	if reply.DecodeValue(&principal) != nil || principal.ID != "alice" {
 		t.Fatalf("invalid register reply: %#v", reply.Value)
 	}
@@ -345,7 +478,7 @@ func TestMembraneOpenPokesOwnerSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var principal lagoon.PrincipalRow
+	var principal regspec.PrincipalRow
 	if reply.DecodeValue(&principal) != nil {
 		t.Fatalf("invalid register reply: %#v", reply.Value)
 	}
@@ -371,7 +504,7 @@ func TestMembraneOpenPokesOwnerSession(t *testing.T) {
 	}
 }
 
-func registerHumanForTest(t *testing.T, eng *Engine, id string) lagoon.PrincipalRow {
+func registerHumanForTest(t *testing.T, eng *Engine, id string) regspec.PrincipalRow {
 	t.Helper()
 	reply, err := eng.submitter.SubmitApplication(context.Background(), lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{
 		ID: id, Email: id + "@example.test", SecretHash: "hash",
@@ -379,7 +512,7 @@ func registerHumanForTest(t *testing.T, eng *Engine, id string) lagoon.Principal
 	if err != nil {
 		t.Fatal(err)
 	}
-	var principal lagoon.PrincipalRow
+	var principal regspec.PrincipalRow
 	if reply.DecodeValue(&principal) != nil {
 		t.Fatalf("invalid register reply: %#v", reply.Value)
 	}
@@ -498,7 +631,7 @@ func TestCredentialSetRejectsAgentAndAllowsHuman(t *testing.T) {
 		t.Fatal(err)
 	}
 	var credential lagoon.CredentialReply
-	if reply.DecodeValue(&credential) != nil || credential.PrincipalID != protocol.RootPrincipalID || credential.Status != lagoon.CredentialActive {
+	if reply.DecodeValue(&credential) != nil || credential.PrincipalID != protocol.RootPrincipalID || credential.Status != regspec.CredentialActive {
 		t.Fatalf("human credential reply=%#v", reply.Value)
 	}
 	var stored string
@@ -512,13 +645,13 @@ func TestCredentialSetRejectsAgentAndAllowsHuman(t *testing.T) {
 
 func TestDeviceMintAndClaimMissAreIntentionallyNonIdempotent(t *testing.T) {
 	eng, _, root := bootRegistrarTest(t)
-	mint := func(word lagoon.Word, payload any) lagoon.DeviceRow {
+	mint := func(word lagoon.Word, payload any) regspec.DeviceRow {
 		t.Helper()
 		reply, err := registrarCall(t, eng, root, protocol.C0ChannelID, word, payload)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var row lagoon.DeviceRow
+		var row regspec.DeviceRow
 		if reply.DecodeValue(&row) != nil {
 			t.Fatalf("invalid device reply: %#v", reply.Value)
 		}
@@ -563,12 +696,12 @@ func TestRetryableWritesReturnExistingValues(t *testing.T) {
 	}
 
 	declInput := lagoon.DeclRegister{ID: "retry-decl", Name: "retry", Class: "codex", Config: json.RawMessage(`{}`), Visibility: "private"}
-	var registered lagoon.DeclRow
+	var registered regspec.DeclRow
 	call(lagoon.WordDeclRegister, declInput, &registered)
 	time.Sleep(2 * time.Millisecond)
 	name := declInput.Name
 	visibility := declInput.Visibility
-	var edited lagoon.DeclRow
+	var edited regspec.DeclRow
 	call(lagoon.WordDeclEdit, lagoon.DeclEdit{ID: declInput.ID, Name: &name, Config: json.RawMessage(`{ }`), Visibility: &visibility}, &edited)
 	if edited.UpdatedAt != registered.UpdatedAt {
 		t.Fatalf("equal declaration edit rewrote timestamp: %d then %d", registered.UpdatedAt, edited.UpdatedAt)
@@ -580,7 +713,7 @@ func TestRetryableWritesReturnExistingValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := lagoon.OverlaySet{DeclID: declInput.ID, ChannelID: created.ID, Config: json.RawMessage(`{}`)}
-	var overlayOne, overlayTwo lagoon.OverlayRow
+	var overlayOne, overlayTwo regspec.OverlayRow
 	reply, err := registrarCall(t, eng, member, created.ID, lagoon.WordOverlaySet, input)
 	if err != nil || reply.DecodeValue(&overlayOne) != nil {
 		t.Fatalf("first overlay reply=%#v err=%v", reply.Value, err)
@@ -593,6 +726,80 @@ func TestRetryableWritesReturnExistingValues(t *testing.T) {
 	}
 	if overlayOne.UpdatedAt != overlayTwo.UpdatedAt {
 		t.Fatalf("equal overlay retry rewrote timestamp: %d then %d", overlayOne.UpdatedAt, overlayTwo.UpdatedAt)
+	}
+}
+
+func TestAllRegistrarWordsReachTheReceiverThroughBothActorEntrances(t *testing.T) {
+	eng, _, root := bootRegistrarTest(t)
+	ordinary := createChannelForTest(t, eng, root, "two-entrances", protocol.C0ChannelID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := eng.waitChannel(ctx, ordinary.ID); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryRoot, err := eng.principalActor(ctx, ordinary.ID, protocol.RootPrincipalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrances := []struct {
+		name   string
+		sender actor.ActorID
+		source channel.ID
+	}{
+		{name: "c0 direct member", sender: root, source: protocol.C0ChannelID},
+		{name: "ordinary channel space-tool", sender: ordinaryRoot, source: ordinary.ID},
+	}
+	words := append(append([]lagoon.Word(nil), lagoon.WriteWords[:]...), lagoon.ReadWords[:]...)
+	for _, entrance := range entrances {
+		for _, word := range words {
+			t.Run(entrance.name+"/"+string(word), func(t *testing.T) {
+				if entrance.source != protocol.C0ChannelID && (word == lagoon.WordChannelList || word == lagoon.WordDeclList || word == lagoon.WordDeviceList) {
+					// List values are arrays, while actor response payloads are
+					// objects carrying status. Exercise these words through the
+					// system call port's forwarded attribution verdict instead of
+					// waiting for an unrepresentable source-leg success payload.
+					bundle, ok := eng.host.Acquire(entrance.source)
+					if !ok {
+						t.Fatal("ordinary channel unavailable")
+					}
+					targets, err := bundle.View().DeclaredInstances(ctx, lagoon.SpaceToolDeclID)
+					if err != nil || len(targets) != 1 {
+						t.Fatalf("space-tool targets=%v err=%v", targets, err)
+					}
+					raw, err := bundle.Call().Call(ctx, targets[0], string(word), map[string]any{})
+					if err == nil {
+						_, err = decodeRegistrarTerminal(raw)
+					}
+					var lagoonErr *lagoon.Error
+					if !errors.As(err, &lagoonErr) || lagoonErr.Code == lagoon.CodeResultUnknown || lagoonErr.Detail == "unknown registrar word" {
+						t.Fatalf("word did not return a registrar verdict: %v", err)
+					}
+					return
+				}
+				_, err := registrarCall(t, eng, entrance.sender, entrance.source, word, map[string]any{})
+				if err == nil {
+					return
+				}
+				var lagoonErr *lagoon.Error
+				if !errors.As(err, &lagoonErr) {
+					t.Fatalf("word did not return a registrar verdict: %v", err)
+				}
+				if lagoonErr.Code == lagoon.CodeResultUnknown || lagoonErr.Detail == "unknown registrar word" {
+					t.Fatalf("word did not reach its registrar handler: %v", err)
+				}
+			})
+		}
+		if _, err := registrarCall(t, eng, entrance.sender, entrance.source, lagoon.Word("future.word"), map[string]any{"future": true}); err == nil {
+			t.Fatal("unknown word was accepted")
+		} else {
+			var lagoonErr *lagoon.Error
+			if !errors.As(err, &lagoonErr) || lagoonErr.Code != lagoon.CodeInvalidArgs || lagoonErr.Detail != "unknown registrar word" {
+				t.Fatalf("unknown word verdict=%v", err)
+			}
+		}
+		if _, err := registrarCall(t, eng, entrance.sender, entrance.source, lagoon.WordPrincipalMe, map[string]any{"future_field": map[string]any{"kept": true}}); err != nil {
+			t.Fatalf("unknown payload field was not passed to registrar: %v", err)
+		}
 	}
 }
 
@@ -745,7 +952,7 @@ func TestStartupRepairsFixedRegistryRowsWithoutTouchingCredential(t *testing.T) 
 	}
 	defer reopened.Close(context.Background())
 	row, ok, err := reopened.registry.GetChannelDesired(context.Background(), protocol.C0ChannelID)
-	if err != nil || !ok || row.Status != lagoon.ChannelPresent {
+	if err != nil || !ok || row.Status != regspec.ChannelPresent {
 		t.Fatalf("c0 row=%+v ok=%v err=%v", row, ok, err)
 	}
 	var rebuilt lagoon.GenesisSpec
@@ -755,7 +962,7 @@ func TestStartupRepairsFixedRegistryRowsWithoutTouchingCredential(t *testing.T) 
 	if row.CreatedAt != physical.CreatedAt || !reflect.DeepEqual(rebuilt, physical) {
 		t.Fatalf("rebuilt c0 genesis differs from physical ledger: row.created_at=%d spec=%+v physical=%+v", row.CreatedAt, rebuilt, physical)
 	}
-	if row, ok, err := reopened.registry.GetDecl(context.Background(), lagoon.SpaceToolDeclID); err != nil || !ok || row.Status != lagoon.DeclPresent {
+	if row, ok, err := reopened.registry.GetDecl(context.Background(), lagoon.SpaceToolDeclID); err != nil || !ok || row.Status != regspec.DeclPresent {
 		t.Fatalf("space-tool row=%+v ok=%v err=%v", row, ok, err)
 	}
 	db, err = sql.Open("sqlite", u.String()+"?mode=rw")

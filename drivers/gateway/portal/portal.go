@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -83,7 +84,7 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 		writeLagoonError(w, err)
 		return
 	}
-	var principal lagoon.PrincipalRow
+	var principal regspec.PrincipalRow
 	if err := reply.DecodeValue(&principal); err != nil {
 		writeError(w, 500, string(codeInternalError), "invalid registrar reply: "+err.Error())
 		return

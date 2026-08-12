@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/spacetool"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -20,7 +21,7 @@ import (
 type assemblyResolver struct {
 	registry  *lagoon.Registry
 	registrar *lagoon.Registrar
-	binder    lagoon.SpaceOpsBinder
+	caller    lagoon.C0Caller
 	logger    *slog.Logger
 }
 
@@ -32,7 +33,7 @@ func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class str
 		}
 		return platform.ActorFactory{Proc: lagoon.Def(r.registrar)}, true
 	case lagoon.SpaceToolClass:
-		return platform.ActorFactory{Proc: spacetool.Def(r.binder)}, true
+		return platform.ActorFactory{Proc: spacetool.Def(r.caller)}, true
 	}
 	decl, err := classregistry.Build(class, classregistry.InstanceSpec{ID: id, Config: config}, classregistry.Deps{ChannelID: ch, Logger: r.logger})
 	if err != nil {
@@ -45,7 +46,7 @@ func (r *assemblyResolver) ResolveDeclaration(ctx context.Context, ch channel.ID
 	if err != nil {
 		return channelspec.DeclarationFacts{}, err
 	}
-	if !ok || decl.Status != lagoon.DeclPresent {
+	if !ok || decl.Status != regspec.DeclPresent {
 		return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 	}
 	config := append(json.RawMessage(nil), decl.Config...)
@@ -84,24 +85,10 @@ func (r *assemblyResolver) LookupClassKind(class string) (actor.Kind, bool) {
 	return classregistry.ClassKind(class)
 }
 
-type c0Facts struct {
+type sourceFacts struct {
 	host    channelhost.LocalHost
 	genesis lagoon.GenesisSpec
 }
-
-func (f c0Facts) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
-	bundle, ok := f.host.Acquire(protocol.C0ChannelID)
-	if !ok {
-		return channelspec.ActorFacts{}, false, errors.New("c0 unavailable")
-	}
-	return bundle.View().ActorFacts(ctx, id)
-}
-
-func (f c0Facts) SystemGenesis(context.Context) (lagoon.GenesisSpec, bool, error) {
-	return f.genesis, f.genesis.ChannelID != "", nil
-}
-
-type sourceFacts struct{ host channelhost.LocalHost }
 
 func (f sourceFacts) ActorFacts(ctx context.Context, ch channel.ID, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	bundle, ok := f.host.Acquire(ch)
@@ -109,4 +96,8 @@ func (f sourceFacts) ActorFacts(ctx context.Context, ch channel.ID, id actor.Act
 		return channelspec.ActorFacts{}, false, errors.New("source channel unavailable")
 	}
 	return bundle.View().ActorFacts(ctx, id)
+}
+
+func (f sourceFacts) SystemGenesis(context.Context) (lagoon.GenesisSpec, bool, error) {
+	return f.genesis, f.genesis.ChannelID != "", nil
 }

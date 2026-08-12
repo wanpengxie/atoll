@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -94,7 +95,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		return nil, e.fail(err)
 	}
 	host = e.host
-	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host, genesis: installed.C0Genesis}, resolver)
+	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
 	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("open c0: %w", err))
 	}
@@ -129,7 +130,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		if err != nil {
 			return daemonhost.DaemonUnavailable
 		}
-		if !ok || status == lagoon.DeviceRetired {
+		if !ok || status == regspec.DeviceRetired {
 			return daemonhost.DaemonDeleted
 		}
 		return daemonhost.DaemonAlive
@@ -157,7 +158,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		return nil, e.fail(err)
 	}
 	host = e.host
-	resolver.registrar = lagoon.NewRegistrar(e.registry, c0Facts{host: e.host, genesis: installed.C0Genesis}, resolver)
+	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
 	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("reopen c0 after init: %w", err))
 	}
@@ -165,8 +166,9 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if !ok {
 		return nil, e.fail(errors.New("reopened c0 did not publish"))
 	}
-	e.submitter = lagoon.NewSubmitter(c0RegistrarCaller{bundle: c0}, sourceFacts{host: e.host}, e.registry)
-	resolver.binder = lagoon.NewSpaceOps(e.submitter)
+	registrarCaller := c0RegistrarCaller{bundle: c0}
+	e.submitter = lagoon.NewSubmitter(registrarCaller)
+	resolver.caller = registrarCaller
 	e.gateway, err = gateway.New(gateway.Config{Resolver: gateway.ResolverFunc(e.resolveEntitlements), Logger: logger})
 	if err != nil {
 		return nil, e.fail(err)
@@ -228,7 +230,7 @@ func (e *Engine) resolveEntitlements(ctx context.Context, principal string) ([]g
 	if err != nil {
 		return nil, nil, err
 	}
-	if !ok || status != lagoon.PrincipalPresent {
+	if !ok || status != regspec.PrincipalPresent {
 		return nil, nil, nil
 	}
 	rows, err := e.registry.ListPresentChannels(ctx)
@@ -276,7 +278,7 @@ func (e *Engine) ProvisionLocalNode(ctx context.Context) (ProvisionResult, error
 	if err != nil {
 		return ProvisionResult{}, err
 	}
-	var home lagoon.ChannelRow
+	var home regspec.ChannelRow
 	if err := reply.DecodeValue(&home); err != nil {
 		return ProvisionResult{}, fmt.Errorf("provision: invalid home reply: %w", err)
 	}

@@ -67,7 +67,7 @@ func TestOrdinaryChannelSpaceToolCarriesTwoLedgerSourceRefs(t *testing.T) {
 				sourceRequest = envelope
 			case channelID == sourceID && envelope["kind"] == "response" && envelope["parent_id"] == sourceRequestID:
 				sourceReply = envelope
-			case channelID == c0ChannelID && envelope["kind"] == "request" && sourceRefMatches(envelope, sourceID, sourceRequestID):
+			case channelID == c0ChannelID && envelope["kind"] == "request" && forwardedEnvelopeMatches(envelope, sourceID, sourceRequestID):
 				c0Request = envelope
 			case channelID == c0ChannelID && c0Request != nil && envelope["kind"] == "response" && envelope["parent_id"] == c0Request["id"]:
 				c0Reply = envelope
@@ -92,6 +92,14 @@ func sourceRefMatches(envelope map[string]any, channelID, requestID string) bool
 	payload, _ := envelope["payload"].(map[string]any)
 	source, _ := payload["source"].(map[string]any)
 	return source["channel_id"] == channelID && source["request_id"] == requestID
+}
+
+// forwardedEnvelopeMatches recognizes the corridor's c0 leg: space-tool
+// forwards the member's original envelope verbatim, so the source facts are
+// the envelope's own channel_id and id rather than a source-ref wrapper.
+func forwardedEnvelopeMatches(envelope map[string]any, channelID, requestID string) bool {
+	payload, _ := envelope["payload"].(map[string]any)
+	return payload["channel_id"] == channelID && payload["id"] == requestID
 }
 
 func responseStatus(envelope map[string]any) string {

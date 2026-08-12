@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 )
 
 func TestRegistrarWordAndAdapterSurfacesAreClosed(t *testing.T) {
@@ -27,16 +29,10 @@ func TestRegistrarWordAndAdapterSurfacesAreClosed(t *testing.T) {
 	if len(ReadWords) != 6 {
 		t.Fatalf("read words=%d", len(ReadWords))
 	}
-	if got := reflect.TypeOf((*SpaceOps)(nil)).Elem().NumMethod(); got != 14 {
-		t.Fatalf("SpaceOps methods=%d", got)
-	}
-	if got := reflect.TypeOf((*SpaceQueries)(nil)).Elem().NumMethod(); got != 6 {
-		t.Fatalf("SpaceQueries methods=%d", got)
-	}
 }
 
 func TestCredentialReplyCannotExposeHash(t *testing.T) {
-	raw, err := json.Marshal(CredentialReply{PrincipalID: "alice", Kind: "password", Status: CredentialActive})
+	raw, err := json.Marshal(CredentialReply{PrincipalID: "alice", Kind: "password", Status: regspec.CredentialActive})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,15 +48,31 @@ func TestReplyDecodeValueRejectsMissingNullAndMalformed(t *testing.T) {
 		"malformed": {Value: json.RawMessage(`{"id":`)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			var out PrincipalRow
+			var out regspec.PrincipalRow
 			if err := reply.DecodeValue(&out); err == nil {
 				t.Fatal("invalid value decoded successfully")
 			}
 		})
 	}
-	var out PrincipalRow
+	var out regspec.PrincipalRow
 	if err := (Reply{Value: json.RawMessage(`{"id":"alice"}`)}).DecodeValue(&out); err != nil || out.ID != "alice" {
 		t.Fatalf("valid value=(%+v,%v)", out, err)
+	}
+}
+
+func TestReplyValueGateRejectsMissingNullAndMalformed(t *testing.T) {
+	for name, reply := range map[string]Reply{
+		"missing": {}, "blank": {Value: json.RawMessage(` `)},
+		"null": {Value: json.RawMessage(`null`)}, "malformed": {Value: json.RawMessage(`{"id":`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := reply.ValidValue(); err == nil {
+				t.Fatal("invalid raw reply value passed its gate")
+			}
+		})
+	}
+	if err := (Reply{Value: json.RawMessage(`{"id":"alice"}`)}).ValidValue(); err != nil {
+		t.Fatalf("valid raw reply value rejected: %v", err)
 	}
 }
 

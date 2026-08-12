@@ -24,6 +24,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -42,7 +43,7 @@ func (gatewayTestCompositionResolver) ClassKind(context.Context, string) (actor.
 	return "", false, nil
 }
 
-type gatewayTestBindings struct{}
+type gatewayTestBindings struct{ rows []regspec.ChannelRow }
 
 func (gatewayTestBindings) IsBound(context.Context, channel.ID, string) (bool, error) {
 	return false, nil
@@ -50,11 +51,16 @@ func (gatewayTestBindings) IsBound(context.Context, channel.ID, string) (bool, e
 func (gatewayTestBindings) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
 	return nil, nil
 }
-func (gatewayTestBindings) ListChannels(context.Context) ([]lagoon.ChannelRow, error) {
-	return nil, nil
+func (b gatewayTestBindings) ListChannels(context.Context) ([]regspec.ChannelRow, error) {
+	return b.rows, nil
 }
-func (gatewayTestBindings) GetChannelDesired(context.Context, channel.ID) (lagoon.ChannelRow, bool, error) {
-	return lagoon.ChannelRow{}, false, nil
+func (b gatewayTestBindings) GetChannelDesired(_ context.Context, id channel.ID) (regspec.ChannelRow, bool, error) {
+	for _, row := range b.rows {
+		if row.ID == id {
+			return row, true, nil
+		}
+	}
+	return regspec.ChannelRow{}, false, nil
 }
 
 // logCapture is a slog.Handler that records every emitted message (for telemetry
@@ -375,11 +381,7 @@ func (h *testChannel) submitOperate(ctx context.Context, typ string, payload any
 func openTestChannel(t *testing.T, chID channel.ID, owner, member string, memberKind actor.Kind, wired *Gateway) (*testChannel, actor.ActorID) {
 	t.Helper()
 	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}, IntroductionResolver: gatewayTestCompositionResolver{}, RegistryBindings: gatewayTestBindings{}}
-	host, err := channelhost.New(t.TempDir(), gatewayTestBindings{}, deps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: "group", OwnerPrincipal: owner, CreatedAt: time.Now().UnixMilli()}
+	genesis := lagoon.GenesisSpec{ChannelID: chID, Type: "group", OwnerPrincipal: owner, CreatedAt: time.Now().UnixMilli()}
 	source := ""
 	if memberKind == actor.KindAgent {
 		source = "gateway-test:" + member
@@ -389,9 +391,21 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 		if sealErr != nil {
 			t.Fatal(sealErr)
 		}
-		spec.GenesisDeclarations = []channelhost.GenesisDeclaration{{DeclID: source, Kind: actor.KindAgent, Rendered: rendered}}
+		genesis.Declarations = []lagoon.GenesisDeclaration{{DeclID: source, Kind: actor.KindAgent, Rendered: rendered}}
 	}
-	if _, err := host.Provision(context.Background(), spec); err != nil {
+	raw, err := json.Marshal(genesis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := gatewayTestBindings{rows: []regspec.ChannelRow{{
+		ID: chID, Name: string(chID), Type: "group", Status: regspec.ChannelPresent,
+		OwnerPrincipal: owner, Spec: raw, CreatedAt: genesis.CreatedAt,
+	}}}
+	host, err := channelhost.New(t.TempDir(), desired, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.StartConvergence(); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Open(context.Background(), channelhost.OpenSpec{ChannelID: chID, ExpectedType: "group"}); err != nil {

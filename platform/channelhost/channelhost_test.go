@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -30,9 +31,9 @@ func (testBindings) IsBound(context.Context, channel.ID, string) (bool, error) {
 func (testBindings) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
 	return nil, nil
 }
-func (testBindings) ListChannels(context.Context) ([]lagoon.ChannelRow, error) { return nil, nil }
-func (testBindings) GetChannelDesired(context.Context, channel.ID) (lagoon.ChannelRow, bool, error) {
-	return lagoon.ChannelRow{}, false, nil
+func (testBindings) ListChannels(context.Context) ([]regspec.ChannelRow, error) { return nil, nil }
+func (testBindings) GetChannelDesired(context.Context, channel.ID) (regspec.ChannelRow, bool, error) {
+	return regspec.ChannelRow{}, false, nil
 }
 
 func (testResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
@@ -60,9 +61,9 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := provisionSpec("offline-declaration")
-	spec.GenesisDeclarations = []GenesisDeclaration{{DeclID: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
-	if _, err := host.Provision(ctx, spec); err != nil {
+	spec := genesisSpec("offline-declaration")
+	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
+	if err := host.provisionGenesis(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
@@ -140,7 +141,7 @@ func TestMembraneUnregisterPrecedesHomeQuiesce(t *testing.T) {
 	}
 	defer host.Close(context.Background())
 	id := channel.ID("staged-close")
-	if _, err := host.Provision(ctx, provisionSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); err != nil {
@@ -160,15 +161,15 @@ func TestMembraneUnregisterPrecedesHomeQuiesce(t *testing.T) {
 	}
 }
 
-func provisionSpec(id channel.ID) ProvisionSpec {
-	return ProvisionSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: time.Now().UnixMilli()}
+func genesisSpec(id channel.ID) lagoon.GenesisSpec {
+	return lagoon.GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: time.Now().UnixMilli()}
 }
 
 func TestLifecycleTombstoneAndCensus(t *testing.T) {
 	ctx := context.Background()
 	host := newTestHost(t)
 	id := channel.ID("opaque/频道?id=1")
-	if _, err := host.Provision(ctx, provisionSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	assertCensus(t, host, id, CensusPresent)
@@ -206,7 +207,7 @@ func TestLifecycleTombstoneAndCensus(t *testing.T) {
 	if err := host.Destroy(ctx, id); err != nil {
 		t.Fatalf("repeated destroy: %v", err)
 	}
-	if _, err := host.Provision(ctx, provisionSpec(id)); !errors.Is(err, ErrChannelRetired) {
+	if err := host.provisionGenesis(ctx, genesisSpec(id)); !errors.Is(err, ErrChannelRetired) {
 		t.Fatalf("retired id reprovision=%v", err)
 	}
 }
@@ -238,7 +239,7 @@ func TestOpenRejectsTypeOwnerAndCopiedIdentity(t *testing.T) {
 	ctx := context.Background()
 	host := newTestHost(t)
 	id := channel.ID("source")
-	if _, err := host.Provision(ctx, provisionSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "other"}); !errors.Is(err, ErrSchemaIncompatible) {
@@ -277,7 +278,7 @@ func TestDestroyNoReplacePreservesExistingTombstone(t *testing.T) {
 	ctx := context.Background()
 	host := newTestHost(t)
 	id := channel.ID("no-replace")
-	if _, err := host.Provision(ctx, provisionSpec(id)); err != nil {
+	if err := host.provisionGenesis(ctx, genesisSpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); err != nil {
@@ -310,10 +311,11 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := provisionSpec("child")
-	spec.Origin = &Origin{ParentChannelID: "parent", InitiatorPrincipal: "owner"}
-	spec.GenesisDeclarations = []GenesisDeclaration{{DeclID: "decl", Kind: actor.KindAgent, Rendered: snapshot}}
-	if _, err := host.Provision(ctx, spec); err != nil {
+	spec := genesisSpec("child")
+	spec.ParentID = "parent"
+	spec.InitiatorPrincipal = "owner"
+	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl", Kind: actor.KindAgent, Rendered: snapshot}}
+	if err := host.provisionGenesis(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	main, _, _ := host.paths("child")
@@ -332,7 +334,7 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 }
 
 func TestGenesisDeclarationWireShapeHasNoPrincipal(t *testing.T) {
-	raw, err := json.Marshal(GenesisDeclaration{DeclID: "decl", Kind: actor.KindAgent})
+	raw, err := json.Marshal(lagoon.GenesisDeclaration{DeclID: "decl", Kind: actor.KindAgent})
 	if err != nil {
 		t.Fatal(err)
 	}

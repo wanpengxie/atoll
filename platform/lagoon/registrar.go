@@ -2,7 +2,6 @@ package lagoon
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -11,22 +10,22 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/lagoon/internal/store"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type Registrar struct {
 	registry *Registry
-	facts    ActorFactsResolver
+	facts    SourceActorFactsResolver
 	classes  ClassCatalog
 	now      Clock
 }
 
-func NewRegistrar(registry *Registry, facts ActorFactsResolver, classes ClassCatalog) *Registrar {
+func NewRegistrar(registry *Registry, facts SourceActorFactsResolver, classes ClassCatalog) *Registrar {
 	return &Registrar{registry: registry, facts: facts, classes: classes, now: time.Now}
 }
 
@@ -36,27 +35,23 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	if r == nil || r.registry == nil {
 		return errors.New("lagoon: registrar registry required")
 	}
-	tx, err := r.registry.db.BeginTx(ctx, nil)
+	rootExists, err := r.registry.store.PrincipalExistsWithKind(ctx, protocol.RootPrincipalID, actor.KindHuman)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	var rootExists, localExists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM principals WHERE id=? AND kind='human')`, protocol.RootPrincipalID).Scan(&rootExists); err != nil {
-		return err
-	}
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE id=?)`, protocol.LocalDeviceID).Scan(&localExists); err != nil {
+	localExists, err := r.registry.store.DeviceExists(ctx, protocol.LocalDeviceID)
+	if err != nil {
 		return err
 	}
 	if !rootExists || !localExists {
 		return errors.New("lagoon: installation identity incomplete")
 	}
 	now := r.now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Steward','present',?) ON CONFLICT(id) DO UPDATE SET kind='agent',email=NULL,display_name='Steward',status='present'`, protocol.StewardPrincipalID, now); err != nil {
+	if err := r.registry.store.UpsertSteward(ctx, protocol.StewardPrincipalID, now); err != nil {
 		return err
 	}
-	var c0Exists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channels WHERE id=?)`, protocol.C0ChannelID).Scan(&c0Exists); err != nil {
+	c0Exists, err := r.registry.store.ChannelExists(ctx, protocol.C0ChannelID)
+	if err != nil {
 		return err
 	}
 	spec := GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: now}
@@ -78,25 +73,22 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?) ON CONFLICT(id) DO UPDATE SET parent_id=NULL,name=excluded.name,type='group',status='present',owner_principal=excluded.owner_principal`, protocol.C0ChannelID, protocol.C0ChannelID, protocol.RootPrincipalID, string(raw), spec.CreatedAt); err != nil {
+	if err := r.registry.store.UpsertSystemChannel(ctx, regspec.ChannelRow{
+		ID: protocol.C0ChannelID, Name: string(protocol.C0ChannelID), Type: "group",
+		Status: regspec.ChannelPresent, OwnerPrincipal: protocol.RootPrincipalID, Spec: raw, CreatedAt: spec.CreatedAt,
+	}); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,'{}','present','public',?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,owner=excluded.owner,default_class=excluded.default_class,config_json='{}',status='present',visibility='public',updated_at=excluded.updated_at`, SpaceToolDeclID, "Space Tool", protocol.RootPrincipalID, SpaceToolClass, now, now); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
+	if err := r.registry.store.UpsertSystemDecl(ctx, regspec.DeclRow{
+		ID: SpaceToolDeclID, Name: "Space Tool", Owner: protocol.RootPrincipalID, DefaultClass: SpaceToolClass,
+		Config: json.RawMessage(`{}`), Status: regspec.DeclPresent, Visibility: "public", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
 		return err
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{AllChannels: true})
 	}
 	return nil
-}
-
-type forwardedRequest struct {
-	Source    SourceRef       `json:"source"`
-	Initiator string          `json:"initiator,omitempty"`
-	Payload   json.RawMessage `json:"payload"`
 }
 
 func Def(registrar *Registrar) actorbase.Def {
@@ -131,27 +123,24 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 	source := SourceRef{ChannelID: msg.ChannelID, RequestID: string(msg.ID)}
 	payload := json.RawMessage(append([]byte(nil), msg.Payload...))
 	if msg.Sender.ID == actor.SystemActorID {
-		var f forwardedRequest
-		if err := json.Unmarshal(msg.Payload, &f); err != nil || f.Source.ChannelID == "" || f.Source.RequestID == "" {
+		var forwarded message.Envelope
+		if err := json.Unmarshal(msg.Payload, &forwarded); err != nil || forwarded.ChannelID == "" || forwarded.ID == "" || forwarded.Type != msg.Type {
 			_, _ = sys.Fail(msg, string(CodeInvalidArgs), "invalid forwarded request")
 			return
 		}
-		principal, source, payload = f.Initiator, f.Source, f.Payload
+		source = SourceRef{ChannelID: forwarded.ChannelID, RequestID: string(forwarded.ID)}
+		payload = json.RawMessage(append([]byte(nil), forwarded.Payload...))
+		if forwarded.Sender.ID != "" {
+			principal = r.resolvePrincipal(msg.Ctx(), forwarded.ChannelID, forwarded.Sender.ID, sys, msg)
+			if principal == "" {
+				return
+			}
+		}
 	} else {
-		if r.facts == nil {
-			_, _ = sys.Fail(msg, string(CodePermissionDenied), "initiator unavailable")
+		principal = r.resolvePrincipal(msg.Ctx(), msg.ChannelID, msg.Sender.ID, sys, msg)
+		if principal == "" {
 			return
 		}
-		facts, found, err := r.facts.ActorFacts(msg.Ctx(), msg.Sender.ID)
-		if err != nil {
-			_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
-			return
-		}
-		if !found || !facts.Active || facts.Principal == "" {
-			_, _ = sys.Fail(msg, string(CodePermissionDenied), "active attributable principal required")
-			return
-		}
-		principal = facts.Principal
 	}
 	if word == WordPrincipalRegister {
 		if principal != "" {
@@ -178,6 +167,37 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	_, _ = sys.Reply(msg, Reply{Word: word, Value: rawValue, Source: source})
+}
+
+func (r *Registrar) resolvePrincipal(ctx context.Context, source channel.ID, sender actor.ActorID, sys actorbase.Sys, msg actorbase.Msg) string {
+	if r.facts == nil {
+		_, _ = sys.Fail(msg, string(CodePermissionDenied), "initiator unavailable")
+		return ""
+	}
+	facts, found, err := r.facts.ActorFacts(ctx, source, sender)
+	if err != nil {
+		_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
+		return ""
+	}
+	if !found || !facts.Active {
+		_, _ = sys.Fail(msg, string(CodePermissionDenied), "active attributable principal required")
+		return ""
+	}
+	if facts.Principal != "" {
+		return facts.Principal
+	}
+	if facts.SourceDeclID != "" {
+		decl, found, err := r.registry.GetDecl(ctx, facts.SourceDeclID)
+		if err != nil {
+			_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
+			return ""
+		}
+		if found {
+			return decl.Owner
+		}
+	}
+	_, _ = sys.Fail(msg, string(CodePermissionDenied), "active attributable principal required")
+	return ""
 }
 
 func knownWord(word Word) bool {
@@ -311,7 +331,7 @@ func (r *Registrar) execute(ctx context.Context, principal string, source channe
 		if err != nil {
 			return nil, err
 		}
-		if !ok || row.Status != ChannelPresent {
+		if !ok || row.Status != regspec.ChannelPresent {
 			return nil, notFound("channel")
 		}
 		return row, nil
@@ -323,7 +343,7 @@ func (r *Registrar) execute(ctx context.Context, principal string, source channe
 		if p.ChannelID == "" {
 			return nil, invalid("channel_id required")
 		}
-		return r.registry.listPrincipals(ctx)
+		return r.registry.store.ListPrincipals(ctx)
 	case WordDeclList:
 		return r.registry.ListDecls(ctx)
 	case WordDeviceList:
@@ -341,20 +361,19 @@ func conflict(detail string) error { return &Error{Code: CodeConflictExists, Det
 func denied(detail string) error   { return &Error{Code: CodePermissionDenied, Detail: detail} }
 func reserved(detail string) error { return &Error{Code: CodeReserved, Detail: detail} }
 
-func (r *Registrar) createChannel(ctx context.Context, owner string, source channel.ID, p ChannelCreate) (ChannelRow, error) {
-	tx, err := r.registry.db.BeginTx(ctx, nil)
+func (r *Registrar) createChannel(ctx context.Context, owner string, source channel.ID, p ChannelCreate) (regspec.ChannelRow, error) {
+	row, created, err := r.createChannelRows(ctx, owner, source, p)
 	if err != nil {
-		return ChannelRow{}, err
+		return regspec.ChannelRow{}, err
 	}
-	defer tx.Rollback()
-	row, _, err := r.createChannelTx(ctx, tx, owner, source, p)
-	if err != nil {
-		return ChannelRow{}, err
+	if !created {
+		if err := r.registry.store.InsertBindingIfAbsent(ctx, regspec.BindingRow{
+			ChannelID: row.ID, DeviceID: protocol.LocalDeviceID, AttachedAt: r.now().UnixMilli(),
+		}); err != nil {
+			return regspec.ChannelRow{}, err
+		}
 	}
-	if err := tx.Commit(); err != nil {
-		return ChannelRow{}, err
-	}
-	// Replays also emit the id-only edge: a previous post-commit physical open
+	// Replays also emit the id-only edge: a previous physical open
 	// may have failed even though the desired row is already durable.
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: row.ID})
@@ -362,110 +381,83 @@ func (r *Registrar) createChannel(ctx context.Context, owner string, source chan
 	return row, nil
 }
 
-func (r *Registrar) createChannelTx(ctx context.Context, tx *sql.Tx, owner string, source channel.ID, p ChannelCreate) (ChannelRow, bool, error) {
+func (r *Registrar) createChannelRows(ctx context.Context, owner string, source channel.ID, p ChannelCreate) (regspec.ChannelRow, bool, error) {
 	p.Name = strings.TrimSpace(p.Name)
 	if p.Name == "" {
-		return ChannelRow{}, false, invalid("name required")
+		return regspec.ChannelRow{}, false, invalid("name required")
 	}
 	parent := p.Parent
 	if parent == "" {
 		parent = source
 	}
 	if parent == "" {
-		return ChannelRow{}, false, invalid("parent required")
+		return regspec.ChannelRow{}, false, invalid("parent required")
 	}
-	var parentPresent bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channels WHERE id=? AND status='present')`, parent).Scan(&parentPresent); err != nil {
-		return ChannelRow{}, false, err
+	parentPresent, err := r.registry.store.PresentChannelExists(ctx, parent)
+	if err != nil {
+		return regspec.ChannelRow{}, false, err
 	}
 	if !parentPresent {
-		return ChannelRow{}, false, notFound("parent channel")
+		return regspec.ChannelRow{}, false, notFound("parent channel")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,parent_id,name,type,status,owner_principal,spec_json,created_at FROM channels WHERE parent_id=? AND name=? AND status='present' ORDER BY id`, parent, p.Name)
+	matches, err := r.registry.store.FindPresentChannels(ctx, parent, p.Name)
 	if err != nil {
-		return ChannelRow{}, false, err
-	}
-	var matches []ChannelRow
-	for rows.Next() {
-		v, e := scanChannel(rows)
-		if e != nil {
-			rows.Close()
-			return ChannelRow{}, false, e
-		}
-		matches = append(matches, v)
-	}
-	if err := rows.Close(); err != nil {
-		return ChannelRow{}, false, err
-	}
-	if err := rows.Err(); err != nil {
-		return ChannelRow{}, false, err
+		return regspec.ChannelRow{}, false, err
 	}
 	if len(matches) > 0 {
 		if len(matches) == 1 && matches[0].OwnerPrincipal == owner {
 			return matches[0], false, nil
 		}
-		return ChannelRow{}, false, conflict("sibling channel name already exists")
+		return regspec.ChannelRow{}, false, conflict("sibling channel name already exists")
 	}
 	now := r.now().UnixMilli()
 	id := channel.ID(uuid.NewString())
 	snapshot, err := (channelspec.RenderedSnapshot{Class: SpaceToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
 	if err != nil {
-		return ChannelRow{}, false, err
+		return regspec.ChannelRow{}, false, err
 	}
 	spec := GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: owner, CreatedAt: now, ParentID: parent, InitiatorPrincipal: owner, Declarations: []GenesisDeclaration{{DeclID: SpaceToolDeclID, Kind: actor.KindTool, Rendered: snapshot}}}
 	raw, err := json.Marshal(spec)
 	if err != nil {
-		return ChannelRow{}, false, err
+		return regspec.ChannelRow{}, false, err
 	}
-	row := ChannelRow{ID: id, ParentID: parent, Name: p.Name, Type: "group", Status: ChannelPresent, OwnerPrincipal: owner, Spec: raw, CreatedAt: now}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, string(row.Spec), row.CreatedAt); err != nil {
-		return ChannelRow{}, false, err
+	row := regspec.ChannelRow{ID: id, ParentID: parent, Name: p.Name, Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: owner, Spec: raw, CreatedAt: now}
+	if err := r.registry.store.InsertChannel(ctx, row); err != nil {
+		return regspec.ChannelRow{}, false, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO bindings(channel_id,device_id,attached_at) VALUES(?,?,?)`, row.ID, protocol.LocalDeviceID, now); err != nil {
-		return ChannelRow{}, false, err
+	if err := r.registry.store.InsertBinding(ctx, regspec.BindingRow{ChannelID: row.ID, DeviceID: protocol.LocalDeviceID, AttachedAt: now}); err != nil {
+		return regspec.ChannelRow{}, false, err
 	}
 	return row, true, nil
 }
 
-func (r *Registrar) retireChannel(ctx context.Context, principal string, p ChannelRetire) (ChannelRow, error) {
+func (r *Registrar) retireChannel(ctx context.Context, principal string, p ChannelRetire) (regspec.ChannelRow, error) {
 	if p.ChannelID == "" {
-		return ChannelRow{}, invalid("channel_id required")
+		return regspec.ChannelRow{}, invalid("channel_id required")
 	}
 	if p.ChannelID == protocol.C0ChannelID {
-		return ChannelRow{}, reserved("c0 cannot be retired")
+		return regspec.ChannelRow{}, reserved("c0 cannot be retired")
 	}
-	tx, err := r.registry.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ChannelRow{}, err
-	}
-	defer tx.Rollback()
-	row, err := scanChannel(tx.QueryRowContext(ctx, `SELECT id,parent_id,name,type,status,owner_principal,spec_json,created_at FROM channels WHERE id=?`, p.ChannelID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return ChannelRow{}, notFound("channel")
+	row, found, err := r.registry.store.GetChannel(ctx, p.ChannelID)
+	if !found && err == nil {
+		return regspec.ChannelRow{}, notFound("channel")
 	}
 	if err != nil {
-		return ChannelRow{}, err
+		return regspec.ChannelRow{}, err
 	}
 	if row.OwnerPrincipal != principal && principal != protocol.RootPrincipalID {
-		return ChannelRow{}, denied("channel owner required")
+		return regspec.ChannelRow{}, denied("channel owner required")
 	}
-	if row.Status == ChannelRetired {
+	if row.Status == regspec.ChannelRetired {
 		return row, nil
 	}
-	var parent any
-	if row.ParentID != "" {
-		parent = row.ParentID
+	if err := r.registry.store.ReparentPresentChildren(ctx, p.ChannelID, row.ParentID); err != nil {
+		return regspec.ChannelRow{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channels SET parent_id=? WHERE parent_id=? AND status='present'`, parent, p.ChannelID); err != nil {
-		return ChannelRow{}, err
+	if err := r.registry.store.UpdateChannelStatus(ctx, p.ChannelID, regspec.ChannelRetired); err != nil {
+		return regspec.ChannelRow{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channels SET status='retired' WHERE id=?`, p.ChannelID); err != nil {
-		return ChannelRow{}, err
-	}
-	row.Status = ChannelRetired
-	if err := tx.Commit(); err != nil {
-		return ChannelRow{}, err
-	}
+	row.Status = regspec.ChannelRetired
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: p.ChannelID})
 		r.registry.onCommit(Change{AllChannels: true})
@@ -473,43 +465,66 @@ func (r *Registrar) retireChannel(ctx context.Context, principal string, p Chann
 	return row, nil
 }
 
-func (r *Registrar) registerPrincipal(ctx context.Context, p PrincipalRegister) (PrincipalRow, error) {
+func (r *Registrar) registerPrincipal(ctx context.Context, p PrincipalRegister) (regspec.PrincipalRow, error) {
 	p.Email = strings.TrimSpace(p.Email)
 	if p.Email == "" || p.SecretHash == "" {
-		return PrincipalRow{}, invalid("email and secret_hash required")
+		return regspec.PrincipalRow{}, invalid("email and secret_hash required")
 	}
 	id := strings.TrimSpace(p.ID)
-	if id == "" {
-		id = uuid.NewString()
-	}
 	if id == protocol.RootPrincipalID {
-		return PrincipalRow{}, reserved("root principal id is reserved")
+		return regspec.PrincipalRow{}, reserved("root principal id is reserved")
 	}
-	tx, err := r.registry.db.BeginTx(ctx, nil)
-	if err != nil {
-		return PrincipalRow{}, err
-	}
-	defer tx.Rollback()
 	now := r.now().UnixMilli()
-	row := PrincipalRow{ID: id, Kind: actor.KindHuman, Email: p.Email, DisplayName: p.DisplayName, Status: PrincipalPresent, CreatedAt: now}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,?,?,?,?,?)`, row.ID, row.Kind, row.Email, nullableText(row.DisplayName), row.Status, row.CreatedAt); err != nil {
-		if isPrincipalConflict(err) {
-			return PrincipalRow{}, conflict("email or principal already exists")
-		}
-		return PrincipalRow{}, err
+	var row regspec.PrincipalRow
+	var found bool
+	var err error
+	if id != "" {
+		row, found, err = r.registry.store.GetPrincipal(ctx, id)
+	} else {
+		row, found, err = r.registry.store.GetPrincipalByEmail(ctx, p.Email)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?)`, id, p.SecretHash, now); err != nil {
-		return PrincipalRow{}, err
-	}
-	home, created, err := r.createChannelTx(ctx, tx, id, protocol.C0ChannelID, ChannelCreate{Name: id, Parent: protocol.C0ChannelID})
 	if err != nil {
-		return PrincipalRow{}, err
+		return regspec.PrincipalRow{}, err
+	}
+	if found {
+		if row.Kind != actor.KindHuman || row.Email != p.Email || row.DisplayName != p.DisplayName || row.Status != regspec.PrincipalPresent {
+			return regspec.PrincipalRow{}, conflict("email or principal already exists")
+		}
+		id = row.ID
+	} else {
+		if id == "" {
+			id = uuid.NewString()
+		}
+		row = regspec.PrincipalRow{ID: id, Kind: actor.KindHuman, Email: p.Email, DisplayName: p.DisplayName, Status: regspec.PrincipalPresent, CreatedAt: now}
+	}
+	if !found {
+		err = r.registry.store.InsertPrincipal(ctx, row)
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return regspec.PrincipalRow{}, conflict("email or principal already exists")
+		}
+		return regspec.PrincipalRow{}, err
+	}
+	hash, status, _, credentialFound, err := r.registry.store.PasswordCredential(ctx, id)
+	if err != nil {
+		return regspec.PrincipalRow{}, err
+	}
+	if credentialFound {
+		if hash != p.SecretHash || status != regspec.CredentialActive {
+			return regspec.PrincipalRow{}, conflict("principal credential already exists")
+		}
+	} else if err := r.registry.store.InsertPasswordCredential(ctx, id, p.SecretHash, now); err != nil {
+		return regspec.PrincipalRow{}, err
+	}
+	home, created, err := r.createChannelRows(ctx, id, protocol.C0ChannelID, ChannelCreate{Name: id, Parent: protocol.C0ChannelID})
+	if err != nil {
+		return regspec.PrincipalRow{}, err
 	}
 	if !created {
-		return PrincipalRow{}, conflict("home channel already exists")
-	}
-	if err := tx.Commit(); err != nil {
-		return PrincipalRow{}, err
+		if err := r.registry.store.InsertBindingIfAbsent(ctx, regspec.BindingRow{ChannelID: home.ID, DeviceID: protocol.LocalDeviceID, AttachedAt: now}); err != nil {
+			return regspec.PrincipalRow{}, err
+		}
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: home.ID})
@@ -517,46 +532,33 @@ func (r *Registrar) registerPrincipal(ctx context.Context, p PrincipalRegister) 
 	return row, nil
 }
 
-func isPrincipalConflict(err error) bool {
-	var sqliteErr *sqlite.Error
-	if !errors.As(err, &sqliteErr) {
-		return false
-	}
-	switch sqliteErr.Code() {
-	case sqlite3.SQLITE_CONSTRAINT_UNIQUE, sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
-		return true
-	default:
-		return false
-	}
-}
-
-func (r *Registrar) retirePrincipal(ctx context.Context, caller string, p PrincipalRetire) (PrincipalRow, error) {
+func (r *Registrar) retirePrincipal(ctx context.Context, caller string, p PrincipalRetire) (regspec.PrincipalRow, error) {
 	if p.PrincipalID == "" {
-		return PrincipalRow{}, invalid("principal_id required")
+		return regspec.PrincipalRow{}, invalid("principal_id required")
 	}
 	if p.PrincipalID == protocol.RootPrincipalID {
-		return PrincipalRow{}, reserved("root cannot be retired")
+		return regspec.PrincipalRow{}, reserved("root cannot be retired")
 	}
 	if caller != p.PrincipalID && caller != protocol.RootPrincipalID {
-		return PrincipalRow{}, denied("principal or root required")
+		return regspec.PrincipalRow{}, denied("principal or root required")
 	}
-	row, err := r.updatePrincipalStatus(ctx, p.PrincipalID, PrincipalRetired)
+	row, err := r.updatePrincipalStatus(ctx, p.PrincipalID, regspec.PrincipalRetired)
 	return row, err
 }
 
-func (r *Registrar) updatePrincipalStatus(ctx context.Context, id string, status PrincipalStatus) (PrincipalRow, error) {
-	row, err := scanPrincipal(r.registry.db.QueryRowContext(ctx, `SELECT id,kind,email,display_name,status,created_at FROM principals WHERE id=?`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return PrincipalRow{}, notFound("principal")
+func (r *Registrar) updatePrincipalStatus(ctx context.Context, id string, status regspec.PrincipalStatus) (regspec.PrincipalRow, error) {
+	row, found, err := r.registry.store.GetPrincipal(ctx, id)
+	if !found && err == nil {
+		return regspec.PrincipalRow{}, notFound("principal")
 	}
 	if err != nil {
-		return PrincipalRow{}, err
+		return regspec.PrincipalRow{}, err
 	}
 	if row.Status == status {
 		return row, nil
 	}
-	if _, err := r.registry.db.ExecContext(ctx, `UPDATE principals SET status=? WHERE id=?`, status, id); err != nil {
-		return PrincipalRow{}, err
+	if err := r.registry.store.UpdatePrincipalStatus(ctx, id, status); err != nil {
+		return regspec.PrincipalRow{}, err
 	}
 	row.Status = status
 	if r.registry.onCommit != nil {
@@ -572,9 +574,8 @@ func (r *Registrar) setCredential(ctx context.Context, caller string, p Credenti
 	if caller != p.PrincipalID && caller != protocol.RootPrincipalID {
 		return CredentialReply{}, denied("principal or root required")
 	}
-	var principalKind actor.Kind
-	err := r.registry.db.QueryRowContext(ctx, `SELECT kind FROM principals WHERE id=?`, p.PrincipalID).Scan(&principalKind)
-	if errors.Is(err, sql.ErrNoRows) {
+	principalKind, found, err := r.registry.store.PrincipalKind(ctx, p.PrincipalID)
+	if !found && err == nil {
 		return CredentialReply{}, notFound("principal")
 	}
 	if err != nil {
@@ -583,59 +584,56 @@ func (r *Registrar) setCredential(ctx context.Context, caller string, p Credenti
 	if principalKind != actor.KindHuman {
 		return CredentialReply{}, denied("credentials require a human principal")
 	}
-	var storedHash string
-	var status CredentialStatus
-	var rotatedAt int64
-	err = r.registry.db.QueryRowContext(ctx, `SELECT secret_hash,status,rotated_at FROM credentials WHERE principal_id=? AND kind='password'`, p.PrincipalID).Scan(&storedHash, &status, &rotatedAt)
-	if err == nil && storedHash == p.SecretHash && status == CredentialActive {
+	storedHash, status, rotatedAt, found, err := r.registry.store.PasswordCredential(ctx, p.PrincipalID)
+	if err == nil && found && storedHash == p.SecretHash && status == regspec.CredentialActive {
 		return CredentialReply{PrincipalID: p.PrincipalID, Kind: "password", Status: status, RotatedAt: rotatedAt}, nil
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err != nil {
 		return CredentialReply{}, err
 	}
 	now := r.now().UnixMilli()
-	if _, err := r.registry.db.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?) ON CONFLICT(principal_id,kind) DO UPDATE SET secret_hash=excluded.secret_hash,status='active',rotated_at=excluded.rotated_at`, p.PrincipalID, p.SecretHash, now); err != nil {
+	if err := r.registry.store.UpsertPasswordCredential(ctx, p.PrincipalID, p.SecretHash, now); err != nil {
 		return CredentialReply{}, err
 	}
-	return CredentialReply{PrincipalID: p.PrincipalID, Kind: "password", Status: CredentialActive, RotatedAt: now}, nil
+	return CredentialReply{PrincipalID: p.PrincipalID, Kind: "password", Status: regspec.CredentialActive, RotatedAt: now}, nil
 }
 
-func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegister) (DeclRow, error) {
+func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegister) (regspec.DeclRow, error) {
 	p.ID = strings.TrimSpace(p.ID)
 	p.Name = strings.TrimSpace(p.Name)
 	p.Class = strings.TrimSpace(p.Class)
 	if p.ID == "" || p.Name == "" || p.Class == "" {
-		return DeclRow{}, invalid("id, name and class required")
+		return regspec.DeclRow{}, invalid("id, name and class required")
 	}
 	if p.Class == SpaceToolClass {
-		return DeclRow{}, reserved("space-tool class is reserved")
+		return regspec.DeclRow{}, reserved("space-tool class is reserved")
 	}
 	if p.Visibility == "" {
 		p.Visibility = "private"
 	}
 	if p.Visibility != "private" && p.Visibility != "public" {
-		return DeclRow{}, invalid("invalid visibility")
+		return regspec.DeclRow{}, invalid("invalid visibility")
 	}
 	if r.classes == nil {
-		return DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
+		return regspec.DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 	}
 	if err := r.classes.ValidateConfig(p.Class, p.Config); err != nil {
-		return DeclRow{}, invalid(err.Error())
+		return regspec.DeclRow{}, invalid(err.Error())
 	}
 	now := r.now().UnixMilli()
-	existing, err := scanDecl(r.registry.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
-	if err == nil {
-		if existing.Status == DeclPresent && existing.Name == p.Name && existing.Owner == owner && existing.DefaultClass == p.Class && existing.Visibility == p.Visibility && jsonEqual(existing.Config, p.Config) {
+	existing, found, err := r.registry.store.GetDecl(ctx, p.ID)
+	if err == nil && found {
+		if existing.Status == regspec.DeclPresent && existing.Name == p.Name && existing.Owner == owner && existing.DefaultClass == p.Class && existing.Visibility == p.Visibility && jsonEqual(existing.Config, p.Config) {
 			return existing, nil
 		}
-		return DeclRow{}, conflict("declaration id already exists")
+		return regspec.DeclRow{}, conflict("declaration id already exists")
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return DeclRow{}, err
+	if err != nil {
+		return regspec.DeclRow{}, err
 	}
-	row := DeclRow{ID: p.ID, Name: p.Name, Owner: owner, DefaultClass: p.Class, Config: cloneJSON(p.Config), Status: DeclPresent, Visibility: p.Visibility, CreatedAt: now, UpdatedAt: now}
-	if _, err := r.registry.db.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,'present',?,?,?)`, row.ID, row.Name, row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.CreatedAt, row.UpdatedAt); err != nil {
-		return DeclRow{}, err
+	row := regspec.DeclRow{ID: p.ID, Name: p.Name, Owner: owner, DefaultClass: p.Class, Config: cloneJSON(p.Config), Status: regspec.DeclPresent, Visibility: p.Visibility, CreatedAt: now, UpdatedAt: now}
+	if err := r.registry.store.InsertDecl(ctx, row); err != nil {
+		return regspec.DeclRow{}, err
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{AllChannels: true})
@@ -643,25 +641,25 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 	return row, nil
 }
 
-func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (DeclRow, error) {
+func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (regspec.DeclRow, error) {
 	if p.ID == "" {
-		return DeclRow{}, invalid("id required")
+		return regspec.DeclRow{}, invalid("id required")
 	}
-	row, err := scanDecl(r.registry.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return DeclRow{}, notFound("declaration")
+	row, found, err := r.registry.store.GetDecl(ctx, p.ID)
+	if !found && err == nil {
+		return regspec.DeclRow{}, notFound("declaration")
 	}
 	if err != nil {
-		return DeclRow{}, err
+		return regspec.DeclRow{}, err
 	}
-	if row.Status != DeclPresent {
-		return DeclRow{}, notFound("declaration")
+	if row.Status != regspec.DeclPresent {
+		return regspec.DeclRow{}, notFound("declaration")
 	}
 	if row.DefaultClass == SpaceToolClass || row.ID == SpaceToolDeclID {
-		return DeclRow{}, reserved("space-tool declaration is reserved")
+		return regspec.DeclRow{}, reserved("space-tool declaration is reserved")
 	}
 	if row.Owner != caller && caller != protocol.RootPrincipalID {
-		return DeclRow{}, denied("declaration owner required")
+		return regspec.DeclRow{}, denied("declaration owner required")
 	}
 	before := row
 	before.Config = cloneJSON(row.Config)
@@ -671,15 +669,15 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (De
 	if p.Class != nil {
 		next := strings.TrimSpace(*p.Class)
 		if next == SpaceToolClass {
-			return DeclRow{}, reserved("space-tool class is reserved")
+			return regspec.DeclRow{}, reserved("space-tool class is reserved")
 		}
 		if r.classes == nil {
-			return DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
+			return regspec.DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 		}
 		oldKind, oldOK := r.classes.LookupClassKind(row.DefaultClass)
 		newKind, newOK := r.classes.LookupClassKind(next)
 		if !oldOK || !newOK || oldKind != newKind {
-			return DeclRow{}, invalid("class transition changes actor kind")
+			return regspec.DeclRow{}, invalid("class transition changes actor kind")
 		}
 		row.DefaultClass = next
 	}
@@ -690,20 +688,20 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (De
 		row.Visibility = *p.Visibility
 	}
 	if row.Name == "" || (row.Visibility != "private" && row.Visibility != "public") {
-		return DeclRow{}, invalid("invalid declaration")
+		return regspec.DeclRow{}, invalid("invalid declaration")
 	}
 	if r.classes == nil {
-		return DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
+		return regspec.DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 	}
 	if err := r.classes.ValidateConfig(row.DefaultClass, row.Config); err != nil {
-		return DeclRow{}, invalid(err.Error())
+		return regspec.DeclRow{}, invalid(err.Error())
 	}
 	if row.Name == before.Name && row.DefaultClass == before.DefaultClass && row.Visibility == before.Visibility && jsonEqual(row.Config, before.Config) {
 		return before, nil
 	}
 	row.UpdatedAt = r.now().UnixMilli()
-	if _, err := r.registry.db.ExecContext(ctx, `UPDATE decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE id=?`, row.Name, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.UpdatedAt, row.ID); err != nil {
-		return DeclRow{}, err
+	if err := r.registry.store.UpdateDecl(ctx, row); err != nil {
+		return regspec.DeclRow{}, err
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{AllChannels: true})
@@ -711,30 +709,30 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (De
 	return row, nil
 }
 
-func (r *Registrar) revokeDecl(ctx context.Context, caller string, p DeclRevoke) (DeclRow, error) {
+func (r *Registrar) revokeDecl(ctx context.Context, caller string, p DeclRevoke) (regspec.DeclRow, error) {
 	if p.ID == "" {
-		return DeclRow{}, invalid("id required")
+		return regspec.DeclRow{}, invalid("id required")
 	}
-	row, err := scanDecl(r.registry.db.QueryRowContext(ctx, `SELECT id,name,owner,default_class,config_json,status,visibility,created_at,updated_at FROM decls WHERE id=?`, p.ID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return DeclRow{}, notFound("declaration")
+	row, found, err := r.registry.store.GetDecl(ctx, p.ID)
+	if !found && err == nil {
+		return regspec.DeclRow{}, notFound("declaration")
 	}
 	if err != nil {
-		return DeclRow{}, err
+		return regspec.DeclRow{}, err
 	}
 	if row.DefaultClass == SpaceToolClass || row.ID == SpaceToolDeclID {
-		return DeclRow{}, reserved("space-tool declaration is reserved")
+		return regspec.DeclRow{}, reserved("space-tool declaration is reserved")
 	}
 	if row.Owner != caller && caller != protocol.RootPrincipalID {
-		return DeclRow{}, denied("declaration owner required")
+		return regspec.DeclRow{}, denied("declaration owner required")
 	}
-	if row.Status == DeclRevoked {
+	if row.Status == regspec.DeclRevoked {
 		return row, nil
 	}
-	row.Status = DeclRevoked
+	row.Status = regspec.DeclRevoked
 	row.UpdatedAt = r.now().UnixMilli()
-	if _, err := r.registry.db.ExecContext(ctx, `UPDATE decls SET status='revoked',updated_at=? WHERE id=?`, row.UpdatedAt, row.ID); err != nil {
-		return DeclRow{}, err
+	if err := r.registry.store.RevokeDecl(ctx, row.ID, row.UpdatedAt); err != nil {
+		return regspec.DeclRow{}, err
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{AllChannels: true})
@@ -742,48 +740,43 @@ func (r *Registrar) revokeDecl(ctx context.Context, caller string, p DeclRevoke)
 	return row, nil
 }
 
-func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID, p OverlaySet) (OverlayRow, error) {
+func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID, p OverlaySet) (regspec.OverlayRow, error) {
 	if p.DeclID == "" || p.ChannelID == "" {
-		return OverlayRow{}, invalid("decl_id and channel_id required")
+		return regspec.OverlayRow{}, invalid("decl_id and channel_id required")
 	}
 	if p.ChannelID != source {
-		return OverlayRow{}, denied("overlay target must equal source channel")
+		return regspec.OverlayRow{}, denied("overlay target must equal source channel")
 	}
 	decl, ok, err := r.registry.GetDecl(ctx, p.DeclID)
 	if err != nil {
-		return OverlayRow{}, err
+		return regspec.OverlayRow{}, err
 	}
-	if !ok || decl.Status != DeclPresent {
-		return OverlayRow{}, notFound("declaration")
+	if !ok || decl.Status != regspec.DeclPresent {
+		return regspec.OverlayRow{}, notFound("declaration")
 	}
 	if r.classes == nil {
-		return OverlayRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
+		return regspec.OverlayRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 	}
 	if err := r.classes.ValidateConfig(decl.DefaultClass, p.Config); err != nil {
-		return OverlayRow{}, invalid(err.Error())
+		return regspec.OverlayRow{}, invalid(err.Error())
 	}
-	var existing OverlayRow
-	var raw sql.NullString
-	err = r.registry.db.QueryRowContext(ctx, `SELECT decl_id,channel_id,config_json,updated_at FROM decl_overlays WHERE decl_id=? AND channel_id=?`, p.DeclID, p.ChannelID).Scan(&existing.DeclID, &existing.ChannelID, &raw, &existing.UpdatedAt)
-	if err == nil {
-		if raw.Valid {
-			existing.Config = json.RawMessage(raw.String)
-		}
+	existing, found, err := r.registry.store.GetOverlay(ctx, p.DeclID, p.ChannelID)
+	if err == nil && found {
 		if jsonEqual(existing.Config, p.Config) {
 			return existing, nil
 		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return OverlayRow{}, err
+	} else if err != nil {
+		return regspec.OverlayRow{}, err
 	}
 	now := r.now().UnixMilli()
-	_, err = r.registry.db.ExecContext(ctx, `INSERT INTO decl_overlays(decl_id,channel_id,config_json,updated_at) VALUES(?,?,?,?) ON CONFLICT(decl_id,channel_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at`, p.DeclID, p.ChannelID, nullableJSON(p.Config), now)
-	if err != nil {
-		return OverlayRow{}, err
+	row := regspec.OverlayRow{DeclID: p.DeclID, ChannelID: p.ChannelID, Config: cloneJSON(p.Config), UpdatedAt: now}
+	if err := r.registry.store.UpsertOverlay(ctx, row); err != nil {
+		return regspec.OverlayRow{}, err
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: p.ChannelID})
 	}
-	return OverlayRow{DeclID: p.DeclID, ChannelID: p.ChannelID, Config: cloneJSON(p.Config), UpdatedAt: now}, nil
+	return row, nil
 }
 
 func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p OverlayClear) (Confirmation, error) {
@@ -793,7 +786,7 @@ func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p Overl
 	if p.ChannelID != source {
 		return Confirmation{}, denied("overlay target must equal source channel")
 	}
-	if _, err := r.registry.db.ExecContext(ctx, `DELETE FROM decl_overlays WHERE decl_id=? AND channel_id=?`, p.DeclID, p.ChannelID); err != nil {
+	if err := r.registry.store.DeleteOverlay(ctx, p.DeclID, p.ChannelID); err != nil {
 		return Confirmation{}, err
 	}
 	if r.registry.onCommit != nil {
@@ -802,53 +795,53 @@ func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p Overl
 	return Confirmation{Word: WordOverlayClear, TargetID: p.DeclID, Status: "cleared"}, nil
 }
 
-func (r *Registrar) mintDevice(ctx context.Context, owner, name string) (DeviceRow, error) {
+func (r *Registrar) mintDevice(ctx context.Context, owner, name string) (regspec.DeviceRow, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return DeviceRow{}, invalid("name required")
+		return regspec.DeviceRow{}, invalid("name required")
 	}
-	row := DeviceRow{ID: uuid.NewString(), OwnerPrincipal: owner, Name: name, Key: uuid.NewString(), Status: DevicePresent, CreatedAt: r.now().UnixMilli()}
-	_, err := r.registry.db.ExecContext(ctx, `INSERT INTO devices(id,owner_principal,name,key,status,created_at) VALUES(?,?,?,?,?,?)`, row.ID, row.OwnerPrincipal, row.Name, row.Key, row.Status, row.CreatedAt)
+	row := regspec.DeviceRow{ID: uuid.NewString(), OwnerPrincipal: owner, Name: name, Key: uuid.NewString(), Status: regspec.DevicePresent, CreatedAt: r.now().UnixMilli()}
+	err := r.registry.store.InsertDevice(ctx, row)
 	return row, err
 }
 
-func (r *Registrar) claimDevice(ctx context.Context, owner string, p DeviceClaim) (DeviceRow, error) {
+func (r *Registrar) claimDevice(ctx context.Context, owner string, p DeviceClaim) (regspec.DeviceRow, error) {
 	if p.DeviceID != "" {
 		row, ok, err := r.registry.GetDevice(ctx, p.DeviceID)
 		if err != nil {
-			return DeviceRow{}, err
+			return regspec.DeviceRow{}, err
 		}
-		if ok && row.Status == DevicePresent && row.OwnerPrincipal == owner {
+		if ok && row.Status == regspec.DevicePresent && row.OwnerPrincipal == owner {
 			return row, nil
 		}
 	}
 	return r.mintDevice(ctx, owner, "claimed-device")
 }
 
-func (r *Registrar) retireDevice(ctx context.Context, owner string, p DeviceRetire) (DeviceRow, error) {
+func (r *Registrar) retireDevice(ctx context.Context, owner string, p DeviceRetire) (regspec.DeviceRow, error) {
 	if p.DeviceID == "" {
-		return DeviceRow{}, invalid("device_id required")
+		return regspec.DeviceRow{}, invalid("device_id required")
 	}
 	if p.DeviceID == protocol.LocalDeviceID {
-		return DeviceRow{}, reserved("local device cannot be retired")
+		return regspec.DeviceRow{}, reserved("local device cannot be retired")
 	}
 	row, ok, err := r.registry.GetDevice(ctx, p.DeviceID)
 	if err != nil {
-		return DeviceRow{}, err
+		return regspec.DeviceRow{}, err
 	}
 	if !ok {
-		return DeviceRow{}, notFound("device")
+		return regspec.DeviceRow{}, notFound("device")
 	}
 	if row.OwnerPrincipal != owner && owner != protocol.RootPrincipalID {
-		return DeviceRow{}, denied("device owner required")
+		return regspec.DeviceRow{}, denied("device owner required")
 	}
-	if row.Status == DeviceRetired {
+	if row.Status == regspec.DeviceRetired {
 		return row, nil
 	}
-	if _, err := r.registry.db.ExecContext(ctx, `UPDATE devices SET status='retired' WHERE id=?`, p.DeviceID); err != nil {
-		return DeviceRow{}, err
+	if err := r.registry.store.UpdateDeviceStatus(ctx, p.DeviceID, regspec.DeviceRetired); err != nil {
+		return regspec.DeviceRow{}, err
 	}
-	row.Status = DeviceRetired
+	row.Status = regspec.DeviceRetired
 	if r.registry.onCommit != nil {
 		// Effective bindings join device status, so this one row can change the
 		// placement view of multiple channels.
@@ -857,23 +850,25 @@ func (r *Registrar) retireDevice(ctx context.Context, owner string, p DeviceReti
 	return row, nil
 }
 
-func (r *Registrar) attachDevice(ctx context.Context, owner string, source channel.ID, p DeviceBinding) (BindingRow, error) {
+func (r *Registrar) attachDevice(ctx context.Context, owner string, source channel.ID, p DeviceBinding) (regspec.BindingRow, error) {
 	if err := r.authorizeBinding(ctx, owner, source, p); err != nil {
-		return BindingRow{}, err
+		return regspec.BindingRow{}, err
 	}
 	now := r.now().UnixMilli()
-	_, err := r.registry.db.ExecContext(ctx, `INSERT INTO bindings(channel_id,device_id,attached_at) VALUES(?,?,?) ON CONFLICT(channel_id,device_id) DO NOTHING`, p.ChannelID, p.DeviceID, now)
-	if err != nil {
-		return BindingRow{}, err
+	if err := r.registry.store.InsertBindingIfAbsent(ctx, regspec.BindingRow{ChannelID: p.ChannelID, DeviceID: p.DeviceID, AttachedAt: now}); err != nil {
+		return regspec.BindingRow{}, err
 	}
-	var attached int64
-	if err := r.registry.db.QueryRowContext(ctx, `SELECT attached_at FROM bindings WHERE channel_id=? AND device_id=?`, p.ChannelID, p.DeviceID).Scan(&attached); err != nil {
-		return BindingRow{}, err
+	row, found, err := r.registry.store.Binding(ctx, p.ChannelID, p.DeviceID)
+	if err != nil {
+		return regspec.BindingRow{}, err
+	}
+	if !found {
+		return regspec.BindingRow{}, errors.New("lagoon: attached binding missing")
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: p.ChannelID})
 	}
-	return BindingRow{ChannelID: p.ChannelID, DeviceID: p.DeviceID, AttachedAt: attached}, nil
+	return row, nil
 }
 
 func (r *Registrar) detachDevice(ctx context.Context, owner string, source channel.ID, p DeviceBinding) (Confirmation, error) {
@@ -883,7 +878,7 @@ func (r *Registrar) detachDevice(ctx context.Context, owner string, source chann
 	if p.DeviceID == protocol.LocalDeviceID {
 		return Confirmation{}, reserved("local device cannot be detached")
 	}
-	if _, err := r.registry.db.ExecContext(ctx, `DELETE FROM bindings WHERE channel_id=? AND device_id=?`, p.ChannelID, p.DeviceID); err != nil {
+	if err := r.registry.store.DeleteBinding(ctx, p.ChannelID, p.DeviceID); err != nil {
 		return Confirmation{}, err
 	}
 	if r.registry.onCommit != nil {
@@ -903,14 +898,14 @@ func (r *Registrar) authorizeBinding(ctx context.Context, owner string, source c
 	if err != nil {
 		return err
 	}
-	if !ok || ch.Status != ChannelPresent {
+	if !ok || ch.Status != regspec.ChannelPresent {
 		return notFound("channel")
 	}
 	device, ok, err := r.registry.GetDevice(ctx, p.DeviceID)
 	if err != nil {
 		return err
 	}
-	if !ok || device.Status != DevicePresent {
+	if !ok || device.Status != regspec.DevicePresent {
 		return notFound("device")
 	}
 	if p.DeviceID != protocol.LocalDeviceID && device.OwnerPrincipal != owner {
@@ -919,7 +914,7 @@ func (r *Registrar) authorizeBinding(ctx context.Context, owner string, source c
 	return nil
 }
 
-func (r *Registrar) readChannels(ctx context.Context, p ChannelList) ([]ChannelRow, error) {
+func (r *Registrar) readChannels(ctx context.Context, p ChannelList) ([]regspec.ChannelRow, error) {
 	rows, err := r.registry.ListPresentChannels(ctx)
 	if err != nil {
 		return nil, err
@@ -936,42 +931,16 @@ func (r *Registrar) readChannels(ctx context.Context, p ChannelList) ([]ChannelR
 	return out, nil
 }
 
-func (r *Registrar) readDevices(ctx context.Context) ([]DeviceRow, error) {
-	rows, err := r.registry.db.QueryContext(ctx, `SELECT id,owner_principal,name,key,status,created_at FROM devices WHERE status='present' ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []DeviceRow
-	for rows.Next() {
-		v, e := scanDevice(rows)
-		if e != nil {
-			return nil, e
-		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
+func (r *Registrar) readDevices(ctx context.Context) ([]regspec.DeviceRow, error) {
+	return r.registry.store.ListDevices(ctx)
 }
 
-func (r *Registrar) readPrincipal(ctx context.Context, id string) (PrincipalRow, error) {
-	row, err := scanPrincipal(r.registry.db.QueryRowContext(ctx, `SELECT id,kind,email,display_name,status,created_at FROM principals WHERE id=? AND status='present'`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return PrincipalRow{}, notFound("principal")
+func (r *Registrar) readPrincipal(ctx context.Context, id string) (regspec.PrincipalRow, error) {
+	row, found, err := r.registry.store.GetPresentPrincipal(ctx, id)
+	if !found && err == nil {
+		return regspec.PrincipalRow{}, notFound("principal")
 	}
 	return row, err
-}
-
-func nullableText(v string) any {
-	if v == "" {
-		return nil
-	}
-	return v
-}
-func nullableJSON(v json.RawMessage) any {
-	if len(v) == 0 {
-		return nil
-	}
-	return string(v)
 }
 func cloneJSON(v json.RawMessage) json.RawMessage { return append(json.RawMessage(nil), v...) }
 func jsonEqual(a, b json.RawMessage) bool {
@@ -992,47 +961,28 @@ type C0Caller interface {
 }
 
 type submitter struct {
-	caller   C0Caller
-	facts    SourceActorFactsResolver
-	registry *Registry
+	caller C0Caller
 }
 
-func NewSubmitter(caller C0Caller, facts SourceActorFactsResolver, registry *Registry) Submitter {
-	return &submitter{caller: caller, facts: facts, registry: registry}
+func NewSubmitter(caller C0Caller) Submitter {
+	return &submitter{caller: caller}
 }
 
 func (s *submitter) Submit(ctx context.Context, in SubmitIn) (Reply, error) {
-	if s.caller == nil || s.facts == nil {
+	if s.caller == nil {
 		return Reply{}, errors.New("lagoon: submitter is not wired")
 	}
 	if in.Source == "" || in.Sender == "" || in.RequestID == "" {
 		return Reply{}, invalid("source frame required")
 	}
-	facts, ok, err := s.facts.ActorFacts(ctx, in.Source, in.Sender)
-	if err != nil {
-		return Reply{}, err
-	}
-	if !ok || !facts.Active {
-		return Reply{}, denied("active source member required")
-	}
-	principal := facts.Principal
-	if principal == "" && facts.SourceDeclID != "" {
-		decl, found, err := s.registryDecl(ctx, facts.SourceDeclID)
-		if err != nil {
-			return Reply{}, err
-		}
-		if found {
-			principal = decl.Owner
-		}
-	}
-	if principal == "" {
-		return Reply{}, denied("attributable principal required")
-	}
 	payload, err := json.Marshal(in.Payload)
 	if err != nil {
 		return Reply{}, invalid("payload is not encodable")
 	}
-	raw, err := s.caller.CallRegistrar(ctx, in.Word, forwardedRequest{Source: SourceRef{ChannelID: in.Source, RequestID: in.RequestID}, Initiator: principal, Payload: payload})
+	raw, err := s.caller.CallRegistrar(ctx, in.Word, message.Envelope{
+		ID: message.ID(in.RequestID), ChannelID: in.Source, Sender: message.Sender{ID: in.Sender},
+		Kind: message.KindRequest, Type: string(in.Word), Payload: payload,
+	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return Reply{}, &Error{Code: CodeResultUnknown, Detail: SourceRef{ChannelID: in.Source, RequestID: in.RequestID}.String()}
@@ -1046,13 +996,6 @@ func (s *submitter) Submit(ctx context.Context, in SubmitIn) (Reply, error) {
 	return reply, nil
 }
 
-func (s *submitter) registryDecl(ctx context.Context, id string) (DeclRow, bool, error) {
-	if s.registry == nil {
-		return DeclRow{}, false, errors.New("lagoon: registry read face required")
-	}
-	return s.registry.GetDecl(ctx, id)
-}
-
 func (s *submitter) SubmitApplication(ctx context.Context, word Word, payload any) (Reply, error) {
 	if word != WordPrincipalRegister {
 		return Reply{}, denied("application entrance only accepts principal.register")
@@ -1062,7 +1005,10 @@ func (s *submitter) SubmitApplication(ctx context.Context, word Word, payload an
 		return Reply{}, invalid("payload is not encodable")
 	}
 	ref := SourceRef{ChannelID: protocol.C0ChannelID, RequestID: uuid.NewString()}
-	raw, err := s.caller.CallRegistrar(ctx, word, forwardedRequest{Source: ref, Payload: rawPayload})
+	raw, err := s.caller.CallRegistrar(ctx, word, message.Envelope{
+		ID: message.ID(ref.RequestID), ChannelID: ref.ChannelID, Kind: message.KindRequest,
+		Type: string(word), Payload: rawPayload,
+	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return Reply{}, &Error{Code: CodeResultUnknown, Detail: ref.String()}

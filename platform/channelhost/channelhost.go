@@ -17,9 +17,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
-	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -38,7 +37,6 @@ var (
 )
 
 type Service interface {
-	Provision(context.Context, ProvisionSpec) (ProvisionReceipt, error)
 	Destroy(context.Context, channel.ID) error
 	Open(context.Context, OpenSpec) error
 	Census(context.Context) ([]CensusEntry, error)
@@ -54,31 +52,6 @@ type LocalHost interface {
 type OpenSpec struct {
 	ChannelID    channel.ID
 	ExpectedType string
-}
-
-type Origin struct {
-	ParentChannelID    channel.ID `json:"parent_channel_id"`
-	InitiatorPrincipal string     `json:"initiator_principal"`
-}
-
-type GenesisDeclaration struct {
-	DeclID   string                       `json:"decl_id"`
-	Kind     actor.Kind                   `json:"kind"`
-	Rendered channelspec.RenderedSnapshot `json:"rendered_snapshot"`
-}
-
-type ProvisionSpec struct {
-	ChannelID           channel.ID           `json:"channel_id"`
-	Type                string               `json:"type"`
-	OwnerPrincipal      string               `json:"owner_principal"`
-	GenesisDeclarations []GenesisDeclaration `json:"genesis_declarations"`
-	CreatedAt           int64                `json:"created_at"`
-	Origin              *Origin              `json:"origin,omitempty"`
-}
-
-type ProvisionReceipt struct {
-	ChannelID channel.ID `json:"channel_id"`
-	CreatedAt int64      `json:"created_at"`
 }
 
 type CensusState string
@@ -244,49 +217,47 @@ func (h *ChannelHost) idLock(id channel.ID) *sync.Mutex {
 	return lock
 }
 
-func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (ProvisionReceipt, error) {
+func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisSpec) error {
 	lock := h.idLock(spec.ChannelID)
 	lock.Lock()
 	defer lock.Unlock()
 	if err := h.checkOpen(); err != nil {
-		return ProvisionReceipt{}, err
+		return err
 	}
 	if spec.Type == "" || spec.OwnerPrincipal == "" || spec.CreatedAt <= 0 {
-		return ProvisionReceipt{}, errors.New("channelhost: invalid provision spec")
+		return errors.New("channelhost: invalid genesis spec")
 	}
 	main, tombstone, err := h.paths(spec.ChannelID)
 	if err != nil {
-		return ProvisionReceipt{}, err
+		return err
 	}
 	h.mu.RLock()
 	current := h.entries[spec.ChannelID]
 	h.mu.RUnlock()
 	if current != nil {
-		return ProvisionReceipt{}, ErrServing
+		return ErrServing
 	}
 	if exists(tombstone) {
-		return ProvisionReceipt{}, ErrChannelRetired
+		return ErrChannelRetired
 	}
 	// A failed, never-published attempt is rebuilt from scratch under the same
 	// per-ID lock. Tombstones are never part of this cleanup set.
 	for _, path := range []string{main, main + "-wal", main + "-shm"} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return ProvisionReceipt{}, fmt.Errorf("channelhost: clean unpublished image: %w", err)
+			return fmt.Errorf("channelhost: clean unpublished image: %w", err)
 		}
 	}
 	genesis := storespec.ChannelGenesis{ChannelID: string(spec.ChannelID), Type: spec.Type, OwnerPrincipal: spec.OwnerPrincipal, CreatedAt: spec.CreatedAt}
-	if spec.Origin != nil {
-		genesis.ParentChannelID = string(spec.Origin.ParentChannelID)
-		genesis.InitiatorPrincipal = spec.Origin.InitiatorPrincipal
-	}
-	bootstrapDeclarations := make([]home.DeclareRequest, 0, len(spec.GenesisDeclarations))
-	for _, declaration := range spec.GenesisDeclarations {
+	genesis.ParentChannelID = string(spec.ParentID)
+	genesis.InitiatorPrincipal = spec.InitiatorPrincipal
+	bootstrapDeclarations := make([]home.DeclareRequest, 0, len(spec.Declarations))
+	for _, declaration := range spec.Declarations {
 		if err := declaration.Rendered.Validate(); err != nil {
-			return ProvisionReceipt{}, fmt.Errorf("channelhost: invalid genesis declaration %q: %w", declaration.DeclID, err)
+			return fmt.Errorf("channelhost: invalid genesis declaration %q: %w", declaration.DeclID, err)
 		}
 		placement, err := storePlacement(declaration.Rendered.Placement)
 		if err != nil {
-			return ProvisionReceipt{}, err
+			return err
 		}
 		config := json.RawMessage(append([]byte(nil), declaration.Rendered.Config...))
 		bootstrapDeclarations = append(bootstrapDeclarations, home.DeclareRequest{
@@ -300,7 +271,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 		spec.OwnerPrincipal, bootstrapDeclarations,
 	)
 	if err != nil {
-		return ProvisionReceipt{}, err
+		return err
 	}
 	succeeded := false
 	defer func() {
@@ -308,17 +279,17 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 			_ = home.Shutdown(homeInstance)
 		}
 	}()
-	for _, declaration := range spec.GenesisDeclarations {
+	for _, declaration := range spec.Declarations {
 		ids, err := homeInstance.View().DeclaredInstances(ctx, declaration.DeclID)
 		if err != nil || len(ids) != 1 {
-			return ProvisionReceipt{}, fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
+			return fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
 		}
 	}
 	if err := home.Shutdown(homeInstance); err != nil {
-		return ProvisionReceipt{}, fmt.Errorf("channelhost: close bootstrap home: %w", err)
+		return fmt.Errorf("channelhost: close bootstrap home: %w", err)
 	}
 	succeeded = true
-	return ProvisionReceipt{ChannelID: spec.ChannelID, CreatedAt: spec.CreatedAt}, nil
+	return nil
 }
 
 func storePlacement(in channel.Placement) (storespec.Placement, error) {

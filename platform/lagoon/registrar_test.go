@@ -10,6 +10,8 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	regstore "github.com/wanpengxie/atoll/platform/lagoon/internal/store"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -23,7 +25,7 @@ type registrarFactsStub struct {
 	err   error
 }
 
-func (s registrarFactsStub) ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error) {
+func (s registrarFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return s.facts, s.found, s.err
 }
 
@@ -31,18 +33,12 @@ type registrarSysStub struct {
 	actorbase.Sys
 	code   string
 	detail string
+	value  any
 }
 
-type principalScanner struct{ kind string }
-
-func (s principalScanner) Scan(dest ...any) error {
-	*dest[0].(*string) = "principal"
-	*dest[1].(*string) = s.kind
-	*dest[2].(*sql.NullString) = sql.NullString{}
-	*dest[3].(*sql.NullString) = sql.NullString{}
-	*dest[4].(*PrincipalStatus) = PrincipalPresent
-	*dest[5].(*int64) = 1
-	return nil
+func (s *registrarSysStub) Reply(_ actorbase.Msg, value any) (message.ID, error) {
+	s.value = value
+	return "reply", nil
 }
 
 func (s *registrarSysStub) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
@@ -58,11 +54,11 @@ func registrarMessage(word Word, payload string) actorbase.Msg {
 }
 
 func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/registry.db")
+	dbPath := t.TempDir() + "/registry.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
 	if _, err := db.Exec(`CREATE TABLE decls (
 		id TEXT PRIMARY KEY, name TEXT, owner TEXT, default_class TEXT, config_json TEXT,
 		status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`); err != nil {
@@ -71,8 +67,16 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	if _, err := db.Exec(`DROP TABLE decls`); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := regstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
 	commits := 0
-	r := NewRegistrar(&Registry{db: db, onCommit: func(Change) { commits++ }}, nil, nil)
+	r := NewRegistrar(&Registry{store: storage, onCommit: func(Change) { commits++ }}, nil, nil)
 	_, err = r.editDecl(context.Background(), "root", DeclEdit{ID: "decl"})
 	if err == nil {
 		t.Fatal("decl.edit succeeded after its table was removed")
@@ -98,20 +102,6 @@ func TestDetachAuthorizesBeforeRevealingLocalDeviceReservation(t *testing.T) {
 	}
 }
 
-func TestScanPrincipalAcceptsOnlyHumanAndAgentKinds(t *testing.T) {
-	for _, kind := range []actor.Kind{actor.KindHuman, actor.KindAgent} {
-		row, err := scanPrincipal(principalScanner{kind: string(kind)})
-		if err != nil || row.Kind != kind {
-			t.Fatalf("kind %q scanned as (%q,%v)", kind, row.Kind, err)
-		}
-	}
-	for _, kind := range []actor.Kind{actor.KindTool, actor.KindSystem} {
-		if _, err := scanPrincipal(principalScanner{kind: string(kind)}); err == nil {
-			t.Fatalf("principal kind %q was accepted", kind)
-		}
-	}
-}
-
 func TestRegistrarFactsFailureUsesClosedResultUnknownCode(t *testing.T) {
 	want := errors.New("facts backend failed")
 	r := NewRegistrar(&Registry{}, registrarFactsStub{err: want}, nil)
@@ -123,17 +113,78 @@ func TestRegistrarFactsFailureUsesClosedResultUnknownCode(t *testing.T) {
 }
 
 func TestRegistrarExecutionFailureUsesClosedResultUnknownCode(t *testing.T) {
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/empty.db")
+	dbPath := t.TempDir() + "/empty.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	r := NewRegistrar(&Registry{db: db}, registrarFactsStub{
+	if _, err := db.Exec(`PRAGMA user_version`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := regstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	r := NewRegistrar(&Registry{store: storage}, registrarFactsStub{
 		facts: channelspec.ActorFacts{Active: true, Principal: "root", Kind: actor.KindHuman}, found: true,
 	}, nil)
 	sys := &registrarSysStub{}
 	r.handle(sys, registrarMessage(WordChannelGet, `{"channel_id":"c0"}`))
 	if sys.code != string(CodeResultUnknown) || !strings.Contains(sys.detail, "no such table") {
 		t.Fatalf("failure=(%q,%q), want result_unknown with query detail", sys.code, sys.detail)
+	}
+}
+
+func TestForwardedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
+	dbPath := t.TempDir() + "/registry.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`,
+		`CREATE TABLE principals (id TEXT PRIMARY KEY, kind TEXT, email TEXT, display_name TEXT, status TEXT, created_at INTEGER)`,
+		`INSERT INTO decls VALUES ('agent-decl','agent','root','codex','{}','present','private',1,1)`,
+		`INSERT INTO principals VALUES ('root','human','root@example.test','Root','present',1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := regstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	r := NewRegistrar(&Registry{store: storage}, registrarFactsStub{
+		facts: channelspec.ActorFacts{Active: true, SourceDeclID: "agent-decl", Kind: actor.KindAgent}, found: true,
+	}, nil)
+	forwarded, err := json.Marshal(message.Envelope{
+		ID: "source-request", ChannelID: "ordinary", Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:member"},
+		Kind: message.KindRequest, Type: string(WordPrincipalMe), Payload: json.RawMessage(`{"unknown_field":true}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "c0-request", ChannelID: protocol.C0ChannelID, Sender: message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind: message.KindRequest, Type: string(WordPrincipalMe), Payload: forwarded,
+	})
+	sys := &registrarSysStub{}
+	r.handle(sys, msg)
+	reply, ok := sys.value.(Reply)
+	if !ok {
+		t.Fatalf("registrar reply=%T failure=(%q,%q)", sys.value, sys.code, sys.detail)
+	}
+	var principal regspec.PrincipalRow
+	if err := reply.DecodeValue(&principal); err != nil || principal.ID != "root" {
+		t.Fatalf("receiver attribution principal=%+v err=%v", principal, err)
 	}
 }

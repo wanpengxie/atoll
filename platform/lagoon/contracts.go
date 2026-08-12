@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -102,102 +103,13 @@ type SourceRef struct {
 
 func (r SourceRef) String() string { return string(r.ChannelID) + ":" + r.RequestID }
 
-type ChannelStatus string
-
-const (
-	ChannelPresent ChannelStatus = "present"
-	ChannelRetired ChannelStatus = "retired"
-)
-
-type PrincipalStatus string
-
-const (
-	PrincipalPresent PrincipalStatus = "present"
-	PrincipalRetired PrincipalStatus = "retired"
-)
-
-type DeclStatus string
-
-const (
-	DeclPresent DeclStatus = "present"
-	DeclRevoked DeclStatus = "revoked"
-)
-
-type DeviceStatus string
-
-const (
-	DevicePresent DeviceStatus = "present"
-	DeviceRetired DeviceStatus = "retired"
-)
-
-type CredentialStatus string
-
-const (
-	CredentialActive  CredentialStatus = "active"
-	CredentialRetired CredentialStatus = "retired"
-)
-
-type ChannelRow struct {
-	ID             channel.ID      `json:"id"`
-	ParentID       channel.ID      `json:"parent_id,omitempty"`
-	Name           string          `json:"name"`
-	Type           string          `json:"type"`
-	Status         ChannelStatus   `json:"status"`
-	OwnerPrincipal string          `json:"owner_principal"`
-	Spec           json.RawMessage `json:"spec"`
-	CreatedAt      int64           `json:"created_at"`
-}
-
-type PrincipalRow struct {
-	ID          string          `json:"id"`
-	Kind        actor.Kind      `json:"kind"`
-	Email       string          `json:"email,omitempty"`
-	DisplayName string          `json:"display_name,omitempty"`
-	Status      PrincipalStatus `json:"status"`
-	CreatedAt   int64           `json:"created_at"`
-}
-
 // CredentialRow is intentionally private. CredentialReply is the only public
 // credential shape and structurally has no secret_hash field.
 type CredentialReply struct {
-	PrincipalID string           `json:"principal_id"`
-	Kind        string           `json:"kind"`
-	Status      CredentialStatus `json:"status"`
-	RotatedAt   int64            `json:"rotated_at,omitempty"`
-}
-
-type DeclRow struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Owner        string          `json:"owner"`
-	DefaultClass string          `json:"default_class"`
-	Config       json.RawMessage `json:"config,omitempty"`
-	Status       DeclStatus      `json:"status"`
-	Visibility   string          `json:"visibility"`
-	CreatedAt    int64           `json:"created_at"`
-	UpdatedAt    int64           `json:"updated_at"`
-}
-
-type OverlayRow struct {
-	DeclID    string          `json:"decl_id"`
-	ChannelID channel.ID      `json:"channel_id"`
-	Config    json.RawMessage `json:"config,omitempty"`
-	UpdatedAt int64           `json:"updated_at"`
-}
-
-type DeviceRow struct {
-	ID             string       `json:"id"`
-	OwnerPrincipal string       `json:"owner_principal"`
-	Name           string       `json:"name"`
-	Key            string       `json:"key"`
-	Status         DeviceStatus `json:"status"`
-	CreatedAt      int64        `json:"created_at"`
-}
-
-type BindingRow struct {
-	ChannelID  channel.ID `json:"channel_id"`
-	DeviceID   string     `json:"device_id"`
-	AttachedAt int64      `json:"attached_at"`
+	PrincipalID string                   `json:"principal_id"`
+	Kind        string                   `json:"kind"`
+	Status      regspec.CredentialStatus `json:"status"`
+	RotatedAt   int64                    `json:"rotated_at,omitempty"`
 }
 
 type Confirmation struct {
@@ -297,12 +209,24 @@ type Reply struct {
 	Source SourceRef       `json:"source,omitempty"`
 }
 
-func (r Reply) DecodeValue(out any) error {
-	if len(r.Value) == 0 {
+func (r Reply) ValidValue() error {
+	value := bytes.TrimSpace(r.Value)
+	if len(value) == 0 {
 		return errors.New("lagoon: reply has no value")
 	}
-	if string(bytes.TrimSpace(r.Value)) == "null" {
+	if bytes.Equal(value, []byte("null")) {
 		return errors.New("lagoon: reply value is null")
+	}
+	var raw json.RawMessage
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return fmt.Errorf("lagoon: invalid reply value: %w", err)
+	}
+	return nil
+}
+
+func (r Reply) DecodeValue(out any) error {
+	if err := r.ValidValue(); err != nil {
+		return err
 	}
 	if err := json.Unmarshal(r.Value, out); err != nil {
 		return fmt.Errorf("lagoon: decode reply value: %w", err)
@@ -321,42 +245,6 @@ type SubmitIn struct {
 type Submitter interface {
 	Submit(context.Context, SubmitIn) (Reply, error)
 	SubmitApplication(context.Context, Word, any) (Reply, error)
-}
-
-// SpaceOps mirrors the fourteen authenticated registrar write words. Anonymous
-// principal.register is intentionally absent and enters via SubmitApplication.
-type SpaceOps interface {
-	CreateChannel(context.Context, ChannelCreate) (ChannelRow, error)
-	RetireChannel(context.Context, ChannelRetire) (ChannelRow, error)
-	RetirePrincipal(context.Context, PrincipalRetire) (PrincipalRow, error)
-	SetCredential(context.Context, CredentialSet) (CredentialReply, error)
-	RegisterDecl(context.Context, DeclRegister) (DeclRow, error)
-	EditDecl(context.Context, DeclEdit) (DeclRow, error)
-	RevokeDecl(context.Context, DeclRevoke) (DeclRow, error)
-	SetOverlay(context.Context, OverlaySet) (OverlayRow, error)
-	ClearOverlay(context.Context, OverlayClear) (Confirmation, error)
-	MintDevice(context.Context, DeviceMint) (DeviceRow, error)
-	ClaimDevice(context.Context, DeviceClaim) (DeviceRow, error)
-	RetireDevice(context.Context, DeviceRetire) (DeviceRow, error)
-	AttachDevice(context.Context, DeviceBinding) (BindingRow, error)
-	DetachDevice(context.Context, DeviceBinding) (Confirmation, error)
-}
-
-type SpaceQueries interface {
-	ListChannels(context.Context, ChannelList) ([]ChannelRow, error)
-	GetChannel(context.Context, ChannelGet) (ChannelRow, error)
-	ListCandidates(context.Context, ChannelCandidates) ([]PrincipalRow, error)
-	ListDecls(context.Context) ([]DeclRow, error)
-	ListDevices(context.Context) ([]DeviceRow, error)
-	Me(context.Context) (PrincipalRow, error)
-}
-
-type SpaceOpsBinder interface {
-	Bind(SubmitIn) (SpaceOps, SpaceQueries)
-}
-
-type ActorFactsResolver interface {
-	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 }
 
 type SystemGenesisResolver interface {
