@@ -143,6 +143,103 @@ make test
 
 The web UI lives in a separate repository and talks to the same portal API.
 
+## Talking to a local node
+
+`atoll up` is the whole node. It installs or opens c0, provisions the owner and
+the home channel, binds the listener, and **connects the well-known local
+device** — you do not mint or attach a device by hand. Reach for
+`atoll-server` + `atoll-daemon` separately only when you actually want the
+roles split across machines.
+
+```bash
+bin/atoll up --dir ~/.atoll --addr 127.0.0.1:8832
+curl -s http://127.0.0.1:8832/healthz     # {"status":"ok"}
+```
+
+### Authenticating
+
+A node writes a bearer token to `<dir>/server/atoll-token` (mode 0600) for
+local automation. Use it instead of the login/cookie dance:
+
+```bash
+TOKEN=$(cat ~/.atoll/server/atoll-token)
+AUTH="Authorization: Bearer $TOKEN"
+```
+
+### The three surfaces
+
+The portal exposes exactly these routes, and there are only two ways in:
+collaboration (over `/ws`) and observation (over `/obs`). **There is no REST
+endpoint that sends a message** — that is the design, not a gap.
+
+| Surface | Method | What it is |
+|---|---|---|
+| `/obs/...` | plain `GET` | read-only observation; never appends to a log |
+| `/ws` | WebSocket | the only way to send a request into a channel |
+| `/files/<address>?t=<ticket>` | `GET` / `PUT` | data plane; the ticket is issued over `/ws` |
+
+**Reads are one curl each:**
+
+```bash
+curl -s -H "$AUTH" http://127.0.0.1:8832/obs/space/channels
+curl -s -H "$AUTH" http://127.0.0.1:8832/obs/space/daemons
+curl -s -H "$AUTH" http://127.0.0.1:8832/obs/space/principals
+curl -s -H "$AUTH" http://127.0.0.1:8832/obs/space/decls
+curl -s -H "$AUTH" http://127.0.0.1:8832/obs/channel/c0/profile
+curl -s -H "$AUTH" http://127.0.0.1:8832/obs/channel/c0/actors
+```
+
+Every answer is `{subject, kind, complete, items[]}`, and every item carries a
+`declared` half (what the ledger says) beside an `actual` half (what was
+observed just now). An observation that could not be taken comes back as
+`unknown` with a reason — never as a fabricated `false`:
+
+```json
+{"name": "device_online", "value": null, "unknown": true, "reason": "no_testimony"}
+```
+
+**Writes go over the WebSocket.** Connect with the same bearer token, send one
+`attach` frame, then one `submit` frame per request; the receipt and everyone
+else's messages arrive on the same connection:
+
+```jsonc
+// 1. subscribe
+{"v":2,"frame_type":"attach","ref":"a","payload":{"since":{}}}
+
+// 2. send a request into c0, addressed to one actor
+{"v":2,"frame_type":"submit","ref":"r1","payload":{
+  "channel_id":"c0","msg_type":"actor.list","kind":"request",
+  "visibility":"public","audience":["system"],"payload":{}}}
+```
+
+The receipt carries `payload.message_id`; the answer arrives later as a `feed`
+frame whose envelope has `kind:"response"` and `parent_id` equal to that id,
+with a terminal `status` of `completed` or `failed`. Because the connection is
+stateful, a shell driving a node holds it open for the whole session rather
+than reconnecting per command.
+
+### Worked example: attach an MCP server at runtime
+
+Two messages, no rebuild. `decl.register` goes to the registrar (find its id in
+`actor.list`); `channel.introduce_actor` goes to `system`:
+
+```jsonc
+// decl.register
+{"id":"my-mcp","name":"My MCP","class":"mcp","visibility":"private",
+ "config":{"name":"testsrv","transport":"http","url":"http://127.0.0.1:8931/mcp"}}
+
+// channel.introduce_actor  ->  {"instance_id":"tool:my-mcp:...","created":true}
+{"kind":"tool","decl_id":"my-mcp"}
+```
+
+The actor connects on birth and discovers its own tool surface, so
+`actor.describe` answers with that server's live `tools/list` — each tool
+becomes a message type prefixed by the `name` you declared
+(`testsrv.echo`, `testsrv.add`, …), and the server's self-reported identity and
+instructions are carried through verbatim. Use `transport:"stdio"` with
+`command` / `args` / `cwd` instead of `url` to run the server as a local
+subprocess.
+
 ## Writing an actor
 
 An actor is a function over a small verb table. `Sys` is handed to it at birth and

@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"regexp"
+	"time"
 )
 
 const (
-	transportStdio = "stdio"
-	transportHTTP  = "http"
+	transportStdio       = "stdio"
+	transportHTTP        = "http"
+	defaultCallTimeoutMS = int64(60_000)
 )
 
 var configNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
@@ -20,13 +23,14 @@ var configNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 // Config contains only the facts needed to reach one external MCP server.
 // Its tool surface is deliberately absent: the actor discovers that live.
 type Config struct {
-	Name      string            `json:"name"`
-	Transport string            `json:"transport"`
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	URL       string            `json:"url,omitempty"`
+	Name          string            `json:"name"`
+	Transport     string            `json:"transport"`
+	Command       string            `json:"command,omitempty"`
+	Args          []string          `json:"args,omitempty"`
+	Cwd           string            `json:"cwd,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	CallTimeoutMS int64             `json:"call_timeout_ms,omitempty"`
 }
 
 func parseConfig(raw json.RawMessage) (Config, error) {
@@ -50,6 +54,11 @@ func parseConfig(raw json.RawMessage) (Config, error) {
 	has := func(name string) bool {
 		_, ok := fields[name]
 		return ok
+	}
+	if !has("call_timeout_ms") {
+		cfg.CallTimeoutMS = defaultCallTimeoutMS
+	} else if cfg.CallTimeoutMS <= 0 || cfg.CallTimeoutMS > math.MaxInt64/int64(time.Millisecond) {
+		return Config{}, errors.New("mcp config: call_timeout_ms must be a positive millisecond duration")
 	}
 	if cfg.Name == "" {
 		return Config{}, errors.New("mcp config: name required")

@@ -15,12 +15,15 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 const (
-	protocolVersion = "2026-07-28"
-	clientName      = "atoll-mcp"
-	clientVersion   = "0.1.0"
+	protocolVersion       = "2026-07-28"
+	clientName            = "atoll-mcp"
+	clientVersion         = "0.1.0"
+	stdioCancelWriteGrace = 100 * time.Millisecond
 )
 
 type rpcRequest struct {
@@ -64,7 +67,7 @@ type transport interface {
 
 type client struct {
 	transport transport
-	nextID    int64
+	nextID    atomic.Int64
 }
 
 func newClient(cfg Config) (*client, error) {
@@ -87,8 +90,7 @@ func newClient(cfg Config) (*client, error) {
 func (c *client) Close() error { return c.transport.Close() }
 
 func (c *client) request(ctx context.Context, method, name string, params map[string]any, progress bool, out any) (responseInfo, error) {
-	c.nextID++
-	id := c.nextID
+	id := c.nextID.Add(1)
 	meta := map[string]any{
 		"io.modelcontextprotocol/protocolVersion": protocolVersion,
 		"io.modelcontextprotocol/clientInfo": map[string]any{
@@ -293,13 +295,24 @@ func readSSE(r io.Reader, requestID int64) (rpcResponse, int, error) {
 }
 
 type stdioTransport struct {
-	roundMu  sync.Mutex
-	closeMu  sync.Mutex
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	scanner  *bufio.Scanner
-	closeErr error
-	closed   bool
+	roundMu   sync.Mutex
+	writeMu   sync.Mutex
+	stateMu   sync.Mutex
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	scanner   *bufio.Scanner
+	incoming  chan stdioRead
+	stop      chan struct{}
+	waitDone  chan struct{}
+	closeOnce sync.Once
+	closed    bool
+	readErr   error
+	closeErr  error
+}
+
+type stdioRead struct {
+	response rpcResponse
+	err      error
 }
 
 func startStdio(cfg Config) (*stdioTransport, error) {
@@ -322,7 +335,12 @@ func startStdio(cfg Config) (*stdioTransport, error) {
 	}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64<<10), 4<<20)
-	return &stdioTransport{cmd: cmd, stdin: stdin, scanner: scanner}, nil
+	t := &stdioTransport{
+		cmd: cmd, stdin: stdin, scanner: scanner,
+		incoming: make(chan stdioRead, 256), stop: make(chan struct{}), waitDone: make(chan struct{}),
+	}
+	go t.readLoop()
+	return t, nil
 }
 
 func mergedEnv(overrides map[string]string) []string {
@@ -350,77 +368,159 @@ func mergedEnv(overrides map[string]string) []string {
 func (t *stdioTransport) RoundTrip(ctx context.Context, request rpcRequest, _ string) (rpcResponse, responseInfo, error) {
 	t.roundMu.Lock()
 	defer t.roundMu.Unlock()
-	t.closeMu.Lock()
-	if t.closed {
-		t.closeMu.Unlock()
+	if t.isClosed() {
 		return rpcResponse{}, responseInfo{}, errors.New("mcp stdio: process is not running")
 	}
-	t.closeMu.Unlock()
-	raw, err := json.Marshal(request)
-	if err != nil {
-		return rpcResponse{}, responseInfo{}, err
-	}
-	if _, err := t.stdin.Write(append(raw, '\n')); err != nil {
-		t.closeProcess()
+	if err := t.writeJSONContext(ctx, request); err != nil {
 		return rpcResponse{}, responseInfo{}, fmt.Errorf("mcp stdio: write: %w", err)
 	}
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			t.closeProcess()
-		case <-stopWatch:
-		}
-	}()
-	defer close(stopWatch)
 	info := responseInfo{ContentType: "application/json"}
-	for t.scanner.Scan() {
-		var response rpcResponse
-		if err := json.Unmarshal(t.scanner.Bytes(), &response); err != nil {
-			t.closeProcess()
-			return rpcResponse{}, info, fmt.Errorf("mcp stdio: decode response: %w", err)
-		}
-		if response.Method != "" && len(response.ID) == 0 {
-			info.Notifications++
-			continue
-		}
-		var id int64
-		if json.Unmarshal(response.ID, &id) == nil && id == request.ID {
-			return response, info, nil
+	for {
+		select {
+		case item, ok := <-t.incoming:
+			if !ok {
+				if err := t.readerError(); err != nil {
+					return rpcResponse{}, info, err
+				}
+				return rpcResponse{}, info, errors.New("mcp stdio: process ended before response")
+			}
+			if item.err != nil {
+				return rpcResponse{}, info, item.err
+			}
+			response := item.response
+			if response.Method != "" && len(response.ID) == 0 {
+				info.Notifications++
+				continue
+			}
+			var id int64
+			if json.Unmarshal(response.ID, &id) == nil && id == request.ID {
+				return response, info, nil
+			}
+		case <-ctx.Done():
+			// stdio remains deliberately serial, but a timed-out request must not
+			// own the subprocess forever. The protocol supports cancellation by
+			// request id; keep the process and reader alive so the next serial call
+			// can proceed after the server cancels this handler.
+			t.sendCancellation(map[string]any{
+				"jsonrpc": "2.0", "method": "notifications/cancelled",
+				"params": map[string]any{"requestId": request.ID, "reason": ctx.Err().Error()},
+			})
+			return rpcResponse{}, info, ctx.Err()
 		}
 	}
-	scanErr := t.scanner.Err()
-	t.closeProcess()
-	if ctx.Err() != nil {
-		return rpcResponse{}, info, ctx.Err()
-	}
-	if scanErr != nil {
-		return rpcResponse{}, info, fmt.Errorf("mcp stdio: read: %w", scanErr)
-	}
-	return rpcResponse{}, info, errors.New("mcp stdio: process ended before response")
 }
 
 func (t *stdioTransport) Close() error {
-	t.closeProcess()
-	t.closeMu.Lock()
-	defer t.closeMu.Unlock()
+	t.abort()
+	<-t.waitDone
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
 	return t.closeErr
 }
 
-func (t *stdioTransport) closeProcess() {
-	t.closeMu.Lock()
-	defer t.closeMu.Unlock()
-	t.closeLocked()
+func (t *stdioTransport) abort() {
+	t.closeOnce.Do(func() {
+		t.stateMu.Lock()
+		t.closed = true
+		t.stateMu.Unlock()
+		close(t.stop)
+		_ = t.stdin.Close()
+		if t.cmd.Process != nil {
+			_ = t.cmd.Process.Kill()
+		}
+		go func() {
+			err := t.cmd.Wait()
+			t.stateMu.Lock()
+			t.closeErr = err
+			t.stateMu.Unlock()
+			close(t.waitDone)
+		}()
+	})
 }
 
-func (t *stdioTransport) closeLocked() {
-	if t.closed {
-		return
+func (t *stdioTransport) isClosed() bool {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.closed
+}
+
+func (t *stdioTransport) writeJSON(value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
 	}
-	t.closed = true
-	_ = t.stdin.Close()
-	if t.cmd.Process != nil {
-		_ = t.cmd.Process.Kill()
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	if t.isClosed() {
+		return errors.New("process is not running")
 	}
-	t.closeErr = t.cmd.Wait()
+	_, err = t.stdin.Write(append(raw, '\n'))
+	return err
+}
+
+func (t *stdioTransport) writeJSONContext(ctx context.Context, value any) error {
+	done := make(chan error, 1)
+	go func() { done <- t.writeJSON(value) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		// Closing stdin is the only portable way to interrupt a blocked pipe
+		// write. A child that does not read its request cannot be kept usable;
+		// mark this transport closed, but never let it outlive the call bound.
+		t.abort()
+		return ctx.Err()
+	}
+}
+
+func (t *stdioTransport) sendCancellation(value any) {
+	done := make(chan struct{})
+	go func() {
+		_ = t.writeJSON(value)
+		close(done)
+	}()
+	timer := time.NewTimer(stdioCancelWriteGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		// A server that has stopped reading stdin cannot receive cancellation
+		// or another call. Retire that subprocess instead of pinning writeMu.
+		t.abort()
+	case <-t.stop:
+	}
+}
+
+func (t *stdioTransport) readLoop() {
+	defer close(t.incoming)
+	for t.scanner.Scan() {
+		var response rpcResponse
+		if err := json.Unmarshal(t.scanner.Bytes(), &response); err != nil {
+			t.publishRead(stdioRead{err: fmt.Errorf("mcp stdio: decode response: %w", err)})
+			return
+		}
+		if !t.publishRead(stdioRead{response: response}) {
+			return
+		}
+	}
+	if err := t.scanner.Err(); err != nil {
+		t.stateMu.Lock()
+		t.readErr = fmt.Errorf("mcp stdio: read: %w", err)
+		t.stateMu.Unlock()
+	}
+}
+
+func (t *stdioTransport) publishRead(item stdioRead) bool {
+	select {
+	case t.incoming <- item:
+		return true
+	case <-t.stop:
+		return false
+	}
+}
+
+func (t *stdioTransport) readerError() error {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.readErr
 }

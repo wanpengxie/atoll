@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
@@ -28,8 +30,10 @@ type snapshot struct {
 type mcpActor struct {
 	cfg       Config
 	client    *client
+	mu        sync.RWMutex
 	snapshot  snapshot
 	lastError error
+	inflight  sync.WaitGroup
 }
 
 func Def(cfg Config) actorbase.Def {
@@ -44,7 +48,10 @@ func (a *mcpActor) run(sys actorbase.Sys) error {
 		a.lastError = err
 	} else {
 		a.client = client
-		defer client.Close()
+		defer func() {
+			_ = client.Close()
+			a.inflight.Wait()
+		}()
 		a.refresh(sys.Life())
 	}
 	for {
@@ -55,27 +62,41 @@ func (a *mcpActor) run(sys actorbase.Sys) error {
 		if msg.Kind != message.KindRequest {
 			continue
 		}
-		if msg.Type == introspect.QueryDescribe {
-			a.describe(sys, msg)
+		if a.cfg.Transport == transportHTTP {
+			a.inflight.Add(1)
+			go func() {
+				defer a.inflight.Done()
+				a.handle(sys, msg)
+			}()
 			continue
 		}
-		a.call(sys, msg)
+		a.handle(sys, msg)
 	}
+}
+
+func (a *mcpActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
+	if msg.Type == introspect.QueryDescribe {
+		a.describe(sys, msg)
+		return
+	}
+	a.call(sys, msg)
 }
 
 func (a *mcpActor) refresh(ctx context.Context) {
 	discover, err := a.client.discover(ctx)
 	if err != nil {
-		a.lastError = err
+		a.setLastError(err)
 		return
 	}
 	tools, err := a.client.listTools(ctx)
 	if err != nil {
-		a.lastError = err
+		a.setLastError(err)
 		return
 	}
+	a.mu.Lock()
 	a.snapshot = buildSnapshot(a.cfg.Name, discover, tools)
 	a.lastError = nil
+	a.mu.Unlock()
 }
 
 func (a *mcpActor) describe(sys actorbase.Sys, msg actorbase.Msg) {
@@ -87,25 +108,29 @@ func (a *mcpActor) describe(sys actorbase.Sys, msg actorbase.Msg) {
 	// A snapshot says what the server last advertised; a lightweight discover
 	// probe says whether that snapshot is currently reachable. It never
 	// replaces or empties the last successful tool list.
-	if a.client != nil && a.lastError == nil {
+	if a.client != nil && a.currentLastError() == nil {
 		if _, err := a.client.discover(msg.Ctx()); err != nil {
-			a.lastError = err
+			a.setLastError(err)
 		}
 	}
-	description := a.snapshot.description
+	a.mu.RLock()
+	current := a.snapshot
+	lastError := a.lastError
+	a.mu.RUnlock()
+	description := current.description
 	if description == "" {
 		description = "经 mcp 类接入的外部服务"
 	}
-	if a.lastError != nil {
-		if len(a.snapshot.types) == 0 {
-			description += "; 从未成功连接: " + a.lastError.Error()
+	if lastError != nil {
+		if len(current.types) == 0 {
+			description += "; 从未成功连接: " + lastError.Error()
 		} else {
-			description += "; 当前够不着（保留最后一次成功快照）: " + a.lastError.Error()
+			description += "; 当前够不着（保留最后一次成功快照）: " + lastError.Error()
 		}
 	}
 	answer, ok := introspect.AnswerDescribe(introspect.Describe{
 		ActorID: string(sys.Self()), Description: description,
-		SkillDoc: a.snapshot.skillDoc, Types: a.snapshot.types,
+		SkillDoc: current.skillDoc, Types: current.types,
 	}, req)
 	if !ok {
 		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("mcp actor does not handle %s", req.Type))
@@ -115,11 +140,14 @@ func (a *mcpActor) describe(sys actorbase.Sys, msg actorbase.Msg) {
 }
 
 func (a *mcpActor) call(sys actorbase.Sys, msg actorbase.Msg) {
-	if a.lastError != nil {
-		_, _ = sys.Fail(msg, "mcp_unreachable", a.lastError.Error())
+	a.mu.RLock()
+	lastError := a.lastError
+	toolName, ok := a.snapshot.tools[msg.Type]
+	a.mu.RUnlock()
+	if lastError != nil {
+		_, _ = sys.Fail(msg, "mcp_unreachable", lastError.Error())
 		return
 	}
-	toolName, ok := a.snapshot.tools[msg.Type]
 	if !ok {
 		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("mcp actor does not handle %s", msg.Type))
 		return
@@ -128,19 +156,29 @@ func (a *mcpActor) call(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "mcp_unreachable", "MCP client is unavailable")
 		return
 	}
-	result, _, err := a.client.callTool(msg.Ctx(), toolName, msg.Payload, false)
+	callCtx, cancel := context.WithTimeout(msg.Ctx(), a.callTimeout())
+	defer cancel()
+	result, _, err := a.client.callTool(callCtx, toolName, msg.Payload, false)
 	if err != nil {
 		var protocolErr *rpcError
 		if errors.As(err, &protocolErr) {
-			a.lastError = nil
+			a.setLastError(nil)
 			_, _ = sys.Fail(msg, fmt.Sprintf("mcp_protocol_%d", protocolErr.Code), protocolErr.Error())
 			return
 		}
-		a.lastError = err
+		if errors.Is(err, context.DeadlineExceeded) {
+			_, _ = sys.Fail(msg, "mcp_timeout", fmt.Sprintf("MCP tool %s exceeded call timeout %s", toolName, a.callTimeout()))
+			return
+		}
+		if errors.Is(err, context.Canceled) {
+			_, _ = sys.Fail(msg, "mcp_cancelled", fmt.Sprintf("MCP tool %s was cancelled", toolName))
+			return
+		}
+		a.setLastError(err)
 		_, _ = sys.Fail(msg, "mcp_unreachable", err.Error())
 		return
 	}
-	a.lastError = nil
+	a.setLastError(nil)
 	payload, detail, err := translateCallResult(result)
 	if err != nil {
 		_, _ = sys.Fail(msg, "mcp_result_invalid", err.Error())
@@ -151,6 +189,26 @@ func (a *mcpActor) call(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	_, _ = sys.Reply(msg, payload)
+}
+
+func (a *mcpActor) callTimeout() time.Duration {
+	millis := a.cfg.CallTimeoutMS
+	if millis == 0 {
+		millis = defaultCallTimeoutMS
+	}
+	return time.Duration(millis) * time.Millisecond
+}
+
+func (a *mcpActor) currentLastError() error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.lastError
+}
+
+func (a *mcpActor) setLastError(err error) {
+	a.mu.Lock()
+	a.lastError = err
+	a.mu.Unlock()
 }
 
 func translateCallResult(result callResult) (map[string]any, string, error) {

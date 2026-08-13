@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/registry"
 )
@@ -49,6 +50,27 @@ func TestValidateConfigDoesNotProbeNetwork(t *testing.T) {
 	}
 	if cfg.URL != "http://127.0.0.1:1/mcp" {
 		t.Fatalf("url=%q", cfg.URL)
+	}
+	if cfg.CallTimeoutMS != defaultCallTimeoutMS {
+		t.Fatalf("default call_timeout_ms=%d want=%d", cfg.CallTimeoutMS, defaultCallTimeoutMS)
+	}
+}
+
+func TestCallTimeoutConfig(t *testing.T) {
+	cfg, err := parseConfig(json.RawMessage(`{"name":"bounded","transport":"http","url":"http://example.test/mcp","call_timeout_ms":125}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := time.Duration(cfg.CallTimeoutMS) * time.Millisecond; got != 125*time.Millisecond {
+		t.Fatalf("call timeout=%s", got)
+	}
+	for _, raw := range []string{
+		`{"name":"bounded","transport":"http","url":"http://example.test/mcp","call_timeout_ms":0}`,
+		`{"name":"bounded","transport":"http","url":"http://example.test/mcp","call_timeout_ms":-1}`,
+	} {
+		if _, err := parseConfig(json.RawMessage(raw)); err == nil || !strings.Contains(err.Error(), "positive millisecond") {
+			t.Fatalf("invalid call timeout accepted: %s (err=%v)", raw, err)
+		}
 	}
 }
 

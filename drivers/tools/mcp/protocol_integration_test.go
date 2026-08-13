@@ -13,6 +13,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
@@ -65,6 +68,9 @@ func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
 			t.Fatalf("progress changed final result:\nwithout=%#v\nwith=%#v", without, with)
 		}
 		t.Logf("plain=%+v stream=%+v final results equal", plainInfo, streamInfo)
+		verifyTimeoutAndReuse(t, c)
+		verifyActorTimeoutWithoutExpires(t, c, transportHTTP)
+		verifyHTTPConcurrency(t, c)
 	})
 
 	t.Run("stdio and close owns child", func(t *testing.T) {
@@ -78,6 +84,8 @@ func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
 		stdio := c.transport.(*stdioTransport)
 		pid := stdio.cmd.Process.Pid
 		verifyReferenceClient(t, c)
+		verifyTimeoutAndReuse(t, c)
+		verifyActorTimeoutWithoutExpires(t, c, transportStdio)
 		if err := c.Close(); err != nil && !stringsContains(err.Error(), "killed") {
 			t.Fatalf("close: %v", err)
 		}
@@ -86,6 +94,106 @@ func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
 		}
 		t.Logf("stdio child %d exited after client close", pid)
 	})
+}
+
+type terminalRecorder struct {
+	actorbase.Sys
+	reply    map[string]any
+	failCode string
+	failText string
+}
+
+func (s *terminalRecorder) Reply(_ actorbase.Msg, value any) (message.ID, error) {
+	s.reply, _ = value.(map[string]any)
+	return "reply", nil
+}
+
+func (s *terminalRecorder) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
+	s.failCode, s.failText = code, detail
+	return "fail", nil
+}
+
+func verifyActorTimeoutWithoutExpires(t *testing.T, c *client, transportName string) {
+	t.Helper()
+	a := &mcpActor{
+		cfg:    Config{Name: "fixture", Transport: transportName, CallTimeoutMS: 150},
+		client: c,
+		snapshot: snapshot{tools: map[string]string{
+			"fixture.never_returns": "never_returns",
+			"fixture.echo":          "echo",
+		}},
+	}
+	sys := &terminalRecorder{}
+	envelope := message.Envelope{
+		ID: "caller-unbounded", Kind: message.KindRequest, Type: "fixture.never_returns",
+		Payload: json.RawMessage(`{}`),
+	}
+	if envelope.ExpiresAt != nil {
+		t.Fatal("test fixture unexpectedly set expires_at")
+	}
+	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), envelope))
+	if sys.failCode != "mcp_timeout" || sys.failText == "" {
+		t.Fatalf("actor timeout terminal: code=%q detail=%q", sys.failCode, sys.failText)
+	}
+	if err := a.currentLastError(); err != nil {
+		t.Fatalf("actor timeout poisoned reachability: %v", err)
+	}
+	sys.failCode, sys.failText = "", ""
+	envelope.ID = "after-timeout"
+	envelope.Type = "fixture.echo"
+	envelope.Payload = json.RawMessage(`{"text":"actor-still-usable"}`)
+	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), envelope))
+	if sys.failCode != "" || sys.reply["text"] != "actor-still-usable" {
+		t.Fatalf("actor call after timeout: reply=%v fail=%s %s", sys.reply, sys.failCode, sys.failText)
+	}
+	t.Log("actor mapped a request with nil ExpiresAt to mcp_timeout, preserved reachability, and served the next call")
+}
+
+func verifyTimeoutAndReuse(t *testing.T, c *client) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, _, err := c.callTool(ctx, "never_returns", json.RawMessage(`{}`), false)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("never_returns error=%v, want deadline exceeded", err)
+	}
+	result, _, err := c.callTool(context.Background(), "echo", json.RawMessage(`{"text":"after-timeout"}`), false)
+	if err != nil {
+		t.Fatalf("echo after timeout: %v", err)
+	}
+	payload, _, err := translateCallResult(result)
+	if err != nil || payload["text"] != "after-timeout" {
+		t.Fatalf("echo after timeout payload=%v err=%v", payload, err)
+	}
+	t.Log("never_returns timed out and the same client remained usable")
+}
+
+func verifyHTTPConcurrency(t *testing.T, c *client) {
+	t.Helper()
+	type outcome struct {
+		name   string
+		result callResult
+		err    error
+	}
+	results := make(chan outcome, 2)
+	go func() {
+		result, _, err := c.callTool(context.Background(), "slow_task", json.RawMessage(`{"seconds":0.4}`), false)
+		results <- outcome{name: "slow", result: result, err: err}
+	}()
+	time.Sleep(30 * time.Millisecond)
+	go func() {
+		result, _, err := c.callTool(context.Background(), "echo", json.RawMessage(`{"text":"fast"}`), false)
+		results <- outcome{name: "echo", result: result, err: err}
+	}()
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent calls: first=%s err=%v second=%s err=%v", first.name, first.err, second.name, second.err)
+	}
+	if first.name != "echo" {
+		t.Fatalf("fast HTTP call was blocked behind slow call: first=%s", first.name)
+	}
+	t.Log("concurrent HTTP echo completed before slow_task")
 }
 
 func verifyReferenceClient(t *testing.T, c *client) {

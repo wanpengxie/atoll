@@ -60,6 +60,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	stdioID := registerAndIntroduceMCP(t, ws, registrar, stdioDecl, map[string]any{
 		"name": stdioName, "transport": "stdio", "command": python,
 		"args": []string{"-m", "server.main", "--transport", "stdio"}, "cwd": project,
+		"call_timeout_ms": 750,
 	})
 	waitActorPresence(t, ws, stdioID, true, daemon, daemonLog)
 	stdioChild := waitMCPChild(t, daemon.cmd.Process.Pid, true)
@@ -72,6 +73,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	stdioDescribe := ws.request(c0ChannelID, "actor.describe", stdioID, map[string]any{})
 	assertMCPDescribe(t, stdioDescribe, stdioName, 15)
 	t.Logf("stdio: %s.echo returned %q; describe exposed 15 tools and server self-report", stdioName, echo["text"])
+	assertMCPTimeoutSurvives(t, api, ws, stdioID, stdioName)
 
 	const scriptDecl = "e2e-mcp-script"
 	registrarRequest(t, ws, registrar, "decl.register", map[string]any{
@@ -104,6 +106,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	const httpName = "local-http"
 	httpConfig := map[string]any{
 		"name": httpName, "transport": "http", "url": fmt.Sprintf("http://127.0.0.1:%d/mcp", httpPort),
+		"call_timeout_ms": 750,
 	}
 	httpID := registerAndIntroduceMCP(t, ws, registrar, httpDecl, httpConfig)
 	waitActorPresence(t, ws, httpID, true, daemon, daemonLog)
@@ -114,6 +117,8 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	httpDescribe := ws.request(c0ChannelID, "actor.describe", httpID, map[string]any{})
 	assertMCPDescribe(t, httpDescribe, httpName, 15)
 	t.Logf("http: %s.echo returned %q; describe exposed 15 tools and server self-report", httpName, httpEcho["text"])
+	assertMCPTimeoutSurvives(t, api, ws, httpID, httpName)
+	assertMCPHTTPConcurrent(t, api, ws, httpID, httpName)
 
 	renamedConfig := make(map[string]any, len(httpConfig))
 	for key, value := range httpConfig {
@@ -238,6 +243,85 @@ func assertMCPTypePrefixChanged(t *testing.T, before map[string]any, beforePrefi
 			t.Fatalf("name-only config change retained old prefix %s.%s", beforePrefix, tool)
 		}
 	}
+}
+
+func assertMCPTimeoutSurvives(t *testing.T, api *apiClient, ws *wsClient, actorID, prefix string) {
+	t.Helper()
+	audit := dialWS(t, api.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0})
+	requestID := ws.submit(c0ChannelID, prefix+".never_returns", "request", []string{actorID}, map[string]any{})
+	request := audit.awaitEnvelope(func(envelope map[string]any) bool {
+		return envelope["id"] == requestID
+	}, 10*time.Second)
+	// ws.submit has no expires-at argument, so this is deliberately a caller-
+	// unbounded request. The substrate currently writes its own 24h fallback
+	// into the durable envelope; accept that fallback, but reject any short
+	// caller-style deadline that could mask the MCP actor's own timeout.
+	if expires, present := request["expires_at"].(float64); present {
+		if remaining := time.Until(time.UnixMilli(int64(expires))); remaining < 23*time.Hour {
+			t.Fatalf("%s never_returns got a short external expires_at (%s)", prefix, remaining)
+		}
+	}
+	terminal := awaitMCPTerminal(t, ws, requestID, 10*time.Second)
+	if terminal["status"] != "failed" || terminal["error_code"] != "mcp_timeout" {
+		t.Fatalf("%s never_returns terminal=%v", prefix, terminal)
+	}
+	describe := ws.request(c0ChannelID, "actor.describe", actorID, map[string]any{})
+	assertMCPDescribe(t, describe, prefix, 15)
+	echo := ws.request(c0ChannelID, prefix+".echo", actorID, map[string]any{"text": "after-timeout"})
+	if echo["text"] != "after-timeout" {
+		t.Fatalf("%s echo after timeout=%v", prefix, echo)
+	}
+	t.Logf("%s: caller-unbounded never_returns failed as mcp_timeout, then describe and echo remained healthy", prefix)
+}
+
+func assertMCPHTTPConcurrent(t *testing.T, api *apiClient, ws *wsClient, actorID, prefix string) {
+	t.Helper()
+	audit := dialWS(t, api.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0})
+	slowWS := dialWS(t, api.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0})
+	slowID := slowWS.submit(c0ChannelID, prefix+".slow_task", "request", []string{actorID}, map[string]any{"seconds": 0.4})
+	echoID, echo := ws.requestWithID(c0ChannelID, prefix+".echo", actorID, map[string]any{"text": "overtook-slow"})
+	if echo["text"] != "overtook-slow" {
+		t.Fatalf("concurrent echo=%v", echo)
+	}
+	slow := awaitMCPTerminal(t, slowWS, slowID, 10*time.Second)
+	if slow["status"] != "completed" || slow["text"] != "slow task complete" {
+		t.Fatalf("concurrent slow_task=%v", slow)
+	}
+	seqs := map[string]float64{}
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for len(seqs) != 2 {
+		select {
+		case item := <-audit.feed:
+			envelope, _ := item["envelope"].(map[string]any)
+			if envelope == nil || envelope["kind"] != "response" {
+				continue
+			}
+			parent, _ := envelope["parent_id"].(string)
+			if parent == echoID || parent == slowID {
+				seqs[parent], _ = item["seq"].(float64)
+			}
+		case <-deadline.C:
+			t.Fatalf("did not observe both concurrent terminals: %v", seqs)
+		}
+	}
+	if seqs[echoID] >= seqs[slowID] {
+		t.Fatalf("http echo did not overtake slow_task: echo seq=%.0f slow seq=%.0f", seqs[echoID], seqs[slowID])
+	}
+	t.Logf("http concurrency: echo terminal seq %.0f preceded slow_task seq %.0f", seqs[echoID], seqs[slowID])
+}
+
+func awaitMCPTerminal(t *testing.T, ws *wsClient, requestID string, timeout time.Duration) map[string]any {
+	t.Helper()
+	terminal := ws.awaitEnvelope(func(envelope map[string]any) bool {
+		if envelope["kind"] != "response" || envelope["parent_id"] != requestID {
+			return false
+		}
+		body, _ := envelope["payload"].(map[string]any)
+		return body["status"] == "completed" || body["status"] == "failed"
+	}, timeout)
+	body, _ := terminal["payload"].(map[string]any)
+	return body
 }
 
 func assertAdjacentQuestionAnswer(t *testing.T, api *apiClient, requestID string) {
