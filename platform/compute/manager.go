@@ -512,11 +512,6 @@ func (m *compartmentManager) acceptLane(lane *clientLane) {
 			manager: m, chID: chID, chName: lane.stream.ChannelName, state: "building", stopBuild: make(chan struct{}),
 		}
 		m.cells[chID] = cell
-	} else if cell.chName != lane.stream.ChannelName {
-		m.mu.Unlock()
-		lane.stream.RetireLogical()
-		lane.stream.CollectPhysical()
-		return
 	}
 	lane.setRetire(func(exact *clientLane) { cell.laneDown(exact) })
 	lane.mu.Lock()
