@@ -83,12 +83,16 @@ func MarshalDevicePresence(online bool) []byte {
 	return b
 }
 
-// ParseDevicePresence decodes a folded device-presence snapshot; ok=false on empty/malformed.
+// ParseDevicePresence decodes a folded device-presence snapshot; ok is true
+// only when the document carries an explicit boolean online field.
 func ParseDevicePresence(raw []byte) (p DevicePresence, ok bool) {
-	if len(raw) == 0 || json.Unmarshal(raw, &p) != nil {
+	var wire struct {
+		Online *bool `json:"online"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &wire) != nil || wire.Online == nil {
 		return DevicePresence{}, false
 	}
-	return p, true
+	return DevicePresence{Online: *wire.Online}, true
 }
 
 // Describe is the full actor.describe answer: the actor's identity plus its

@@ -46,6 +46,11 @@ func TestRosterDeviceProjectionPreservesFourTestimonyStates(t *testing.T) {
 		{"known false", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: introspect.MarshalDevicePresence(false), ReceivedAt: 11}}}, channelspec.DeviceState{Kind: channelspec.DeviceKnown, Online: false, ReceivedAt: 11}},
 		{"stale", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: introspect.MarshalDevicePresence(true), ReceivedAt: 12, StaleFromPriorLife: true}}}, channelspec.DeviceState{Kind: channelspec.DeviceStale, ReceivedAt: 12}},
 		{"malformed", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: []byte("bad"), ReceivedAt: 13}}}, channelspec.DeviceState{Kind: channelspec.DeviceMalformed}},
+		{"null document", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: []byte(`null`), ReceivedAt: 14}}}, channelspec.DeviceState{Kind: channelspec.DeviceMalformed}},
+		{"empty object", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: []byte(`{}`), ReceivedAt: 15}}}, channelspec.DeviceState{Kind: channelspec.DeviceMalformed}},
+		{"null online", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: []byte(`{"online":null}`), ReceivedAt: 16}}}, channelspec.DeviceState{Kind: channelspec.DeviceMalformed}},
+		{"wrong online type", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: []byte(`{"online":0}`), ReceivedAt: 17}}}, channelspec.DeviceState{Kind: channelspec.DeviceMalformed}},
+		{"missing online", presence.Snapshot{L3: map[actorrt.ObsKind]presence.Testimony{kind: {Val: []byte(`{"other":1}`), ReceivedAt: 18}}}, channelspec.DeviceState{Kind: channelspec.DeviceMalformed}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

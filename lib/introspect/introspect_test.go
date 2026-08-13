@@ -91,6 +91,38 @@ func TestParseStatusRequest(t *testing.T) {
 	}
 }
 
+func TestParseDevicePresenceRequiresBooleanOnlineField(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want *bool
+	}{
+		{name: "online", raw: `{"online":true}`, want: boolPointer(true)},
+		{name: "offline", raw: `{"online":false}`, want: boolPointer(false)},
+		{name: "null document", raw: `null`},
+		{name: "empty object", raw: `{}`},
+		{name: "null field", raw: `{"online":null}`},
+		{name: "wrong field type", raw: `{"online":"false"}`},
+		{name: "other field", raw: `{"other":1}`},
+		{name: "non object", raw: `false`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := ParseDevicePresence([]byte(test.raw))
+			if test.want == nil {
+				if ok {
+					t.Fatalf("ParseDevicePresence(%s)=(%+v,true), want unreadable", test.raw, got)
+				}
+				return
+			}
+			if !ok || got.Online != *test.want {
+				t.Fatalf("ParseDevicePresence(%s)=(%+v,%v), want online=%v", test.raw, got, ok, *test.want)
+			}
+		})
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
 // TestWireFieldNames pins the JSON contract — the exact keys the LLM-facing
 // tools (describe_actor / describe_type) and every actor self-answer rely on.
 // Changing a key here is a protocol-level convention revision.

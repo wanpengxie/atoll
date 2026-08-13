@@ -27,6 +27,7 @@ type registryStub struct {
 	declsOK          bool
 	declsErr         error
 	seenParent       *string
+	seenChannel      string
 }
 
 func (s *registryStub) PrincipalPresent(context.Context, string) (bool, error) {
@@ -36,7 +37,8 @@ func (s *registryStub) Channels(_ context.Context, parent *string) ([]Row, bool,
 	s.seenParent = parent
 	return s.channels, s.channelsComplete, s.channelsErr
 }
-func (s *registryStub) Channel(context.Context, string) (Row, bool, error) {
+func (s *registryStub) Channel(_ context.Context, id string) (Row, bool, error) {
+	s.seenChannel = id
 	return s.channel, s.channelFound, s.channelErr
 }
 func (s *registryStub) Principals(context.Context) ([]Row, bool, error) {
@@ -109,13 +111,13 @@ func TestSixObservationWordsHaveCompleteGoldenJSON(t *testing.T) {
 			golden:   `{"subject":"channel/c/频道/profile","kind":"profile","complete":true,"items":[{"declared":{"id":"c/频道","qualified_name":"c0.channel"},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":1000,"since":null}]}}]}`,
 		},
 		{
-			name: "channel actors", path: "/obs/channel/c0/actors",
+			name: "channel actors", path: "/obs/channel/c%2F%20%E9%A2%91%E9%81%93/actors",
 			registry: &registryStub{present: true, channelFound: true, channel: Row{Declared: json.RawMessage(`{"id":"c0"}`)}},
 			channels: &channelStub{serving: true, roster: []RosterEntry{
 				{Key: "z", Declared: json.RawMessage(`{"id":"z","kind":"tool"}`), Bound: false, Device: DeviceState{Kind: DeviceAbsent}},
 				{Key: "a", Declared: json.RawMessage(`{"id":"a","kind":"human"}`), Bound: true, Device: DeviceState{Kind: DeviceKnown, Online: false, ReceivedAt: 77}},
 			}},
-			golden: `{"subject":"channel/c0/actors","kind":"actors","complete":true,"items":[{"key":"a","declared":{"id":"a","kind":"human"},"actual":{"measures":[{"name":"bound","value":true,"unknown":false,"observed_at":1000,"since":null},{"name":"device_online","value":false,"unknown":false,"observed_at":77,"since":null}]}},{"key":"z","declared":{"id":"z","kind":"tool"},"actual":{"measures":[{"name":"bound","value":false,"unknown":false,"observed_at":1000,"since":null},{"name":"device_online","value":null,"unknown":true,"reason":"no_testimony","observed_at":1000,"since":null}]}}]}`,
+			golden: `{"subject":"channel/c/ 频道/actors","kind":"actors","complete":true,"items":[{"key":"a","declared":{"id":"a","kind":"human"},"actual":{"measures":[{"name":"bound","value":true,"unknown":false,"observed_at":1000,"since":null},{"name":"device_online","value":false,"unknown":false,"observed_at":77,"since":null}]}},{"key":"z","declared":{"id":"z","kind":"tool"},"actual":{"measures":[{"name":"bound","value":false,"unknown":false,"observed_at":1000,"since":null},{"name":"device_online","value":null,"unknown":true,"reason":"no_testimony","observed_at":1000,"since":null}]}}]}`,
 		},
 	}
 
@@ -132,6 +134,17 @@ func TestSixObservationWordsHaveCompleteGoldenJSON(t *testing.T) {
 			}
 			if string(raw) != test.golden {
 				t.Fatalf("golden mismatch\n got: %s\nwant: %s", raw, test.golden)
+			}
+			if test.name == "space channels" {
+				if test.registry.seenParent == nil || *test.registry.seenParent != "c0" {
+					t.Fatalf("registry parent filter=%v, want c0", test.registry.seenParent)
+				}
+			}
+			if test.name == "channel actors" {
+				const decoded = "c/ 频道"
+				if test.registry.seenChannel != decoded || test.channels.rosterSeen != decoded {
+					t.Fatalf("decoded channel id registry=%q membrane=%q, want %q", test.registry.seenChannel, test.channels.rosterSeen, decoded)
+				}
 			}
 		})
 	}

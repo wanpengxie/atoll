@@ -201,6 +201,41 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	}
 }
 
+func TestActorListUnreadableDeviceTestimonyStaysUnknown(t *testing.T) {
+	const member = actor.ActorID("actor:a")
+	for _, raw := range []string{`null`, `{}`, `{"online":null}`, `{"online":0}`, `{"other":1}`} {
+		t.Run(raw, func(t *testing.T) {
+			s := New(Deps{
+				Authority: fakeRegistry{rows: []storespec.Record{{ID: member, Kind: actor.KindAgent}}},
+				Presence: fixedPresence{snapshot: presence.Snapshot{
+					Member: true,
+					L3: map[actorrt.ObsKind]presence.Testimony{
+						actorrt.ObsKind(introspect.ObsDevicePresence): {Val: []byte(raw), ReceivedAt: 9},
+					},
+				}},
+			})
+			sys := &fakeSys{}
+			s.handle(sys, requestMsg("directory", introspect.QueryList, nil))
+			if len(sys.replies) != 1 {
+				t.Fatalf("actor.list replies=%d", len(sys.replies))
+			}
+			catalog := sys.replies[0].v.(introspect.Catalog)
+			found := false
+			for _, row := range catalog.Actors {
+				if row.ID == string(member) {
+					found = true
+					if row.Device != nil {
+						t.Fatalf("unreadable testimony %s became known offline: %+v", raw, row.Device)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("actor.list omitted member %q", member)
+			}
+		})
+	}
+}
+
 type recordAuthority struct{ rows []storespec.ActiveIdentity }
 
 func (a recordAuthority) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
