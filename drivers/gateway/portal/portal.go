@@ -3,6 +3,7 @@
 package portal
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
+	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -35,6 +37,11 @@ type Config struct {
 	DaemonHost      *daemonhost.Host
 	DataPlane       dataplane.Redeemer
 	ContractVersion string
+	Obs             ObsPlane
+}
+
+type ObsPlane interface {
+	Pull(ctx context.Context, principal, escapedPath, rawQuery string) (obs.Observation, error)
 }
 type Portal struct {
 	cfg Config
@@ -131,6 +138,14 @@ func (w *trackingResponseWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 func (p *Portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.EscapedPath(), "/obs/") {
+		if r.Method == http.MethodGet {
+			p.observe(w, r)
+		} else {
+			writeError(w, http.StatusMethodNotAllowed, string(codeNotFound), "method not allowed")
+		}
+		return
+	}
 	if strings.HasPrefix(r.URL.EscapedPath(), "/files/") {
 		if r.Method == http.MethodGet || r.Method == http.MethodPut {
 			p.files(w, r)
@@ -140,6 +155,46 @@ func (p *Portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.mux.ServeHTTP(w, r)
+}
+
+func (p *Portal) observe(w http.ResponseWriter, r *http.Request) {
+	principal, ok := p.authenticate(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, string(codeNotAuthenticated), "invalid session")
+		return
+	}
+	if p.cfg.Obs == nil {
+		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), "observation plane unavailable")
+		return
+	}
+	answer, err := p.cfg.Obs.Pull(r.Context(), principal, r.URL.EscapedPath(), r.URL.RawQuery)
+	if err == nil {
+		writeJSON(w, http.StatusOK, answer)
+		return
+	}
+	var observationErr *obs.Error
+	if !errors.As(err, &observationErr) {
+		writeError(w, http.StatusInternalServerError, string(codeInternalError), err.Error())
+		return
+	}
+	detail := observationErr.Detail
+	if detail == "" {
+		detail = observationErr.Error()
+	}
+	switch observationErr.Kind {
+	case obs.ErrBadAddress, obs.ErrUnknownKind, obs.ErrBadQuery:
+		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), detail)
+	case obs.ErrUnauthed:
+		writeError(w, http.StatusUnauthorized, string(codeNotAuthenticated), detail)
+	case obs.ErrForbidden:
+		writeError(w, http.StatusForbidden, string(codePermissionDenied), detail)
+	case obs.ErrNotServing, obs.ErrTimeout, obs.ErrOverloaded:
+		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), detail)
+	case obs.ErrCanceled:
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, string(codeInternalError), detail)
+	}
 }
 
 func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {

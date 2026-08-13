@@ -2,12 +2,15 @@ package home
 
 import (
 	"context"
+	"slices"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -168,6 +171,79 @@ func (v View) HumanRoster(ctx context.Context) ([]channelspec.HumanRosterEntry, 
 		})
 	}
 	return out, nil
+}
+
+// Roster projects the channel's complete actor directory from the membrane's
+// existing read faces. Membership is the enumeration authority; presence is an
+// advisory per-row read and never removes an enumerated identity.
+func (v View) Roster(ctx context.Context) ([]channelspec.ObsRosterRow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	identities, err := v.authority.ActiveIdentities()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]channelspec.ObsRosterRow, 0, len(identities)+1)
+	for _, identity := range identities {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		declID := ""
+		facts, found, err := v.authority.ActorFacts(ctx, identity.ID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			declID = facts.SourceDeclID
+		}
+		snapshot, err := v.presence.Snapshot(ctx, identity.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, channelspec.ObsRosterRow{
+			ID: identity.ID, Kind: identity.Kind, DeclID: declID,
+			Bound: snapshot.L1Present, Device: rosterDeviceState(snapshot),
+		})
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	kernelSnapshot, err := v.presence.Snapshot(ctx, actor.SystemActorID)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, channelspec.ObsRosterRow{
+		ID: actor.SystemActorID, Kind: actor.KindSystem,
+		Bound: kernelSnapshot.L1Present, Device: rosterDeviceState(kernelSnapshot),
+	})
+	slices.SortFunc(out, func(left, right channelspec.ObsRosterRow) int {
+		switch {
+		case left.ID < right.ID:
+			return -1
+		case left.ID > right.ID:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return out, nil
+}
+
+func rosterDeviceState(snapshot presence.Snapshot) channelspec.DeviceState {
+	testimony, found := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	if !found {
+		return channelspec.DeviceState{Kind: channelspec.DeviceAbsent}
+	}
+	if testimony.StaleFromPriorLife {
+		return channelspec.DeviceState{Kind: channelspec.DeviceStale, ReceivedAt: testimony.ReceivedAt}
+	}
+	value, ok := introspect.ParseDevicePresence(testimony.Val)
+	if !ok {
+		return channelspec.DeviceState{Kind: channelspec.DeviceMalformed}
+	}
+	return channelspec.DeviceState{Kind: channelspec.DeviceKnown, Online: value.Online, ReceivedAt: testimony.ReceivedAt}
 }
 
 // DeclaredInstances answers which actor ids one declaration currently has.

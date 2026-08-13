@@ -40,6 +40,7 @@ type View interface {
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
 	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 	IsBound(context.Context, string) (bool, error)
+	Roster(context.Context) ([]channelspec.ObsRosterRow, error)
 }
 
 type bundle struct {
@@ -69,6 +70,9 @@ type viewAdapter struct{ home *home.Home }
 
 func (a viewAdapter) HumanRoster(ctx context.Context) ([]channelspec.HumanRosterEntry, error) {
 	return a.home.View().HumanRoster(ctx)
+}
+func (a viewAdapter) Roster(ctx context.Context) ([]channelspec.ObsRosterRow, error) {
+	return a.home.View().Roster(ctx)
 }
 func (a viewAdapter) DeclaredInstances(ctx context.Context, d string) ([]actor.ActorID, error) {
 	return a.home.View().DeclaredInstances(ctx, d)

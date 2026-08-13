@@ -30,6 +30,31 @@ type HumanRosterEntry struct {
 	Principal string        `json:"principal"`
 }
 
+// ObsRosterRow is the business membrane's complete actor-roster projection.
+// It deliberately contains neither a presence snapshot nor a runtime record.
+type ObsRosterRow struct {
+	ID     actor.ActorID `json:"id"`
+	Kind   actor.Kind    `json:"kind"`
+	DeclID string        `json:"decl_id,omitempty"`
+	Bound  bool          `json:"-"`
+	Device DeviceState   `json:"-"`
+}
+
+type DeviceStateKind string
+
+const (
+	DeviceKnown     DeviceStateKind = "known"
+	DeviceAbsent    DeviceStateKind = "absent"
+	DeviceStale     DeviceStateKind = "stale"
+	DeviceMalformed DeviceStateKind = "malformed"
+)
+
+type DeviceState struct {
+	Kind       DeviceStateKind
+	Online     bool
+	ReceivedAt int64
+}
+
 type DeclarationFacts struct {
 	OwnerPrincipal string
 	Visibility     string

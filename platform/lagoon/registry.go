@@ -77,6 +77,14 @@ func (r *Registry) GetPrincipalStatus(ctx context.Context, id string) (regspec.P
 	return r.store.GetPrincipalStatus(ctx, id)
 }
 
+func (r *Registry) ListPrincipals(ctx context.Context) ([]regspec.PrincipalRow, error) {
+	return r.store.ListPrincipals(ctx)
+}
+
+func (r *Registry) ListDevices(ctx context.Context) ([]regspec.DeviceRow, error) {
+	return r.store.ListDevices(ctx)
+}
+
 func (r *Registry) ListChannels(ctx context.Context) ([]regspec.ChannelRow, error) {
 	rows, err := r.store.ListChannels(ctx)
 	if err != nil {

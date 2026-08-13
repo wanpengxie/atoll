@@ -23,6 +23,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
+	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -188,7 +189,13 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		return nil, e.fail(err)
 	}
 	gatewayEdge = e.gateway
-	p := portal.New(portal.Config{Registry: e.registry, Submitter: e.submitter, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, ContractVersion: contractVersion})
+	observationPlane := obs.New(obs.Config{
+		Registry: registryObsAdapter{registry: e.registry},
+		Channels: channelObsAdapter{host: e.host},
+		Daemons:  daemonObsAdapter{host: e.daemonHost},
+		Now:      func() int64 { return time.Now().UnixMilli() },
+	})
+	p := portal.New(portal.Config{Registry: e.registry, Submitter: e.submitter, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion})
 	e.handler = p
 	e.gateway.Start()
 	if err := e.host.StartConvergence(); err != nil {

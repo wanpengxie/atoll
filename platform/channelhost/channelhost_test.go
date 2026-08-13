@@ -119,6 +119,35 @@ func newTestHost(t *testing.T) *ChannelHost {
 	return host
 }
 
+func TestViewAdapterForwardsObservationRoster(t *testing.T) {
+	ctx := context.Background()
+	host := newTestHost(t)
+	id := channel.ID("obs-roster")
+	if err := host.provisionGenesis(ctx, genesisSpec(id), "c0.obs-roster"); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Open(ctx, OpenSpec{ChannelID: id, ChannelName: "c0.obs-roster", ExpectedType: "group"}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, serving := host.Acquire(id)
+	if !serving {
+		t.Fatal("opened channel is not serving")
+	}
+	rows, err := bundle.View().Roster(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSystem := false
+	for _, row := range rows {
+		if row.ID == actor.SystemActorID && row.Kind == actor.KindSystem {
+			foundSystem = true
+		}
+	}
+	if !foundSystem {
+		t.Fatalf("forwarded roster omitted system actor: %+v", rows)
+	}
+}
+
 func TestMembraneUnregisterPrecedesHomeQuiesce(t *testing.T) {
 	ctx := context.Background()
 	var opened Bundle

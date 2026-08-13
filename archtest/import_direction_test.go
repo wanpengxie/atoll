@@ -330,6 +330,7 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		"platform/lagoon/regspec": true,
 		"platform/daemonhost":     true,
 		"platform/dataplane":      true,
+		"platform/obs":            true, // obs = portal 的统一只读观测出口脸（2026-08-13 登记）。
 		// compute = 设备载体的出口脸（/compute 链的 daemon 侧运行时）。登记于
 		// 2026-08-05 devicehost 入 drivers 层（此前同一 import 住 cmd/daemon，
 		// 墙不覆盖 cmd）：消费者轴是"设备"，与 subjectgate 之于"人"对称。
