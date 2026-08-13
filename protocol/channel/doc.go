@@ -1,3 +1,4 @@
-// Package channel defines the opaque channel-id type and the canonical dotted
-// qualified-name grammar. ID allocation remains outside the kernel's scope.
+// Package channel defines the opaque channel-id type. Both ID allocation and
+// the channel-name grammar are outside the kernel's scope: names are minted and
+// judged in exactly one place, the registry.
 package channel
