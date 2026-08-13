@@ -143,14 +143,12 @@ func TestCompartmentBuildsAndClosesOnlyByExplicitCommand(t *testing.T) {
 			},
 		})
 	}()
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "channel-a")
 	})
 
 	bound.Store(false)
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return !host.LaneAttached("daemon-a", "channel-a") &&
 			len(host.LaneView("daemon-a")) == 0
 	})
@@ -228,16 +226,14 @@ func TestOneCarrierServicesTwoCompartmentsAndDetachIsLocal(t *testing.T) {
 			t.Error("compute did not join")
 		}
 	}()
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "a") &&
 			host.LaneAttached("daemon-a", "b") &&
 			len(host.LaneView("daemon-a")) == 2
 	})
 
 	boundA.Store(false)
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		mu.Lock()
 		aClosed := closes["a"]
 		mu.Unlock()
@@ -603,8 +599,7 @@ func TestLanePlanPokePullsFreshPlan(t *testing.T) {
 	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
 		return CompartmentResources{Factories: emptyFactories{}}, nil
 	})
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "a") && pulls.Load() > 0
 	})
 	baseline := pulls.Load()
@@ -639,8 +634,7 @@ func TestChannelDeletedWhileOfflineIsRetiredOnReconnect(t *testing.T) {
 			Close:     func() error { closed.Add(1); return nil },
 		}, nil
 	})
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "a")
 	})
 
@@ -649,8 +643,7 @@ func TestChannelDeletedWhileOfflineIsRetiredOnReconnect(t *testing.T) {
 	host.Unregister("a", 1)
 	present.Store([]channel.ID(nil))
 
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return closed.Load() == 1
 	})
 }
@@ -675,8 +668,7 @@ func TestUnjudgeableChannelKeepsTheCompartment(t *testing.T) {
 			Close:     func() error { closed.Add(1); return nil },
 		}, nil
 	})
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "a")
 	})
 
@@ -727,8 +719,7 @@ func TestCompartment_RebuildsAfterCloseWhenRebound(t *testing.T) {
 	// the server's ledger and holds before the device has even built. An
 	// unbind landing before the first build call closes a compartment that
 	// never held resources — nothing ever enters the blocking Close.
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "a") && builds.Load() >= 1
 	})
 	bound.Store(false)
@@ -791,8 +782,7 @@ func TestClosingCompartmentCommandRegisterUsesLastLane(t *testing.T) {
 		// is the server's ledger and holds before the device has even built.
 		// An unbind landing before the first build call closes a compartment
 		// that never held resources — nothing ever enters the blocking Close.
-		waitCompute(t, func() bool {
-			host.Scan()
+		scanUntil(t, host, func() bool {
 			return host.LaneAttached("daemon-a", "a") && builds.Load() >= 1
 		})
 		bound.Store(false)
@@ -871,8 +861,7 @@ func TestLaneRetirementPreservesCompartmentAndPullsFullPlan(t *testing.T) {
 			},
 		}, nil
 	})
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "a") && pulls.Load() >= 1
 	})
 	host.Register("a", 2, membrane)
@@ -999,8 +988,7 @@ func TestBlockedRebindPlanDoesNotBlockSiblingLaneAdmission(t *testing.T) {
 	startTestCompute(t, host, func(string, string) (CompartmentResources, error) {
 		return CompartmentResources{Factories: emptyFactories{}}, nil
 	})
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return host.LaneAttached("daemon-a", "a") &&
 			host.LaneAttached("daemon-a", "b")
 	})
@@ -1044,16 +1032,14 @@ func TestCondemnedCompartmentNeverBuildsSecondResourceSet(t *testing.T) {
 	// Wait for the resource set itself, not for the route. A live lane no longer
 	// implies a finished build, and this test needs the first set to exist
 	// before it can ask whether a second one is ever created.
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return builds.Load() == 1
 	})
 	bound.Store(false)
 	host.Scan()
 	// The failing Close is what condemns this coordinate, so wait for it rather
 	// than for the route to drop.
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return closeAttempts.Load() >= 1
 	})
 	bound.Store(true)
@@ -1083,8 +1069,7 @@ func TestCompartmentFaultRetriesInPlaceAndBecomesReady(t *testing.T) {
 		}
 		return CompartmentResources{Factories: emptyFactories{}}, nil
 	})
-	waitCompute(t, func() bool {
-		host.Scan()
+	scanUntil(t, host, func() bool {
 		return attempts.Load() >= 1 && len(host.LaneView("daemon-a")) == 1
 	})
 	// A fault is the compartment's own business: it retries in place and the
