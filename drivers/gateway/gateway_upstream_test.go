@@ -75,7 +75,12 @@ func TestUpstreamSixFramesFourCodes(t *testing.T) {
 	}
 }
 
-func TestFileFrameRejectsChannelIDThatDisagreesWithAddress(t *testing.T) {
+// A file resource frame routes on its channel_id like every other business
+// frame: the channel is where the request is being made, which the requester
+// states, not something the gateway infers from the object being named. The
+// address is not read here at all — whether it names this channel's files is
+// the receiving channel's door to decide.
+func TestFileFrameRoutesOnItsChannelIDNotItsAddress(t *testing.T) {
 	g := newTestGateway(t, Config{Resolver: newResolver()}, settings{clock: newClock()})
 	s, err := g.Attach("u", nil)
 	if err != nil {
@@ -83,18 +88,31 @@ func TestFileFrameRejectsChannelIDThatDisagreesWithAddress(t *testing.T) {
 	}
 	defer s.Close()
 	s.elig.Store(&eligState{
-		routes: map[channel.ID]Route{"channel-a": {Channel: "channel-a", ChannelName: "c0.test"}},
+		routes: map[channel.ID]Route{"channel-a": {Channel: "channel-a"}},
 		paused: map[channel.ID]struct{}{},
 	})
+	// Names a file living under another channel, but is made in channel-b,
+	// where this session has no eligibility at all.
 	f, err := subjectgate.NewFrame(subjectgate.FrameResource, "r", subjectgate.ResourcePayload{
 		ChannelID: "channel-b", Op: subjectgate.ResRead,
-		ResourceID: "daemon://host/c0.test/docs/report.txt",
+		ResourceID: "daemon://host/c0.a/docs/report.txt",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := codeOf(t, s.Upstream(f)); code != subjectgate.CodeBadPayload {
-		t.Fatalf("mismatched channel_id code=%q, want %q", code, subjectgate.CodeBadPayload)
+	if code := codeOf(t, s.Upstream(f)); code != subjectgate.CodeForbidden {
+		t.Fatalf("frame made in an ineligible channel code=%q, want %q", code, subjectgate.CodeForbidden)
+	}
+	// Omitting the channel is a malformed frame, not an invitation to guess it
+	// from the address.
+	blank, err := subjectgate.NewFrame(subjectgate.FrameResource, "r2", subjectgate.ResourcePayload{
+		Op: subjectgate.ResRead, ResourceID: "daemon://host/c0.a/docs/report.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := codeOf(t, s.Upstream(blank)); code != subjectgate.CodeBadPayload {
+		t.Fatalf("channel-less file frame code=%q, want %q", code, subjectgate.CodeBadPayload)
 	}
 }
 

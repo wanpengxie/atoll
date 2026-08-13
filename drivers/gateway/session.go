@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
 // defaultEpoch mints the production process-lifetime gateway epoch.
@@ -751,40 +749,20 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 		}
 	case subjectgate.FrameSubmit, subjectgate.FrameResolve, subjectgate.FrameCancel,
 		subjectgate.FrameAfter, subjectgate.FrameCancelTimer, subjectgate.FrameResource:
+		// channel_id is required on every business frame, file resources
+		// included: it says which channel the request is being made *in*, which
+		// is a fact about the request and not about the object it names. A file
+		// address separately says where the bytes live; the two are compared by
+		// that channel's own door, which refuses an address naming anywhere else.
 		st := s.elig.Load()
 		chID, derr := channelIDOf(f)
 		if derr != nil {
 			return errFrame(subjectgate.CodeBadPayload, derr.Error())
 		}
-		cid := channel.ID(chID)
-		if f.Type == subjectgate.FrameResource {
-			var payload subjectgate.ResourcePayload
-			if err := f.DecodePayload(&payload); err != nil {
-				return errFrame(subjectgate.CodeBadPayload, err.Error())
-			}
-			channelName, file, err := resourceFileChannel(payload)
-			if err != nil {
-				return errFrame(subjectgate.CodeBadPayload, err.Error())
-			}
-			if file {
-				cid = ""
-				for id, route := range st.routes {
-					if route.ChannelName == channelName {
-						cid = id
-						break
-					}
-				}
-				if cid == "" {
-					return errFrame(subjectgate.CodeForbidden, "no eligibility for channel")
-				}
-				if payload.ChannelID != "" && payload.ChannelID != string(cid) {
-					return errFrame(subjectgate.CodeBadPayload, "channel_id does not match file address")
-				}
-			}
-		}
-		if cid == "" {
+		if err := subjectgate.RequireChannelID(chID); err != nil {
 			return errFrame(subjectgate.CodeBadPayload, "missing required channel_id")
 		}
+		cid := channel.ID(chID)
 		r, ok := st.routes[cid]
 		if !ok {
 			if _, paused := st.paused[cid]; paused {
@@ -832,39 +810,9 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 	}
 }
 
-func resourceFileChannel(p subjectgate.ResourcePayload) (string, bool, error) {
-	var raw string
-	var prefix bool
-	switch p.Op {
-	case subjectgate.ResCreate:
-		raw = p.Address
-	case subjectgate.ResList:
-		if p.Query != nil {
-			raw, prefix = p.Query.Prefix, true
-		}
-	default:
-		raw = p.ResourceID
-	}
-	if !strings.HasPrefix(raw, "daemon://") {
-		return "", false, nil
-	}
-	if prefix {
-		parsed, err := accessdoor.ParseFilePrefix(raw)
-		if err != nil {
-			return "", true, err
-		}
-		return parsed.Channel, true, nil
-	}
-	parsed, err := accessdoor.ParseFileAddress(raw)
-	if err != nil {
-		return "", true, err
-	}
-	return parsed.Channel, true, nil
-}
-
-// channelIDOf extracts channel_id from a business frame. It is required by
-// every non-file business operation; file resources may omit it because their
-// address supplies the channel.
+// channelIDOf extracts the required channel_id from any business frame payload
+// (all six carry it as `channel_id`). A payload that fails to decode → error
+// (bad_payload).
 func channelIDOf(f subjectgate.Frame) (string, error) {
 	var p struct {
 		ChannelID string `json:"channel_id"`

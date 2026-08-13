@@ -38,7 +38,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 
 	address := "daemon://file-host/c0/e2e/report.bin"
 	created := ws.resource(map[string]any{
-		"op": "create", "address": address,
+		"channel_id": c0ChannelID, "op": "create", "address": address,
 		"with_content": true,
 	})
 	ticket := stringField(t, created, "ticket")
@@ -65,7 +65,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 		t.Fatalf("channel tree bytes=%d err=%v, want collaboration bytes=%d", len(onDisk), err, len(want))
 	}
 
-	opened := ws.resource(map[string]any{"op": "read", "resource_id": address})
+	opened := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
 	readTicket := stringField(t, opened, "ticket")
 	resp, err = api.http.Get(h.base + "/files/" + url.PathEscape(address) + "?t=" + url.QueryEscape(readTicket))
 	if err != nil {
@@ -106,7 +106,7 @@ func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T
 		if daemon.exited() {
 			t.Fatalf("archive daemon exited\n%s", tailLog(daemonLog, 100))
 		}
-		if opened, err := ws.tryResource(map[string]any{"op": "create", "address": address, "with_content": true}); err == nil {
+		if opened, err := ws.tryResource(map[string]any{"channel_id": channelID, "op": "create", "address": address, "with_content": true}); err == nil {
 			outcome = opened
 			break
 		}
@@ -127,7 +127,7 @@ func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T
 	if err := os.WriteFile(reverse, []byte("disk-visible"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := httpReadFile(t, api, h.base, ws, "daemon://archive-host/c0.archive/docs/from-disk.txt"); string(got) != "disk-visible" {
+	if got := httpReadFile(t, api, h.base, ws, channelID, "daemon://archive-host/c0.archive/docs/from-disk.txt"); string(got) != "disk-visible" {
 		t.Fatalf("reverse disk read=%q", got)
 	}
 	registrarRequest(t, ws, registrar, "channel.retire", map[string]any{"channel_id": channelID})
@@ -237,7 +237,7 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 
 	address := "daemon://storage-node/c0/e2e/cross.bin"
 	original := "bytes-created-on-A"
-	created := ws.resource(map[string]any{"op": "create", "address": address, "with_content": true})
+	created := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "create", "address": address, "with_content": true})
 	httpPutFile(t, api, h.base, address, stringField(t, created, "ticket"), []byte(original))
 
 	// A hosts the file; the echo actor is pinned to B and reads through the
@@ -252,7 +252,7 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 	if writeReply["ok"] != true {
 		t.Fatalf("cross-device write reply=%v", writeReply)
 	}
-	if got := httpReadFile(t, api, h.base, ws, address); string(got) != rewritten {
+	if got := httpReadFile(t, api, h.base, ws, c0ChannelID, address); string(got) != rewritten {
 		t.Fatalf("A bytes after B write=%q, want %q", got, rewritten)
 	}
 
@@ -261,12 +261,12 @@ func TestCrossDeviceFileReadWriteCreateAndOfflineSemantics(t *testing.T) {
 	if createReply["ok"] != true {
 		t.Fatalf("cross-device create reply=%v", createReply)
 	}
-	if got := httpReadFile(t, api, h.base, ws, createdByB); string(got) != "created-remotely" {
+	if got := httpReadFile(t, api, h.base, ws, c0ChannelID, createdByB); string(got) != "created-remotely" {
 		t.Fatalf("remote create bytes=%q", got)
 	}
 
 	// Mint while A is online, then redeem only after it is gone.
-	preissued := ws.resource(map[string]any{"op": "read", "resource_id": address})
+	preissued := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
 	preissuedTicket := stringField(t, preissued, "ticket")
 	storageDaemon.kill9(t)
 
@@ -357,7 +357,7 @@ func waitStorageReady(t *testing.T, ws *wsClient, daemon *proc, logPath string) 
 			t.Fatalf("storage daemon exited while waiting for its lane\n%s", tailLog(logPath, 100))
 		}
 		address := fmt.Sprintf("daemon://storage-node/c0/e2e/readiness-%d", attempt)
-		if _, err := ws.tryResource(map[string]any{"op": "create", "address": address}); err == nil {
+		if _, err := ws.tryResource(map[string]any{"channel_id": c0ChannelID, "op": "create", "address": address}); err == nil {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -384,9 +384,9 @@ func httpPutFile(t *testing.T, api *apiClient, base, address, ticket string, con
 	}
 }
 
-func httpReadFile(t *testing.T, api *apiClient, base string, ws *wsClient, address string) []byte {
+func httpReadFile(t *testing.T, api *apiClient, base string, ws *wsClient, channelID, address string) []byte {
 	t.Helper()
-	opened := ws.resource(map[string]any{"op": "read", "resource_id": address})
+	opened := ws.resource(map[string]any{"channel_id": channelID, "op": "read", "resource_id": address})
 	endpoint := base + "/files/" + url.PathEscape(address) + "?t=" + url.QueryEscape(stringField(t, opened, "ticket"))
 	resp, err := api.http.Get(endpoint)
 	if err != nil {

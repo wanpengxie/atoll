@@ -387,7 +387,7 @@ type ResourceQuery struct {
 }
 
 type ResourcePayload struct {
-	ChannelID   string          `json:"channel_id,omitempty"`
+	ChannelID   string          `json:"channel_id"`
 	Op          ResourceOp      `json:"op"`
 	ResourceID  string          `json:"resource_id"`
 	Args        json.RawMessage `json:"args,omitempty"`

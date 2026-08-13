@@ -272,7 +272,7 @@ func (e *Engine) resolveEntitlements(ctx context.Context, principal string) ([]g
 			continue
 		}
 		if found {
-			routes = append(routes, gateway.Route{Channel: row.ID, ChannelName: row.QualifiedName, Bundle: bundle, SubjectID: id})
+			routes = append(routes, gateway.Route{Channel: row.ID, Bundle: bundle, SubjectID: id})
 		}
 	}
 	return routes, failed, nil

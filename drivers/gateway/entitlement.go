@@ -18,10 +18,9 @@ import (
 // membership set: it has no subject id, holds no presence slot, and cannot drive
 // business frames.
 type Route struct {
-	Channel     channel.ID
-	ChannelName string
-	Bundle      channelhost.Bundle
-	SubjectID   actor.ActorID
+	Channel   channel.ID
+	Bundle    channelhost.Bundle
+	SubjectID actor.ActorID
 }
 
 // EntitlementResolver is the policy seam (injected by the assembly root, spec

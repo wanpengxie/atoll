@@ -466,7 +466,7 @@ func newTestGateway(t testing.TB, cfg Config, set settings) *Gateway {
 
 // memberRoute builds a member Route to a channel bundle's admitted subject.
 func memberRoute(chID channel.ID, h *testChannel, subj actor.ActorID, now time.Time) Route {
-	return Route{Channel: chID, ChannelName: "c0.test", Bundle: h, SubjectID: subj}
+	return Route{Channel: chID, Bundle: h, SubjectID: subj}
 }
 
 // mkBusiness builds a business frame of type typ carrying channel_id=cid (empty cid →

@@ -53,6 +53,30 @@ func (f *listFiles) List(_ context.Context, daemonID, prefix string) ([]FileInfo
 	return f.rows, nil
 }
 
+// Listing takes the same route as a single address: the door serves one
+// channel, so a prefix naming any other channel is refused before membership is
+// even consulted. Nothing upstream re-derives the channel from the address —
+// the frame says which channel the request is made in, and this is where the
+// two are held to agree.
+func TestFileListRejectsPrefixForAnotherChannel(t *testing.T) {
+	membership := &fakeMembership{isMember: true}
+	d := &door{deps: Deps{
+		Authority:     membership,
+		ChannelID:     "channel-a",
+		ChannelName:   "c0.channel-a",
+		StorageMounts: directMounts{},
+		Files:         &listFiles{},
+	}}
+	if _, err := d.list(t.Context(), actor.ActorID("agent:a"), ListQuery{
+		Prefix: "daemon://laptop-a/c0.channel-b/docs/",
+	}); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("cross-channel list error = %v, want ErrMalformed", err)
+	}
+	if membership.calls != 0 {
+		t.Fatalf("membership consulted %d times before rejection", membership.calls)
+	}
+}
+
 func TestFileListReturnsEveryDiskEntryBeyondDefaultLimit(t *testing.T) {
 	files := &listFiles{}
 	for i := 0; i < defaultListLimit+7; i++ {
