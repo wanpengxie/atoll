@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-v2-reference-testserver"
+version = "0.1.0"
+description = "Deterministic MCP 2026-07-28 reference test server"
+requires-python = ">=3.12"
+dependencies = [
+  "mcp==2.0.0",
+]
+
+[project.scripts]
+mcp-testserver = "server.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*"]
