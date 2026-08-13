@@ -968,6 +968,17 @@ func (r *Registrar) readChannels(ctx context.Context, p ChannelList) ([]regspec.
 	return out, nil
 }
 
+// WARNING (2026-08-13, known and accepted by the owner): this read word
+// returns DeviceRow as-is, and that row carries the device admission secret
+// in cleartext (see the warning on regspec.DeviceRow.Key). Every principal
+// able to send device.list therefore reads every device secret. Deliberate:
+// secrets have no first-class carrier yet — they ride the ordinary kv store,
+// and the secret axis is a later batch; confidentiality is not a leading
+// constraint at this stage. The fix is a reply type that omits that field.
+//
+// Second, older debt: this bypasses Registry and reaches into store directly.
+// A NEW read path must not follow that: add the Registry door instead (obs
+// did, see ListPrincipals/ListDevices).
 func (r *Registrar) readDevices(ctx context.Context) ([]regspec.DeviceRow, error) {
 	return r.registry.store.ListDevices(ctx)
 }

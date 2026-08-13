@@ -86,12 +86,31 @@ type OverlayRow struct {
 }
 
 type DeviceRow struct {
-	ID             string       `json:"id"`
-	OwnerPrincipal string       `json:"owner_principal"`
-	Name           string       `json:"name"`
-	Key            string       `json:"key"`
-	Status         DeviceStatus `json:"status"`
-	CreatedAt      int64        `json:"created_at"`
+	ID             string `json:"id"`
+	OwnerPrincipal string `json:"owner_principal"`
+	Name           string `json:"name"`
+	// WARNING (2026-08-13, known and accepted by the owner): Key is the
+	// device's admission secret in cleartext, and it carries a json tag —
+	// ANY read path that serializes this row as-is leaks it. The device.list
+	// word does exactly that today (registrar.readDevices returns the row
+	// unchanged), so every principal able to send that word can read every
+	// device secret.
+	//
+	// This is deliberate, not an oversight. Secrets are not a first-class
+	// carrier yet: everything secret-shaped (this key, an actor's config
+	// credentials) rides the ordinary kv store, and hardening the whole
+	// secret axis is a later batch (coral C2 "credentials end-to-end").
+	// Confidentiality is not a leading constraint at this stage, while
+	// seeing the key during install and debugging is genuinely useful.
+	//
+	// The fix, when the secret axis is built, is a reply type for that word
+	// that omits this field (the credential side already does this).
+	// Until then: a NEW read path must never emit this row as-is. The obs
+	// daemons word builds its own projection without this field
+	// (platform/lagoon/obsview.go).
+	Key       string       `json:"key"`
+	Status    DeviceStatus `json:"status"`
+	CreatedAt int64        `json:"created_at"`
 }
 
 type BindingRow struct {
