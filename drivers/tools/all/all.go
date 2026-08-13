@@ -18,5 +18,6 @@ import (
 	_ "github.com/wanpengxie/atoll/drivers/tools/device"
 	_ "github.com/wanpengxie/atoll/drivers/tools/echo"
 	_ "github.com/wanpengxie/atoll/drivers/tools/kimi"
+	_ "github.com/wanpengxie/atoll/drivers/tools/mcp"
 	_ "github.com/wanpengxie/atoll/drivers/tools/xhs"
 )

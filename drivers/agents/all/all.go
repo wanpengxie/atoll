@@ -44,7 +44,7 @@ func newScript(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 	if err != nil {
 		return platform.ActorDecl{}, err
 	}
-	return compose(spec, script.NewProvider(cfg.ToolID))
+	return compose(spec, script.NewProviderForTool(cfg.ToolID, cfg.ToolType))
 }
 
 func compose(spec registry.InstanceSpec, provider driverproto.Provider) (platform.ActorDecl, error) {
