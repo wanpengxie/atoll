@@ -60,7 +60,32 @@ func (r *assemblyResolver) ResolveDeclaration(ctx context.Context, ch channel.ID
 			break
 		}
 	}
-	return channelspec.DeclarationFacts{OwnerPrincipal: decl.Owner, Visibility: decl.Visibility, Class: decl.DefaultClass, Config: config}, nil
+	return channelspec.DeclarationFacts{
+		OwnerPrincipal: decl.Owner, Name: decl.Name, Description: decl.Description,
+		Visibility: decl.Visibility, Class: decl.DefaultClass, Config: config,
+	}, nil
+}
+
+func (r *assemblyResolver) ResolveDeclarationCatalog(ctx context.Context, _ channel.ID, ids []string) (map[string]channelspec.DeclarationFacts, error) {
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	rows, err := r.registry.ListDecls(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]channelspec.DeclarationFacts, len(wanted))
+	for _, decl := range rows {
+		if _, ok := wanted[decl.ID]; !ok {
+			continue
+		}
+		out[decl.ID] = channelspec.DeclarationFacts{
+			OwnerPrincipal: decl.Owner, Name: decl.Name, Description: decl.Description,
+			Visibility: decl.Visibility, Class: decl.DefaultClass,
+		}
+	}
+	return out, nil
 }
 func (r *assemblyResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
 	switch class {

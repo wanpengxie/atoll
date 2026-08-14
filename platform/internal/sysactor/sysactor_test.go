@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -248,6 +249,42 @@ func (a recordAuthority) IsActive(_ context.Context, id actor.ActorID) (bool, er
 }
 func (a recordAuthority) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	return append([]storespec.ActiveIdentity(nil), a.rows...), nil
+}
+
+func TestActorListIncludesDeclarationNameAndDescriptionWithoutActorDescribe(t *testing.T) {
+	member := actor.ActorID("tool:catalog")
+	lookups := 0
+	// The source declaration rides the roster row: composing the directory must
+	// take ONE declaration lookup and no per-member fact query.
+	s := New(Deps{
+		Authority: recordAuthority{rows: []storespec.ActiveIdentity{
+			{ID: member, Kind: actor.KindTool, SourceDeclID: "decl:catalog"},
+		}},
+		Declaration: func(_ context.Context, ids []string) (map[string]channelspec.DeclarationFacts, error) {
+			lookups++
+			if len(ids) != 1 || ids[0] != "decl:catalog" {
+				t.Fatalf("declaration lookup=%v", ids)
+			}
+			return map[string]channelspec.DeclarationFacts{
+				"decl:catalog": {Name: "Orders", Description: "Create and inspect orders."},
+			}, nil
+		},
+	})
+	sys := &fakeSys{}
+	s.handle(sys, requestMsg("catalog", introspect.QueryList, nil))
+	catalog := sys.replies[0].v.(introspect.Catalog)
+	if lookups != 1 {
+		t.Fatalf("declaration lookups=%d", lookups)
+	}
+	for _, entry := range catalog.Actors {
+		if entry.ID == string(member) {
+			if entry.Name != "Orders" || entry.Description != "Create and inspect orders." {
+				t.Fatalf("catalog entry=%+v", entry)
+			}
+			return
+		}
+	}
+	t.Fatalf("catalog omitted %s: %+v", member, catalog)
 }
 
 // The kernel is not a member, so it has no record to list. Its directory entry

@@ -25,6 +25,13 @@ type registrarFactsStub struct {
 	err   error
 }
 
+type registrarClassStub struct{}
+
+func (registrarClassStub) ValidateConfig(string, json.RawMessage) error { return nil }
+func (registrarClassStub) LookupClassKind(string) (actor.Kind, bool) {
+	return actor.KindTool, true
+}
+
 func (s registrarFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return s.facts, s.found, s.err
 }
@@ -60,7 +67,7 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`CREATE TABLE decls (
-		id TEXT PRIMARY KEY, name TEXT, owner TEXT, default_class TEXT, config_json TEXT,
+		id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT,
 		status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +97,47 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	}
 	if commits != 0 {
 		t.Fatalf("failed write emitted %d onCommit callbacks", commits)
+	}
+}
+
+func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
+	dbPath := t.TempDir() + "/registry.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE decls (
+		id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT,
+		status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := regstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	r := NewRegistrar(&Registry{store: storage}, nil, registrarClassStub{})
+	created, err := r.registerDecl(context.Background(), "alice", DeclRegister{
+		ID: "orders", Name: "Orders", Description: "Create and inspect orders.",
+		Class: "mcp", Config: json.RawMessage(`{}`), Visibility: "private",
+	})
+	if err != nil || created.Description != "Create and inspect orders." {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	empty := ""
+	edited, err := r.editDecl(context.Background(), "alice", DeclEdit{ID: "orders", Description: &empty})
+	if err != nil || edited.Description != "" {
+		t.Fatalf("edited=%+v err=%v", edited, err)
+	}
+	raw, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "description") {
+		t.Fatalf("empty description did not omit field: %s", raw)
 	}
 }
 
@@ -146,9 +194,9 @@ func TestForwardedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
-		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`,
+		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`,
 		`CREATE TABLE principals (id TEXT PRIMARY KEY, kind TEXT, email TEXT, display_name TEXT, status TEXT, created_at INTEGER)`,
-		`INSERT INTO decls VALUES ('agent-decl','agent','root','codex','{}','present','private',1,1)`,
+		`INSERT INTO decls VALUES ('agent-decl','agent',NULL,'root','codex','{}','present','private',1,1)`,
 		`INSERT INTO principals VALUES ('root','human','root@example.test','Root','present',1)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {

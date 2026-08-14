@@ -40,6 +40,7 @@ type View struct {
 	actors    *actorSystem
 	nowMs     func() int64
 	bindings  BindingReader
+	resolver  IntroductionResolver
 	channelID channel.ID
 
 	ownerPrincipal string
@@ -57,6 +58,7 @@ func (h *Home) View() View {
 		actors:         h.actors,
 		nowMs:          h.nowMs,
 		bindings:       h.registryBindings,
+		resolver:       h.resolver,
 		channelID:      h.channelID,
 		ownerPrincipal: h.ownerPrincipal,
 	}
@@ -184,25 +186,43 @@ func (v View) Roster(ctx context.Context) ([]channelspec.ObsRosterRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	declByActor := make(map[actor.ActorID]string, len(identities))
+	declIDs := make([]string, 0, len(identities))
+	seenDecl := make(map[string]bool, len(identities))
+	for _, identity := range identities {
+		facts, found, factsErr := v.authority.ActorFacts(ctx, identity.ID)
+		if factsErr != nil {
+			return nil, factsErr
+		}
+		if found && facts.SourceDeclID != "" {
+			declByActor[identity.ID] = facts.SourceDeclID
+			if !seenDecl[facts.SourceDeclID] {
+				seenDecl[facts.SourceDeclID] = true
+				declIDs = append(declIDs, facts.SourceDeclID)
+			}
+		}
+	}
+	declarations := map[string]channelspec.DeclarationFacts{}
+	if len(declIDs) > 0 && v.resolver != nil {
+		declarations, err = resolveDeclarationCatalog(ctx, v.resolver, v.channelID, declIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
 	out := make([]channelspec.ObsRosterRow, 0, len(identities)+1)
 	for _, identity := range identities {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		declID := ""
-		facts, found, err := v.authority.ActorFacts(ctx, identity.ID)
-		if err != nil {
-			return nil, err
-		}
-		if found {
-			declID = facts.SourceDeclID
-		}
+		declID := declByActor[identity.ID]
+		declaration := declarations[declID]
 		snapshot, err := v.presence.Snapshot(ctx, identity.ID)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, channelspec.ObsRosterRow{
 			ID: identity.ID, Kind: identity.Kind, DeclID: declID,
+			Name: declaration.Name, Description: declaration.Description,
 			Bound: snapshot.L1Present, Device: rosterDeviceState(snapshot),
 		})
 	}

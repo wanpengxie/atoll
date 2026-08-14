@@ -146,10 +146,14 @@ type ActorFacts struct {
 
 // ActiveIdentity answers "who is a member right now". It deliberately carries
 // no definition, no principal and no placement: presence and connection-slot
-// sweeps ask membership, nothing else.
+// sweeps ask membership, nothing else. SourceDeclID is admitted because it is
+// an identity fact rather than a definition — which declaration produced this
+// member — and the roster already holds it; withholding it only forces readers
+// to fetch per member what this call already had in hand.
 type ActiveIdentity struct {
-	ID   actor.ActorID
-	Kind actor.Kind
+	ID           actor.ActorID
+	Kind         actor.Kind
+	SourceDeclID string
 }
 
 // ActorFactsAuthority answers the narrow identity-fact question for one id.

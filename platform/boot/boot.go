@@ -66,6 +66,7 @@ var registryDDL = [...]string{
   rotated_at INTEGER, PRIMARY KEY (principal_id, kind))`,
 	`CREATE TABLE decls (
   id TEXT PRIMARY KEY, name TEXT NOT NULL,
+  description TEXT,
   owner TEXT NOT NULL REFERENCES principals(id),
   default_class TEXT NOT NULL, config_json TEXT,
   status TEXT NOT NULL CHECK(status IN ('present','revoked')),
@@ -169,6 +170,10 @@ func prepareStartup(ctx context.Context, c0Path, registryPath string, now time.T
 	if err != nil {
 		return err
 	}
+	if err := ensureDeclDescriptionColumn(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
 	checks := []struct {
 		noun  string
 		query string
@@ -216,6 +221,40 @@ func prepareStartup(ctx context.Context, c0Path, registryPath string, now time.T
 		if _, err := cs.Actors.Insert(ctx, storespec.ActorDraft{Kind: actor.KindHuman, Principal: protocol.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()}); err != nil {
 			return fmt.Errorf("boot: repair c0 owner seat: %w", err)
 		}
+	}
+	return nil
+}
+
+func ensureDeclDescriptionColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(decls)`)
+	if err != nil {
+		return fmt.Errorf("boot: inspect decls columns: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("boot: scan decls columns: %w", err)
+		}
+		if name == "description" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("boot: inspect decls columns: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("boot: close decls column scan: %w", err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE decls ADD COLUMN description TEXT`); err != nil {
+		return fmt.Errorf("boot: add decls.description: %w", err)
 	}
 	return nil
 }

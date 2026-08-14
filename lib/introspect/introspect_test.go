@@ -3,6 +3,7 @@ package introspect
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -149,7 +150,7 @@ func TestWireFieldNames(t *testing.T) {
 
 func TestCatalogRoundTrip(t *testing.T) {
 	c := Catalog{Actors: []CatalogEntry{
-		{ID: "a1", Kind: "agent", Present: true, UptimeMs: 1500},
+		{ID: "a1", Kind: "agent", Name: "Planner", Description: "Plans work.", Present: true, UptimeMs: 1500},
 	}}
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -161,5 +162,28 @@ func TestCatalogRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(round, c) {
 		t.Fatalf("catalog round-trip mismatch: got %+v want %+v", round, c)
+	}
+}
+
+func TestSchemaFieldsAreAdditiveAndOmittedForExistingActors(t *testing.T) {
+	legacy := TypeMeta{Description: "legacy", PayloadFields: []FieldDoc{{Name: "value", Description: "value"}}}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "input_schema") || strings.Contains(string(raw), "output_schema") {
+		t.Fatalf("empty additive schema fields changed legacy wire shape: %s", raw)
+	}
+	withSchemas := TypeMeta{
+		Description:  "mcp",
+		InputSchema:  json.RawMessage(`{"type":"object","$defs":{"X":{"type":"string"}}}`),
+		OutputSchema: json.RawMessage(`{"type":"array","items":{"type":"number"}}`),
+	}
+	raw, err = json.Marshal(withSchemas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"input_schema"`) || !strings.Contains(string(raw), `"output_schema"`) {
+		t.Fatalf("schema fields missing: %s", raw)
 	}
 }

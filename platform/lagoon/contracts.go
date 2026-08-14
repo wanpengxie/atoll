@@ -155,18 +155,20 @@ type CredentialSet struct {
 	SecretHash  string `json:"secret_hash"`
 }
 type DeclRegister struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	Class      string          `json:"class"`
-	Config     json.RawMessage `json:"config,omitempty"`
-	Visibility string          `json:"visibility"`
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Class       string          `json:"class"`
+	Config      json.RawMessage `json:"config,omitempty"`
+	Visibility  string          `json:"visibility"`
 }
 type DeclEdit struct {
-	ID         string          `json:"id"`
-	Name       *string         `json:"name,omitempty"`
-	Class      *string         `json:"class,omitempty"`
-	Config     json.RawMessage `json:"config,omitempty"`
-	Visibility *string         `json:"visibility,omitempty"`
+	ID          string          `json:"id"`
+	Name        *string         `json:"name,omitempty"`
+	Description *string         `json:"description,omitempty"`
+	Class       *string         `json:"class,omitempty"`
+	Config      json.RawMessage `json:"config,omitempty"`
+	Visibility  *string         `json:"visibility,omitempty"`
 }
 type DeclRevoke struct {
 	ID string `json:"id"`

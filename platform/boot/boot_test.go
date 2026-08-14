@@ -55,6 +55,10 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 			t.Fatalf("table %s count=%d err=%v", table, n, err)
 		}
 	}
+	var descriptionColumns int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('decls') WHERE name='description'`).Scan(&descriptionColumns); err != nil || descriptionColumns != 1 {
+		t.Fatalf("decls.description columns=%d err=%v", descriptionColumns, err)
+	}
 	var installedAt int64
 	if err := db.QueryRowContext(ctx, `SELECT installed_at FROM atoll_install WHERE id=1`).Scan(&installedAt); err != nil || installedAt != stamp.UnixMilli() {
 		t.Fatalf("marker=%d err=%v", installedAt, err)
@@ -88,6 +92,38 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 		t.Fatalf("reopen pure c0: %v", err)
 	}
 	_ = cs.Close()
+}
+
+func TestEnsureAddsDescriptionColumnToInstalledRegistry(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "channels")
+	installed, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", installed.RegistryDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE decls DROP COLUMN description`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "ignored"}); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", installed.RegistryDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('decls') WHERE name='description'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("migrated description columns=%d err=%v", count, err)
+	}
 }
 
 func TestEnsureGeneratesRootPasswordWhenNotSupplied(t *testing.T) {

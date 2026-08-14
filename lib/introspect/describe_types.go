@@ -26,6 +26,8 @@ type TypeMeta struct {
 	MaxPendingMs   int64           `json:"max_pending_ms,omitempty"`
 	PayloadExample json.RawMessage `json:"payload_example,omitempty"`
 	PayloadFields  []FieldDoc      `json:"payload_fields,omitempty"`
+	InputSchema    json.RawMessage `json:"input_schema,omitempty"`
+	OutputSchema   json.RawMessage `json:"output_schema,omitempty"`
 	ErrorCodes     []ErrorDoc      `json:"error_codes,omitempty"`
 	Notes          string          `json:"notes,omitempty"`
 }

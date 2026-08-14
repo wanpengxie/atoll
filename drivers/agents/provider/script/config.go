@@ -8,15 +8,16 @@ import (
 )
 
 const (
-	Class       = "script"
-	TypeChat    = "loop.chat"
-	TypeVerify  = "loop.verify"
-	toolSayType = "echo.say"
-	ActorDoc    = "Deterministic scripted assistant: loop.chat calls echo and writes a file; loop.verify reads it."
+	Class           = "script"
+	TypeChat        = "loop.chat"
+	TypeVerify      = "loop.verify"
+	defaultToolType = "echo.say"
+	ActorDoc        = "Deterministic scripted assistant: loop.chat calls echo and writes a file; loop.verify reads it."
 )
 
 type Config struct {
-	ToolID string `json:"tool_id"`
+	ToolID   string `json:"tool_id"`
+	ToolType string `json:"tool_type"`
 }
 
 func ParseConfig(raw json.RawMessage) (Config, error) {
@@ -27,8 +28,12 @@ func ParseConfig(raw json.RawMessage) (Config, error) {
 		}
 	}
 	c.ToolID = strings.TrimSpace(c.ToolID)
+	c.ToolType = strings.TrimSpace(c.ToolType)
 	if c.ToolID == "" {
 		return c, fmt.Errorf("script: config.tool_id required")
+	}
+	if c.ToolType == "" {
+		c.ToolType = defaultToolType
 	}
 	return c, nil
 }

@@ -19,9 +19,11 @@ type kindResolver struct{}
 func (kindResolver) ResolveDeclaration(_ context.Context, _ channel.ID, id string) (channelspec.DeclarationFacts, error) {
 	switch id {
 	case "agent-decl":
-		return channelspec.DeclarationFacts{OwnerPrincipal: "alice", Visibility: "public", Class: "agent-class"}, nil
+		return channelspec.DeclarationFacts{OwnerPrincipal: "alice", Name: "Agent", Visibility: "public", Class: "agent-class"}, nil
 	case "tool-decl":
-		return channelspec.DeclarationFacts{OwnerPrincipal: "alice", Visibility: "public", Class: "tool-class"}, nil
+		return channelspec.DeclarationFacts{OwnerPrincipal: "alice", Name: "Public Tool", Visibility: "public", Class: "tool-class"}, nil
+	case "private-tool-decl":
+		return channelspec.DeclarationFacts{OwnerPrincipal: "alice", Name: "Private Tool", Description: "Alice's private tool.", Visibility: "private", Class: "tool-class"}, nil
 	default:
 		return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 	}
@@ -147,6 +149,61 @@ func TestIntroducePayloadThreeKinds(t *testing.T) {
 		value, err := executeIntroduce(h, alice, `{"kind":"tool","decl_id":"tool-decl"}`)
 		if err != nil || value == nil {
 			t.Fatalf("value=%v err=%v", value, err)
+		}
+	})
+}
+
+func TestPrivateIntroductionUsesRegistrarAttributionRule(t *testing.T) {
+	t.Run("agent without principal falls back to source declaration owner", func(t *testing.T) {
+		h, alice := openKindHome(t)
+		value, err := executeIntroduce(h, alice, `{"kind":"agent","decl_id":"agent-decl"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agentID := value.(map[string]any)["instance_id"].(actor.ActorID)
+		privateValue, err := executeIntroduce(h, agentID, `{"kind":"tool","decl_id":"private-tool-decl"}`)
+		if err != nil {
+			t.Fatalf("unprincipaled agent could not introduce its owner's private declaration: %v", err)
+		}
+		privateID := privateValue.(map[string]any)["instance_id"].(actor.ActorID)
+		roster, err := h.View().Roster(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range roster {
+			if row.ID == privateID {
+				if row.Name != "Private Tool" || row.Description != "Alice's private tool." {
+					t.Fatalf("obs roster row=%+v", row)
+				}
+				return
+			}
+		}
+		t.Fatalf("obs roster omitted %s", privateID)
+	})
+
+	t.Run("explicit mismatched principal wins and is rejected", func(t *testing.T) {
+		h, alice := openKindHome(t)
+		value, err := executeIntroduce(h, alice, `{"kind":"agent","decl_id":"agent-decl","principal":"mallory"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agentID := value.(map[string]any)["instance_id"].(actor.ActorID)
+		_, err = executeIntroduce(h, agentID, `{"kind":"tool","decl_id":"private-tool-decl"}`)
+		var operateErr *sysactor.OperateError
+		if !errors.As(err, &operateErr) || operateErr.Code != string(channelspec.ErrCodeForbidden) {
+			t.Fatalf("mismatched principal error=%v", err)
+		}
+	})
+
+	t.Run("tool falls back to source declaration owner", func(t *testing.T) {
+		h, alice := openKindHome(t)
+		value, err := executeIntroduce(h, alice, `{"kind":"tool","decl_id":"tool-decl"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		toolID := value.(map[string]any)["instance_id"].(actor.ActorID)
+		if _, err := executeIntroduce(h, toolID, `{"kind":"tool","decl_id":"private-tool-decl"}`); err != nil {
+			t.Fatalf("tool could not introduce its owner's private declaration: %v", err)
 		}
 	})
 }

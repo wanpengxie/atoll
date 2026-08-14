@@ -152,14 +152,17 @@ func ParseDescribeRequest(payload []byte) (DescribeRequest, error) {
 
 // CatalogEntry is one row of the actor.list channel directory: membership
 // (registry truth) ∧ liveness (volatile, read from the substrate's authoritative
-// obs). No readiness axis — whether an actor can service a request is the OUTCOME
-// of send→terminal, not a field here. No capability axis either — types and
-// payload docs are the actor's own self-answer (actor.describe), not directory
-// rows.
+// obs). Name and Description are declaration facts supplied by the introducer,
+// not a restatement of the actor's self-description. No readiness axis —
+// whether an actor can service a request is the OUTCOME of send→terminal, not a
+// field here. No capability axis either — types and payload docs are the actor's
+// own self-answer (actor.describe), not directory rows.
 type CatalogEntry struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Present bool   `json:"present"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Present     bool   `json:"present"`
 	// UptimeMs is the elapsed time since the substrate bound the live instance
 	// (now - StartedAt), derived by the system actor from the substrate's
 	// authoritative bind-instant. 0 when not present. Substrate-owned obs (the

@@ -40,6 +40,7 @@ type ObsDaemonRow struct {
 type ObsDeclRow struct {
 	ID           string             `json:"id"`
 	Name         string             `json:"name"`
+	Description  string             `json:"description,omitempty"`
 	Owner        string             `json:"owner"`
 	DefaultClass string             `json:"default_class"`
 	Config       json.RawMessage    `json:"config,omitempty"`
@@ -118,7 +119,7 @@ func (r *Registry) ObsDecls(ctx context.Context) ([]ObsDeclRow, bool, error) {
 	out := make([]ObsDeclRow, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, ObsDeclRow{
-			ID: row.ID, Name: row.Name, Owner: row.Owner, DefaultClass: row.DefaultClass,
+			ID: row.ID, Name: row.Name, Description: row.Description, Owner: row.Owner, DefaultClass: row.DefaultClass,
 			Config: append(json.RawMessage(nil), row.Config...), Status: row.Status,
 			Visibility: row.Visibility, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		})

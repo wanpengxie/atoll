@@ -69,6 +69,7 @@ type PrincipalRow struct {
 type DeclRow struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
 	Owner        string          `json:"owner"`
 	DefaultClass string          `json:"default_class"`
 	Config       json.RawMessage `json:"config,omitempty"`

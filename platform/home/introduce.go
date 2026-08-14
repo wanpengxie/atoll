@@ -53,15 +53,36 @@ func (h *Home) resolveIntroduction(
 			Code: code, Detail: err.Error(), Retryable: retryable,
 		}
 	}
-	// A non-public declaration is its owner's to place, and ownership is a
-	// principal fact. The initiator's principal is read here, from the roster —
-	// the door does not get to assert it. An initiator that carries no principal
-	// (every non-human admission: the store forbids them one) can therefore own
-	// nothing, and the empty-vs-empty comparison that would otherwise admit it
-	// is refused explicitly rather than left to depend on space-side invariants
-	// keeping every declaration owner non-empty.
+	// A non-public declaration is its owner's to place. Attribution follows the
+	// same two-level rule as the registrar: an explicit principal wins; an actor
+	// without one acts for the owner of its source declaration. The actor facts
+	// come from the roster and declaration ownership comes from the space read
+	// port, so the door accepts neither as a caller assertion.
+	initiatorPrincipal, err := channelspec.ResolveActorPrincipal(ctx, channelspec.ActorFacts{
+		Principal: initiatorFacts.Principal, SourceDeclID: initiatorFacts.SourceDeclID,
+		Kind: initiatorFacts.Kind, Active: active,
+	}, func(ctx context.Context, sourceDeclID string) (string, bool, error) {
+		if sourceDeclID == declID {
+			return facts.OwnerPrincipal, true, nil
+		}
+		lookupCtx, lookupCancel := context.WithTimeout(ctx, introductionResolveTimeout)
+		declaration, lookupErr := h.resolver.ResolveDeclaration(lookupCtx, h.channelID, sourceDeclID)
+		lookupCancel()
+		if errors.Is(lookupErr, channelspec.ErrDeclarationNotFound) {
+			return "", false, nil
+		}
+		if lookupErr != nil {
+			return "", false, lookupErr
+		}
+		return declaration.OwnerPrincipal, true, nil
+	})
+	if err != nil {
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true,
+		}
+	}
 	if facts.Visibility != "public" &&
-		(initiatorFacts.Principal == "" || initiatorFacts.Principal != facts.OwnerPrincipal) {
+		(initiatorPrincipal == "" || initiatorPrincipal != facts.OwnerPrincipal) {
 		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
 			Code: channelspec.ErrCodeForbidden, Detail: "declaration is private",
 		}

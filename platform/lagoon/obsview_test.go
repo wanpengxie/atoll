@@ -33,8 +33,8 @@ func TestObsProjectionGoldenJSON(t *testing.T) {
 		},
 		{
 			"decl",
-			ObsDeclRow{ID: "decl-a", Name: "A", Owner: "alice", DefaultClass: "echo", Config: json.RawMessage(`{"x":1}`), Status: regspec.DeclPresent, Visibility: "private", CreatedAt: 4, UpdatedAt: 5},
-			`{"id":"decl-a","name":"A","owner":"alice","default_class":"echo","config":{"x":1},"status":"present","visibility":"private","created_at":4,"updated_at":5}`,
+			ObsDeclRow{ID: "decl-a", Name: "A", Description: "declared purpose", Owner: "alice", DefaultClass: "echo", Config: json.RawMessage(`{"x":1}`), Status: regspec.DeclPresent, Visibility: "private", CreatedAt: 4, UpdatedAt: 5},
+			`{"id":"decl-a","name":"A","description":"declared purpose","owner":"alice","default_class":"echo","config":{"x":1},"status":"present","visibility":"private","created_at":4,"updated_at":5}`,
 		},
 	}
 	for _, test := range tests {

@@ -1,0 +1,8 @@
+# Local Python environment created by the README's install steps.
+# The venv is machine-specific and large; it is rebuilt, never committed.
+.venv/
+
+# Editable-install and bytecode artefacts.
+*.egg-info/
+__pycache__/
+*.py[cod]

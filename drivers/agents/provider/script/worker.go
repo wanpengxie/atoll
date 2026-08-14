@@ -23,6 +23,7 @@ const (
 
 type worker struct {
 	toolID    string
+	toolType  string
 	host      driverproto.WorkerHost
 	mu        sync.Mutex
 	phase     workerPhase
@@ -34,8 +35,8 @@ type worker struct {
 	once      sync.Once
 }
 
-func newWorker(toolID string, h driverproto.WorkerHost) *worker {
-	return &worker{toolID: toolID, host: h, producing: true, reaped: make(chan struct{})}
+func newWorker(toolID, toolType string, h driverproto.WorkerHost) *worker {
+	return &worker{toolID: toolID, toolType: toolType, host: h, producing: true, reaped: make(chan struct{})}
 }
 
 func (w *worker) Open(context.Context, driverproto.OpenRequest) {
@@ -75,7 +76,9 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	m := req.Messages[len(req.Messages)-1]
 	go func() {
 		defer w.calls.Done()
-		if !w.publish(driverproto.TurnStarted{Target: target}) { return }
+		if !w.publish(driverproto.TurnStarted{Target: target}) {
+			return
+		}
 		text, detail := w.execute(req.Life, target, m)
 		status := driverproto.TurnOK
 		if detail != "" {
@@ -170,7 +173,7 @@ func (w *worker) chat(ctx context.Context, target driverproto.WorkerTurnTarget, 
 	if json.Unmarshal(m.Payload, &payload) != nil || payload == nil {
 		return "", "bad_payload: loop.chat payload must be a JSON object"
 	}
-	params, _ := json.Marshal(map[string]any{"actor_id": w.toolID, "type": toolSayType, "payload": payload, "wait": true})
+	params, _ := json.Marshal(map[string]any{"actor_id": w.toolID, "type": w.toolType, "payload": payload, "wait": true})
 	tool := w.tool(ctx, target, driverproto.ToolInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("call-%d", target.Attempt)), Name: "call_actor", Params: params})
 	if tool.IsError {
 		return "", "tool_call_failed: " + tool.Text
