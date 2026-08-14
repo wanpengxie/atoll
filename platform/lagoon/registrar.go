@@ -187,18 +187,16 @@ func (r *Registrar) resolvePrincipal(ctx context.Context, source channel.ID, sen
 		_, _ = sys.Fail(msg, string(CodePermissionDenied), "active attributable principal required")
 		return ""
 	}
-	if facts.Principal != "" {
-		return facts.Principal
+	principal, err := channelspec.ResolveActorPrincipal(ctx, facts, func(ctx context.Context, declID string) (string, bool, error) {
+		decl, found, err := r.registry.GetDecl(ctx, declID)
+		return decl.Owner, found, err
+	})
+	if err != nil {
+		_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
+		return ""
 	}
-	if facts.SourceDeclID != "" {
-		decl, found, err := r.registry.GetDecl(ctx, facts.SourceDeclID)
-		if err != nil {
-			_, _ = sys.Fail(msg, string(CodeResultUnknown), err.Error())
-			return ""
-		}
-		if found {
-			return decl.Owner
-		}
+	if principal != "" {
+		return principal
 	}
 	_, _ = sys.Fail(msg, string(CodePermissionDenied), "active attributable principal required")
 	return ""
@@ -648,7 +646,7 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 	now := r.now().UnixMilli()
 	existing, found, err := r.registry.store.GetDecl(ctx, p.ID)
 	if err == nil && found {
-		if existing.Status == regspec.DeclPresent && existing.Name == p.Name && existing.Owner == owner && existing.DefaultClass == p.Class && existing.Visibility == p.Visibility && jsonEqual(existing.Config, p.Config) {
+		if existing.Status == regspec.DeclPresent && existing.Name == p.Name && existing.Description == p.Description && existing.Owner == owner && existing.DefaultClass == p.Class && existing.Visibility == p.Visibility && jsonEqual(existing.Config, p.Config) {
 			return existing, nil
 		}
 		return regspec.DeclRow{}, conflict("declaration id already exists")
@@ -656,7 +654,7 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 	if err != nil {
 		return regspec.DeclRow{}, err
 	}
-	row := regspec.DeclRow{ID: p.ID, Name: p.Name, Owner: owner, DefaultClass: p.Class, Config: cloneJSON(p.Config), Status: regspec.DeclPresent, Visibility: p.Visibility, CreatedAt: now, UpdatedAt: now}
+	row := regspec.DeclRow{ID: p.ID, Name: p.Name, Description: p.Description, Owner: owner, DefaultClass: p.Class, Config: cloneJSON(p.Config), Status: regspec.DeclPresent, Visibility: p.Visibility, CreatedAt: now, UpdatedAt: now}
 	if err := r.registry.store.InsertDecl(ctx, row); err != nil {
 		return regspec.DeclRow{}, err
 	}
@@ -691,6 +689,9 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (re
 	if p.Name != nil {
 		row.Name = strings.TrimSpace(*p.Name)
 	}
+	if p.Description != nil {
+		row.Description = *p.Description
+	}
 	if p.Class != nil {
 		next := strings.TrimSpace(*p.Class)
 		if next == SpaceToolClass {
@@ -721,7 +722,7 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, p DeclEdit) (re
 	if err := r.classes.ValidateConfig(row.DefaultClass, row.Config); err != nil {
 		return regspec.DeclRow{}, invalid(err.Error())
 	}
-	if row.Name == before.Name && row.DefaultClass == before.DefaultClass && row.Visibility == before.Visibility && jsonEqual(row.Config, before.Config) {
+	if row.Name == before.Name && row.Description == before.Description && row.DefaultClass == before.DefaultClass && row.Visibility == before.Visibility && jsonEqual(row.Config, before.Config) {
 		return before, nil
 	}
 	row.UpdatedAt = r.now().UnixMilli()

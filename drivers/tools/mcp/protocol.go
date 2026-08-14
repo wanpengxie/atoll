@@ -68,6 +68,14 @@ type transport interface {
 type client struct {
 	transport transport
 	nextID    atomic.Int64
+	cacheMu   sync.Mutex
+	cache     map[string]cachedResult
+	now       func() time.Time
+}
+
+type cachedResult struct {
+	raw       json.RawMessage
+	expiresAt time.Time
 }
 
 func newClient(cfg Config) (*client, error) {
@@ -84,19 +92,32 @@ func newClient(cfg Config) (*client, error) {
 	default:
 		return nil, fmt.Errorf("mcp: unsupported transport %q", cfg.Transport)
 	}
-	return &client{transport: t}, nil
+	return &client{transport: t, cache: make(map[string]cachedResult), now: time.Now}, nil
 }
 
 func (c *client) Close() error { return c.transport.Close() }
 
 func (c *client) request(ctx context.Context, method, name string, params map[string]any, progress bool, out any) (responseInfo, error) {
+	raw, info, err := c.requestRaw(ctx, method, name, params, progress)
+	if err != nil {
+		return info, err
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return info, fmt.Errorf("mcp: decode %s result: %w", method, err)
+	}
+	return info, nil
+}
+
+func (c *client) requestRaw(ctx context.Context, method, name string, params map[string]any, progress bool) (json.RawMessage, responseInfo, error) {
 	id := c.nextID.Add(1)
 	meta := map[string]any{
 		"io.modelcontextprotocol/protocolVersion": protocolVersion,
 		"io.modelcontextprotocol/clientInfo": map[string]any{
 			"name": clientName, "version": clientVersion,
 		},
-		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+		"io.modelcontextprotocol/clientCapabilities": map[string]any{
+			"elicitation": map[string]any{"form": map[string]any{}},
+		},
 	}
 	if progress {
 		meta["progressToken"] = id
@@ -109,29 +130,78 @@ func (c *client) request(ctx context.Context, method, name string, params map[st
 		JSONRPC: "2.0", ID: id, Method: method, Params: params,
 	}, name)
 	if err != nil {
-		return info, err
+		return nil, info, err
 	}
 	if response.Error != nil {
-		return info, response.Error
+		return nil, info, response.Error
 	}
 	if len(response.Result) == 0 {
-		return info, errors.New("mcp: JSON-RPC response omitted result")
+		return nil, info, errors.New("mcp: JSON-RPC response omitted result")
 	}
-	if err := json.Unmarshal(response.Result, out); err != nil {
+	return append(json.RawMessage(nil), response.Result...), info, nil
+}
+
+// cachedRequest holds cacheMu only around the map itself, never across the
+// round trip. sync.Mutex.Lock takes no context, so a request waiting on a peer's
+// in-flight fetch could not honour its own cancellation — one slow server would
+// pin every concurrent describe for the full call timeout. The cost of releasing
+// it is that two callers racing a cold entry each issue a request; for ttlMs=0
+// methods (tools/list) that is what happens anyway, and for cached ones it is
+// one extra fetch at the expiry instant.
+func (c *client) cachedRequest(ctx context.Context, method, name string, params map[string]any, out any) (responseInfo, error) {
+	now := time.Now
+	if c.now != nil {
+		now = c.now
+	}
+	c.cacheMu.Lock()
+	cached, ok := c.cache[method]
+	c.cacheMu.Unlock()
+	if ok && now().Before(cached.expiresAt) {
+		if err := json.Unmarshal(cached.raw, out); err != nil {
+			return responseInfo{}, fmt.Errorf("mcp: decode cached %s result: %w", method, err)
+		}
+		return responseInfo{}, nil
+	}
+	raw, info, err := c.requestRaw(ctx, method, name, params, false)
+	if err != nil {
+		return info, err
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
 		return info, fmt.Errorf("mcp: decode %s result: %w", method, err)
 	}
+	var hint struct {
+		TTLMS int64 `json:"ttlMs"`
+	}
+	if err := json.Unmarshal(raw, &hint); err != nil {
+		return info, fmt.Errorf("mcp: decode %s cache hint: %w", method, err)
+	}
+	c.cacheMu.Lock()
+	if hint.TTLMS > 0 {
+		c.cache[method] = cachedResult{
+			raw:       append(json.RawMessage(nil), raw...),
+			expiresAt: now().Add(time.Duration(hint.TTLMS) * time.Millisecond),
+		}
+	} else {
+		delete(c.cache, method)
+	}
+	c.cacheMu.Unlock()
 	return info, nil
 }
 
 type discovery struct {
-	Instructions string `json:"instructions"`
-	Meta         struct {
+	SupportedVersions []string `json:"supportedVersions"`
+	Instructions      string   `json:"instructions"`
+	TTLMS             int64    `json:"ttlMs"`
+	CacheScope        string   `json:"cacheScope"`
+	Meta              struct {
 		ServerInfo json.RawMessage `json:"io.modelcontextprotocol/serverInfo"`
 	} `json:"_meta"`
 }
 
 type toolList struct {
-	Tools []tool `json:"tools"`
+	Tools      []tool `json:"tools"`
+	TTLMS      int64  `json:"ttlMs"`
+	CacheScope string `json:"cacheScope"`
 }
 
 type tool struct {
@@ -146,17 +216,31 @@ type callResult struct {
 	StructuredContent json.RawMessage   `json:"structuredContent,omitempty"`
 	IsError           bool              `json:"isError"`
 	ResultType        string            `json:"resultType"`
+	InputRequests     json.RawMessage   `json:"inputRequests,omitempty"`
+	RequestState      *string           `json:"requestState,omitempty"`
 }
 
 func (c *client) discover(ctx context.Context) (discovery, error) {
 	var out discovery
-	_, err := c.request(ctx, "server/discover", "", nil, false, &out)
-	return out, err
+	_, err := c.cachedRequest(ctx, "server/discover", "", nil, &out)
+	if err != nil {
+		var protocolErr *rpcError
+		if errors.As(err, &protocolErr) && protocolErr.Code == -32601 {
+			return discovery{}, fmt.Errorf("mcp: server is not a %s v2 server (possibly 2025-11-25): server/discover is unavailable: %w", protocolVersion, err)
+		}
+		return discovery{}, err
+	}
+	for _, version := range out.SupportedVersions {
+		if version == protocolVersion {
+			return out, nil
+		}
+	}
+	return discovery{}, fmt.Errorf("mcp: server is not a %s v2 server; advertised supportedVersions=%v", protocolVersion, out.SupportedVersions)
 }
 
 func (c *client) listTools(ctx context.Context) (toolList, error) {
 	var out toolList
-	_, err := c.request(ctx, "tools/list", "", nil, false, &out)
+	_, err := c.cachedRequest(ctx, "tools/list", "", nil, &out)
 	return out, err
 }
 
@@ -164,15 +248,54 @@ func (c *client) callTool(ctx context.Context, name string, arguments json.RawMe
 	if len(arguments) == 0 {
 		arguments = json.RawMessage(`{}`)
 	}
-	var rawArguments any
-	if err := json.Unmarshal(arguments, &rawArguments); err != nil {
+	rawArguments, inputResponses, requestState, err := splitCallPayload(arguments)
+	if err != nil {
 		return callResult{}, responseInfo{}, fmt.Errorf("mcp: arguments must be JSON: %w", err)
 	}
+	params := map[string]any{"name": name, "arguments": rawArguments}
+	if inputResponses != nil {
+		params["inputResponses"] = inputResponses
+	}
+	if requestState != nil {
+		params["requestState"] = *requestState
+	}
 	var out callResult
-	info, err := c.request(ctx, "tools/call", name, map[string]any{
-		"name": name, "arguments": rawArguments,
-	}, progress, &out)
+	info, err := c.request(ctx, "tools/call", name, params, progress, &out)
 	return out, info, err
+}
+
+func splitCallPayload(raw json.RawMessage) (map[string]json.RawMessage, any, *string, error) {
+	arguments := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(raw, &arguments); err != nil {
+		return nil, nil, nil, err
+	}
+	// Underscore-prefixed per MCP's own reserved-namespace convention (_meta).
+	// This object is the tool's own argument map, so an unprefixed control key
+	// would silently claim a name a tool may legitimately declare.
+	continuationRaw, ok := arguments["_continuation"]
+	if !ok {
+		return arguments, nil, nil, nil
+	}
+	delete(arguments, "_continuation")
+	var continuation struct {
+		Responses json.RawMessage `json:"responses"`
+		Answers   json.RawMessage `json:"answers"`
+		State     *string         `json:"state"`
+	}
+	if err := json.Unmarshal(continuationRaw, &continuation); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode continuation: %w", err)
+	}
+	responses := continuation.Responses
+	if len(responses) == 0 {
+		responses = continuation.Answers
+	}
+	var inputResponses any
+	if len(responses) != 0 && string(responses) != "null" {
+		if err := json.Unmarshal(responses, &inputResponses); err != nil {
+			return nil, nil, nil, fmt.Errorf("decode continuation responses: %w", err)
+		}
+	}
+	return arguments, inputResponses, continuation.State, nil
 }
 
 type httpTransport struct {

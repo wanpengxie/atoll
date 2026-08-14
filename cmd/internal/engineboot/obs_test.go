@@ -287,14 +287,14 @@ func TestProductionChannelAdapterAnswersOpenWithoutCensus(t *testing.T) {
 
 func TestProductionChannelAdapterRosterAcquiresOnceAndMarshalsOwnerProjection(t *testing.T) {
 	host := &censusPanicHost{serving: true, bundle: obsBundleStub{view: obsViewStub{roster: []channelspec.ObsRosterRow{{
-		ID: "tool:a", Kind: actor.KindTool, DeclID: "decl-a", Bound: true,
+		ID: "tool:a", Kind: actor.KindTool, DeclID: "decl-a", Name: "Ticket Booker", Description: "Books a ticket", Bound: true,
 		Device: channelspec.DeviceState{Kind: channelspec.DeviceKnown, Online: false, ReceivedAt: 9},
 	}}}}}
 	rows, serving, err := (channelObsAdapter{host: host}).Roster(context.Background(), "c0")
 	if err != nil || !serving || host.acquireCalls != 1 || len(rows) != 1 {
 		t.Fatalf("roster=(%+v,%v,%v) acquire calls=%d", rows, serving, err, host.acquireCalls)
 	}
-	if string(rows[0].Declared) != `{"id":"tool:a","kind":"tool","decl_id":"decl-a"}` || !rows[0].Bound || rows[0].Device.Kind != obs.DeviceKnown || rows[0].Device.Online {
+	if string(rows[0].Declared) != `{"id":"tool:a","kind":"tool","decl_id":"decl-a","name":"Ticket Booker","description":"Books a ticket"}` || !rows[0].Bound || rows[0].Device.Kind != obs.DeviceKnown || rows[0].Device.Online {
 		t.Fatalf("adapted row=%+v declared=%s", rows[0], rows[0].Declared)
 	}
 }

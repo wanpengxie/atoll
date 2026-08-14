@@ -1,6 +1,8 @@
-// Package mcp adapts one external MCP server into one ordinary Atoll tool
-// actor. The connection facts are configured; the tool surface is discovered
-// live from server/discover and tools/list.
+// Package mcp is a protocol adapter: it turns one external MCP server into one
+// ordinary Atoll actor without knowing which concrete service is behind that
+// server. The connection facts are configured and the capability surface is
+// discovered live. The resulting actor is still KindTool, so this adapter
+// lives beside the concrete device, kimi, and xhs drivers under drivers/tools.
 package mcp
 
 import (
@@ -105,13 +107,12 @@ func (a *mcpActor) describe(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
 		return
 	}
-	// A snapshot says what the server last advertised; a lightweight discover
-	// probe says whether that snapshot is currently reachable. It never
-	// replaces or empties the last successful tool list.
-	if a.client != nil && a.currentLastError() == nil {
-		if _, err := a.client.discover(msg.Ctx()); err != nil {
-			a.setLastError(err)
-		}
+	// Refresh through the server's own cache hints before answering. A failed
+	// refresh never replaces or empties the last successful tool list — and is
+	// never itself a reason to stop refreshing: this is the actor's only path
+	// back from a transient outage, so it runs unconditionally.
+	if a.client != nil {
+		a.refresh(msg.Ctx())
 	}
 	a.mu.RLock()
 	current := a.snapshot
@@ -143,12 +144,20 @@ func (a *mcpActor) call(sys actorbase.Sys, msg actorbase.Msg) {
 	a.mu.RLock()
 	lastError := a.lastError
 	toolName, ok := a.snapshot.tools[msg.Type]
+	everConnected := len(a.snapshot.tools) > 0
 	a.mu.RUnlock()
-	if lastError != nil {
-		_, _ = sys.Fail(msg, "mcp_unreachable", lastError.Error())
-		return
-	}
+	// lastError is REPORTING material (it feeds describe's self-answer), never an
+	// admission gate: reachability is the outcome of send→terminal, never a stored
+	// field. Gating here on the last observation would make the actor's own error
+	// record decide whether a fresh observation may happen at all — an absorbing
+	// state no recovery can escape (the server comes back; this actor never does).
 	if !ok {
+		// A tool table we never obtained cannot answer "is this type mine?". Saying
+		// type_unsupported would assert an absence we have not observed.
+		if !everConnected && lastError != nil {
+			_, _ = sys.Fail(msg, "mcp_unreachable", lastError.Error())
+			return
+		}
 		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("mcp actor does not handle %s", msg.Type))
 		return
 	}
@@ -247,6 +256,26 @@ func translateCallResult(result callResult) (map[string]any, string, error) {
 		}
 		payload["structured_content"] = structured
 	}
+	if result.ResultType == "input_required" {
+		continuation := map[string]any{"reason": "input_required"}
+		if len(result.InputRequests) > 0 && string(result.InputRequests) != "null" {
+			var requests any
+			if err := json.Unmarshal(result.InputRequests, &requests); err != nil {
+				return nil, "", fmt.Errorf("decode MCP inputRequests: %w", err)
+			}
+			continuation["requests"] = requests
+		}
+		if result.RequestState != nil {
+			continuation["state"] = *result.RequestState
+		}
+		if _, hasRequests := continuation["requests"]; !hasRequests && result.RequestState == nil {
+			return nil, "", errors.New("MCP input_required result omitted inputRequests and requestState")
+		}
+		// Underscore-prefixed, following MCP's own reserved-namespace convention
+		// (_meta): the control field shares one JSON object with the tool's own
+		// arguments, so it needs a prefix no legitimate parameter would claim.
+		payload["_continuation"] = continuation
+	}
 	if text != "" {
 		return payload, text, nil
 	}
@@ -300,7 +329,8 @@ func translateTool(t tool) introspect.TypeMeta {
 	meta := introspect.TypeMeta{
 		Description:  t.Description,
 		AllowedKinds: []string{string(message.KindRequest)},
-		Notes:        "过渡形：MCP inputSchema 原文如下；当前 PayloadFields 翻译有损，阶段 3 处理。\n" + string(t.InputSchema),
+		InputSchema:  append(json.RawMessage(nil), t.InputSchema...),
+		OutputSchema: append(json.RawMessage(nil), t.OutputSchema...),
 	}
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`

@@ -1,6 +1,7 @@
 package channelspec
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -21,6 +22,29 @@ type ActorFacts struct {
 	Active       bool       `json:"active"`
 }
 
+// ResolveActorPrincipal applies the platform's single attribution rule: an
+// actor's explicit principal wins; otherwise its source declaration's owner is
+// the principal. The lookup is intentionally supplied by the caller because
+// channel homes and the c0 registrar reach declaration truth through different
+// read ports.
+func ResolveActorPrincipal(
+	ctx context.Context,
+	facts ActorFacts,
+	lookupOwner func(context.Context, string) (owner string, found bool, err error),
+) (string, error) {
+	if facts.Principal != "" {
+		return facts.Principal, nil
+	}
+	if facts.SourceDeclID == "" || lookupOwner == nil {
+		return "", nil
+	}
+	owner, found, err := lookupOwner(ctx, facts.SourceDeclID)
+	if err != nil || !found {
+		return "", err
+	}
+	return owner, nil
+}
+
 // HumanRosterEntry is one row of the channel's human membership roster — the
 // entitlement projection's whole vocabulary. It is a business-membrane value:
 // no kind axis (every entry is human by construction), no definition, no
@@ -33,11 +57,13 @@ type HumanRosterEntry struct {
 // ObsRosterRow is the business membrane's complete actor-roster projection.
 // It deliberately contains neither a presence snapshot nor a runtime record.
 type ObsRosterRow struct {
-	ID     actor.ActorID `json:"id"`
-	Kind   actor.Kind    `json:"kind"`
-	DeclID string        `json:"decl_id,omitempty"`
-	Bound  bool          `json:"-"`
-	Device DeviceState   `json:"-"`
+	ID          actor.ActorID `json:"id"`
+	Kind        actor.Kind    `json:"kind"`
+	DeclID      string        `json:"decl_id,omitempty"`
+	Name        string        `json:"name,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Bound       bool          `json:"-"`
+	Device      DeviceState   `json:"-"`
 }
 
 type DeviceStateKind string
@@ -57,6 +83,8 @@ type DeviceState struct {
 
 type DeclarationFacts struct {
 	OwnerPrincipal string
+	Name           string
+	Description    string
 	Visibility     string
 	Class          string
 	Config         json.RawMessage

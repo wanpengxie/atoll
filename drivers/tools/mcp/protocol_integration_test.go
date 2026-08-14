@@ -1,20 +1,26 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
@@ -28,21 +34,24 @@ func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := filepath.Dir(filepath.Dir(filepath.Dir(python)))
-	port := freeTCPPort(t)
-	server := exec.Command(python, "-m", "server.main", "--transport", "http", "--port", fmt.Sprint(port))
-	server.Dir = project
-	server.Stdout = os.Stderr
-	server.Stderr = os.Stderr
-	if err := server.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = server.Process.Kill()
-		_ = server.Wait()
-	})
-	waitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
-
+	port, localListenErr := freeTCPPort()
 	t.Run("http json and sse", func(t *testing.T) {
+		if localListenErr != nil {
+			t.Skipf("HTTP fixture cannot listen in this environment: %v", localListenErr)
+		}
+		server := exec.Command(python, "-m", "server.main", "--transport", "http", "--port", fmt.Sprint(port))
+		server.Dir = project
+		server.Stdout = os.Stderr
+		server.Stderr = os.Stderr
+		if err := server.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			_ = server.Process.Kill()
+			_ = server.Wait()
+		}()
+		waitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+
 		c, err := newClient(Config{Name: "reference-http", Transport: transportHTTP, URL: fmt.Sprintf("http://127.0.0.1:%d/mcp", port)})
 		if err != nil {
 			t.Fatal(err)
@@ -68,12 +77,17 @@ func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
 			t.Fatalf("progress changed final result:\nwithout=%#v\nwith=%#v", without, with)
 		}
 		t.Logf("plain=%+v stream=%+v final results equal", plainInfo, streamInfo)
+		verifyMRTR(t, c)
+		verifyTTLRefreshAndPromptCache(t, c)
 		verifyTimeoutAndReuse(t, c)
 		verifyActorTimeoutWithoutExpires(t, c, transportHTTP)
 		verifyHTTPConcurrency(t, c)
 	})
 
 	t.Run("stdio and close owns child", func(t *testing.T) {
+		if localListenErr != nil {
+			t.Skipf("Python SDK async runtime is unavailable in the no-socket execution sandbox: %v", localListenErr)
+		}
 		c, err := newClient(Config{
 			Name: "reference-stdio", Transport: transportStdio, Command: python,
 			Args: []string{"-m", "server.main", "--transport", "stdio"}, Cwd: project,
@@ -84,6 +98,8 @@ func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
 		stdio := c.transport.(*stdioTransport)
 		pid := stdio.cmd.Process.Pid
 		verifyReferenceClient(t, c)
+		verifyMRTR(t, c)
+		verifyTTLRefreshAndPromptCache(t, c)
 		verifyTimeoutAndReuse(t, c)
 		verifyActorTimeoutWithoutExpires(t, c, transportStdio)
 		if err := c.Close(); err != nil && !stringsContains(err.Error(), "killed") {
@@ -215,12 +231,31 @@ func verifyReferenceClient(t *testing.T, c *client) {
 	if discover.Instructions != "Deterministic MCP 2026-07-28 protocol and tool conformance fixture." {
 		t.Fatalf("instructions=%q", discover.Instructions)
 	}
+	if !reflect.DeepEqual(discover.SupportedVersions, []string{protocolVersion}) {
+		t.Fatalf("supportedVersions=%v", discover.SupportedVersions)
+	}
 	listing, err := c.listTools(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(listing.Tools) != 15 {
 		t.Fatalf("tools=%d", len(listing.Tools))
+	}
+	byName := make(map[string]tool, len(listing.Tools))
+	for _, item := range listing.Tools {
+		byName[item.Name] = item
+	}
+	createOrder := translateTool(byName["create_order"])
+	if !bytes.Equal(createOrder.InputSchema, byName["create_order"].InputSchema) ||
+		!bytes.Contains(createOrder.InputSchema, []byte(`"$defs"`)) {
+		t.Fatalf("create_order input schema changed: got=%s want=%s", createOrder.InputSchema, byName["create_order"].InputSchema)
+	}
+	structured := translateTool(byName["structured_report"])
+	if !bytes.Equal(structured.OutputSchema, byName["structured_report"].OutputSchema) {
+		t.Fatalf("structured_report output schema changed: got=%s want=%s", structured.OutputSchema, byName["structured_report"].OutputSchema)
+	}
+	if stringsContains(createOrder.Notes, string(createOrder.InputSchema)) || stringsContains(structured.Notes, string(structured.OutputSchema)) {
+		t.Fatalf("schema leaked into notes: create=%q structured=%q", createOrder.Notes, structured.Notes)
 	}
 	result, _, err := c.callTool(context.Background(), "echo", json.RawMessage(`{"text":"go-mcp"}`), false)
 	if err != nil {
@@ -241,14 +276,197 @@ func verifyReferenceClient(t *testing.T, c *client) {
 	}
 }
 
-func freeTCPPort(t *testing.T) int {
+func verifyMRTR(t *testing.T, c *client) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	first, _, err := c.callTool(context.Background(), "book_ticket", json.RawMessage(`{"destination":"Singapore"}`), false)
+	if err != nil {
+		t.Fatalf("book_ticket first round: %v", err)
+	}
+	payload, _, err := translateCallResult(first)
 	if err != nil {
 		t.Fatal(err)
 	}
+	continuation, ok := payload["_continuation"].(map[string]any)
+	if !ok || continuation["reason"] != "input_required" || continuation["state"] == "" {
+		t.Fatalf("first continuation=%#v", payload["_continuation"])
+	}
+	retry, err := json.Marshal(map[string]any{
+		"destination": "Singapore",
+		"_continuation": map[string]any{
+			"responses": map[string]any{
+				"confirm_booking": map[string]any{"action": "accept", "content": map[string]any{"confirm": true}},
+			},
+			"state": continuation["state"],
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, _, err := c.callTool(context.Background(), "book_ticket", retry, false)
+	if err != nil {
+		t.Fatalf("book_ticket retry: %v", err)
+	}
+	finalPayload, _, err := translateCallResult(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids struct {
+		Ticket           string `json:"ticket"`
+		InitialRequestID string `json:"initialRequestId"`
+		RetryRequestID   string `json:"retryRequestId"`
+	}
+	if err := json.Unmarshal([]byte(finalPayload["text"].(string)), &ids); err != nil {
+		t.Fatal(err)
+	}
+	if ids.Ticket != "TICKET-SINGAPORE" || ids.InitialRequestID == ids.RetryRequestID {
+		t.Fatalf("MRTR final=%+v", ids)
+	}
+	t.Logf("MRTR completed with distinct ids initial=%s retry=%s", ids.InitialRequestID, ids.RetryRequestID)
+}
+
+type countingTransport struct {
+	transport
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (t *countingTransport) RoundTrip(ctx context.Context, request rpcRequest, name string) (rpcResponse, responseInfo, error) {
+	t.mu.Lock()
+	t.calls[request.Method]++
+	t.mu.Unlock()
+	return t.transport.RoundTrip(ctx, request, name)
+}
+
+func (t *countingTransport) count(method string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls[method]
+}
+
+func verifyTTLRefreshAndPromptCache(t *testing.T, c *client) {
+	t.Helper()
+	counter := &countingTransport{transport: c.transport, calls: make(map[string]int)}
+	c.transport = counter
+	var prompts struct {
+		TTLMS int64 `json:"ttlMs"`
+	}
+	if _, err := c.cachedRequest(context.Background(), "prompts/list", "", nil, &prompts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cachedRequest(context.Background(), "prompts/list", "", nil, &prompts); err != nil {
+		t.Fatal(err)
+	}
+	if prompts.TTLMS != 60_000 || counter.count("prompts/list") != 1 {
+		t.Fatalf("prompts cache ttl=%d calls=%d", prompts.TTLMS, counter.count("prompts/list"))
+	}
+
+	a := &mcpActor{cfg: Config{Name: "ttl", Transport: transportHTTP}, client: c}
+	a.refresh(context.Background())
+	if got := len(a.snapshot.types); got != 15 {
+		t.Fatalf("initial types=%d", got)
+	}
+	if _, _, err := c.callTool(context.Background(), "toggle_extra_tool", json.RawMessage(`{}`), false); err != nil {
+		t.Fatal(err)
+	}
+	a.describe(&describeRecorder{}, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "describe-enabled", Kind: message.KindRequest, Type: introspect.QueryDescribe,
+	}))
+	if got := len(a.snapshot.types); got != 16 {
+		t.Fatalf("types after enabling extra_tool=%d", got)
+	}
+	if _, ok := a.snapshot.types["ttl.extra_tool"]; !ok {
+		t.Fatal("enabled snapshot omitted ttl.extra_tool")
+	}
+	if _, _, err := c.callTool(context.Background(), "toggle_extra_tool", json.RawMessage(`{}`), false); err != nil {
+		t.Fatal(err)
+	}
+	a.describe(&describeRecorder{}, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "describe-disabled", Kind: message.KindRequest, Type: introspect.QueryDescribe,
+	}))
+	if got := len(a.snapshot.types); got != 15 {
+		t.Fatalf("types after disabling extra_tool=%d", got)
+	}
+	if _, ok := a.snapshot.types["ttl.extra_tool"]; ok {
+		t.Fatal("disabled snapshot retained ttl.extra_tool")
+	}
+	if counter.count("tools/list") < 3 {
+		t.Fatalf("ttlMs=0 tools/list calls=%d, want each refresh to pull", counter.count("tools/list"))
+	}
+	t.Logf("ttl refresh tools/list calls=%d; prompts/list calls=%d", counter.count("tools/list"), counter.count("prompts/list"))
+}
+
+type describeRecorder struct {
+	actorbase.Sys
+	reply any
+	fail  string
+}
+
+func (s *describeRecorder) Self() actor.ActorID { return "tool:mcp-test" }
+func (s *describeRecorder) Reply(_ actorbase.Msg, value any) (message.ID, error) {
+	s.reply = value
+	return "reply", nil
+}
+func (s *describeRecorder) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
+	s.fail = code + ": " + detail
+	return "fail", nil
+}
+
+func TestRejectsNonV2ServersWithActionableDescribe(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		response   rpcResponse
+		wantDetail string
+	}{
+		{name: "method missing", response: rpcResponse{Error: &rpcError{Code: -32601, Message: "Method not found"}}, wantDetail: "not a 2026-07-28 v2 server"},
+		{name: "old advertised version", response: rpcResponse{Result: json.RawMessage(`{"resultType":"complete","supportedVersions":["2025-11-25"],"capabilities":{},"ttlMs":60000,"cacheScope":"public"}`)}, wantDetail: "2025-11-25"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer r.Body.Close()
+				var request rpcRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				response := tc.response
+				response.JSONRPC = "2.0"
+				response.ID = json.RawMessage(fmt.Sprint(request.ID))
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(response)
+			})
+			c := testClient(&httpTransport{
+				url:    "http://old-server.test/mcp",
+				client: &http.Client{Transport: handlerRoundTripper{handler: handler}},
+			})
+			a := &mcpActor{cfg: Config{Name: "old", Transport: transportHTTP}, client: c}
+			a.refresh(context.Background())
+			recorder := &describeRecorder{}
+			a.describe(recorder, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+				ID: "describe-old", Kind: message.KindRequest, Type: introspect.QueryDescribe,
+			}))
+			answer, ok := recorder.reply.(introspect.Describe)
+			if !ok || len(answer.Types) != 0 || !stringsContains(answer.Description, tc.wantDetail) {
+				t.Fatalf("describe=%#v fail=%q", recorder.reply, recorder.fail)
+			}
+		})
+	}
+}
+
+type handlerRoundTripper struct{ handler http.Handler }
+
+func (t handlerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	t.handler.ServeHTTP(recorder, request)
+	return recorder.Result(), nil
+}
+
+func freeTCPPort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
 	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
+	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
 func waitTCP(t *testing.T, address string) {

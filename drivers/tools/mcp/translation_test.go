@@ -6,11 +6,15 @@ import (
 	"testing"
 )
 
-func TestTranslateToolKeepsRawSchemaAndOnlyFlattensTopLevel(t *testing.T) {
-	raw := json.RawMessage(`{"type":"object","$defs":{"Customer":{"type":"object"}},"properties":{"customer":{"$ref":"#/$defs/Customer"},"level":{"type":"string","enum":["low","high"],"description":"Priority."}},"required":["customer"]}`)
-	meta := translateTool(tool{Name: "create_order", Description: "Create.", InputSchema: raw})
-	if !strings.HasPrefix(meta.Notes, "过渡形：") || !strings.Contains(meta.Notes, string(raw)) {
-		t.Fatalf("raw schema not preserved in transitional notes: %q", meta.Notes)
+func TestTranslateToolKeepsRawSchemasAndOnlyFlattensTopLevel(t *testing.T) {
+	input := json.RawMessage(`{"type":"object","$defs":{"Customer":{"type":"object"}},"properties":{"customer":{"$ref":"#/$defs/Customer"},"level":{"type":"string","enum":["low","high"],"description":"Priority."}},"required":["customer"]}`)
+	output := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
+	meta := translateTool(tool{Name: "create_order", Description: "Create.", InputSchema: input, OutputSchema: output})
+	if string(meta.InputSchema) != string(input) || string(meta.OutputSchema) != string(output) {
+		t.Fatalf("schemas changed: input=%s output=%s", meta.InputSchema, meta.OutputSchema)
+	}
+	if strings.Contains(meta.Notes, string(input)) || strings.Contains(meta.Notes, string(output)) {
+		t.Fatalf("notes retained schema source: %q", meta.Notes)
 	}
 	if len(meta.PayloadFields) != 2 {
 		t.Fatalf("payload fields=%#v", meta.PayloadFields)
@@ -21,6 +25,25 @@ func TestTranslateToolKeepsRawSchemaAndOnlyFlattensTopLevel(t *testing.T) {
 	}
 	if !byName["customer"] || byName["level"] {
 		t.Fatalf("required translation=%v", byName)
+	}
+}
+
+func TestTranslateInputRequiredCarriesContinuation(t *testing.T) {
+	state := "opaque-state"
+	payload, _, err := translateCallResult(callResult{
+		ResultType:    "input_required",
+		InputRequests: json.RawMessage(`{"confirm":{"method":"elicitation/create","params":{"message":"Continue?"}}}`),
+		RequestState:  &state,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuation := payload["_continuation"].(map[string]any)
+	if continuation["reason"] != "input_required" || continuation["state"] != state {
+		t.Fatalf("continuation=%#v", continuation)
+	}
+	if _, ok := continuation["requests"].(map[string]any)["confirm"]; !ok {
+		t.Fatalf("requests=%#v", continuation["requests"])
 	}
 }
 
@@ -75,5 +98,21 @@ func TestBuildSnapshotTypePrefixComesOnlyFromConfigName(t *testing.T) {
 				t.Fatalf("self-description %q omitted %q", text, want)
 			}
 		}
+	}
+}
+
+func TestCacheHintsStayInternalToDescribe(t *testing.T) {
+	discover := discovery{SupportedVersions: []string{protocolVersion}, TTLMS: 60_000, CacheScope: "public"}
+	listing := toolList{
+		TTLMS: 0, CacheScope: "private",
+		Tools: []tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}
+	snapshot := buildSnapshot("srv", discover, listing)
+	raw, err := json.Marshal(snapshot.types)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "ttlMs") || strings.Contains(string(raw), "cacheScope") {
+		t.Fatalf("cache hint leaked into describe types: %s", raw)
 	}
 }

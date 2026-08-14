@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
@@ -301,6 +302,9 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}, func(actorrt.Incarnation) actorrt.Actor {
 		return actorbase.New(systemCaps, h.hooks(), sysactor.Def(sysactor.Deps{
 			Authority: h.actors, Clock: clock,
+			Declaration: func(ctx context.Context, declIDs []string) (map[string]channelspec.DeclarationFacts, error) {
+				return resolveDeclarationCatalog(ctx, h.resolver, h.channelID, declIDs)
+			},
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
 			Logger:   logger, Operate: h.opEntry, Logbook: h.query, Calls: h.callPort,
 		}))

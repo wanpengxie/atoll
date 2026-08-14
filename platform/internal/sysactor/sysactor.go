@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -43,6 +44,7 @@ type Directory interface {
 // incarnation; run(sys) is the process body.
 type SystemActor struct {
 	authority Directory
+	decl      func(context.Context, []string) (map[string]channelspec.DeclarationFacts, error)
 	clock     func() time.Time
 	presence  PresenceStat
 	operate   OperateExecutor
@@ -56,10 +58,11 @@ type SystemActor struct {
 
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
-	Authority Directory
-	Clock     func() time.Time
-	Presence  PresenceStat
-	Logger    *slog.Logger
+	Authority   Directory
+	Declaration func(context.Context, []string) (map[string]channelspec.DeclarationFacts, error)
+	Clock       func() time.Time
+	Presence    PresenceStat
+	Logger      *slog.Logger
 	// Operate is the injected channel-operate executor (the in-gate control plane's
 	// implementation half; the gate here does permission + routing). Nil → the four
 	// control types are inert (no synthesis) — the injection point is unfilled.
@@ -87,6 +90,7 @@ func New(deps Deps) *SystemActor {
 	}
 	return &SystemActor{
 		authority: deps.Authority,
+		decl:      deps.Declaration,
 		clock:     clock,
 		presence:  deps.Presence,
 		operate:   deps.Operate,
@@ -168,18 +172,48 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(identities))}
+	// The roster already carries each member's source declaration, so the
+	// declarations are fetched in ONE call. Asking per member would re-read what
+	// this roster just handed over.
+	declIDs := make([]string, 0, len(identities))
+	if s.decl != nil {
+		seen := make(map[string]bool, len(identities))
+		for _, identity := range identities {
+			if identity.SourceDeclID == "" || seen[identity.SourceDeclID] {
+				continue
+			}
+			seen[identity.SourceDeclID] = true
+			declIDs = append(declIDs, identity.SourceDeclID)
+		}
+	}
+	declarations := map[string]channelspec.DeclarationFacts{}
+	if len(declIDs) > 0 {
+		var declErr error
+		declarations, declErr = s.decl(msg.Ctx(), declIDs)
+		if declErr != nil {
+			s.logger.Warn("sysactor.declaration_catalog_failed", "error", declErr)
+			declarations = map[string]channelspec.DeclarationFacts{}
+		}
+	}
 	for _, identity := range identities {
 		snapshot, err := s.snapshot(msg.Ctx(), identity.ID)
 		if err != nil {
 			s.logger.Warn("sysactor.presence_snapshot_failed", "actor", string(identity.ID), "error", err)
 		}
 		present, uptimeMs := s.liveness(snapshot)
-		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
+		entry := introspect.CatalogEntry{
 			ID: string(identity.ID), Kind: string(identity.Kind),
 			Present:  present,
 			UptimeMs: uptimeMs,
 			Device:   deviceTestimony(snapshot),
-		})
+		}
+		if identity.SourceDeclID != "" {
+			if declaration, ok := declarations[identity.SourceDeclID]; ok {
+				entry.Name = declaration.Name
+				entry.Description = declaration.Description
+			}
+		}
+		catalog.Actors = append(catalog.Actors, entry)
 	}
 	// The kernel is a constant, not a member: it has no record to list. The
 	// directory entry is SYNTHESIZED here from the identity constant, never read

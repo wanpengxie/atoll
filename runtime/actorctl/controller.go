@@ -282,7 +282,9 @@ func (c *Controller) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	}
 	out := make([]storespec.ActiveIdentity, 0, len(c.actors))
 	for id, value := range c.actors {
-		out = append(out, storespec.ActiveIdentity{ID: id, Kind: value.Record.Kind})
+		out = append(out, storespec.ActiveIdentity{
+			ID: id, Kind: value.Record.Kind, SourceDeclID: value.Record.SourceDeclID,
+		})
 	}
 	sortByActorID(out, func(v storespec.ActiveIdentity) actor.ActorID { return v.ID })
 	return out, nil

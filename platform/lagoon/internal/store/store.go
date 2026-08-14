@@ -21,7 +21,7 @@ import (
 const (
 	channelColumns   = "channels.id,channels.parent_id,channels.name,channels.type,channels.status,channels.owner_principal,channels.spec_json,channels.created_at"
 	principalColumns = "principals.id,principals.kind,principals.email,principals.display_name,principals.status,principals.created_at"
-	declColumns      = "decls.id,decls.name,decls.owner,decls.default_class,decls.config_json,decls.status,decls.visibility,decls.created_at,decls.updated_at"
+	declColumns      = "decls.id,decls.name,decls.description,decls.owner,decls.default_class,decls.config_json,decls.status,decls.visibility,decls.created_at,decls.updated_at"
 	deviceColumns    = "devices.id,devices.owner_principal,devices.name,devices.key,devices.status,devices.created_at"
 	overlayColumns   = "decl_overlays.decl_id,decl_overlays.channel_id,decl_overlays.config_json,decl_overlays.updated_at"
 )
@@ -321,7 +321,7 @@ func (s *Store) UpsertSystemChannel(ctx context.Context, row regspec.ChannelRow)
 }
 
 func (s *Store) UpsertSystemDecl(ctx context.Context, row regspec.DeclRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,'{}','present','public',?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,owner=excluded.owner,default_class=excluded.default_class,config_json='{}',status='present',visibility='public',updated_at=excluded.updated_at`, row.ID, row.Name, row.Owner, row.DefaultClass, row.CreatedAt, row.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,'{}','present','public',?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,owner=excluded.owner,default_class=excluded.default_class,config_json='{}',status='present',visibility='public',updated_at=excluded.updated_at`, row.ID, row.Name, nullableText(row.Description), row.Owner, row.DefaultClass, row.CreatedAt, row.UpdatedAt)
 	return classify(err)
 }
 
@@ -376,12 +376,12 @@ func (s *Store) UpsertPasswordCredential(ctx context.Context, principalID, hash 
 }
 
 func (s *Store) InsertDecl(ctx context.Context, row regspec.DeclRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,'present',?,?,?)`, row.ID, row.Name, row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.CreatedAt, row.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,?,'present',?,?,?)`, row.ID, row.Name, nullableText(row.Description), row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.CreatedAt, row.UpdatedAt)
 	return classify(err)
 }
 
 func (s *Store) UpdateDecl(ctx context.Context, row regspec.DeclRow) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE id=?`, row.Name, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.UpdatedAt, row.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE decls SET name=?,description=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE id=?`, row.Name, nullableText(row.Description), row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.UpdatedAt, row.ID)
 	return err
 }
 
@@ -473,8 +473,11 @@ func scanPrincipal(s scanner) (regspec.PrincipalRow, error) {
 
 func scanDecl(s scanner) (regspec.DeclRow, error) {
 	var row regspec.DeclRow
-	var raw sql.NullString
-	err := s.Scan(&row.ID, &row.Name, &row.Owner, &row.DefaultClass, &raw, &row.Status, &row.Visibility, &row.CreatedAt, &row.UpdatedAt)
+	var description, raw sql.NullString
+	err := s.Scan(&row.ID, &row.Name, &description, &row.Owner, &row.DefaultClass, &raw, &row.Status, &row.Visibility, &row.CreatedAt, &row.UpdatedAt)
+	if description.Valid {
+		row.Description = description.String
+	}
 	if raw.Valid {
 		row.Config = json.RawMessage(raw.String)
 	}
