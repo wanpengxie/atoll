@@ -74,9 +74,11 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		var stored GenesisSpec
-		if !found || json.Unmarshal(row.Spec, &stored) != nil {
-			return errors.New("lagoon: c0 registry genesis invalid — wipe the installation and start again")
+		if !found {
+			return errors.New("lagoon: c0 registry genesis missing — wipe the installation and start again")
+		}
+		if err := validateStoredC0Genesis(row.Spec); err != nil {
+			return fmt.Errorf("lagoon: c0 registry genesis invalid (%w) — wipe the installation and start again", err)
 		}
 	} else {
 		genesis, ok := r.facts.(SystemGenesisResolver)
@@ -101,7 +103,7 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := r.registry.store.UpsertSystemChannel(ctx, regspec.ChannelRow{
+		if err := r.registry.store.InsertSystemChannel(ctx, regspec.ChannelRow{
 			ID: protocol.C0ChannelID, Name: string(protocol.C0ChannelID), Type: "group",
 			Status: regspec.ChannelPresent, OwnerPrincipal: protocol.RootPrincipalID, Description: description, Serving: serving, Spec: raw, CreatedAt: spec.CreatedAt,
 		}); err != nil {
@@ -120,6 +122,32 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{AllChannels: true})
+	}
+	return nil
+}
+
+// validateStoredC0Genesis is the whole of what a start asks of an existing
+// c0: that this build can read its genesis and that it is c0's. Anything
+// else means the installation predates this build's shape — there is no
+// upgrade path before 1.0; the operator wipes and starts again.
+func validateStoredC0Genesis(raw json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var stored GenesisSpec
+	if err := decoder.Decode(&stored); err != nil {
+		return err
+	}
+	if stored.ChannelID != protocol.C0ChannelID {
+		return errors.New("channel_id is not c0")
+	}
+	if stored.Type != "group" {
+		return errors.New("type is not group")
+	}
+	if stored.OwnerPrincipal != protocol.RootPrincipalID {
+		return errors.New("owner is not root")
+	}
+	if len(stored.Profile.Endpoints) == 0 {
+		return errors.New("profile has no endpoints")
 	}
 	return nil
 }
@@ -619,7 +647,10 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if !ok {
 			return regspec.ChannelRow{}, false, invalid("unknown class placement")
 		}
-		rendered := channelspec.RenderedSnapshot{Class: decl.DefaultClass, Config: cloneJSON(config), Placement: channel.Placement{Kind: placement}}
+		// The recipe entry records the expectation (which declaration, what
+		// kind); the config a channel runs with has one source, the overlay
+		// (written right before introduction), so it is not frozen here.
+		rendered := channelspec.RenderedSnapshot{Class: decl.DefaultClass, Placement: channel.Placement{Kind: placement}}
 		if placement == channel.PlacementDaemon {
 			rendered.Placement.DesiredHost = protocol.LocalDeviceID
 		}
@@ -768,7 +799,7 @@ func (r *Registrar) introduceChannel(sys actorbase.Sys, ctx context.Context, row
 	}
 	userDeclarations := make([]GenesisDeclaration, 0, len(spec.Declarations))
 	for _, declaration := range spec.Declarations {
-		if declaration.DeclID == SvcActorDeclID || declaration.DeclID == CoreActorDeclID || declaration.DeclID == RegistrarSeatDeclID {
+		if systemCompanion(declaration.DeclID) {
 			continue
 		}
 		userDeclarations = append(userDeclarations, declaration)
@@ -1100,6 +1131,13 @@ func systemClass(class string) bool {
 }
 func systemDecl(id string) bool {
 	return id == SvcActorDeclID || id == CoreActorDeclID || id == RegistrarSeatDeclID || strings.HasPrefix(id, PeerActorDeclPrefix)
+}
+
+// systemCompanion names the declarations genesis materialises itself; a
+// recipe neither introduces nor projects them. Peer handles are user-facing
+// recipe entries and are not companions.
+func systemCompanion(id string) bool {
+	return id == SvcActorDeclID || id == CoreActorDeclID || id == RegistrarSeatDeclID
 }
 
 func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.ID, p DeclEdit) (regspec.DeclRow, error) {
@@ -1594,14 +1632,25 @@ func (r *Registrar) channelView(ctx context.Context, row regspec.ChannelRow) (re
 	if err := json.Unmarshal(row.Spec, &spec); err != nil {
 		return regspec.ChannelRow{}, err
 	}
+	// The recipe projects what the channel runs with now: the declaration
+	// list from genesis, and per-declaration config from the overlay — the
+	// one source of a channel's config. Peer handles carry no config.
+	overlays, err := r.registry.store.GetOverlays(ctx, row.ID)
+	if err != nil {
+		return regspec.ChannelRow{}, err
+	}
+	overlayConfig := make(map[string]json.RawMessage, len(overlays))
+	for _, overlay := range overlays {
+		overlayConfig[overlay.DeclID] = overlay.Config
+	}
 	recipe := regspec.TemplateBody{Profile: &spec.Profile}
 	for _, declaration := range spec.Declarations {
-		if declaration.DeclID == SvcActorDeclID || declaration.DeclID == CoreActorDeclID {
+		if systemCompanion(declaration.DeclID) {
 			continue
 		}
 		item := regspec.TemplateDeclaration{DeclID: declaration.DeclID}
-		if !strings.HasPrefix(declaration.DeclID, PeerActorDeclPrefix) {
-			item.Config = cloneJSON(declaration.Rendered.Config)
+		if config, ok := overlayConfig[declaration.DeclID]; ok && !strings.HasPrefix(declaration.DeclID, PeerActorDeclPrefix) {
+			item.Config = cloneJSON(config)
 		}
 		recipe.Declarations = append(recipe.Declarations, item)
 	}

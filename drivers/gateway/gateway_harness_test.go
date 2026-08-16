@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,7 +39,12 @@ func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, stri
 	return platform.ActorFactory{}, false
 }
 
-func (gatewayTestCompositionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error) {
+// Only the fixture's own agent declarations resolve; every other id is not
+// found, so tests keep the "declaration absent / withdrawn" branch reachable.
+func (gatewayTestCompositionResolver) ResolveDeclaration(_ context.Context, _ channel.ID, declID string) (channelspec.DeclarationFacts, error) {
+	if !strings.HasPrefix(declID, "gateway-test:") {
+		return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
+	}
 	return channelspec.DeclarationFacts{Visibility: "public", Class: gatewayTestAgentClass}, nil
 }
 func (gatewayTestCompositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
@@ -446,10 +452,10 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 			}
 			time.Sleep(time.Millisecond)
 		}
-		found = len(ids) != 0
-		if found {
-			id = ids[0]
+		if err != nil || len(ids) == 0 {
+			t.Fatalf("introduce_actor(%s): no instance within 3s (err=%v)", source, err)
 		}
+		id, found = ids[0], true
 	} else {
 		id, found, err = bundle.View().ResolvePrincipal(context.Background(), member)
 	}

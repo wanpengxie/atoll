@@ -472,8 +472,10 @@ func (s *Store) UpsertSteward(ctx context.Context, id string, at int64) error {
 	return classify(err)
 }
 
-func (s *Store) UpsertSystemChannel(ctx context.Context, row regspec.ChannelRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET parent_id=NULL,name=excluded.name,type='group',status='present',owner_principal=excluded.owner_principal,description=excluded.description,serving=1`, row.ID, row.Name, row.OwnerPrincipal, row.Description, 1, string(row.Spec), row.CreatedAt)
+// InsertSystemChannel carves c0's registry row once. There is no upsert:
+// a start never rewrites an existing c0 row.
+func (s *Store) InsertSystemChannel(ctx context.Context, row regspec.ChannelRow) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?,?,?)`, row.ID, row.Name, row.OwnerPrincipal, row.Description, row.Serving, string(row.Spec), row.CreatedAt)
 	return classify(err)
 }
 

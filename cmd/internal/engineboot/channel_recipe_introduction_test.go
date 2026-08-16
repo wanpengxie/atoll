@@ -248,3 +248,69 @@ func TestChannelRecipesRejectSystemDeclarationsPeerConfigAndDuplicateIDs(t *test
 		})
 	}
 }
+
+// A channel's recipe projects what it runs with now: config comes from the
+// overlay (the one source of per-channel config), never from a value frozen at
+// creation. Changing the overlay changes the recipe; a fork gets the current
+// configuration. c0's own recipe — whose genesis carries the registrar seat —
+// forks as-is too: every system companion is skipped by the same rule.
+func TestChannelRecipeProjectsCurrentOverlayAndForksAsIs(t *testing.T) {
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close(context.Background())
+	core, _ := eng.host.Acquire(protocol.C0ChannelID)
+	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
+	call := func(word lagoon.Word, payload any, out any) {
+		t.Helper()
+		terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(word), payload), out)
+	}
+	call(lagoon.WordDeclRegister, map[string]any{"id": "recipe-live", "name": "Recipe Live", "class": svcactorTestReceiverClass, "config": map[string]any{"marker": "DEFAULT"}, "visibility": "public"}, nil)
+	var created lagoon.ChannelCreateReply
+	call(lagoon.WordChannelCreate, map[string]any{"name": "recipe-live-channel", "overrides": map[string]any{"declarations": []any{map[string]any{"decl_id": "recipe-live", "config": map[string]any{"marker": "CREATE"}}}}}, &created)
+	recipeConfig := func(id channel.ID) string {
+		t.Helper()
+		var view regspec.ChannelRow
+		call(lagoon.WordChannelGet, map[string]any{"channel_id": id}, &view)
+		if view.Recipe == nil || len(view.Recipe.Declarations) != 1 || view.Recipe.Declarations[0].DeclID != "recipe-live" {
+			t.Fatalf("recipe=%+v", view.Recipe)
+		}
+		var config map[string]string
+		if err := json.Unmarshal(view.Recipe.Declarations[0].Config, &config); err != nil {
+			t.Fatalf("recipe config %s: %v", view.Recipe.Declarations[0].Config, err)
+		}
+		return config["marker"]
+	}
+	if got := recipeConfig(created.ID); got != "CREATE" {
+		t.Fatalf("recipe after create=%q, want CREATE", got)
+	}
+	// The overlay is the channel's own to set: spoken from inside it.
+	bundle := waitBundle(t, eng, created.ID)
+	terminalValue(t, callMember(t, created.ID, bundle, protocol.RootPrincipalID, onlyDecl(t, bundle, lagoon.CoreActorDeclID), string(lagoon.WordOverlaySet), map[string]any{"decl_id": "recipe-live", "channel_id": created.ID, "config": map[string]any{"marker": "LATER"}}), nil)
+	if got := recipeConfig(created.ID); got != "LATER" {
+		t.Fatalf("recipe after overlay.set=%q, want LATER", got)
+	}
+	var view regspec.ChannelRow
+	call(lagoon.WordChannelGet, map[string]any{"channel_id": created.ID}, &view)
+	var fork lagoon.ChannelCreateReply
+	call(lagoon.WordChannelCreate, map[string]any{"name": "recipe-live-fork", "overrides": view.Recipe}, &fork)
+	if len(fork.Introduced.Members) != 1 || fork.Introduced.Members[0].Result != "ok" {
+		t.Fatalf("fork introduction=%+v", fork.Introduced.Members)
+	}
+	if got := recipeConfig(fork.ID); got != "LATER" {
+		t.Fatalf("fork recipe=%q, want LATER", got)
+	}
+
+	var c0View regspec.ChannelRow
+	call(lagoon.WordChannelGet, map[string]any{"channel_id": protocol.C0ChannelID}, &c0View)
+	for _, item := range c0View.Recipe.Declarations {
+		if item.DeclID == lagoon.RegistrarSeatDeclID || item.DeclID == lagoon.SvcActorDeclID || item.DeclID == lagoon.CoreActorDeclID {
+			t.Fatalf("c0 recipe projects system companion %s", item.DeclID)
+		}
+	}
+	terminal := decodeTerminal(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "c0-recipe-fork", "overrides": c0View.Recipe}))
+	if terminal.Status != "completed" {
+		t.Fatalf("c0 recipe fork: %+v recipe=%+v", terminal, c0View.Recipe)
+	}
+}
