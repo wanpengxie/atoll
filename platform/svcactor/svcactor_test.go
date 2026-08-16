@@ -79,7 +79,7 @@ func (s *svcSys) Life() context.Context {
 func svcDeps(class string) Deps {
 	return Deps{
 		Self: "target", Core: "c0", RegistrarClass: "registrar",
-		Endpoints:     func(context.Context) ([]Endpoint, error) { return []Endpoint{{Name: "work", Receiver: "decl"}}, nil },
+		Endpoints:     func(context.Context, channel.ID) ([]Endpoint, error) { return []Endpoint{{Name: "work", Receiver: "decl"}}, nil },
 		Instances:     func(context.Context, string) ([]actor.ActorID, error) { return []actor.ActorID{"receiver"}, nil },
 		Parent:        func(context.Context) (channel.ID, error) { return "parent", nil },
 		ReceiverClass: func(context.Context, string) (string, error) { return class, nil },

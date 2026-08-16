@@ -27,8 +27,8 @@ func TestEveryRegistrarWordReachesItsHandlerThroughDeclaredRoutes(t *testing.T) 
 	bundle := waitBundle(t, eng, home.ID)
 	coreactor := onlyDecl(t, bundle, lagoon.CoreActorDeclID)
 	words := append(append([]lagoon.Word{}, lagoon.WriteWords[:]...), lagoon.ReadWords[:]...)
-	if len(words) != 28 {
-		t.Fatalf("registrar word inventory=%d want=28", len(words))
+	if len(words) != 29 {
+		t.Fatalf("registrar word inventory=%d want=29", len(words))
 	}
 	seenTemplates := 0
 	routes := []struct {

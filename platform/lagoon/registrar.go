@@ -204,13 +204,12 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		}
 	}
-	if word == WordPrincipalRegister {
-		if principal != protocol.GuestPrincipalID {
-			_, _ = sys.Fail(msg, string(CodePermissionDenied), "registration requires guest")
-			return
-		}
-	} else if principal == protocol.GuestPrincipalID {
-		_, _ = sys.Fail(msg, string(CodePermissionDenied), "guest may only register a principal")
+	// The lobby doors are judged by the calling channel: register and login
+	// are spoken from the lobby and from nowhere else. Everything else the
+	// lobby could say never reaches here — c0's svcactor exposes only these
+	// two endpoints to it.
+	if LobbyWord(word) != (source.ChannelID == protocol.LobbyChannelID) {
+		_, _ = sys.Fail(msg, string(CodePermissionDenied), "lobby speaks register and login only, and only the lobby speaks them")
 		return
 	}
 	value, err := r.execute(sys, msg.Ctx(), principal, source.ChannelID, word, payload)
@@ -355,6 +354,12 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 			return nil, err
 		}
 		return r.registerPrincipal(sys, ctx, p)
+	case WordPrincipalLogin:
+		var p PrincipalLogin
+		if err := decodePayload(raw, &p); err != nil {
+			return nil, err
+		}
+		return r.loginPrincipal(ctx, p)
 	case WordPrincipalRetire:
 		var p PrincipalRetire
 		if err := decodePayload(raw, &p); err != nil {
@@ -1012,6 +1017,25 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p 
 	}
 	introduced := r.introduceChannel(sys, ctx, home, nil)
 	return PrincipalRegisterReply{PrincipalRow: row, HomeChannelID: home.ID, Introduced: introduced}, nil
+}
+
+// loginPrincipal is the lobby's second door: a guest presents an email and
+// password and, if they match an active credential, learns which principal it
+// is. The session itself is the portal's to mint from a "completed" reply —
+// nothing here hands out anything but the principal id.
+func (r *Registrar) loginPrincipal(ctx context.Context, p PrincipalLogin) (PrincipalLoginReply, error) {
+	p.Email = strings.TrimSpace(p.Email)
+	if p.Email == "" || p.Password == "" {
+		return PrincipalLoginReply{}, invalid("email and password required")
+	}
+	id, ok, err := r.registry.VerifyCredential(ctx, p.Email, p.Password)
+	if err != nil {
+		return PrincipalLoginReply{}, err
+	}
+	if !ok {
+		return PrincipalLoginReply{}, &Error{Code: CodeInvalidCredentials, Detail: "invalid credentials"}
+	}
+	return PrincipalLoginReply{PrincipalID: id}, nil
 }
 
 func (r *Registrar) retirePrincipal(ctx context.Context, caller string, source channel.ID, p PrincipalRetire) (regspec.PrincipalRow, error) {

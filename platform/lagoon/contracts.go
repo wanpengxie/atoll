@@ -24,6 +24,7 @@ const (
 	WordChannelCreate           Word = "channel.create"
 	WordChannelRetire           Word = "channel.retire"
 	WordPrincipalRegister       Word = "principal.register"
+	WordPrincipalLogin          Word = "principal.login"
 	WordPrincipalRetire         Word = "principal.retire"
 	WordCredentialSet           Word = "credential.set"
 	WordDeclRegister            Word = "actor.template.register"
@@ -63,8 +64,23 @@ var WriteWords = [...]Word{
 
 var ReadWords = [...]Word{
 	WordChannelList, WordChannelGet, WordChannelCandidates,
-	WordDeclList, WordDeviceList, WordPrincipalMe,
+	WordDeclList, WordDeviceList, WordPrincipalMe, WordPrincipalLogin,
 	WordChannelTemplateList, WordChannelTemplateGet, WordChannelDescribe,
+}
+
+// LobbyWords is everything c0 exposes to the lobby: the two doors an
+// unauthenticated guest may knock on. The lobby is outside the trust domain,
+// so c0's svcactor neither advertises nor dispatches any other endpoint to
+// it, and the registrar accepts these two words from the lobby only.
+var LobbyWords = [...]Word{WordPrincipalRegister, WordPrincipalLogin}
+
+func LobbyWord(word Word) bool {
+	for _, candidate := range LobbyWords {
+		if word == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -92,6 +108,7 @@ const (
 	CodeNotFound         ErrorCode = "not_found"
 	CodeConflictExists   ErrorCode = "conflict_exists"
 	CodePermissionDenied ErrorCode = "permission_denied"
+	CodeInvalidCredentials ErrorCode = "invalid_credentials"
 	CodeReserved         ErrorCode = "reserved"
 	CodeResultUnknown    ErrorCode = "result_unknown"
 )
@@ -160,6 +177,13 @@ type PrincipalRegister struct {
 	Email       string `json:"email"`
 	SecretHash  string `json:"secret_hash"`
 	DisplayName string `json:"display_name,omitempty"`
+}
+type PrincipalLogin struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+type PrincipalLoginReply struct {
+	PrincipalID string `json:"id"`
 }
 type PrincipalRetire struct {
 	PrincipalID string `json:"principal_id"`

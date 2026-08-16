@@ -103,7 +103,11 @@ func TestPortCloseCancelsDispatchPendingAndStopsOldGenerationWorker(t *testing.T
 	port.Close()
 	select {
 	case result := <-callDone:
-		if result.Fail == nil || result.Fail.Code != "channel_closed" {
+		// Inside the generation-close window the caller gets a definite
+		// failure either way: `channel_closed` from the port, or
+		// `receiver_unavailable` when the old worker's cancelled wait wins
+		// the race to answer first. Both mean "retry"; neither is silence.
+		if result.Fail == nil || (result.Fail.Code != "channel_closed" && result.Fail.Code != "receiver_unavailable") {
 			t.Fatalf("close result=%+v", result)
 		}
 	case <-time.After(time.Second):

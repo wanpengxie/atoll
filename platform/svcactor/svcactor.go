@@ -30,7 +30,7 @@ type Deps struct {
 	Self           channel.ID
 	Core           channel.ID
 	RegistrarClass string
-	Endpoints      func(context.Context) ([]Endpoint, error)
+	Endpoints      func(context.Context, channel.ID) ([]Endpoint, error) // endpoints target exposes to this caller
 	Instances      func(context.Context, string) ([]actor.ActorID, error)
 	Parent         func(context.Context) (channel.ID, error)
 	ReceiverClass  func(context.Context, string) (string, error)
@@ -118,7 +118,7 @@ func dispatch(ctx context.Context, sys actorbase.Sys, deps Deps, caller channel.
 		}
 		target = actor.SystemActorID
 	} else {
-		endpoints, err := deps.Endpoints(ctx)
+		endpoints, err := deps.Endpoints(ctx, caller)
 		if err != nil {
 			return failure("channel_unavailable", err.Error())
 		}

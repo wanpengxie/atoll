@@ -137,7 +137,7 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertBootRoster(t, lobbyPath, []string{lagoon.SvcActorDeclID, lagoon.CoreActorDeclID}, []string{protocol.RootPrincipalID, protocol.GuestPrincipalID}, 4)
+	assertBootRoster(t, lobbyPath, []string{lagoon.SvcActorDeclID, lagoon.CoreActorDeclID}, []string{protocol.GuestPrincipalID}, 3)
 }
 
 func assertBootRoster(t *testing.T, path string, decls, principals []string, total int) {

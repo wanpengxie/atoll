@@ -276,7 +276,8 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 	if err := writePhysicalChannel(ctx, lobbyPath, storespec.ChannelGenesis{ChannelID: string(protocol.LobbyChannelID), Type: "group", OwnerPrincipal: protocol.RootPrincipalID, ParentChannelID: string(protocol.C0ChannelID), InitiatorPrincipal: protocol.RootPrincipalID, CreatedAt: stamp}, []storespec.ActorDraft{
 		{Kind: actor.KindTool, SourceDeclID: lagoon.SvcActorDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.SvcActorClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
 		{Kind: actor.KindTool, SourceDeclID: lagoon.CoreActorDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.PeerActorClass, Config: targetConfig(protocol.C0ChannelID)}, Placement: storespec.NewServerPlacement()},
-		{Kind: actor.KindHuman, Principal: protocol.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()},
+		// The lobby is outside the trust domain: only the guest speaks there.
+		// root is not a lobby member; c0 reaches the lobby through its handle.
 		{Kind: actor.KindHuman, Principal: protocol.GuestPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()},
 	}); err != nil {
 		return fmt.Errorf("boot: write lobby: %w", err)

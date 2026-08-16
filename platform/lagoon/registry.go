@@ -159,6 +159,28 @@ func (r *Registry) LocalDeviceKey(ctx context.Context) (string, error) {
 	return row.Key, nil
 }
 
+// EndpointsFor is the endpoint table a caller channel sees on target: the
+// one place that decides what a channel exposes to whom. The lobby is outside
+// the trust domain, so c0 shows it only the two doors in LobbyWords — the
+// svcactor dispatches from this same table, so what is not shown is not
+// callable either.
+func (r *Registry) EndpointsFor(ctx context.Context, target, caller channel.ID) ([]regspec.EndpointRow, error) {
+	rows, err := r.ListEndpoints(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	if target != protocol.C0ChannelID || caller != protocol.LobbyChannelID {
+		return rows, nil
+	}
+	exposed := rows[:0]
+	for _, row := range rows {
+		if LobbyWord(Word(row.Name)) {
+			exposed = append(exposed, row)
+		}
+	}
+	return exposed, nil
+}
+
 func (r *Registry) Describe(ctx context.Context, target channel.ID, caller channel.ID) (introspect.Describe, error) {
 	row, ok, err := r.GetChannelDesired(ctx, target)
 	if err != nil {
@@ -167,7 +189,7 @@ func (r *Registry) Describe(ctx context.Context, target channel.ID, caller chann
 	if !ok || row.Status != regspec.ChannelPresent {
 		return introspect.Describe{}, errors.New("lagoon: channel not found")
 	}
-	endpoints, err := r.ListEndpoints(ctx, target)
+	endpoints, err := r.EndpointsFor(ctx, target, caller)
 	if err != nil {
 		return introspect.Describe{}, err
 	}

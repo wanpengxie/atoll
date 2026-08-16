@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/wanpengxie/atoll/drivers/tools/echo"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
@@ -277,15 +278,37 @@ func TestPortalRegistersThroughLobbyGuestCell(t *testing.T) {
 		t.Fatal("c0 registrar ledger omitted svcactor {origin,args} registration request")
 	}
 	guestCore := onlyDecl(t, lobby, lagoon.CoreActorDeclID)
+	// The lock sits in c0's svcactor: to the lobby it exposes register and
+	// login only — anything else is not an endpoint there, so it never
+	// reaches the registrar. The card the lobby sees says the same.
 	guestList := decodeTerminal(t, callMember(t, protocol.LobbyChannelID, lobby, protocol.GuestPrincipalID, guestCore, string(lagoon.WordChannelList), map[string]any{}))
-	if guestList.Status != message.StatusFailed || guestList.ErrorCode != string(lagoon.CodePermissionDenied) {
+	if guestList.Status != message.StatusFailed || guestList.ErrorCode != "endpoint_not_found" {
 		t.Fatalf("guest channel.list=%+v", guestList)
+	}
+	var lobbyCard introspect.Describe
+	if err := json.Unmarshal(callMember(t, protocol.LobbyChannelID, lobby, protocol.GuestPrincipalID, guestCore, introspect.QueryDescribe, map[string]any{}), &lobbyCard); err != nil {
+		t.Fatal(err)
+	}
+	if len(lobbyCard.Types) != 2 || lobbyCard.Types[string(lagoon.WordPrincipalRegister)].Description == "" || lobbyCard.Types[string(lagoon.WordPrincipalLogin)].Description == "" {
+		t.Fatalf("c0 card as seen from lobby=%v", lobbyCard.Types)
+	}
+	loginOK := decodeTerminal(t, callMember(t, protocol.LobbyChannelID, lobby, protocol.GuestPrincipalID, guestCore, string(lagoon.WordPrincipalLogin), map[string]any{"email": "root@atoll.local", "password": "test-root-password"}))
+	if loginOK.Status != message.StatusCompleted {
+		t.Fatalf("lobby login=%+v", loginOK)
+	}
+	loginBad := decodeTerminal(t, callMember(t, protocol.LobbyChannelID, lobby, protocol.GuestPrincipalID, guestCore, string(lagoon.WordPrincipalLogin), map[string]any{"email": "root@atoll.local", "password": "wrong"}))
+	if loginBad.Status != message.StatusFailed || loginBad.ErrorCode != string(lagoon.CodeInvalidCredentials) {
+		t.Fatalf("lobby bad login=%+v", loginBad)
 	}
 	aliceBundle := waitBundle(t, eng, channel.ID(homeID))
 	aliceCore := onlyDecl(t, aliceBundle, lagoon.CoreActorDeclID)
 	authRegister := decodeTerminal(t, callMember(t, channel.ID(homeID), aliceBundle, "alice", aliceCore, string(lagoon.WordPrincipalRegister), map[string]any{"id": "bob", "email": "bob@example.test", "secret_hash": "hash"}))
 	if authRegister.Status != message.StatusFailed || authRegister.ErrorCode != string(lagoon.CodePermissionDenied) {
 		t.Fatalf("authenticated register=%+v", authRegister)
+	}
+	authLogin := decodeTerminal(t, callMember(t, channel.ID(homeID), aliceBundle, "alice", aliceCore, string(lagoon.WordPrincipalLogin), map[string]any{"email": "root@atoll.local", "password": "test-root-password"}))
+	if authLogin.Status != message.StatusFailed || authLogin.ErrorCode != string(lagoon.CodePermissionDenied) {
+		t.Fatalf("login from a home=%+v", authLogin)
 	}
 }
 

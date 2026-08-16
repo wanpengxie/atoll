@@ -234,7 +234,7 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	}
 	callCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	reply, err := p.registerViaLobby(callCtx, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
+	reply, err := p.callViaLobby(callCtx, lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			writeError(w, http.StatusGatewayTimeout, string(codeUnavailable), err.Error())
@@ -252,7 +252,10 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, principal)
 }
 
-func (p *Portal) registerViaLobby(ctx context.Context, in lagoon.PrincipalRegister) (lagoon.Reply, error) {
+// callViaLobby speaks one of the two lobby doors as the guest: the request is
+// submitted into the lobby ledger addressed to the lobby coreactor, crosses to
+// c0 through the peer port, and the terminal is read back from the lobby.
+func (p *Portal) callViaLobby(ctx context.Context, word lagoon.Word, in any) (lagoon.Reply, error) {
 	if p.cfg.Lobby == nil {
 		return lagoon.Reply{}, errors.New("registration lobby unavailable")
 	}
@@ -280,7 +283,7 @@ func (p *Portal) registerViaLobby(ctx context.Context, in lagoon.PrincipalRegist
 	}
 	requestID := message.ID(uuid.NewString())
 	raw, _ := json.Marshal(in)
-	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(protocol.LobbyChannelID), ID: string(requestID), MsgType: string(lagoon.WordPrincipalRegister), Kind: string(message.KindRequest), Audience: []string{string(cores[0])}, Visibility: string(message.VisibilityPublic), Payload: raw})
+	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(protocol.LobbyChannelID), ID: string(requestID), MsgType: string(word), Kind: string(message.KindRequest), Audience: []string{string(cores[0])}, Visibility: string(message.VisibilityPublic), Payload: raw})
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
@@ -338,17 +341,29 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, string(codeInvalidArgs), "email and password required")
 		return
 	}
-	principal, ok, err := p.cfg.Registry.VerifyCredential(r.Context(), in.Email, in.Password)
+	callCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	reply, err := p.callViaLobby(callCtx, lagoon.WordPrincipalLogin, lagoon.PrincipalLogin{Email: in.Email, Password: in.Password})
 	if err != nil {
-		writeError(w, 503, string(codeUnavailable), err.Error())
+		var le *lagoon.Error
+		if errors.As(err, &le) && le.Code == lagoon.CodeInvalidCredentials {
+			writeError(w, 401, string(codeInvalidCredentials), "invalid credentials")
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			writeError(w, http.StatusGatewayTimeout, string(codeUnavailable), err.Error())
+			return
+		}
+		writeLagoonError(w, err)
 		return
 	}
-	if !ok {
-		writeError(w, 401, string(codeInvalidCredentials), "invalid credentials")
+	var login lagoon.PrincipalLoginReply
+	if err := reply.DecodeValue(&login); err != nil || login.PrincipalID == "" {
+		writeError(w, 500, string(codeInternalError), "invalid registrar reply")
 		return
 	}
-	p.setSession(w, principal)
-	writeJSON(w, 200, map[string]string{"id": principal})
+	p.setSession(w, login.PrincipalID)
+	writeJSON(w, 200, map[string]string{"id": login.PrincipalID})
 }
 func (p *Portal) logout(w http.ResponseWriter, r *http.Request) {
 	if token := requestToken(r); token != "" {

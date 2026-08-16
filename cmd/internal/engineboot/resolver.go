@@ -56,8 +56,8 @@ func (r *assemblyResolver) BuildServiceClass(ch channel.ID, _ actor.ActorID, por
 	}
 	deps := svcactor.Deps{Port: port, Self: ch, Core: protocol.C0ChannelID, RegistrarClass: lagoon.RegistrarClass,
 		Audit: audit, Logger: r.logger,
-		Endpoints: func(ctx context.Context) ([]svcactor.Endpoint, error) {
-			rows, err := r.registry.ListEndpoints(ctx, ch)
+		Endpoints: func(ctx context.Context, caller channel.ID) ([]svcactor.Endpoint, error) {
+			rows, err := r.registry.EndpointsFor(ctx, ch, caller)
 			out := make([]svcactor.Endpoint, len(rows))
 			for i, row := range rows {
 				out[i] = svcactor.Endpoint{Name: row.Name, Receiver: row.Receiver}
