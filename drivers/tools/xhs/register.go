@@ -3,10 +3,13 @@ package xhs
 import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
-func init() { registry.Register("xhs", registry.ClassDecl{Kind: actor.KindTool, New: construct}) }
+func init() {
+	registry.Register("xhs", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementServer, New: construct})
+}
 
 // construct: browser-extension adapter — owns a PRIVATE loopback WS endpoint the
 // extension connects in to (keyless; the 127.0.0.1 bind is the trust boundary).

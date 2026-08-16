@@ -1,5 +1,5 @@
 // Command atoll runs a complete personal node. `atoll up` installs or opens
-// c0, provisions the local system through registrar requests, binds the public
+// c0, starts the runtime, binds the public
 // listener, and only then connects the well-known local device.
 package main
 
@@ -72,7 +72,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	provision, err := eng.ProvisionLocalNode(ctx)
+	deviceKey, err := eng.LocalDeviceKey(ctx)
 	if err != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), teardownGrace)
 		_ = eng.Close(closeCtx)
@@ -80,7 +80,7 @@ func main() {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Fatalf("up: provision: %v", err)
+		log.Fatalf("up: local device key: %v", err)
 	}
 
 	engineCtx, cancelEngine := context.WithCancel(context.Background())
@@ -103,7 +103,7 @@ func main() {
 		}
 		deviceDone <- devicehost.Run(deviceCtx, devicehost.Config{
 			ServerWS:   "ws://" + eng.BoundAddr() + "/compute",
-			Credential: provision.DeviceKey,
+			Credential: deviceKey,
 			DeviceName: deviceName + "-local",
 			AtollHome:  deviceHome,
 			Logger:     logger.With("part", "local-device"),

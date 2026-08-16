@@ -84,6 +84,12 @@ func (r *declPullSpace) ClassKind(context.Context, string) (actor.Kind, bool, er
 	r.classKinds++
 	return r.kind, r.kindFound, r.kindErr
 }
+func (r *declPullSpace) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+	return channel.PlacementServer, true, nil
+}
+func (r *declPullSpace) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
+	return nil
+}
 
 func (r *declPullSpace) setFacts(class, config string) {
 	r.mu.Lock()

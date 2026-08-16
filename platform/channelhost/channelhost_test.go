@@ -35,6 +35,9 @@ func (testBindings) ListChannels(context.Context) ([]regspec.ChannelRow, error) 
 func (testBindings) GetChannelDesired(context.Context, channel.ID) (regspec.ChannelRow, bool, error) {
 	return regspec.ChannelRow{}, false, nil
 }
+func (testBindings) ChannelDesired(context.Context, channel.ID) (channelspec.ChannelDesiredFacts, bool, error) {
+	return channelspec.ChannelDesiredFacts{}, false, nil
+}
 
 func (testResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
@@ -108,6 +111,12 @@ func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool
 		return actor.KindAgent, true, nil
 	}
 	return "", false, nil
+}
+func (testResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+	return channel.PlacementServer, true, nil
+}
+func (testResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
+	return nil
 }
 func newTestHost(t *testing.T) *ChannelHost {
 	t.Helper()

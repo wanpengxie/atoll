@@ -72,6 +72,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		subjectgate:  subjectgate.NewRegistry(),
 		pokeCh:       make(chan struct{}, 1),
 	}
+	h.servicePort = cfg.ServicePort
 	defer func() {
 		if p := recover(); p != nil {
 			_ = h.closeInternal("panic")
@@ -290,8 +291,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: construct server actor host: %w", err)
 	}
 	h.opEntry = &opEntry{home: h}
-	h.callPort = sysactor.NewCallPort()
-
 	systemCaps, err := systemCapsMinter.Mint(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("platform: mint system caps: %w", err)
@@ -306,7 +305,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 				return resolveDeclarationCatalog(ctx, h.resolver, h.channelID, declIDs)
 			},
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
-			Logger:   logger, Operate: h.opEntry, Logbook: h.query, Calls: h.callPort,
+			Logger:   logger, Operate: h.opEntry, Logbook: h.query,
 		}))
 	}, nil)
 	if err != nil {

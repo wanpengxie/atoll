@@ -14,12 +14,13 @@ import (
 	agentruntime "github.com/wanpengxie/atoll/drivers/agents/runtime"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
 func init() {
-	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, New: newCodex, ValidateConfig: codex.ValidateConfig})
-	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
+	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newCodex, ValidateConfig: codex.ValidateConfig})
+	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementServer, New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
 }
 
 func newCodex(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {

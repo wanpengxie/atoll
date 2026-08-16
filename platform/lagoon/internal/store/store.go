@@ -19,16 +19,32 @@ import (
 )
 
 const (
-	channelColumns   = "channels.id,channels.parent_id,channels.name,channels.type,channels.status,channels.owner_principal,channels.spec_json,channels.created_at"
+	channelColumns   = "channels.id,channels.parent_id,channels.name,channels.type,channels.status,channels.owner_principal,channels.description,channels.serving,channels.spec_json,channels.created_at"
 	principalColumns = "principals.id,principals.kind,principals.email,principals.display_name,principals.status,principals.created_at"
 	declColumns      = "decls.id,decls.name,decls.description,decls.owner,decls.default_class,decls.config_json,decls.status,decls.visibility,decls.created_at,decls.updated_at"
 	deviceColumns    = "devices.id,devices.owner_principal,devices.name,devices.key,devices.status,devices.created_at"
 	overlayColumns   = "decl_overlays.decl_id,decl_overlays.channel_id,decl_overlays.config_json,decl_overlays.updated_at"
+	endpointColumns  = "channel_endpoints.channel_id,channel_endpoints.name,channel_endpoints.description,channel_endpoints.receiver,channel_endpoints.meta_json,channel_endpoints.updated_at"
+	templateColumns  = "channel_templates.id,channel_templates.name,channel_templates.description,channel_templates.owner,channel_templates.status,channel_templates.visibility,channel_templates.body_json,channel_templates.created_at,channel_templates.updated_at"
 )
 
 var ErrConflict = errors.New("registry store: unique or primary-key conflict")
 
 type Store struct{ db *sql.DB }
+
+type Tx struct{ tx *sql.Tx }
+
+func (s *Store) InTx(ctx context.Context, fn func(*Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(&Tx{tx: tx}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
 func Open(path string) (*Store, error) {
 	u := &url.URL{Scheme: "file", Path: path}
@@ -147,12 +163,153 @@ func (s *Store) GetChannel(ctx context.Context, id channel.ID) (regspec.ChannelR
 	return row, err == nil, err
 }
 
+func (t *Tx) GetChannel(ctx context.Context, id channel.ID) (regspec.ChannelRow, bool, error) {
+	row, err := scanChannel(t.tx.QueryRowContext(ctx, `SELECT `+channelColumns+` FROM channels WHERE channels.id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.ChannelRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
+func (t *Tx) ListChannels(ctx context.Context) ([]regspec.ChannelRow, error) {
+	rows, err := t.tx.QueryContext(ctx, `SELECT `+channelColumns+` FROM channels ORDER BY channels.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []regspec.ChannelRow
+	for rows.Next() {
+		row, err := scanChannel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (t *Tx) FindChannels(ctx context.Context, parent channel.ID, name string) ([]regspec.ChannelRow, error) {
+	rows, err := t.tx.QueryContext(ctx, `SELECT `+channelColumns+` FROM channels WHERE channels.parent_id=? AND channels.name=? ORDER BY channels.id`, parent, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []regspec.ChannelRow
+	for rows.Next() {
+		row, err := scanChannel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetDecl(ctx context.Context, id string) (regspec.DeclRow, bool, error) {
 	row, err := scanDecl(s.db.QueryRowContext(ctx, `SELECT `+declColumns+` FROM decls WHERE decls.id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return regspec.DeclRow{}, false, nil
 	}
 	return row, err == nil, err
+}
+
+func (t *Tx) GetDecl(ctx context.Context, id string) (regspec.DeclRow, bool, error) {
+	row, err := scanDecl(t.tx.QueryRowContext(ctx, `SELECT `+declColumns+` FROM decls WHERE decls.id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.DeclRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
+func (s *Store) ListEndpoints(ctx context.Context, ch channel.ID) ([]regspec.EndpointRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+endpointColumns+` FROM channel_endpoints WHERE channel_endpoints.channel_id=? ORDER BY channel_endpoints.name`, ch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []regspec.EndpointRow
+	for rows.Next() {
+		row, err := scanEndpoint(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (t *Tx) InsertEndpoint(ctx context.Context, row regspec.EndpointRow) error {
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO channel_endpoints(channel_id,name,description,receiver,meta_json,updated_at) VALUES(?,?,?,?,?,?)`, row.ChannelID, row.Name, row.Description, row.Receiver, nullableJSON(row.Meta), row.UpdatedAt)
+	return classify(err)
+}
+
+func (s *Store) ReplaceProfile(ctx context.Context, ch channel.ID, description string, serving int, endpoints []regspec.EndpointRow) error {
+	return s.InTx(ctx, func(tx *Tx) error {
+		return tx.ReplaceProfile(ctx, ch, description, serving, endpoints)
+	})
+}
+
+func (tx *Tx) ReplaceProfile(ctx context.Context, ch channel.ID, description string, serving int, endpoints []regspec.EndpointRow) error {
+	if _, err := tx.tx.ExecContext(ctx, `UPDATE channels SET description=?,serving=? WHERE id=?`, description, serving, ch); err != nil {
+		return err
+	}
+	if _, err := tx.tx.ExecContext(ctx, `DELETE FROM channel_endpoints WHERE channel_id=?`, ch); err != nil {
+		return err
+	}
+	for _, row := range endpoints {
+		if err := tx.InsertEndpoint(ctx, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) GetChannelTemplate(ctx context.Context, id string) (regspec.ChannelTemplateRow, bool, error) {
+	row, err := scanTemplate(s.db.QueryRowContext(ctx, `SELECT `+templateColumns+` FROM channel_templates WHERE channel_templates.id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.ChannelTemplateRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
+func (t *Tx) GetChannelTemplate(ctx context.Context, id string) (regspec.ChannelTemplateRow, bool, error) {
+	row, err := scanTemplate(t.tx.QueryRowContext(ctx, `SELECT `+templateColumns+` FROM channel_templates WHERE channel_templates.id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.ChannelTemplateRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
+func (s *Store) ListChannelTemplates(ctx context.Context) ([]regspec.ChannelTemplateRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+templateColumns+` FROM channel_templates ORDER BY channel_templates.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []regspec.ChannelTemplateRow
+	for rows.Next() {
+		row, err := scanTemplate(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) InsertChannelTemplate(ctx context.Context, row regspec.ChannelTemplateRow) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_templates(id,name,description,owner,status,visibility,body_json,created_at,updated_at) VALUES(?,?,?,?,'present',?,?,?,?)`, row.ID, row.Name, nullableText(row.Description), row.Owner, row.Visibility, string(row.Body), row.CreatedAt, row.UpdatedAt)
+	return classify(err)
+}
+
+func (s *Store) UpdateChannelTemplate(ctx context.Context, row regspec.ChannelTemplateRow) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_templates SET name=?,description=?,visibility=?,body_json=?,updated_at=? WHERE id=?`, row.Name, nullableText(row.Description), row.Visibility, string(row.Body), row.UpdatedAt, row.ID)
+	return err
+}
+
+func (s *Store) RevokeChannelTemplate(ctx context.Context, id string, at int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_templates SET status='revoked',updated_at=? WHERE id=?`, at, id)
+	return err
 }
 
 func (s *Store) ListDecls(ctx context.Context) ([]regspec.DeclRow, error) {
@@ -316,18 +473,53 @@ func (s *Store) UpsertSteward(ctx context.Context, id string, at int64) error {
 }
 
 func (s *Store) UpsertSystemChannel(ctx context.Context, row regspec.ChannelRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?) ON CONFLICT(id) DO UPDATE SET parent_id=NULL,name=excluded.name,type='group',status='present',owner_principal=excluded.owner_principal`, row.ID, row.Name, row.OwnerPrincipal, string(row.Spec), row.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET parent_id=NULL,name=excluded.name,type='group',status='present',owner_principal=excluded.owner_principal,description=excluded.description,serving=1`, row.ID, row.Name, row.OwnerPrincipal, row.Description, 1, string(row.Spec), row.CreatedAt)
 	return classify(err)
 }
 
 func (s *Store) UpsertSystemDecl(ctx context.Context, row regspec.DeclRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,'{}','present','public',?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,owner=excluded.owner,default_class=excluded.default_class,config_json='{}',status='present',visibility='public',updated_at=excluded.updated_at`, row.ID, row.Name, nullableText(row.Description), row.Owner, row.DefaultClass, row.CreatedAt, row.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,?,'present',?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,owner=excluded.owner,default_class=excluded.default_class,config_json=excluded.config_json,status='present',visibility=excluded.visibility,updated_at=excluded.updated_at`, row.ID, row.Name, nullableText(row.Description), row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Visibility, row.CreatedAt, row.UpdatedAt)
 	return classify(err)
 }
 
 func (s *Store) InsertChannel(ctx context.Context, row regspec.ChannelRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, string(row.Spec), row.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, row.Description, row.Serving, string(row.Spec), row.CreatedAt)
 	return classify(err)
+}
+
+func (t *Tx) InsertChannel(ctx context.Context, row regspec.ChannelRow) error {
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, row.Description, row.Serving, string(row.Spec), row.CreatedAt)
+	return classify(err)
+}
+
+func (t *Tx) InsertBinding(ctx context.Context, row regspec.BindingRow) error {
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO bindings(channel_id,device_id,attached_at) VALUES(?,?,?)`, row.ChannelID, row.DeviceID, row.AttachedAt)
+	return classify(err)
+}
+
+func (t *Tx) InsertDecl(ctx context.Context, row regspec.DeclRow) error {
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, row.ID, row.Name, nullableText(row.Description), row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Status, row.Visibility, row.CreatedAt, row.UpdatedAt)
+	return classify(err)
+}
+
+func (t *Tx) InsertPrincipal(ctx context.Context, row regspec.PrincipalRow) error {
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,?,?,?,?,?)`, row.ID, row.Kind, row.Email, nullableText(row.DisplayName), row.Status, row.CreatedAt)
+	return classify(err)
+}
+
+func (t *Tx) InsertPasswordCredential(ctx context.Context, principalID, hash string, at int64) error {
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?)`, principalID, hash, at)
+	return classify(err)
+}
+
+func (s *Store) RetireChannelAndPeer(ctx context.Context, id channel.ID, peerDecl string, at int64) error {
+	return s.InTx(ctx, func(tx *Tx) error {
+		if _, err := tx.tx.ExecContext(ctx, `UPDATE channels SET status='retired' WHERE id=?`, id); err != nil {
+			return err
+		}
+		_, err := tx.tx.ExecContext(ctx, `UPDATE decls SET status='revoked',updated_at=? WHERE id=?`, at, peerDecl)
+		return err
+	})
 }
 
 func (s *Store) UpdateChannelStatus(ctx context.Context, id channel.ID, status regspec.ChannelStatus) error {
@@ -440,11 +632,33 @@ func scanChannel(s scanner) (regspec.ChannelRow, error) {
 	var row regspec.ChannelRow
 	var parent sql.NullString
 	var spec string
-	err := s.Scan(&row.ID, &parent, &row.Name, &row.Type, &row.Status, &row.OwnerPrincipal, &spec, &row.CreatedAt)
+	err := s.Scan(&row.ID, &parent, &row.Name, &row.Type, &row.Status, &row.OwnerPrincipal, &row.Description, &row.Serving, &spec, &row.CreatedAt)
 	if parent.Valid {
 		row.ParentID = channel.ID(parent.String)
 	}
 	row.Spec = json.RawMessage(spec)
+	return row, err
+}
+
+func scanEndpoint(s scanner) (regspec.EndpointRow, error) {
+	var row regspec.EndpointRow
+	var meta sql.NullString
+	err := s.Scan(&row.ChannelID, &row.Name, &row.Description, &row.Receiver, &meta, &row.UpdatedAt)
+	if meta.Valid {
+		row.Meta = json.RawMessage(meta.String)
+	}
+	return row, err
+}
+
+func scanTemplate(s scanner) (regspec.ChannelTemplateRow, error) {
+	var row regspec.ChannelTemplateRow
+	var description sql.NullString
+	var body string
+	err := s.Scan(&row.ID, &row.Name, &description, &row.Owner, &row.Status, &row.Visibility, &body, &row.CreatedAt, &row.UpdatedAt)
+	if description.Valid {
+		row.Description = description.String
+	}
+	row.Body = json.RawMessage(body)
 	return row, err
 }
 

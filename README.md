@@ -97,7 +97,7 @@ lib/         stdlib for actor authors: actorbase (the Proc + verb-table base eve
              vocabulary), introspect
 platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word table);
              channelhost/ (the channel contract surface the space talks to),
-             spacetool/ (in-channel port for space requests), home/ (server-side
+             peeractor/ and svcactor/ (in-process cross-channel path), home/ (server-side
              channel-home assembly), daemonhost/ (space device carriers),
              compute/ (daemon-side multi-compartment assembly), subjectgate/,
              lagoon/ (registry storage module + registrar), boot/ (one-shot

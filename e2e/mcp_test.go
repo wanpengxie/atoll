@@ -76,7 +76,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	assertMCPTimeoutSurvives(t, api, ws, stdioID, stdioName)
 
 	const scriptDecl = "e2e-mcp-script"
-	registrarRequest(t, ws, registrar, "decl.register", map[string]any{
+	registrarRequest(t, ws, registrar, "actor.template.register", map[string]any{
 		"id": scriptDecl, "name": scriptDecl, "class": "script",
 		"config":     map[string]any{"tool_id": stdioID, "tool_type": stdioName + ".echo"},
 		"visibility": "private",
@@ -196,7 +196,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 
 func registerAndIntroduceMCP(t *testing.T, ws *wsClient, registrar, declID string, config map[string]any) string {
 	t.Helper()
-	registrarRequest(t, ws, registrar, "decl.register", map[string]any{
+	registrarRequest(t, ws, registrar, "actor.template.register", map[string]any{
 		"id": declID, "name": declID, "class": "mcp", "config": config, "visibility": "private",
 	})
 	introduced := ws.request(c0ChannelID, "channel.introduce_actor", systemActor, map[string]any{

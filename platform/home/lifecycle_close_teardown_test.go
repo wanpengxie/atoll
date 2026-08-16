@@ -60,6 +60,12 @@ func (g *lifecycleReconcileGate) ResolveDeclaration(
 func (g *lifecycleReconcileGate) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
+func (g *lifecycleReconcileGate) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+	return "", false, nil
+}
+func (g *lifecycleReconcileGate) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
+	return nil
+}
 
 // lifecycleCloseConfig is a bootstrap channel carrying ONE declared agent —
 // the declared instance is what gives the reconcile pass something to resolve,

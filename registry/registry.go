@@ -62,6 +62,7 @@ type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 // the Register signature no longer changes when they arrive.
 type ClassDecl struct {
 	Kind           actor.Kind
+	Placement      channel.PlacementKind
 	New            Constructor
 	ValidateConfig func(json.RawMessage) error
 }
@@ -104,12 +105,27 @@ var (
 // actor package's init(); a duplicate class is a programmer error (panic, like
 // sql.Register).
 func Register(class string, d ClassDecl) {
+	if d.Placement != channel.PlacementServer && d.Placement != channel.PlacementDaemon {
+		panic("registry: class placement required: " + class)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if _, dup := reg[class]; dup {
 		panic("registry: duplicate class registration: " + class)
 	}
 	reg[class] = d
+}
+
+// ClassPlacement returns the single class-level placement fact used by both
+// genesis rendering and runtime introduction.
+func ClassPlacement(class string) (channel.PlacementKind, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	d, ok := reg[class]
+	if !ok {
+		return "", false
+	}
+	return d.Placement, true
 }
 
 // ClassKind returns a class's declared Kind (pure table lookup, no construction)

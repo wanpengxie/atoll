@@ -13,14 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/obs"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"golang.org/x/crypto/bcrypt"
@@ -31,7 +37,7 @@ const sessionTTL = 30 * 24 * time.Hour
 
 type Config struct {
 	Registry        *lagoon.Registry
-	Submitter       lagoon.Submitter
+	Lobby           func(context.Context) (channelhost.Bundle, error)
 	Sessions        *gateway.SessionStore
 	Gateway         *gateway.Gateway
 	DaemonHost      *daemonhost.Host
@@ -226,8 +232,14 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, string(codeInternalError), err.Error())
 		return
 	}
-	reply, err := p.cfg.Submitter.SubmitApplication(r.Context(), lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
+	callCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	reply, err := p.registerViaLobby(callCtx, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			writeError(w, http.StatusGatewayTimeout, string(codeUnavailable), err.Error())
+			return
+		}
 		writeLagoonError(w, err)
 		return
 	}
@@ -238,6 +250,80 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	}
 	p.setSession(w, principal.ID)
 	writeJSON(w, http.StatusCreated, principal)
+}
+
+func (p *Portal) registerViaLobby(ctx context.Context, in lagoon.PrincipalRegister) (lagoon.Reply, error) {
+	if p.cfg.Lobby == nil {
+		return lagoon.Reply{}, errors.New("registration lobby unavailable")
+	}
+	bundle, err := p.cfg.Lobby(ctx)
+	if err != nil {
+		return lagoon.Reply{}, err
+	}
+	guest, found, err := bundle.View().ResolvePrincipal(ctx, protocol.GuestPrincipalID)
+	if err != nil {
+		return lagoon.Reply{}, err
+	}
+	if !found {
+		return lagoon.Reply{}, errors.New("guest cell unavailable")
+	}
+	cores, err := bundle.View().DeclaredInstances(ctx, lagoon.CoreActorDeclID)
+	if err != nil {
+		return lagoon.Reply{}, err
+	}
+	if len(cores) != 1 {
+		return lagoon.Reply{}, errors.New("lobby coreactor unavailable")
+	}
+	slot, ok := bundle.Gateway().SubjectSlotFor(guest)
+	if !ok {
+		return lagoon.Reply{}, errors.New("guest subject slot unavailable")
+	}
+	requestID := message.ID(uuid.NewString())
+	raw, _ := json.Marshal(in)
+	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(protocol.LobbyChannelID), ID: string(requestID), MsgType: string(lagoon.WordPrincipalRegister), Kind: string(message.KindRequest), Audience: []string{string(cores[0])}, Visibility: string(message.VisibilityPublic), Payload: raw})
+	if err != nil {
+		return lagoon.Reply{}, err
+	}
+	if _, err := slot.Deliver(ctx, frame); err != nil {
+		return lagoon.Reply{}, err
+	}
+	reader := channel.Reader{ActorID: guest, Mode: channel.ReaderMember}
+	var cursor int64
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		rows, next, err := bundle.View().ReadVisibleAfterSeq(ctx, reader, cursor, 256)
+		if err != nil {
+			return lagoon.Reply{}, err
+		}
+		cursor = next
+		for _, row := range rows {
+			if !row.IsTerminal || row.Envelope.ParentID != requestID {
+				continue
+			}
+			var terminal struct {
+				Status    string `json:"status"`
+				ErrorCode string `json:"error_code"`
+				Detail    string `json:"detail"`
+			}
+			if json.Unmarshal(row.Envelope.Payload, &terminal) != nil {
+				return lagoon.Reply{}, errors.New("invalid registration terminal")
+			}
+			if terminal.Status == message.StatusFailed {
+				return lagoon.Reply{}, &lagoon.Error{Code: lagoon.ErrorCode(terminal.ErrorCode), Detail: terminal.Detail}
+			}
+			var reply lagoon.Reply
+			if err := json.Unmarshal(row.Envelope.Payload, &reply); err != nil {
+				return lagoon.Reply{}, err
+			}
+			return reply, nil
+		}
+		select {
+		case <-ctx.Done():
+			return lagoon.Reply{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {

@@ -6,13 +6,14 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 func TestValidateConfig(t *testing.T) {
 	const class = "registry-validate-config-test"
 	called := false
 	Register(class, ClassDecl{
-		Kind: actor.KindAgent,
+		Kind: actor.KindAgent, Placement: channel.PlacementServer,
 		ValidateConfig: func(raw json.RawMessage) error {
 			called = true
 			if string(raw) != `{"ok":true}` {
@@ -42,4 +43,13 @@ func TestValidateConfig(t *testing.T) {
 	if _, err := Build("registry-validate-missing", InstanceSpec{}, Deps{}); !errors.Is(err, ErrUnknownClass) {
 		t.Fatalf("Build unknown class must surface ErrUnknownClass, got %v", err)
 	}
+}
+
+func TestRegisterRejectsZeroPlacement(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("zero placement registration did not panic")
+		}
+	}()
+	Register("registry-zero-placement-test", ClassDecl{Kind: actor.KindTool})
 }

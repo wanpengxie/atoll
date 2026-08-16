@@ -45,7 +45,6 @@ type obsBundleStub struct{ view channelhost.View }
 
 func (b obsBundleStub) Generation() uint64                { return 1 }
 func (b obsBundleStub) Gateway() channelhost.GatewayHitch { return nil }
-func (b obsBundleStub) Call() channelhost.Caller          { return nil }
 func (b obsBundleStub) View() channelhost.View            { return b.view }
 
 type obsViewStub struct{ roster []channelspec.ObsRosterRow }
@@ -157,11 +156,11 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 	}{
 		{
 			name: "space channels", path: "/obs/space/channels", query: "parent_id=c0",
-			golden: `{"subject":"space/channels","kind":"channels","complete":true,"items":[{"key":"c/ 频道","declared":{"id":"c/ 频道","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","created_at":1700000000001},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}}]}`,
+			golden: `{"subject":"space/channels","kind":"channels","complete":true,"items":[{"key":"c/ 频道","declared":{"id":"c/ 频道","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","created_at":1700000000001},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}},{"key":"c0.lobby","declared":{"id":"c0.lobby","parent_id":"c0","name":"lobby","qualified_name":"c0.lobby","type":"group","status":"present","owner_principal":"root","created_at":1700000000000},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}}]}`,
 		},
 		{
 			name: "space principals", path: "/obs/space/principals",
-			golden: `{"subject":"space/principals","kind":"principals","complete":true,"items":[{"key":"root","declared":{"id":"root","kind":"human","email":"root@atoll.local","display_name":"Root","status":"present","created_at":1700000000000},"actual":null},{"key":"steward","declared":{"id":"steward","kind":"agent","display_name":"Steward","status":"present","created_at":1700000000000},"actual":null}]}`,
+			golden: `{"subject":"space/principals","kind":"principals","complete":true,"items":[{"key":"guest","declared":{"id":"guest","kind":"agent","display_name":"Guest","status":"present","created_at":1700000000000},"actual":null},{"key":"root","declared":{"id":"root","kind":"human","email":"root@atoll.local","display_name":"Root","status":"present","created_at":1700000000000},"actual":null},{"key":"steward","declared":{"id":"steward","kind":"agent","display_name":"Steward","status":"present","created_at":1700000000000},"actual":null}]}`,
 		},
 		{
 			name: "space daemons", path: "/obs/space/daemons",
@@ -169,7 +168,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 		},
 		{
 			name: "space decls", path: "/obs/space/decls",
-			golden: `{"subject":"space/decls","kind":"decls","complete":true,"items":[{"key":"space-tool","declared":{"id":"space-tool","name":"Space Tool","owner":"root","default_class":"space-tool","config":{},"status":"present","visibility":"public","created_at":1700000000000,"updated_at":1700000000000},"actual":null}]}`,
+			golden: `{"subject":"space/decls","kind":"decls","complete":true,"items":[{"key":"5d3fb46c-2d36-57d3-a324-66628dfd67c8","declared":{"id":"5d3fb46c-2d36-57d3-a324-66628dfd67c8","name":"Steward","owner":"root","default_class":"codex","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"atoll-internal:registrar-seat","declared":{"id":"atoll-internal:registrar-seat","name":"Registrar Seat","owner":"root","default_class":"atoll-internal:registrar","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"atoll-internal:svcactor","declared":{"id":"atoll-internal:svcactor","name":"Service Actor","owner":"root","default_class":"svcactor","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"coreactor","declared":{"id":"coreactor","name":"Core Actor","owner":"root","default_class":"peeractor","config":{"channel":"c0"},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"peer:c0.lobby","declared":{"id":"peer:c0.lobby","name":"c0.lobby","owner":"root","default_class":"peeractor","config":{"channel":"c0.lobby"},"status":"present","visibility":"public","created_at":1700000000000,"updated_at":1700000000000},"actual":null}]}`,
 		},
 		{
 			name: "channel profile", path: "/obs/channel/" + escapedChannel + "/profile",
@@ -195,12 +194,13 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 			}
 		})
 	}
-	if len(host.acquired) != 3 {
+	if len(host.acquired) != 4 {
 		t.Fatalf("production channel adapter acquisitions=%v, want channels/profile/actors", host.acquired)
 	}
+	wantAcquired := []channel.ID{channel.ID(channelID), protocol.LobbyChannelID, channel.ID(channelID), channel.ID(channelID)}
 	for i, got := range host.acquired {
-		if got != channel.ID(channelID) {
-			t.Fatalf("production channel adapter acquire[%d]=%q, want decoded id %q", i, got, channelID)
+		if got != wantAcquired[i] {
+			t.Fatalf("production channel adapter acquire[%d]=%q, want %q", i, got, wantAcquired[i])
 		}
 	}
 }

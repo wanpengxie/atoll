@@ -149,11 +149,25 @@ func (e *opEntry) Execute(
 	case sysactor.TypeRemoveActor:
 		var payload struct {
 			InstanceID actor.ActorID `json:"instance_id"`
+			DeclID     string        `json:"decl_id"`
 		}
-		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
+		if err := decodeStrict(req.Payload, &payload); err != nil || (payload.InstanceID == "") == (payload.DeclID == "") {
 			return nil, &sysactor.OperateError{
-				Code: string(channelspec.ErrCodeBadPayload), Detail: "instance_id required",
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "exactly one of instance_id or decl_id required",
 			}
+		}
+		if payload.DeclID != "" {
+			ids, err := e.home.View().DeclaredInstances(ctx, payload.DeclID)
+			if err != nil {
+				return nil, asOperateError(err)
+			}
+			if len(ids) == 0 {
+				return map[string]any{"removed": false}, nil
+			}
+			if len(ids) != 1 {
+				return nil, &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: "declaration instance is ambiguous"}
+			}
+			payload.InstanceID = ids[0]
 		}
 		result, err := e.remove(ctx, removeRequest{
 			Target: payload.InstanceID, InitiatorActorID: req.Sender,
@@ -171,6 +185,9 @@ func (e *opEntry) Execute(
 			return nil, &sysactor.OperateError{
 				Code: string(channelspec.ErrCodeBadPayload), Detail: "instance_id required",
 			}
+		}
+		if err := e.home.guardOwnerTerminal(ctx, payload.InstanceID); err != nil {
+			return nil, asOperateError(err)
 		}
 		if err := e.home.actors.Restart(ctx, actorctl.RestartRequest{
 			ActorID: payload.InstanceID,

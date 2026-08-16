@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	regstore "github.com/wanpengxie/atoll/platform/lagoon/internal/store"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
+	"github.com/wanpengxie/atoll/platform/peerproto"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -25,11 +26,20 @@ type registrarFactsStub struct {
 	err   error
 }
 
+type registrarFactsFunc func(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error)
+
+func (f registrarFactsFunc) ActorFacts(ctx context.Context, ch channel.ID, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
+	return f(ctx, ch, id)
+}
+
 type registrarClassStub struct{}
 
 func (registrarClassStub) ValidateConfig(string, json.RawMessage) error { return nil }
 func (registrarClassStub) LookupClassKind(string) (actor.Kind, bool) {
 	return actor.KindTool, true
+}
+func (registrarClassStub) LookupClassPlacement(string) (channel.PlacementKind, bool) {
+	return channel.PlacementServer, true
 }
 
 func (s registrarFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
@@ -84,7 +94,7 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	defer storage.Close()
 	commits := 0
 	r := NewRegistrar(&Registry{store: storage, onCommit: func(Change) { commits++ }}, nil, nil)
-	_, err = r.editDecl(context.Background(), "root", DeclEdit{ID: "decl"})
+	_, err = r.editDecl(context.Background(), "root", protocol.C0ChannelID, DeclEdit{ID: "decl"})
 	if err == nil {
 		t.Fatal("decl.edit succeeded after its table was removed")
 	}
@@ -128,7 +138,7 @@ func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
 		t.Fatalf("created=%+v err=%v", created, err)
 	}
 	empty := ""
-	edited, err := r.editDecl(context.Background(), "alice", DeclEdit{ID: "orders", Description: &empty})
+	edited, err := r.editDecl(context.Background(), "alice", "source", DeclEdit{ID: "orders", Description: &empty})
 	if err != nil || edited.Description != "" {
 		t.Fatalf("edited=%+v err=%v", edited, err)
 	}
@@ -187,7 +197,7 @@ func TestRegistrarExecutionFailureUsesClosedResultUnknownCode(t *testing.T) {
 	}
 }
 
-func TestForwardedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
+func TestSvcactorWrappedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	dbPath := t.TempDir() + "/registry.db"
 	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
@@ -211,19 +221,26 @@ func TestForwardedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer storage.Close()
-	r := NewRegistrar(&Registry{store: storage}, registrarFactsStub{
-		facts: channelspec.ActorFacts{Active: true, SourceDeclID: "agent-decl", Kind: actor.KindAgent}, found: true,
-	}, nil)
-	forwarded, err := json.Marshal(message.Envelope{
-		ID: "source-request", ChannelID: "ordinary", Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:member"},
-		Kind: message.KindRequest, Type: string(WordPrincipalMe), Payload: json.RawMessage(`{"unknown_field":true}`),
+	r := NewRegistrar(&Registry{store: storage}, registrarFactsFunc(func(_ context.Context, ch channel.ID, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
+		switch {
+		case ch == protocol.C0ChannelID && id == "svc":
+			return channelspec.ActorFacts{Active: true, SourceDeclID: SvcActorDeclID, Kind: actor.KindTool}, true, nil
+		case ch == "ordinary" && id == "agent:member":
+			return channelspec.ActorFacts{Active: true, SourceDeclID: "agent-decl", Kind: actor.KindAgent}, true, nil
+		default:
+			return channelspec.ActorFacts{}, false, nil
+		}
+	}), nil)
+	wrapped, err := json.Marshal(map[string]any{
+		"origin": peerproto.Origin{Channel: "ordinary", Actor: "agent:member", RequestID: "source-request"},
+		"args":   json.RawMessage(`{"unknown_field":true}`),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "c0-request", ChannelID: protocol.C0ChannelID, Sender: message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
-		Kind: message.KindRequest, Type: string(WordPrincipalMe), Payload: forwarded,
+		ID: "c0-request", ChannelID: protocol.C0ChannelID, Sender: message.Sender{Kind: actor.KindTool, ID: "svc"},
+		Kind: message.KindRequest, Type: string(WordPrincipalMe), Payload: wrapped,
 	})
 	sys := &registrarSysStub{}
 	r.handle(sys, msg)
@@ -234,5 +251,8 @@ func TestForwardedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	var principal regspec.PrincipalRow
 	if err := reply.DecodeValue(&principal); err != nil || principal.ID != "root" {
 		t.Fatalf("receiver attribution principal=%+v err=%v", principal, err)
+	}
+	if reply.Source.ChannelID != "ordinary" || reply.Source.RequestID != "source-request" {
+		t.Fatalf("source=%+v", reply.Source)
 	}
 }

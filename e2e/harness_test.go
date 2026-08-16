@@ -563,7 +563,7 @@ func findTool(t *testing.T, ws *wsClient) string {
 	for _, raw := range rows {
 		row, _ := raw.(map[string]any)
 		if row["kind"] == "tool" {
-			if id, _ := row["id"].(string); id != "" {
+			if id, _ := row["id"].(string); strings.HasPrefix(id, "tool:atoll-internal:registrar-seat:") {
 				return id
 			}
 		}
@@ -572,11 +572,11 @@ func findTool(t *testing.T, ws *wsClient) string {
 	return ""
 }
 
-// awaitSpaceTool waits for a channel to publish its own space-tool and returns
+// awaitCoreactor waits for a channel to publish its own coreactor and returns
 // its actor id. A channel that has just been created reaches its first serving
 // generation asynchronously, so the poll is part of the contract rather than a
 // convenience.
-func awaitSpaceTool(t *testing.T, ws *wsClient, channelID string) string {
+func awaitCoreactor(t *testing.T, ws *wsClient, channelID string) string {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -585,7 +585,7 @@ func awaitSpaceTool(t *testing.T, ws *wsClient, channelID string) string {
 			for _, raw := range rows {
 				row, _ := raw.(map[string]any)
 				if row["kind"] == "tool" {
-					if id, _ := row["id"].(string); id != "" {
+					if id, _ := row["id"].(string); strings.HasPrefix(id, "tool:coreactor:") {
 						return id
 					}
 				}
@@ -593,23 +593,23 @@ func awaitSpaceTool(t *testing.T, ws *wsClient, channelID string) string {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("channel %s never published its space-tool", channelID)
+	t.Fatalf("channel %s never published its coreactor", channelID)
 	return ""
 }
 
 // attachDevice binds a device to a channel. Binding is requested from inside
-// the target channel through that channel's own space-tool: the registrar in
+// the target channel through that channel's own coreactor: the registrar in
 // c0 cannot bind on another channel's behalf.
 func attachDevice(t *testing.T, ws *wsClient, channelID, deviceID string) {
 	t.Helper()
-	tool := awaitSpaceTool(t, ws, channelID)
+	tool := awaitCoreactor(t, ws, channelID)
 	ws.request(channelID, "device.attach", tool, map[string]any{
 		"channel_id": channelID, "device_id": deviceID,
 	})
 }
 
 // c0 seats the registrar itself. Its wire reply wraps the operation value in
-// {word,value,source}; per-channel space-tool actors unwrap that same result.
+// {word,value,source}; per-channel coreactors unwrap that same result.
 func registrarRequest(t *testing.T, ws *wsClient, registrar, word string, payload any) map[string]any {
 	t.Helper()
 	reply := ws.request(c0ChannelID, word, registrar, payload)
@@ -627,4 +627,30 @@ func stringField(t *testing.T, row map[string]any, field string) string {
 		t.Fatalf("%s missing from %v", field, row)
 	}
 	return value
+}
+
+// waitActorPresence polls actor.list until actorID's presence matches want,
+// failing early if the daemon expected to host it has already exited.
+func waitActorPresence(t *testing.T, ws *wsClient, actorID string, want bool, daemon *proc, logPath string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if daemon != nil && daemon.exited() {
+			t.Fatalf("daemon exited while waiting for actor presence=%v\n%s", want, tailLog(logPath, 100))
+		}
+		catalog := ws.request(c0ChannelID, "actor.list", systemActor, map[string]any{})
+		present := false
+		rows, _ := catalog["actors"].([]any)
+		for _, raw := range rows {
+			row, _ := raw.(map[string]any)
+			present = present || row["id"] == actorID && row["present"] == true
+		}
+		if present == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remote actor %s presence=%v, want %v\ndaemon log:\n%s", actorID, present, want, tailLog(logPath, 100))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -52,6 +53,19 @@ func (h *Home) resolveIntroduction(
 		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
 			Code: code, Detail: err.Error(), Retryable: retryable,
 		}
+	}
+	admitCtx, admitCancel := context.WithTimeout(ctx, introductionResolveTimeout)
+	err = h.resolver.AdmitIntroduction(admitCtx, h.channelID, facts)
+	admitCancel()
+	if err != nil {
+		code, retryable := channelspec.ErrCodeAuthorityUnavailable, true
+		if errors.Is(err, channelspec.ErrTargetNotServing) {
+			code, retryable = channelspec.ErrCodeForbidden, false
+		}
+		if errors.Is(err, channelspec.ErrDeclarationNotFound) {
+			code, retryable = channelspec.ErrCodeDeclNotFound, false
+		}
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{Code: code, Detail: err.Error(), Retryable: retryable}
 	}
 	// A non-public declaration is its owner's to place. Attribution follows the
 	// same two-level rule as the registrar: an explicit principal wins; an actor
@@ -102,7 +116,24 @@ func (h *Home) resolveIntroduction(
 		}
 	}
 
-	placement, err := h.resolveDaemonPlacement(ctx)
+	placementCtx, placementCancel := context.WithTimeout(ctx, introductionResolveTimeout)
+	placementKind, found, err := h.resolver.ClassPlacement(placementCtx, facts.Class)
+	placementCancel()
+	if err != nil {
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{Code: channelspec.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true}
+	}
+	if !found {
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{Code: channelspec.ErrCodeUnknownClass, Detail: "unknown class " + facts.Class}
+	}
+	var placement storespec.Placement
+	switch placementKind {
+	case channel.PlacementServer:
+		placement = storespec.NewServerPlacement()
+	case channel.PlacementDaemon:
+		placement, err = h.resolveDaemonPlacement(ctx)
+	default:
+		err = &channelspec.OperationError{Code: channelspec.ErrCodeUnknownClass, Detail: "class has invalid placement"}
+	}
 	if err != nil {
 		return actorctl.IntroduceRequest{}, err
 	}

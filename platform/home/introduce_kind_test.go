@@ -38,12 +38,21 @@ func (kindResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool
 		return "", false, nil
 	}
 }
+func (kindResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+	return channel.PlacementDaemon, true, nil
+}
+func (kindResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
+	return nil
+}
 
 type oneBindingReader struct{}
 
 func (oneBindingReader) IsBound(context.Context, channel.ID, string) (bool, error) { return true, nil }
 func (oneBindingReader) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
 	return []string{"device-1"}, nil
+}
+func (oneBindingReader) ChannelDesired(context.Context, channel.ID) (channelspec.ChannelDesiredFacts, bool, error) {
+	return channelspec.ChannelDesiredFacts{}, false, nil
 }
 
 func openKindHome(t *testing.T) (*Home, actor.ActorID) {

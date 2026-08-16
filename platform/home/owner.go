@@ -2,9 +2,11 @@ package home
 
 import (
 	"context"
+	"strings"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -26,6 +28,9 @@ func (h *Home) guardOwnerTerminal(ctx context.Context, target actor.ActorID) err
 	if h == nil || target == "" || h.ownerPrincipal == "" {
 		return nil
 	}
+	if target == actor.SystemActorID {
+		return &channelspec.OperationError{Code: channelspec.ErrCodeProtectedActor, Detail: "system actor is protected"}
+	}
 	facts, active, err := h.actors.ActorFacts(ctx, target)
 	if err != nil || !active {
 		return err
@@ -33,6 +38,19 @@ func (h *Home) guardOwnerTerminal(ctx context.Context, target actor.ActorID) err
 	if h.isOwner(facts) {
 		return &channelspec.OperationError{
 			Code: channelspec.ErrCodeProtectedActor, Detail: "channel owner is protected",
+		}
+	}
+	if facts.SourceDeclID == "atoll-internal:svcactor" || facts.SourceDeclID == "coreactor" || facts.SourceDeclID == "atoll-internal:registrar-seat" {
+		return &channelspec.OperationError{Code: channelspec.ErrCodeProtectedActor, Detail: "system actor is protected"}
+	}
+	if strings.HasPrefix(facts.SourceDeclID, "peer:") {
+		targetChannel := channel.ID(strings.TrimPrefix(facts.SourceDeclID, "peer:"))
+		desired, found, err := h.registryBindings.ChannelDesired(ctx, targetChannel)
+		if err != nil {
+			return err
+		}
+		if found && desired.Present && (h.channelID == "c0" || desired.ParentID == h.channelID) {
+			return &channelspec.OperationError{Code: channelspec.ErrCodeProtectedActor, Detail: "foundation peeractor is protected"}
 		}
 	}
 	return nil

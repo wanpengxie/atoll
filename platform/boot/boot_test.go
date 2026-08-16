@@ -35,7 +35,7 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if !result.Installed || result.RootPassword != "root-pass" {
 		t.Fatalf("result=%+v", result)
 	}
-	if boot.RegistryDDLCount() != 7 {
+	if boot.RegistryDDLCount() != 9 {
 		t.Fatalf("registry DDL count=%d", boot.RegistryDDLCount())
 	}
 	if filepath.Dir(result.RegistryDBPath) == filepath.Clean(root) {
@@ -49,11 +49,36 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"channels", "principals", "credentials", "decls", "decl_overlays", "devices", "bindings", "atoll_install"} {
+	for _, table := range []string{"channels", "principals", "credentials", "decls", "decl_overlays", "channel_endpoints", "channel_templates", "devices", "bindings", "atoll_install"} {
 		var n int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("table %s count=%d err=%v", table, n, err)
 		}
+	}
+	for _, column := range []string{"description", "serving"} {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('channels') WHERE name=?`, column).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("channels.%s count=%d err=%v", column, n, err)
+		}
+	}
+	var channelCount, endpointCount, principalCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channels`).Scan(&channelCount); err != nil || channelCount != 2 {
+		t.Fatalf("channels=%d err=%v", channelCount, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_endpoints WHERE channel_id=?`, protocol.C0ChannelID).Scan(&endpointCount); err != nil || endpointCount != len(lagoon.WriteWords)+len(lagoon.ReadWords) {
+		t.Fatalf("c0 endpoints=%d err=%v", endpointCount, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM principals WHERE id IN (?,?,?)`, protocol.RootPrincipalID, protocol.StewardPrincipalID, protocol.GuestPrincipalID).Scan(&principalCount); err != nil || principalCount != 3 {
+		t.Fatalf("system principals=%d err=%v", principalCount, err)
+	}
+	var lobbyServing int
+	var lobbyDescription string
+	if err := db.QueryRowContext(ctx, `SELECT serving,description FROM channels WHERE id=?`, protocol.LobbyChannelID).Scan(&lobbyServing, &lobbyDescription); err != nil || lobbyServing != 0 || lobbyDescription == "" {
+		t.Fatalf("lobby serving=%d description=%q err=%v", lobbyServing, lobbyDescription, err)
+	}
+	var privateSystemDecls int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decls WHERE id IN (?,?) AND visibility='private' AND status='present'`, lagoon.SvcActorDeclID, lagoon.RegistrarSeatDeclID).Scan(&privateSystemDecls); err != nil || privateSystemDecls != 2 {
+		t.Fatalf("private system declarations=%d err=%v", privateSystemDecls, err)
 	}
 	var descriptionColumns int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('decls') WHERE name='description'`).Scan(&descriptionColumns); err != nil || descriptionColumns != 1 {
@@ -92,37 +117,43 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 		t.Fatalf("reopen pure c0: %v", err)
 	}
 	_ = cs.Close()
+	assertBootRoster(t, result.C0DBPath, []string{lagoon.RegistrarSeatDeclID, lagoon.SvcActorDeclID, lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), "peer:" + string(protocol.LobbyChannelID)}, []string{protocol.RootPrincipalID}, 5)
+	lobbyPath, err := channelhost.DBPath(root, protocol.LobbyChannelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBootRoster(t, lobbyPath, []string{lagoon.SvcActorDeclID, lagoon.CoreActorDeclID}, []string{protocol.RootPrincipalID, protocol.GuestPrincipalID}, 4)
 }
 
-func TestEnsureAddsDescriptionColumnToInstalledRegistry(t *testing.T) {
-	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "channels")
-	installed, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", installed.RegistryDBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE decls DROP COLUMN description`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "ignored"}); err != nil {
-		t.Fatal(err)
-	}
-	db, err = sql.Open("sqlite", installed.RegistryDBPath)
+func assertBootRoster(t *testing.T, path string, decls, principals []string, total int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('decls') WHERE name='description'`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("migrated description columns=%d err=%v", count, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE deregistered_at IS NULL`).Scan(&count); err != nil || count != total {
+		t.Fatalf("%s active roster=%d want=%d err=%v", path, count, total, err)
+	}
+	for _, decl := range decls {
+		var placement string
+		if err := db.QueryRow(`SELECT placement FROM actor_registry WHERE source_decl_id=? AND deregistered_at IS NULL`, decl).Scan(&placement); err != nil {
+			t.Fatalf("%s decl %s: %v", path, decl, err)
+		}
+		want := "server"
+		if decl == lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward") {
+			want = "daemon"
+		}
+		if placement != want {
+			t.Fatalf("%s decl %s placement=%s want=%s", path, decl, placement, want)
+		}
+	}
+	for _, principal := range principals {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE principal=? AND deregistered_at IS NULL`, principal).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("%s principal %s count=%d err=%v", path, principal, count, err)
+		}
 	}
 }
 
@@ -332,57 +363,5 @@ func TestRegistryAndC0WritersDoNotShareSQLiteLockDomain(t *testing.T) {
 				t.Fatalf("concurrent registry/c0 write %d: %v", i, err)
 			}
 		}
-	}
-}
-
-func TestStartupRepairsC0CompositionSeatsWithoutReinstalling(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	installed, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, installed.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows, err := cs.Actors.ListActive(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range rows {
-		if row.SourceDeclID == lagoon.RegistrarSeatDeclID {
-			if err := cs.Actors.Deregister(ctx, []actor.ActorID{row.ID}, time.Now().UnixMilli()); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if err := cs.Close(); err != nil {
-		t.Fatal(err)
-	}
-	result, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "must-not-be-used"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Installed {
-		t.Fatal("seat repair reran installation")
-	}
-	cs, err = runtime.OpenChannel(ctx, protocol.C0ChannelID, installed.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
-	rows, err = cs.Actors.ListActive(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := 0
-	for _, row := range rows {
-		if row.SourceDeclID == lagoon.RegistrarSeatDeclID {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("active registrar seats=%d", count)
 	}
 }

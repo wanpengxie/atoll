@@ -7,7 +7,9 @@ import "github.com/wanpengxie/atoll/protocol/channel"
 // before the registry is readable.
 const (
 	C0ChannelID        channel.ID = "c0"
+	LobbyChannelID     channel.ID = "c0.lobby"
 	RootPrincipalID               = "root"
 	StewardPrincipalID            = "steward"
+	GuestPrincipalID              = "guest"
 	LocalDeviceID                 = "local-device"
 )

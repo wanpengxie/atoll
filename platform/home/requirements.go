@@ -21,6 +21,8 @@ type IntroductionResolver interface {
 	// the resolver could not answer at all — which callers must map to a
 	// retryable refusal, never to a permanent terminal.
 	ClassKind(context.Context, string) (actor.Kind, bool, error)
+	ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error)
+	AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error
 }
 
 // DeclarationCatalogResolver is the optional bulk read used by directory and
