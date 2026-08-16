@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
-	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/platform/svcactor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
@@ -54,6 +55,7 @@ type Config struct {
 	DataPlaneIssuer      dataplane.Issuer
 	DeviceDirectory      DeviceDirectory
 	RegistryBindings     BindingReader
+	ServicePort          *svcactor.Port
 }
 
 type DeviceDirectory interface {
@@ -63,6 +65,7 @@ type DeviceDirectory interface {
 type BindingReader interface {
 	IsBound(context.Context, channelpkg.ID, string) (bool, error)
 	ListBoundDeviceIDs(context.Context, channelpkg.ID) ([]string, error)
+	ChannelDesired(context.Context, channelpkg.ID) (channelspec.ChannelDesiredFacts, bool, error)
 }
 
 type unavailableBindingReader struct{}
@@ -72,6 +75,9 @@ func (unavailableBindingReader) IsBound(context.Context, channelpkg.ID, string) 
 }
 func (unavailableBindingReader) ListBoundDeviceIDs(context.Context, channelpkg.ID) ([]string, error) {
 	return nil, errors.New("platform: registry binding reader unavailable")
+}
+func (unavailableBindingReader) ChannelDesired(context.Context, channelpkg.ID) (channelspec.ChannelDesiredFacts, bool, error) {
+	return channelspec.ChannelDesiredFacts{}, false, errors.New("platform: registry binding reader unavailable")
 }
 
 // Home is the channel composition root. Runtime organs are held as peers;
@@ -124,7 +130,7 @@ type Home struct {
 	subjectgate    *subjectgate.Registry
 	factories      ActorFactoryResolver
 	opEntry        *opEntry
-	callPort       *sysactor.CallPort
+	servicePort    *svcactor.Port
 
 	systemPen    harness.Pen
 	expiryCursor storespec.ExpiryCursor

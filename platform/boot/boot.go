@@ -18,7 +18,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -51,6 +53,8 @@ var registryDDL = [...]string{
   name TEXT NOT NULL, type TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('present','retired')),
   owner_principal TEXT NOT NULL REFERENCES principals(id),
+  description TEXT NOT NULL DEFAULT '',
+  serving INTEGER NOT NULL DEFAULT 1 CHECK(serving IN (0,1)),
   spec_json TEXT NOT NULL, created_at INTEGER NOT NULL)`,
 	`CREATE TABLE principals (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('human','agent')),
@@ -77,6 +81,18 @@ var registryDDL = [...]string{
   channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   config_json TEXT, updated_at INTEGER NOT NULL,
   PRIMARY KEY (decl_id, channel_id))`,
+	`CREATE TABLE channel_endpoints (
+  channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, description TEXT NOT NULL,
+  receiver TEXT NOT NULL REFERENCES decls(id), meta_json TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (channel_id, name))`,
+	`CREATE TABLE channel_templates (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+  owner TEXT NOT NULL REFERENCES principals(id),
+  status TEXT NOT NULL CHECK(status IN ('present','revoked')),
+  visibility TEXT NOT NULL DEFAULT 'private', body_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE devices (
   id TEXT PRIMARY KEY,
   owner_principal TEXT NOT NULL REFERENCES principals(id),
@@ -104,6 +120,10 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 		return Result{}, errors.New("boot: channel directory must have a distinct parent for registry database")
 	}
 	registryPath := filepath.Join(registryParent, registryDBName)
+	lobbyPath, err := channelhost.DBPath(cfg.ChannelDir, protocol.LobbyChannelID)
+	if err != nil {
+		return Result{}, err
+	}
 	installed, err := hasMarker(ctx, registryPath)
 	if err != nil {
 		return Result{}, err
@@ -118,7 +138,7 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 		}
 		return Result{C0DBPath: c0Path, RegistryDBPath: registryPath, C0Genesis: genesis}, nil
 	}
-	if err := removeUnpublished(c0Path, registryPath); err != nil {
+	if err := removeUnpublished(c0Path, lobbyPath, registryPath); err != nil {
 		return Result{}, err
 	}
 	password := cfg.RootPassword
@@ -162,16 +182,11 @@ func readC0Genesis(ctx context.Context, path string) (lagoon.GenesisSpec, error)
 	}, nil
 }
 
-// prepareStartup verifies installation-only identities without rewriting any
-// credential or device row, and repairs the two c0 composition seats through
-// the ordinary channel actor store before the membrane is opened.
+// prepareStartup verifies the immutable installation image. There are no
+// schema migrations or legacy-shape repairs before 1.0.
 func prepareStartup(ctx context.Context, c0Path, registryPath string, now time.Time) error {
 	db, err := openSQLite(registryPath, false)
 	if err != nil {
-		return err
-	}
-	if err := ensureDeclDescriptionColumn(ctx, db); err != nil {
-		_ = db.Close()
 		return err
 	}
 	checks := []struct {
@@ -196,65 +211,6 @@ func prepareStartup(ctx context.Context, c0Path, registryPath string, now time.T
 	}
 	if err := db.Close(); err != nil {
 		return err
-	}
-	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, c0Path, runtime.OpenChannelOptions{MustExist: true})
-	if err != nil {
-		return fmt.Errorf("boot: open installed c0: %w", err)
-	}
-	defer cs.Close()
-	rows, err := cs.Actors.ListActive(ctx)
-	if err != nil {
-		return err
-	}
-	var rootSeat, registrarSeat bool
-	for _, row := range rows {
-		rootSeat = rootSeat || (row.Kind == actor.KindHuman && row.Principal == protocol.RootPrincipalID)
-		registrarSeat = registrarSeat || (row.Kind == actor.KindTool && row.SourceDeclID == lagoon.RegistrarSeatDeclID)
-	}
-	stamp := now.UnixMilli()
-	if !registrarSeat {
-		if _, err := cs.Actors.Insert(ctx, storespec.ActorDraft{Kind: actor.KindTool, SourceDeclID: lagoon.RegistrarSeatDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.RegistrarClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()}); err != nil {
-			return fmt.Errorf("boot: repair registrar seat: %w", err)
-		}
-	}
-	if !rootSeat {
-		if _, err := cs.Actors.Insert(ctx, storespec.ActorDraft{Kind: actor.KindHuman, Principal: protocol.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()}); err != nil {
-			return fmt.Errorf("boot: repair c0 owner seat: %w", err)
-		}
-	}
-	return nil
-}
-
-func ensureDeclDescriptionColumn(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(decls)`)
-	if err != nil {
-		return fmt.Errorf("boot: inspect decls columns: %w", err)
-	}
-	found := false
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("boot: scan decls columns: %w", err)
-		}
-		if name == "description" {
-			found = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("boot: inspect decls columns: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("boot: close decls column scan: %w", err)
-	}
-	if found {
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE decls ADD COLUMN description TEXT`); err != nil {
-		return fmt.Errorf("boot: add decls.description: %w", err)
 	}
 	return nil
 }
@@ -300,27 +256,30 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 	if err := lagoon.ValidateName(string(protocol.C0ChannelID)); err != nil {
 		return fmt.Errorf("boot: invalid c0 channel name: %w", err)
 	}
-	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, c0Path, runtime.OpenChannelOptions{})
+	daemonPlacement, err := storespec.NewDaemonPlacement(protocol.LocalDeviceID)
 	if err != nil {
-		return fmt.Errorf("boot: create c0: %w", err)
+		return err
 	}
-	genesis := storespec.ChannelGenesis{ChannelID: string(protocol.C0ChannelID), Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp}
-	if err := cs.Genesis.CreateGenesis(ctx, genesis); err != nil {
-		_ = cs.Close()
-		return fmt.Errorf("boot: write c0 genesis: %w", err)
-	}
-	_, err = cs.Actors.Insert(ctx, storespec.ActorDraft{Kind: actor.KindTool, SourceDeclID: lagoon.RegistrarSeatDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.RegistrarClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()})
+	lobbyPath, err := channelhost.DBPath(filepath.Dir(c0Path), protocol.LobbyChannelID)
 	if err != nil {
-		_ = cs.Close()
-		return fmt.Errorf("boot: seat registrar: %w", err)
+		return err
 	}
-	_, err = cs.Actors.Insert(ctx, storespec.ActorDraft{Kind: actor.KindHuman, Principal: protocol.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()})
-	if err != nil {
-		_ = cs.Close()
-		return fmt.Errorf("boot: seat c0 owner: %w", err)
+	if err := writePhysicalChannel(ctx, c0Path, storespec.ChannelGenesis{ChannelID: string(protocol.C0ChannelID), Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp}, []storespec.ActorDraft{
+		{Kind: actor.KindTool, SourceDeclID: lagoon.RegistrarSeatDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.RegistrarClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
+		{Kind: actor.KindTool, SourceDeclID: lagoon.SvcActorDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.SvcActorClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
+		{Kind: actor.KindHuman, Principal: protocol.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()},
+		{Kind: actor.KindAgent, Principal: protocol.StewardPrincipalID, SourceDeclID: lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "codex", Config: json.RawMessage(`{}`)}, Placement: daemonPlacement},
+		{Kind: actor.KindTool, SourceDeclID: peerDeclID(protocol.LobbyChannelID), CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.PeerActorClass, Config: targetConfig(protocol.LobbyChannelID)}, Placement: storespec.NewServerPlacement()},
+	}); err != nil {
+		return fmt.Errorf("boot: write c0: %w", err)
 	}
-	if err := cs.Close(); err != nil {
-		return fmt.Errorf("boot: close c0 install phase: %w", err)
+	if err := writePhysicalChannel(ctx, lobbyPath, storespec.ChannelGenesis{ChannelID: string(protocol.LobbyChannelID), Type: "group", OwnerPrincipal: protocol.RootPrincipalID, ParentChannelID: string(protocol.C0ChannelID), InitiatorPrincipal: protocol.RootPrincipalID, CreatedAt: stamp}, []storespec.ActorDraft{
+		{Kind: actor.KindTool, SourceDeclID: lagoon.SvcActorDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.SvcActorClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
+		{Kind: actor.KindTool, SourceDeclID: lagoon.CoreActorDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.PeerActorClass, Config: targetConfig(protocol.C0ChannelID)}, Placement: storespec.NewServerPlacement()},
+		{Kind: actor.KindHuman, Principal: protocol.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()},
+		{Kind: actor.KindHuman, Principal: protocol.GuestPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()},
+	}); err != nil {
+		return fmt.Errorf("boot: write lobby: %w", err)
 	}
 
 	db, err := openSQLite(registryPath, true)
@@ -337,37 +296,119 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'human',?,'Root','present',?)`, protocol.RootPrincipalID, "root@atoll.local", stamp); err != nil {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'human',?,'Root','present',?)`, protocol.RootPrincipalID, "root@atoll.local", stamp); err != nil {
 		return fmt.Errorf("boot: root principal: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?)`, protocol.RootPrincipalID, string(hash), stamp); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?)`, protocol.RootPrincipalID, string(hash), stamp); err != nil {
 		return fmt.Errorf("boot: root credential: %w", err)
 	}
-	c0spec := lagoon.GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Steward','present',?)`, protocol.StewardPrincipalID, stamp); err != nil {
+		return fmt.Errorf("boot: steward principal: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Guest','present',?)`, protocol.GuestPrincipalID, stamp); err != nil {
+		return fmt.Errorf("boot: guest principal: %w", err)
+	}
+	svcSnapshot, err := sealSnapshot(lagoon.SvcActorClass, json.RawMessage(`{}`), channel.PlacementServer)
+	if err != nil {
+		return err
+	}
+	registrarSnapshot, err := sealSnapshot(lagoon.RegistrarClass, json.RawMessage(`{}`), channel.PlacementServer)
+	if err != nil {
+		return err
+	}
+	coreSnapshot, err := sealSnapshot(lagoon.PeerActorClass, targetConfig(protocol.C0ChannelID), channel.PlacementServer)
+	if err != nil {
+		return err
+	}
+	c0Description := "Atoll core registry and administration channel."
+	c0Serving := 1
+	c0Endpoints := make(map[string]regspec.EndpointSpec, len(lagoon.WriteWords)+len(lagoon.ReadWords))
+	for _, word := range append(append([]lagoon.Word{}, lagoon.WriteWords[:]...), lagoon.ReadWords[:]...) {
+		c0Endpoints[string(word)] = regspec.EndpointSpec{Description: "Registrar endpoint " + string(word) + ".", Receiver: lagoon.RegistrarSeatDeclID}
+	}
+	c0spec := lagoon.GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindTool, Rendered: svcSnapshot}, {DeclID: lagoon.RegistrarSeatDeclID, Kind: actor.KindTool, Rendered: registrarSnapshot}}, Profile: regspec.ChannelProfile{Description: &c0Description, Serving: &c0Serving, Endpoints: c0Endpoints}}
 	raw, err := json.Marshal(c0spec)
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?)`, protocol.C0ChannelID, protocol.C0ChannelID, protocol.RootPrincipalID, string(raw), stamp); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,NULL,?,'group','present',?, ?,1,?,?)`, protocol.C0ChannelID, protocol.C0ChannelID, protocol.RootPrincipalID, "Atoll core registry and administration channel.", string(raw), stamp); err != nil {
 		return fmt.Errorf("boot: c0 channel row: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Steward','present',?)`, protocol.StewardPrincipalID, stamp); err != nil {
-		return fmt.Errorf("boot: steward principal: %w", err)
+	lobbyDescription := "Registration lobby for unauthenticated guests."
+	lobbyServing := 0
+	lobbySpec := lagoon.GenesisSpec{ChannelID: protocol.LobbyChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp, ParentID: protocol.C0ChannelID, InitiatorPrincipal: protocol.RootPrincipalID, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindTool, Rendered: svcSnapshot}, {DeclID: lagoon.CoreActorDeclID, Kind: actor.KindTool, Rendered: coreSnapshot}}, Profile: regspec.ChannelProfile{Description: &lobbyDescription, Serving: &lobbyServing, Endpoints: map[string]regspec.EndpointSpec{}}}
+	lobbyRaw, err := json.Marshal(lobbySpec)
+	if err != nil {
+		return err
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO decls(id,name,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,'{}','present','public',?,?)`, lagoon.SpaceToolDeclID, "Space Tool", protocol.RootPrincipalID, lagoon.SpaceToolClass, stamp, stamp); err != nil {
-		return fmt.Errorf("boot: space-tool decl: %w", err)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,?,'lobby','group','present',?, ?,0,?,?)`, protocol.LobbyChannelID, protocol.C0ChannelID, protocol.RootPrincipalID, "Registration lobby for unauthenticated guests.", string(lobbyRaw), stamp); err != nil {
+		return fmt.Errorf("boot: lobby channel row: %w", err)
+	}
+	decls := []struct {
+		id, name, class, visibility string
+		config                      json.RawMessage
+	}{
+		{lagoon.RegistrarSeatDeclID, "Registrar Seat", lagoon.RegistrarClass, "private", json.RawMessage(`{}`)},
+		{lagoon.SvcActorDeclID, "Service Actor", lagoon.SvcActorClass, "private", json.RawMessage(`{}`)},
+		{lagoon.CoreActorDeclID, "Core Actor", lagoon.PeerActorClass, "private", targetConfig(protocol.C0ChannelID)},
+		{peerDeclID(protocol.LobbyChannelID), "c0.lobby", lagoon.PeerActorClass, "public", targetConfig(protocol.LobbyChannelID)},
+		{lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), "Steward", "codex", "private", json.RawMessage(`{}`)},
+	}
+	for _, decl := range decls {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,NULL,?,?,?,'present',?,?,?)`, decl.id, decl.name, protocol.RootPrincipalID, decl.class, string(decl.config), decl.visibility, stamp, stamp); err != nil {
+			return fmt.Errorf("boot: system declaration %s: %w", decl.id, err)
+		}
 	}
 	const localDeviceName = "local-device"
 	if err := lagoon.ValidateName(localDeviceName); err != nil {
 		return fmt.Errorf("boot: local device name: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO devices(id,owner_principal,name,key,status,created_at) VALUES(?,?,?,?,'present',?)`, protocol.LocalDeviceID, protocol.RootPrincipalID, localDeviceName, uuid.NewString(), stamp); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO devices(id,owner_principal,name,key,status,created_at) VALUES(?,?,?,?,'present',?)`, protocol.LocalDeviceID, protocol.RootPrincipalID, localDeviceName, uuid.NewString(), stamp); err != nil {
 		return fmt.Errorf("boot: local device: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO atoll_install(id,installed_at) VALUES(1,?)`, stamp); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bindings(channel_id,device_id,attached_at) VALUES(?,?,?)`, protocol.C0ChannelID, protocol.LocalDeviceID, stamp); err != nil {
+		return fmt.Errorf("boot: c0 local binding: %w", err)
+	}
+	for _, word := range append(append([]lagoon.Word{}, lagoon.WriteWords[:]...), lagoon.ReadWords[:]...) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_endpoints(channel_id,name,description,receiver,meta_json,updated_at) VALUES(?,?,?,?,NULL,?)`, protocol.C0ChannelID, string(word), "Registrar endpoint "+string(word)+".", lagoon.RegistrarSeatDeclID, stamp); err != nil {
+			return fmt.Errorf("boot: c0 endpoint %s: %w", word, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO atoll_install(id,installed_at) VALUES(1,?)`, stamp); err != nil {
 		return fmt.Errorf("boot: publish install marker: %w", err)
 	}
+	return tx.Commit()
+}
+
+func writePhysicalChannel(ctx context.Context, path string, genesis storespec.ChannelGenesis, actors []storespec.ActorDraft) error {
+	cs, err := runtime.OpenChannel(ctx, channel.ID(genesis.ChannelID), path, runtime.OpenChannelOptions{})
+	if err != nil {
+		return err
+	}
+	defer cs.Close()
+	if err := cs.Genesis.CreateGenesis(ctx, genesis); err != nil {
+		return err
+	}
+	for _, draft := range actors {
+		if _, err := cs.Actors.Insert(ctx, draft); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func targetConfig(id channel.ID) json.RawMessage {
+	raw, _ := json.Marshal(map[string]channel.ID{"channel": id})
+	return raw
+}
+func peerDeclID(id channel.ID) string { return lagoon.PeerActorDeclPrefix + string(id) }
+func sealSnapshot(class string, config json.RawMessage, placement channel.PlacementKind) (channelspec.RenderedSnapshot, error) {
+	return (channelspec.RenderedSnapshot{Class: class, Config: config, Placement: channel.Placement{Kind: placement}}).Seal()
 }
 
 func openSQLite(path string, create bool) (*sql.DB, error) {

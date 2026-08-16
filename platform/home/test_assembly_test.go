@@ -21,6 +21,12 @@ func (inertIntroductionResolver) ResolveDeclaration(context.Context, channel.ID,
 func (inertIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
+func (inertIntroductionResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+	return "", false, nil
+}
+func (inertIntroductionResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
+	return nil
+}
 
 type emptyCompositionResolver struct{}
 
@@ -35,6 +41,9 @@ func (emptyBindingReader) IsBound(context.Context, channel.ID, string) (bool, er
 }
 func (emptyBindingReader) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
 	return nil, nil
+}
+func (emptyBindingReader) ChannelDesired(context.Context, channel.ID) (channelspec.ChannelDesiredFacts, bool, error) {
+	return channelspec.ChannelDesiredFacts{}, false, nil
 }
 
 func completeHomeTestConfig(cfg Config) Config {

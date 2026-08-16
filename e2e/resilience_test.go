@@ -23,7 +23,7 @@ func setupDaemonEcho(t *testing.T, h *harness, ws *wsClient, declID string) (*pr
 		"channel_id": c0ChannelID,
 		"device_id":  deviceID,
 	})
-	registrarRequest(t, ws, registrar, "decl.register", map[string]any{
+	registrarRequest(t, ws, registrar, "actor.template.register", map[string]any{
 		"id": declID, "name": "E2E resilience echo", "class": "echo",
 		"config": map[string]any{}, "visibility": "private",
 	})

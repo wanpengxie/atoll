@@ -17,7 +17,7 @@ func TestRegistrarWordAndAdapterSurfacesAreClosed(t *testing.T) {
 		}
 		seen[word] = true
 	}
-	if len(WriteWords) != 15 {
+	if len(WriteWords) != 19 {
 		t.Fatalf("write words=%d", len(WriteWords))
 	}
 	for _, word := range ReadWords {
@@ -26,7 +26,7 @@ func TestRegistrarWordAndAdapterSurfacesAreClosed(t *testing.T) {
 		}
 		seen[word] = true
 	}
-	if len(ReadWords) != 6 {
+	if len(ReadWords) != 9 {
 		t.Fatalf("read words=%d", len(ReadWords))
 	}
 }

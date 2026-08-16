@@ -3,6 +3,8 @@ package actorbase
 import (
 	"context"
 	"time"
+
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // Pending is the single-use ticket sys.Call hands back — the caller's own
@@ -11,6 +13,10 @@ import (
 // It is a SEALED ticket, not a chaining builder: exactly two dispositions,
 // nothing else grafts onto it later.
 type Pending interface {
+	// RequestID is the durable local request id allocated by Call. It is
+	// available before the receiver reaches a terminal state so callers can
+	// write correlation records at dispatch time.
+	RequestID() message.ID
 	// Wait blocks until the matching response lands, ctx is done, or d
 	// elapses (selective receive on the out-station account) — whichever
 	// first. ctx is caller-supplied by design (spec's ctx-provenance rule:

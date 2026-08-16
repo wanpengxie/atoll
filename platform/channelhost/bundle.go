@@ -2,7 +2,6 @@ package channelhost
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/home"
@@ -15,12 +14,7 @@ import (
 type Bundle interface {
 	Generation() uint64
 	Gateway() GatewayHitch
-	Call() Caller
 	View() View
-}
-
-type Caller interface {
-	Call(context.Context, actor.ActorID, string, any) (json.RawMessage, error)
 }
 
 type GatewayHitch interface {
@@ -50,14 +44,7 @@ type bundle struct {
 
 func (b *bundle) Generation() uint64    { return b.generation }
 func (b *bundle) Gateway() GatewayHitch { return gatewayAdapter{b.home} }
-func (b *bundle) Call() Caller          { return callAdapter{b.home} }
 func (b *bundle) View() View            { return viewAdapter{b.home} }
-
-type callAdapter struct{ home *home.Home }
-
-func (a callAdapter) Call(ctx context.Context, target actor.ActorID, word string, payload any) (json.RawMessage, error) {
-	return home.Call(a.home, ctx, target, word, payload)
-}
 
 type gatewayAdapter struct{ home *home.Home }
 

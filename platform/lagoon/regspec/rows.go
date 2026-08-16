@@ -53,8 +53,56 @@ type ChannelRow struct {
 	Type           string          `json:"type"`
 	Status         ChannelStatus   `json:"status"`
 	OwnerPrincipal string          `json:"owner_principal"`
+	Description    string          `json:"description"`
+	Serving        int             `json:"serving"`
 	Spec           json.RawMessage `json:"spec"`
 	CreatedAt      int64           `json:"created_at"`
+	Recipe         *TemplateBody   `json:"recipe,omitempty"`
+	Profile        *ChannelProfile `json:"profile,omitempty"`
+}
+
+type TemplateDeclaration struct {
+	DeclID string          `json:"decl_id"`
+	Config json.RawMessage `json:"config,omitempty"`
+}
+
+type EndpointSpec struct {
+	Description string            `json:"description"`
+	Receiver    string            `json:"receiver"`
+	Examples    []json.RawMessage `json:"examples,omitempty"`
+	Schema      json.RawMessage   `json:"schema,omitempty"`
+}
+
+type ChannelProfile struct {
+	Description *string                 `json:"description,omitempty"`
+	Serving     *int                    `json:"serving,omitempty"`
+	Endpoints   map[string]EndpointSpec `json:"endpoints,omitempty"`
+}
+
+type TemplateBody struct {
+	Declarations []TemplateDeclaration `json:"declarations"`
+	Profile      *ChannelProfile       `json:"profile,omitempty"`
+}
+
+type EndpointRow struct {
+	ChannelID   channel.ID      `json:"channel_id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Receiver    string          `json:"receiver"`
+	Meta        json.RawMessage `json:"meta,omitempty"`
+	UpdatedAt   int64           `json:"updated_at"`
+}
+
+type ChannelTemplateRow struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Owner       string          `json:"owner"`
+	Status      DeclStatus      `json:"status"`
+	Visibility  string          `json:"visibility"`
+	Body        json.RawMessage `json:"body"`
+	CreatedAt   int64           `json:"created_at"`
+	UpdatedAt   int64           `json:"updated_at"`
 }
 
 type PrincipalRow struct {

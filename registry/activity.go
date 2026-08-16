@@ -54,4 +54,3 @@ type ActivityToolEndedPayload struct {
 	Status     string `json:"status"`
 	Detail     string `json:"detail,omitempty"`
 }
-

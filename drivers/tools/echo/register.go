@@ -5,13 +5,15 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
 func init() {
 	registry.Register("echo", registry.ClassDecl{
-		Kind: actor.KindTool,
-		New:  construct,
+		Kind:      actor.KindTool,
+		Placement: channel.PlacementDaemon,
+		New:       construct,
 		// ValidateConfig is the acceptance gate: it lets a declaration be
 		// refused at admit time ("this config can never build") instead of
 		// failing later at build. Same parser as construct — one truth.

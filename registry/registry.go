@@ -62,6 +62,7 @@ type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 // the Register signature no longer changes when they arrive.
 type ClassDecl struct {
 	Kind           actor.Kind
+	Placement      channel.PlacementKind
 	New            Constructor
 	ValidateConfig func(json.RawMessage) error
 }
@@ -104,12 +105,27 @@ var (
 // actor package's init(); a duplicate class is a programmer error (panic, like
 // sql.Register).
 func Register(class string, d ClassDecl) {
+	if d.Placement != channel.PlacementServer && d.Placement != channel.PlacementDaemon {
+		panic("registry: class placement required: " + class)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if _, dup := reg[class]; dup {
 		panic("registry: duplicate class registration: " + class)
 	}
 	reg[class] = d
+}
+
+// ClassPlacement returns the single class-level placement fact used by both
+// genesis rendering and runtime introduction.
+func ClassPlacement(class string) (channel.PlacementKind, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	d, ok := reg[class]
+	if !ok {
+		return "", false
+	}
+	return d.Placement, true
 }
 
 // ClassKind returns a class's declared Kind (pure table lookup, no construction)
@@ -126,8 +142,8 @@ func ClassKind(class string) (actor.Kind, bool) {
 }
 
 // classes returns the registered class keys, sorted (stable iteration order).
-// Unexported: the only legitimate reader is Build's own error path below —
-// there is no discovery/catalog surface over the registry (see package doc).
+// Build uses it for diagnostics; RegisteredClasses exposes a snapshot for
+// whole-registry invariants without exposing mutable declarations.
 func classes() []string {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -138,6 +154,10 @@ func classes() []string {
 	sort.Strings(out)
 	return out
 }
+
+// RegisteredClasses returns a stable snapshot of class keys for whole-registry
+// validation. Callers still resolve class facts through the narrow lookups.
+func RegisteredClasses() []string { return classes() }
 
 // Build instantiates one instance of class with the given spec + host context.
 // Unknown class or a constructor error are returned to the caller (who asked for

@@ -5,10 +5,13 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
-func init() { registry.Register("device", registry.ClassDecl{Kind: actor.KindTool, New: construct}) }
+func init() {
+	registry.Register("device", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementDaemon, New: construct})
+}
 
 // construct: the generic device actor. This is a true essence-singleton:
 // the instance's identity IS the external resource (the machine), so the id

@@ -21,28 +21,35 @@ import (
 type Word string
 
 const (
-	WordChannelCreate     Word = "channel.create"
-	WordChannelRetire     Word = "channel.retire"
-	WordPrincipalRegister Word = "principal.register"
-	WordPrincipalRetire   Word = "principal.retire"
-	WordCredentialSet     Word = "credential.set"
-	WordDeclRegister      Word = "decl.register"
-	WordDeclEdit          Word = "decl.edit"
-	WordDeclRevoke        Word = "decl.revoke"
-	WordOverlaySet        Word = "overlay.set"
-	WordOverlayClear      Word = "overlay.clear"
-	WordDeviceMint        Word = "device.mint"
-	WordDeviceClaim       Word = "device.claim"
-	WordDeviceRetire      Word = "device.retire"
-	WordDeviceAttach      Word = "device.attach"
-	WordDeviceDetach      Word = "device.detach"
+	WordChannelCreate           Word = "channel.create"
+	WordChannelRetire           Word = "channel.retire"
+	WordPrincipalRegister       Word = "principal.register"
+	WordPrincipalRetire         Word = "principal.retire"
+	WordCredentialSet           Word = "credential.set"
+	WordDeclRegister            Word = "actor.template.register"
+	WordDeclEdit                Word = "actor.template.edit"
+	WordDeclRevoke              Word = "actor.template.revoke"
+	WordOverlaySet              Word = "actor.overlay.set"
+	WordOverlayClear            Word = "actor.overlay.clear"
+	WordChannelTemplateRegister Word = "channel.template.register"
+	WordChannelTemplateEdit     Word = "channel.template.edit"
+	WordChannelTemplateRevoke   Word = "channel.template.revoke"
+	WordChannelProfileSet       Word = "channel.profile.set"
+	WordDeviceMint              Word = "device.mint"
+	WordDeviceClaim             Word = "device.claim"
+	WordDeviceRetire            Word = "device.retire"
+	WordDeviceAttach            Word = "device.attach"
+	WordDeviceDetach            Word = "device.detach"
 
-	WordChannelList       Word = "channel.list"
-	WordChannelGet        Word = "channel.get"
-	WordChannelCandidates Word = "channel.candidates"
-	WordDeclList          Word = "decl.list"
-	WordDeviceList        Word = "device.list"
-	WordPrincipalMe       Word = "principal.me"
+	WordChannelList         Word = "channel.list"
+	WordChannelGet          Word = "channel.get"
+	WordChannelCandidates   Word = "channel.candidates"
+	WordDeclList            Word = "actor.template.list"
+	WordChannelTemplateList Word = "channel.template.list"
+	WordChannelTemplateGet  Word = "channel.template.get"
+	WordChannelDescribe     Word = "channel.describe"
+	WordDeviceList          Word = "device.list"
+	WordPrincipalMe         Word = "principal.me"
 )
 
 var WriteWords = [...]Word{
@@ -50,18 +57,23 @@ var WriteWords = [...]Word{
 	WordPrincipalRegister, WordPrincipalRetire, WordCredentialSet,
 	WordDeclRegister, WordDeclEdit, WordDeclRevoke,
 	WordOverlaySet, WordOverlayClear,
+	WordChannelTemplateRegister, WordChannelTemplateEdit, WordChannelTemplateRevoke, WordChannelProfileSet,
 	WordDeviceMint, WordDeviceClaim, WordDeviceRetire, WordDeviceAttach, WordDeviceDetach,
 }
 
 var ReadWords = [...]Word{
 	WordChannelList, WordChannelGet, WordChannelCandidates,
 	WordDeclList, WordDeviceList, WordPrincipalMe,
+	WordChannelTemplateList, WordChannelTemplateGet, WordChannelDescribe,
 }
 
 const (
-	SpaceToolDeclID = "space-tool"
-	SpaceToolClass  = "space-tool"
-	RegistrarClass  = "atoll-internal:registrar"
+	CoreActorDeclID     = "coreactor"
+	PeerActorClass      = "peeractor"
+	PeerActorDeclPrefix = "peer:"
+	SvcActorDeclID      = "atoll-internal:svcactor"
+	SvcActorClass       = "svcactor"
+	RegistrarClass      = "atoll-internal:registrar"
 	// RegistrarSeatDeclID is an installation detail, not a well-known public
 	// identity. Its stable source key lets channel genesis rebuild the seat.
 	RegistrarSeatDeclID = "atoll-internal:registrar-seat"
@@ -119,13 +131,14 @@ type Confirmation struct {
 }
 
 type GenesisSpec struct {
-	ChannelID          channel.ID           `json:"channel_id"`
-	Type               string               `json:"type"`
-	OwnerPrincipal     string               `json:"owner_principal"`
-	CreatedAt          int64                `json:"created_at"`
-	ParentID           channel.ID           `json:"parent_id,omitempty"`
-	InitiatorPrincipal string               `json:"initiator_principal,omitempty"`
-	Declarations       []GenesisDeclaration `json:"genesis_declarations"`
+	ChannelID          channel.ID             `json:"channel_id"`
+	Type               string                 `json:"type"`
+	OwnerPrincipal     string                 `json:"owner_principal"`
+	CreatedAt          int64                  `json:"created_at"`
+	ParentID           channel.ID             `json:"parent_id,omitempty"`
+	InitiatorPrincipal string                 `json:"initiator_principal,omitempty"`
+	Declarations       []GenesisDeclaration   `json:"genesis_declarations"`
+	Profile            regspec.ChannelProfile `json:"profile"`
 }
 
 type GenesisDeclaration struct {
@@ -135,8 +148,9 @@ type GenesisDeclaration struct {
 }
 
 type ChannelCreate struct {
-	Name   string     `json:"name"`
-	Parent channel.ID `json:"parent,omitempty"`
+	Name      string                `json:"name"`
+	Template  string                `json:"template,omitempty"`
+	Overrides *regspec.TemplateBody `json:"overrides,omitempty"`
 }
 type ChannelRetire struct {
 	ChannelID channel.ID `json:"channel_id"`
@@ -206,6 +220,41 @@ type ChannelCandidates struct {
 	ChannelID channel.ID `json:"channel_id"`
 }
 
+type ChannelTemplateRegister struct {
+	ID          string               `json:"id"`
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	Visibility  string               `json:"visibility"`
+	Body        regspec.TemplateBody `json:"body"`
+}
+
+type ChannelTemplateEdit struct {
+	ID          string                `json:"id"`
+	Name        *string               `json:"name,omitempty"`
+	Description *string               `json:"description,omitempty"`
+	Visibility  *string               `json:"visibility,omitempty"`
+	Body        *regspec.TemplateBody `json:"body,omitempty"`
+}
+
+type ChannelTemplateRevoke struct {
+	ID string `json:"id"`
+}
+type ChannelTemplateGet struct {
+	ID string `json:"id"`
+}
+
+type ChannelProfileSet struct {
+	ChannelID   channel.ID                      `json:"channel_id"`
+	Description string                          `json:"description"`
+	Serving     *int                            `json:"serving"`
+	Endpoints   map[string]regspec.EndpointSpec `json:"endpoints"`
+}
+
+type ChannelDescribe struct {
+	Channel   string     `json:"channel,omitempty"`
+	ChannelID channel.ID `json:"channel_id,omitempty"`
+}
+
 type Reply struct {
 	Word   Word            `json:"word"`
 	Value  json.RawMessage `json:"value,omitempty"`
@@ -237,19 +286,6 @@ func (r Reply) DecodeValue(out any) error {
 	return nil
 }
 
-type SubmitIn struct {
-	Source    channel.ID
-	Sender    actor.ActorID
-	RequestID string
-	Word      Word
-	Payload   any
-}
-
-type Submitter interface {
-	Submit(context.Context, SubmitIn) (Reply, error)
-	SubmitApplication(context.Context, Word, any) (Reply, error)
-}
-
 type SystemGenesisResolver interface {
 	SystemGenesis(context.Context) (GenesisSpec, bool, error)
 }
@@ -257,10 +293,19 @@ type SystemGenesisResolver interface {
 type ClassCatalog interface {
 	ValidateConfig(class string, config json.RawMessage) error
 	LookupClassKind(class string) (actor.Kind, bool)
+	LookupClassPlacement(class string) (channel.PlacementKind, bool)
 }
 
 type SourceActorFactsResolver interface {
 	ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error)
+}
+
+type ChannelInstancesResolver interface {
+	DeclaredInstances(context.Context, channel.ID, string) ([]actor.ActorID, error)
+}
+
+type ChannelServiceResolver interface {
+	WaitChannelService(context.Context, channel.ID) error
 }
 
 type Clock func() time.Time

@@ -13,6 +13,7 @@ import (
 var (
 	ErrDeclarationNotFound = errors.New("channel: declaration not found")
 	ErrDigestMismatch      = errors.New("channel: snapshot digest mismatch")
+	ErrTargetNotServing    = errors.New("channel: target is not serving")
 )
 
 type ActorFacts struct {
@@ -20,6 +21,11 @@ type ActorFacts struct {
 	SourceDeclID string     `json:"source_decl_id,omitempty"`
 	Kind         actor.Kind `json:"kind"`
 	Active       bool       `json:"active"`
+}
+
+type ChannelDesiredFacts struct {
+	Present  bool
+	ParentID channel.ID
 }
 
 // ResolveActorPrincipal applies the platform's single attribution rule: an

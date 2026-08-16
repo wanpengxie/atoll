@@ -5,13 +5,15 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
 func init() {
 	registry.Register("mcp", registry.ClassDecl{
-		Kind: actor.KindTool,
-		New:  construct,
+		Kind:      actor.KindTool,
+		Placement: channel.PlacementDaemon,
+		New:       construct,
 		ValidateConfig: func(raw json.RawMessage) error {
 			_, err := parseConfig(raw)
 			return err

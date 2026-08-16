@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/svcactor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -47,6 +48,7 @@ type Service interface {
 type LocalHost interface {
 	Service
 	Acquire(channel.ID) (Bundle, bool)
+	AcquirePort(channel.ID) (*svcactor.Port, uint64, bool)
 	Poke(channel.ID) bool
 }
 
@@ -92,6 +94,7 @@ const (
 
 type entry struct {
 	home           *home.Home
+	port           *svcactor.Port
 	generation     uint64
 	state          entryState
 	closed         bool
@@ -263,6 +266,9 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	genesis.InitiatorPrincipal = spec.InitiatorPrincipal
 	bootstrapDeclarations := make([]home.DeclareRequest, 0, len(spec.Declarations))
 	for _, declaration := range spec.Declarations {
+		if declaration.DeclID != lagoon.SvcActorDeclID && declaration.DeclID != lagoon.CoreActorDeclID && declaration.DeclID != lagoon.RegistrarSeatDeclID {
+			continue
+		}
 		if err := declaration.Rendered.Validate(); err != nil {
 			return fmt.Errorf("channelhost: invalid genesis declaration %q: %w", declaration.DeclID, err)
 		}
@@ -277,9 +283,10 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 			CreatedAt: spec.CreatedAt,
 		})
 	}
+	port := svcactor.NewPort()
 	homeInstance, err := h.openHome(
 		spec.ChannelID, name, main, true, &genesis,
-		spec.OwnerPrincipal, bootstrapDeclarations,
+		spec.OwnerPrincipal, bootstrapDeclarations, port,
 	)
 	if err != nil {
 		return err
@@ -287,10 +294,14 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	succeeded := false
 	defer func() {
 		if !succeeded {
+			port.Close()
 			_ = home.Shutdown(homeInstance)
 		}
 	}()
 	for _, declaration := range spec.Declarations {
+		if declaration.DeclID != lagoon.SvcActorDeclID && declaration.DeclID != lagoon.CoreActorDeclID && declaration.DeclID != lagoon.RegistrarSeatDeclID {
+			continue
+		}
 		ids, err := homeInstance.View().DeclaredInstances(ctx, declaration.DeclID)
 		if err != nil || len(ids) != 1 {
 			return fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
@@ -299,6 +310,7 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	if err := home.Shutdown(homeInstance); err != nil {
 		return fmt.Errorf("channelhost: close bootstrap home: %w", err)
 	}
+	port.Close()
 	succeeded = true
 	return nil
 }
@@ -360,8 +372,10 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	// Owner has exactly one home — the immutable genesis pointer — so opening
 	// checks only that the pointer is present. There is no second account to
 	// cross-check it against.
-	homeInstance, err := h.openHome(spec.ChannelID, spec.ChannelName, main, false, &genesis, "", nil)
+	port := svcactor.NewPort()
+	homeInstance, err := h.openHome(spec.ChannelID, spec.ChannelName, main, false, &genesis, "", nil, port)
 	if err != nil {
+		port.Close()
 		if errors.Is(err, home.ErrOwnerInvariant) {
 			return errors.Join(ErrOwnerInvariant, err)
 		}
@@ -382,7 +396,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 		_ = home.Shutdown(homeInstance)
 		return nil
 	}
-	h.entries[spec.ChannelID] = &entry{home: homeInstance, generation: generation, state: stateServing, genesisType: spec.ExpectedType, channelName: spec.ChannelName}
+	h.entries[spec.ChannelID] = &entry{home: homeInstance, port: port, generation: generation, state: stateServing, genesisType: spec.ExpectedType, channelName: spec.ChannelName}
 	h.mu.Unlock()
 	notifyGeneration = generation
 	notifyMembrane = home.DaemonMembrane(homeInstance)
@@ -397,6 +411,7 @@ func (h *ChannelHost) openHome(
 	genesis *storespec.ChannelGenesis,
 	bootstrapOwner string,
 	bootstrapDeclarations []home.DeclareRequest,
+	port *svcactor.Port,
 ) (*home.Home, error) {
 	config := home.Config{
 		ChannelID: id, ChannelName: name, DBPath: path, Bootstrap: bootstrap, MustExistDB: !bootstrap,
@@ -407,6 +422,7 @@ func (h *ChannelHost) openHome(
 		DataPlaneIssuer:       h.deps.DataPlaneIssuer,
 		DeviceDirectory:       h.deps.DeviceDirectory,
 		RegistryBindings:      h.deps.RegistryBindings,
+		ServicePort:           port,
 	}
 	if bootstrap {
 		config.Genesis = genesis
@@ -427,6 +443,19 @@ func (h *ChannelHost) Acquire(id channel.ID) (Bundle, bool) {
 		return nil, false
 	}
 	return &bundle{home: entry.home, generation: entry.generation}, true
+}
+
+func (h *ChannelHost) AcquirePort(id channel.ID) (*svcactor.Port, uint64, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.closed {
+		return nil, 0, false
+	}
+	entry := h.entries[id]
+	if entry == nil || entry.state != stateServing || entry.port == nil {
+		return nil, 0, false
+	}
+	return entry.port, entry.generation, true
 }
 
 func (h *ChannelHost) Destroy(ctx context.Context, id channel.ID) error {
@@ -452,6 +481,9 @@ func (h *ChannelHost) Destroy(ctx context.Context, id channel.ID) error {
 		}
 		current.destroying = true
 		current.state = stateSealing
+		if current.port != nil {
+			current.port.Close()
+		}
 		if !current.membraneClosed {
 			current.membraneClosed = true
 			notifyGeneration = current.generation
@@ -594,6 +626,9 @@ func (h *ChannelHost) Close(ctx context.Context) error {
 	for id, e := range h.entries {
 		entries[id] = e
 		e.state = stateSealing
+		if e.port != nil {
+			e.port.Close()
+		}
 		if !e.membraneClosed {
 			e.membraneClosed = true
 			notifications[id] = e.generation

@@ -44,6 +44,12 @@ func (r *mutableDeclarationResolver) ClassKind(_ context.Context, class string) 
 	}
 	return "", false, nil
 }
+func (r *mutableDeclarationResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+	return channel.PlacementServer, true, nil
+}
+func (r *mutableDeclarationResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
+	return nil
+}
 
 func (r *mutableDeclarationResolver) BuildClass(
 	channel.ID, actor.ActorID, string, json.RawMessage,

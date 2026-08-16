@@ -2,9 +2,12 @@ package lagoon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon/internal/store"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol"
@@ -120,6 +123,79 @@ func (r *Registry) GetChannelDesired(ctx context.Context, id channel.ID) (regspe
 	return regspec.ChannelRow{}, false, nil
 }
 
+func (r *Registry) ResolveChannel(ctx context.Context, id channel.ID, qualified string) (regspec.ChannelRow, bool, error) {
+	rows, err := r.ListChannels(ctx)
+	if err != nil {
+		return regspec.ChannelRow{}, false, err
+	}
+	for _, row := range rows {
+		if (id != "" && row.ID == id) || (id == "" && qualified != "" && row.QualifiedName == qualified) {
+			return row, true, nil
+		}
+	}
+	return regspec.ChannelRow{}, false, nil
+}
+
+func (r *Registry) ListEndpoints(ctx context.Context, ch channel.ID) ([]regspec.EndpointRow, error) {
+	return r.store.ListEndpoints(ctx, ch)
+}
+
+func (r *Registry) GetChannelTemplate(ctx context.Context, id string) (regspec.ChannelTemplateRow, bool, error) {
+	return r.store.GetChannelTemplate(ctx, id)
+}
+
+func (r *Registry) ListChannelTemplates(ctx context.Context) ([]regspec.ChannelTemplateRow, error) {
+	return r.store.ListChannelTemplates(ctx)
+}
+
+func (r *Registry) LocalDeviceKey(ctx context.Context) (string, error) {
+	row, ok, err := r.store.GetDevice(ctx, protocol.LocalDeviceID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("lagoon: local device missing")
+	}
+	return row.Key, nil
+}
+
+func (r *Registry) Describe(ctx context.Context, target channel.ID, caller channel.ID) (introspect.Describe, error) {
+	row, ok, err := r.GetChannelDesired(ctx, target)
+	if err != nil {
+		return introspect.Describe{}, err
+	}
+	if !ok || row.Status != regspec.ChannelPresent {
+		return introspect.Describe{}, errors.New("lagoon: channel not found")
+	}
+	endpoints, err := r.ListEndpoints(ctx, target)
+	if err != nil {
+		return introspect.Describe{}, err
+	}
+	types := make(map[string]introspect.TypeMeta, len(endpoints)+3)
+	for _, endpoint := range endpoints {
+		meta := introspect.TypeMeta{Description: endpoint.Description}
+		if len(endpoint.Meta) > 0 {
+			var extra struct {
+				Examples []json.RawMessage `json:"examples"`
+				Schema   json.RawMessage   `json:"schema"`
+			}
+			if json.Unmarshal(endpoint.Meta, &extra) == nil {
+				if len(extra.Examples) > 0 {
+					meta.PayloadExample = extra.Examples[0]
+				}
+				meta.InputSchema = extra.Schema
+			}
+		}
+		types[endpoint.Name] = meta
+	}
+	if target != protocol.C0ChannelID && (caller == protocol.C0ChannelID || caller == row.ParentID) {
+		types["channel.introduce_actor"] = introspect.TypeMeta{Description: "Introduce a channel member."}
+		types["channel.remove_actor"] = introspect.TypeMeta{Description: "Remove a channel member."}
+		types["channel.restart_actor"] = introspect.TypeMeta{Description: "Restart a channel member."}
+	}
+	return introspect.Describe{ActorID: row.QualifiedName, Description: row.Description, Types: types}, nil
+}
+
 func qualifyChannelRows(rows []regspec.ChannelRow) ([]regspec.ChannelRow, error) {
 	byID := make(map[channel.ID]int, len(rows))
 	for i := range rows {
@@ -190,4 +266,12 @@ func (r *Registry) IsBound(ctx context.Context, ch channel.ID, device string) (b
 // device credentials and other registry columns never cross it.
 func (r *Registry) ListBoundDeviceIDs(ctx context.Context, ch channel.ID) ([]string, error) {
 	return r.store.ListBoundDeviceIDs(ctx, ch)
+}
+
+func (r *Registry) ChannelDesired(ctx context.Context, id channel.ID) (channelspec.ChannelDesiredFacts, bool, error) {
+	row, ok, err := r.GetChannelDesired(ctx, id)
+	if err != nil || !ok {
+		return channelspec.ChannelDesiredFacts{}, ok, err
+	}
+	return channelspec.ChannelDesiredFacts{Present: row.Status == regspec.ChannelPresent, ParentID: row.ParentID}, true, nil
 }

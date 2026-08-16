@@ -271,7 +271,7 @@ func (v View) DeclaredInstances(_ context.Context, declID string) ([]actor.Actor
 	return v.authority.DeclaredInstances(declID)
 }
 
-// HasDeclaredInstance is the availability question (space-tool and routing
+// HasDeclaredInstance is the availability question (peeractor and routing
 // fallback): does this declaration have a live instance at all.
 func (v View) HasDeclaredInstance(ctx context.Context, declID string) (bool, error) {
 	ids, err := v.DeclaredInstances(ctx, declID)

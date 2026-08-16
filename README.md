@@ -97,7 +97,7 @@ lib/         stdlib for actor authors: actorbase (the Proc + verb-table base eve
              vocabulary), introspect
 platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word table);
              channelhost/ (the channel contract surface the space talks to),
-             spacetool/ (in-channel port for space requests), home/ (server-side
+             peeractor/ and svcactor/ (in-process cross-channel path), home/ (server-side
              channel-home assembly), daemonhost/ (space device carriers),
              compute/ (daemon-side multi-compartment assembly), subjectgate/,
              lagoon/ (registry storage module + registrar), boot/ (one-shot
@@ -220,11 +220,11 @@ than reconnecting per command.
 
 ### Worked example: attach an MCP server at runtime
 
-Two messages, no rebuild. `decl.register` goes to the registrar (find its id in
+Two messages, no rebuild. `actor.template.register` goes to the registrar (find its id in
 `actor.list`); `channel.introduce_actor` goes to `system`:
 
 ```jsonc
-// decl.register
+// actor.template.register
 {"id":"my-mcp","name":"My MCP","class":"mcp","visibility":"private",
  "config":{"name":"testsrv","transport":"http","url":"http://127.0.0.1:8931/mcp"}}
 
