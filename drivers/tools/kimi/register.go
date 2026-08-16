@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	registry.Register("kimi", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementServer, New: construct})
+	registry.Register("kimi", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementDaemon, New: construct})
 }
 
 // construct: the Kimi WebBridge browser-extension adapter. id comes from the

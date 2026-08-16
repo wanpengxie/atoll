@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	registry.Register("xhs", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementServer, New: construct})
+	registry.Register("xhs", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementDaemon, New: construct})
 }
 
 // construct: browser-extension adapter — owns a PRIVATE loopback WS endpoint the

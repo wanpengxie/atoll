@@ -74,20 +74,22 @@ func openKindHome(t *testing.T) (*Home, actor.ActorID) {
 	return h, alice
 }
 
-func TestIntroduceAllowsUnknownFieldsButRejectsTrailingDocument(t *testing.T) {
+func TestNativeManagementPayloadsRejectUnknownFieldsAndTrailingDocuments(t *testing.T) {
 	h, _ := openKindHome(t)
 	for _, tc := range []struct {
-		name    string
-		payload json.RawMessage
-		wantErr bool
+		name      string
+		operation string
+		payload   json.RawMessage
 	}{
-		{name: "unknown field", payload: json.RawMessage(`{"kind":"human","principal":"future-human","future_option":true}`)},
-		{name: "trailing document", payload: json.RawMessage(`{"kind":"human","principal":"second-human"} {}`), wantErr: true},
+		{name: "introduce unknown field", operation: sysactor.TypeIntroduceActor, payload: json.RawMessage(`{"kind":"human","principal":"future-human","future_option":true}`)},
+		{name: "introduce trailing document", operation: sysactor.TypeIntroduceActor, payload: json.RawMessage(`{"kind":"human","principal":"second-human"} {}`)},
+		{name: "remove unknown field", operation: sysactor.TypeRemoveActor, payload: json.RawMessage(`{"instance_id":"actor","future_option":true}`)},
+		{name: "restart unknown field", operation: sysactor.TypeRestartActor, payload: json.RawMessage(`{"instance_id":"actor","future_option":true}`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := h.opEntry.Execute(context.Background(), sysactor.TypeIntroduceActor, sysactor.OperateRequest{Payload: tc.payload})
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Execute error=%v wantErr=%v", err, tc.wantErr)
+			_, err := h.opEntry.Execute(context.Background(), tc.operation, sysactor.OperateRequest{Payload: tc.payload})
+			if err == nil {
+				t.Fatal("unknown or trailing payload was accepted")
 			}
 		})
 	}

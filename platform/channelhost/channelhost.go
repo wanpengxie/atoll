@@ -266,6 +266,9 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	genesis.InitiatorPrincipal = spec.InitiatorPrincipal
 	bootstrapDeclarations := make([]home.DeclareRequest, 0, len(spec.Declarations))
 	for _, declaration := range spec.Declarations {
+		if declaration.DeclID != lagoon.SvcActorDeclID && declaration.DeclID != lagoon.CoreActorDeclID && declaration.DeclID != lagoon.RegistrarSeatDeclID {
+			continue
+		}
 		if err := declaration.Rendered.Validate(); err != nil {
 			return fmt.Errorf("channelhost: invalid genesis declaration %q: %w", declaration.DeclID, err)
 		}
@@ -296,6 +299,9 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 		}
 	}()
 	for _, declaration := range spec.Declarations {
+		if declaration.DeclID != lagoon.SvcActorDeclID && declaration.DeclID != lagoon.CoreActorDeclID && declaration.DeclID != lagoon.RegistrarSeatDeclID {
+			continue
+		}
 		ids, err := homeInstance.View().DeclaredInstances(ctx, declaration.DeclID)
 		if err != nil || len(ids) != 1 {
 			return fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)

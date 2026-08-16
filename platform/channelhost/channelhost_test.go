@@ -50,7 +50,7 @@ func (r testResolver) ResolveDeclaration(context.Context, channel.ID, string) (c
 	return r.declaration, nil
 }
 
-func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
+func TestProvisionGenesisSkipsRecipeUserDeclarations(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	liveResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`)}}
@@ -69,41 +69,15 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if err := host.provisionGenesis(ctx, spec, "c0.test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ChannelName: "c0.test", ExpectedType: spec.Type}); err != nil {
-		t.Fatal(err)
-	}
-	initial, ok := host.Acquire(spec.ChannelID)
-	if !ok {
-		t.Fatal("provisioned channel not serving")
-	}
-	initialRows, err := initial.View().DeclaredInstances(ctx, "decl-a")
-	if err != nil || len(initialRows) != 1 {
-		t.Fatalf("equal first sweep double-wrote genesis: instances=%+v err=%v", initialRows, err)
-	}
-	if err := host.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	latestResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"b"}`)}}
-	reopened, err := New(root, testBindings{}, HomeDeps{CompositionResolver: latestResolver, IntroductionResolver: latestResolver, RegistryBindings: testBindings{}})
+	main, _, _ := host.paths(spec.ChannelID)
+	db, err := sql.Open("sqlite", main)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close(context.Background())
-	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ChannelName: "c0.test", ExpectedType: spec.Type}); err != nil {
-		t.Fatal(err)
-	}
-	bundle, ok := reopened.Acquire(spec.ChannelID)
-	if !ok {
-		t.Fatal("reopened channel not serving")
-	}
-	// The reopened channel keeps exactly one instance of the declaration: the
-	// first sweep re-applies the latest definition onto the same record instead
-	// of introducing a second one. What the definition now says is the
-	// Controller's own reconcile projection, not a business-membrane fact.
-	rows, err := bundle.View().DeclaredInstances(ctx, "decl-a")
-	if err != nil || len(rows) != 1 || rows[0] != initialRows[0] {
-		t.Fatalf("first-sweep declaration=(%+v,%v)", rows, err)
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE source_decl_id='decl-a' AND deregistered_at IS NULL`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("recipe declaration was written during genesis: count=%d err=%v", count, err)
 	}
 }
 func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {

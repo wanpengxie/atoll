@@ -63,7 +63,15 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 		return err
 	}
 	spec := GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: now}
-	if !c0Exists {
+	if c0Exists {
+		row, found, err := r.registry.GetChannelDesired(ctx, protocol.C0ChannelID)
+		if err != nil {
+			return err
+		}
+		if !found || json.Unmarshal(row.Spec, &spec) != nil {
+			return errors.New("lagoon: c0 registry genesis invalid")
+		}
+	} else {
 		genesis, ok := r.facts.(SystemGenesisResolver)
 		if !ok {
 			return errors.New("lagoon: c0 physical genesis unavailable")
@@ -77,6 +85,13 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 			return errors.New("lagoon: c0 physical genesis missing")
 		}
 	}
+	description := "Atoll core registry and administration channel."
+	serving := 1
+	endpoints := make(map[string]regspec.EndpointSpec, len(WriteWords)+len(ReadWords))
+	for _, word := range append(append([]Word{}, WriteWords[:]...), ReadWords[:]...) {
+		endpoints[string(word)] = regspec.EndpointSpec{Description: "Registrar endpoint " + string(word) + ".", Receiver: RegistrarSeatDeclID}
+	}
+	spec.Profile = regspec.ChannelProfile{Description: &description, Serving: &serving, Endpoints: endpoints}
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		return err
@@ -455,8 +470,13 @@ func denied(detail string) error   { return &Error{Code: CodePermissionDenied, D
 func reserved(detail string) error { return &Error{Code: CodeReserved, Detail: detail} }
 
 type postActionResults struct {
-	Core   any `json:"core"`
-	Parent any `json:"parent"`
+	Core    any                        `json:"core"`
+	Parent  any                        `json:"parent"`
+	Members []memberIntroductionResult `json:"members"`
+}
+type memberIntroductionResult struct {
+	DeclID string `json:"decl_id"`
+	Result any    `json:"result"`
 }
 type ChannelCreateReply struct {
 	regspec.ChannelRow
@@ -475,12 +495,12 @@ func (r *Registrar) createChannel(sys actorbase.Sys, ctx context.Context, owner 
 		return ChannelCreateReply{}, err
 	}
 	if !created {
-		return ChannelCreateReply{ChannelRow: row, Introduced: postActionResults{Core: "n/a", Parent: "n/a"}}, nil
+		return ChannelCreateReply{ChannelRow: row, Introduced: postActionResults{Core: "n/a", Parent: "n/a", Members: []memberIntroductionResult{}}}, nil
 	}
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: row.ID})
 	}
-	results := r.introduceChannelEdges(sys, ctx, row)
+	results := r.introduceChannel(sys, ctx, row)
 	return ChannelCreateReply{ChannelRow: row, Introduced: results}, nil
 }
 
@@ -641,9 +661,15 @@ func (r *Registrar) mergedTemplate(ctx context.Context, tx *store.Tx, id string,
 		if err := json.Unmarshal(row.Body, &body); err != nil {
 			return body, err
 		}
+		if err := r.validateTemplateDeclarations(ctx, tx, body.Declarations); err != nil {
+			return body, err
+		}
 	}
 	if overrides == nil {
 		return body, nil
+	}
+	if err := r.validateTemplateDeclarations(ctx, tx, overrides.Declarations); err != nil {
+		return body, err
 	}
 	index := map[string]int{}
 	for i, d := range body.Declarations {
@@ -683,7 +709,7 @@ func targetConfig(id channel.ID) json.RawMessage {
 	raw, _ := json.Marshal(map[string]channel.ID{"channel": id})
 	return raw
 }
-func peerDeclID(id channel.ID) string { return "peer:" + string(id) }
+func peerDeclID(id channel.ID) string { return PeerActorDeclPrefix + string(id) }
 
 func (r *Registrar) validateEndpoints(ctx context.Context, tx *store.Tx, endpoints map[string]regspec.EndpointSpec) error {
 	for name, endpoint := range endpoints {
@@ -708,7 +734,7 @@ func (r *Registrar) validateEndpoints(ctx context.Context, tx *store.Tx, endpoin
 	return nil
 }
 
-func (r *Registrar) introduceChannelEdges(sys actorbase.Sys, ctx context.Context, row regspec.ChannelRow) postActionResults {
+func (r *Registrar) introduceChannel(sys actorbase.Sys, ctx context.Context, row regspec.ChannelRow) postActionResults {
 	core := r.callActor(sys, ctx, actor.SystemActorID, "channel.introduce_actor", map[string]any{"kind": "tool", "decl_id": peerDeclID(row.ID)})
 	parent := any("n/a")
 	if row.ParentID != protocol.C0ChannelID {
@@ -725,7 +751,60 @@ func (r *Registrar) introduceChannelEdges(sys actorbase.Sys, ctx context.Context
 			parent = map[string]string{"error_code": "receiver_unavailable", "detail": "channel instance resolver unavailable"}
 		}
 	}
-	return postActionResults{Core: core, Parent: parent}
+	results := postActionResults{Core: core, Parent: parent, Members: []memberIntroductionResult{}}
+	var spec GenesisSpec
+	if err := json.Unmarshal(row.Spec, &spec); err != nil {
+		return results
+	}
+	userDeclarations := make([]GenesisDeclaration, 0, len(spec.Declarations))
+	for _, declaration := range spec.Declarations {
+		if declaration.DeclID == SvcActorDeclID || declaration.DeclID == CoreActorDeclID || declaration.DeclID == RegistrarSeatDeclID {
+			continue
+		}
+		userDeclarations = append(userDeclarations, declaration)
+	}
+	if len(userDeclarations) == 0 {
+		return results
+	}
+	service, ok := r.facts.(ChannelServiceResolver)
+	if !ok {
+		failure := map[string]string{"error_code": "receiver_unavailable", "detail": "channel service resolver unavailable"}
+		for _, declaration := range userDeclarations {
+			results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: failure})
+		}
+		return results
+	}
+	if err := service.WaitChannelService(ctx, row.ID); err != nil {
+		failure := errorValue(err)
+		for _, declaration := range userDeclarations {
+			results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: failure})
+		}
+		return results
+	}
+	instances, ok := r.facts.(ChannelInstancesResolver)
+	if !ok {
+		failure := map[string]string{"error_code": "receiver_unavailable", "detail": "channel instance resolver unavailable"}
+		for _, declaration := range userDeclarations {
+			results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: failure})
+		}
+		return results
+	}
+	peers, err := instances.DeclaredInstances(ctx, protocol.C0ChannelID, peerDeclID(row.ID))
+	if err != nil || len(peers) != 1 {
+		failure := any(map[string]string{"error_code": "receiver_unavailable", "detail": "target peeractor unavailable"})
+		if err != nil {
+			failure = errorValue(err)
+		}
+		for _, declaration := range userDeclarations {
+			results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: failure})
+		}
+		return results
+	}
+	for _, declaration := range userDeclarations {
+		result := r.callActor(sys, ctx, peers[0], "channel.introduce_actor", map[string]any{"kind": declaration.Kind, "decl_id": declaration.DeclID})
+		results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: result})
+	}
+	return results
 }
 func (r *Registrar) callActor(sys actorbase.Sys, ctx context.Context, target actor.ActorID, word string, payload any) any {
 	pending, err := sys.Call(target, word, payload)
@@ -845,11 +924,7 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p 
 		return PrincipalRegisterReply{}, err
 	}
 	if found {
-		if row.Kind != actor.KindHuman || row.Email != p.Email || row.DisplayName != p.DisplayName || row.Status != regspec.PrincipalPresent {
-			return PrincipalRegisterReply{}, conflict("email or principal already exists")
-		}
-		id = row.ID
-		return PrincipalRegisterReply{PrincipalRow: row, Introduced: postActionResults{Core: "n/a", Parent: "n/a"}}, nil
+		return PrincipalRegisterReply{}, conflict("email or principal already exists")
 	}
 	if id == "" {
 		id = uuid.NewString()
@@ -883,7 +958,7 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p 
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: home.ID, Principal: id})
 	}
-	introduced := r.introduceChannelEdges(sys, ctx, home)
+	introduced := r.introduceChannel(sys, ctx, home)
 	return PrincipalRegisterReply{PrincipalRow: row, HomeChannelID: home.ID, Introduced: introduced}, nil
 }
 
@@ -1000,12 +1075,15 @@ func systemClass(class string) bool {
 	return class == SvcActorClass || class == PeerActorClass || class == RegistrarClass
 }
 func systemDecl(id string) bool {
-	return id == SvcActorDeclID || id == CoreActorDeclID || id == RegistrarSeatDeclID || strings.HasPrefix(id, "peer:")
+	return id == SvcActorDeclID || id == CoreActorDeclID || id == RegistrarSeatDeclID || strings.HasPrefix(id, PeerActorDeclPrefix)
 }
 
 func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.ID, p DeclEdit) (regspec.DeclRow, error) {
 	if p.ID == "" {
 		return regspec.DeclRow{}, invalid("id required")
+	}
+	if systemDecl(p.ID) {
+		return regspec.DeclRow{}, reserved("system declaration is reserved")
 	}
 	row, found, err := r.registry.store.GetDecl(ctx, p.ID)
 	if !found && err == nil {
@@ -1078,6 +1156,9 @@ func (r *Registrar) revokeDecl(ctx context.Context, caller string, source channe
 	if p.ID == "" {
 		return regspec.DeclRow{}, invalid("id required")
 	}
+	if systemDecl(p.ID) {
+		return regspec.DeclRow{}, reserved("system declaration is reserved")
+	}
 	row, found, err := r.registry.store.GetDecl(ctx, p.ID)
 	if !found && err == nil {
 		return regspec.DeclRow{}, notFound("declaration")
@@ -1109,8 +1190,8 @@ func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID,
 	if p.DeclID == "" || p.ChannelID == "" {
 		return regspec.OverlayRow{}, invalid("decl_id and channel_id required")
 	}
-	if p.ChannelID != source {
-		return regspec.OverlayRow{}, denied("overlay target must equal source channel")
+	if systemDecl(p.DeclID) {
+		return regspec.OverlayRow{}, reserved("system declaration is reserved")
 	}
 	decl, ok, err := r.registry.GetDecl(ctx, p.DeclID)
 	if err != nil {
@@ -1118,6 +1199,12 @@ func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID,
 	}
 	if !ok || decl.Status != regspec.DeclPresent {
 		return regspec.OverlayRow{}, notFound("declaration")
+	}
+	if systemClass(decl.DefaultClass) || systemDecl(decl.ID) {
+		return regspec.OverlayRow{}, reserved("system declaration is reserved")
+	}
+	if p.ChannelID != source {
+		return regspec.OverlayRow{}, denied("overlay target must equal source channel")
 	}
 	if r.classes == nil {
 		return regspec.OverlayRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
@@ -1147,6 +1234,19 @@ func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID,
 func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p OverlayClear) (Confirmation, error) {
 	if p.DeclID == "" || p.ChannelID == "" {
 		return Confirmation{}, invalid("decl_id and channel_id required")
+	}
+	if systemDecl(p.DeclID) {
+		return Confirmation{}, reserved("system declaration is reserved")
+	}
+	decl, ok, err := r.registry.GetDecl(ctx, p.DeclID)
+	if err != nil {
+		return Confirmation{}, err
+	}
+	if !ok || decl.Status != regspec.DeclPresent {
+		return Confirmation{}, notFound("declaration")
+	}
+	if systemClass(decl.DefaultClass) || systemDecl(decl.ID) {
+		return Confirmation{}, reserved("system declaration is reserved")
 	}
 	if p.ChannelID != source {
 		return Confirmation{}, denied("overlay target must equal source channel")
@@ -1293,14 +1393,8 @@ func (r *Registrar) authorizeBinding(ctx context.Context, owner string, source c
 
 func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.TemplateBody) error {
 	return r.registry.store.InTx(ctx, func(tx *store.Tx) error {
-		for _, item := range body.Declarations {
-			decl, ok, err := tx.GetDecl(ctx, item.DeclID)
-			if err != nil {
-				return err
-			}
-			if !ok || decl.Status != regspec.DeclPresent {
-				return invalid("template declaration not found")
-			}
+		if err := r.validateTemplateDeclarations(ctx, tx, body.Declarations); err != nil {
+			return err
 		}
 		if body.Profile != nil {
 			if body.Profile.Serving != nil && *body.Profile.Serving != 0 && *body.Profile.Serving != 1 {
@@ -1310,6 +1404,39 @@ func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.Templ
 		}
 		return nil
 	})
+}
+
+func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.Tx, declarations []regspec.TemplateDeclaration) error {
+	seen := make(map[string]struct{}, len(declarations))
+	for _, item := range declarations {
+		if item.DeclID == "" {
+			return invalid("template declaration id required")
+		}
+		if _, duplicate := seen[item.DeclID]; duplicate {
+			return invalid("duplicate template declaration")
+		}
+		seen[item.DeclID] = struct{}{}
+		decl, ok, err := tx.GetDecl(ctx, item.DeclID)
+		if err != nil {
+			return err
+		}
+		if !ok || decl.Status != regspec.DeclPresent {
+			return invalid("template declaration not found")
+		}
+		if strings.HasPrefix(item.DeclID, PeerActorDeclPrefix) {
+			if item.Config != nil {
+				return invalid("peer declaration config is fixed")
+			}
+			if decl.DefaultClass != PeerActorClass {
+				return invalid("peer declaration class is invalid")
+			}
+			continue
+		}
+		if systemDecl(item.DeclID) || systemClass(decl.DefaultClass) {
+			return invalid("system declaration is not allowed in channel recipes")
+		}
+	}
+	return nil
 }
 func (r *Registrar) registerChannelTemplate(ctx context.Context, owner string, p ChannelTemplateRegister) (regspec.ChannelTemplateRow, error) {
 	p.ID = strings.TrimSpace(p.ID)
@@ -1401,7 +1528,7 @@ func (r *Registrar) setChannelProfile(ctx context.Context, source channel.ID, p 
 	if source != protocol.C0ChannelID && source != p.ChannelID {
 		return regspec.ChannelRow{}, denied("profile target must equal source channel or core")
 	}
-	if p.Serving != 0 && p.Serving != 1 {
+	if p.Serving == nil || (*p.Serving != 0 && *p.Serving != 1) {
 		return regspec.ChannelRow{}, invalid("serving must be 0 or 1")
 	}
 	var rows []regspec.EndpointRow
@@ -1419,7 +1546,7 @@ func (r *Registrar) setChannelProfile(ctx context.Context, source channel.ID, p 
 			meta, _ := json.Marshal(map[string]any{"examples": endpoint.Examples, "schema": endpoint.Schema})
 			rows = append(rows, regspec.EndpointRow{ChannelID: p.ChannelID, Name: name, Description: endpoint.Description, Receiver: endpoint.Receiver, Meta: meta, UpdatedAt: now})
 		}
-		return tx.ReplaceProfile(ctx, p.ChannelID, p.Description, p.Serving, rows)
+		return tx.ReplaceProfile(ctx, p.ChannelID, p.Description, *p.Serving, rows)
 	})
 	if err != nil {
 		return regspec.ChannelRow{}, err

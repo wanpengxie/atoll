@@ -12,8 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-const Class = "peeractor"
-
 type Seam func(context.Context, channel.ID, channel.ID, peerproto.Request) (peerproto.Result, error)
 type Card func(context.Context, channel.ID, channel.ID) (introspect.Describe, error)
 

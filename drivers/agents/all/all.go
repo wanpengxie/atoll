@@ -20,7 +20,7 @@ import (
 
 func init() {
 	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newCodex, ValidateConfig: codex.ValidateConfig})
-	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementServer, New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
+	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
 }
 
 func newCodex(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {

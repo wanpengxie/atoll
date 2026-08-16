@@ -68,11 +68,12 @@ var ReadWords = [...]Word{
 }
 
 const (
-	CoreActorDeclID = "coreactor"
-	PeerActorClass  = "peeractor"
-	SvcActorDeclID  = "atoll-internal:svcactor"
-	SvcActorClass   = "svcactor"
-	RegistrarClass  = "atoll-internal:registrar"
+	CoreActorDeclID     = "coreactor"
+	PeerActorClass      = "peeractor"
+	PeerActorDeclPrefix = "peer:"
+	SvcActorDeclID      = "atoll-internal:svcactor"
+	SvcActorClass       = "svcactor"
+	RegistrarClass      = "atoll-internal:registrar"
 	// RegistrarSeatDeclID is an installation detail, not a well-known public
 	// identity. Its stable source key lets channel genesis rebuild the seat.
 	RegistrarSeatDeclID = "atoll-internal:registrar-seat"
@@ -245,7 +246,7 @@ type ChannelTemplateGet struct {
 type ChannelProfileSet struct {
 	ChannelID   channel.ID                      `json:"channel_id"`
 	Description string                          `json:"description"`
-	Serving     int                             `json:"serving"`
+	Serving     *int                            `json:"serving"`
 	Endpoints   map[string]regspec.EndpointSpec `json:"endpoints"`
 }
 
@@ -301,6 +302,10 @@ type SourceActorFactsResolver interface {
 
 type ChannelInstancesResolver interface {
 	DeclaredInstances(context.Context, channel.ID, string) ([]actor.ActorID, error)
+}
+
+type ChannelServiceResolver interface {
+	WaitChannelService(context.Context, channel.ID) error
 }
 
 type Clock func() time.Time

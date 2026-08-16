@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
@@ -54,7 +55,7 @@ func (r *assemblyResolver) BuildServiceClass(ch channel.ID, _ actor.ActorID, por
 		return platform.ActorFactory{}, false
 	}
 	deps := svcactor.Deps{Port: port, Self: ch, Core: protocol.C0ChannelID, RegistrarClass: lagoon.RegistrarClass,
-		Audit: audit,
+		Audit: audit, Logger: r.logger,
 		Endpoints: func(ctx context.Context) ([]svcactor.Endpoint, error) {
 			rows, err := r.registry.ListEndpoints(ctx, ch)
 			out := make([]svcactor.Endpoint, len(rows))
@@ -240,6 +241,21 @@ func (f sourceFacts) DeclaredInstances(ctx context.Context, ch channel.ID, decl 
 		return nil, errors.New("source channel unavailable")
 	}
 	return bundle.View().DeclaredInstances(ctx, decl)
+}
+
+func (f sourceFacts) WaitChannelService(ctx context.Context, ch channel.ID) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, _, ok := f.host.AcquirePort(ch); ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (f sourceFacts) SystemGenesis(context.Context) (lagoon.GenesisSpec, bool, error) {

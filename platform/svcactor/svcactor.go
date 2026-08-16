@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
@@ -14,8 +15,7 @@ import (
 )
 
 const (
-	Class  = "svcactor"
-	DeclID = "atoll-internal:svcactor"
+	Class = "svcactor"
 )
 
 type Endpoint struct {
@@ -36,12 +36,16 @@ type Deps struct {
 	ReceiverClass  func(context.Context, string) (string, error)
 	Card           func(context.Context, channel.ID) (introspect.Describe, error)
 	Audit          Audit
+	Logger         *slog.Logger
 }
 
 func Def(deps Deps) actorbase.Def {
 	return actorbase.Def{Doc: "external service for channel " + string(deps.Self), New: func() (actorbase.Proc, error) {
 		if deps.Port == nil || deps.Self == "" || deps.Core == "" || deps.Endpoints == nil || deps.Instances == nil || deps.Parent == nil || deps.ReceiverClass == nil || deps.Card == nil || deps.Audit == nil {
 			return nil, errors.New("svcactor: incomplete dependencies")
+		}
+		if deps.Logger == nil {
+			deps.Logger = slog.New(slog.DiscardHandler)
 		}
 		return func(sys actorbase.Sys) error { return serve(sys, deps) }, nil
 	}}
@@ -153,11 +157,43 @@ func dispatch(ctx context.Context, sys actorbase.Sys, deps Deps, caller channel.
 	if err != nil {
 		return failure("receiver_unavailable", err.Error())
 	}
-	terminal, err := pending.Wait(ctx, 0)
+	completed := false
+	defer func() {
+		if !completed {
+			_ = pending.Cancel()
+		}
+	}()
+	localRequestID := pending.RequestID()
+	if err := deps.Audit(ctx, map[string]any{"origin": req.Origin, "type": req.Type, "local_request_id": localRequestID}); err != nil {
+		deps.Logger.Warn("svcactor.audit_failed", "request_id", localRequestID, "err", err)
+	}
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	waitDone := make(chan struct{})
+	go func() {
+		defer close(waitDone)
+		if deps.Port == nil {
+			select {
+			case <-sys.Life().Done():
+				cancelWait()
+			case <-waitCtx.Done():
+			}
+			return
+		}
+		select {
+		case <-deps.Port.done:
+			cancelWait()
+		case <-sys.Life().Done():
+			cancelWait()
+		case <-waitCtx.Done():
+		}
+	}()
+	terminal, err := pending.Wait(waitCtx, 0)
+	cancelWait()
+	<-waitDone
 	if err != nil {
 		return failure("receiver_unavailable", err.Error())
 	}
-	_ = deps.Audit(ctx, map[string]any{"origin": req.Origin, "type": req.Type, "local_request_id": terminal.ParentID})
+	completed = true
 	return terminalResult(terminal.Payload)
 }
 
@@ -200,9 +236,4 @@ func terminalResult(raw json.RawMessage) peerproto.Result {
 
 func failure(code, detail string) peerproto.Result {
 	return peerproto.Result{Fail: &peerproto.Failure{Code: code, Detail: detail}}
-}
-
-func mustJSON(v any) json.RawMessage {
-	raw, _ := json.Marshal(v)
-	return raw
 }

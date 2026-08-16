@@ -220,11 +220,11 @@ than reconnecting per command.
 
 ### Worked example: attach an MCP server at runtime
 
-Two messages, no rebuild. `decl.register` goes to the registrar (find its id in
+Two messages, no rebuild. `actor.template.register` goes to the registrar (find its id in
 `actor.list`); `channel.introduce_actor` goes to `system`:
 
 ```jsonc
-// decl.register
+// actor.template.register
 {"id":"my-mcp","name":"My MCP","class":"mcp","visibility":"private",
  "config":{"name":"testsrv","transport":"http","url":"http://127.0.0.1:8931/mcp"}}
 

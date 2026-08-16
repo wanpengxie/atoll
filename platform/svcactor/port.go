@@ -34,6 +34,11 @@ func (p *Port) Call(ctx context.Context, caller channel.ID, frame peerproto.Requ
 	if p == nil {
 		return peerproto.Result{}, ErrChannelClosed
 	}
+	select {
+	case <-p.done:
+		return closedResult(), nil
+	default:
+	}
 	req := portRequest{ctx: ctx, caller: caller, frame: cloneRequest(frame), done: make(chan peerproto.Result, 1)}
 	select {
 	case p.requests <- req:
@@ -53,6 +58,11 @@ func (p *Port) Call(ctx context.Context, caller channel.ID, frame peerproto.Requ
 }
 
 func (p *Port) receive(ctx context.Context) (portRequest, error) {
+	select {
+	case <-p.done:
+		return portRequest{}, ErrChannelClosed
+	default:
+	}
 	select {
 	case req := <-p.requests:
 		return req, nil

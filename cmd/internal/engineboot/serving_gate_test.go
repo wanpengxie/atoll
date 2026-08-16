@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -46,6 +47,13 @@ func TestServingGateAppliesOnlyToNewPeerIntroduction(t *testing.T) {
 	}
 	if ids, err := parentHome.View().DeclaredInstances(context.Background(), "peer:"+string(child.ID)); err != nil || len(ids) != 1 {
 		t.Fatalf("parent retained foundation peer ids=%v err=%v", ids, err)
+	}
+	var unrelated lagoon.ChannelCreateReply
+	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "serving-unrelated"}), &unrelated)
+	unrelatedHome := waitBundle(t, eng, unrelated.ID)
+	blocked := decodeTerminal(t, callMember(t, unrelated.ID, unrelatedHome, protocol.RootPrincipalID, actor.SystemActorID, "channel.introduce_actor", map[string]any{"kind": "tool", "decl_id": "peer:" + string(child.ID)}))
+	if blocked.Status != "failed" || blocked.ErrorCode != string(channelspec.ErrCodeForbidden) {
+		t.Fatalf("real introduce serving verdict=%+v", blocked)
 	}
 
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelProfileSet), map[string]any{
@@ -84,6 +92,9 @@ func TestProfileSetAuthorizesTargetOrCoreAndRejectsCoreTarget(t *testing.T) {
 	}
 	if terminal := decodeTerminal(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelProfileSet), map[string]any{"channel_id": protocol.C0ChannelID, "description": "no", "serving": 1, "endpoints": map[string]any{}})); terminal.Status != "failed" || terminal.ErrorCode != string(lagoon.CodeReserved) {
 		t.Fatalf("c0 profile set=%+v", terminal)
+	}
+	if terminal := decodeTerminal(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelProfileSet), map[string]any{"channel_id": target.ID, "description": "missing serving", "endpoints": map[string]any{}})); terminal.Status != "failed" || terminal.ErrorCode != string(lagoon.CodeInvalidArgs) {
+		t.Fatalf("missing serving profile set=%+v", terminal)
 	}
 }
 

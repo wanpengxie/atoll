@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -75,6 +76,20 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	var lobbyDescription string
 	if err := db.QueryRowContext(ctx, `SELECT serving,description FROM channels WHERE id=?`, protocol.LobbyChannelID).Scan(&lobbyServing, &lobbyDescription); err != nil || lobbyServing != 0 || lobbyDescription == "" {
 		t.Fatalf("lobby serving=%d description=%q err=%v", lobbyServing, lobbyDescription, err)
+	}
+	for _, id := range []channel.ID{protocol.C0ChannelID, protocol.LobbyChannelID} {
+		var description, specRaw string
+		var serving int
+		if err := db.QueryRowContext(ctx, `SELECT description,serving,spec_json FROM channels WHERE id=?`, id).Scan(&description, &serving, &specRaw); err != nil {
+			t.Fatal(err)
+		}
+		var spec lagoon.GenesisSpec
+		if err := json.Unmarshal([]byte(specRaw), &spec); err != nil || spec.Profile.Description == nil || *spec.Profile.Description != description || spec.Profile.Serving == nil || *spec.Profile.Serving != serving {
+			t.Fatalf("channel %s frozen profile=%+v row=(%q,%d) err=%v", id, spec.Profile, description, serving, err)
+		}
+		if id == protocol.C0ChannelID && len(spec.Profile.Endpoints) != endpointCount {
+			t.Fatalf("c0 frozen endpoints=%d want=%d", len(spec.Profile.Endpoints), endpointCount)
+		}
 	}
 	var privateSystemDecls int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decls WHERE id IN (?,?) AND visibility='private' AND status='present'`, lagoon.SvcActorDeclID, lagoon.RegistrarSeatDeclID).Scan(&privateSystemDecls); err != nil || privateSystemDecls != 2 {

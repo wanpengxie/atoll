@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wanpengxie/atoll/drivers/tools/echo"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/peerproto"
@@ -20,7 +22,19 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	classregistry "github.com/wanpengxie/atoll/registry"
 )
+
+const svcactorTestReceiverClass = "engineboot-test-receiver"
+
+func init() {
+	classregistry.Register(svcactorTestReceiverClass, classregistry.ClassDecl{
+		Kind: actor.KindTool, Placement: channel.PlacementServer,
+		New: func(spec classregistry.InstanceSpec, _ classregistry.Deps) (platform.ActorDecl, error) {
+			return platform.ActorDecl{ID: spec.ID, Kind: actor.KindTool, Factory: platform.ActorFactory{Proc: echo.Def(echo.Config{})}}, nil
+		},
+	})
+}
 
 func TestSvcactorCrossChannelLedgerAndAuditChain(t *testing.T) {
 	channelDir := filepath.Join(t.TempDir(), "channels")
@@ -32,7 +46,7 @@ func TestSvcactorCrossChannelLedgerAndAuditChain(t *testing.T) {
 	core, _ := eng.host.Acquire(protocol.C0ChannelID)
 	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordDeclRegister), map[string]any{
-		"id": "echo-chain", "name": "Echo Chain", "class": "echo", "config": map[string]any{}, "visibility": "public",
+		"id": "echo-chain", "name": "Echo Chain", "class": svcactorTestReceiverClass, "config": map[string]any{}, "visibility": "public",
 	}), nil)
 	var source, target lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "chain-source"}), &source)
@@ -153,7 +167,7 @@ func TestChildCanIntroduceParentPeerForReverseResult(t *testing.T) {
 	core, _ := eng.host.Acquire(protocol.C0ChannelID)
 	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordDeclRegister), map[string]any{
-		"id": "echo-parent", "name": "Echo Parent", "class": "echo", "config": map[string]any{}, "visibility": "public",
+		"id": "echo-parent", "name": "Echo Parent", "class": svcactorTestReceiverClass, "config": map[string]any{}, "visibility": "public",
 	}), nil)
 	var parent lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
@@ -189,7 +203,7 @@ func TestParentCreatesTwentyChildrenAndCallsBusinessEndpoint(t *testing.T) {
 	core, _ := eng.host.Acquire(protocol.C0ChannelID)
 	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordDeclRegister), map[string]any{
-		"id": "echo-twenty", "name": "Echo Twenty", "class": "echo", "config": map[string]any{}, "visibility": "public",
+		"id": "echo-twenty", "name": "Echo Twenty", "class": svcactorTestReceiverClass, "config": map[string]any{}, "visibility": "public",
 	}), nil)
 	var parent lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "twenty-parent"}), &parent)
@@ -231,7 +245,7 @@ func TestUnrelatedAliceChannelCanCallBusinessButNotManagement(t *testing.T) {
 	core, _ := eng.host.Acquire(protocol.C0ChannelID)
 	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordDeclRegister), map[string]any{
-		"id": "echo-legal", "name": "Echo Legal", "class": "echo", "config": map[string]any{}, "visibility": "public",
+		"id": "echo-legal", "name": "Echo Legal", "class": svcactorTestReceiverClass, "config": map[string]any{}, "visibility": "public",
 	}), nil)
 	var target lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{

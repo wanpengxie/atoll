@@ -21,6 +21,7 @@ import (
 type terminalShape struct {
 	Status    string          `json:"status"`
 	ErrorCode string          `json:"error_code"`
+	Detail    string          `json:"detail"`
 	Value     json.RawMessage `json:"value"`
 }
 
@@ -55,6 +56,25 @@ func TestLifecycleProtectsSystemAndFoundationActors(t *testing.T) {
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "peer-holder-a"}), &a)
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "peer-target-b"}), &b)
 	homeA := waitBundle(t, eng, a.ID)
+	for _, decl := range []string{lagoon.SvcActorDeclID, lagoon.CoreActorDeclID} {
+		id := onlyDecl(t, homeA, decl)
+		for _, word := range []string{"channel.remove_actor", "channel.restart_actor"} {
+			terminal := decodeTerminal(t, callMember(t, a.ID, homeA, protocol.RootPrincipalID, actor.SystemActorID, word, map[string]any{"instance_id": id}))
+			if terminal.Status != message.StatusFailed || terminal.ErrorCode != "protected_actor" {
+				t.Fatalf("non-c0 decl=%s word=%s terminal=%+v", decl, word, terminal)
+			}
+		}
+	}
+	coreactor := onlyDecl(t, homeA, lagoon.CoreActorDeclID)
+	var child lagoon.ChannelCreateReply
+	terminalValue(t, callMember(t, a.ID, homeA, protocol.RootPrincipalID, coreactor, string(lagoon.WordChannelCreate), map[string]any{"name": "foundation-child"}), &child)
+	childPeer := onlyDecl(t, homeA, lagoon.PeerActorDeclPrefix+string(child.ID))
+	for _, word := range []string{"channel.remove_actor", "channel.restart_actor"} {
+		terminal := decodeTerminal(t, callMember(t, a.ID, homeA, protocol.RootPrincipalID, actor.SystemActorID, word, map[string]any{"instance_id": childPeer}))
+		if terminal.Status != message.StatusFailed || terminal.ErrorCode != "protected_actor" {
+			t.Fatalf("parent foundation word=%s terminal=%+v", word, terminal)
+		}
+	}
 	peerDecl := "peer:" + string(b.ID)
 	introduced := decodeTerminal(t, callMember(t, a.ID, homeA, protocol.RootPrincipalID, actor.SystemActorID, "channel.introduce_actor", map[string]any{"kind": "tool", "decl_id": peerDecl}))
 	if introduced.Status != message.StatusCompleted {

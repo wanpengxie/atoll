@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 
 type svcPending struct{ msg actorbase.Msg }
 
+func (p svcPending) RequestID() message.ID                                      { return p.msg.ParentID }
 func (p svcPending) Wait(context.Context, time.Duration) (actorbase.Msg, error) { return p.msg, nil }
 func (svcPending) Cancel() error                                                { return nil }
 
@@ -31,6 +34,18 @@ type svcSys struct {
 	recv    []actorbase.Msg
 	life    context.Context
 }
+
+type warningCounter struct{ count atomic.Int32 }
+
+func (h *warningCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (h *warningCounter) Handle(_ context.Context, record slog.Record) error {
+	if record.Level >= slog.LevelWarn {
+		h.count.Add(1)
+	}
+	return nil
+}
+func (h *warningCounter) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *warningCounter) WithGroup(string) slog.Handler      { return h }
 
 func (s *svcSys) Call(target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	s.target, s.word = target, word
@@ -113,6 +128,17 @@ func TestSvcactorDispatchLeavesBusinessPayloadByteEquivalent(t *testing.T) {
 	}
 }
 
+func TestSvcactorAuditFailureWarnsWithoutChangingBusinessTerminal(t *testing.T) {
+	deps := svcDeps("codex")
+	warnings := &warningCounter{}
+	deps.Logger = slog.New(warnings)
+	deps.Audit = func(context.Context, map[string]any) error { return errors.New("audit unavailable") }
+	result := dispatch(context.Background(), &svcSys{}, deps, "caller", peerproto.Request{Origin: peerproto.Origin{Channel: "caller", Actor: "alice", RequestID: "remote"}, Type: "work", Payload: json.RawMessage(`{"x":1}`)})
+	if result.Fail != nil || warnings.count.Load() != 1 {
+		t.Fatalf("result=%+v warnings=%d", result, warnings.count.Load())
+	}
+}
+
 func TestSvcactorRejectsBeforeWritingTargetLedger(t *testing.T) {
 	cases := []struct {
 		name, caller, code string
@@ -121,6 +147,16 @@ func TestSvcactorRejectsBeforeWritingTargetLedger(t *testing.T) {
 	}{
 		{name: "bad origin", caller: "caller", code: "bad_origin", req: peerproto.Request{Origin: peerproto.Origin{Channel: "forged"}, Type: "work"}, deps: svcDeps("codex")},
 		{name: "unknown endpoint", caller: "caller", code: "endpoint_not_found", req: peerproto.Request{Origin: peerproto.Origin{Channel: "caller"}, Type: "missing"}, deps: svcDeps("codex")},
+		{name: "receiver unavailable", caller: "caller", code: "receiver_unavailable", req: peerproto.Request{Origin: peerproto.Origin{Channel: "caller"}, Type: "work"}, deps: func() Deps {
+			d := svcDeps("codex")
+			d.Instances = func(context.Context, string) ([]actor.ActorID, error) { return nil, nil }
+			return d
+		}()},
+		{name: "receiver ambiguous", caller: "caller", code: "receiver_ambiguous", req: peerproto.Request{Origin: peerproto.Origin{Channel: "caller"}, Type: "work"}, deps: func() Deps {
+			d := svcDeps("codex")
+			d.Instances = func(context.Context, string) ([]actor.ActorID, error) { return []actor.ActorID{"a", "b"}, nil }
+			return d
+		}()},
 		{name: "foreign management", caller: "foreign", code: "forbidden", req: peerproto.Request{Origin: peerproto.Origin{Channel: "foreign"}, Type: "channel.remove_actor"}, deps: svcDeps("codex")},
 	}
 	for _, tc := range cases {

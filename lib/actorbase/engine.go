@@ -722,6 +722,8 @@ type pendingTicket struct {
 	id   message.ID
 }
 
+func (p *pendingTicket) RequestID() message.ID { return p.id }
+
 func (p *pendingTicket) Wait(ctx context.Context, d time.Duration) (Msg, error) {
 	env, ok, err := p.call.wait(ctx, p.id, d)
 	if err != nil {

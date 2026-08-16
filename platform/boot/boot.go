@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
+	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -324,7 +325,13 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 	if err != nil {
 		return err
 	}
-	c0spec := lagoon.GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindTool, Rendered: svcSnapshot}, {DeclID: lagoon.RegistrarSeatDeclID, Kind: actor.KindTool, Rendered: registrarSnapshot}}}
+	c0Description := "Atoll core registry and administration channel."
+	c0Serving := 1
+	c0Endpoints := make(map[string]regspec.EndpointSpec, len(lagoon.WriteWords)+len(lagoon.ReadWords))
+	for _, word := range append(append([]lagoon.Word{}, lagoon.WriteWords[:]...), lagoon.ReadWords[:]...) {
+		c0Endpoints[string(word)] = regspec.EndpointSpec{Description: "Registrar endpoint " + string(word) + ".", Receiver: lagoon.RegistrarSeatDeclID}
+	}
+	c0spec := lagoon.GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindTool, Rendered: svcSnapshot}, {DeclID: lagoon.RegistrarSeatDeclID, Kind: actor.KindTool, Rendered: registrarSnapshot}}, Profile: regspec.ChannelProfile{Description: &c0Description, Serving: &c0Serving, Endpoints: c0Endpoints}}
 	raw, err := json.Marshal(c0spec)
 	if err != nil {
 		return err
@@ -332,7 +339,9 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 	if _, err := tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,NULL,?,'group','present',?, ?,1,?,?)`, protocol.C0ChannelID, protocol.C0ChannelID, protocol.RootPrincipalID, "Atoll core registry and administration channel.", string(raw), stamp); err != nil {
 		return fmt.Errorf("boot: c0 channel row: %w", err)
 	}
-	lobbySpec := lagoon.GenesisSpec{ChannelID: protocol.LobbyChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp, ParentID: protocol.C0ChannelID, InitiatorPrincipal: protocol.RootPrincipalID, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindTool, Rendered: svcSnapshot}, {DeclID: lagoon.CoreActorDeclID, Kind: actor.KindTool, Rendered: coreSnapshot}}}
+	lobbyDescription := "Registration lobby for unauthenticated guests."
+	lobbyServing := 0
+	lobbySpec := lagoon.GenesisSpec{ChannelID: protocol.LobbyChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: stamp, ParentID: protocol.C0ChannelID, InitiatorPrincipal: protocol.RootPrincipalID, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindTool, Rendered: svcSnapshot}, {DeclID: lagoon.CoreActorDeclID, Kind: actor.KindTool, Rendered: coreSnapshot}}, Profile: regspec.ChannelProfile{Description: &lobbyDescription, Serving: &lobbyServing, Endpoints: map[string]regspec.EndpointSpec{}}}
 	lobbyRaw, err := json.Marshal(lobbySpec)
 	if err != nil {
 		return err
@@ -397,7 +406,7 @@ func targetConfig(id channel.ID) json.RawMessage {
 	raw, _ := json.Marshal(map[string]channel.ID{"channel": id})
 	return raw
 }
-func peerDeclID(id channel.ID) string { return "peer:" + string(id) }
+func peerDeclID(id channel.ID) string { return lagoon.PeerActorDeclPrefix + string(id) }
 func sealSnapshot(class string, config json.RawMessage, placement channel.PlacementKind) (channelspec.RenderedSnapshot, error) {
 	return (channelspec.RenderedSnapshot{Class: class, Config: config, Placement: channel.Placement{Kind: placement}}).Seal()
 }

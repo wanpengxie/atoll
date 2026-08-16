@@ -97,8 +97,6 @@ func (e *opEntry) remove(
 	result, err := e.home.actors.Remove(ctx, actorctl.RemoveRequest{
 		Target: req.Target, InitiatorActorID: req.InitiatorActorID,
 	})
-	if err == nil {
-	}
 	return result, err
 }
 
@@ -181,7 +179,7 @@ func (e *opEntry) Execute(
 		var payload struct {
 			InstanceID actor.ActorID `json:"instance_id"`
 		}
-		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
+		if err := decodeStrict(req.Payload, &payload); err != nil || payload.InstanceID == "" {
 			return nil, &sysactor.OperateError{
 				Code: string(channelspec.ErrCodeBadPayload), Detail: "instance_id required",
 			}
@@ -209,6 +207,7 @@ func badIntroduce(detail string) *sysactor.OperateError {
 
 func decodeStrict(raw json.RawMessage, out any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
 		return err
 	}

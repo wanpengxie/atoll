@@ -55,12 +55,25 @@ func TestBootPublishesCoreAndLobbyOnly(t *testing.T) {
 		_, core := eng.host.Acquire(protocol.C0ChannelID)
 		_, lobby := eng.host.Acquire(protocol.LobbyChannelID)
 		if core && lobby {
-			return
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("core/lobby not serving")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	for _, id := range []channel.ID{protocol.C0ChannelID, protocol.LobbyChannelID} {
+		row, ok, err := eng.registry.GetChannelDesired(context.Background(), id)
+		if err != nil || !ok {
+			t.Fatalf("channel %s row ok=%v err=%v", id, ok, err)
+		}
+		var spec lagoon.GenesisSpec
+		if err := json.Unmarshal(row.Spec, &spec); err != nil || spec.Profile.Description == nil || *spec.Profile.Description != row.Description || spec.Profile.Serving == nil || *spec.Profile.Serving != row.Serving {
+			t.Fatalf("channel %s frozen profile=%+v row=(%q,%d) err=%v", id, spec.Profile, row.Description, row.Serving, err)
+		}
+		if id == protocol.C0ChannelID && len(spec.Profile.Endpoints) != len(lagoon.WriteWords)+len(lagoon.ReadWords) {
+			t.Fatalf("c0 frozen endpoints=%d", len(spec.Profile.Endpoints))
+		}
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 func init() {
 	registry.Register("echo", registry.ClassDecl{
 		Kind:      actor.KindTool,
-		Placement: channel.PlacementServer,
+		Placement: channel.PlacementDaemon,
 		New:       construct,
 		// ValidateConfig is the acceptance gate: it lets a declaration be
 		// refused at admit time ("this config can never build") instead of

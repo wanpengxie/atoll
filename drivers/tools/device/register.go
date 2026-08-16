@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	registry.Register("device", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementServer, New: construct})
+	registry.Register("device", registry.ClassDecl{Kind: actor.KindTool, Placement: channel.PlacementDaemon, New: construct})
 }
 
 // construct: the generic device actor. This is a true essence-singleton:
