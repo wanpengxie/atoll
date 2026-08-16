@@ -80,6 +80,62 @@ func TestProvisionGenesisSkipsRecipeUserDeclarations(t *testing.T) {
 		t.Fatalf("recipe declaration was written during genesis: count=%d err=%v", count, err)
 	}
 }
+
+func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	liveResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`)}}
+	host, err := New(root, testBindings{}, HomeDeps{CompositionResolver: liveResolver, IntroductionResolver: liveResolver, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := (channelspec.RenderedSnapshot{
+		Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`), Placement: channel.Placement{Kind: channel.PlacementServer},
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := genesisSpec("first-sweep-declaration")
+	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindAgent, Rendered: snapshot}}
+	if err := host.provisionGenesis(ctx, spec, "c0.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ChannelName: "c0.test", ExpectedType: spec.Type}); err != nil {
+		t.Fatal(err)
+	}
+	initial, ok := host.Acquire(spec.ChannelID)
+	if !ok {
+		t.Fatal("provisioned channel not serving")
+	}
+	initialRows, err := initial.View().DeclaredInstances(ctx, lagoon.SvcActorDeclID)
+	if err != nil || len(initialRows) != 1 {
+		t.Fatalf("equal first sweep double-wrote genesis: instances=%+v err=%v", initialRows, err)
+	}
+	if err := host.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	latestResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"b"}`)}}
+	reopened, err := New(root, testBindings{}, HomeDeps{CompositionResolver: latestResolver, IntroductionResolver: latestResolver, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(context.Background())
+	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ChannelName: "c0.test", ExpectedType: spec.Type}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, ok := reopened.Acquire(spec.ChannelID)
+	if !ok {
+		t.Fatal("reopened channel not serving")
+	}
+	// The first sweep re-applies the latest declaration to the existing record;
+	// it does not introduce a second instance.
+	rows, err := bundle.View().DeclaredInstances(ctx, lagoon.SvcActorDeclID)
+	if err != nil || len(rows) != 1 || rows[0] != initialRows[0] {
+		t.Fatalf("first-sweep declaration=(%+v,%v)", rows, err)
+	}
+}
+
 func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
 	if class == "test-agent" {
 		return actor.KindAgent, true, nil

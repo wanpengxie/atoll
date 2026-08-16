@@ -34,8 +34,13 @@ func NewRegistrar(registry *Registry, facts SourceActorFactsResolver, classes Cl
 	return &Registrar{registry: registry, facts: facts, classes: classes, now: time.Now}
 }
 
-// ReconcileSystem verifies and repairs the registry's fixed system rows. It
-// deliberately never touches credentials or user/device identities.
+// ReconcileSystem carves the registry's fixed system rows on first start and
+// leaves them alone afterwards. An existing c0 row is never rewritten: its
+// profile (description, serving, endpoints) belongs to its owner and survives
+// restarts. If the stored genesis cannot be read the start fails and the
+// operator wipes the installation — there is no automatic upgrade or
+// recalibration. It deliberately never touches credentials or user/device
+// identities.
 func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	if r == nil || r.registry == nil {
 		return errors.New("lagoon: registrar registry required")
@@ -62,45 +67,46 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	spec := GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: protocol.RootPrincipalID, CreatedAt: now}
 	if c0Exists {
+		// c0 exists: its row is the owner's to change and is left untouched.
+		// Only refuse to start on a genesis this build cannot read.
 		row, found, err := r.registry.GetChannelDesired(ctx, protocol.C0ChannelID)
 		if err != nil {
 			return err
 		}
-		if !found || json.Unmarshal(row.Spec, &spec) != nil {
-			return errors.New("lagoon: c0 registry genesis invalid")
+		var stored GenesisSpec
+		if !found || json.Unmarshal(row.Spec, &stored) != nil {
+			return errors.New("lagoon: c0 registry genesis invalid — wipe the installation and start again")
 		}
 	} else {
 		genesis, ok := r.facts.(SystemGenesisResolver)
 		if !ok {
 			return errors.New("lagoon: c0 physical genesis unavailable")
 		}
-		var found bool
-		spec, found, err = genesis.SystemGenesis(ctx)
+		spec, found, err := genesis.SystemGenesis(ctx)
 		if err != nil {
 			return err
 		}
 		if !found {
 			return errors.New("lagoon: c0 physical genesis missing")
 		}
-	}
-	description := "Atoll core registry and administration channel."
-	serving := 1
-	endpoints := make(map[string]regspec.EndpointSpec, len(WriteWords)+len(ReadWords))
-	for _, word := range append(append([]Word{}, WriteWords[:]...), ReadWords[:]...) {
-		endpoints[string(word)] = regspec.EndpointSpec{Description: "Registrar endpoint " + string(word) + ".", Receiver: RegistrarSeatDeclID}
-	}
-	spec.Profile = regspec.ChannelProfile{Description: &description, Serving: &serving, Endpoints: endpoints}
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		return err
-	}
-	if err := r.registry.store.UpsertSystemChannel(ctx, regspec.ChannelRow{
-		ID: protocol.C0ChannelID, Name: string(protocol.C0ChannelID), Type: "group",
-		Status: regspec.ChannelPresent, OwnerPrincipal: protocol.RootPrincipalID, Description: "Atoll core registry and administration channel.", Serving: 1, Spec: raw, CreatedAt: spec.CreatedAt,
-	}); err != nil {
-		return err
+		description := "Atoll core registry and administration channel."
+		serving := 1
+		endpoints := make(map[string]regspec.EndpointSpec, len(WriteWords)+len(ReadWords))
+		for _, word := range append(append([]Word{}, WriteWords[:]...), ReadWords[:]...) {
+			endpoints[string(word)] = regspec.EndpointSpec{Description: "Registrar endpoint " + string(word) + ".", Receiver: RegistrarSeatDeclID}
+		}
+		spec.Profile = regspec.ChannelProfile{Description: &description, Serving: &serving, Endpoints: endpoints}
+		raw, err := json.Marshal(spec)
+		if err != nil {
+			return err
+		}
+		if err := r.registry.store.UpsertSystemChannel(ctx, regspec.ChannelRow{
+			ID: protocol.C0ChannelID, Name: string(protocol.C0ChannelID), Type: "group",
+			Status: regspec.ChannelPresent, OwnerPrincipal: protocol.RootPrincipalID, Description: description, Serving: serving, Spec: raw, CreatedAt: spec.CreatedAt,
+		}); err != nil {
+			return err
+		}
 	}
 	decls := []regspec.DeclRow{
 		{ID: SvcActorDeclID, Name: "Service Actor", Owner: protocol.RootPrincipalID, DefaultClass: SvcActorClass, Config: json.RawMessage(`{}`), Status: regspec.DeclPresent, Visibility: "private", CreatedAt: now, UpdatedAt: now},
@@ -486,9 +492,10 @@ type ChannelCreateReply struct {
 func (r *Registrar) createChannel(sys actorbase.Sys, ctx context.Context, owner string, source channel.ID, p ChannelCreate) (ChannelCreateReply, error) {
 	var row regspec.ChannelRow
 	var created bool
+	recipeConfigs := map[string]json.RawMessage{}
 	err := r.registry.store.InTx(ctx, func(tx *store.Tx) error {
 		var err error
-		row, created, err = r.provisionChannel(ctx, tx, owner, source, p.Name, p.Template, p.Overrides)
+		row, created, err = r.provisionChannel(ctx, tx, owner, source, p.Name, p.Template, p.Overrides, recipeConfigs)
 		return err
 	})
 	if err != nil {
@@ -500,11 +507,11 @@ func (r *Registrar) createChannel(sys actorbase.Sys, ctx context.Context, owner 
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: row.ID})
 	}
-	results := r.introduceChannel(sys, ctx, row)
+	results := r.introduceChannel(sys, ctx, row, recipeConfigs)
 	return ChannelCreateReply{ChannelRow: row, Introduced: results}, nil
 }
 
-func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name, template string, overrides *regspec.TemplateBody) (regspec.ChannelRow, bool, error) {
+func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name, template string, overrides *regspec.TemplateBody, recipeConfigs map[string]json.RawMessage) (regspec.ChannelRow, bool, error) {
 	if name == "" {
 		return regspec.ChannelRow{}, false, invalid("name required")
 	}
@@ -594,6 +601,9 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		config := decl.Config
 		if item.Config != nil {
 			config = item.Config
+			if recipeConfigs != nil {
+				recipeConfigs[item.DeclID] = cloneJSON(item.Config)
+			}
 		}
 		if r.classes == nil {
 			return regspec.ChannelRow{}, false, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
@@ -734,7 +744,7 @@ func (r *Registrar) validateEndpoints(ctx context.Context, tx *store.Tx, endpoin
 	return nil
 }
 
-func (r *Registrar) introduceChannel(sys actorbase.Sys, ctx context.Context, row regspec.ChannelRow) postActionResults {
+func (r *Registrar) introduceChannel(sys actorbase.Sys, ctx context.Context, row regspec.ChannelRow, recipeConfigs map[string]json.RawMessage) postActionResults {
 	core := r.callActor(sys, ctx, actor.SystemActorID, "channel.introduce_actor", map[string]any{"kind": "tool", "decl_id": peerDeclID(row.ID)})
 	parent := any("n/a")
 	if row.ParentID != protocol.C0ChannelID {
@@ -801,6 +811,16 @@ func (r *Registrar) introduceChannel(sys actorbase.Sys, ctx context.Context, row
 		return results
 	}
 	for _, declaration := range userDeclarations {
+		if err := ctx.Err(); err != nil {
+			results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: errorValue(err)})
+			continue
+		}
+		if config, ok := recipeConfigs[declaration.DeclID]; ok {
+			if _, err := r.writeOverlay(ctx, OverlaySet{DeclID: declaration.DeclID, ChannelID: row.ID, Config: config}); err != nil {
+				results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: errorValue(err)})
+				continue
+			}
+		}
 		result := r.callActor(sys, ctx, peers[0], "channel.introduce_actor", map[string]any{"kind": declaration.Kind, "decl_id": declaration.DeclID})
 		results.Members = append(results.Members, memberIntroductionResult{DeclID: declaration.DeclID, Result: result})
 	}
@@ -813,6 +833,7 @@ func (r *Registrar) callActor(sys actorbase.Sys, ctx context.Context, target act
 	}
 	terminal, err := pending.Wait(ctx, 0)
 	if err != nil {
+		_ = pending.Cancel()
 		return errorValue(err)
 	}
 	var fields map[string]json.RawMessage
@@ -940,7 +961,7 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p 
 		}
 		var created bool
 		var err error
-		home, created, err = r.provisionChannel(ctx, tx, id, protocol.C0ChannelID, id, "", nil)
+		home, created, err = r.provisionChannel(ctx, tx, id, protocol.C0ChannelID, id, "", nil, nil)
 		if err != nil {
 			return err
 		}
@@ -958,7 +979,7 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p 
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: home.ID, Principal: id})
 	}
-	introduced := r.introduceChannel(sys, ctx, home)
+	introduced := r.introduceChannel(sys, ctx, home, nil)
 	return PrincipalRegisterReply{PrincipalRow: row, HomeChannelID: home.ID, Introduced: introduced}, nil
 }
 
@@ -1034,6 +1055,9 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 	p.Class = strings.TrimSpace(p.Class)
 	if p.ID == "" || p.Name == "" || p.Class == "" {
 		return regspec.DeclRow{}, invalid("id, name and class required")
+	}
+	if systemDecl(p.ID) {
+		return regspec.DeclRow{}, reserved("system declaration is reserved")
 	}
 	if systemClass(p.Class) {
 		return regspec.DeclRow{}, reserved("system class is reserved")
@@ -1193,6 +1217,9 @@ func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID,
 	if systemDecl(p.DeclID) {
 		return regspec.OverlayRow{}, reserved("system declaration is reserved")
 	}
+	if p.ChannelID != source {
+		return regspec.OverlayRow{}, denied("overlay target must equal source channel")
+	}
 	decl, ok, err := r.registry.GetDecl(ctx, p.DeclID)
 	if err != nil {
 		return regspec.OverlayRow{}, err
@@ -1203,15 +1230,16 @@ func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID,
 	if systemClass(decl.DefaultClass) || systemDecl(decl.ID) {
 		return regspec.OverlayRow{}, reserved("system declaration is reserved")
 	}
-	if p.ChannelID != source {
-		return regspec.OverlayRow{}, denied("overlay target must equal source channel")
-	}
 	if r.classes == nil {
 		return regspec.OverlayRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 	}
 	if err := r.classes.ValidateConfig(decl.DefaultClass, p.Config); err != nil {
 		return regspec.OverlayRow{}, invalid(err.Error())
 	}
+	return r.writeOverlay(ctx, p)
+}
+
+func (r *Registrar) writeOverlay(ctx context.Context, p OverlaySet) (regspec.OverlayRow, error) {
 	existing, found, err := r.registry.store.GetOverlay(ctx, p.DeclID, p.ChannelID)
 	if err == nil && found {
 		if jsonEqual(existing.Config, p.Config) {
@@ -1238,6 +1266,9 @@ func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p Overl
 	if systemDecl(p.DeclID) {
 		return Confirmation{}, reserved("system declaration is reserved")
 	}
+	if p.ChannelID != source {
+		return Confirmation{}, denied("overlay target must equal source channel")
+	}
 	decl, ok, err := r.registry.GetDecl(ctx, p.DeclID)
 	if err != nil {
 		return Confirmation{}, err
@@ -1247,9 +1278,6 @@ func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p Overl
 	}
 	if systemClass(decl.DefaultClass) || systemDecl(decl.ID) {
 		return Confirmation{}, reserved("system declaration is reserved")
-	}
-	if p.ChannelID != source {
-		return Confirmation{}, denied("overlay target must equal source channel")
 	}
 	if err := r.registry.store.DeleteOverlay(ctx, p.DeclID, p.ChannelID); err != nil {
 		return Confirmation{}, err
@@ -1571,7 +1599,11 @@ func (r *Registrar) channelView(ctx context.Context, row regspec.ChannelRow) (re
 		if declaration.DeclID == SvcActorDeclID || declaration.DeclID == CoreActorDeclID {
 			continue
 		}
-		recipe.Declarations = append(recipe.Declarations, regspec.TemplateDeclaration{DeclID: declaration.DeclID, Config: cloneJSON(declaration.Rendered.Config)})
+		item := regspec.TemplateDeclaration{DeclID: declaration.DeclID}
+		if !strings.HasPrefix(declaration.DeclID, PeerActorDeclPrefix) {
+			item.Config = cloneJSON(declaration.Rendered.Config)
+		}
+		recipe.Declarations = append(recipe.Declarations, item)
 	}
 	endpoints, err := r.registry.ListEndpoints(ctx, row.ID)
 	if err != nil {

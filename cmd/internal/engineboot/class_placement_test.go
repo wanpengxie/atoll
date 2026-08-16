@@ -12,7 +12,10 @@ import (
 )
 
 func TestRegisteredProductionClassesAreDaemonPlaced(t *testing.T) {
-	for _, class := range []string{"codex", "script", "mcp", "xhs", "kimi", "device", "echo"} {
+	for _, class := range classregistry.RegisteredClasses() {
+		if class == svcactorTestReceiverClass {
+			continue
+		}
 		placement, ok := classregistry.ClassPlacement(class)
 		if !ok || placement != channel.PlacementDaemon {
 			t.Errorf("class %s placement=%q present=%v", class, placement, ok)

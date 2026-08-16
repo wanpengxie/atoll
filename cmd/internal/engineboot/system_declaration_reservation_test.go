@@ -69,3 +69,47 @@ func TestSystemDeclarationsRejectOverlayEditAndRevokeWithoutRetargeting(t *testi
 		}
 	}
 }
+
+func TestSystemDeclarationIDsCannotBeRegistered(t *testing.T) {
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close(context.Background())
+	core, _ := eng.host.Acquire(protocol.C0ChannelID)
+	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
+	for _, declID := range []string{"peer:not-a-channel", lagoon.SvcActorDeclID, lagoon.CoreActorDeclID, lagoon.RegistrarSeatDeclID} {
+		t.Run(declID, func(t *testing.T) {
+			terminal := decodeTerminal(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordDeclRegister), map[string]any{
+				"id": declID, "name": "Reserved", "class": "class-must-not-be-looked-up", "config": map[string]any{}, "visibility": "public",
+			}))
+			if terminal.Status != message.StatusFailed || terminal.ErrorCode != string(lagoon.CodeReserved) {
+				t.Fatalf("register %s terminal=%+v", declID, terminal)
+			}
+		})
+	}
+}
+
+func TestOverlayTargetAuthorizationPrecedesDeclarationLookup(t *testing.T) {
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close(context.Background())
+	core, _ := eng.host.Acquire(protocol.C0ChannelID)
+	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
+	var home lagoon.ChannelCreateReply
+	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "overlay-authorization-home"}), &home)
+	bundle := waitBundle(t, eng, home.ID)
+	coreactor := onlyDecl(t, bundle, lagoon.CoreActorDeclID)
+	for _, word := range []lagoon.Word{lagoon.WordOverlaySet, lagoon.WordOverlayClear} {
+		payload := map[string]any{"decl_id": "missing-declaration", "channel_id": protocol.C0ChannelID}
+		if word == lagoon.WordOverlaySet {
+			payload["config"] = map[string]any{}
+		}
+		terminal := decodeTerminal(t, callMember(t, home.ID, bundle, protocol.RootPrincipalID, coreactor, string(word), payload))
+		if terminal.Status != message.StatusFailed || terminal.ErrorCode != string(lagoon.CodePermissionDenied) {
+			t.Fatalf("word=%s terminal=%+v", word, terminal)
+		}
+	}
+}

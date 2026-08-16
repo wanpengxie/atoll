@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -51,6 +52,35 @@ type registrarSysStub struct {
 	code   string
 	detail string
 	value  any
+}
+
+type registrarCanceledFacts struct{ registrarFactsStub }
+
+func (registrarCanceledFacts) WaitChannelService(context.Context, channel.ID) error { return nil }
+func (registrarCanceledFacts) DeclaredInstances(context.Context, channel.ID, string) ([]actor.ActorID, error) {
+	return []actor.ActorID{"tool:target-peer"}, nil
+}
+
+type registrarCanceledPending struct{ canceled bool }
+
+func (*registrarCanceledPending) RequestID() message.ID { return "canceled-request" }
+func (*registrarCanceledPending) Wait(ctx context.Context, _ time.Duration) (actorbase.Msg, error) {
+	return actorbase.Msg{}, ctx.Err()
+}
+func (p *registrarCanceledPending) Cancel() error {
+	p.canceled = true
+	return nil
+}
+
+type registrarCallSys struct {
+	actorbase.Sys
+	calls   int
+	pending *registrarCanceledPending
+}
+
+func (s *registrarCallSys) Call(actor.ActorID, string, any) (actorbase.Pending, error) {
+	s.calls++
+	return s.pending, nil
 }
 
 func (s *registrarSysStub) Reply(_ actorbase.Msg, value any) (message.ID, error) {
@@ -107,6 +137,36 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	}
 	if commits != 0 {
 		t.Fatalf("failed write emitted %d onCommit callbacks", commits)
+	}
+}
+
+func TestCanceledRecipeIntroductionCancelsPendingAndSkipsMemberCalls(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	facts := registrarCanceledFacts{}
+	r := NewRegistrar(&Registry{}, facts, nil)
+	pending := &registrarCanceledPending{}
+	sys := &registrarCallSys{pending: pending}
+	snapshot := channelspec.RenderedSnapshot{Class: "test", Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}
+	raw, err := json.Marshal(GenesisSpec{ChannelID: "target", ParentID: protocol.C0ChannelID, Declarations: []GenesisDeclaration{
+		{DeclID: "member-a", Kind: actor.KindTool, Rendered: snapshot},
+		{DeclID: "member-b", Kind: actor.KindTool, Rendered: snapshot},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := r.introduceChannel(sys, ctx, regspec.ChannelRow{ID: "target", ParentID: protocol.C0ChannelID, Spec: raw}, nil)
+	if sys.calls != 1 || !pending.canceled {
+		t.Fatalf("calls=%d pending canceled=%v", sys.calls, pending.canceled)
+	}
+	if len(results.Members) != 2 {
+		t.Fatalf("members=%+v", results.Members)
+	}
+	for _, member := range results.Members {
+		failure, ok := member.Result.(map[string]string)
+		if !ok || failure["detail"] != context.Canceled.Error() {
+			t.Fatalf("member=%+v", member)
+		}
 	}
 }
 

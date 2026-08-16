@@ -36,7 +36,7 @@ func init() {
 	})
 }
 
-func TestSvcactorCrossChannelLedgerAndAuditChain(t *testing.T) {
+func TestSvcactorCrossChannelPayloadIsJSONSemanticallyEquivalentAndAudited(t *testing.T) {
 	channelDir := filepath.Join(t.TempDir(), "channels")
 	eng, err := Boot(Config{ChannelDBDir: channelDir, Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -63,7 +63,7 @@ func TestSvcactorCrossChannelLedgerAndAuditChain(t *testing.T) {
 		t.Fatalf("introduce peer=%+v", terminal)
 	}
 	peer := onlyDecl(t, sourceBundle, peerDecl)
-	payload := map[string]any{"text": "byte-equivalent", "n": 7}
+	payload := map[string]any{"text": "json-equivalent", "n": 7}
 	terminal := decodeTerminal(t, callMember(t, source.ID, sourceBundle, protocol.RootPrincipalID, peer, "echo.say", payload))
 	if terminal.Status != message.StatusCompleted {
 		t.Fatalf("echo terminal=%+v", terminal)
@@ -113,7 +113,7 @@ func TestSvcactorCrossChannelLedgerAndAuditChain(t *testing.T) {
 			t.Fatal("forbidden management request landed in target ledger")
 		}
 	}
-	if localRequest.ID == "" || string(localRequest.Payload) != string(sourceRequest.Payload) {
+	if localRequest.ID == "" || !jsonEqualTest(localRequest.Payload, sourceRequest.Payload) {
 		t.Fatalf("local request=%+v payload=%s source=%s", localRequest, localRequest.Payload, sourceRequest.Payload)
 	}
 	targetPath, err := channelhost.DBPath(channelDir, target.ID)

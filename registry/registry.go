@@ -142,8 +142,8 @@ func ClassKind(class string) (actor.Kind, bool) {
 }
 
 // classes returns the registered class keys, sorted (stable iteration order).
-// Unexported: the only legitimate reader is Build's own error path below —
-// there is no discovery/catalog surface over the registry (see package doc).
+// Build uses it for diagnostics; RegisteredClasses exposes a snapshot for
+// whole-registry invariants without exposing mutable declarations.
 func classes() []string {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -154,6 +154,10 @@ func classes() []string {
 	sort.Strings(out)
 	return out
 }
+
+// RegisteredClasses returns a stable snapshot of class keys for whole-registry
+// validation. Callers still resolve class facts through the narrow lookups.
+func RegisteredClasses() []string { return classes() }
 
 // Build instantiates one instance of class with the given spec + host context.
 // Unknown class or a constructor error are returned to the caller (who asked for

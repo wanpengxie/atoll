@@ -41,6 +41,12 @@ func TestLifecycleProtectsSystemAndFoundationActors(t *testing.T) {
 	}
 	defer eng.Close(context.Background())
 	core, _ := eng.host.Acquire(protocol.C0ChannelID)
+	for _, word := range []string{"channel.remove_actor", "channel.restart_actor"} {
+		terminal := decodeTerminal(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, actor.SystemActorID, word, map[string]any{"instance_id": actor.SystemActorID}))
+		if terminal.Status != message.StatusFailed || terminal.ErrorCode != "protected_actor" {
+			t.Fatalf("c0 sysactor word=%s terminal=%+v", word, terminal)
+		}
+	}
 	for _, decl := range []string{lagoon.SvcActorDeclID, lagoon.RegistrarSeatDeclID, "peer:" + string(protocol.LobbyChannelID)} {
 		id := onlyDecl(t, core, decl)
 		for _, word := range []string{"channel.remove_actor", "channel.restart_actor"} {
@@ -56,6 +62,12 @@ func TestLifecycleProtectsSystemAndFoundationActors(t *testing.T) {
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "peer-holder-a"}), &a)
 	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "peer-target-b"}), &b)
 	homeA := waitBundle(t, eng, a.ID)
+	for _, word := range []string{"channel.remove_actor", "channel.restart_actor"} {
+		terminal := decodeTerminal(t, callMember(t, a.ID, homeA, protocol.RootPrincipalID, actor.SystemActorID, word, map[string]any{"instance_id": actor.SystemActorID}))
+		if terminal.Status != message.StatusFailed || terminal.ErrorCode != "protected_actor" {
+			t.Fatalf("non-c0 sysactor word=%s terminal=%+v", word, terminal)
+		}
+	}
 	for _, decl := range []string{lagoon.SvcActorDeclID, lagoon.CoreActorDeclID} {
 		id := onlyDecl(t, homeA, decl)
 		for _, word := range []string{"channel.remove_actor", "channel.restart_actor"} {

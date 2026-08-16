@@ -105,6 +105,8 @@ func dispatch(ctx context.Context, sys actorbase.Sys, deps Deps, caller channel.
 	}
 
 	var target actor.ActorID
+	// Business payloads cross the membrane as JSON values. Sys.Call marshals
+	// RawMessage again, so the contract is semantic equivalence, not byte identity.
 	payload := any(json.RawMessage(req.Payload))
 	if native(req.Type) {
 		parent, err := deps.Parent(ctx)

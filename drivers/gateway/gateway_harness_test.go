@@ -32,15 +32,23 @@ import (
 
 type gatewayTestCompositionResolver struct{}
 
+const gatewayTestAgentClass = "gateway-test-unresolved"
+
 func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
 }
 
 func (gatewayTestCompositionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error) {
-	return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
+	return channelspec.DeclarationFacts{Visibility: "public", Class: gatewayTestAgentClass}, nil
 }
-func (gatewayTestCompositionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
-	return "", false, nil
+func (gatewayTestCompositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
+	return actor.KindAgent, class == gatewayTestAgentClass, nil
+}
+func (gatewayTestCompositionResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+	return channel.PlacementServer, true, nil
+}
+func (gatewayTestCompositionResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
+	return nil
 }
 
 type gatewayTestBindings struct{ rows []regspec.ChannelRow }
@@ -61,6 +69,9 @@ func (b gatewayTestBindings) GetChannelDesired(_ context.Context, id channel.ID)
 		}
 	}
 	return regspec.ChannelRow{}, false, nil
+}
+func (gatewayTestBindings) ChannelDesired(context.Context, channel.ID) (channelspec.ChannelDesiredFacts, bool, error) {
+	return channelspec.ChannelDesiredFacts{Present: true}, true, nil
 }
 
 // logCapture is a slog.Handler that records every emitted message (for telemetry
@@ -386,7 +397,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	if memberKind == actor.KindAgent {
 		source = "gateway-test:" + member
 		rendered, sealErr := (channelspec.RenderedSnapshot{
-			Class: "gateway-test-unresolved", Placement: channel.Placement{Kind: channel.PlacementServer},
+			Class: gatewayTestAgentClass, Placement: channel.Placement{Kind: channel.PlacementServer},
 		}).Seal()
 		if sealErr != nil {
 			t.Fatal(sealErr)
@@ -415,11 +426,26 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	if !ok {
 		t.Fatal("channel bundle unavailable")
 	}
+	ownerID, ownerFound, ownerErr := bundle.View().ResolvePrincipal(context.Background(), owner)
+	if ownerErr != nil || !ownerFound {
+		t.Fatalf("ResolvePrincipal(owner %s)=(%s,%v,%v)", owner, ownerID, ownerFound, ownerErr)
+	}
+	h := &testChannel{Bundle: bundle, host: host, channelID: chID, principal: member, ownerID: ownerID, extras: subjectgate.NewRegistry(), sources: map[actor.ActorID]string{}}
 	var id actor.ActorID
 	var found bool
 	if memberKind == actor.KindAgent {
+		if err := h.submitOperate(context.Background(), "channel.introduce_actor", map[string]any{"kind": actor.KindAgent, "decl_id": source, "principal": member}); err != nil {
+			t.Fatal(err)
+		}
 		var ids []actor.ActorID
-		ids, err = bundle.View().DeclaredInstances(context.Background(), source)
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			ids, err = bundle.View().DeclaredInstances(context.Background(), source)
+			if err != nil || len(ids) != 0 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		found = len(ids) != 0
 		if found {
 			id = ids[0]
@@ -430,11 +456,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	if err != nil || !found {
 		t.Fatalf("ResolvePrincipal(%s)=(%s,%v,%v)", member, id, found, err)
 	}
-	ownerID, ownerFound, ownerErr := bundle.View().ResolvePrincipal(context.Background(), owner)
-	if ownerErr != nil || !ownerFound {
-		t.Fatalf("ResolvePrincipal(owner %s)=(%s,%v,%v)", owner, ownerID, ownerFound, ownerErr)
-	}
-	h := &testChannel{Bundle: bundle, host: host, channelID: chID, principal: member, memberID: id, ownerID: ownerID, extras: subjectgate.NewRegistry(), sources: map[actor.ActorID]string{}}
+	h.memberID = id
 	if source != "" {
 		h.sources[id] = source
 		h.EnsureSubjectSlot(id)
