@@ -260,7 +260,7 @@ func (d definition) run(sys actorbase.Sys) error {
 	port := &runtimePort{queue: inbox}
 	exec := newExecutor(sys, vault)
 	deps := runtimeproto.Deps{Parent: local, Tools: newToolBridge(sys, vault), Resources: newResourceBridge(sys, vault), Logger: slog.Default()}
-	rt, err := d.cfg.NewRuntime(deps, readSeed(sys), port)
+	rt, err := d.cfg.NewRuntime(deps, readSeed(local, sys), port)
 	if err != nil {
 		cancel()
 		vault.Seal()
