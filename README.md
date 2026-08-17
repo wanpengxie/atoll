@@ -118,7 +118,15 @@ docs/        architecture and dev walkthroughs
 # 1. build
 make build          # -> bin/atoll, bin/atoll-server, bin/atoll-daemon
 
-# 2. one-command personal node: engine + owner + home channel + local device,
+# 2. first time: the interactive installer — preflight (previous install, codex/claude
+#    CLIs + login state, port), pick the c0 steward, set the root password, choose
+#    home/addr, then it runs `atoll up` and prints how to log in
+scripts/install.sh
+
+# 2b. or non-interactively (all defaults; env ATOLL_HOME/ATOLL_ADDR/ATOLL_ROOT_PASSWORD)
+scripts/install.sh --yes
+
+# 3. later runs: the node itself (reads <home>/atoll.env written by the installer)
 #    all provisioned and converging on every run (default home: ~/.atoll)
 bin/atoll up
 ```

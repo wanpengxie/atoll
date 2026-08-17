@@ -28,13 +28,15 @@ const teardownGrace = 30 * time.Second
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "up" {
-		fmt.Fprintln(os.Stderr, "usage: atoll up [--dir DIR] [--addr ADDR] [--root-password PASSWORD]")
+		fmt.Fprintln(os.Stderr, "usage: atoll up [--dir DIR] [--addr ADDR] [--root-password PASSWORD] [--steward CLASS] [--open-registration]")
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	dir := fs.String("dir", defaultDir(), "node home root")
 	addr := fs.String("addr", "127.0.0.1:8832", "listen address")
 	rootPassword := fs.String("root-password", "", "root password used only during installation")
+	steward := fs.String("steward", "", "agent class carved as the c0 steward on first install (default codex; env ATOLL_STEWARD)")
+	openReg := fs.Bool("open-registration", false, "expose principal.register to the lobby (default closed; env ATOLL_OPEN_REGISTRATION=1)")
 	_ = fs.Parse(os.Args[2:])
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -43,6 +45,25 @@ func main() {
 		logger.Warn("up: .env load failed", "err", err.Error())
 	} else if n > 0 {
 		logger.Info("up: loaded .env", "vars_set", n)
+	}
+	// <dir>/atoll.env is the installer's hand-off: ATOLL_ADDR / ATOLL_STEWARD /
+	// ATOLL_ROOT_PASSWORD written once by scripts/install.sh so a bare `atoll up`
+	// opens the same node. Explicit flags still win.
+	if n, err := dotenv.Load(filepath.Join(*dir, "atoll.env")); err != nil {
+		logger.Warn("up: atoll.env load failed", "err", err.Error())
+	} else if n > 0 {
+		logger.Info("up: loaded atoll.env", "dir", *dir, "vars_set", n)
+	}
+	if !flagGiven(fs, "addr") {
+		if v := os.Getenv("ATOLL_ADDR"); v != "" {
+			*addr = v
+		}
+	}
+	if !flagGiven(fs, "open-registration") && os.Getenv("ATOLL_OPEN_REGISTRATION") == "1" {
+		*openReg = true
+	}
+	if *steward == "" {
+		*steward = os.Getenv("ATOLL_STEWARD")
 	}
 	if *rootPassword == "" {
 		*rootPassword = os.Getenv("ATOLL_ROOT_PASSWORD")
@@ -62,10 +83,12 @@ func main() {
 	}
 
 	eng, err := engineboot.Boot(engineboot.Config{
-		ChannelDBDir: channelDir,
-		Addr:         *addr,
-		TokenPath:    filepath.Join(serverHome, "atoll-token"),
-		RootPassword: *rootPassword,
+		ChannelDBDir:     channelDir,
+		Addr:             *addr,
+		TokenPath:        filepath.Join(serverHome, "atoll-token"),
+		RootPassword:     *rootPassword,
+		StewardClass:     *steward,
+		OpenRegistration: *openReg,
 	}, logger)
 	if err != nil {
 		log.Fatalf("up: %v", err)
@@ -155,4 +178,14 @@ func defaultDir() string {
 		return ".atoll-node"
 	}
 	return filepath.Join(home, ".atoll")
+}
+
+func flagGiven(fs *flag.FlagSet, name string) bool {
+	given := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			given = true
+		}
+	})
+	return given
 }

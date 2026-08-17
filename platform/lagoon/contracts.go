@@ -104,13 +104,13 @@ func HomeCodexDeclID(owner string) string { return StableBootstrapDeclID(owner, 
 type ErrorCode string
 
 const (
-	CodeInvalidArgs      ErrorCode = "invalid_args"
-	CodeNotFound         ErrorCode = "not_found"
-	CodeConflictExists   ErrorCode = "conflict_exists"
-	CodePermissionDenied ErrorCode = "permission_denied"
+	CodeInvalidArgs        ErrorCode = "invalid_args"
+	CodeNotFound           ErrorCode = "not_found"
+	CodeConflictExists     ErrorCode = "conflict_exists"
+	CodePermissionDenied   ErrorCode = "permission_denied"
 	CodeInvalidCredentials ErrorCode = "invalid_credentials"
-	CodeReserved         ErrorCode = "reserved"
-	CodeResultUnknown    ErrorCode = "result_unknown"
+	CodeReserved           ErrorCode = "reserved"
+	CodeResultUnknown      ErrorCode = "result_unknown"
 )
 
 type Error struct {

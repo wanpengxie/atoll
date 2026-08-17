@@ -24,6 +24,7 @@ func main() {
 	home := flag.String("home", defaultServerHome(), "server home")
 	addr := flag.String("addr", ":8080", "listen address")
 	rootPassword := flag.String("root-password", "", "root password used only during installation")
+	openReg := flag.Bool("open-registration", false, "expose principal.register to the lobby (default closed)")
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if n, err := dotenv.Load(".env"); err != nil {
@@ -43,10 +44,11 @@ func main() {
 		defer release()
 	}
 	eng, err := engineboot.Boot(engineboot.Config{
-		ChannelDBDir: channels,
-		Addr:         *addr,
-		TokenPath:    filepath.Join(*home, "atoll-token"),
-		RootPassword: *rootPassword,
+		ChannelDBDir:     channels,
+		Addr:             *addr,
+		TokenPath:        filepath.Join(*home, "atoll-token"),
+		RootPassword:     *rootPassword,
+		OpenRegistration: *openReg,
 	}, logger)
 	if err != nil {
 		log.Fatalf("server: %v", err)

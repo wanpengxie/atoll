@@ -19,6 +19,7 @@ const (
 	codePermissionDenied   portalErrorCode = "permission_denied"
 	codeReserved           portalErrorCode = "reserved"
 	codeResultUnknown      portalErrorCode = "result_unknown"
+	codeRegistrationClosed portalErrorCode = "registration_closed"
 )
 
 func mapLagoonCode(code lagoon.ErrorCode) (portalErrorCode, bool) {

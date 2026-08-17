@@ -236,6 +236,13 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	reply, err := p.callViaLobby(callCtx, lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
 	if err != nil {
+		// Registration closed = c0 exposes no such endpoint to the lobby: the
+		// svcactor answers endpoint_not_found. That is node policy, not an error.
+		var le *lagoon.Error
+		if errors.As(err, &le) && le.Code == "endpoint_not_found" {
+			writeError(w, http.StatusForbidden, string(codeRegistrationClosed), "registration is closed on this node")
+			return
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			writeError(w, http.StatusGatewayTimeout, string(codeUnavailable), err.Error())
 			return

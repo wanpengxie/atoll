@@ -38,7 +38,7 @@ func init() {
 
 func TestSvcactorCrossChannelPayloadIsJSONSemanticallyEquivalentAndAudited(t *testing.T) {
 	channelDir := filepath.Join(t.TempDir(), "channels")
-	eng, err := Boot(Config{ChannelDBDir: channelDir, Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	eng, err := Boot(Config{ChannelDBDir: channelDir, Addr: "127.0.0.1:0", RootPassword: "test-root-password", OpenRegistration: true}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestSvcactorCrossChannelPayloadIsJSONSemanticallyEquivalentAndAudited(t *te
 }
 
 func TestChildCanIntroduceParentPeerForReverseResult(t *testing.T) {
-	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password", OpenRegistration: true}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestChildCanIntroduceParentPeerForReverseResult(t *testing.T) {
 }
 
 func TestParentCreatesTwentyChildrenAndCallsBusinessEndpoint(t *testing.T) {
-	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password", OpenRegistration: true}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestParentCreatesTwentyChildrenAndCallsBusinessEndpoint(t *testing.T) {
 }
 
 func TestUnrelatedAliceChannelCanCallBusinessButNotManagement(t *testing.T) {
-	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password", OpenRegistration: true}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

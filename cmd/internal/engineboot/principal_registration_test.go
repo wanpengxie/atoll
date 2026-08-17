@@ -3,17 +3,22 @@ package engineboot
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol"
 )
 
 func TestGuestRegistrationConflictsNeverMintSessions(t *testing.T) {
-	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password", OpenRegistration: true}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,5 +51,53 @@ func TestGuestRegistrationConflictsNeverMintSessions(t *testing.T) {
 
 	if _, ok, err := eng.registry.GetPrincipalStatus(context.Background(), protocol.RootPrincipalID); err != nil || !ok {
 		t.Fatalf("root disappeared ok=%v err=%v", ok, err)
+	}
+}
+
+// Registration is node policy and closed by default: c0 exposes no
+// principal.register endpoint to the lobby, so the guest can neither see it on
+// c0's card nor call it, and the portal answers 403 registration_closed
+// without minting a session. Login stays open.
+func TestRegistrationClosedByDefaultIsInvisibleAndRefused(t *testing.T) {
+	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := eng.host.Acquire(protocol.LobbyChannelID); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lobby unavailable")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/identity/register", bytes.NewBufferString(`{"id":"alice","email":"alice@example.test","password":"secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	eng.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "registration_closed") || rec.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("closed registration: status=%d body=%s cookie=%q", rec.Code, rec.Body.String(), rec.Header().Get("Set-Cookie"))
+	}
+	if _, found, _ := eng.registry.GetPrincipalStatus(context.Background(), "alice"); found {
+		t.Fatal("closed registration still created a principal")
+	}
+	lobby, _ := eng.host.Acquire(protocol.LobbyChannelID)
+	guestCore := onlyDecl(t, lobby, lagoon.CoreActorDeclID)
+	var card introspect.Describe
+	if err := json.Unmarshal(callMember(t, protocol.LobbyChannelID, lobby, protocol.GuestPrincipalID, guestCore, introspect.QueryDescribe, map[string]any{}), &card); err != nil {
+		t.Fatal(err)
+	}
+	if len(card.Types) != 1 || card.Types[string(lagoon.WordPrincipalLogin)].Description == "" {
+		t.Fatalf("c0 card as seen from lobby with registration closed=%v", card.Types)
+	}
+	login := httptest.NewRequest(http.MethodPost, "/api/identity/login", bytes.NewBufferString(`{"email":"root@atoll.local","password":"test-root-password"}`))
+	login.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	eng.handler.ServeHTTP(rec, login)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login with registration closed: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

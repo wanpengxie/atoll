@@ -34,6 +34,9 @@ import (
 type Config struct {
 	ChannelDir   string
 	RootPassword string
+	// StewardClass is the agent class boot carves as c0's steward. Empty = codex.
+	// It is an input to the carver, not a mechanism: boot writes what it is told.
+	StewardClass string
 	Now          func() time.Time
 }
 
@@ -149,7 +152,11 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 	if cfg.Now != nil {
 		now = cfg.Now
 	}
-	if err := install(ctx, c0Path, registryPath, password, now()); err != nil {
+	steward := strings.TrimSpace(cfg.StewardClass)
+	if steward == "" {
+		steward = "codex"
+	}
+	if err := install(ctx, c0Path, registryPath, password, steward, now()); err != nil {
 		return Result{}, err
 	}
 	genesis, err := readC0Genesis(ctx, c0Path)
@@ -251,7 +258,7 @@ func removeUnpublished(paths ...string) error {
 	return nil
 }
 
-func install(ctx context.Context, c0Path, registryPath, password string, now time.Time) error {
+func install(ctx context.Context, c0Path, registryPath, password, stewardClass string, now time.Time) error {
 	stamp := now.UnixMilli()
 	if err := lagoon.ValidateName(string(protocol.C0ChannelID)); err != nil {
 		return fmt.Errorf("boot: invalid c0 channel name: %w", err)
@@ -268,7 +275,7 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 		{Kind: actor.KindTool, SourceDeclID: lagoon.RegistrarSeatDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.RegistrarClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
 		{Kind: actor.KindTool, SourceDeclID: lagoon.SvcActorDeclID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.SvcActorClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
 		{Kind: actor.KindHuman, Principal: protocol.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()},
-		{Kind: actor.KindAgent, Principal: protocol.StewardPrincipalID, SourceDeclID: lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "codex", Config: json.RawMessage(`{}`)}, Placement: daemonPlacement},
+		{Kind: actor.KindAgent, Principal: protocol.StewardPrincipalID, SourceDeclID: lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: stewardClass, Config: json.RawMessage(`{}`)}, Placement: daemonPlacement},
 		{Kind: actor.KindTool, SourceDeclID: peerDeclID(protocol.LobbyChannelID), CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.PeerActorClass, Config: targetConfig(protocol.LobbyChannelID)}, Placement: storespec.NewServerPlacement()},
 	}); err != nil {
 		return fmt.Errorf("boot: write c0: %w", err)
@@ -358,7 +365,7 @@ func install(ctx context.Context, c0Path, registryPath, password string, now tim
 		{lagoon.SvcActorDeclID, "Service Actor", lagoon.SvcActorClass, "private", json.RawMessage(`{}`)},
 		{lagoon.CoreActorDeclID, "Core Actor", lagoon.PeerActorClass, "private", targetConfig(protocol.C0ChannelID)},
 		{peerDeclID(protocol.LobbyChannelID), "c0.lobby", lagoon.PeerActorClass, "public", targetConfig(protocol.LobbyChannelID)},
-		{lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), "Steward", "codex", "private", json.RawMessage(`{}`)},
+		{lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), "Steward", stewardClass, "private", json.RawMessage(`{}`)},
 	}
 	for _, decl := range decls {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,NULL,?,?,?,'present',?,?,?)`, decl.id, decl.name, protocol.RootPrincipalID, decl.class, string(decl.config), decl.visibility, stamp, stamp); err != nil {

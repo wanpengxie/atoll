@@ -27,14 +27,31 @@ type Change struct {
 type Registry struct {
 	store    *store.Store
 	onCommit func(Change)
+	// openRegistration is node policy: whether c0 exposes principal.register to
+	// the lobby at all. Closed = the endpoint does not exist for the lobby, so
+	// the guest can neither see nor call it. Default closed.
+	openRegistration bool
+}
+
+// Policy is node-level policy the registry face is constructed with; it is
+// not a mutation surface (Registry stays read-only after Open).
+type Policy struct {
+	// OpenRegistration exposes principal.register to the lobby. Default closed:
+	// the endpoint then does not exist for the lobby — neither on c0's card nor
+	// dispatchable by its svcactor.
+	OpenRegistration bool
 }
 
 func Open(path string, onCommit func(Change)) (*Registry, error) {
+	return OpenWith(path, onCommit, Policy{})
+}
+
+func OpenWith(path string, onCommit func(Change), policy Policy) (*Registry, error) {
 	storage, err := store.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Registry{store: storage, onCommit: onCommit}, nil
+	return &Registry{store: storage, onCommit: onCommit, openRegistration: policy.OpenRegistration}, nil
 }
 
 func (r *Registry) Close() error {
@@ -161,9 +178,9 @@ func (r *Registry) LocalDeviceKey(ctx context.Context) (string, error) {
 
 // EndpointsFor is the endpoint table a caller channel sees on target: the
 // one place that decides what a channel exposes to whom. The lobby is outside
-// the trust domain, so c0 shows it only the two doors in LobbyWords — the
-// svcactor dispatches from this same table, so what is not shown is not
-// callable either.
+// the trust domain, so c0 shows it only the doors in LobbyWords (and register
+// only while registration is open) — the svcactor dispatches from this same
+// table, so what is not shown is not callable either.
 func (r *Registry) EndpointsFor(ctx context.Context, target, caller channel.ID) ([]regspec.EndpointRow, error) {
 	rows, err := r.ListEndpoints(ctx, target)
 	if err != nil {
@@ -174,9 +191,13 @@ func (r *Registry) EndpointsFor(ctx context.Context, target, caller channel.ID) 
 	}
 	exposed := rows[:0]
 	for _, row := range rows {
-		if LobbyWord(Word(row.Name)) {
-			exposed = append(exposed, row)
+		if !LobbyWord(Word(row.Name)) {
+			continue
 		}
+		if Word(row.Name) == WordPrincipalRegister && !r.openRegistration {
+			continue
+		}
+		exposed = append(exposed, row)
 	}
 	return exposed, nil
 }

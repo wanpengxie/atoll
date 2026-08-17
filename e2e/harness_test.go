@@ -220,6 +220,7 @@ func (h *harness) startServer() {
 		"--home", h.serverHome,
 		"--addr", fmt.Sprintf("127.0.0.1:%d", h.port),
 		"--root-password", rootPassword,
+		"--open-registration", // e2e registers users; nodes are closed by default
 	}, h.env, filepath.Join(h.root, "work"), logPath)
 	if err := waitHealth(h.base, h.server, 40*time.Second); err != nil {
 		h.t.Fatalf("%v\nserver log:\n%s", err, tailLog(logPath, 100))

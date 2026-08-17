@@ -30,10 +30,12 @@ const shutdownTimeout = 30 * time.Second
 const contractVersion = "5"
 
 type Config struct {
-	ChannelDBDir string
-	Addr         string
-	TokenPath    string
-	RootPassword string
+	ChannelDBDir     string
+	Addr             string
+	TokenPath        string
+	RootPassword     string
+	StewardClass     string // agent class carved as c0 steward on first install; empty = codex
+	OpenRegistration bool   // node policy: expose principal.register to the lobby (default closed)
 }
 
 type Engine struct {
@@ -63,7 +65,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if cfg.ChannelDBDir == "" {
 		return nil, errors.New("engineboot: channel db dir required")
 	}
-	installed, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: cfg.ChannelDBDir, RootPassword: cfg.RootPassword})
+	installed, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: cfg.ChannelDBDir, RootPassword: cfg.RootPassword, StewardClass: cfg.StewardClass})
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +75,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.NewSessionStore()}
 	var host *channelhost.ChannelHost
 	var gatewayEdge *gateway.Gateway
-	e.registry, err = lagoon.Open(installed.RegistryDBPath, func(change lagoon.Change) {
+	e.registry, err = lagoon.OpenWith(installed.RegistryDBPath, func(change lagoon.Change) {
 		if host != nil && (change.ChannelID != "" || change.AllChannels) {
 			host.RegistryChanged(change)
 		}
@@ -83,7 +85,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		if change.AllPrincipals && gatewayEdge != nil {
 			gatewayEdge.PokeAll()
 		}
-	})
+	}, lagoon.Policy{OpenRegistration: cfg.OpenRegistration})
 	if err != nil {
 		return nil, err
 	}
