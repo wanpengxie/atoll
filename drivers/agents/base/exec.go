@@ -114,6 +114,7 @@ func (x *executor) runtimeTerminate() error                            { return 
 func (x *executor) runtimeEnsureReady(op runtimeproto.OpID) error      { return x.runtime.EnsureReady(op) }
 func (x *executor) revoke(scope effectcap.Scope)                       { x.vault.Revoke(scope) }
 func (x *executor) persistSeed(value []byte)                           { persistSeed(x.sys, value) }
+func (x *executor) persistSelection(value runtimeproto.TurnOptions)    { persistSelection(x.sys, value) }
 
 func emptyAudiencePublic(spec behavior.EventSpec) behavior.EventSpec {
 	spec.Audience = message.Audience{}

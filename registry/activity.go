@@ -36,8 +36,16 @@ type ActivityTurnStartedPayload struct {
 }
 
 type ActivityTurnEndedPayload struct {
-	TurnIndex int    `json:"turn_index"`
-	Status    string `json:"status"`
+	TurnIndex int               `json:"turn_index"`
+	Status    string            `json:"status"`
+	Usage     *TurnUsagePayload `json:"usage,omitempty"`
+}
+
+type TurnUsagePayload struct {
+	ContextTokens int64  `json:"context_tokens"`
+	ContextWindow int64  `json:"context_window"`
+	Model         string `json:"model"`
+	Effort        string `json:"effort"`
 }
 
 type ActivityToolStartedPayload struct {

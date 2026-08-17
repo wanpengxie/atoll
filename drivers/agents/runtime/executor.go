@@ -29,6 +29,7 @@ type publishTurnEnded struct {
 	turn         runtimeproto.TurnID
 	status       runtimeproto.TurnStatus
 	text, detail string
+	usage        runtimeproto.TurnUsage
 }
 type publishControlDone struct {
 	op      runtimeproto.OpID
@@ -67,7 +68,7 @@ func (e *engine) publish(f publishFact) {
 	case publishTool:
 		e.events.Tool(x.turn, x.event)
 	case publishTurnEnded:
-		e.events.TurnEnded(x.turn, x.status, x.text, x.detail)
+		e.events.TurnEnded(x.turn, x.status, x.text, x.detail, x.usage)
 	case publishControlDone:
 		e.events.ControlDone(x.op, x.turn, x.verdict, x.detail)
 	case publishReadyDone:

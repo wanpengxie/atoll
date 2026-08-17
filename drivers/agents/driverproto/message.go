@@ -26,6 +26,19 @@ type AttemptToken uint64
 type ActionToken uint64
 type WorkerTurnRef string
 
+type TurnKind uint8
+
+const (
+	TurnChat TurnKind = iota
+	TurnCompact
+	TurnSelect
+)
+
+type TurnOptions struct {
+	Model  string `json:"model"`
+	Effort string `json:"effort"`
+}
+
 type WorkerTurnTarget struct {
 	Attempt AttemptToken
 	Native  WorkerTurnRef
@@ -38,4 +51,6 @@ type StartRequest struct {
 	Life       context.Context
 	Messages   []DriverMessage
 	Background []ContextMessage
+	Kind       TurnKind
+	Options    TurnOptions
 }

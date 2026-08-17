@@ -36,6 +36,7 @@ type liveEvent struct {
 	detail  string
 	verdict runtimeproto.ControlVerdict
 	status  runtimeproto.TurnStatus
+	usage   runtimeproto.TurnUsage
 }
 
 type liveCollector struct {
@@ -65,8 +66,8 @@ func (c *liveCollector) TurnRejected(op runtimeproto.OpID, code, detail string) 
 func (c *liveCollector) Tool(id runtimeproto.TurnID, e runtimeproto.ToolEvent) {
 	c.push(liveEvent{kind: "tool", turn: id, text: e.Name, detail: e.Phase + " " + e.Detail})
 }
-func (c *liveCollector) TurnEnded(id runtimeproto.TurnID, status runtimeproto.TurnStatus, text, detail string) {
-	c.push(liveEvent{kind: "ended", turn: id, status: status, text: text, detail: detail})
+func (c *liveCollector) TurnEnded(id runtimeproto.TurnID, status runtimeproto.TurnStatus, text, detail string, usage runtimeproto.TurnUsage) {
+	c.push(liveEvent{kind: "ended", turn: id, status: status, text: text, detail: detail, usage: usage})
 }
 func (c *liveCollector) ControlDone(op runtimeproto.OpID, id runtimeproto.TurnID, verdict runtimeproto.ControlVerdict, detail string) {
 	c.push(liveEvent{kind: "control", op: op, turn: id, verdict: verdict, detail: detail})
@@ -125,6 +126,35 @@ func startTurn(t *testing.T, rt runtimeproto.Runtime, op runtimeproto.OpID, text
 	}
 }
 
+func runTurnControlsLive(t *testing.T, rt runtimeproto.Runtime, events *liveCollector, baseOp runtimeproto.OpID, options runtimeproto.TurnOptions) {
+	t.Helper()
+	if err := rt.Start(runtimeproto.StartCommand{Op: baseOp, Kind: runtimeproto.TurnSelect, Options: options}); err != nil {
+		t.Fatal(err)
+	}
+	events.await(t, turnWait, "started")
+	selected := events.await(t, turnWait, "ended")
+	if selected.status != runtimeproto.TurnStatusOK || selected.usage.Model != options.Model || selected.usage.Effort != options.Effort {
+		t.Fatalf("select ended=%+v", selected)
+	}
+	startTurn(t, rt, baseOp+1, "Reply with exactly OK and nothing else. Do not run tools.")
+	events.await(t, turnWait, "started")
+	chat := events.await(t, turnWait, "ended")
+	if chat.status != runtimeproto.TurnStatusOK || chat.usage.Model != options.Model || chat.usage.Effort != options.Effort {
+		t.Fatalf("selected chat ended=%+v", chat)
+	}
+	if err := rt.Start(runtimeproto.StartCommand{Op: baseOp + 2, Kind: runtimeproto.TurnCompact}); err != nil {
+		t.Fatal(err)
+	}
+	events.await(t, turnWait, "started")
+	compact := events.await(t, turnWait, "ended")
+	if compact.status != runtimeproto.TurnStatusOK {
+		t.Fatalf("compact ended=%+v", compact)
+	}
+	if chat.usage.ContextTokens > 0 && compact.usage.ContextTokens >= chat.usage.ContextTokens {
+		t.Fatalf("compact did not reduce context: before=%d after=%d", chat.usage.ContextTokens, compact.usage.ContextTokens)
+	}
+}
+
 func TestCodexLiveE2E(t *testing.T) {
 	if os.Getenv("CODEX_E2E") != "1" {
 		t.Skip("set CODEX_E2E=1 to run the live codex E2E")
@@ -142,7 +172,7 @@ func TestCodexLiveE2E(t *testing.T) {
 	t.Logf("spec: caps=%+v receipt=%s", spec.Capabilities, spec.Bounds.ReceiptDeadline)
 
 	events := newLiveCollector(t)
-	rt, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, nil, events)
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, nil, runtimeproto.TurnOptions{}, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +236,7 @@ func TestCodexLiveE2E(t *testing.T) {
 	t.Logf("line4: resuming with seed %q", seed)
 
 	events2 := newLiveCollector(t)
-	rt2, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, seed, events2)
+	rt2, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, seed, runtimeproto.TurnOptions{}, events2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,4 +294,16 @@ func TestCodexLiveE2E(t *testing.T) {
 		t.Fatalf("line5 respawn: ended=%+v", ended)
 	}
 	t.Logf("line5 OK: respawn turn in %s, final=%q", time.Since(t0), ended.text)
+
+	// Turn controls run last: compact rewrites the session summary, so it must
+	// not precede the resume-recall line.
+	if model := os.Getenv("CODEX_E2E_MODEL"); model != "" {
+		effort := os.Getenv("CODEX_E2E_EFFORT")
+		if effort == "" {
+			effort = "low"
+		}
+		runTurnControlsLive(t, rt2, events2, 20, runtimeproto.TurnOptions{Model: model, Effort: effort})
+	} else {
+		t.Log("turn-controls segment skipped: CODEX_E2E_MODEL is unset")
+	}
 }

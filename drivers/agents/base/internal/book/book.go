@@ -29,6 +29,8 @@ type Request struct {
 	ExplicitCAS   bool
 	ExpectedTurn  runtimeproto.TurnID
 	Location      Location
+	TurnKind      runtimeproto.TurnKind
+	Options       runtimeproto.TurnOptions
 }
 
 type TurnPhase uint8

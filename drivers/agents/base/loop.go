@@ -162,6 +162,7 @@ type runtimeEvent struct {
 	ready              runtimeproto.ReadyResult
 	cause              runtimeproto.LostCause
 	seed               []byte
+	usage              runtimeproto.TurnUsage
 }
 
 type runtimePort struct {
@@ -212,8 +213,8 @@ func (p *runtimePort) TurnRejected(op runtimeproto.OpID, code, detail string) {
 func (p *runtimePort) Tool(id runtimeproto.TurnID, v runtimeproto.ToolEvent) {
 	p.send(runtimeEvent{kind: evTool, turnID: id, tool: v})
 }
-func (p *runtimePort) TurnEnded(id runtimeproto.TurnID, status runtimeproto.TurnStatus, text, detail string) {
-	p.send(runtimeEvent{kind: evTurnEnded, turnID: id, status: status, text: text, detail: detail})
+func (p *runtimePort) TurnEnded(id runtimeproto.TurnID, status runtimeproto.TurnStatus, text, detail string, usage runtimeproto.TurnUsage) {
+	p.send(runtimeEvent{kind: evTurnEnded, turnID: id, status: status, text: text, detail: detail, usage: usage})
 }
 func (p *runtimePort) ControlDone(op runtimeproto.OpID, id runtimeproto.TurnID, verdict runtimeproto.ControlVerdict, detail string) {
 	p.send(runtimeEvent{kind: evControlDone, op: op, turnID: id, verdict: verdict, detail: detail})
@@ -250,6 +251,9 @@ type agentLoop struct {
 	logger                                    *slog.Logger
 	fault                                     error
 	cleanupOnce                               sync.Once
+	options                                   runtimeproto.TurnOptions
+	lastUsage                                 runtimeproto.TurnUsage
+	hasUsage                                  bool
 }
 
 func (d definition) run(sys actorbase.Sys) error {
@@ -260,7 +264,9 @@ func (d definition) run(sys actorbase.Sys) error {
 	port := &runtimePort{queue: inbox}
 	exec := newExecutor(sys, vault)
 	deps := runtimeproto.Deps{Parent: local, Tools: newToolBridge(sys, vault), Resources: newResourceBridge(sys, vault), Logger: slog.Default()}
-	rt, err := d.cfg.NewRuntime(deps, readSeed(sys), port)
+	seed := readSeed(local, sys)
+	options := readSelection(local, sys, d.cfg.Runtime)
+	rt, err := d.cfg.NewRuntime(deps, seed, options, port)
 	if err != nil {
 		cancel()
 		vault.Seal()
@@ -268,7 +274,11 @@ func (d definition) run(sys actorbase.Sys) error {
 		return fmt.Errorf("agent/base: runtime construct: %w", err)
 	}
 	exec.bindRuntime(rt)
-	l := &agentLoop{def: d, sys: sys, rt: rt, port: port, vault: vault, exec: exec, state: book.New(), inbox: inbox, local: local, cancel: cancel, background: loadCatchup(local, sys), receipts: map[string]receiptRow{}, receiptTimers: map[string]*time.Timer{}, logger: slog.Default()}
+	l := &agentLoop{def: d, sys: sys, rt: rt, port: port, vault: vault, exec: exec, state: book.New(), inbox: inbox, local: local, cancel: cancel, background: loadCatchup(local, sys), receipts: map[string]receiptRow{}, receiptTimers: map[string]*time.Timer{}, logger: slog.Default(), options: options}
+	if options.Model != "" || options.Effort != "" {
+		l.lastUsage = runtimeproto.TurnUsage{Model: options.Model, Effort: options.Effort}
+		l.hasUsage = true
+	}
 	defer l.cleanup()
 	go l.receive()
 	return l.runLoop()
@@ -373,8 +383,16 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		l.answerDescribe(msg)
 		return
 	}
+	if msg.Type == TypeContext {
+		value := any(map[string]any{})
+		if l.hasUsage {
+			value = usageValue(l.lastUsage)
+		}
+		l.exec.terminal(string(msg.ID), terminalCandidate{value: value})
+		return
+	}
 	if strings.HasPrefix(msg.Type, "agent.") {
-		known := msg.Type == TypeSteer || msg.Type == TypeInterrupt || msg.Type == TypeQueue || msg.Type == TypeStop || msg.Type == TypeTerminate || msg.Type == TypeRestart
+		known := msg.Type == TypeCompact || msg.Type == TypeSelect || msg.Type == TypeContext || msg.Type == TypeSteer || msg.Type == TypeInterrupt || msg.Type == TypeQueue || msg.Type == TypeStop || msg.Type == TypeTerminate || msg.Type == TypeRestart
 		if !known || !l.def.supports(msg.Type) {
 			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported", detail: "agent does not support " + msg.Type})
 			return
@@ -402,12 +420,27 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 			return
 		}
 	}
+	if msg.Type == TypeCompact {
+		row.TurnKind = runtimeproto.TurnCompact
+		row.Input.Text = ""
+	}
+	if msg.Type == TypeSelect {
+		options, code, detail := l.validateSelection(msg.Payload)
+		if code != "" {
+			l.state.Requests[id] = row
+			l.finish(id, terminalCandidate{fail: true, code: code, detail: detail})
+			return
+		}
+		row.TurnKind, row.Options, row.Input.Text = runtimeproto.TurnSelect, options, ""
+	}
 	l.state.Requests[id] = row
 	l.watchClosure(id, msg.Ctx())
 	switch msg.Type {
 	case TypeQueue:
 		row.Input = steerInput(row)
 		l.enqueue(id, true)
+	case TypeCompact, TypeSelect:
+		l.enqueue(id, l.state.Turn != nil)
 	case TypeSteer:
 		l.acceptContent(id, true)
 	case TypeInterrupt:
@@ -454,12 +487,40 @@ func (l *agentLoop) answerDescribe(msg actorbase.Msg) {
 	for typ := range l.def.controls {
 		d.Types[typ] = introspect.TypeMeta{Description: "standard agent control", AllowedKinds: []string{string(message.KindRequest)}}
 	}
+	d.Types[TypeCompact] = introspect.TypeMeta{Description: "compact the provider conversation as one turn", AllowedKinds: []string{string(message.KindRequest)}}
+	selectExample, _ := json.Marshal(map[string]any{"selections": l.def.cfg.Runtime.Selections, "current": l.options})
+	d.Types[TypeSelect] = introspect.TypeMeta{Description: "select a configured model and effort for subsequent turns", AllowedKinds: []string{string(message.KindRequest)}, PayloadExample: selectExample}
+	d.Types[TypeContext] = introspect.TypeMeta{Description: "read the most recent turn context usage", AllowedKinds: []string{string(message.KindRequest)}}
 	answer, ok := introspect.AnswerDescribe(d, req)
 	if !ok {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported", detail: "agent has no type " + req.Type})
 		return
 	}
 	l.exec.terminal(string(msg.ID), terminalCandidate{value: answer})
+}
+
+func (l *agentLoop) validateSelection(raw json.RawMessage) (runtimeproto.TurnOptions, string, string) {
+	if len(l.def.cfg.Runtime.Selections) == 0 {
+		return runtimeproto.TurnOptions{}, "type_unsupported", "agent does not support " + TypeSelect
+	}
+	var requested runtimeproto.TurnOptions
+	if len(raw) != 0 && json.Unmarshal(raw, &requested) != nil {
+		return runtimeproto.TurnOptions{}, "invalid_args", "selection payload must be an object"
+	}
+	requested.Model = strings.TrimSpace(requested.Model)
+	requested.Effort = strings.TrimSpace(requested.Effort)
+	if requested.Model == "" && requested.Effort != "" {
+		requested.Model = l.options.Model
+	}
+	for _, candidate := range l.def.cfg.Runtime.Selections {
+		if requested.Model != candidate.Model {
+			continue
+		}
+		if requested.Effort == "" || requested.Effort == candidate.Effort {
+			return candidate, "", ""
+		}
+	}
+	return runtimeproto.TurnOptions{}, "invalid_args", "selection is not in provider selections"
 }
 
 func (l *agentLoop) watchClosure(id book.RequestID, ctx context.Context) {
@@ -534,9 +595,15 @@ func (l *agentLoop) startNext() {
 		if row.Sender != first.Sender {
 			break
 		}
+		if len(batch) > 0 && isCommandRequest(row) {
+			break
+		}
 		l.state.Buffer = l.state.Buffer[1:]
 		l.state.BufferBytes -= row.Bytes
 		batch = append(batch, id)
+		if isCommandRequest(row) {
+			break
+		}
 	}
 	if len(batch) == 0 {
 		return
@@ -545,6 +612,9 @@ func (l *agentLoop) startNext() {
 	messages := make([]runtimeproto.Input, 0, len(batch))
 	for _, id := range batch {
 		if row := l.state.Requests[id]; row != nil {
+			if isCommandRequest(row) {
+				continue
+			}
 			messages = append(messages, runtimeproto.CloneInput(row.Input))
 		}
 	}
@@ -564,12 +634,16 @@ func (l *agentLoop) startNext() {
 	op := l.opID()
 	owner.Location = book.Starting
 	l.state.Turn = &book.Turn{Serial: l.nextTurn, Phase: book.TurnStarting, StartOp: op, Owner: tail, Scope: owner.Scope, AnchorParent: owner.ParentID, AnchorCorrelation: owner.CorrelationID}
-	cmd := runtimeproto.StartCommand{Op: op, Messages: messages, Background: l.takeBackground(), Scope: owner.Scope}
+	cmd := runtimeproto.StartCommand{Op: op, Messages: messages, Background: l.takeBackground(), Scope: owner.Scope, Kind: owner.TurnKind, Options: owner.Options}
 	if err := l.exec.runtimeStart(cmd); err != nil {
 		l.faultNow("command_admission", err.Error())
 		return
 	}
 	l.armReceipt(receiptKey("start", uint64(op)))
+}
+
+func isCommandRequest(row *book.Request) bool {
+	return row != nil && (row.TurnKind == runtimeproto.TurnCompact || row.TurnKind == runtimeproto.TurnSelect)
 }
 
 func (l *agentLoop) scheduleAction(kind book.ActionKind, id book.RequestID) {
@@ -845,17 +919,33 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 		l.logLate("TurnEnded", e.turnID)
 		return
 	}
+	ownerKind := runtimeproto.TurnChat
+	if row := l.state.Requests[t.Owner]; row != nil {
+		ownerKind = row.TurnKind
+	}
 	if t.Owner != "" {
 		switch e.status {
 		case runtimeproto.TurnStatusOK:
-			l.finish(t.Owner, terminalCandidate{value: map[string]any{"turn_index": t.Serial, "text": e.text}})
+			value := map[string]any{"turn_index": t.Serial, "usage": usageValue(e.usage)}
+			if e.text != "" {
+				value["text"] = e.text
+			}
+			if ownerKind == runtimeproto.TurnCompact {
+				value["status"] = "completed"
+			}
+			l.finish(t.Owner, terminalCandidate{value: value})
 		case runtimeproto.TurnStatusInterrupted:
 			l.finish(t.Owner, terminalCandidate{fail: true, code: errorInterrupted, detail: e.detail})
 		default:
 			l.finish(t.Owner, terminalCandidate{fail: true, code: errorProviderFailed, detail: e.detail})
 		}
 	}
-	l.emitTurnEnded(string(e.status))
+	l.lastUsage, l.hasUsage = e.usage, true
+	if e.status == runtimeproto.TurnStatusOK && ownerKind == runtimeproto.TurnSelect {
+		l.options = runtimeproto.TurnOptions{Model: e.usage.Model, Effort: e.usage.Effort}
+		l.exec.persistSelection(l.options)
+	}
+	l.emitTurnEnded(string(e.status), &e.usage)
 	l.clearTurn()
 	if a := l.state.Running; a != nil && a.Target == e.turnID {
 		l.clearReceipt(receiptKey("terminal", a.Serial))
@@ -866,6 +956,10 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 	}
 	l.maybeRunAction()
 	l.startNext()
+}
+
+func usageValue(usage runtimeproto.TurnUsage) map[string]any {
+	return map[string]any{"context_tokens": usage.ContextTokens, "context_window": usage.ContextWindow, "model": usage.Model, "effort": usage.Effort}
 }
 
 func (l *agentLoop) onProviderLost(e runtimeEvent) {
@@ -881,7 +975,7 @@ func (l *agentLoop) onProviderLost(e runtimeEvent) {
 	if t.Owner != "" {
 		l.finish(t.Owner, terminalCandidate{fail: true, code: code, detail: e.detail})
 	}
-	l.emitTurnEnded(string(runtimeproto.TurnStatusFailed))
+	l.emitTurnEnded(string(runtimeproto.TurnStatusFailed), nil)
 	l.clearTurn()
 	if a := l.state.Running; a != nil && a.Target == e.turnID {
 		l.clearReceipt(receiptKey("terminal", a.Serial))

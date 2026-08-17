@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
-	"github.com/wanpengxie/atoll/drivers/agents/provider/codex/internal/emit"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/emit"
 )
 
 type connection struct {
@@ -48,6 +48,9 @@ type worker struct {
 	attempt    driverproto.AttemptToken
 	target     driverproto.WorkerTurnTarget
 	final      map[driverproto.WorkerTurnRef]string
+	options    driverproto.TurnOptions
+	pending    driverproto.TurnOptions
+	usage      driverproto.TurnUsage
 	leases     sync.WaitGroup
 	reaped     chan struct{}
 	retireOnce sync.Once
@@ -80,6 +83,8 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	defer w.end()
 	w.mu.Lock()
 	w.phase = phaseOpening
+	w.options = req.Options
+	w.pending.Effort = req.Options.Effort
 	w.mu.Unlock()
 	p, err := w.cfg.processFactory(ctx, w.cfg)
 	if err != nil {
@@ -130,9 +135,20 @@ func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage
 		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 		return
 	}
-	method, params := "thread/start", any(map[string]any{"approvalPolicy": "never", "sandbox": "danger-full-access", "cwd": w.cfg.WorkspaceDir})
+	w.mu.Lock()
+	model := w.options.Model
+	w.mu.Unlock()
+	startParams := map[string]any{"approvalPolicy": "never", "sandbox": "danger-full-access", "cwd": w.cfg.WorkspaceDir}
+	if model != "" {
+		startParams["model"] = model
+	}
+	method, params := "thread/start", any(startParams)
 	if len(seed) > 0 {
-		method, params = "thread/resume", map[string]any{"threadId": string(seed), "excludeTurns": true}
+		resumeParams := map[string]any{"threadId": string(seed), "excludeTurns": true}
+		if model != "" {
+			resumeParams["model"] = model
+		}
+		method, params = "thread/resume", resumeParams
 	}
 	if err := c.rpc.callAsync(method, params, func(raw json.RawMessage, err error) { w.afterSession(c, len(seed) > 0, raw, err) }); err != nil {
 		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
@@ -180,7 +196,6 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 		return
 	}
 	defer w.end()
-	input := buildInput(req.Messages, req.Background)
 	w.mu.Lock()
 	if w.phase != phaseReady || w.conn == nil {
 		w.mu.Unlock()
@@ -189,10 +204,55 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	c, thread := w.conn, w.thread
 	w.phase, w.attempt = phaseStarting, req.Attempt
 	w.target = driverproto.WorkerTurnTarget{Attempt: req.Attempt}
+	if req.Kind == driverproto.TurnSelect {
+		selected := req.Options
+		if selected.Model == "" {
+			selected.Model = w.options.Model
+		}
+		if selected.Effort == "" {
+			selected.Effort = w.options.Effort
+		}
+		w.options = selected
+		w.pending = req.Options
+		w.target.Native = driverproto.WorkerTurnRef(fmt.Sprintf("select-%d", req.Attempt))
+		target, usage := w.target, w.currentUsageLocked()
+		w.phase = phaseActive
+		w.mu.Unlock()
+		w.publish(driverproto.TurnStarted{Target: target})
+		w.mu.Lock()
+		if w.attempt == req.Attempt {
+			w.attempt, w.target, w.phase = 0, driverproto.WorkerTurnTarget{}, phaseReady
+		}
+		w.mu.Unlock()
+		w.publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, Usage: usage})
+		return
+	}
+	pending := w.pending
+	if req.Kind == driverproto.TurnChat {
+		w.pending = driverproto.TurnOptions{}
+	}
 	w.mu.Unlock()
-	if err := c.rpc.callAsync("turn/start", map[string]any{"threadId": thread, "input": input}, func(_ json.RawMessage, err error) { w.afterStartResponse(req.Attempt, err) }); err != nil {
+	method := "thread/compact/start"
+	params := map[string]any{"threadId": thread}
+	if req.Kind == driverproto.TurnChat {
+		method = "turn/start"
+		params["input"] = buildInput(req.Messages, req.Background)
+		if pending.Model != "" {
+			params["model"] = pending.Model
+		}
+		if pending.Effort != "" {
+			params["effort"] = pending.Effort
+		}
+	}
+	if err := c.rpc.callAsync(method, params, func(_ json.RawMessage, err error) { w.afterStartResponse(req.Attempt, err) }); err != nil {
 		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 	}
+}
+
+func (w *worker) currentUsageLocked() driverproto.TurnUsage {
+	usage := w.usage
+	usage.Model, usage.Effort = w.options.Model, w.options.Effort
+	return usage
 }
 
 func (w *worker) afterStartResponse(attempt driverproto.AttemptToken, err error) {

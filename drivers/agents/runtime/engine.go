@@ -139,9 +139,10 @@ type engine struct {
 	pending      *pendingDemand
 	turn         *turnState
 	seed         []byte
+	options      runtimeproto.TurnOptions
 }
 
-func newEngine(provider driverproto.Provider, spec driverproto.ProviderSpec, policy Policy, deps runtimeproto.Deps, seed []byte, events runtimeproto.Events) (*engine, error) {
+func newEngine(provider driverproto.Provider, spec driverproto.ProviderSpec, policy Policy, deps runtimeproto.Deps, seed []byte, options runtimeproto.TurnOptions, events runtimeproto.Events) (*engine, error) {
 	if deps.Parent == nil {
 		return nil, fmt.Errorf("agent/runtime: parent context required")
 	}
@@ -152,7 +153,7 @@ func newEngine(provider driverproto.Provider, spec driverproto.ProviderSpec, pol
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
 	root, cancel := context.WithCancel(deps.Parent)
-	e := &engine{provider: provider, providerSpec: spec, policy: policy, deps: deps, events: events, root: root, cancel: cancel, inbox: newInbox(policy), timers: map[timerKind]*time.Timer{}, seed: append([]byte(nil), seed...)}
+	e := &engine{provider: provider, providerSpec: spec, policy: policy, deps: deps, events: events, root: root, cancel: cancel, inbox: newInbox(policy), timers: map[timerKind]*time.Timer{}, seed: append([]byte(nil), seed...), options: options}
 	go e.run()
 	return e, nil
 }
@@ -285,7 +286,7 @@ func (e *engine) handleCommand(c command) {
 }
 
 func (e *engine) acceptStart(c runtimeproto.StartCommand) {
-	if c.Op == 0 || len(c.Messages) == 0 || e.pending != nil {
+	if c.Op == 0 || (c.Kind == runtimeproto.TurnChat && len(c.Messages) == 0) || e.pending != nil {
 		e.contractFault("invalid_start", "duplicate or malformed Start command")
 		return
 	}
@@ -419,7 +420,7 @@ func (e *engine) spawn() {
 	e.generation = generationState{id: g, phase: generationOpening, sink: sink, openRevision: e.revision()}
 	go e.watchReaped(g, w)
 	seed := append([]byte(nil), e.seed...)
-	e.workerOpen(w, driverproto.OpenRequest{ResumeSeed: seed})
+	e.workerOpen(w, driverproto.OpenRequest{ResumeSeed: seed, Options: driverproto.TurnOptions{Model: e.options.Model, Effort: e.options.Effort}})
 	e.arm(timerOpen, e.policy.OpenFactDeadline, timerFact{kind: timerOpen, generation: g, revision: e.generation.openRevision})
 }
 
@@ -456,7 +457,7 @@ func (e *engine) dispatchDemand() {
 		e.contractFault("worker_slot", "ready generation has no worker")
 		return
 	}
-	req := driverproto.StartRequest{Attempt: t.attempt, Life: life, Messages: toDriverInputs(d.start.Messages), Background: toDriverContexts(d.start.Background)}
+	req := driverproto.StartRequest{Attempt: t.attempt, Life: life, Messages: toDriverInputs(d.start.Messages), Background: toDriverContexts(d.start.Background), Kind: d.start.Kind, Options: driverproto.TurnOptions{Model: d.start.Options.Model, Effort: d.start.Options.Effort}}
 	e.workerStart(w, req)
 	e.arm(timerStart, e.policy.StartFactDeadline, timerFact{kind: timerStart, generation: e.generation.id, revision: t.startRevision, attempt: t.attempt})
 }
@@ -630,7 +631,11 @@ func (e *engine) turnEnded(x driverproto.TurnEnded) {
 	} else if x.Status == driverproto.TurnInterrupted {
 		status = runtimeproto.TurnStatusInterrupted
 	}
-	e.publish(publishTurnEnded{turn: e.turn.id, status: status, text: x.FinalText, detail: x.ErrorDetail})
+	usage := runtimeproto.TurnUsage{ContextTokens: x.Usage.ContextTokens, ContextWindow: x.Usage.ContextWindow, Model: x.Usage.Model, Effort: x.Usage.Effort}
+	if e.turn.start.Kind == runtimeproto.TurnSelect && status == runtimeproto.TurnStatusOK {
+		e.options = runtimeproto.TurnOptions{Model: usage.Model, Effort: usage.Effort}
+	}
+	e.publish(publishTurnEnded{turn: e.turn.id, status: status, text: x.FinalText, detail: x.ErrorDetail, usage: usage})
 	e.turn.terminal = true
 	e.turn.cancel()
 	if e.turn.control != nil {

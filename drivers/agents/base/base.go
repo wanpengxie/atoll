@@ -42,7 +42,7 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 	if cfg.Runtime.Describe.SkillDoc == "" {
 		cfg.Runtime.Describe.SkillDoc = doc
 	}
-	d := definition{cfg: cfg, controls: map[string]struct{}{TypeQueue: {}, TypeStop: {}, TypeTerminate: {}, TypeRestart: {}}}
+	d := definition{cfg: cfg, controls: map[string]struct{}{TypeCompact: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeStop: {}, TypeTerminate: {}, TypeRestart: {}}}
 	if cfg.Runtime.Capabilities.Steer {
 		d.controls[TypeSteer] = struct{}{}
 	}
@@ -71,6 +71,9 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 }
 
 const (
+	TypeCompact   = "agent.compact"
+	TypeSelect    = "agent.select"
+	TypeContext   = "agent.context"
 	TypeSteer     = "agent.steer"
 	TypeInterrupt = "agent.interrupt"
 	TypeQueue     = "agent.queue"
