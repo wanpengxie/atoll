@@ -24,12 +24,14 @@ func TestAgentDriverDependencyWalls(t *testing.T) {
 			switch {
 			case hasPathPrefix(f.dir, "drivers/agents/provider"):
 				// 一个 provider 自己的子包（internal/…）在它自身边界之内；
+				// provider/internal 公共叶子也在边界内，不构成 provider 间依赖；
 				// 墙拦的是跨层与跨 provider 依赖。
 				own := f.dir
 				if parts := strings.SplitN(f.dir, "/", 5); len(parts) >= 4 {
 					own = strings.Join(parts[:4], "/")
 				}
-				if hasPathPrefix(rel, "drivers/agents") && !hasPathPrefix(rel, "drivers/agents/driverproto") && !hasPathPrefix(rel, own) {
+				sharedProviderLeaf := hasPathPrefix(rel, "drivers/agents/provider/internal")
+				if hasPathPrefix(rel, "drivers/agents") && !hasPathPrefix(rel, "drivers/agents/driverproto") && !hasPathPrefix(rel, own) && !sharedProviderLeaf {
 					bad = append(bad, fmt.Sprintf("%s imports %s", f.path, p))
 				}
 				if hasPathPrefix(rel, "lib/actorbase") || hasPathPrefix(rel, "runtime/actorhost") || hasPathPrefix(rel, "runtime/actorrt") {

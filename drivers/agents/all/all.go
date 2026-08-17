@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/claude"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/codex"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/script"
 	agentruntime "github.com/wanpengxie/atoll/drivers/agents/runtime"
@@ -19,8 +20,23 @@ import (
 )
 
 func init() {
+	registry.Register(claude.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newClaude, ValidateConfig: claude.ValidateConfig})
 	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newCodex, ValidateConfig: codex.ValidateConfig})
 	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
+}
+
+func newClaude(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
+	if spec.ID == "" {
+		return platform.ActorDecl{}, errors.New("claude: explicit instance id required")
+	}
+	if deps.ChannelID == "" {
+		return platform.ActorDecl{}, errors.New("claude: channel required")
+	}
+	cfg, err := claude.ParseConfig(spec.Config, deps.WorkspaceDir, deps.Logger)
+	if err != nil {
+		return platform.ActorDecl{}, fmt.Errorf("claude config: %w", err)
+	}
+	return compose(spec, claude.NewProvider(cfg))
 }
 
 func newCodex(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {

@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
-	"github.com/wanpengxie/atoll/drivers/agents/provider/codex/internal/emit"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/emit"
 )
 
 type connection struct {

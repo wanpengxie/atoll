@@ -1,4 +1,4 @@
-// Package emit owns the single gated path from the codex worker to the
+// Package emit owns the single gated path from a provider worker to the
 // Runtime EventSink. The raw sink is captured here at construction and is
 // unreachable from the rest of the driver, so the contract rule
 // "Publish=false means stop producing immediately" cannot be bypassed:
