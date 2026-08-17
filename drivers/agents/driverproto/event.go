@@ -98,11 +98,18 @@ type Tool struct {
 	Status ToolStatus
 	Detail string
 }
+type TurnUsage struct {
+	ContextTokens int64
+	ContextWindow int64
+	Model         string
+	Effort        string
+}
 type TurnEnded struct {
 	Target      WorkerTurnTarget
 	Status      TurnEndStatus
 	FinalText   string
 	ErrorDetail string
+	Usage       TurnUsage
 }
 type SeedUpdated struct{ Value []byte }
 type WorkerEnded struct {

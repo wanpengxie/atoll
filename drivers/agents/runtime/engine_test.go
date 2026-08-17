@@ -125,10 +125,11 @@ func (w *resumeRetryWorker) Retire()                                           {
 func (w *resumeRetryWorker) Reaped() <-chan struct{}                           { return w.reaped }
 
 type collectedEvent struct {
-	kind string
-	op   runtimeproto.OpID
-	turn runtimeproto.TurnID
-	text string
+	kind  string
+	op    runtimeproto.OpID
+	turn  runtimeproto.TurnID
+	text  string
+	usage runtimeproto.TurnUsage
 }
 type eventCollector struct{ ch chan collectedEvent }
 
@@ -140,8 +141,8 @@ func (c *eventCollector) TurnRejected(op runtimeproto.OpID, code, detail string)
 	c.ch <- collectedEvent{kind: "rejected", op: op, text: code + detail}
 }
 func (c *eventCollector) Tool(runtimeproto.TurnID, runtimeproto.ToolEvent) {}
-func (c *eventCollector) TurnEnded(id runtimeproto.TurnID, _ runtimeproto.TurnStatus, text, _ string) {
-	c.ch <- collectedEvent{kind: "ended", turn: id, text: text}
+func (c *eventCollector) TurnEnded(id runtimeproto.TurnID, _ runtimeproto.TurnStatus, text, _ string, usage runtimeproto.TurnUsage) {
+	c.ch <- collectedEvent{kind: "ended", turn: id, text: text, usage: usage}
 }
 func (c *eventCollector) ControlDone(op runtimeproto.OpID, id runtimeproto.TurnID, _ runtimeproto.ControlVerdict, _ string) {
 	c.ch <- collectedEvent{kind: "control", op: op, turn: id}
@@ -188,7 +189,7 @@ func TestRuntimeFactsDriveTurnAndUUIDv7(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events := newCollector()
-	rt, err := factory(runtimeproto.Deps{Parent: ctx}, nil, events)
+	rt, err := factory(runtimeproto.Deps{Parent: ctx}, nil, runtimeproto.TurnOptions{}, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +232,7 @@ func TestResumeInvalidRetriesAtMostOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			events := newCollector()
-			rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, []byte("stale-seed"), events)
+			rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, []byte("stale-seed"), runtimeproto.TurnOptions{}, events)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -412,7 +413,7 @@ func TestUnexpectedReapSettlesPendingControlOnTerminalTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := newCollector()
-	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, nil, events)
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, nil, runtimeproto.TurnOptions{}, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +688,7 @@ func TestCloseDoesNotWaitForBrokenReaped(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := newCollector()
-	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, nil, events)
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background()}, nil, runtimeproto.TurnOptions{}, events)
 	if err != nil {
 		t.Fatal(err)
 	}

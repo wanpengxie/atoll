@@ -47,7 +47,7 @@ func (c *claudeRuntimeCollector) TurnRejected(op runtimeproto.OpID, code, detail
 	c.push(claudeRuntimeEvent{kind: "rejected", op: op, code: code, text: detail})
 }
 func (*claudeRuntimeCollector) Tool(runtimeproto.TurnID, runtimeproto.ToolEvent) {}
-func (c *claudeRuntimeCollector) TurnEnded(_ runtimeproto.TurnID, status runtimeproto.TurnStatus, text, _ string) {
+func (c *claudeRuntimeCollector) TurnEnded(_ runtimeproto.TurnID, status runtimeproto.TurnStatus, text, _ string, _ runtimeproto.TurnUsage) {
 	c.push(claudeRuntimeEvent{kind: "ended", status: status, text: text})
 }
 func (*claudeRuntimeCollector) ControlDone(runtimeproto.OpID, runtimeproto.TurnID, runtimeproto.ControlVerdict, string) {
@@ -96,7 +96,7 @@ func TestRuntimeRetriesResumeInvalidWithFreshSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := newClaudeRuntimeCollector()
-	rt, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: slog.New(slog.DiscardHandler)}, []byte("stale-session"), events)
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: slog.New(slog.DiscardHandler)}, []byte("stale-session"), runtimeproto.TurnOptions{}, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +165,11 @@ func TestClaudeMockProcessHelper(t *testing.T) {
 		}
 		if frame["type"] == "control_request" {
 			request := frame["request"].(map[string]any)
-			if request["subtype"] == "initialize" {
+			switch request["subtype"] {
+			case "initialize":
 				_ = encoder.Encode(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": frame["request_id"], "response": map[string]any{}}})
+			case "get_context_usage":
+				_ = encoder.Encode(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": frame["request_id"], "response": map[string]any{"totalTokens": 0, "maxTokens": 200000}}})
 			}
 			continue
 		}

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+
+	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
 
 const (
@@ -17,9 +20,17 @@ type Config struct {
 	Binary         string
 	Logger         *slog.Logger
 	processFactory processFactory
+	Selections     []driverproto.TurnOptions
+	Default        int
 }
 
-type specConfig struct{}
+type specConfig struct {
+	Selections []struct {
+		Model  string `json:"model"`
+		Effort string `json:"effort"`
+	} `json:"selections,omitempty"`
+	Default int `json:"default,omitempty"`
+}
 
 func ValidateConfig(raw json.RawMessage) error {
 	if len(raw) == 0 {
@@ -28,7 +39,16 @@ func ValidateConfig(raw json.RawMessage) error {
 	var c specConfig
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	return dec.Decode(&c)
+	if err := dec.Decode(&c); err != nil {
+		return err
+	}
+	if len(c.Selections) > 0 && (c.Default < 0 || c.Default >= len(c.Selections)) {
+		return fmt.Errorf("codex: default selection index %d out of range", c.Default)
+	}
+	if len(c.Selections) == 0 && c.Default != 0 {
+		return fmt.Errorf("codex: default selection requires selections")
+	}
+	return nil
 }
 
 func ParseConfig(raw json.RawMessage, workspace string, logger *slog.Logger) (Config, error) {
@@ -41,5 +61,13 @@ func ParseConfig(raw json.RawMessage, workspace string, logger *slog.Logger) (Co
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return Config{WorkspaceDir: workspace, Binary: "codex", Logger: logger, processFactory: spawnProcess}, nil
+	var spec specConfig
+	if len(raw) != 0 {
+		_ = json.Unmarshal(raw, &spec)
+	}
+	selections := make([]driverproto.TurnOptions, len(spec.Selections))
+	for i, option := range spec.Selections {
+		selections[i] = driverproto.TurnOptions{Model: option.Model, Effort: option.Effort}
+	}
+	return Config{WorkspaceDir: workspace, Binary: "codex", Logger: logger, processFactory: spawnProcess, Selections: selections, Default: spec.Default}, nil
 }

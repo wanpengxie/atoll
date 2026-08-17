@@ -2,6 +2,7 @@ package driverproto
 
 type OpenRequest struct {
 	ResumeSeed []byte
+	Options    TurnOptions
 }
 
 type ControlKind uint8

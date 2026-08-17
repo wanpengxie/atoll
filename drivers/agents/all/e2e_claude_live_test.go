@@ -53,7 +53,7 @@ func TestClaudeLiveE2E(t *testing.T) {
 	t.Logf("spec: caps=%+v receipt=%s", spec.Capabilities, spec.Bounds.ReceiptDeadline)
 
 	events := newLiveCollector(t)
-	rt, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, nil, events)
+	rt, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, nil, runtimeproto.TurnOptions{}, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestClaudeLiveE2E(t *testing.T) {
 	rt.Close()
 	closed = true
 	events2 := newLiveCollector(t)
-	rt2, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, seed, events2)
+	rt2, err := factory(runtimeproto.Deps{Parent: context.Background(), Logger: logger}, seed, runtimeproto.TurnOptions{}, events2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +154,18 @@ func TestClaudeLiveE2E(t *testing.T) {
 	ended = events2.await(t, turnWait, "ended")
 	if ended.status != runtimeproto.TurnStatusOK || !strings.Contains(strings.ToUpper(ended.text), "OK") {
 		t.Fatalf("respawn turn=%+v", ended)
+	}
+
+	// Turn controls run last: compact rewrites the session summary, so it must
+	// not precede the resume-recall line.
+	if model := os.Getenv("CLAUDE_E2E_MODEL"); model != "" {
+		effort := os.Getenv("CLAUDE_E2E_EFFORT")
+		if effort == "" {
+			effort = "low"
+		}
+		runTurnControlsLive(t, rt2, events2, 20, runtimeproto.TurnOptions{Model: model, Effort: effort})
+	} else {
+		t.Log("turn-controls segment skipped: CLAUDE_E2E_MODEL is unset")
 	}
 }
 

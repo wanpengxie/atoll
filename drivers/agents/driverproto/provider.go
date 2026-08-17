@@ -23,9 +23,11 @@ type Worker interface {
 }
 
 type ProviderSpec struct {
-	Name         string
-	Capabilities Capabilities
-	Describe     introspect.Describe
+	Name             string
+	Capabilities     Capabilities
+	Describe         introspect.Describe
+	Selections       []TurnOptions
+	DefaultSelection int
 }
 
 type Capabilities struct {

@@ -29,12 +29,17 @@ func Build(provider driverproto.Provider, policy Policy) (runtimeproto.Factory, 
 		}
 	}
 	spec := runtimeproto.Spec{
-		Describe:     ps.Describe,
-		Capabilities: runtimeproto.Capabilities{Steer: ps.Capabilities.Steer, Interrupt: ps.Capabilities.Interrupt, Resume: ps.Capabilities.Resume},
-		Bounds:       runtimeproto.Bounds{ReceiptDeadline: receipt, EventCapacity: policy.EventCapacity},
+		Describe:         ps.Describe,
+		Capabilities:     runtimeproto.Capabilities{Steer: ps.Capabilities.Steer, Interrupt: ps.Capabilities.Interrupt, Resume: ps.Capabilities.Resume},
+		Bounds:           runtimeproto.Bounds{ReceiptDeadline: receipt, EventCapacity: policy.EventCapacity},
+		Selections:       make([]runtimeproto.TurnOptions, len(ps.Selections)),
+		DefaultSelection: ps.DefaultSelection,
 	}
-	factory := func(deps runtimeproto.Deps, seed []byte, events runtimeproto.Events) (runtimeproto.Runtime, error) {
-		return newEngine(provider, ps, policy, deps, seed, events)
+	for i, option := range ps.Selections {
+		spec.Selections[i] = runtimeproto.TurnOptions{Model: option.Model, Effort: option.Effort}
+	}
+	factory := func(deps runtimeproto.Deps, seed []byte, options runtimeproto.TurnOptions, events runtimeproto.Events) (runtimeproto.Runtime, error) {
+		return newEngine(provider, ps, policy, deps, seed, options, events)
 	}
 	return factory, spec, nil
 }

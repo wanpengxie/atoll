@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
 
 type childProcess struct {
@@ -28,15 +30,22 @@ type childProcess struct {
 
 type processFactory func(context.Context, Config, []string) (*childProcess, error)
 
-func spawnArgs(cfg Config, session string, resume bool) []string {
+func spawnArgs(cfg Config, session string, resume bool, options driverproto.TurnOptions) []string {
 	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 	if resume {
 		args = append(args, "--resume", session)
 	} else {
 		args = append(args, "--session-id", session)
 	}
-	if cfg.Model != "" {
-		args = append(args, "--model", cfg.Model)
+	model := options.Model
+	if model == "" {
+		model = cfg.Model
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if options.Effort != "" {
+		args = append(args, "--effort", options.Effort)
 	}
 	return args
 }

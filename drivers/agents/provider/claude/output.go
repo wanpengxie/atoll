@@ -32,16 +32,41 @@ type messageFrame struct {
 	Message struct {
 		Content []contentBlock  `json:"content"`
 		Error   json.RawMessage `json:"error"`
+		Model   string          `json:"model"`
 	} `json:"message"`
 }
+type resultUsage struct {
+	InputTokens         int64 `json:"input_tokens"`
+	CacheCreationTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadTokens     int64 `json:"cache_read_input_tokens"`
+}
 type resultFrame struct {
-	Subtype         string   `json:"subtype"`
-	IsError         bool     `json:"is_error"`
-	Result          string   `json:"result"`
-	Errors          []string `json:"errors"`
-	TerminalReason  string   `json:"terminal_reason"`
-	UserMessageUUID string   `json:"user_message_uuid"`
-	NumTurns        int      `json:"num_turns"`
+	Subtype         string      `json:"subtype"`
+	IsError         bool        `json:"is_error"`
+	Result          string      `json:"result"`
+	Errors          []string    `json:"errors"`
+	TerminalReason  string      `json:"terminal_reason"`
+	UserMessageUUID string      `json:"user_message_uuid"`
+	NumTurns        int         `json:"num_turns"`
+	Usage           resultUsage `json:"usage"`
+}
+
+type statusFrame struct {
+	CompactResult string `json:"compact_result"`
+	CompactError  string `json:"compact_error"`
+}
+
+type compactBoundaryFrame struct {
+	Metadata struct {
+		PreTokens  int64 `json:"pre_tokens"`
+		PostTokens int64 `json:"post_tokens"`
+		DurationMS int64 `json:"duration_ms"`
+	} `json:"compact_metadata"`
+}
+
+type contextUsageFrame struct {
+	TotalTokens int64 `json:"totalTokens"`
+	MaxTokens   int64 `json:"maxTokens"`
 }
 
 func (w *worker) onLifecycle(c *connection, id, state string) {
@@ -135,6 +160,14 @@ func (w *worker) onFrame(c *connection, typ, subtype string, raw json.RawMessage
 			}
 			return
 		}
+		if subtype == "status" {
+			w.onStatus(c, raw)
+			return
+		}
+		if subtype == "compact_boundary" {
+			w.onCompactBoundary(c, raw)
+			return
+		}
 		w.debug("noise_frame", typ+"/"+subtype)
 	case "assistant":
 		w.onAssistant(c, raw)
@@ -147,6 +180,49 @@ func (w *worker) onFrame(c *connection, typ, subtype string, raw json.RawMessage
 	default:
 		w.debug("noise_frame", typ+"/"+subtype)
 	}
+}
+
+func (w *worker) onStatus(c *connection, raw json.RawMessage) {
+	var frame statusFrame
+	if json.Unmarshal(raw, &frame) != nil {
+		w.debug("invalid_frame", "system/status")
+		return
+	}
+	w.mu.Lock()
+	if w.conn != c || w.turn == nil || w.turn.kind != driverproto.TurnCompact {
+		w.mu.Unlock()
+		w.debug("noise_frame", "system/status")
+		return
+	}
+	if frame.CompactResult != "" {
+		w.turn.compactResult, w.turn.compactError = frame.CompactResult, frame.CompactError
+	}
+	target := w.target
+	w.mu.Unlock()
+	if target.Valid() {
+		w.publish(driverproto.Activity{Target: target})
+	}
+}
+
+func (w *worker) onCompactBoundary(c *connection, raw json.RawMessage) {
+	var frame compactBoundaryFrame
+	if json.Unmarshal(raw, &frame) != nil {
+		w.debug("invalid_frame", "system/compact_boundary")
+		return
+	}
+	w.mu.Lock()
+	current := w.conn == c && w.turn != nil && w.turn.kind == driverproto.TurnCompact
+	if current {
+		w.turn.compactPost = frame.Metadata.PostTokens
+		w.turn.compactMeta = true
+	}
+	w.mu.Unlock()
+	if !current {
+		w.debug("noise_frame", "system/compact_boundary")
+		return
+	}
+	detail, _ := json.Marshal(map[string]int64{"pre_tokens": frame.Metadata.PreTokens, "post_tokens": frame.Metadata.PostTokens, "duration_ms": frame.Metadata.DurationMS})
+	w.publish(driverproto.Diagnostic{Level: driverproto.DiagnosticInfo, Code: "compact", Detail: string(detail)})
 }
 
 func nonNull(raw json.RawMessage) bool {
@@ -216,6 +292,11 @@ func (w *worker) onAssistant(c *connection, raw json.RawMessage) {
 	if json.Unmarshal(raw, &frame) != nil {
 		w.debug("invalid_frame", "assistant")
 		return
+	}
+	if frame.Message.Model != "" && frame.Message.Model != "<synthetic>" {
+		w.mu.Lock()
+		w.lastModel = frame.Message.Model
+		w.mu.Unlock()
 	}
 	for _, block := range frame.Message.Content {
 		switch block.Type {
@@ -290,13 +371,18 @@ func (w *worker) onResult(c *connection, raw json.RawMessage) {
 		return
 	}
 	turn := w.turn
-	owned := frame.UserMessageUUID == turn.U || (frame.UserMessageUUID == "" && strings.HasPrefix(frame.TerminalReason, "aborted_") && turn.interrupt.inflight)
+	owned := frame.UserMessageUUID == turn.U || (frame.UserMessageUUID == "" && strings.HasPrefix(frame.TerminalReason, "aborted_") && turn.interrupt.inflight) || (frame.UserMessageUUID == "" && frame.NumTurns == 0 && turn.kind != driverproto.TurnChat)
 	if !owned {
 		w.mu.Unlock()
 		w.unsolicited("result")
 		return
 	}
 	target := w.target
+	if turn.settling {
+		w.mu.Unlock()
+		return
+	}
+	turn.settling = true
 	var cancelQueued bool
 	var targetGone []driverproto.ControlOutcome
 	for _, steer := range turn.steers {
@@ -308,10 +394,6 @@ func (w *worker) onResult(c *connection, raw json.RawMessage) {
 			targetGone = append(targetGone, driverproto.ControlOutcome{Action: steer.action, Target: target, Verdict: driverproto.ControlTargetGone, Detail: "turn ended before steer queued", Disposition: driverproto.KeepWorker})
 		}
 	}
-	w.turn = nil
-	w.attempt = 0
-	w.target = driverproto.WorkerTurnTarget{}
-	w.phase = phaseReady
 	w.mu.Unlock()
 	if cancelQueued {
 		_, _ = c.wire.sendControl("interrupt", map[string]any{"cancel_queued": true}, nil)
@@ -319,8 +401,51 @@ func (w *worker) onResult(c *connection, raw json.RawMessage) {
 	for _, outcome := range targetGone {
 		w.publish(outcome)
 	}
+	w.finishResult(c, target, frame)
+}
+
+func (w *worker) finishResult(c *connection, target driverproto.WorkerTurnTarget, frame resultFrame) {
+	w.mu.Lock()
+	if w.conn != c || w.turn == nil || !w.turn.settling || w.target != target {
+		w.mu.Unlock()
+		return
+	}
+	turn := w.turn
+	usage := w.currentUsageLocked()
+	switch turn.kind {
+	case driverproto.TurnChat:
+		usage.ContextTokens = frame.Usage.InputTokens + frame.Usage.CacheCreationTokens + frame.Usage.CacheReadTokens
+	case driverproto.TurnCompact:
+		if turn.compactMeta {
+			usage.ContextTokens = turn.compactPost
+		}
+	case driverproto.TurnSelect:
+		// Claude reports zero result usage for control turns. Preserve the
+		// latest context usage while applying the selected model and effort.
+	}
+	if turn.kind == driverproto.TurnSelect {
+		if frame.Subtype == "success" {
+			w.options = turn.options
+		}
+		usage.Model, usage.Effort = w.options.Model, w.options.Effort
+	}
+	w.usage = usage
+	w.turn = nil
+	w.attempt = 0
+	w.target = driverproto.WorkerTurnTarget{}
+	w.phase = phaseReady
+	w.mu.Unlock()
 	status, final, detail := settleResult(frame)
-	w.publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail})
+	if turn.kind == driverproto.TurnCompact {
+		final = ""
+		if turn.compactResult == "failed" {
+			status, detail = driverproto.TurnFailed, turn.compactError
+		}
+	}
+	if turn.kind == driverproto.TurnSelect {
+		final = ""
+	}
+	w.publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail, Usage: usage})
 }
 
 func resultDetail(frame resultFrame) string {

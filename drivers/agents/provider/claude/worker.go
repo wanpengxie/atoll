@@ -7,11 +7,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/emit"
 )
+
+const initialContextUsageTimeout = 5 * time.Second
 
 type connection struct {
 	process      *childProcess
@@ -94,10 +97,17 @@ type interruptState struct {
 	requestID string
 }
 type turnState struct {
-	U         string
-	steers    map[string]steerState
-	interrupt interruptState
-	seen      map[string]map[string]bool
+	U             string
+	kind          driverproto.TurnKind
+	options       driverproto.TurnOptions
+	settling      bool
+	compactResult string
+	compactError  string
+	compactPost   int64
+	compactMeta   bool
+	steers        map[string]steerState
+	interrupt     interruptState
+	seen          map[string]map[string]bool
 }
 
 type worker struct {
@@ -118,6 +128,9 @@ type worker struct {
 	initSeen          bool
 	unsolicitedWarned bool
 	debugSeen         map[string]bool
+	options           driverproto.TurnOptions
+	lastModel         string
+	usage             driverproto.TurnUsage
 }
 
 func newWorker(cfg Config, host driverproto.WorkerHost) *worker {
@@ -144,6 +157,10 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	defer w.end()
 	w.mu.Lock()
 	w.phase = phaseOpening
+	w.options = req.Options
+	if w.options.Model == "" {
+		w.options.Model = w.cfg.Model
+	}
 	if len(req.ResumeSeed) > 0 {
 		w.session, w.resume = string(req.ResumeSeed), true
 	} else {
@@ -151,7 +168,7 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	}
 	session, resume := w.session, w.resume
 	w.mu.Unlock()
-	p, err := w.cfg.processFactory(ctx, w.cfg, spawnArgs(w.cfg, session, resume))
+	p, err := w.cfg.processFactory(ctx, w.cfg, spawnArgs(w.cfg, session, resume, req.Options))
 	if err != nil {
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 		return
@@ -196,7 +213,6 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 func (w *worker) afterInitialize(c *connection, reply controlReply) {
 	w.mu.Lock()
 	opening := w.phase == phaseOpening && w.conn == c
-	resume, session := w.resume, w.session
 	w.mu.Unlock()
 	if !opening {
 		return
@@ -214,17 +230,73 @@ func (w *worker) afterInitialize(c *connection, reply controlReply) {
 		return
 	}
 	w.initializeDiagnostic(reply.Response)
+	w.fetchInitialContextWindow(c)
+}
+
+func (w *worker) fetchInitialContextWindow(c *connection) {
+	var once sync.Once
+	finish := func(reply controlReply, timeout bool) {
+		once.Do(func() {
+			if timeout {
+				w.debug("context_usage_timeout", "initial context window unavailable after 5s")
+			} else if !w.cacheContextWindow(c, reply) {
+				w.debug("context_usage_failed", "initial context window unavailable")
+			}
+			w.finishOpen(c)
+		})
+	}
+	id, err := c.wire.sendControl("get_context_usage", nil, func(reply controlReply) { finish(reply, false) })
+	if err != nil {
+		finish(controlReply{Error: err.Error()}, false)
+		return
+	}
+	time.AfterFunc(initialContextUsageTimeout, func() {
+		c.wire.take(id)
+		finish(controlReply{}, true)
+	})
+}
+
+func (w *worker) finishOpen(c *connection) {
 	w.mu.Lock()
 	if w.phase != phaseOpening || w.conn != c {
 		w.mu.Unlock()
 		return
 	}
+	resume, session := w.resume, w.session
 	w.phase = phaseReady
 	w.mu.Unlock()
 	if !resume && !w.publish(driverproto.SeedUpdated{Value: []byte(session)}) {
 		return
 	}
 	w.publish(driverproto.WorkerReady{})
+}
+
+func (w *worker) refreshContextWindow(c *connection) {
+	_, err := c.wire.sendControl("get_context_usage", nil, func(reply controlReply) {
+		if !w.cacheContextWindow(c, reply) && reply.Error != "wire closed" {
+			w.debug("context_usage_failed", "selected model context window unavailable")
+		}
+	})
+	if err != nil {
+		w.debug("context_usage_failed", "selected model context window unavailable")
+	}
+}
+
+func (w *worker) cacheContextWindow(c *connection, reply controlReply) bool {
+	if !reply.Success {
+		return false
+	}
+	var frame contextUsageFrame
+	if json.Unmarshal(reply.Response, &frame) != nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.conn != c || w.phase == phaseRetiring || w.phase == phaseReaped {
+		return false
+	}
+	w.usage.ContextWindow = frame.MaxTokens
+	return true
 }
 
 func (w *worker) initializeDiagnostic(raw json.RawMessage) {
@@ -242,7 +314,10 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	}
 	defer w.end()
 	content := buildContent(req.Messages, req.Background)
-	if len(content) == 0 {
+	if req.Kind == driverproto.TurnCompact {
+		content = []map[string]any{{"type": "text", "text": "/compact"}}
+	}
+	if req.Kind == driverproto.TurnChat && len(content) == 0 {
 		w.publish(driverproto.SubmissionRejected{Attempt: req.Attempt, Class: driverproto.FailureInvalidInput, Detail: "empty input", Disposition: driverproto.KeepWorker})
 		return
 	}
@@ -255,11 +330,106 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	c, session := w.conn, w.session
 	w.phase, w.attempt = phaseStarting, req.Attempt
 	w.target = driverproto.WorkerTurnTarget{Attempt: req.Attempt}
-	w.turn = &turnState{U: u, steers: map[string]steerState{}, seen: map[string]map[string]bool{}}
+	selected := req.Options
+	if selected.Model == "" {
+		selected.Model = w.options.Model
+	}
+	if selected.Effort == "" {
+		selected.Effort = w.options.Effort
+	}
+	w.turn = &turnState{U: u, kind: req.Kind, options: selected, steers: map[string]steerState{}, seen: map[string]map[string]bool{}}
 	w.mu.Unlock()
+	if req.Kind == driverproto.TurnSelect {
+		w.startSelect(c, session, req, u)
+		return
+	}
 	if err := c.wire.writeFrame(userFrame(u, session, content)); err != nil {
 		w.terminal(driverproto.SubmissionRejected{Attempt: req.Attempt, Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 	}
+}
+
+func (w *worker) startSelect(c *connection, session string, req driverproto.StartRequest, u string) {
+	afterModel := func(reply controlReply) {
+		if !reply.Success {
+			detail := strings.TrimSpace(reply.Error)
+			if detail == "" {
+				detail = "set_model rejected"
+			}
+			w.rejectSelection(req.Attempt, detail)
+			return
+		}
+		w.mu.Lock()
+		if w.attempt != req.Attempt || w.turn == nil {
+			w.mu.Unlock()
+			return
+		}
+		if req.Options.Model != "" {
+			w.options.Model = req.Options.Model
+			w.lastModel = ""
+		}
+		w.mu.Unlock()
+		if req.Options.Effort == "" {
+			w.finishModelOnlySelection(req.Attempt)
+			w.refreshContextWindow(c)
+			return
+		}
+		if err := c.wire.writeFrame(userFrame(u, session, []map[string]any{{"type": "text", "text": "/effort " + req.Options.Effort}})); err != nil {
+			w.terminal(driverproto.SubmissionRejected{Attempt: req.Attempt, Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+			return
+		}
+		w.refreshContextWindow(c)
+	}
+	if req.Options.Model == "" {
+		afterModel(controlReply{Success: true})
+		return
+	}
+	if _, err := c.wire.sendControl("set_model", map[string]any{"model": req.Options.Model}, afterModel); err != nil {
+		w.terminal(driverproto.SubmissionRejected{Attempt: req.Attempt, Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+	}
+}
+
+func (w *worker) rejectSelection(attempt driverproto.AttemptToken, detail string) {
+	w.mu.Lock()
+	if w.attempt != attempt || w.phase != phaseStarting {
+		w.mu.Unlock()
+		return
+	}
+	w.attempt, w.target, w.turn, w.phase = 0, driverproto.WorkerTurnTarget{}, nil, phaseReady
+	w.mu.Unlock()
+	w.publish(driverproto.SubmissionRejected{Attempt: attempt, Class: driverproto.FailureProvider, Detail: detail, Disposition: driverproto.KeepWorker})
+}
+
+func (w *worker) finishModelOnlySelection(attempt driverproto.AttemptToken) {
+	w.mu.Lock()
+	if w.attempt != attempt || w.phase != phaseStarting || w.turn == nil {
+		w.mu.Unlock()
+		return
+	}
+	w.target.Native = driverproto.WorkerTurnRef(fmt.Sprintf("select-%d", attempt))
+	target := w.target
+	usage := w.currentUsageLocked()
+	w.options = w.turn.options
+	usage.Model, usage.Effort = w.options.Model, w.options.Effort
+	w.usage = usage
+	w.phase = phaseActive
+	w.mu.Unlock()
+	w.publish(driverproto.TurnStarted{Target: target})
+	w.mu.Lock()
+	if w.attempt == attempt {
+		w.attempt, w.target, w.turn, w.phase = 0, driverproto.WorkerTurnTarget{}, nil, phaseReady
+	}
+	w.mu.Unlock()
+	w.publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, Usage: usage})
+}
+
+func (w *worker) currentUsageLocked() driverproto.TurnUsage {
+	usage := w.usage
+	usage.Model = w.lastModel
+	if usage.Model == "" {
+		usage.Model = w.options.Model
+	}
+	usage.Effort = w.options.Effort
+	return usage
 }
 
 func userFrame(id, session string, content []map[string]any) map[string]any {

@@ -12,7 +12,7 @@ func TestToolPressureDoesNotBlockLifecycleEvent(t *testing.T) {
 	for i := 0; i < q.capacity+1; i++ {
 		port.Tool("turn", runtimeproto.ToolEvent{CallID: "tool"})
 	}
-	port.TurnEnded("turn", runtimeproto.TurnStatusOK, "done", "")
+	port.TurnEnded("turn", runtimeproto.TurnStatusOK, "done", "", runtimeproto.TurnUsage{})
 
 	for i := 0; i < q.capacity; i++ {
 		fact, ok := q.pop()

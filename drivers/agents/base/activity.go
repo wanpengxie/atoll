@@ -3,6 +3,7 @@ package base
 import (
 	"fmt"
 
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
@@ -30,10 +31,18 @@ func (l *agentLoop) emitTurnStarted() {
 		l.emit(registry.ActivityTurnStarted, registry.ActivityTurnStartedPayload{TurnIndex: int(t.Serial), Status: registry.ActivityStartedStatus})
 	}
 }
-func (l *agentLoop) emitTurnEnded(status string) {
+func (l *agentLoop) emitTurnEnded(status string, usage *runtimeproto.TurnUsage) {
 	if t := l.state.Turn; t != nil {
-		l.emit(registry.ActivityTurnEnded, registry.ActivityTurnEndedPayload{TurnIndex: int(t.Serial), Status: status})
+		var payload *registry.TurnUsagePayload
+		if usage != nil {
+			payload = usagePayload(*usage)
+		}
+		l.emit(registry.ActivityTurnEnded, registry.ActivityTurnEndedPayload{TurnIndex: int(t.Serial), Status: status, Usage: payload})
 	}
+}
+
+func usagePayload(usage runtimeproto.TurnUsage) *registry.TurnUsagePayload {
+	return &registry.TurnUsagePayload{ContextTokens: usage.ContextTokens, ContextWindow: usage.ContextWindow, Model: usage.Model, Effort: usage.Effort}
 }
 func (l *agentLoop) emitTool(v toolEvent) {
 	if v.CallID == "" || v.Name == "" || l.state.Turn == nil {

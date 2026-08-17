@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,12 +46,13 @@ func (h workerHost) Tools() driverproto.ToolPort         { return nil }
 func (h workerHost) Resources() driverproto.ResourcePort { return nil }
 
 type fakeProcess struct {
-	process *childProcess
-	inputs  chan map[string]any
-	out     *os.File
-	exit    chan error
-	once    sync.Once
-	writeMu sync.Mutex
+	process     *childProcess
+	inputs      chan map[string]any
+	out         *os.File
+	exit        chan error
+	once        sync.Once
+	writeMu     sync.Mutex
+	autoContext atomic.Bool
 }
 
 func newFakeProcess(t *testing.T) *fakeProcess {
@@ -67,6 +69,7 @@ func newFakeProcess(t *testing.T) *fakeProcess {
 	close(reaped)
 	exit := make(chan error, 1)
 	f := &fakeProcess{inputs: make(chan map[string]any, 64), out: stdoutW, exit: exit}
+	f.autoContext.Store(true)
 	f.process = &childProcess{stdin: stdinW, stdout: stdoutR, exit: exit, waitDone: make(chan struct{}), stderrDone: make(chan struct{}), reaped: reaped}
 	go func() {
 		scanner := bufio.NewScanner(stdinR)
@@ -74,6 +77,14 @@ func newFakeProcess(t *testing.T) *fakeProcess {
 		for scanner.Scan() {
 			var frame map[string]any
 			if json.Unmarshal(scanner.Bytes(), &frame) == nil {
+				if requestSubtype(frame) == "get_context_usage" && f.autoContext.Load() {
+					id := requestID(frame)
+					raw, _ := json.Marshal(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": id, "response": map[string]any{"totalTokens": 100, "maxTokens": 200000}}})
+					f.writeMu.Lock()
+					_, _ = f.out.Write(append(raw, '\n'))
+					f.writeMu.Unlock()
+					continue
+				}
 				f.inputs <- frame
 			}
 		}
@@ -155,6 +166,15 @@ func (h *harness) input() map[string]any {
 	case <-time.After(2 * time.Second):
 		h.t.Fatal("timed out waiting for stdin frame")
 		return nil
+	}
+}
+
+func (h *harness) noInputFor(wait time.Duration) {
+	h.t.Helper()
+	select {
+	case frame := <-h.proc.inputs:
+		h.t.Fatalf("unexpected stdin frame=%v", frame)
+	case <-time.After(wait):
 	}
 }
 

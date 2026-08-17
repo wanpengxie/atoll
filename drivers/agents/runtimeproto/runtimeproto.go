@@ -8,12 +8,25 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
 	"github.com/wanpengxie/atoll/lib/introspect"
 )
 
 type OpID uint64
 type TurnID string
+type TurnKind = driverproto.TurnKind
+
+const (
+	TurnChat    = driverproto.TurnChat
+	TurnCompact = driverproto.TurnCompact
+	TurnSelect  = driverproto.TurnSelect
+)
+
+type TurnOptions struct {
+	Model  string `json:"model"`
+	Effort string `json:"effort"`
+}
 
 type Input struct {
 	SourceID string
@@ -37,6 +50,8 @@ type StartCommand struct {
 	Messages   []Input
 	Background []ContextItem
 	Scope      effectcap.Scope
+	Kind       TurnKind
+	Options    TurnOptions
 }
 
 type ControlKind uint8
@@ -107,11 +122,18 @@ type ToolEvent struct {
 	Detail string
 }
 
+type TurnUsage struct {
+	ContextTokens int64
+	ContextWindow int64
+	Model         string
+	Effort        string
+}
+
 type Events interface {
 	TurnStarted(OpID, TurnID)
 	TurnRejected(OpID, string, string)
 	Tool(TurnID, ToolEvent)
-	TurnEnded(TurnID, TurnStatus, string, string)
+	TurnEnded(TurnID, TurnStatus, string, string, TurnUsage)
 	ControlDone(OpID, TurnID, ControlVerdict, string)
 	ReadyDone(OpID, ReadyResult)
 	ProviderLost(TurnID, LostCause, string)
@@ -133,9 +155,11 @@ type Bounds struct {
 }
 
 type Spec struct {
-	Describe     introspect.Describe
-	Capabilities Capabilities
-	Bounds       Bounds
+	Describe         introspect.Describe
+	Capabilities     Capabilities
+	Bounds           Bounds
+	Selections       []TurnOptions
+	DefaultSelection int
 }
 
 type ToolSpec struct {
@@ -185,7 +209,7 @@ type Deps struct {
 	Logger    *slog.Logger
 }
 
-type Factory func(Deps, []byte, Events) (Runtime, error)
+type Factory func(Deps, []byte, TurnOptions, Events) (Runtime, error)
 
 func CloneInput(v Input) Input {
 	v.Payload = append(json.RawMessage(nil), v.Payload...)

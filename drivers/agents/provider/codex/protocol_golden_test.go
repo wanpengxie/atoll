@@ -23,9 +23,11 @@ func TestRequiredMethodsAndFieldsGolden(t *testing.T) {
 	want := map[string][]string{
 		"initialize":                            {"capabilities.optOutNotificationMethods", "clientInfo.name", "clientInfo.title", "clientInfo.version", "result.userAgent"},
 		"initialized":                           {},
-		"thread/start":                          {"approvalPolicy", "cwd", "result.thread.id", "sandbox"},
-		"thread/resume":                         {"excludeTurns", "result.thread.id", "threadId"},
-		"turn/start":                            {"input", "threadId"},
+		"thread/start":                          {"approvalPolicy", "cwd", "model", "result.thread.id", "sandbox"},
+		"thread/resume":                         {"excludeTurns", "model", "result.thread.id", "threadId"},
+		"thread/compact/start":                  {"threadId"},
+		"thread/tokenUsage/updated":             {"threadId", "tokenUsage.last.totalTokens", "tokenUsage.modelContextWindow", "turnId"},
+		"turn/start":                            {"effort", "input", "model", "threadId"},
 		"turn/steer":                            {"expectedTurnId", "input", "threadId"},
 		"turn/interrupt":                        {"threadId", "turnId"},
 		"turn/started":                          {"threadId", "turn.id"},
@@ -114,6 +116,7 @@ func protocolTokensForMethod(t *testing.T, method string, declarations map[strin
 	contexts := map[string][]string{
 		"initialize": {"Open", "afterInitialize"}, "initialized": {"afterInitialize"},
 		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom"},
+		"thread/compact/start": {"Start"}, "thread/tokenUsage/updated": {"notification", "tokenUsageNotice"},
 		"turn/start": {"Start"}, "turn/steer": {"Control"}, "turn/interrupt": {"Control"},
 		"turn/started": {"notification", "turnNotice", "turnWire"}, "turn/completed": {"notification", "turnNotice", "turnWire"},
 		"item/started": {"notification", "itemNotice", "itemWire"}, "item/completed": {"notification", "itemNotice", "itemWire"},

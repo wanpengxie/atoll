@@ -47,6 +47,16 @@ type itemNotice struct {
 	TurnID   string   `json:"turnId"`
 	Item     itemWire `json:"item"`
 }
+type tokenUsageNotice struct {
+	ThreadID   string `json:"threadId"`
+	TurnID     string `json:"turnId"`
+	TokenUsage struct {
+		Last struct {
+			TotalTokens int64 `json:"totalTokens"`
+		} `json:"last"`
+		ModelContextWindow *int64 `json:"modelContextWindow"`
+	} `json:"tokenUsage"`
+}
 
 func (w *worker) notification(c *connection, method string, params json.RawMessage) {
 	w.mu.Lock()
@@ -57,6 +67,17 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 	thread, attempt, target := w.thread, w.attempt, w.target
 	w.mu.Unlock()
 	switch method {
+	case "thread/tokenUsage/updated":
+		var n tokenUsageNotice
+		if json.Unmarshal(params, &n) != nil || n.ThreadID != thread {
+			return
+		}
+		w.mu.Lock()
+		w.usage.ContextTokens = n.TokenUsage.Last.TotalTokens
+		if n.TokenUsage.ModelContextWindow != nil {
+			w.usage.ContextWindow = *n.TokenUsage.ModelContextWindow
+		}
+		w.mu.Unlock()
 	case "turn/started":
 		var n turnNotice
 		if json.Unmarshal(params, &n) != nil || n.Turn.ID == "" || n.ThreadID != thread || attempt == 0 {
@@ -84,6 +105,7 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 			return
 		}
 		final := w.final[target.Native]
+		usage := w.currentUsageLocked()
 		delete(w.final, target.Native)
 		w.attempt = 0
 		w.target = driverproto.WorkerTurnTarget{}
@@ -107,7 +129,7 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 			status = driverproto.TurnFailed
 			detail = "unknown codex turn status: " + n.Turn.Status
 		}
-		w.publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail})
+		w.publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail, Usage: usage})
 	case "item/started", "item/completed":
 		var n itemNotice
 		if json.Unmarshal(params, &n) != nil || n.ThreadID != thread || driverproto.WorkerTurnRef(n.TurnID) != target.Native {
