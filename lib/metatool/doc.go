@@ -30,7 +30,7 @@
 // engine's callLedger now; this package only translates params into JobTable
 // operations and renders the results.
 //
-// The actor.* self-answer contract — Describe / DescribeType / TypeMeta /
+// The actor.* self-answer contract — Describe / DescribeRequest / WordSpec /
 // Catalog response shapes — lives in lib/introspect, the ONE home of those
 // shapes: this package only binds them to the LLM tool surface and never
 // restates their fields.

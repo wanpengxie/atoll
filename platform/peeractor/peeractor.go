@@ -13,13 +13,13 @@ import (
 )
 
 type Seam func(context.Context, channel.ID, channel.ID, channel.Request, func(channel.Progress)) (channel.Result, error)
-type Card func(context.Context, channel.ID, channel.ID) (introspect.Describe, error)
+type Describe func(context.Context, channel.ID, channel.ID, channel.Describe) (channel.Card, error)
 
 type Deps struct {
-	Caller channel.ID
-	Target channel.ID
-	Seam   Seam
-	Card   Card
+	Caller   channel.ID
+	Target   channel.ID
+	Seam     Seam
+	Describe Describe
 }
 
 func ValidateConfig(raw json.RawMessage) (channel.ID, error) {
@@ -36,16 +36,22 @@ func Def(deps Deps) actorbase.Def {
 	return actorbase.Def{Manifest: introspect.Manifest{
 		Class: "peeractor", Interfaces: []string{"actor", "peer"}, Words: map[string]introspect.WordSpec{},
 		Dynamic: func(ctx context.Context) (map[string]introspect.WordSpec, error) {
-			card, err := deps.Card(ctx, deps.Target, deps.Caller)
+			card, err := deps.Describe(ctx, deps.Caller, deps.Target, channel.Describe{From: channel.DescribeFrom{Channel: deps.Caller}})
 			if err != nil {
 				return nil, err
 			}
-			words := introspect.CloneWords(card.Words)
-			delete(words, introspect.QueryDescribe)
+			words := make(map[string]introspect.WordSpec, len(card.Words))
+			for name, raw := range card.Words {
+				var spec introspect.WordSpec
+				if err := json.Unmarshal(raw, &spec); err != nil {
+					return nil, err
+				}
+				words[name] = spec
+			}
 			return words, nil
 		},
 	}, New: func() (actorbase.Proc, error) {
-		if deps.Caller == "" || deps.Target == "" || deps.Seam == nil || deps.Card == nil {
+		if deps.Caller == "" || deps.Target == "" || deps.Seam == nil || deps.Describe == nil {
 			return nil, errors.New("peeractor: incomplete dependencies")
 		}
 		return func(sys actorbase.Sys) error { return serve(sys, deps) }, nil
@@ -74,7 +80,6 @@ func serve(sys actorbase.Sys, deps Deps) error {
 func handle(sys actorbase.Sys, deps Deps, msg actorbase.Msg) {
 	caller := actorbase.EffectiveCaller(msg)
 	request := channel.Request{
-		To:   channel.Address{Channel: deps.Target},
 		From: channel.From{Channel: caller.Channel, Actor: string(caller.Actor), RequestID: string(msg.ID)},
 		Type: msg.Type, Payload: append(json.RawMessage(nil), msg.Payload...),
 	}

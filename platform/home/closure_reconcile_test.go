@@ -69,7 +69,7 @@ func closureCall(t *testing.T, h *Home, caller, receiver actor.ActorID) message.
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
 		Type:     closureRequestType,
-		Payload:  json.RawMessage(`{"unit":"work"}`),
+		Payload:  json.RawMessage(`{"body":{"unit":"work"}}`),
 		Audience: message.Audience{receiver},
 	})
 	if err != nil {
@@ -296,7 +296,7 @@ func TestShutdownLeavesOpenUntilDeadlineThenReaperCloses(t *testing.T) {
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	deadline := h.nowMs() + 10_000
 	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
-		Type: closureRequestType, Payload: json.RawMessage(`{"unit":"shutdown"}`),
+		Type: closureRequestType, Payload: json.RawMessage(`{"body":{"unit":"shutdown"}}`),
 		Audience: message.Audience{receiver}, ExpiresAt: &deadline,
 	})
 	if err != nil {

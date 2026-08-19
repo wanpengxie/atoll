@@ -29,7 +29,7 @@ func Build(provider driverproto.Provider, policy Policy) (runtimeproto.Factory, 
 		}
 	}
 	spec := runtimeproto.Spec{
-		Describe:         ps.Describe,
+		Documentation:    ps.Documentation,
 		Capabilities:     cloneCapabilities(ps.Capabilities),
 		Bounds:           runtimeproto.Bounds{ReceiptDeadline: receipt, EventCapacity: policy.EventCapacity},
 		Selections:       make([]runtimeproto.TurnOptions, len(ps.Selections)),

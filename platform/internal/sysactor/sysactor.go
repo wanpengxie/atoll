@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
-	"slices"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -145,6 +144,11 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		switch msg.Type {
 		case message.TypeSystemMemberList:
+			var body struct{}
+			if err := actorbase.DecodeStrictEmpty(msg.Payload, &body); err != nil {
+				_, _ = sys.Fail(msg, "invalid_args", err.Error())
+				return
+			}
 			s.respondList(sys, msg)
 			return
 		case message.TypeSystemMemberGet:
@@ -223,34 +227,7 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		catalog.Actors = append(catalog.Actors, entry)
 	}
-	// The kernel is a constant, not a member: it has no record to list. The
-	// directory entry is SYNTHESIZED here from the identity constant, never read
-	// from any row.
-	catalog.Actors = append(catalog.Actors, s.kernelEntry(msg))
-	slices.SortFunc(catalog.Actors, func(l, r introspect.CatalogEntry) int {
-		switch {
-		case l.ID < r.ID:
-			return -1
-		case l.ID > r.ID:
-			return 1
-		default:
-			return 0
-		}
-	})
 	_, _ = sys.Reply(msg, catalog)
-}
-
-func (s *SystemActor) kernelEntry(msg actorbase.Msg) introspect.CatalogEntry {
-	snapshot, err := s.snapshot(msg.Ctx(), actor.SystemActorID)
-	if err != nil {
-		s.logger.Warn("sysactor.presence_snapshot_failed",
-			"actor", string(actor.SystemActorID), "error", err)
-	}
-	present, uptimeMs := s.liveness(snapshot)
-	return introspect.CatalogEntry{
-		ID: string(actor.SystemActorID), Kind: string(actor.KindSystem),
-		Present: present, UptimeMs: uptimeMs,
-	}
 }
 
 // systemDescribe is the system actor's self-answer in the introspect contract
@@ -264,7 +241,7 @@ func systemManifest() introspect.Manifest {
 			words[entry.Name] = introspect.WordSpec{Description: "reserved system request"}
 		}
 	}
-	return introspect.Manifest{Class: "membrane", Interfaces: []string{"actor"}, Words: words}
+	return introspect.Manifest{Class: "sysactor", Interfaces: []string{"actor"}, Words: words}
 }
 
 func (s *SystemActor) snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
@@ -298,18 +275,19 @@ func deviceTestimony(snapshot presence.Snapshot) *introspect.DevicePresence {
 }
 
 func (s *SystemActor) respondStatus(sys actorbase.Sys, msg actorbase.Msg) {
-	req, err := introspect.ParseStatusRequest(msg.Payload)
-	if err != nil {
-		s.logger.Warn("sysactor.member_get.bad_request", "error", err)
+	var req introspect.StatusRequest
+	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil || req.Member == "" {
+		_, _ = sys.Fail(msg, "invalid_args", "system.member.get requires {member}")
 		return
 	}
 	target := actor.ActorID(req.Member)
 	if s.resolve != nil {
-		target, err = s.resolve(req.Member)
+		resolved, err := s.resolve(req.Member)
 		if err != nil {
 			_, _ = sys.Fail(msg, resolveErrorCode(err), err.Error())
 			return
 		}
+		target = resolved
 	}
 	snapshot, err := s.snapshot(msg.Ctx(), target)
 	if err != nil {

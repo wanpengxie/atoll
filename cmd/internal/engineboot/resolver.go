@@ -6,8 +6,6 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/google/uuid"
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -39,7 +37,7 @@ func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class str
 		if err != nil {
 			return platform.ActorFactory{}, false
 		}
-		return platform.ActorFactory{Proc: peeractor.Def(peeractor.Deps{Caller: ch, Target: target, Seam: r.callPeer, Card: r.card})}, true
+		return platform.ActorFactory{Proc: peeractor.Def(peeractor.Deps{Caller: ch, Target: target, Seam: r.callPeer, Describe: r.describePeer})}, true
 	}
 	decl, err := classregistry.Build(class, classregistry.InstanceSpec{ID: id, Config: config}, classregistry.Deps{ChannelID: ch, Logger: r.logger})
 	if err != nil {
@@ -67,27 +65,12 @@ func (r *assemblyResolver) callPeer(ctx context.Context, caller, target channel.
 func (r *assemblyResolver) Peer(ctx context.Context, caller, target channel.ID, req channel.Request, onProgress func(channel.Progress)) (channel.Result, error) {
 	return r.callPeer(ctx, caller, target, req, onProgress)
 }
-func (r *assemblyResolver) card(ctx context.Context, target, caller channel.ID) (introspect.Describe, error) {
+func (r *assemblyResolver) describePeer(ctx context.Context, caller, target channel.ID, frame channel.Describe) (channel.Card, error) {
 	port, _, ok := r.host.AcquirePort(target)
 	if !ok {
-		return introspect.Describe{}, errors.New("target channel unavailable")
+		return channel.Card{}, errors.New("target channel unavailable")
 	}
-	result, err := port.Call(ctx, caller, channel.Request{
-		To:   channel.Address{Channel: target},
-		From: channel.From{Channel: caller, Actor: "peer-card", RequestID: uuid.NewString()},
-		Type: introspect.QueryDescribe, Payload: json.RawMessage(`{}`),
-	}, nil)
-	if err != nil {
-		return introspect.Describe{}, err
-	}
-	if result.Fail != nil {
-		return introspect.Describe{}, errors.New(result.Fail.Code + ": " + result.Fail.Detail)
-	}
-	var card introspect.Describe
-	if err := json.Unmarshal(result.Body, &card); err != nil {
-		return introspect.Describe{}, err
-	}
-	return card, nil
+	return port.Describe(ctx, caller, frame)
 }
 func (r *assemblyResolver) ResolveDeclaration(ctx context.Context, ch channel.ID, id string) (channelspec.DeclarationFacts, error) {
 	decl, ok, err := r.registry.GetDecl(ctx, id)

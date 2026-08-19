@@ -1,11 +1,8 @@
 package home
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -106,7 +103,7 @@ func (e *opEntry) Execute(
 		var payload struct {
 			DeclID string `json:"decl_id"`
 		}
-		if err := decodeStrict(req.Payload, &payload); err != nil || payload.DeclID == "" {
+		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil || payload.DeclID == "" {
 			return nil, &sysactor.OperateError{
 				Code: string(channelspec.ErrCodeBadPayload), Detail: "decl_id required",
 			}
@@ -128,7 +125,7 @@ func (e *opEntry) Execute(
 		var payload struct {
 			Principal string `json:"principal"`
 		}
-		if err := decodeStrict(req.Payload, &payload); err != nil || payload.Principal == "" {
+		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil || payload.Principal == "" {
 			return nil, &sysactor.OperateError{
 				Code: string(channelspec.ErrCodeBadPayload), Detail: "principal required",
 			}
@@ -146,7 +143,7 @@ func (e *opEntry) Execute(
 		var payload struct {
 			Member actor.ActorID `json:"member"`
 		}
-		if err := decodeStrict(req.Payload, &payload); err != nil || payload.Member == "" {
+		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil || payload.Member == "" {
 			return nil, &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: "member required"}
 		}
 		resolved, err := e.home.actors.ResolveTarget(string(payload.Member))
@@ -165,7 +162,7 @@ func (e *opEntry) Execute(
 		var payload struct {
 			Member actor.ActorID `json:"member"`
 		}
-		if err := decodeStrict(req.Payload, &payload); err != nil || payload.Member == "" {
+		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil || payload.Member == "" {
 			return nil, &sysactor.OperateError{
 				Code: string(channelspec.ErrCodeBadPayload), Detail: "member required",
 			}
@@ -190,22 +187,6 @@ func (e *opEntry) Execute(
 			Code: string(channelspec.ErrCodeNotAcceptedSource), Detail: "operation is not accepted",
 		}
 	}
-}
-
-func decodeStrict(raw json.RawMessage, out any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(out); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("trailing JSON value")
-		}
-		return err
-	}
-	return nil
 }
 
 // narrateBirth writes the "joined the channel" narration for a freshly created

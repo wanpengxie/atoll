@@ -86,7 +86,7 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
   WHERE deregistered_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
   ON actor_registry(actor_kind, principal)
-  WHERE deregistered_at IS NULL AND principal <> '';
+  WHERE deregistered_at IS NULL AND actor_kind = 'human' AND principal <> '';
 CREATE INDEX IF NOT EXISTS ix_actor_registry_active_source_decl
   ON actor_registry(actor_kind, source_decl_id)
   WHERE deregistered_at IS NULL AND source_decl_id <> '';

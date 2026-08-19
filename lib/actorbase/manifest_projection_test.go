@@ -34,6 +34,13 @@ func TestDescribeIsProjectedBeforeProcDelivery(t *testing.T) {
 	if last := pen.last(); last == nil || json.Unmarshal(last.Payload, &terminal) != nil || terminal.Status != message.StatusCompleted || terminal.Class != "device" || len(terminal.Words) != 1 {
 		t.Fatalf("terminal=%+v envelope=%+v", terminal, pen.last())
 	}
+	nullBody := &message.Envelope{ID: "describe-null", Kind: message.KindRequest, Type: introspect.QueryDescribe, Payload: json.RawMessage(`{"body":null}`)}
+	if err := e.Receive(context.Background(), nullBody); err != nil {
+		t.Fatal(err)
+	}
+	if last := pen.last(); last == nil || json.Unmarshal(last.Payload, &terminal) != nil || terminal.Status != message.StatusCompleted {
+		t.Fatalf("null-body describe terminal=%+v envelope=%+v", terminal, last)
+	}
 
 	unknown := &message.Envelope{ID: "unknown", Kind: message.KindRequest, Type: introspect.QueryDescribe, Payload: json.RawMessage(`{"body":{"type":"missing.word"}}`)}
 	if err := e.Receive(context.Background(), unknown); err != nil {
@@ -45,6 +52,14 @@ func TestDescribeIsProjectedBeforeProcDelivery(t *testing.T) {
 	}
 	if err := json.Unmarshal(pen.last().Payload, &failure); err != nil || failure.Status != message.StatusFailed || failure.ErrorCode != "invalid_args" {
 		t.Fatalf("unknown selector=%s", pen.last().Payload)
+	}
+
+	extra := &message.Envelope{ID: "extra", Kind: message.KindRequest, Type: introspect.QueryDescribe, Payload: json.RawMessage(`{"body":{"type":"device.read","typo":true}}`)}
+	if err := e.Receive(context.Background(), extra); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(pen.last().Payload, &failure); err != nil || failure.Status != message.StatusFailed || failure.ErrorCode != "invalid_args" {
+		t.Fatalf("unknown describe field=%s", pen.last().Payload)
 	}
 }
 

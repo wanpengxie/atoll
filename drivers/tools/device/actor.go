@@ -1,11 +1,8 @@
 package device
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -121,22 +118,6 @@ func resolvePath(p string) (string, error) {
 		return "", errors.New("path escapes the workspace")
 	}
 	return clean, nil
-}
-
-func decodePayload(raw json.RawMessage, out any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(out); err != nil {
-		return err
-	}
-	var trailing any
-	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-		return err
-	}
-	return nil
 }
 
 func pathEscaped(err error) bool {

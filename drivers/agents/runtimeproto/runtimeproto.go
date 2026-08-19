@@ -10,7 +10,6 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
@@ -166,7 +165,7 @@ type Bounds struct {
 }
 
 type Spec struct {
-	Describe         introspect.Describe
+	Documentation    driverproto.Documentation
 	Capabilities     map[string]bool
 	Bounds           Bounds
 	Selections       []TurnOptions

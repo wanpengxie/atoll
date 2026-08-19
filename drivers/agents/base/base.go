@@ -37,11 +37,11 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 	if cfg.NewRuntime == nil {
 		return actorbase.Def{}, errors.New("agent/base: Config.NewRuntime required")
 	}
-	if cfg.Runtime.Describe.Description == "" {
-		cfg.Runtime.Describe.Description = doc
+	if cfg.Runtime.Documentation.Description == "" {
+		cfg.Runtime.Documentation.Description = doc
 	}
-	if cfg.Runtime.Describe.SkillDoc == "" {
-		cfg.Runtime.Describe.SkillDoc = doc
+	if cfg.Runtime.Documentation.SkillDoc == "" {
+		cfg.Runtime.Documentation.SkillDoc = doc
 	}
 	d := definition{cfg: cfg, controls: map[string]struct{}{TypeAsk: {}, TypeCompact: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeStop: {}}}
 	if cfg.Runtime.Capabilities[runtimeproto.CapabilityFork] {

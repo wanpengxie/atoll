@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -250,32 +249,14 @@ func knownWord(word Word) bool {
 }
 
 func decodePayload(raw json.RawMessage, out any) error {
-	if len(raw) == 0 {
-		raw = json.RawMessage(`{}`)
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
+	if err := actorbase.DecodeStrict(raw, out); err != nil {
 		return &Error{Code: CodeInvalidArgs, Detail: "invalid JSON payload"}
 	}
 	return nil
 }
 
 func decodeClosed(raw json.RawMessage, out any) error {
-	if len(raw) == 0 {
-		raw = json.RawMessage(`{}`)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(out); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("trailing JSON value")
-		}
-		return err
-	}
-	return nil
+	return actorbase.DecodeStrict(raw, out)
 }
 
 func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal string, source channel.ID, word Word, raw json.RawMessage) (any, error) {

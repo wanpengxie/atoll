@@ -70,9 +70,9 @@ func compose(spec registry.InstanceSpec, provider driverproto.Provider) (platfor
 	if err != nil {
 		return platform.ActorDecl{}, err
 	}
-	doc := runtimeSpec.Describe.SkillDoc
+	doc := runtimeSpec.Documentation.SkillDoc
 	if doc == "" {
-		doc = runtimeSpec.Describe.Description
+		doc = runtimeSpec.Documentation.Description
 	}
 	definition, err := base.Def(doc, base.Config{NewRuntime: factory, Runtime: runtimeSpec})
 	if err != nil {

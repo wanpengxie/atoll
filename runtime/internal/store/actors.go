@@ -143,10 +143,10 @@ func validateDraft(in storespec.ActorDraft) error {
 	return nil
 }
 
-// Insert is the whole add-or-update introduce on ONE transaction bed: semantic
-// key lookup updates the mutable fields of an active row; otherwise id mint
-// (with tombstone avoidance) and row insert create it. There is no intermediate
-// state — a crash leaves either the old row or the complete new value.
+// Insert creates one actor record on ONE transaction bed. Human admissions are
+// the sole principal-keyed identity: re-admitting one principal updates that
+// person's live cell. Declaration-backed actors are births, not upserts;
+// singleton declarations and the peer/system domains reject a second live row.
 func (r *actorRegistry) Insert(
 	ctx context.Context,
 	in storespec.ActorDraft,
@@ -207,7 +207,7 @@ func (r *actorRegistry) Insert(
 		if found {
 			return storespec.ActorRecord{}, storespec.ErrConflictExists
 		}
-	case in.Principal != "":
+	case in.Kind == actor.KindHuman && in.Principal != "":
 		record, found, err := lookupExisting(`SELECT `+actorRecordColumns+` FROM actor_registry
 			WHERE actor_kind=? AND principal=? AND deregistered_at IS NULL`,
 			string(in.Kind), in.Principal)

@@ -241,6 +241,23 @@ func TestActorRegistryInsert_NonSingletonBirthsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestActorRegistryInsert_NonHumanPrincipalNeverMergesBirths(t *testing.T) {
+	rig := newActorRegRig(t)
+	firstDraft := agentDraft("decl-principal", "worker", 1000)
+	firstDraft.Principal = "shared-operator"
+	secondDraft := agentDraft("decl-principal", "worker", 2000)
+	secondDraft.Principal = "shared-operator"
+	first := rig.mustInsert(firstDraft)
+	second := rig.mustInsert(secondDraft)
+	if second.ID == first.ID || rig.rawRowCount() != 2 {
+		t.Fatalf("non-human births merged: first=%+v second=%+v rows=%d", first, second, rig.rawRowCount())
+	}
+	stored, found, err := rig.reg.LookupActive(context.Background(), first.ID)
+	if err != nil || !found || stored.CreatedAt != first.CreatedAt || stored.Principal != "shared-operator" {
+		t.Fatalf("first birth changed: stored=%+v found=%v err=%v", stored, found, err)
+	}
+}
+
 func TestActorRegistryInsert_EqualReplayPreservesShape(t *testing.T) {
 	rig := newActorRegRig(t)
 	draft := agentDraft("decl-equal", "worker", 1000)

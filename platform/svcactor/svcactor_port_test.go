@@ -28,8 +28,8 @@ func TestPortWithoutActorHonorsCallerContextAndRemainsUsable(t *testing.T) {
 	served := make(chan struct{})
 	go func() {
 		req, err := port.receive(context.Background())
-		if err == nil {
-			req.done <- channel.Result{Body: []byte(`{"ok":true}`)}
+		if err == nil && req.call != nil {
+			req.call.done <- channel.Result{Body: []byte(`{"ok":true}`)}
 		}
 		close(served)
 	}()

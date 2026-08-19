@@ -69,7 +69,6 @@ func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
 		// immediate: 收件即 completed 回执 (log 即收件箱).
 		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
 	case subjectgate.WordHumanAsk, subjectgate.WordHumanApprove:
-		_ = actorbase.EffectiveCaller(msg)
 	default:
 		_, _ = sys.Fail(msg, "type_unsupported", "human does not support "+msg.Type)
 	}

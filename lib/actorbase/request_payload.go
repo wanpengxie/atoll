@@ -1,13 +1,48 @@
 package actorbase
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
+
+// DecodeStrict decodes a standard protocol body. Standard bodies are JSON
+// objects: unknown fields, null/scalar/array values, and trailing documents are
+// rejected so misspelled arguments fail at the receiver instead of becoming a
+// different request.
+func DecodeStrict(raw json.RawMessage, out any) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("request body must be a JSON object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+// DecodeStrictEmpty is the no-argument variant: a canonical body:null means
+// the same thing as {}, while every non-empty body is still closed and strict.
+func DecodeStrictEmpty(raw json.RawMessage, out any) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		raw = json.RawMessage(`{}`)
+	}
+	return DecodeStrict(raw, out)
+}
 
 func encodeRequestPayload(caller *harness.Caller, args any) (json.RawMessage, error) {
 	raw, err := json.Marshal(args)

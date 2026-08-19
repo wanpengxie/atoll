@@ -39,7 +39,6 @@ func (s *SystemActor) routeSpace(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		}
 		frame := channel.Request{
-			To: channel.Address{Channel: channelspec.C0ChannelID},
 			From: channel.From{
 				Channel: msg.ChannelID, Actor: string(caller.Actor), RequestID: string(msg.ID),
 			},

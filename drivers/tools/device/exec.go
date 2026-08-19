@@ -38,8 +38,8 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // timeout or a spawn failure fails the request.
 func (a *Actor) handleExec(msg actorbase.Msg) {
 	var p ExecPayload
-	if err := decodePayload(msg.Payload, &p); err != nil {
-		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
+	if err := actorbase.DecodeStrict(msg.Payload, &p); err != nil {
+		a.fail(msg, "invalid_args", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
 	if p.Command == "" {

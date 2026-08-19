@@ -105,12 +105,6 @@ type Describe struct {
 	Interfaces   []string            `json:"interfaces"`
 	Capabilities map[string]bool     `json:"capabilities"`
 	Words        map[string]WordSpec `json:"words"`
-
-	// Source compatibility only; never part of the one wire projection.
-	ActorID     string              `json:"-"`
-	Description string              `json:"-"`
-	SkillDoc    string              `json:"-"`
-	Types       map[string]TypeMeta `json:"-"`
 }
 
 // DescribeType is the single-type actor.describe answer (selector form):
@@ -127,9 +121,6 @@ type DescribeType struct {
 // with its own error convention). This is the ONE standard dispatch every
 // actor routes through, so the answer shape never drifts from the convention.
 func AnswerDescribe(d Describe, req DescribeRequest) (any, bool) {
-	if d.Words == nil && d.Types != nil {
-		d.Words = d.Types
-	}
 	if req.Type == "" {
 		return d, true
 	}

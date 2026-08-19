@@ -122,6 +122,32 @@ func TestEffectiveCallerPrefersContextAndFallsBackToEnvelope(t *testing.T) {
 	}
 }
 
+func TestNewMsgRejectsEveryNonCanonicalRequestEnvelope(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "legacy raw object", raw: `{"value":1}`},
+		{name: "null outer", raw: `null`},
+		{name: "array outer", raw: `[]`},
+		{name: "scalar outer", raw: `"raw"`},
+		{name: "unknown outer field", raw: `{"body":{},"extra":true}`},
+		{name: "missing body", raw: `{"_context":{"caller":{"channel":"c","actor":"a"}}}`},
+		{name: "trailing document", raw: `{"body":{}} {}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("NewMsg accepted %s", test.raw)
+				}
+			}()
+			_ = NewMsg(OriginMailbox, context.Background(), message.Envelope{
+				Kind: message.KindRequest, Payload: json.RawMessage(test.raw),
+			})
+		})
+	}
+}
+
 func jsonSemanticallyEqual(t *testing.T, a, b []byte) bool {
 	t.Helper()
 	var av, bv any

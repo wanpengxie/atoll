@@ -198,6 +198,17 @@ func TestRegistrarExecutionFailureUsesClosedResultUnknownCode(t *testing.T) {
 	}
 }
 
+func TestRegistrarRejectsUnknownPayloadFieldsAsInvalidArgs(t *testing.T) {
+	r := NewRegistrar(&Registry{}, registrarFactsStub{
+		facts: channelspec.ActorFacts{Active: true, Principal: "root", Kind: actor.KindHuman}, found: true,
+	}, nil)
+	sys := &registrarSysStub{}
+	r.handle(sys, registrarMessage(WordChannelGet, `{"channel_id":"c0","chanenl_id":"typo"}`))
+	if sys.value != nil || sys.code != string(CodeInvalidArgs) {
+		t.Fatalf("reply=%#v failure=(%q,%q)", sys.value, sys.code, sys.detail)
+	}
+}
+
 func TestEffectiveAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	dbPath := t.TempDir() + "/registry.db"
 	db, err := sql.Open("sqlite", "file:"+dbPath)

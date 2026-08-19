@@ -1,14 +1,13 @@
 package svcactor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
@@ -23,6 +22,8 @@ import (
 const Class = "svcactor"
 
 const ServiceStateKey resource.ResourceID = "_service"
+
+const cardDescribeTimeout = time.Second
 
 type ServiceTable struct {
 	SvcAgent  *string                  `json:"svc_agent"`
@@ -52,16 +53,22 @@ type Deps struct {
 }
 
 type service struct {
-	deps  Deps
-	mu    sync.RWMutex
-	table ServiceTable
+	deps     Deps
+	mu       sync.RWMutex
+	table    ServiceTable
+	card     channel.Card
+	revision uint64
+}
+
+type persistedService struct {
+	Table ServiceTable  `json:"table"`
+	Card  *channel.Card `json:"card,omitempty"`
 }
 
 func manifest() introspect.Manifest {
 	return introspect.Manifest{
-		Class: Class, Interfaces: []string{"actor", "agent", "svcactor"},
+		Class: Class, Interfaces: []string{"actor", "svcactor"},
 		Words: map[string]introspect.WordSpec{
-			"agent.ask":    {Description: "delegate a request to the channel service agent"},
 			"svcactor.set": {Description: "replace the channel service table"},
 			"svcactor.get": {Description: "read the channel service table"},
 		},
@@ -84,18 +91,48 @@ func Def(deps Deps) actorbase.Def {
 func emptyTable() ServiceTable { return ServiceTable{Endpoints: map[string]actor.ActorID{}} }
 
 func (s *service) serve(sys actorbase.Sys) error {
-	if table, found, err := readTable(sys.State()); err != nil {
+	materializeInitial := false
+	if state, found, err := readService(sys.State()); err != nil {
 		return err
 	} else if found {
-		s.table = table
-		if _, cardFound, _ := readDynamicWords(sys.State()); !cardFound {
-			_ = s.materialize(sys, table)
+		s.table = state.Table
+		if state.Card == nil {
+			s.card = skeletonCard(state.Table)
+			materializeInitial = true
+		} else {
+			s.card = cloneCard(*state.Card)
 		}
 	}
-	go s.servePort(sys)
+	var startup sync.WaitGroup
+	if materializeInitial {
+		startup.Add(1)
+		go func(table ServiceTable) {
+			defer startup.Done()
+			card := s.buildCard(sys, table)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.revision != 0 || sys.Life().Err() != nil {
+				return
+			}
+			if err := writeService(sys.State(), table, card); err != nil {
+				s.deps.Logger.Warn("svcactor.initial_card_write_failed", "error", err)
+				return
+			}
+			s.card = cloneCard(card)
+		}(cloneTable(s.table))
+	}
+	portCtx, stopPort := context.WithCancel(sys.Life())
+	portDone := make(chan struct{})
+	go func() {
+		defer close(portDone)
+		s.servePort(portCtx, sys)
+	}()
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
+			stopPort()
+			<-portDone
+			startup.Wait()
 			return err
 		}
 		if msg.Kind != message.KindRequest {
@@ -119,7 +156,7 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 	switch msg.Type {
 	case "svcactor.get":
 		var empty struct{}
-		if err := decodeStrict(msg.Payload, &empty); err != nil {
+		if err := actorbase.DecodeStrictEmpty(msg.Payload, &empty); err != nil {
 			_, _ = sys.Fail(msg, "invalid_args", err.Error())
 			return
 		}
@@ -130,7 +167,7 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		}
 		var table ServiceTable
-		if err := decodeStrict(msg.Payload, &table); err != nil {
+		if err := actorbase.DecodeStrict(msg.Payload, &table); err != nil {
 			_, _ = sys.Fail(msg, "invalid_args", err.Error())
 			return
 		}
@@ -141,18 +178,17 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = sys.Fail(msg, "invalid_args", err.Error())
 			return
 		}
-		raw, _ := json.Marshal(table)
-		if _, err := sys.State().Put(ServiceStateKey, raw); err != nil {
-			_, _ = sys.Fail(msg, "internal_error", err.Error())
-			return
-		}
+		card := s.buildCard(sys, table)
 		s.mu.Lock()
-		s.table = cloneTable(table)
-		s.mu.Unlock()
-		if err := s.materialize(sys, table); err != nil {
+		if err := writeService(sys.State(), table, card); err != nil {
+			s.mu.Unlock()
 			_, _ = sys.Fail(msg, "internal_error", err.Error())
 			return
 		}
+		s.table = cloneTable(table)
+		s.card = cloneCard(card)
+		s.revision++
+		s.mu.Unlock()
 		_, _ = sys.Reply(msg, table)
 	default:
 		_, _ = sys.Fail(msg, "type_unsupported", "svcactor mailbox only accepts svcactor.set/get")
@@ -193,11 +229,11 @@ func fullActorID(id actor.ActorID) bool {
 	return len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != ""
 }
 
-func (s *service) materialize(sys actorbase.Sys, table ServiceTable) error {
-	words := make(map[string]introspect.WordSpec, len(table.Endpoints))
+func (s *service) buildCard(sys actorbase.Sys, table ServiceTable) channel.Card {
+	card := skeletonCard(table)
+	words := card.Words
 	byReceiver := map[actor.ActorID][]string{}
 	for word, receiver := range table.Endpoints {
-		words[word] = introspect.WordSpec{}
 		byReceiver[receiver] = append(byReceiver[receiver], word)
 	}
 	for receiver, names := range byReceiver {
@@ -205,8 +241,9 @@ func (s *service) materialize(sys actorbase.Sys, table ServiceTable) error {
 		if err != nil {
 			continue
 		}
-		terminal, err := pending.Wait(sys.Life(), 0)
-		if err != nil {
+		terminal, err := pending.Wait(sys.Life(), cardDescribeTimeout)
+		if err != nil || len(terminal.Payload) == 0 {
+			_ = pending.Cancel()
 			continue
 		}
 		var card introspect.Describe
@@ -215,48 +252,58 @@ func (s *service) materialize(sys actorbase.Sys, table ServiceTable) error {
 		}
 		for _, name := range names {
 			if spec, ok := card.Words[name]; ok {
-				words[name] = spec
+				raw, _ := json.Marshal(spec)
+				words[name] = raw
 			}
 		}
 	}
-	raw, _ := json.Marshal(words)
-	_, err := sys.State().Put(actorbase.ManifestStateKey, raw)
-	return err
+	return channel.Card{Words: words}
 }
 
-func (s *service) servePort(sys actorbase.Sys) {
+func skeletonCard(table ServiceTable) channel.Card {
+	words := make(map[string]json.RawMessage, len(table.Endpoints)+1)
+	agentSpec, _ := json.Marshal(introspect.WordSpec{Description: "delegate a request to the channel service agent"})
+	words["agent.ask"] = agentSpec
+	for word := range table.Endpoints {
+		words[word] = json.RawMessage(`{}`)
+	}
+	return channel.Card{Words: words}
+}
+
+func (s *service) servePort(life context.Context, sys actorbase.Sys) {
 	var inFlight sync.WaitGroup
 	defer inFlight.Wait()
 	for {
-		req, err := s.deps.Port.receive(sys.Life())
+		req, err := s.deps.Port.receive(life)
 		if err != nil {
 			return
 		}
 		inFlight.Add(1)
 		go func(req portRequest) {
 			defer inFlight.Done()
-			result := s.dispatch(req.ctx, sys, req.caller, req.frame, req.progress)
-			select {
-			case req.done <- result:
-			case <-sys.Life().Done():
+			switch {
+			case req.call != nil:
+				dispatchCtx, cancel := context.WithCancel(req.call.ctx)
+				stop := context.AfterFunc(life, cancel)
+				result := s.dispatch(dispatchCtx, life, sys, req.call.caller, req.call.frame, req.call.progress)
+				stop()
+				cancel()
+				req.call.done <- result
+			case req.describe != nil:
+				if req.describe.frame.From.Channel != req.describe.caller {
+					req.describe.done <- describeResponse{err: errors.New("svcactor: describe origin channel does not match bound caller")}
+					return
+				}
+				req.describe.done <- describeResponse{card: s.cardSnapshot()}
 			}
 		}(req)
 	}
 }
 
-func (s *service) dispatch(ctx context.Context, sys actorbase.Sys, caller channel.ID, req channel.Request, onProgress func(channel.Progress)) channel.Result {
+func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller channel.ID, req channel.Request, onProgress func(channel.Progress)) channel.Result {
 	if req.From.Channel != caller {
 		return gateFailure(channel.GateBadOrigin, "origin channel does not match the bound caller")
 	}
-	if req.Type == introspect.QueryDescribe {
-		card, err := projectCard(sys.State())
-		if err != nil {
-			return receiverFailure("internal_error", err.Error())
-		}
-		raw, _ := json.Marshal(card)
-		return channel.Result{Body: raw}
-	}
-
 	var target actor.ActorID
 	switch {
 	case req.Type == "agent.ask":
@@ -275,9 +322,14 @@ func (s *service) dispatch(ctx context.Context, sys actorbase.Sys, caller channe
 			target = id
 		} else {
 			target = actor.ActorID(*table.SvcAgent)
+			active, err := s.deps.Members.IsActive(ctx, target)
+			if err != nil {
+				return gateFailure(channel.GateChannelUnavailable, err.Error())
+			}
+			if !active {
+				return gateFailure(channel.GateReceiverInactive, "service agent is inactive")
+			}
 		}
-	case s.deps.Self == s.deps.Core && message.IsSpaceWord(req.Type):
-		target = actor.ActorID("system:registrar")
 	case req.From.Channel == s.deps.Core && message.IsMembraneWord(req.Type):
 		target = actor.SystemActorID
 	case message.IsSpaceWord(req.Type):
@@ -306,6 +358,8 @@ func (s *service) dispatch(ctx context.Context, sys actorbase.Sys, caller channe
 		return gateFailure(channel.GateChannelUnavailable, err.Error())
 	}
 	localRequestID := pending.RequestID()
+	stopPendingCancel := context.AfterFunc(ctx, func() { _ = pending.Cancel() })
+	defer stopPendingCancel()
 	if err := s.deps.Audit(ctx, map[string]any{"from": req.From, "type": req.Type, "local_request_id": localRequestID}); err != nil {
 		s.deps.Logger.Warn("svcactor.audit_failed", "request_id", localRequestID, "err", err)
 	}
@@ -325,6 +379,9 @@ func (s *service) dispatch(ctx context.Context, sys actorbase.Sys, caller channe
 	if err != nil {
 		_ = pending.Cancel()
 		<-progressDone
+		if life.Err() != nil {
+			return gateFailure(channel.GateChannelUnavailable, "service actor stopped while request was in flight")
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return receiverFailure(string(message.TerminalUnansweredTimeout), err.Error())
 		}
@@ -399,6 +456,12 @@ func (s *service) snapshot() ServiceTable {
 	return cloneTable(s.table)
 }
 
+func (s *service) cardSnapshot() channel.Card {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneCard(s.card)
+}
+
 func cloneTable(in ServiceTable) ServiceTable {
 	out := emptyTable()
 	if in.SvcAgent != nil {
@@ -411,71 +474,45 @@ func cloneTable(in ServiceTable) ServiceTable {
 	return out
 }
 
-func readTable(state actorbase.StateHandle) (ServiceTable, bool, error) {
+func readService(state actorbase.StateHandle) (persistedService, bool, error) {
 	out, err := state.Get(ServiceStateKey)
 	if err != nil {
-		return ServiceTable{}, false, err
+		return persistedService{}, false, err
 	}
 	if out.RejectReason == access.ResourceNotFound || !out.Found || len(out.Value) == 0 {
-		return emptyTable(), false, nil
+		return persistedService{Table: emptyTable()}, false, nil
 	}
 	if !out.Accepted() {
-		return ServiceTable{}, false, errors.New("svcactor: service state read rejected")
+		return persistedService{}, false, errors.New("svcactor: service state read rejected")
 	}
-	var table ServiceTable
-	if err := json.Unmarshal(out.Value, &table); err != nil {
-		return ServiceTable{}, false, err
+	var persisted persistedService
+	if err := json.Unmarshal(out.Value, &persisted); err != nil {
+		return persistedService{}, false, err
 	}
-	if table.Endpoints == nil {
-		table.Endpoints = map[string]actor.ActorID{}
+	if persisted.Table.Endpoints == nil {
+		persisted.Table.Endpoints = map[string]actor.ActorID{}
 	}
-	return table, true, nil
+	return persisted, true, nil
 }
 
-func readDynamicWords(state actorbase.StateHandle) (map[string]introspect.WordSpec, bool, error) {
-	out, err := state.Get(actorbase.ManifestStateKey)
+func writeService(state actorbase.StateHandle, table ServiceTable, card channel.Card) error {
+	persisted := persistedService{Table: cloneTable(table), Card: func() *channel.Card { cloned := cloneCard(card); return &cloned }()}
+	raw, err := json.Marshal(persisted)
 	if err != nil {
-		return nil, false, err
-	}
-	if out.RejectReason == access.ResourceNotFound || !out.Found || len(out.Value) == 0 {
-		return nil, false, nil
-	}
-	if !out.Accepted() {
-		return nil, false, errors.New("svcactor: manifest state read rejected")
-	}
-	var words map[string]introspect.WordSpec
-	if err := json.Unmarshal(out.Value, &words); err != nil {
-		return nil, false, err
-	}
-	return words, true, nil
-}
-
-func projectCard(state actorbase.StateHandle) (introspect.Describe, error) {
-	m := manifest()
-	words := introspect.CloneWords(m.Words)
-	words[introspect.QueryDescribe] = introspect.WordSpec{Description: "project this actor's live manifest"}
-	dynamic, _, err := readDynamicWords(state)
-	if err != nil {
-		return introspect.Describe{}, err
-	}
-	for name, spec := range dynamic {
-		words[name] = spec
-	}
-	return introspect.Describe{Class: m.Class, Interfaces: append([]string(nil), m.Interfaces...), Capabilities: map[string]bool{}, Words: words}, nil
-}
-
-func decodeStrict(raw json.RawMessage, out any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(out); err != nil {
 		return err
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("trailing JSON value")
-		}
-		return err
+	_, err = state.Put(ServiceStateKey, raw)
+	return err
+}
+
+func BootstrapState(table ServiceTable) ([]byte, error) {
+	return json.Marshal(persistedService{Table: cloneTable(table)})
+}
+
+func cloneCard(in channel.Card) channel.Card {
+	out := channel.Card{Words: make(map[string]json.RawMessage, len(in.Words))}
+	for word, spec := range in.Words {
+		out.Words[word] = append(json.RawMessage(nil), spec...)
 	}
-	return nil
+	return out
 }

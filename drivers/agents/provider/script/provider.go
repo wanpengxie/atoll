@@ -2,8 +2,6 @@ package script
 
 import (
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
-	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 type provider struct {
@@ -25,12 +23,9 @@ func (provider) Spec() driverproto.ProviderSpec {
 	return driverproto.ProviderSpec{
 		Name:         Class,
 		Capabilities: map[string]bool{driverproto.CapabilityFork: true},
-		Describe: introspect.Describe{
+		Documentation: driverproto.Documentation{
 			Description: ActorDoc,
 			SkillDoc:    "# script\n\nDeterministic regression provider.",
-			Types: map[string]introspect.TypeMeta{
-				TypeAsk: {Description: "call echo and persist payload, or verify resource_id", AllowedKinds: []string{string(message.KindRequest)}},
-			},
 		},
 	}
 }

@@ -57,8 +57,8 @@ func TestPeeractorSealsOriginFromLedgerEnvelopeAndReturnsOnlyBody(t *testing.T) 
 			got = request
 			return channel.Result{Body: json.RawMessage(`{"ok":true}`)}, nil
 		},
-		Card: func(context.Context, channel.ID, channel.ID) (introspect.Describe, error) {
-			return introspect.Describe{}, nil
+		Describe: func(context.Context, channel.ID, channel.ID, channel.Describe) (channel.Card, error) {
+			return channel.Card{Words: map[string]json.RawMessage{}}, nil
 		},
 	})
 	if err == nil || got.From.Channel != "caller" || got.From.Actor != "alice" || got.From.RequestID != "request-a" || got.Type != "work" || string(got.Payload) != `{"origin":{"channel":"forged"},"value":7}` {
@@ -93,8 +93,8 @@ func TestPeeractorUnavailableAndRemoteFailureUseClosedCodes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "request", ChannelID: "caller", Kind: message.KindRequest, Type: "work", Payload: json.RawMessage(`{"body":null}`)})
 			sys := &peerSys{recv: []actorbase.Msg{msg}}
-			_ = serve(sys, Deps{Caller: "caller", Target: "target", Seam: tc.seam, Card: func(context.Context, channel.ID, channel.ID) (introspect.Describe, error) {
-				return introspect.Describe{}, nil
+			_ = serve(sys, Deps{Caller: "caller", Target: "target", Seam: tc.seam, Describe: func(context.Context, channel.ID, channel.ID, channel.Describe) (channel.Card, error) {
+				return channel.Card{Words: map[string]json.RawMessage{}}, nil
 			}})
 			if sys.fail != tc.want {
 				t.Fatalf("fail=%q want=%q", sys.fail, tc.want)
@@ -111,8 +111,8 @@ func TestPeeractorRelaysProgressBeforeTerminal(t *testing.T) {
 	_ = serve(sys, Deps{Caller: "caller", Target: "target", Seam: func(_ context.Context, _, _ channel.ID, request channel.Request, progress func(channel.Progress)) (channel.Result, error) {
 		progress(channel.Progress{RequestID: request.From.RequestID, Seq: 1, Status: message.StatusProcessing, Body: json.RawMessage(`{"step":1}`)})
 		return channel.Result{Body: json.RawMessage(`{"done":true}`)}, nil
-	}, Card: func(context.Context, channel.ID, channel.ID) (introspect.Describe, error) {
-		return introspect.Describe{}, nil
+	}, Describe: func(context.Context, channel.ID, channel.ID, channel.Describe) (channel.Card, error) {
+		return channel.Card{Words: map[string]json.RawMessage{}}, nil
 	}})
 	if len(sys.progress) != 1 || sys.progress[0] != message.StatusProcessing || string(sys.reply) != `{"done":true}` {
 		t.Fatalf("progress=%v reply=%s", sys.progress, sys.reply)
@@ -123,9 +123,13 @@ func TestPeeractorDynamicManifestIsOneRemoteCardProjection(t *testing.T) {
 	calls := 0
 	def := Def(Deps{Caller: "caller", Target: "target", Seam: func(context.Context, channel.ID, channel.ID, channel.Request, func(channel.Progress)) (channel.Result, error) {
 		return channel.Result{}, nil
-	}, Card: func(context.Context, channel.ID, channel.ID) (introspect.Describe, error) {
+	}, Describe: func(_ context.Context, caller, target channel.ID, frame channel.Describe) (channel.Card, error) {
 		calls++
-		return introspect.Describe{Words: map[string]introspect.WordSpec{"actor.describe": {}, "work.run": {Description: "remote"}}}, nil
+		if caller != "caller" || target != "target" || frame.From.Channel != "caller" {
+			t.Fatalf("describe caller=%q target=%q frame=%+v", caller, target, frame)
+		}
+		spec, _ := json.Marshal(introspect.WordSpec{Description: "remote"})
+		return channel.Card{Words: map[string]json.RawMessage{"work.run": spec}}, nil
 	}})
 	words, err := def.Manifest.Dynamic(context.Background())
 	if err != nil || calls != 1 || len(words) != 1 || words["work.run"].Description != "remote" {

@@ -222,6 +222,30 @@ func TestReadRejectsNegativeSlice(t *testing.T) {
 	}
 }
 
+func TestDeviceReceiverRejectsUnknownFields(t *testing.T) {
+	sys, _ := startActor(t)
+	msg := request(TypeFileRead, map[string]any{"path": "f.txt", "paht": "typo"})
+	msg.ID = "req-unknown-field"
+	sys.push(msg)
+	status, code, _ := waitTerminal(t, sys, msg.ID)
+	if status != "failed" || code != "invalid_args" {
+		t.Fatalf("status=%s code=%s", status, code)
+	}
+}
+
+func TestDeviceDescribePublishesCanonicalInputSchemas(t *testing.T) {
+	describe := manifest()
+	spec, ok := describe.Words[TypeExec]
+	if !ok || len(spec.InputSchema) == 0 || !json.Valid(spec.InputSchema) {
+		t.Fatalf("device.exec word spec=%+v", spec)
+	}
+	var schema map[string]any
+	_ = json.Unmarshal(spec.InputSchema, &schema)
+	if schema["type"] != "object" {
+		t.Fatalf("device.exec input schema=%s", spec.InputSchema)
+	}
+}
+
 func TestWriteRejectsSymlinkEscape(t *testing.T) {
 	sys, root := startActor(t)
 	outside := t.TempDir()

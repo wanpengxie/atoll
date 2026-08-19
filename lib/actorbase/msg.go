@@ -1,8 +1,11 @@
 package actorbase
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -139,16 +142,32 @@ func NewMsg(origin MsgOrigin, ctx context.Context, env message.Envelope) Msg {
 	}
 	msg := Msg{Envelope: env, ctx: ctx, origin: origin}
 	if env.Kind == message.KindRequest {
+		// Clear first: an invalid envelope must never leak its undecoded payload
+		// to a receiver as an accidental legacy protocol.
+		msg.Payload = nil
 		var wrapped struct {
 			Context *harness.Context `json:"_context,omitempty"`
 			Body    json.RawMessage  `json:"body"`
 		}
-		if json.Unmarshal(env.Payload, &wrapped) == nil {
-			msg.Payload = append(json.RawMessage(nil), wrapped.Body...)
-			if wrapped.Context != nil {
-				caller := wrapped.Context.Caller
-				msg.caller = &caller
+		dec := json.NewDecoder(bytes.NewReader(env.Payload))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&wrapped); err != nil {
+			panic("actorbase: invalid request payload envelope: " + err.Error())
+		}
+		var trailing any
+		if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+			if err == nil {
+				panic("actorbase: invalid request payload envelope: multiple JSON values")
 			}
+			panic("actorbase: invalid request payload envelope: " + err.Error())
+		}
+		if len(wrapped.Body) == 0 {
+			panic("actorbase: invalid request payload envelope: body field required")
+		}
+		msg.Payload = append(json.RawMessage(nil), wrapped.Body...)
+		if wrapped.Context != nil {
+			caller := wrapped.Context.Caller
+			msg.caller = &caller
 		}
 	}
 	return msg

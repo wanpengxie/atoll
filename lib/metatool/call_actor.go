@@ -19,7 +19,7 @@ Workflow:
   1. Call list_actors first to see who is in the channel (thin directory:
      actor_id, kind, present, uptime_ms, and optional device; no types).
   2. Call describe_actor for the chosen actor's skill doc and full type list.
-  3. Call describe_type when you need payload_example, payload_fields, notes, or
+  3. Call describe_type when you need the input/output schemas, examples, or
      adapter-specific error codes for the selected type.
   4. Call call_actor.
 

@@ -14,9 +14,8 @@ func sampleDescribe() Describe {
 		Capabilities: map[string]bool{},
 		Words: map[string]WordSpec{
 			"device.exec": {
-				Description:  "run bash",
-				AllowedKinds: []string{"request"},
-				MaxPendingMs: 120_000,
+				Description: "run bash",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
 			},
 		},
 	}
@@ -43,7 +42,7 @@ func TestAnswerDescribe_TypeSelector(t *testing.T) {
 	if !isDescribe {
 		t.Fatalf("type answer is %T; want Describe", got)
 	}
-	if len(selected.Words) != 1 || selected.Words["device.exec"].MaxPendingMs != 120_000 {
+	if len(selected.Words) != 1 || string(selected.Words["device.exec"].InputSchema) != `{"type":"object"}` {
 		t.Fatalf("type answer = %+v", selected)
 	}
 }
@@ -74,7 +73,7 @@ func TestReservedQueryNames(t *testing.T) {
 	}
 }
 
-func TestManifestReservationAppliesToWordsNotClassNames(t *testing.T) {
+func TestManifestValidationOnlyReservesGateErrorsAndDynamicCollisions(t *testing.T) {
 	for _, class := range []string{"device", "svcactor"} {
 		manifest := Manifest{Class: class, Interfaces: []string{"actor"}, Words: map[string]WordSpec{"device.read": {}}}
 		if class == "svcactor" {
@@ -85,8 +84,14 @@ func TestManifestReservationAppliesToWordsNotClassNames(t *testing.T) {
 			t.Fatalf("class %q rejected: %v", class, err)
 		}
 	}
-	if err := ValidateManifest(Manifest{Class: "device", Interfaces: []string{"actor"}, Words: map[string]WordSpec{"system.channel.list": {}}}); err == nil {
-		t.Fatal("reserved word prefix accepted for a non-owner")
+	if err := ValidateManifest(Manifest{Class: "device", Interfaces: []string{"actor"}, Words: map[string]WordSpec{"system.channel.list": {}, "no-dot": {}}}); err != nil {
+		t.Fatalf("prefix or word spelling was enforced: %v", err)
+	}
+	if err := ValidateManifest(Manifest{Words: map[string]WordSpec{"work.run": {ErrorCodes: []string{"endpoint_not_found"}}}}); err == nil {
+		t.Fatal("reserved gate error code accepted")
+	}
+	if err := ValidateDynamicWords(map[string]WordSpec{"work.run": {}}, map[string]WordSpec{"work.run": {}}); err == nil {
+		t.Fatal("dynamic/static collision accepted")
 	}
 }
 
@@ -163,25 +168,24 @@ func TestCatalogRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSchemaFieldsAreAdditiveAndOmittedForExistingActors(t *testing.T) {
-	legacy := TypeMeta{Description: "legacy", PayloadFields: []FieldDoc{{Name: "value", Description: "value"}}}
-	raw, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "input_schema") || strings.Contains(string(raw), "output_schema") {
-		t.Fatalf("empty additive schema fields changed legacy wire shape: %s", raw)
-	}
-	withSchemas := TypeMeta{
+func TestWordSpecWireShapeContainsOnlyCanonicalFields(t *testing.T) {
+	withSchemas := WordSpec{
 		Description:  "mcp",
 		InputSchema:  json.RawMessage(`{"type":"object","$defs":{"X":{"type":"string"}}}`),
 		OutputSchema: json.RawMessage(`{"type":"array","items":{"type":"number"}}`),
+		ErrorCodes:   []string{"tool_failed"},
+		Examples:     []json.RawMessage{json.RawMessage(`{"value":"x"}`)},
 	}
-	raw, err = json.Marshal(withSchemas)
+	raw, err := json.Marshal(withSchemas)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(raw), `"input_schema"`) || !strings.Contains(string(raw), `"output_schema"`) {
 		t.Fatalf("schema fields missing: %s", raw)
+	}
+	for _, removed := range []string{"allowed_kinds", "max_pending_ms", "payload_example", "payload_fields", "notes"} {
+		if strings.Contains(string(raw), removed) {
+			t.Fatalf("removed compatibility field %q leaked: %s", removed, raw)
+		}
 	}
 }

@@ -14,8 +14,8 @@ import (
 // without them the whole file is returned subject to MaxReadBytes.
 func (a *Actor) handleFileRead(msg actorbase.Msg) {
 	var p FileReadPayload
-	if err := decodePayload(msg.Payload, &p); err != nil {
-		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
+	if err := actorbase.DecodeStrict(msg.Payload, &p); err != nil {
+		a.fail(msg, "invalid_args", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
 	if p.Offset < 0 || p.Limit < 0 {
@@ -86,8 +86,8 @@ func (a *Actor) handleFileRead(msg actorbase.Msg) {
 // directories created as needed.
 func (a *Actor) handleFileWrite(msg actorbase.Msg) {
 	var p FileWritePayload
-	if err := decodePayload(msg.Payload, &p); err != nil {
-		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
+	if err := actorbase.DecodeStrict(msg.Payload, &p); err != nil {
+		a.fail(msg, "invalid_args", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
 	root, err := a.channelWorkspace(msg.ChannelID)
@@ -124,8 +124,8 @@ func (a *Actor) handleFileWrite(msg actorbase.Msg) {
 // Without replace_all, old_string must occur exactly once.
 func (a *Actor) handleFileEdit(msg actorbase.Msg) {
 	var p FileEditPayload
-	if err := decodePayload(msg.Payload, &p); err != nil {
-		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
+	if err := actorbase.DecodeStrict(msg.Payload, &p); err != nil {
+		a.fail(msg, "invalid_args", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
 	if p.OldString == "" {

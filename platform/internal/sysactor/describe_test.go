@@ -8,7 +8,7 @@ import (
 
 func TestSystemManifestUsesTheClosedSystemVocabulary(t *testing.T) {
 	manifest := systemManifest()
-	if manifest.Class != "membrane" || len(manifest.Interfaces) != 1 || manifest.Interfaces[0] != "actor" {
+	if manifest.Class != "sysactor" || len(manifest.Interfaces) != 1 || manifest.Interfaces[0] != "actor" {
 		t.Fatalf("manifest=%+v", manifest)
 	}
 	for _, entry := range message.SystemEntries() {

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +27,7 @@ const refreshInterval = time.Minute
 type snapshot struct {
 	description string
 	skillDoc    string
-	types       map[string]introspect.TypeMeta
+	types       map[string]introspect.WordSpec
 	tools       map[string]string
 }
 
@@ -265,7 +264,7 @@ func buildSnapshot(name string, discover discovery, list toolList) snapshot {
 	selfDescription := serverSelfDescription(name, discover)
 	s := snapshot{
 		description: selfDescription,
-		types:       make(map[string]introspect.TypeMeta, len(list.Tools)),
+		types:       make(map[string]introspect.WordSpec, len(list.Tools)),
 		tools:       make(map[string]string, len(list.Tools)),
 	}
 	var doc strings.Builder
@@ -303,67 +302,10 @@ func serverSelfDescription(name string, discover discovery) string {
 	return doc.String()
 }
 
-func translateTool(t tool) introspect.TypeMeta {
-	meta := introspect.TypeMeta{
+func translateTool(t tool) introspect.WordSpec {
+	return introspect.WordSpec{
 		Description:  t.Description,
-		AllowedKinds: []string{string(message.KindRequest)},
 		InputSchema:  append(json.RawMessage(nil), t.InputSchema...),
 		OutputSchema: append(json.RawMessage(nil), t.OutputSchema...),
 	}
-	var schema struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-		Required   []string                   `json:"required"`
-	}
-	if json.Unmarshal(t.InputSchema, &schema) != nil {
-		return meta
-	}
-	required := make(map[string]bool, len(schema.Required))
-	for _, name := range schema.Required {
-		required[name] = true
-	}
-	names := make([]string, 0, len(schema.Properties))
-	for name := range schema.Properties {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		raw := schema.Properties[name]
-		var field struct {
-			Description string `json:"description"`
-			Type        string `json:"type"`
-			Enum        []any  `json:"enum"`
-		}
-		_ = json.Unmarshal(raw, &field)
-		details := []string{}
-		if field.Type != "" {
-			details = append(details, "type: "+field.Type)
-		}
-		if len(field.Enum) > 0 {
-			details = append(details, "enum present")
-		}
-		if bytesContainSchemaDetail(raw) {
-			details = append(details, "see raw schema")
-		}
-		description := field.Description
-		if len(details) > 0 {
-			if description != "" {
-				description += " "
-			}
-			description += "(" + strings.Join(details, "; ") + ")"
-		}
-		meta.PayloadFields = append(meta.PayloadFields, introspect.FieldDoc{
-			Name: name, Required: required[name], Description: description,
-		})
-	}
-	return meta
-}
-
-func bytesContainSchemaDetail(raw []byte) bool {
-	text := string(raw)
-	for _, marker := range []string{`"$ref"`, `"oneOf"`, `"anyOf"`, `"items"`, `"properties"`, `"enum"`} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
 }

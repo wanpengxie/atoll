@@ -13,21 +13,16 @@ func TestTranslateToolKeepsRawSchemasAndOnlyFlattensTopLevel(t *testing.T) {
 	if string(meta.InputSchema) != string(input) || string(meta.OutputSchema) != string(output) {
 		t.Fatalf("schemas changed: input=%s output=%s", meta.InputSchema, meta.OutputSchema)
 	}
-	if strings.Contains(meta.Notes, string(input)) || strings.Contains(meta.Notes, string(output)) {
-		t.Fatalf("notes retained schema source: %q", meta.Notes)
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(meta.PayloadFields) != 2 {
-		t.Fatalf("payload fields=%#v", meta.PayloadFields)
-	}
-	byName := map[string]bool{}
-	for _, field := range meta.PayloadFields {
-		byName[field.Name] = field.Required
-	}
-	if !byName["customer"] || byName["level"] {
-		t.Fatalf("required translation=%v", byName)
+	for _, legacy := range []string{"notes", "payload_fields"} {
+		if strings.Contains(string(raw), legacy) {
+			t.Fatalf("legacy field %q leaked: %s", legacy, raw)
+		}
 	}
 }
-
 func TestTranslateInputRequiredCarriesContinuation(t *testing.T) {
 	state := "opaque-state"
 	payload, _, err := translateCallResult(callResult{

@@ -269,9 +269,6 @@ func verifyReferenceClient(t *testing.T, c *client) {
 	if !bytes.Equal(structured.OutputSchema, byName["structured_report"].OutputSchema) {
 		t.Fatalf("structured_report output schema changed: got=%s want=%s", structured.OutputSchema, byName["structured_report"].OutputSchema)
 	}
-	if stringsContains(createOrder.Notes, string(createOrder.InputSchema)) || stringsContains(structured.Notes, string(structured.OutputSchema)) {
-		t.Fatalf("schema leaked into notes: create=%q structured=%q", createOrder.Notes, structured.Notes)
-	}
 	result, _, err := c.callTool(context.Background(), "echo", json.RawMessage(`{"text":"go-mcp"}`), false)
 	if err != nil {
 		t.Fatal(err)

@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -37,14 +41,20 @@ type svcSys struct {
 	callErr error
 	reply   any
 	fail    string
+	state   actorbase.StateHandle
 }
 
 type memoryState struct {
+	mu     sync.Mutex
 	values map[resource.ResourceID][]byte
+	putErr error
+	puts   int
 }
 
 func newMemoryState() *memoryState { return &memoryState{values: map[resource.ResourceID][]byte{}} }
 func (s *memoryState) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	raw, ok := s.values[id]
 	if !ok {
 		return accessdoor.Outcome{RejectReason: access.ResourceNotFound}, nil
@@ -52,12 +62,26 @@ func (s *memoryState) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{Found: true, Value: append([]byte(nil), raw...)}, nil
 }
 func (s *memoryState) Put(id resource.ResourceID, raw []byte) (accessdoor.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.putErr != nil {
+		return accessdoor.Outcome{}, s.putErr
+	}
+	s.puts++
 	s.values[id] = append([]byte(nil), raw...)
 	return accessdoor.Outcome{}, nil
 }
 func (s *memoryState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.values, id)
 	return accessdoor.Outcome{}, nil
+}
+
+func (s *memoryState) putCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.puts
 }
 
 type materializeSys struct {
@@ -65,11 +89,17 @@ type materializeSys struct {
 	ctx   context.Context
 	state *memoryState
 	calls int
+	recv  <-chan struct{}
 }
 
 func (s *materializeSys) Life() context.Context        { return s.ctx }
 func (s *materializeSys) State() actorbase.StateHandle { return s.state }
-func (*materializeSys) Recv() (actorbase.Msg, error)   { return actorbase.Msg{}, context.Canceled }
+func (s *materializeSys) Recv() (actorbase.Msg, error) {
+	if s.recv != nil {
+		<-s.recv
+	}
+	return actorbase.Msg{}, context.Canceled
+}
 func (s *materializeSys) Call(_ actor.ActorID, _ string, _ any) (actorbase.Pending, error) {
 	s.calls++
 	env := message.Envelope{Payload: json.RawMessage(`{"status":"completed","class":"echo","interfaces":["actor"],"capabilities":{},"words":{"echo.say":{"description":"live echo"},"echo.alt":{"description":"live alternate"}}}`)}
@@ -84,6 +114,8 @@ func (s *svcSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
 	s.fail = code
 	return "fail", nil
 }
+
+func (s *svcSys) State() actorbase.StateHandle { return s.state }
 
 func (s *svcSys) CallFor(caller harness.Caller, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	s.caller, s.target, s.word = caller, target, word
@@ -114,7 +146,7 @@ func TestDispatchPreservesBodyAndEffectiveCaller(t *testing.T) {
 	s := &service{deps: deps, table: ServiceTable{Endpoints: map[string]actor.ActorID{"work": "tool:worker:1"}}}
 	sys := &svcSys{}
 	req := channel.Request{From: channel.From{Channel: "caller", Actor: "agent:alice:1", RequestID: "remote"}, Type: "work", Payload: json.RawMessage(`{"origin":"business","n":1}`)}
-	result := s.dispatch(context.Background(), sys, "caller", req, nil)
+	result := s.dispatch(context.Background(), context.Background(), sys, "caller", req, nil)
 	if result.Fail != nil || string(result.Body) != `{"value":{"ok":true}}` {
 		t.Fatalf("result=%+v", result)
 	}
@@ -131,7 +163,7 @@ func TestC0SpaceWordRoutesToRegistrarWithoutAServiceTable(t *testing.T) {
 	s := &service{deps: deps, table: emptyTable()}
 	sys := &svcSys{}
 	req := channel.Request{From: channel.From{Channel: "ordinary", Actor: "agent:alice:1", RequestID: "remote"}, Type: "system.channel.get", Payload: json.RawMessage(`{"channel_id":"ordinary"}`)}
-	result := s.dispatch(context.Background(), sys, "ordinary", req, nil)
+	result := s.dispatch(context.Background(), context.Background(), sys, "ordinary", req, nil)
 	if result.Fail != nil || sys.target != "system:registrar" {
 		t.Fatalf("result=%+v target=%q", result, sys.target)
 	}
@@ -141,9 +173,36 @@ func TestUnknownEndpointFailsBeforeWriting(t *testing.T) {
 	deps := serviceDeps("target")
 	s := &service{deps: deps, table: emptyTable()}
 	sys := &svcSys{}
-	result := s.dispatch(context.Background(), sys, "caller", channel.Request{From: channel.From{Channel: "caller"}, Type: "missing"}, nil)
+	result := s.dispatch(context.Background(), context.Background(), sys, "caller", channel.Request{From: channel.From{Channel: "caller"}, Type: "missing"}, nil)
 	if result.Fail == nil || result.Fail.Code != "endpoint_not_found" || sys.target != "" {
 		t.Fatalf("result=%+v target=%q", result, sys.target)
+	}
+}
+
+func TestInternalManifestAndPeerCardRemainSeparateSurfaces(t *testing.T) {
+	internal := manifest()
+	if internal.Class != "svcactor" || !reflect.DeepEqual(internal.Interfaces, []string{"actor", "svcactor"}) || len(internal.Words) != 2 {
+		t.Fatalf("internal manifest=%+v", internal)
+	}
+	if _, ok := internal.Words["svcactor.set"]; !ok {
+		t.Fatalf("internal manifest words=%v", internal.Words)
+	}
+	if _, ok := internal.Words["svcactor.get"]; !ok {
+		t.Fatalf("internal manifest words=%v", internal.Words)
+	}
+	if _, ok := internal.Words["actor.describe"]; ok {
+		t.Fatalf("engine-owned actor.describe was declared as a mailbox word")
+	}
+
+	s := &service{deps: serviceDeps("target"), table: emptyTable(), card: channel.Card{Words: map[string]json.RawMessage{"agent.ask": json.RawMessage(`{}`)}}}
+	for _, word := range []string{"actor.describe", "svcactor.set", "svcactor.get"} {
+		result := s.dispatch(context.Background(), context.Background(), &svcSys{}, "caller", channel.Request{From: channel.From{Channel: "caller"}, Type: word}, nil)
+		if result.Fail == nil || result.Fail.Code != string(channel.GateEndpointNotFound) {
+			t.Fatalf("peer call %q result=%+v", word, result)
+		}
+	}
+	if card := s.cardSnapshot(); len(card.Words) != 1 || card.Words["agent.ask"] == nil {
+		t.Fatalf("peer card=%+v", card)
 	}
 }
 
@@ -151,14 +210,14 @@ func TestStructuralDispatchBranchesStayClosed(t *testing.T) {
 	t.Run("c0 may operate a remote membrane", func(t *testing.T) {
 		s := &service{deps: serviceDeps("remote"), table: emptyTable()}
 		sys := &svcSys{}
-		result := s.dispatch(context.Background(), sys, "c0", channel.Request{From: channel.From{Channel: "c0", Actor: "system:registrar:1"}, Type: message.TypeSystemMemberDelete, Payload: json.RawMessage(`{"member":"tool:x:1"}`)}, nil)
+		result := s.dispatch(context.Background(), context.Background(), sys, "c0", channel.Request{From: channel.From{Channel: "c0", Actor: "system:registrar:1"}, Type: message.TypeSystemMemberDelete, Payload: json.RawMessage(`{"member":"tool:x:1"}`)}, nil)
 		if result.Fail != nil || sys.target != actor.SystemActorID {
 			t.Fatalf("result=%+v target=%q", result, sys.target)
 		}
 	})
 	t.Run("ordinary channel cannot operate another membrane", func(t *testing.T) {
 		s := &service{deps: serviceDeps("remote"), table: emptyTable()}
-		result := s.dispatch(context.Background(), &svcSys{}, "other", channel.Request{From: channel.From{Channel: "other"}, Type: message.TypeSystemMemberDelete}, nil)
+		result := s.dispatch(context.Background(), context.Background(), &svcSys{}, "other", channel.Request{From: channel.From{Channel: "other"}, Type: message.TypeSystemMemberDelete}, nil)
 		if result.Fail == nil || result.Fail.Code != string(channel.GateEndpointNotFound) {
 			t.Fatalf("result=%+v", result)
 		}
@@ -166,14 +225,14 @@ func TestStructuralDispatchBranchesStayClosed(t *testing.T) {
 	t.Run("ordinary space route resolves no local registrar", func(t *testing.T) {
 		s := &service{deps: serviceDeps("remote"), table: emptyTable()}
 		sys := &svcSys{callErr: &actorbase.TargetResolveError{Code: "not_found", Target: "system:registrar"}}
-		result := s.dispatch(context.Background(), sys, "other", channel.Request{From: channel.From{Channel: "other"}, Type: message.TypeSystemChannelList}, nil)
+		result := s.dispatch(context.Background(), context.Background(), sys, "other", channel.Request{From: channel.From{Channel: "other"}, Type: message.TypeSystemChannelList}, nil)
 		if result.Fail == nil || result.Fail.Stage != channel.StageGate || result.Fail.Code != string(channel.GateEndpointNotFound) {
 			t.Fatalf("result=%+v", result)
 		}
 	})
 	t.Run("missing service agent is explicit", func(t *testing.T) {
 		s := &service{deps: serviceDeps("remote"), table: emptyTable()}
-		result := s.dispatch(context.Background(), &svcSys{}, "other", channel.Request{From: channel.From{Channel: "other"}, Type: "agent.ask"}, nil)
+		result := s.dispatch(context.Background(), context.Background(), &svcSys{}, "other", channel.Request{From: channel.From{Channel: "other"}, Type: "agent.ask"}, nil)
 		if result.Fail == nil || result.Fail.Code != string(channel.GateNoServiceAgent) {
 			t.Fatalf("result=%+v", result)
 		}
@@ -196,7 +255,7 @@ func TestServiceAgentDispatchCoversNullDefaultAndNamedStates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			s := &service{deps: serviceDeps("target"), table: ServiceTable{SvcAgent: test.agent, Endpoints: map[string]actor.ActorID{}}}
 			sys := &svcSys{}
-			result := s.dispatch(context.Background(), sys, "caller", channel.Request{From: channel.From{Channel: "caller", Actor: "human:alice:1"}, Type: "agent.ask", Payload: json.RawMessage(`{"text":"hello"}`)}, nil)
+			result := s.dispatch(context.Background(), context.Background(), sys, "caller", channel.Request{From: channel.From{Channel: "caller", Actor: "human:alice:1"}, Type: "agent.ask", Payload: json.RawMessage(`{"text":"hello"}`)}, nil)
 			if test.fail != "" {
 				if result.Fail == nil || result.Fail.Code != string(test.fail) {
 					t.Fatalf("result=%+v", result)
@@ -207,6 +266,19 @@ func TestServiceAgentDispatchCoversNullDefaultAndNamedStates(t *testing.T) {
 				t.Fatalf("result=%+v target=%q", result, sys.target)
 			}
 		})
+	}
+}
+
+func TestNamedServiceAgentMustStillBeActiveAtDispatch(t *testing.T) {
+	deps := serviceDeps("target")
+	deps.Members.IsActive = func(context.Context, actor.ActorID) (bool, error) { return false, nil }
+	named := "agent:named:1"
+	s := &service{deps: deps, table: ServiceTable{SvcAgent: &named, Endpoints: map[string]actor.ActorID{}}}
+	result := s.dispatch(context.Background(), context.Background(), &svcSys{}, "caller", channel.Request{
+		From: channel.From{Channel: "caller", Actor: "human:alice:1"}, Type: "agent.ask",
+	}, nil)
+	if result.Fail == nil || result.Fail.Stage != channel.StageGate || result.Fail.Code != string(channel.GateReceiverInactive) {
+		t.Fatalf("inactive named service agent result=%+v", result)
 	}
 }
 
@@ -246,38 +318,87 @@ func TestFailurePropagationTableMatchesA9FrameCodes(t *testing.T) {
 }
 
 func TestServiceManifestMaterializesOnceSurvivesRestartAndUpdates(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	state := newMemoryState()
 	table := ServiceTable{Endpoints: map[string]actor.ActorID{"echo.say": "tool:echo:1"}}
-	raw, _ := json.Marshal(table)
+	raw, _ := BootstrapState(table)
 	_, _ = state.Put(ServiceStateKey, raw)
-	sys := &materializeSys{ctx: ctx, state: state}
+	state.puts = 0
+	stopFirst := make(chan struct{})
+	sys := &materializeSys{ctx: context.Background(), state: state, recv: stopFirst}
 	deps := serviceDeps("target")
 	deps.Port = NewPort()
 	defer deps.Port.Close()
 
 	first := &service{deps: deps, table: emptyTable()}
-	if err := first.serve(sys); !errors.Is(err, context.Canceled) || sys.calls != 1 {
-		t.Fatalf("first serve err=%v describe calls=%d", err, sys.calls)
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- first.serve(sys) }()
+	deadline := time.Now().Add(time.Second)
+	for state.putCount() != 1 && time.Now().Before(deadline) {
+		runtime.Gosched()
 	}
-	words, found, err := readDynamicWords(state)
-	if err != nil || !found || words["echo.say"].Description != "live echo" {
-		t.Fatalf("first words=%+v found=%v err=%v", words, found, err)
+	close(stopFirst)
+	if err := <-firstDone; !errors.Is(err, context.Canceled) || sys.calls != 1 {
+		t.Fatalf("first serve err=%v describe calls=%d puts=%d", err, sys.calls, state.puts)
+	}
+	persisted, found, err := readService(state)
+	var echoSpec introspect.WordSpec
+	if err == nil && found && persisted.Card != nil {
+		_ = json.Unmarshal(persisted.Card.Words["echo.say"], &echoSpec)
+	}
+	if err != nil || !found || persisted.Card == nil || echoSpec.Description != "live echo" || state.puts != 1 {
+		t.Fatalf("first state=%+v spec=%+v found=%v puts=%d err=%v", persisted, echoSpec, found, state.puts, err)
 	}
 
 	restarted := &service{deps: deps, table: emptyTable()}
-	if err := restarted.serve(sys); !errors.Is(err, context.Canceled) || sys.calls != 1 {
+	stopRestart := make(chan struct{})
+	sys.recv = stopRestart
+	restartDone := make(chan error, 1)
+	go func() { restartDone <- restarted.serve(sys) }()
+	close(stopRestart)
+	if err := <-restartDone; !errors.Is(err, context.Canceled) || sys.calls != 1 {
 		t.Fatalf("restart err=%v describe calls=%d", err, sys.calls)
 	}
 
 	updated := ServiceTable{Endpoints: map[string]actor.ActorID{"echo.alt": "tool:echo:1"}}
-	if err := restarted.materialize(sys, updated); err != nil {
+	updatedCard := restarted.buildCard(sys, updated)
+	if err := writeService(state, updated, updatedCard); err != nil {
 		t.Fatal(err)
 	}
-	words, found, err = readDynamicWords(state)
-	if err != nil || !found || len(words) != 1 || words["echo.alt"].Description != "live alternate" {
-		t.Fatalf("updated words=%+v found=%v err=%v", words, found, err)
+	persisted, found, err = readService(state)
+	var altSpec introspect.WordSpec
+	if err == nil && found && persisted.Card != nil {
+		_ = json.Unmarshal(persisted.Card.Words["echo.alt"], &altSpec)
+	}
+	if err != nil || !found || persisted.Card == nil || altSpec.Description != "live alternate" || sys.calls != 2 || state.puts != 2 {
+		t.Fatalf("updated state=%+v spec=%+v calls=%d puts=%d found=%v err=%v", persisted, altSpec, sys.calls, state.puts, found, err)
+	}
+}
+
+func TestServiceSetPublishesTableAndCardOnlyAfterOneSuccessfulWrite(t *testing.T) {
+	state := newMemoryState()
+	oldTable := ServiceTable{Endpoints: map[string]actor.ActorID{"old.run": "tool:old:1"}}
+	oldCard := channel.Card{Words: map[string]json.RawMessage{"old.run": json.RawMessage(`{"description":"old"}`)}}
+	if err := writeService(state, oldTable, oldCard); err != nil {
+		t.Fatal(err)
+	}
+	before := append([]byte(nil), state.values[ServiceStateKey]...)
+	state.puts = 0
+	state.putErr = errors.New("disk full")
+	s := &service{deps: serviceDeps("target"), table: cloneTable(oldTable), card: cloneCard(oldCard)}
+	sys := &svcSys{state: state}
+	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "set", ChannelID: "target", Kind: message.KindRequest, Type: "svcactor.set",
+		Sender: message.Sender{ID: "agent:owner:1"}, Payload: json.RawMessage(`{"body":{"svc_agent":null,"endpoints":{}}}`),
+	})
+	s.handleMailbox(sys, msg)
+	if sys.fail != "internal_error" || state.puts != 0 || string(state.values[ServiceStateKey]) != string(before) {
+		t.Fatalf("fail=%q puts=%d state=%s", sys.fail, state.puts, state.values[ServiceStateKey])
+	}
+	if got := s.snapshot(); len(got.Endpoints) != 1 || got.Endpoints["old.run"] != "tool:old:1" {
+		t.Fatalf("in-memory table changed on failed write: %+v", got)
+	}
+	if got := s.cardSnapshot(); string(got.Words["old.run"]) != `{"description":"old"}` {
+		t.Fatalf("in-memory card changed on failed write: %+v", got)
 	}
 }
 
@@ -299,6 +420,19 @@ func TestC0ServiceTableIsEmptyAndImmutable(t *testing.T) {
 	s.handleMailbox(setSys, request("svcactor.set", `{"svc_agent":null,"endpoints":{}}`))
 	if setSys.fail != "permission_denied" || setSys.reply != nil {
 		t.Fatalf("set reply=%#v fail=%q", setSys.reply, setSys.fail)
+	}
+}
+
+func TestServiceMailboxRejectsUnknownFieldsImmediately(t *testing.T) {
+	s := &service{deps: serviceDeps("target"), table: emptyTable(), card: channel.Card{Words: map[string]json.RawMessage{}}}
+	sys := &svcSys{}
+	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "get", ChannelID: "target", Kind: message.KindRequest, Type: "svcactor.get",
+		Sender: message.Sender{ID: "agent:member:1"}, Payload: json.RawMessage(`{"body":{"extra":true}}`),
+	})
+	s.handleMailbox(sys, msg)
+	if sys.reply != nil || sys.fail != "invalid_args" {
+		t.Fatalf("reply=%#v fail=%q", sys.reply, sys.fail)
 	}
 }
 
@@ -363,9 +497,13 @@ func (blockedPending) Progress() <-chan actorbase.Msg {
 	close(out)
 	return out
 }
-func (p blockedPending) Wait(context.Context, time.Duration) (actorbase.Msg, error) {
+func (p blockedPending) Wait(ctx context.Context, _ time.Duration) (actorbase.Msg, error) {
 	close(p.started)
-	<-p.release
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return actorbase.Msg{}, ctx.Err()
+	}
 	env := message.Envelope{Payload: json.RawMessage(`{"status":"completed","ok":true}`)}
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env), nil
 }
@@ -392,9 +530,13 @@ func TestBlockedServiceRequestDoesNotBlockDescribe(t *testing.T) {
 	deps := serviceDeps("target")
 	deps.Port = port
 	agentID := "agent:service:1"
-	s := &service{deps: deps, table: ServiceTable{SvcAgent: &agentID, Endpoints: map[string]actor.ActorID{}}}
+	s := &service{
+		deps: deps, table: ServiceTable{SvcAgent: &agentID, Endpoints: map[string]actor.ActorID{}},
+		card: channel.Card{Words: map[string]json.RawMessage{"agent.ask": json.RawMessage(`{"description":"ask"}`)}},
+	}
 	sys := &concurrentSys{ctx: ctx, pending: blockedPending{started: started, release: release}}
-	go s.servePort(sys)
+	serveDone := make(chan struct{})
+	go func() { s.servePort(ctx, sys); close(serveDone) }()
 	firstDone := make(chan channel.Result, 1)
 	go func() {
 		result, _ := port.Call(ctx, "caller", channel.Request{From: channel.From{Channel: "caller"}, Type: "agent.ask"}, nil)
@@ -407,8 +549,8 @@ func TestBlockedServiceRequestDoesNotBlockDescribe(t *testing.T) {
 	}
 	describeCtx, stopDescribe := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopDescribe()
-	describe, err := port.Call(describeCtx, "caller", channel.Request{From: channel.From{Channel: "caller"}, Type: "actor.describe"}, nil)
-	if err != nil || describe.Fail != nil || len(describe.Body) == 0 {
+	describe, err := port.Describe(describeCtx, "caller", channel.Describe{From: channel.DescribeFrom{Channel: "caller"}})
+	if err != nil || string(describe.Words["agent.ask"]) != `{"description":"ask"}` {
 		t.Fatalf("describe=%+v err=%v", describe, err)
 	}
 	close(release)
@@ -419,5 +561,57 @@ func TestBlockedServiceRequestDoesNotBlockDescribe(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("blocked request did not finish")
+	}
+	cancel()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("service port generation did not stop")
+	}
+}
+
+func TestServiceActorStopCancelsInFlightWithChannelUnavailableAndJoins(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	port := NewPort()
+	defer port.Close()
+	life, stopLife := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	deps := serviceDeps("target")
+	deps.Port = port
+	agentID := "agent:service:1"
+	s := &service{deps: deps, table: ServiceTable{SvcAgent: &agentID, Endpoints: map[string]actor.ActorID{}}}
+	sys := &concurrentSys{ctx: life, pending: blockedPending{started: started, release: make(chan struct{})}}
+	serveDone := make(chan struct{})
+	go func() { s.servePort(life, sys); close(serveDone) }()
+	callDone := make(chan channel.Result, 1)
+	go func() {
+		result, _ := port.Call(context.Background(), "caller", channel.Request{From: channel.From{Channel: "caller"}, Type: "agent.ask"}, nil)
+		callDone <- result
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight service request did not start")
+	}
+	stopLife()
+	select {
+	case result := <-callDone:
+		if result.Fail == nil || result.Fail.Stage != channel.StageGate || result.Fail.Code != string(channel.GateChannelUnavailable) {
+			t.Fatalf("stopped in-flight result=%+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stopped in-flight request did not terminate")
+	}
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("service port and child goroutine did not join")
+	}
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > baseline+1 && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if got := runtime.NumGoroutine(); got > baseline+1 {
+		t.Fatalf("goroutines after lifecycle join=%d baseline=%d", got, baseline)
 	}
 }

@@ -90,7 +90,8 @@ func (e *engine) validateStatePut(id resource.ResourceID, raw []byte) error {
 
 func (e *engine) respondManifest(env *message.Envelope) {
 	msg := NewMsg(OriginMailbox, e.lifeCtx, *env)
-	req, err := introspect.ParseDescribeRequest(msg.Payload)
+	var req introspect.DescribeRequest
+	err := DecodeStrictEmpty(msg.Payload, &req)
 	if err != nil {
 		_, _ = e.Fail(msg, "invalid_args", err.Error())
 		return

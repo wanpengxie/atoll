@@ -2,7 +2,6 @@ package home
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -448,7 +447,7 @@ func seedBootstrap(
 		}
 		table.SvcAgent = &value
 	}
-	raw, err := json.Marshal(table)
+	raw, err := svcactor.BootstrapState(table)
 	if err != nil {
 		return err
 	}
