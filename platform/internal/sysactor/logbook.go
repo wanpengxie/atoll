@@ -33,13 +33,13 @@ func (s *SystemActor) respondLogbookRecent(sys actorbase.Sys, msg actorbase.Msg)
 		return
 	}
 	if s.logbook == nil {
-		_, _ = sys.Fail(msg, "provider_failed", "logbook query unavailable")
+		_, _ = sys.Fail(msg, "provider_failed", "this channel has no ledger reader attached, so recent rows cannot be read here. This is a fact about how the channel was assembled, not a passing fault")
 		return
 	}
 
 	maxSeq, err := s.logbook.MaxSeq(msg.Ctx())
 	if err != nil {
-		_, _ = sys.Fail(msg, "provider_failed", err.Error())
+		_, _ = sys.Fail(msg, "provider_failed", "reading the ledger head failed: "+err.Error()+"; the ledger is momentarily unreadable, so a retry may succeed")
 		return
 	}
 	ring := make([]storespec.StoredRow, 0, req.Limit)
@@ -47,7 +47,7 @@ func (s *SystemActor) respondLogbookRecent(sys actorbase.Sys, msg actorbase.Msg)
 	for after < maxSeq {
 		rows, err := s.logbook.ReadAfterSeq(msg.Ctx(), after, logbookPageSize)
 		if err != nil {
-			_, _ = sys.Fail(msg, "provider_failed", err.Error())
+			_, _ = sys.Fail(msg, "provider_failed", "reading a ledger page failed: "+err.Error()+"; the ledger is momentarily unreadable, so a retry may succeed")
 			return
 		}
 		if len(rows) == 0 {

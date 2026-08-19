@@ -135,11 +135,11 @@ func (a *mcpActor) call(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = sys.Fail(msg, "mcp_unreachable", lastError.Error())
 			return
 		}
-		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("mcp actor does not handle %s", msg.Type))
+		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("this mcp adapter does not answer %q; call actor.describe on it for the tools the server currently exposes", msg.Type))
 		return
 	}
 	if a.client == nil {
-		_, _ = sys.Fail(msg, "mcp_unreachable", "MCP client is unavailable")
+		_, _ = sys.Fail(msg, "mcp_unreachable", "the MCP server backing this adapter is not connected, so no tool on it can be called right now; retry once it reconnects")
 		return
 	}
 	callCtx, cancel := context.WithTimeout(msg.Ctx(), a.callTimeout())

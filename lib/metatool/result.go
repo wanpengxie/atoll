@@ -50,6 +50,20 @@ func PayloadInvalidError(toolName, msg, hint string) ResultValue {
 // TerminalFailureToActorCLI maps a terminal failure reason to the
 // actor-CLI closed error set.
 func TerminalFailureToActorCLI(toolName, actorID, typeName, reason string, detail any) ResultValue {
+	// The actor's own verdict wins when it gave one. `reason` distinguishes
+	// only how the request ended (the receiver answered / went silent / timed
+	// out); error_code says WHAT was wrong, which is the half an agent can act
+	// on. Reading it first is what turns "internal error, inspect logs" into
+	// "this argument is wrong" or "this will never be permitted".
+	if failure := failureDetailOf(detail); failure.Code != "" {
+		if class, known := classifyActorError(failure.Code); known {
+			message := fmt.Sprintf("Actor %q refused %q: %s", actorID, typeName, failure.Code)
+			if failure.Detail != "" {
+				message = fmt.Sprintf("Actor %q refused %q (%s): %s", actorID, typeName, failure.Code, failure.Detail)
+			}
+			return newClassifiedError(toolName, class, message, detail)
+		}
+	}
 	switch reason {
 	case string(message.TerminalReceiverUnavailable):
 		return NewError(

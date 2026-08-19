@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -93,7 +94,7 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	if !authed {
 		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
 			"sender", string(caller.Actor), "code", unauthorizedSenderCode)
-		_, _ = sys.Fail(msg, unauthorizedSenderCode, "sender is not an active channel member")
+		_, _ = sys.Fail(msg, unauthorizedSenderCode, fmt.Sprintf("%q is not an active member of this channel, so it may not use the channel control words; check the roster with system.member.list", caller.Actor))
 		return
 	}
 	req := OperateRequest{ChannelID: msg.ChannelID, Caller: caller, Anchor: string(msg.ID), Payload: msg.Payload}

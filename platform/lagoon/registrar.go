@@ -185,7 +185,7 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if word == WordPrincipalCreate && caller.Channel == channelspec.LobbyChannelID && !r.registry.openRegistration {
-		_, _ = sys.Fail(msg, "endpoint_not_found", "registration is closed")
+		_, _ = sys.Fail(msg, "endpoint_not_found", "this node is not accepting self-registration, so new principals cannot be created from the lobby; an existing principal must create the account")
 		return
 	}
 	value, err := r.execute(sys, msg.Ctx(), principal, caller.Channel, word, msg.Payload)
@@ -280,6 +280,32 @@ func decodeArgs(raw json.RawMessage, out any, shape string) error {
 	return invalid(detail)
 }
 
+// kindOrUnknown names a class's kind for a message, staying legible when the
+// class is not one this node runs — the caller is being told why a transition
+// was refused, and "unknown class" as one half of that sentence is still more
+// use than no sentence.
+// configRejection relays a class's own verdict on a config and points at where
+// the shape can be read. The class knows exactly what it refused and says so;
+// what it cannot know is that a caller who got here has no other way to learn
+// the field set — the shapes live in Go types, and system.class.list is the
+// one word that publishes them.
+// The unknown-class case is told apart with the catalog itself rather than by
+// matching the registry's error, so this stays behind the ClassCatalog
+// interface that keeps lagoon independent of any particular class registry.
+func (r *Registrar) configRejection(class string, err error) error {
+	if _, known := r.classes.LookupClassKind(class); !known {
+		return invalid(fmt.Sprintf("class %q is not one this node can run; list the runnable classes, each with the config shape it accepts, using system.class.list", class))
+	}
+	return invalid(fmt.Sprintf("%s; read the accepted config shape for class %q with system.class.list", err.Error(), class))
+}
+
+func kindOrUnknown(kind actor.Kind, known bool) string {
+	if !known {
+		return "unknown class"
+	}
+	return string(kind)
+}
+
 // nameRule states the name law from ValidateName instead of only enforcing it.
 // "lagoon: invalid name" names the package that refused and nothing a caller
 // can act on; the first name an agent tried here was a non-ASCII one, which
@@ -301,7 +327,7 @@ const (
 func decodeEmpty(raw json.RawMessage) error {
 	var body struct{}
 	if err := actorbase.DecodeStrictEmpty(raw, &body); err != nil {
-		return invalid("invalid JSON payload")
+		return invalid("this word takes no parameters; send an empty object: " + err.Error())
 	}
 	return nil
 }
@@ -438,7 +464,7 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 			return nil, err
 		}
 		if !ok || row.Status != regspec.ChannelPresent {
-			return nil, notFound("channel")
+			return nil, notFound("channel", string(p.ChannelID), "system.channel.list")
 		}
 		return r.channelView(ctx, row)
 	case WordPrincipalList:
@@ -454,14 +480,14 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 	case WordActorTemplateGet:
 		var p DeclRevoke
 		if err := decodeClosed(raw, &p); err != nil || p.ID == "" {
-			return nil, invalid("id required")
+			return nil, invalid("id required: name the template to act on; list them with system.actor.template.list")
 		}
 		row, ok, err := r.registry.GetDecl(ctx, p.ID)
 		if err != nil {
 			return nil, err
 		}
 		if !ok || row.Status != regspec.DeclPresent {
-			return nil, notFound("declaration")
+			return nil, notFound("declaration", p.ID, "system.actor.template.list")
 		}
 		return row, nil
 	case WordChannelTemplateList:
@@ -479,7 +505,7 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 			return nil, err
 		}
 		if !ok {
-			return nil, notFound("channel template")
+			return nil, notFound("channel template", p.ID, "system.channel.template.list")
 		}
 		return row, nil
 	case WordDeviceList:
@@ -498,12 +524,29 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 		}
 		return r.readPrincipal(ctx, principal)
 	default:
-		return nil, invalid("unknown registrar word")
+		return nil, invalid(fmt.Sprintf("%q is not a word this registry answers; call actor.describe on the system door to see the ones it does", word))
 	}
 }
 
-func invalid(detail string) error  { return &Error{Code: CodeInvalidArgs, Detail: detail} }
-func notFound(noun string) error   { return &Error{Code: CodeNotFound, Detail: noun + " not found"} }
+func invalid(detail string) error { return &Error{Code: CodeInvalidArgs, Detail: detail} }
+
+// notFound names the id that was not found and where the caller can get a
+// real one. The previous signature took only a noun, so "channel not found"
+// was the most it could ever say — the sender learned neither which of the
+// ids it sent was wrong nor how to obtain a correct one, and had to go
+// probing. The listing word is part of the message because the registry is
+// the only place these ids exist; reconstructing one by hand is how a caller
+// arrives here in the first place.
+func notFound(noun, id, listWord string) error {
+	detail := noun + " not found"
+	if id != "" {
+		detail = fmt.Sprintf("%s %q not found", noun, id)
+	}
+	if listWord != "" {
+		detail += "; list the current ones with " + listWord
+	}
+	return &Error{Code: CodeNotFound, Detail: detail}
+}
 func conflict(detail string) error { return &Error{Code: CodeConflictExists, Detail: detail} }
 func denied(detail string) error   { return &Error{Code: CodePermissionDenied, Detail: detail} }
 func reserved(detail string) error { return &Error{Code: CodeReserved, Detail: detail} }
@@ -535,13 +578,13 @@ func (r *Registrar) createChannel(sys actorbase.Sys, ctx context.Context, owner 
 
 func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name string, body regspec.TemplateBody) (regspec.ChannelRow, bool, error) {
 	if name == "" {
-		return regspec.ChannelRow{}, false, invalid("name required")
+		return regspec.ChannelRow{}, false, invalid("name required: a channel needs a name, 1-63 chars of lowercase a-z, 0-9 or '-'")
 	}
 	if err := ValidateName(name); err != nil {
 		return regspec.ChannelRow{}, false, invalid(nameRule("channel name", name))
 	}
 	if parent == "" {
-		return regspec.ChannelRow{}, false, invalid("parent required")
+		return regspec.ChannelRow{}, false, invalid("parent required: a channel is always created under the channel the request came from, and that channel could not be determined")
 	}
 	rows, err := tx.ListChannels(ctx)
 	if err != nil {
@@ -560,7 +603,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		}
 	}
 	if !parentFound || parentRow.Status != regspec.ChannelPresent {
-		return regspec.ChannelRow{}, false, notFound("parent channel")
+		return regspec.ChannelRow{}, false, notFound("parent channel", string(parent), "system.channel.list")
 	}
 	qualified, err := JoinName(parentRow.QualifiedName, name)
 	if err != nil {
@@ -610,7 +653,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			return regspec.ChannelRow{}, false, err
 		}
 		if !ok || decl.Status != regspec.DeclPresent {
-			return regspec.ChannelRow{}, false, notFound("declaration")
+			return regspec.ChannelRow{}, false, notFound("declaration", item.DeclID, "system.actor.template.list")
 		}
 		if decl.Visibility != "public" && decl.Owner != owner {
 			return regspec.ChannelRow{}, false, denied(fmt.Sprintf("declaration %q is private and owned by %q, not you; use a public declaration, one you own, or create your own with system.actor.template.create and visibility \"public\"", item.DeclID, decl.Owner))
@@ -624,15 +667,15 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			return regspec.ChannelRow{}, false, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 		}
 		if err := r.classes.ValidateConfig(decl.DefaultClass, config); err != nil {
-			return regspec.ChannelRow{}, false, invalid(err.Error())
+			return regspec.ChannelRow{}, false, r.configRejection(decl.DefaultClass, err)
 		}
 		kind, ok := r.classes.LookupClassKind(decl.DefaultClass)
 		if !ok {
-			return regspec.ChannelRow{}, false, invalid("unknown class")
+			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("declaration %q names class %q, which this node cannot run; list the runnable classes with system.class.list", item.DeclID, decl.DefaultClass))
 		}
 		placement, ok := r.classes.LookupClassPlacement(decl.DefaultClass)
 		if !ok {
-			return regspec.ChannelRow{}, false, invalid("unknown class placement")
+			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("class %q declares no valid placement, so no host can be chosen for it; this is a defect in the class itself rather than in your request", decl.DefaultClass))
 		}
 		rendered := channelspec.RenderedSnapshot{Class: decl.DefaultClass, Config: cloneJSON(config), Placement: channelspec.Placement{Kind: placement}, Singleton: decl.Singleton}
 		if placement == channelspec.PlacementDaemon {
@@ -647,14 +690,14 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	if parent != channelspec.C0ChannelID {
 		if declarationKinds[string(parent)] != "" {
-			return regspec.ChannelRow{}, false, invalid("recipe must not declare its parent peer")
+			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("a recipe must not list %q, the peer back to its own parent channel: the registry mints that itself", string(parent)))
 		}
 		parentDecl, ok, err := tx.GetDecl(ctx, string(parent))
 		if err != nil {
 			return regspec.ChannelRow{}, false, err
 		}
 		if !ok || parentDecl.Status != regspec.DeclPresent {
-			return regspec.ChannelRow{}, false, notFound("parent peer declaration")
+			return regspec.ChannelRow{}, false, notFound("parent peer declaration", string(parent), "system.actor.template.list")
 		}
 		parentRendered, err := r.renderSystem(PeerActorClass, targetConfig(parent))
 		if err != nil {
@@ -722,7 +765,7 @@ func declaredIn(kinds map[string]actor.Kind) string {
 func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]actor.Kind) error {
 	for name, endpoint := range profile.Endpoints {
 		if strings.TrimSpace(name) == "" || name == introspect.QueryDescribe || name == "agent.ask" || strings.HasPrefix(name, "svcactor.") || strings.HasPrefix(name, "system.") {
-			return invalid("reserved or empty service endpoint name")
+			return invalid(fmt.Sprintf("service endpoint name %q is empty or reserved: an endpoint may not be named actor.describe or agent.ask, nor start with svcactor. or system., because those are already answered by the door itself", name))
 		}
 		kind, ok := kinds[endpoint.Receiver]
 		if !ok {
@@ -757,20 +800,20 @@ type ChannelRetireReply struct {
 
 func (r *Registrar) retireChannel(sys actorbase.Sys, ctx context.Context, principal string, source channel.ID, p ChannelRetire) (ChannelRetireReply, error) {
 	if p.ChannelID == "" {
-		return ChannelRetireReply{}, invalid("channel_id required")
+		return ChannelRetireReply{}, invalid("channel_id required: name the channel to act on; list them with system.channel.list")
 	}
 	if p.ChannelID == channelspec.C0ChannelID {
 		return ChannelRetireReply{}, reserved("c0 cannot be retired")
 	}
 	row, found, err := r.registry.GetChannelDesired(ctx, p.ChannelID)
 	if !found && err == nil {
-		return ChannelRetireReply{}, notFound("channel")
+		return ChannelRetireReply{}, notFound("channel", string(p.ChannelID), "system.channel.list")
 	}
 	if err != nil {
 		return ChannelRetireReply{}, err
 	}
 	if row.OwnerPrincipal != principal && source != channelspec.C0ChannelID {
-		return ChannelRetireReply{}, denied("channel owner or core required")
+		return ChannelRetireReply{}, denied(fmt.Sprintf("channel %q is owned by %q and you are acting as %q; only its owner, or a caller in the registry channel, may retire it", p.ChannelID, row.OwnerPrincipal, principal))
 	}
 	hasPresentChild, err := r.registry.store.PresentChildExists(ctx, p.ChannelID)
 	if err != nil {
@@ -798,7 +841,7 @@ type PrincipalRegisterReply struct {
 func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p PrincipalRegister) (PrincipalRegisterReply, error) {
 	p.Email = strings.TrimSpace(p.Email)
 	if p.Email == "" || p.SecretHash == "" {
-		return PrincipalRegisterReply{}, invalid("email and secret_hash required")
+		return PrincipalRegisterReply{}, invalid("email and secret_hash are both required to create a principal")
 	}
 	id := strings.TrimSpace(p.ID)
 	if id == channelspec.RootPrincipalID {
@@ -867,7 +910,7 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p 
 func (r *Registrar) loginPrincipal(ctx context.Context, p PrincipalLogin) (PrincipalLoginReply, error) {
 	p.Email = strings.TrimSpace(p.Email)
 	if p.Email == "" || p.Password == "" {
-		return PrincipalLoginReply{}, invalid("email and password required")
+		return PrincipalLoginReply{}, invalid("email and password are both required to sign in")
 	}
 	id, ok, err := r.registry.VerifyCredential(ctx, p.Email, p.Password)
 	if err != nil {
@@ -881,13 +924,13 @@ func (r *Registrar) loginPrincipal(ctx context.Context, p PrincipalLogin) (Princ
 
 func (r *Registrar) retirePrincipal(ctx context.Context, caller string, source channel.ID, p PrincipalRetire) (regspec.PrincipalRow, error) {
 	if p.PrincipalID == "" {
-		return regspec.PrincipalRow{}, invalid("principal_id required")
+		return regspec.PrincipalRow{}, invalid("principal_id required: name the principal to act on; list them with system.principal.list")
 	}
 	if p.PrincipalID == channelspec.RootPrincipalID {
 		return regspec.PrincipalRow{}, reserved("root cannot be retired")
 	}
 	if caller != p.PrincipalID && source != channelspec.C0ChannelID {
-		return regspec.PrincipalRow{}, denied("principal or core required")
+		return regspec.PrincipalRow{}, denied(fmt.Sprintf("you are acting as %q and may only retire your own principal; retiring %q requires acting as that principal or calling from the registry channel", caller, p.PrincipalID))
 	}
 	row, err := r.updatePrincipalStatus(ctx, p.PrincipalID, regspec.PrincipalRetired)
 	return row, err
@@ -896,7 +939,7 @@ func (r *Registrar) retirePrincipal(ctx context.Context, caller string, source c
 func (r *Registrar) updatePrincipalStatus(ctx context.Context, id string, status regspec.PrincipalStatus) (regspec.PrincipalRow, error) {
 	row, found, err := r.registry.store.GetPrincipal(ctx, id)
 	if !found && err == nil {
-		return regspec.PrincipalRow{}, notFound("principal")
+		return regspec.PrincipalRow{}, notFound("principal", id, "system.principal.list")
 	}
 	if err != nil {
 		return regspec.PrincipalRow{}, err
@@ -916,20 +959,20 @@ func (r *Registrar) updatePrincipalStatus(ctx context.Context, id string, status
 
 func (r *Registrar) setCredential(ctx context.Context, caller string, source channel.ID, p CredentialSet) (CredentialReply, error) {
 	if p.PrincipalID == "" || p.SecretHash == "" {
-		return CredentialReply{}, invalid("principal_id and secret_hash required")
+		return CredentialReply{}, invalid("principal_id and secret_hash are both required to replace a credential")
 	}
 	if caller != p.PrincipalID && source != channelspec.C0ChannelID {
-		return CredentialReply{}, denied("principal or core required")
+		return CredentialReply{}, denied(fmt.Sprintf("you are acting as %q and may only change your own credential; changing %q requires acting as that principal or calling from the registry channel", caller, p.PrincipalID))
 	}
 	principalKind, found, err := r.registry.store.PrincipalKind(ctx, p.PrincipalID)
 	if !found && err == nil {
-		return CredentialReply{}, notFound("principal")
+		return CredentialReply{}, notFound("principal", p.PrincipalID, "system.principal.list")
 	}
 	if err != nil {
 		return CredentialReply{}, err
 	}
 	if principalKind != actor.KindHuman {
-		return CredentialReply{}, denied("credentials require a human principal")
+		return CredentialReply{}, denied(fmt.Sprintf("principal %q is a %s, and only a human principal signs in with a credential", p.PrincipalID, principalKind))
 	}
 	storedHash, status, rotatedAt, found, err := r.registry.store.PasswordCredential(ctx, p.PrincipalID)
 	if err == nil && found && storedHash == p.SecretHash && status == regspec.CredentialActive {
@@ -950,7 +993,7 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 	p.Name = strings.TrimSpace(p.Name)
 	p.Class = strings.TrimSpace(p.Class)
 	if p.ID == "" || p.Name == "" || p.Class == "" {
-		return regspec.DeclRow{}, invalid("id, name and class required")
+		return regspec.DeclRow{}, invalid("id, name and class are all required: class decides what the declaration runs, and system.class.list shows which classes this node has")
 	}
 	if systemDecl(p.ID) {
 		return regspec.DeclRow{}, reserved("system declaration is reserved")
@@ -962,13 +1005,13 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 		p.Visibility = "private"
 	}
 	if p.Visibility != "private" && p.Visibility != "public" {
-		return regspec.DeclRow{}, invalid("invalid visibility")
+		return regspec.DeclRow{}, invalid(fmt.Sprintf("visibility %q is not valid: the only values are public (anyone may build from this declaration) and private (only you may, and this is the default)", p.Visibility))
 	}
 	if r.classes == nil {
 		return regspec.DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 	}
 	if err := r.classes.ValidateConfig(p.Class, p.Config); err != nil {
-		return regspec.DeclRow{}, invalid(err.Error())
+		return regspec.DeclRow{}, r.configRejection(p.Class, err)
 	}
 	now := r.now().UnixMilli()
 	existing, found, err := r.registry.store.GetDecl(ctx, p.ID)
@@ -1011,26 +1054,26 @@ func systemCompanion(id string) bool {
 
 func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.ID, p DeclEdit) (regspec.DeclRow, error) {
 	if p.ID == "" {
-		return regspec.DeclRow{}, invalid("id required")
+		return regspec.DeclRow{}, invalid("id required: name the template to act on; list them with system.actor.template.list")
 	}
 	if systemDecl(p.ID) {
 		return regspec.DeclRow{}, reserved("system declaration is reserved")
 	}
 	row, found, err := r.registry.store.GetDecl(ctx, p.ID)
 	if !found && err == nil {
-		return regspec.DeclRow{}, notFound("declaration")
+		return regspec.DeclRow{}, notFound("declaration", p.ID, "system.actor.template.list")
 	}
 	if err != nil {
 		return regspec.DeclRow{}, err
 	}
 	if row.Status != regspec.DeclPresent {
-		return regspec.DeclRow{}, notFound("declaration")
+		return regspec.DeclRow{}, notFound("declaration", p.ID, "system.actor.template.list")
 	}
 	if r.systemClass(row.DefaultClass) || systemDecl(row.ID) {
 		return regspec.DeclRow{}, reserved("system declaration is reserved")
 	}
 	if row.Owner != caller && source != channelspec.C0ChannelID {
-		return regspec.DeclRow{}, denied("declaration owner required")
+		return regspec.DeclRow{}, denied(fmt.Sprintf("declaration %q is owned by %q and you are acting as %q; only its owner, or a caller in the registry channel, may change it", row.ID, row.Owner, caller))
 	}
 	before := row
 	before.Config = cloneJSON(row.Config)
@@ -1051,7 +1094,7 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.
 		oldKind, oldOK := r.classes.LookupClassKind(row.DefaultClass)
 		newKind, newOK := r.classes.LookupClassKind(next)
 		if !oldOK || !newOK || oldKind != newKind {
-			return regspec.DeclRow{}, invalid("class transition changes actor kind")
+			return regspec.DeclRow{}, invalid(fmt.Sprintf("cannot change class from %q to %q: that would change the declaration from a %s into a %s, and a declaration's kind is fixed once minted. Create a new declaration instead", row.DefaultClass, next, kindOrUnknown(oldKind, oldOK), kindOrUnknown(newKind, newOK)))
 		}
 		row.DefaultClass = next
 	}
@@ -1065,13 +1108,13 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.
 		row.Singleton = *p.Singleton
 	}
 	if row.Name == "" || (row.Visibility != "private" && row.Visibility != "public") {
-		return regspec.DeclRow{}, invalid("invalid declaration")
+		return regspec.DeclRow{}, invalid(fmt.Sprintf("the declaration would be left invalid: name is %q and visibility is %q, but a declaration needs a non-empty name and a visibility of public or private", row.Name, row.Visibility))
 	}
 	if r.classes == nil {
 		return regspec.DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 	}
 	if err := r.classes.ValidateConfig(row.DefaultClass, row.Config); err != nil {
-		return regspec.DeclRow{}, invalid(err.Error())
+		return regspec.DeclRow{}, r.configRejection(row.DefaultClass, err)
 	}
 	if row.Name == before.Name && row.Description == before.Description && row.DefaultClass == before.DefaultClass && row.Visibility == before.Visibility && row.Singleton == before.Singleton && jsonEqual(row.Config, before.Config) {
 		return before, nil
@@ -1088,14 +1131,14 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.
 
 func (r *Registrar) revokeDecl(ctx context.Context, caller string, source channel.ID, p DeclRevoke) (regspec.DeclRow, error) {
 	if p.ID == "" {
-		return regspec.DeclRow{}, invalid("id required")
+		return regspec.DeclRow{}, invalid("id required: name the template to act on; list them with system.actor.template.list")
 	}
 	if systemDecl(p.ID) {
 		return regspec.DeclRow{}, reserved("system declaration is reserved")
 	}
 	row, found, err := r.registry.store.GetDecl(ctx, p.ID)
 	if !found && err == nil {
-		return regspec.DeclRow{}, notFound("declaration")
+		return regspec.DeclRow{}, notFound("declaration", p.ID, "system.actor.template.list")
 	}
 	if err != nil {
 		return regspec.DeclRow{}, err
@@ -1104,7 +1147,7 @@ func (r *Registrar) revokeDecl(ctx context.Context, caller string, source channe
 		return regspec.DeclRow{}, reserved("system declaration is reserved")
 	}
 	if row.Owner != caller && source != channelspec.C0ChannelID {
-		return regspec.DeclRow{}, denied("declaration owner required")
+		return regspec.DeclRow{}, denied(fmt.Sprintf("declaration %q is owned by %q and you are acting as %q; only its owner, or a caller in the registry channel, may change it", row.ID, row.Owner, caller))
 	}
 	if row.Status == regspec.DeclRevoked {
 		return row, nil
@@ -1122,20 +1165,20 @@ func (r *Registrar) revokeDecl(ctx context.Context, caller string, source channe
 
 func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID, p OverlaySet) (regspec.OverlayRow, error) {
 	if p.DeclID == "" || p.ChannelID == "" {
-		return regspec.OverlayRow{}, invalid("decl_id and channel_id required")
+		return regspec.OverlayRow{}, invalid("decl_id and channel_id are both required: the overlay names which declaration, in which channel")
 	}
 	if systemDecl(p.DeclID) {
 		return regspec.OverlayRow{}, reserved("system declaration is reserved")
 	}
 	if p.ChannelID != source {
-		return regspec.OverlayRow{}, denied("overlay target must equal source channel")
+		return regspec.OverlayRow{}, denied(fmt.Sprintf("an overlay may only be set on the channel it is sent from: this request names channel_id %q but arrived from %q. Send it from the target channel instead", p.ChannelID, source))
 	}
 	decl, ok, err := r.registry.GetDecl(ctx, p.DeclID)
 	if err != nil {
 		return regspec.OverlayRow{}, err
 	}
 	if !ok || decl.Status != regspec.DeclPresent {
-		return regspec.OverlayRow{}, notFound("declaration")
+		return regspec.OverlayRow{}, notFound("declaration", p.DeclID, "system.actor.template.list")
 	}
 	if r.systemClass(decl.DefaultClass) || systemDecl(decl.ID) {
 		return regspec.OverlayRow{}, reserved("system declaration is reserved")
@@ -1144,7 +1187,7 @@ func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID,
 		return regspec.OverlayRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 	}
 	if err := r.classes.ValidateConfig(decl.DefaultClass, p.Config); err != nil {
-		return regspec.OverlayRow{}, invalid(err.Error())
+		return regspec.OverlayRow{}, r.configRejection(decl.DefaultClass, err)
 	}
 	return r.writeOverlay(ctx, p)
 }
@@ -1171,20 +1214,20 @@ func (r *Registrar) writeOverlay(ctx context.Context, p OverlaySet) (regspec.Ove
 
 func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p OverlayClear) (Confirmation, error) {
 	if p.DeclID == "" || p.ChannelID == "" {
-		return Confirmation{}, invalid("decl_id and channel_id required")
+		return Confirmation{}, invalid("decl_id and channel_id are both required: the overlay names which declaration, in which channel")
 	}
 	if systemDecl(p.DeclID) {
 		return Confirmation{}, reserved("system declaration is reserved")
 	}
 	if p.ChannelID != source {
-		return Confirmation{}, denied("overlay target must equal source channel")
+		return Confirmation{}, denied(fmt.Sprintf("an overlay may only be set on the channel it is sent from: this request names channel_id %q but arrived from %q. Send it from the target channel instead", p.ChannelID, source))
 	}
 	decl, ok, err := r.registry.GetDecl(ctx, p.DeclID)
 	if err != nil {
 		return Confirmation{}, err
 	}
 	if !ok || decl.Status != regspec.DeclPresent {
-		return Confirmation{}, notFound("declaration")
+		return Confirmation{}, notFound("declaration", p.DeclID, "system.actor.template.list")
 	}
 	if r.systemClass(decl.DefaultClass) || systemDecl(decl.ID) {
 		return Confirmation{}, reserved("system declaration is reserved")
@@ -1217,7 +1260,7 @@ func (r *Registrar) createDevice(ctx context.Context, owner, name string) (regsp
 
 func (r *Registrar) retireDevice(ctx context.Context, owner string, source channel.ID, p DeviceRetire) (regspec.DeviceRow, error) {
 	if p.DeviceID == "" {
-		return regspec.DeviceRow{}, invalid("device_id required")
+		return regspec.DeviceRow{}, invalid("device_id required: name the device to act on; list them with system.device.list")
 	}
 	if p.DeviceID == channelspec.LocalDeviceID {
 		return regspec.DeviceRow{}, reserved("local device cannot be retired")
@@ -1227,10 +1270,10 @@ func (r *Registrar) retireDevice(ctx context.Context, owner string, source chann
 		return regspec.DeviceRow{}, err
 	}
 	if !ok {
-		return regspec.DeviceRow{}, notFound("device")
+		return regspec.DeviceRow{}, notFound("device", p.DeviceID, "system.device.list")
 	}
 	if row.OwnerPrincipal != owner && source != channelspec.C0ChannelID {
-		return regspec.DeviceRow{}, denied("device owner required")
+		return regspec.DeviceRow{}, denied(fmt.Sprintf("device %q belongs to %q and you are acting as %q; only its owner, or a caller in the registry channel, may retire it", p.DeviceID, row.OwnerPrincipal, owner))
 	}
 	if row.Status == regspec.DeviceRetired {
 		return row, nil
@@ -1286,27 +1329,27 @@ func (r *Registrar) detachDevice(ctx context.Context, owner string, source chann
 
 func (r *Registrar) authorizeBinding(ctx context.Context, owner string, source channel.ID, p DeviceBinding) error {
 	if p.ChannelID == "" || p.DeviceID == "" {
-		return invalid("channel_id and device_id required")
+		return invalid("channel_id and device_id are both required: a binding names which device, to which channel")
 	}
 	if p.ChannelID != source {
-		return denied("binding target must equal source channel")
+		return denied(fmt.Sprintf("a device may only be bound to the channel the request comes from: this names channel_id %q but arrived from %q. Send it from the target channel instead", p.ChannelID, source))
 	}
 	ch, ok, err := r.registry.GetChannelDesired(ctx, p.ChannelID)
 	if err != nil {
 		return err
 	}
 	if !ok || ch.Status != regspec.ChannelPresent {
-		return notFound("channel")
+		return notFound("channel", string(p.ChannelID), "system.channel.list")
 	}
 	device, ok, err := r.registry.GetDevice(ctx, p.DeviceID)
 	if err != nil {
 		return err
 	}
 	if !ok || device.Status != regspec.DevicePresent {
-		return notFound("device")
+		return notFound("device", p.DeviceID, "system.device.list")
 	}
 	if p.DeviceID != channelspec.LocalDeviceID && device.OwnerPrincipal != owner {
-		return denied("device owner required")
+		return denied(fmt.Sprintf("device %q belongs to %q and you are acting as %q; only its owner may bind it", p.DeviceID, device.OwnerPrincipal, owner))
 	}
 	return nil
 }
@@ -1327,11 +1370,11 @@ func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.Templ
 					return err
 				}
 				if !ok || r.classes == nil {
-					return invalid("template declaration unavailable")
+					return invalid(fmt.Sprintf("declaration %q cannot be resolved right now, so the template cannot be checked against it", item.DeclID))
 				}
 				kind, ok := r.classes.LookupClassKind(decl.DefaultClass)
 				if !ok {
-					return invalid("unknown class")
+					return invalid(fmt.Sprintf("declaration %q names class %q, which this node cannot run; list the runnable classes with system.class.list", item.DeclID, decl.DefaultClass))
 				}
 				kinds[item.DeclID] = kind
 			}
@@ -1345,10 +1388,10 @@ func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.
 	seen := make(map[string]struct{}, len(declarations))
 	for _, item := range declarations {
 		if item.DeclID == "" {
-			return invalid("template declaration id required")
+			return invalid("every entry in declarations needs a non-empty decl_id")
 		}
 		if _, duplicate := seen[item.DeclID]; duplicate {
-			return invalid("duplicate template declaration")
+			return invalid(fmt.Sprintf("declaration %q is listed more than once; each decl_id may appear at most once", item.DeclID))
 		}
 		seen[item.DeclID] = struct{}{}
 		decl, ok, err := tx.GetDecl(ctx, item.DeclID)
@@ -1356,11 +1399,11 @@ func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.
 			return err
 		}
 		if !ok || decl.Status != regspec.DeclPresent {
-			return invalid("template declaration not found")
+			return invalid(fmt.Sprintf("declaration %q is not present; list the available ones with system.actor.template.list", item.DeclID))
 		}
 		if decl.DefaultClass == PeerActorClass {
 			if item.Config != nil {
-				return invalid("peer declaration config is fixed")
+				return invalid(fmt.Sprintf("declaration %q is a peer, whose config is minted by the registry and cannot be overridden here; drop the config field for this entry", item.DeclID))
 			}
 			if decl.DefaultClass != PeerActorClass {
 				return invalid("peer declaration class is invalid")
@@ -1377,13 +1420,13 @@ func (r *Registrar) registerChannelTemplate(ctx context.Context, owner string, p
 	p.ID = strings.TrimSpace(p.ID)
 	p.Name = strings.TrimSpace(p.Name)
 	if p.ID == "" || p.Name == "" {
-		return regspec.ChannelTemplateRow{}, invalid("id and name required")
+		return regspec.ChannelTemplateRow{}, invalid("id and name are both required to create a channel template")
 	}
 	if p.Visibility == "" {
 		p.Visibility = "private"
 	}
 	if p.Visibility != "private" && p.Visibility != "public" {
-		return regspec.ChannelTemplateRow{}, invalid("invalid visibility")
+		return regspec.ChannelTemplateRow{}, invalid(fmt.Sprintf("visibility %q is not valid: the only values are public (anyone may build from this template) and private (only you may, and this is the default)", p.Visibility))
 	}
 	if err := r.validateTemplateBody(ctx, p.Body); err != nil {
 		return regspec.ChannelTemplateRow{}, err
@@ -1408,10 +1451,10 @@ func (r *Registrar) editChannelTemplate(ctx context.Context, caller string, p Ch
 		return regspec.ChannelTemplateRow{}, err
 	}
 	if !ok || row.Status != regspec.DeclPresent {
-		return regspec.ChannelTemplateRow{}, notFound("channel template")
+		return regspec.ChannelTemplateRow{}, notFound("channel template", p.ID, "system.channel.template.list")
 	}
 	if row.Owner != caller {
-		return regspec.ChannelTemplateRow{}, denied("channel template owner required")
+		return regspec.ChannelTemplateRow{}, denied(fmt.Sprintf("channel template %q is owned by %q and you are acting as %q; only its owner may change it", p.ID, row.Owner, caller))
 	}
 	if p.Name != nil {
 		row.Name = strings.TrimSpace(*p.Name)
@@ -1423,7 +1466,7 @@ func (r *Registrar) editChannelTemplate(ctx context.Context, caller string, p Ch
 		row.Visibility = *p.Visibility
 	}
 	if row.Name == "" || (row.Visibility != "private" && row.Visibility != "public") {
-		return regspec.ChannelTemplateRow{}, invalid("invalid channel template")
+		return regspec.ChannelTemplateRow{}, invalid(fmt.Sprintf("the template would be left invalid: name is %q and visibility is %q, but a template needs a non-empty name and a visibility of public or private", row.Name, row.Visibility))
 	}
 	if p.Body != nil {
 		if err := r.validateTemplateBody(ctx, *p.Body); err != nil {
@@ -1440,10 +1483,10 @@ func (r *Registrar) revokeChannelTemplate(ctx context.Context, caller string, p 
 		return regspec.ChannelTemplateRow{}, err
 	}
 	if !ok {
-		return regspec.ChannelTemplateRow{}, notFound("channel template")
+		return regspec.ChannelTemplateRow{}, notFound("channel template", p.ID, "system.channel.template.list")
 	}
 	if row.Owner != caller {
-		return regspec.ChannelTemplateRow{}, denied("channel template owner required")
+		return regspec.ChannelTemplateRow{}, denied(fmt.Sprintf("channel template %q is owned by %q and you are acting as %q; only its owner may change it", p.ID, row.Owner, caller))
 	}
 	if row.Status == regspec.DeclRevoked {
 		return row, nil
@@ -1455,13 +1498,13 @@ func (r *Registrar) revokeChannelTemplate(ctx context.Context, caller string, p 
 
 func (r *Registrar) setChannelProfile(ctx context.Context, source channel.ID, p ChannelProfileSet) (regspec.ChannelRow, error) {
 	if p.ChannelID == "" {
-		return regspec.ChannelRow{}, invalid("channel_id required")
+		return regspec.ChannelRow{}, invalid("channel_id required: name the channel to act on; list them with system.channel.list")
 	}
 	if p.ChannelID == channelspec.C0ChannelID {
 		return regspec.ChannelRow{}, reserved("c0 profile is fixed")
 	}
 	if source != channelspec.C0ChannelID && source != p.ChannelID {
-		return regspec.ChannelRow{}, denied("profile target must equal source channel or core")
+		return regspec.ChannelRow{}, denied(fmt.Sprintf("a channel profile may only be changed from that channel or from the registry channel: this names channel_id %q but arrived from %q", p.ChannelID, source))
 	}
 	if p.Serving == nil || (*p.Serving != 0 && *p.Serving != 1) {
 		return regspec.ChannelRow{}, invalid("serving must be 0 or 1")
@@ -1470,7 +1513,7 @@ func (r *Registrar) setChannelProfile(ctx context.Context, source channel.ID, p 
 		if _, ok, err := tx.GetChannel(ctx, p.ChannelID); err != nil {
 			return err
 		} else if !ok {
-			return notFound("channel")
+			return notFound("channel", string(p.ChannelID), "system.channel.list")
 		}
 		return tx.ReplaceProfile(ctx, p.ChannelID, p.Description, *p.Serving)
 	})
@@ -1482,7 +1525,7 @@ func (r *Registrar) setChannelProfile(ctx context.Context, source channel.ID, p 
 		return regspec.ChannelRow{}, err
 	}
 	if !ok {
-		return regspec.ChannelRow{}, notFound("channel")
+		return regspec.ChannelRow{}, notFound("channel", string(p.ChannelID), "system.channel.list")
 	}
 	return row, nil
 }
@@ -1553,7 +1596,7 @@ type ClassRow struct {
 
 func (r *Registrar) readClasses() ([]ClassRow, error) {
 	if r.classes == nil {
-		return nil, invalid("class catalog unavailable")
+		return nil, &Error{Code: CodeResultUnknown, Detail: "the class catalog is not attached to this registry, so the runnable classes cannot be listed right now"}
 	}
 	names := r.classes.Classes()
 	out := make([]ClassRow, 0, len(names))
@@ -1576,7 +1619,7 @@ func (r *Registrar) readClasses() ([]ClassRow, error) {
 func (r *Registrar) readPrincipal(ctx context.Context, id string) (regspec.PrincipalRow, error) {
 	row, found, err := r.registry.store.GetPresentPrincipal(ctx, id)
 	if !found && err == nil {
-		return regspec.PrincipalRow{}, notFound("principal")
+		return regspec.PrincipalRow{}, notFound("principal", id, "system.principal.list")
 	}
 	return row, err
 }

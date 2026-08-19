@@ -48,7 +48,7 @@ func dispatch(sys Sys, msg Msg, routes map[string]Handler) {
 	}
 	h, ok := routes[msg.Type]
 	if !ok {
-		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("no route for type %q", msg.Type))
+		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("this actor has no handler for %q; call actor.describe on it to see the words it does answer", msg.Type))
 		settle(false)
 		return
 	}

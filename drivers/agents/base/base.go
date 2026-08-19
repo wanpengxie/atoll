@@ -2,6 +2,7 @@ package base
 
 import (
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
@@ -103,4 +104,22 @@ const (
 )
 
 func (d definition) supports(typ string) bool { _, ok := d.controls[typ]; return ok }
-func actorKind() actor.Kind                   { return actor.KindAgent }
+
+// accepted lists what this agent does take, sorted. A refusal that names only
+// the rejected word leaves the sender to go looking; naming the alternatives
+// ends the search in the refusal itself. This is not hypothetical: a web client
+// shipped sending "human.text" to an agent, and the refusal said only that the
+// agent did not support it — the word set it does support was one line away and
+// went unsaid, so the mismatch had to be traced through the ledger instead.
+//
+// The set is per-instance, not per-class: steer is only present when the
+// provider declares the capability, so a class-level list would over-promise.
+func (d definition) accepted() []string {
+	out := make([]string, 0, len(d.controls))
+	for name := range d.controls {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+func actorKind() actor.Kind { return actor.KindAgent }

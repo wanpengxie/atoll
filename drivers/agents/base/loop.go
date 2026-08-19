@@ -391,7 +391,8 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		return
 	}
 	if !l.def.supports(msg.Type) {
-		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported", detail: "agent does not support " + msg.Type})
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported",
+			detail: "agent does not support " + msg.Type + "; it accepts " + strings.Join(l.def.accepted(), ", ")})
 		return
 	}
 	if msg.Type == TypeFork {
@@ -603,14 +604,16 @@ func (l *agentLoop) acceptContent(id book.RequestID, explicitSteer bool) {
 	t := l.state.Turn
 	if t == nil || t.Phase != book.TurnActive || !l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilitySteer] {
 		if explicitSteer && row.ExplicitCAS {
-			l.finish(id, terminalCandidate{fail: true, code: errorCASMismatch, detail: "no steerable turn"})
+			l.finish(id, terminalCandidate{fail: true, code: errorCASMismatch,
+				detail: "no steerable turn: no turn is active, so there is nothing to steer into. Send agent.ask to start work, or resend without expected_turn_id to queue behind whatever runs next"})
 			return
 		}
 		l.enqueue(id, t != nil)
 		return
 	}
 	if row.ExplicitCAS && row.ExpectedTurn != t.ID {
-		l.finish(id, terminalCandidate{fail: true, code: errorCASMismatch, detail: "turn target mismatch"})
+		l.finish(id, terminalCandidate{fail: true, code: errorCASMismatch,
+			detail: fmt.Sprintf("turn target mismatch: expected_turn_id %q, but the active turn is %q. Re-read turn_id from the most recent processing reply and resend; the turn you named has already ended", row.ExpectedTurn, t.ID)})
 		return
 	}
 	l.scheduleAction(book.ActionSteer, id)
@@ -771,7 +774,8 @@ func (l *agentLoop) runSteer(a *book.Action) {
 	}
 	if turn == nil || turn.Phase != book.TurnActive || (row.ExplicitCAS && row.ExpectedTurn != turn.ID) {
 		if row.ExplicitCAS {
-			l.finish(row.ID, terminalCandidate{fail: true, code: errorCASMismatch, detail: "steer target is no longer active"})
+			l.finish(row.ID, terminalCandidate{fail: true, code: errorCASMismatch,
+				detail: fmt.Sprintf("steer target is no longer active: turn %q ended before this steer could be applied, so the work it aimed at is already finished. Read that turn's result before deciding whether anything still needs saying", row.ExpectedTurn)})
 		} else {
 			l.state.Running = nil
 			l.enqueue(row.ID, true)

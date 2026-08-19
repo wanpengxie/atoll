@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -146,12 +147,12 @@ func (s *service) serve(sys actorbase.Sys) error {
 func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 	caller := actorbase.EffectiveCaller(msg)
 	if caller.Channel != s.deps.Self {
-		_, _ = sys.Fail(msg, "permission_denied", "svcactor mailbox is membrane-local")
+		_, _ = sys.Fail(msg, "permission_denied", fmt.Sprintf("the service actor mailbox only answers members of its own channel %q, and this arrived from %q. To reach this channel from outside, send through its peer instead", s.deps.Self, caller.Channel))
 		return
 	}
 	active, err := s.deps.Members.IsActive(msg.Ctx(), caller.Actor)
 	if err != nil || !active {
-		_, _ = sys.Fail(msg, "permission_denied", "caller is not an active channel member")
+		_, _ = sys.Fail(msg, "permission_denied", fmt.Sprintf("%q is not an active member of this channel; check the roster with system.member.list", caller.Actor))
 		return
 	}
 	switch msg.Type {
@@ -164,7 +165,7 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Reply(msg, s.snapshot())
 	case "svcactor.set":
 		if s.deps.Self == s.deps.Core {
-			_, _ = sys.Fail(msg, "permission_denied", "c0 service table is fixed empty")
+			_, _ = sys.Fail(msg, "permission_denied", "the registry channel serves a fixed set of words and its service table cannot be edited; set endpoints on an ordinary channel instead")
 			return
 		}
 		var table ServiceTable
@@ -192,7 +193,7 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 		s.mu.Unlock()
 		_, _ = sys.Reply(msg, table)
 	default:
-		_, _ = sys.Fail(msg, "type_unsupported", "svcactor mailbox only accepts svcactor.set/get")
+		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("the service actor mailbox does not answer %q; it accepts only svcactor.get and svcactor.set. Channel membership words go to the system door, not here", msg.Type))
 	}
 }
 

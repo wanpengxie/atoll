@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"time"
 
@@ -70,7 +71,7 @@ func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
 	case subjectgate.WordHumanAsk, subjectgate.WordHumanApprove:
 	default:
-		_, _ = sys.Fail(msg, "type_unsupported", "human does not support "+msg.Type)
+		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("a human member does not answer %q; it accepts %s, %s and %s", msg.Type, subjectgate.WordHumanMessage, subjectgate.WordHumanAsk, subjectgate.WordHumanApprove))
 	}
 }
 

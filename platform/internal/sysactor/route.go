@@ -35,7 +35,7 @@ func (s *SystemActor) routeSpace(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		}
 		if s.peer == nil {
-			_, _ = sys.Fail(msg, "channel_unavailable", "c0 peer port unavailable")
+			_, _ = sys.Fail(msg, "channel_unavailable", "this channel has no open port to the registry channel, so space words cannot be forwarded from here right now; retry once the link is back")
 			return
 		}
 		frame := channel.Request{
@@ -81,7 +81,7 @@ func routeErrorCode(err error) string {
 func relayTerminal(sys actorbase.Sys, request actorbase.Msg, raw json.RawMessage) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil {
-		_, _ = sys.Fail(request, "internal_error", "registrar returned an invalid terminal")
+		_, _ = sys.Fail(request, "internal_error", "the registry answered with a payload this door could not read; the request may or may not have taken effect, so check the current state before sending it again")
 		return
 	}
 	var status string
@@ -96,7 +96,7 @@ func relayTerminal(sys actorbase.Sys, request actorbase.Msg, raw json.RawMessage
 		return
 	}
 	if status != message.StatusCompleted {
-		_, _ = sys.Fail(request, "internal_error", "registrar returned a non-terminal response")
+		_, _ = sys.Fail(request, "internal_error", "the registry answered without reaching a final verdict; the request may or may not have taken effect, so check the current state before sending it again")
 		return
 	}
 	delete(fields, "status")

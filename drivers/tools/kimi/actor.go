@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -224,7 +225,7 @@ func (a *Actor) handle(msg actorbase.Msg) {
 	}
 
 	if msg.Type != TypeCommand {
-		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", msg.Type))
+		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("the kimi adapter does not answer %q; it accepts only %s", msg.Type, TypeCommand))
 		return
 	}
 
@@ -239,7 +240,7 @@ func (a *Actor) handle(msg actorbase.Msg) {
 		}
 	}
 	if !isAction(cmd.Action) {
-		_, _ = a.sys.Fail(msg, "invalid_action", fmt.Sprintf("unknown action %q", cmd.Action))
+		_, _ = a.sys.Fail(msg, "invalid_action", fmt.Sprintf("unknown action %q; this adapter accepts only: %s", cmd.Action, strings.Join(actionNames(), ", ")))
 		return
 	}
 
@@ -253,6 +254,6 @@ func (a *Actor) handle(msg actorbase.Msg) {
 	if err := a.dev.dispatch(msg, cmd.Action, commandDeadline, params); err != nil {
 		// dispatch only errors for the digestible offline case; the device
 		// being absent is a business failure, not a crash.
-		_, _ = a.sys.Fail(msg, "device_offline", err.Error())
+		_, _ = a.sys.Fail(msg, "device_offline", err.Error()+"; the browser device backing this adapter is not connected — check it with list_actors and retry once it is present")
 	}
 }

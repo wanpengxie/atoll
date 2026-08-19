@@ -92,12 +92,12 @@ func (e *engine) respondManifest(env *message.Envelope) {
 	}
 	describe, err := e.ProjectManifest(msg.Ctx())
 	if err != nil {
-		_, _ = e.Fail(msg, "internal_error", err.Error())
+		_, _ = e.Fail(msg, "internal_error", "this actor could not assemble its own manifest: "+err.Error())
 		return
 	}
 	answer, ok := introspect.AnswerDescribe(describe, req)
 	if !ok {
-		_, _ = e.Fail(msg, "invalid_args", "unknown manifest word")
+		_, _ = e.Fail(msg, "invalid_args", fmt.Sprintf("this actor declares no word named %q; send actor.describe with no arguments to get the full word list first", req.Type))
 		return
 	}
 	_, _ = e.Reply(msg, answer)

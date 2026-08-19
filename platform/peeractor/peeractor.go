@@ -94,7 +94,7 @@ func handle(sys actorbase.Sys, deps Deps, msg actorbase.Msg) {
 		_, _ = sys.Progress(msg, progress.Status, body)
 	})
 	if err != nil {
-		_, _ = sys.Fail(msg, "channel_unavailable", err.Error())
+		_, _ = sys.Fail(msg, "channel_unavailable", "the channel behind this peer could not be reached: "+err.Error()+"; the door is momentarily shut rather than absent, so a retry may succeed")
 		return
 	}
 	if result.Fail != nil {

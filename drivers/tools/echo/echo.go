@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -221,7 +222,7 @@ func run(sys actorbase.Sys, cfg Config) error {
 			handleFileCreate(sys, msg)
 
 		default:
-			_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("echo actor does not handle %s", msg.Type))
+			_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("the echo actor does not answer %q; it accepts %s", msg.Type, strings.Join([]string{TypeSay, TypeCountdownStart, TypeCountdownAbort, TypeFileRead, TypeFileWrite, TypeFileCreate}, ", ")))
 		}
 	}
 }
@@ -234,7 +235,7 @@ type filePayload struct {
 func decodeFilePayload(sys actorbase.Sys, msg actorbase.Msg) (filePayload, bool) {
 	var payload filePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Address == "" {
-		_, _ = sys.Fail(msg, "payload_invalid", "want {address, content?}")
+		_, _ = sys.Fail(msg, "payload_invalid", "want {address, content?}: address is a ResourceID string and content is optional")
 		return filePayload{}, false
 	}
 	return payload, true
@@ -344,7 +345,7 @@ func fileRedeemKind(fa accessdoor.FileAccess) string {
 func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[message.ID]actorbase.Msg, timers map[message.ID]schedule.TimerID) {
 	var p startPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.Seconds <= 0 {
-		_, _ = sys.Fail(msg, "payload_invalid", "want {seconds>0, note, ask?}")
+		_, _ = sys.Fail(msg, "payload_invalid", "want {seconds>0, note, ask?}: seconds must be a positive integer within the configured cap, note is the text to echo back, and ask is optional")
 		return
 	}
 

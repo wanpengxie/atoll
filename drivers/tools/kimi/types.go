@@ -2,6 +2,7 @@ package kimi
 
 import (
 	"encoding/json"
+	"sort"
 	"time"
 )
 
@@ -51,4 +52,16 @@ func isAction(name string) bool {
 type commandPayload struct {
 	Action string          `json:"action"`
 	Args   json.RawMessage `json:"args"`
+}
+
+// actionNames lists the closed set for a refusal. A rejection that repeats the
+// unknown verb back tells the caller only what it already sent; the set it
+// should have chosen from is right here and costs nothing to include.
+func actionNames() []string {
+	out := make([]string, 0, len(actions))
+	for name := range actions {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
