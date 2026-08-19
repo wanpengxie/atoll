@@ -2,40 +2,51 @@
 
 English | [简体中文](README.zh-CN.md)
 
-**A kernel for agent collaboration.**
+**An operating system for agents.**
 
-Atoll is a self-hosted node where your coding agents (codex, claude, …), MCP tools
-and you work in shared **channels**. Everything anyone says in a channel goes into
-one append-only log the server owns; who said it is enforced, not declared; what an
-actor may touch is decided by channel membership, not by per-tool config. You run
-it on your own machine, talk to it from a browser or a script, and add agents,
-tools and machines to it at runtime — no rebuild.
+Atoll is to agents what Linux is to programs. You install it on a machine; after
+that, any number of agents (codex, claude, your own), tools (MCP servers, devices)
+and people run on it side by side, in shared rooms, under one set of rules — and
+every one of them gets the things an OS is supposed to give a process for free:
+an identity, a place to live, a way to talk to the others, permissions, a durable
+record of what happened, and a way to be woken up later.
 
-It is built kernel-first: the guarantees are structural, not prompts. The
-reasoning behind that is in [docs/architecture](docs/architecture/README.md);
-this README is about installing and using it.
+| Unix | Atoll | |
+|---|---|---|
+| process | **actor** | anything that acts: a person, an agent, a tool, the system itself — one kind of identity |
+| file system + pipes | **channel** | where collaboration happens; also the authoritative ledger — everything that happens is a message in the channel's ordered log |
+| byte stream | **message** | the only way anything interacts: request / event / response; the OS does not interpret the content |
+| file | **resource** | passive objects — files, KV, external things; control plane in the OS, data plane delegated |
+| permission bits | **access** | who may enter which channel and do what — decided by structure (membership), not by a program |
+| cron | **timer** | a durable promise to wake an actor later; survives restarts |
+
+"**Everything is a message, and every message is on the ledger**" is Atoll's
+everything-is-a-file. A person's sentence, an agent's tool call, the system creating
+a member, an approval — one kind of thing, appended to one ordered log per channel.
+Audit, replay, recovery and observation are not features bolted on; they fall out
+of the ledger. The shape is deliberately close to *Android + Slack*: every resident
+has an identity and a sandbox, residents only talk through messages, and the rooms
+are shared.
 
 > **Status: v0.01 — pre-release, not data-safe.**
-> Atoll runs end to end today (`atoll up` + the web UI), but it is an early kernel,
+> Atoll runs end to end today (`atoll up` + the web UI), but it is early software,
 > not a product. **Storage formats, APIs and the wire protocol change without
 > deprecation cycles or migration paths** — a newer build may refuse or overwrite a
 > node home created by an older one. Do not keep anything in it you cannot recreate.
-> See [Status](#status).
+> See [What works today](#what-works-today) and [Status](#status).
 
 ---
 
+- [Why an OS](#why-an-os)
+- [What works today](#what-works-today)
 - [Quickstart](#quickstart)
-  - [1. Build](#1-build)
-  - [2. Install and run a node](#2-install-and-run-a-node)
-  - [3. Start the web UI](#3-start-the-web-ui)
-  - [Running the roles as separate processes](#running-the-roles-as-separate-processes)
-- [What you get](#what-you-get)
+- [How a node is put together](#how-a-node-is-put-together)
 - [Using the node](#using-the-node)
   - [From the web UI](#from-the-web-ui)
   - [From a script](#from-a-script)
   - [Recipes](#recipes)
+- [What the OS guarantees](#what-the-os-guarantees)
 - [Extending: write your own actor](#extending-write-your-own-actor)
-- [Concepts you will meet](#concepts-you-will-meet)
 - [Repository layout](#repository-layout)
 - [Development](#development)
 - [Documentation](#documentation)
@@ -44,13 +55,56 @@ this README is about installing and using it.
 
 ---
 
+## Why an OS
+
+The last two years produced excellent agent *applications* — Claude Code, Codex,
+harnesses, workflow frameworks. They all run on bare metal: no OS underneath.
+
+- Each product brings its own sessions, permissions, tools, memory and scheduling;
+  none of it is shared, and switching models means switching the whole stack.
+- When several agents and several people work together there is no common truth:
+  who did what, who was allowed to, how far the task got — scattered across
+  private conversation logs.
+- Long tasks do not survive a context compaction; when something goes wrong there
+  is no ledger to read, no single switch to flip, no gate on cost.
+- The community is patching the same holes with the same folk remedies — spec
+  files, goal checkers, loops, state graphs — which are four faces of one missing
+  thing: what must hold, what counts as done and who decides, where state lives,
+  who picks the next step.
+
+This is the position application software was in around 1970. Unix's answer was
+not a stronger application but a tiny core, a handful of primitives that do not
+interpret content, and everything else in user space. Atoll carries that answer to
+agents — and has to answer a question Unix never faced: **when the "processes" are
+entities that make judgments, what is it that the OS organises?** Its answer is
+that the OS organises obligations and attention on top of a shared record, not
+instructions — but that organisation layer (think OTP on top of Erlang) is the
+next thing to build, not what ships today. See
+[docs/architecture](docs/architecture/README.md).
+
+## What works today
+
+Read this before the quickstart; it is the honest line.
+
+| | Today (2026-08) |
+|---|---|
+| Install & run a node in one command | ✅ `scripts/install.sh` → `atoll up`; root account, `c0`, local device |
+| A coding agent seated in a channel | ✅ codex or claude CLI runs as the `c0` **steward** on your device; ask it, it answers |
+| Several channels, several agents, several people | ✅ channel tree, `agent`/`tool` templates, one template → many instances, accounts |
+| Mount an MCP server at runtime | ✅ two messages, no rebuild; its tools become message types |
+| Add another machine | ✅ `atoll-daemon` joins as a device |
+| Browser client | ✅ [`atoll-web`](https://github.com/wanpengxie/atoll-web) over the public contract (login / ws frames / obs) — it must track the node's wire dialect, which moves |
+| Script everything | ✅ bearer token, `/obs` reads, `/ws` writes — there is nothing the UI can do that a script cannot |
+| Agents using Atoll's own tools (`call_actor`, …) from inside their model loop | 🚧 the tool port exists; the codex / claude workers do not yet expose it to the model |
+| Programmatic prompt injection for agents (who am I, where am I, who is here) | 🚧 designed, not built |
+| Jobs, approvals, quotas, message interposition (the organisation layer) | 📐 design only |
+| Cross-node federation, DID identity | 📐 direction only |
+
 ## Quickstart
 
-A complete local setup is three steps: build the binaries, run the installer once,
-start the web UI against the node. You end up with a running node at
-`http://127.0.0.1:8832`, a `root` account, and a coding agent (codex or claude)
-already seated in the root channel `c0` as its **steward** — open the UI, log in,
-and talk to it.
+Three steps: build, run the installer once, start the web UI against the node.
+You end up with a node at `http://127.0.0.1:8832`, a `root` account, and a coding
+agent seated in the root channel `c0` as its **steward**.
 
 **Prerequisites**
 
@@ -94,11 +148,6 @@ bin/atoll up                      # same as: bin/atoll up --dir ~/.atoll
 bin/atoll up --dir ~/.atoll --addr 127.0.0.1:8832   # flags still win over atoll.env
 ```
 
-`atoll up` is the whole node in one process: it installs or opens `c0`, provisions
-the root principal and the home channel, binds the listener, and connects the
-well-known local device (the compute host that actually runs agents and tools). You
-do not mint or attach a device by hand.
-
 What the installer leaves behind:
 
 ```
@@ -109,7 +158,7 @@ What the installer leaves behind:
 │   ├── atoll-token           # bearer token for local automation (0600)
 │   ├── root-password         # if you set/generated one (0600)
 │   ├── registry.db           # space registry
-│   └── channels/             # one SQLite truth log per channel
+│   └── channels/             # one SQLite ledger per channel
 └── device/                   # the local device's identity + working dirs
 ```
 
@@ -144,16 +193,14 @@ the proxy, it never enters the browser bundle):
 ATOLL_SERVER_URL=http://127.0.0.1:9000 npm run dev
 ```
 
-Open the printed URL, log in as `root@atoll.local`, pick `c0`, and mention the
-steward (`@steward …`) from the editor — the reply streams back as rounds in the
-timeline. `atoll-web` also ships a stand-alone mock of the same contract
-(`npm run mock`) if you want to try the UI without a node; see its README.
-
-Putting the three together on one machine looks like:
+Open the printed URL, log in as `root@atoll.local`, you are in `c0` with the
+steward; mention it and the answer streams back as a round in the timeline.
+`atoll-web` also ships a stand-alone mock of the node (`npm run mock`) if you want
+to try the UI without a node.
 
 ```
  browser ──► atoll-web (vite :5173) ──proxy──► atoll up (:8832)
-                                               ├── server   (truth: c0, channels, registry)
+                                               ├── server   (ledgers: c0, channels, registry)
                                                └── local device (runs codex/claude/tools)
 ```
 
@@ -163,60 +210,56 @@ Putting the three together on one machine looks like:
 started with `atoll up` can be split later with zero migration:
 
 ```bash
-# server — holds truth for all channels; installs itself on first run
+# server — holds the ledgers for all channels; installs itself on first run
 # (the generated root password is printed to the log)
 bin/atoll-server --home ~/.atoll/server --addr 127.0.0.1:8832
 
-# daemon — a compute host; first run binds with a device key (minted by `atoll up`
-# provisioning or via the system.device.create space word); later runs start bare,
+# daemon — a compute host (a "device"); first run binds with a device key (minted by
+# `atoll up` provisioning or via system.device.create); later runs start bare,
 # the identity persists in the home
 bin/atoll-daemon --home ~/.atoll/device --server "ws://127.0.0.1:8832/compute" --key <device-key>
 ```
 
 Reach for this only when you actually want the roles on different machines.
 
-## What you get
+## How a node is put together
 
 After `atoll up` you have, concretely:
 
-- **A node** on `127.0.0.1:8832` holding one space. Truth lives in
-  `~/.atoll/server/` as SQLite files; nothing is in memory only.
-- **A root channel `c0`** and a `lobby` under it. `c0` is where the space is
-  administered — new channels, agents, devices and accounts are all created by
-  speaking to `system` in `c0`.
-- **An account** `root@atoll.local` (the only one until you create more or open
-  registration with `--open-registration`).
-- **A steward** — the codex or claude CLI you picked, running as an agent actor
-  inside `c0`, on your machine, under your own CLI login. Mention it and it works
-  a request, streams its rounds into the channel, and can call the tools mounted
-  next to it.
-- **A local device** — the compute host that actually runs agents and tools. It is
-  attached automatically; more machines can join as extra devices.
-- **A bearer token** in `~/.atoll/server/atoll-token` so scripts on the same box
-  can talk to the node without logging in.
-
-Everything a channel's members say or do is one ordered log per channel. The
-web UI, the agents and your scripts all read the same log and write through the
-same gate; there is no privileged back door for any of them.
+- **One space, one server.** Truth lives in `~/.atoll/server/` as SQLite files —
+  one ledger per channel plus a registry. Nothing is in memory only.
+- **A channel tree rooted at `c0`.** Channels are addressed by dotted name:
+  `c0`, `c0.lobby`, `c0.dev`, `c0.<user>` (each registered user's home). `c0` is
+  where the space is administered — channels, agent/tool templates, devices and
+  accounts are all created by speaking to `system` in `c0`. `c0.lobby` is the one
+  room outside the trust boundary: it exists only so guests can register and log in.
+- **Actors with three-segment ids** `<kind>:<seed>:<ts>` — `human:root:…`,
+  `agent:reviewer:…`, `tool:my-mcp:…`, `system:registrar:…`, `peer:c0.dev:…`. The
+  kind is the namespace (`tool / human / agent / peer / system`); the seed is the
+  template id (or the principal, for humans); you may address an actor by any
+  unambiguous run of segments (`reviewer`, `agent:reviewer`). The word `system`
+  alone is the channel's gate. The roster of a channel is `/obs/channel/<id>/actors`.
+- **Inside every channel:** a gate (`system`) that handles membership and routes
+  space-level words to `c0`; a service actor that answers for the channel to other
+  channels (`peer:*`); whatever members you seat there.
+- **In `c0` additionally:** `registrar` (the only writer of the registry), root's
+  human cell, and the **steward** — the codex or claude CLI you picked, running as
+  an agent actor on your device, under your own CLI login.
+- **Devices.** A device is a machine that runs actors. `atoll up` attaches the local
+  one automatically; `atoll-daemon` attaches more. Agents run *on a device* with a
+  working directory there — that is where their shell, git and files are.
+- **An account** `root@atoll.local` (root's home is `c0` itself) and a bearer token
+  in `~/.atoll/server/atoll-token` so scripts on the same box need not log in.
 
 ## Using the node
 
 ### From the web UI
 
-`atoll-web` (step 3 above) is a plain chat-style client over the node's contract:
-
-- **Channels** on the left: `c0`, `lobby`, and whatever you create. Each shows
-  its timeline (human messages, agent rounds, system events) and its roster.
-- **Talk to an agent** by `@`-mentioning it in the editor. Its answer arrives as a
-  round — queued → processing → tool calls → final text — all of which are
-  messages in the log, so you see exactly what it did.
-- **Approvals**: when an agent asks for something that needs a human (a credential,
-  a risky action), a card appears in the channel; approve or reject from there.
-- **Roster**: who is in the channel — humans, agents, `system`, tools — and what
-  each one can be asked (`actor.describe`).
-
-There is nothing the UI can do that a script cannot; it uses the same three
-surfaces below.
+`atoll-web` (step 3) is a client over the node's public contract — login, `/ws`
+frames, `/obs` reads — nothing more. Channels on the left, the channel's timeline
+(people, agent rounds, system events) in the middle, the roster on the right; the
+composer sends `agent.ask` to an agent or `human.message` to people. Everything
+it shows is read from the ledger; everything it does is a message on it.
 
 ### From a script
 
@@ -258,42 +301,52 @@ member's messages arrive on the same connection, so keep it open for the session
 // 1. subscribe (replay from the beginning; pass a cursor to resume)
 {"v":2,"frame_type":"attach","ref":"a","payload":{"since":{}}}
 
-// 2. ask `system` in c0 to list members
+// 2. ask the c0 gate to list members
 {"v":2,"frame_type":"submit","ref":"r1","payload":{
   "channel_id":"c0","msg_type":"system.member.list","kind":"request",
   "visibility":"public","audience":["system"],"payload":{"body":{}}}}
+
+// 3. ask the steward something (its id is in /obs/channel/c0/actors, kind "agent")
+{"v":2,"frame_type":"submit","ref":"r2","payload":{
+  "channel_id":"c0","msg_type":"agent.ask","kind":"request",
+  "visibility":"public","audience":["agent:<steward-seed>"],
+  "payload":{"body":{"text":"reply PONG"}}}}
 ```
 
-The receipt carries `payload.message_id`; the answer arrives later as a `feed`
-frame with `kind:"response"`, `parent_id` equal to that id and a terminal
-`status` of `completed` or `failed`. To talk to an agent the way the web UI
-does, submit `msg_type:"human.text"` with the agent in `audience`; its rounds
-(`activity.turn.*`, `activity.tool.*`) and final answer come back on the feed.
+Every request payload has the one shape `{"body": <args>}`. The receipt carries
+`payload.message_id`; the answer arrives later as a `feed` frame with
+`kind:"response"`, `parent_id` equal to that id and a terminal `status` of
+`completed` or `failed`. An agent's rounds (`agent.turn.*`, `agent.tool.*`) show
+up on the same feed as events before its final response.
 
 **Administration is a vocabulary, not an admin panel.** All of it is requests to
-`system` (templates go to `system:registrar`):
+`system` (the gate); space-level words are spoken in `c0`, channel-level words in
+the channel itself:
 
 | Family | Words | Spoken in |
 |---|---|---|
 | channels | `system.channel.create/get/list/set/delete`, `system.channel.template.*` | `c0` |
-| agents & tools (classes) | `system.actor.template.create/get/list/set/delete`, `system.actor.overlay.set/delete` | `c0` |
-| membership | `system.member.create/get/list/delete/restart/admit` | the channel itself |
+| agent & tool classes | `system.actor.template.create/get/list/set/delete`, `system.actor.overlay.set/delete` | `c0` |
 | machines | `system.device.create/list/attach/detach/delete` | `c0` |
 | accounts | `system.principal.create/get/list/delete` | `c0` |
-| secrets | `system.credential.set` | the channel itself |
-| logs | `system.log.recent` | the channel itself |
+| membership | `system.member.create/get/list/delete/restart/admit` | the channel |
+| secrets | `system.credential.set` | the channel |
+| logs | `system.log.recent` | the channel |
 
-Full request/response shapes are the Go structs in
-[`protocol/message/system.go`](protocol/message/system.go) and
+Agents answer `agent.ask / steer / interrupt / queue / stop / compact / select /
+context / fork`; people answer `human.message / ask / approve`; every actor answers
+`actor.describe` (its manifest: class, capabilities, words). Full shapes are the Go
+structs in [`protocol/message/system.go`](protocol/message/system.go) and
 [`platform/lagoon/contracts.go`](platform/lagoon/contracts.go).
 
 ### Recipes
 
-**Add a second agent to a channel.** Agents are *templates* (a class — `codex`,
-`claude`, `script` — plus config) that you then *seat* in a channel:
+**Seat a second agent.** Agents are *templates* (a class — `codex`, `claude`,
+`script` — plus config) that you then *seat* in a channel; one template can have
+many instances unless declared `singleton`:
 
 ```jsonc
-// in c0, to system:registrar — declare the template
+// in c0, to system — declare the template
 {"msg_type":"system.actor.template.create","payload":{"body":{
   "id":"reviewer","name":"Reviewer","class":"claude","visibility":"private",
   "singleton":false,"config":{/* class-specific */}}}}
@@ -305,7 +358,7 @@ Full request/response shapes are the Go structs in
 **Mount an MCP server — two messages, no rebuild.**
 
 ```jsonc
-// in c0, to system:registrar
+// in c0, to system
 {"id":"my-mcp","name":"My MCP","class":"mcp","visibility":"private",
  "singleton":false,
  "config":{"name":"testsrv","transport":"http","url":"http://127.0.0.1:8931/mcp"}}
@@ -316,9 +369,14 @@ Full request/response shapes are the Go structs in
 
 The actor connects on birth and discovers the server's `tools/list`; each tool
 becomes a message type prefixed by the `name` you declared (`testsrv.echo`,
-`testsrv.add`, …), and `actor.describe` on it shows them. Use
-`transport:"stdio"` with `command` / `args` / `cwd` instead of `url` for a local
-subprocess. Agents in the same channel can call these tools.
+`testsrv.add`, …), and `actor.describe` on it lists them. Use `transport:"stdio"`
+with `command` / `args` / `cwd` instead of `url` for a local subprocess. Anyone in
+the channel — a script, a person, another actor — can then `submit` `testsrv.echo`
+to it.
+
+**Create a channel and give it an agent.** `system.channel.create {name, recipe}`
+in `c0`; the recipe lists the templates to seat. The new channel is carved in one
+step from the frozen recipe and shows up as `peer:<name>` in `c0`'s roster.
 
 **Attach another machine as a device.** Ask `system.device.create` in `c0` for a
 key, then on the other box:
@@ -328,6 +386,53 @@ bin/atoll-daemon --home ~/.atoll/device --server "ws://<node>:8832/compute" --ke
 ```
 
 It shows up in `/obs/space/daemons` and can host agents and tools like the local one.
+
+## What the OS guarantees
+
+These are the properties you can build on. They are structural — enforced by how
+the code is shaped, not by a prompt — and the layering is machine-checked
+(`archtest/`), which matters because some of the code on this OS will be written by
+the agents running on it.
+
+1. **The channel ledger is the truth; it is replayable, recoverable, forkable.**
+   Every message is appended before anyone sees it; there is no side channel and no
+   REST "send". An actor that dies, changes model or moves machines recovers from
+   the ledger to the same state.
+2. **Identity outlives the incumbent.** An actor's id is stable; the model process
+   under it can be restarted, upgraded, swapped (codex today, claude tomorrow) and
+   it is still the same member. Any provider that writes usage/steps as events and
+   honours the stop protocol can be plugged in — model-neutral, harness-neutral.
+3. **Permission lives on the membrane, not in the prompt.** Who may enter a channel
+   and what they may say is decided at the gate, uniformly for the whole channel:
+   no per-object ACLs, no token impersonation. An agent's act is legally its
+   principal's act. "Agent overreach" becomes structurally unreachable instead of
+   a runtime whack-a-mole.
+4. **Declarative convergence; absence never destroys.** One mechanism: desired
+   state on the ledger minus the host's testimony → start or retire. No cascading
+   kills, no hidden timers; after a crash, disconnect or restart the system converges
+   back to what the ledger says.
+5. **Devices are compute; agents come with hands.** A machine, container or cloud
+   sandbox joins as a device; an agent placed there gets a shell, a filesystem,
+   git and a browser without per-tool adapters. Storage and compute sit behind
+   interfaces and can be swapped for cloud infrastructure wholesale.
+6. **The organisation layer is installable, with zero OS changes.** Long-task
+   governance (goals, claims, who decides, evidence, done), message interposition
+   (audit, rate limit, billing, approval, A/B), quotas — each is a protocol plus a
+   service member you add to a channel, Slack "add app to channel" style. This is
+   the OTP-to-Erlang layer; it is designed and not yet shipped.
+7. **People are first-class members.** A channel is a room where people and agents
+   speak, decide and hand over on the same ledger. An approval is a message to a
+   person, not a button outside the flow. The web UI is one client of that contract;
+   any app, browser or IDE plugin can be another.
+8. **Self-observing, self-managed by the same law, safely self-improving.** The
+   system watches and manages itself through no privileged path: `c0` governs every
+   channel under the same rules; operations is a channel with people and agents in
+   it; the next version is built and tested inside a forked Atoll before it is
+   switched in.
+
+Why it is shaped this way — and how it relates to harnesses, frameworks, MCP, A2A,
+Kubernetes and Erlang/OTP — is the subject of the
+[architecture series](docs/architecture/README.md).
 
 ## Extending: write your own actor
 
@@ -377,53 +482,23 @@ Register a class like that, rebuild, and `system.actor.template.create` with
 are built exactly this way under `drivers/`; a step-by-step walkthrough is in
 [docs/architecture/09-actor-hello-world.md](docs/architecture/09-actor-hello-world.md).
 
-## Concepts you will meet
-
-Five words cover the whole system; everything else is built from them.
-
-| Word | Means |
-|---|---|
-| **channel** | A room with one log, one membership, one set of files. `c0` is the root; others are created under it. |
-| **actor** | Anything that is a member of a channel and can speak: a human, an agent, a tool, `system`. Addressed by a stable id; each run of it is a separate incarnation. |
-| **message** | One entry in a channel's log. Requests get exactly one terminal response — from the actor, from a timeout, or from the actor dying. |
-| **access** | An actor reaching a file, a secret, a piece of state. Allowed by membership in the channel that owns it; not logged, but gated. |
-| **device** | A machine that runs actors for the node. `atoll up` gives you one; `atoll-daemon` adds more. |
-
-Things the node guarantees that you can rely on when building on it:
-
-- **The server is the only writer.** Every message is appended to the channel's
-  log before anyone sees it; there is no side channel and no REST "send".
-- **Sender cannot be forged.** An actor writes through a pen minted at birth.
-- **Membership is the permission.** Inside a channel, members read and write alike;
-  there are no per-object ACLs to administer or to drift.
-- **Every write passes the same admission chain** — caller authorization, envelope
-  shape, sender consistency, kind/audience rules, response pairing, dedupe.
-- **Dead incarnations cannot haunt the log**; a restarted agent is a new incarnation
-  of the same identity.
-- **Local and remote actors are indistinguishable** to the runtime.
-- **Layering is machine-checked** (`archtest/`) — it holds for agent-written code
-  too.
-
-Why it is shaped this way, and how it relates to MCP, A2A and message buses, is
-the subject of the [architecture series](docs/architecture/README.md).
-
 ## Repository layout
 
 ```
 cmd/         binaries: atoll (the node), server, daemon; + devtools and shared internals
 scripts/     install.sh (interactive installer) and repo lint scripts
-drivers/     external-world drivers: tools/ (echo, device, kimi, mcp, xhs),
-             agents/ (agent engine providers: codex, claude, script),
+drivers/     the outside world: tools/ (echo, device, kimi, mcp, xhs),
+             agents/ (engine providers: codex, claude, script),
              gateway/ (human ingress; portal/ = identity doors + /ws + /obs + /compute),
              devicehost/ (the local device `atoll up` connects)
-protocol/    protocol types (envelope, actor, channel, access, resource, system words)
-runtime/     the kernel runtime (admission pipeline, actor cells/ports, sqlite store,
-             actor store, schedule/timers, access door)
+protocol/    wire vocabulary (envelope, actor ids, channel peer frames, access, resource, system words)
+runtime/     the core: admission pipeline, actor cells/ports, sqlite ledgers, actor store,
+             schedule/timers, access door
 lib/         stdlib for actor authors: actorbase (the Proc + verb-table base every
              actor stands on), behavior, metatool (tool catalog), introspect
-platform/    cross-host assembly: channelhost/, peeractor/ + svcactor/ (cross-channel
-             path), home/ (server-side channel home), daemonhost/ + compute/ (device
-             side), subjectgate/, lagoon/ (registry + registrar), boot/ (installer)
+platform/    assembly: channelhost/, peeractor/ + svcactor/ (cross-channel path),
+             home/ (server-side channel home), daemonhost/ + compute/ (device side),
+             subjectgate/, lagoon/ (registry + registrar), boot/ (installer)
 registry/    actor class registry (config → running actor)
 archtest/    architecture enforcement tests (layer graph + closed sets)
 e2e/         end-to-end tests over the real server + daemon binaries
@@ -450,9 +525,9 @@ invariant is broken — read the header comment of a failing test before changin
 
 ## Documentation
 
-- [docs/architecture/](docs/architecture/README.md) — why it is a kernel and not
-  an agent loop, the five elements, channels, actors, scheduling, federation,
-  roadmap, and an actor hello-world.
+- [docs/architecture/](docs/architecture/README.md) — why an agent loop is not an
+  agent OS, the five primitives, channels as autonomous worlds, actors, scheduling,
+  federation, roadmap, and an actor hello-world.
 - [docs/dev/](docs/dev/README.md) — developer walkthroughs of the substrate,
   actorbase, composition, and the design notes behind current constructions.
 - [docs/production/](docs/production/README.md) — positioning, competitor notes,
@@ -464,9 +539,11 @@ invariant is broken — read the header comment of a failing test before changin
 
 ## Status
 
-Atoll is **v0.01 — pre-release**. It runs end to end: a node installs and starts
-in one command, a coding agent sits in `c0` as steward, MCP servers mount at
-runtime, and the web UI talks to it over the public contract.
+Atoll is **v0.01 — pre-release**. The OS core — identity, channels, ledger,
+membership, devices, timers — is implemented and enforced; a node installs in one
+command; coding agents sit in channels as members; the web client talks to it over
+the public contract. The project is now being used to develop itself: owner and
+agents in a channel, agents writing and reviewing code, people merging.
 
 What that version number means in practice:
 
@@ -476,13 +553,17 @@ What that version number means in practice:
   disposable — the installer offers to move a previous home aside for exactly this
   reason.
 - **APIs move without deprecation cycles.** Message types, frame shapes and Go
-  package surfaces are revised as the kernel is reviewed; nothing is frozen.
+  package surfaces are revised as the system is reviewed; nothing is frozen. The
+  web client and the node move together; a mismatch shows up as `type_unsupported`
+  or a rejected frame, not as silent breakage.
+- **Known gaps** are listed in [What works today](#what-works-today): agents do not
+  yet see Atoll's own tools from inside their model loop, there is no prompt layer,
+  and the organisation layer is design only.
 - **Current boundaries:** one trust domain per node; the local device is the only
-  compute host `atoll up` manages for you (others are attached by hand); the
-  shipped engines are codex, claude and a generic `script` runner.
+  compute host `atoll up` manages for you (others are attached by hand).
 
-Kernel first, polish second — more connectors, scaffolding and packaging come next.
-Watch the repo if you want to see the rest arrive.
+Core first, then the organisation layer, then polish. Watch the repo if you want
+to see the rest arrive.
 
 ## License
 
