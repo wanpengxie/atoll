@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
@@ -146,8 +148,8 @@ func NewMsg(origin MsgOrigin, ctx context.Context, env message.Envelope) Msg {
 		// to a receiver as an accidental legacy protocol.
 		msg.Payload = nil
 		var wrapped struct {
-			Context *harness.Context `json:"_context,omitempty"`
-			Body    json.RawMessage  `json:"body"`
+			Context json.RawMessage `json:"_context"`
+			Body    json.RawMessage `json:"body"`
 		}
 		dec := json.NewDecoder(bytes.NewReader(env.Payload))
 		dec.DisallowUnknownFields()
@@ -165,10 +167,48 @@ func NewMsg(origin MsgOrigin, ctx context.Context, env message.Envelope) Msg {
 			panic("actorbase: invalid request payload envelope: body field required")
 		}
 		msg.Payload = append(json.RawMessage(nil), wrapped.Body...)
-		if wrapped.Context != nil {
-			caller := wrapped.Context.Caller
+		if len(wrapped.Context) != 0 {
+			// _context 若在场，只有一形 {caller:{channel,actor}}：显式 null、空对象、
+			// caller 为 null / 缺 channel / 缺 actor 一律 fail-loud，恒不静默退化为
+			// "无 context" 或零值 caller。
+			caller, err := decodeRequestContext(wrapped.Context)
+			if err != nil {
+				panic("actorbase: invalid request payload envelope: " + err.Error())
+			}
 			msg.caller = &caller
 		}
 	}
 	return msg
+}
+
+// decodeRequestContext decodes the request payload's `_context` value into
+// its one legal shape {caller:{channel,actor}}. Every level is checked for
+// presence AND non-emptiness: `null` at any level, `{}`, and a caller missing
+// channel or actor are all rejected — the engine (encodeRequestPayload) never
+// writes those, so seeing one means the payload is not canonical.
+func decodeRequestContext(raw json.RawMessage) (harness.Caller, error) {
+	var outer struct {
+		Caller json.RawMessage `json:"caller"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&outer); err != nil {
+		return harness.Caller{}, errors.New("_context: " + err.Error())
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || len(outer.Caller) == 0 {
+		return harness.Caller{}, errors.New("_context must be {caller:{channel,actor}}")
+	}
+	var callerRaw struct {
+		Channel *string `json:"channel"`
+		Actor   *string `json:"actor"`
+	}
+	dec = json.NewDecoder(bytes.NewReader(outer.Caller))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&callerRaw); err != nil {
+		return harness.Caller{}, errors.New("_context.caller: " + err.Error())
+	}
+	if callerRaw.Channel == nil || *callerRaw.Channel == "" || callerRaw.Actor == nil || *callerRaw.Actor == "" {
+		return harness.Caller{}, errors.New("_context.caller requires non-empty channel and actor")
+	}
+	return harness.Caller{Channel: channel.ID(*callerRaw.Channel), Actor: actor.ActorID(*callerRaw.Actor)}, nil
 }

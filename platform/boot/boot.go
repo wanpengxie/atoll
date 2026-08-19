@@ -311,7 +311,7 @@ func install(ctx context.Context, c0Path, registryPath, password, stewardClass s
 	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Steward','present',?)`, channelspec.StewardPrincipalID, stamp); err != nil {
 		return fmt.Errorf("boot: steward principal: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'agent',NULL,'Guest','present',?)`, channelspec.GuestPrincipalID, stamp); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES(?,'human',?,'Guest','present',?)`, channelspec.GuestPrincipalID, "guest@atoll.local", stamp); err != nil {
 		return fmt.Errorf("boot: guest principal: %w", err)
 	}
 	svcSnapshot, err := sealSnapshot(lagoon.SvcActorClass, json.RawMessage(`{}`), channelspec.PlacementServer)

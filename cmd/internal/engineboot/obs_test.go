@@ -156,7 +156,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 		},
 		{
 			name: "space principals", path: "/obs/space/principals",
-			golden: `{"subject":"space/principals","kind":"principals","complete":true,"items":[{"key":"guest","declared":{"id":"guest","kind":"agent","display_name":"Guest","status":"present","created_at":1700000000000},"actual":null},{"key":"root","declared":{"id":"root","kind":"human","email":"root@atoll.local","display_name":"Root","status":"present","created_at":1700000000000},"actual":null},{"key":"steward","declared":{"id":"steward","kind":"agent","display_name":"Steward","status":"present","created_at":1700000000000},"actual":null}]}`,
+			golden: `{"subject":"space/principals","kind":"principals","complete":true,"items":[{"key":"guest","declared":{"id":"guest","kind":"human","email":"guest@atoll.local","display_name":"Guest","status":"present","created_at":1700000000000},"actual":null},{"key":"root","declared":{"id":"root","kind":"human","email":"root@atoll.local","display_name":"Root","status":"present","created_at":1700000000000},"actual":null},{"key":"steward","declared":{"id":"steward","kind":"agent","display_name":"Steward","status":"present","created_at":1700000000000},"actual":null}]}`,
 		},
 		{
 			name: "space daemons", path: "/obs/space/daemons",

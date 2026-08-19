@@ -134,6 +134,18 @@ func TestNewMsgRejectsEveryNonCanonicalRequestEnvelope(t *testing.T) {
 		{name: "unknown outer field", raw: `{"body":{},"extra":true}`},
 		{name: "missing body", raw: `{"_context":{"caller":{"channel":"c","actor":"a"}}}`},
 		{name: "trailing document", raw: `{"body":{}} {}`},
+		// _context 在场就只有一形 {caller:{channel,actor}}；下列每一种都不得
+		// 静默退化为"无 context"或零值 caller。
+		{name: "context null", raw: `{"_context":null,"body":{}}`},
+		{name: "context empty object", raw: `{"_context":{},"body":{}}`},
+		{name: "context caller null", raw: `{"_context":{"caller":null},"body":{}}`},
+		{name: "context caller empty", raw: `{"_context":{"caller":{}},"body":{}}`},
+		{name: "context caller missing actor", raw: `{"_context":{"caller":{"channel":"c"}},"body":{}}`},
+		{name: "context caller missing channel", raw: `{"_context":{"caller":{"actor":"a"}},"body":{}}`},
+		{name: "context caller empty strings", raw: `{"_context":{"caller":{"channel":"","actor":""}},"body":{}}`},
+		{name: "context unknown field", raw: `{"_context":{"caller":{"channel":"c","actor":"a"},"extra":1},"body":{}}`},
+		{name: "context caller unknown field", raw: `{"_context":{"caller":{"channel":"c","actor":"a","x":1}},"body":{}}`},
+		{name: "context scalar", raw: `{"_context":"c","body":{}}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			defer func() {

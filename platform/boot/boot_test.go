@@ -69,6 +69,12 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM principals WHERE id IN (?,?,?)`, channelspec.RootPrincipalID, channelspec.StewardPrincipalID, channelspec.GuestPrincipalID).Scan(&principalCount); err != nil || principalCount != 3 {
 		t.Fatalf("system principals=%d err=%v", principalCount, err)
 	}
+	// guest 的唯一 cell 是 lobby 里的 human cell，principal kind 必须与之一致：
+	// human 才走 store.Insert 的 principal 合并支。
+	var guestKind string
+	if err := db.QueryRowContext(ctx, `SELECT kind FROM principals WHERE id=?`, channelspec.GuestPrincipalID).Scan(&guestKind); err != nil || guestKind != "human" {
+		t.Fatalf("guest principal kind=%q err=%v", guestKind, err)
+	}
 	var lobbyServing int
 	var lobbyDescription string
 	if err := db.QueryRowContext(ctx, `SELECT serving,description FROM channels WHERE id=?`, channelspec.LobbyChannelID).Scan(&lobbyServing, &lobbyDescription); err != nil || lobbyServing != 0 || lobbyDescription == "" {
