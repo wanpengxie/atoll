@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/toolsurface"
 )
 
 const (
@@ -32,11 +33,30 @@ func TestOpenInitializesThenReadyAndSeedIsClientSession(t *testing.T) {
 		t.Fatalf("initialize=%v", init)
 	}
 	request := init["request"].(map[string]any)
-	if _, present := request["sdkMcpServers"]; present {
-		t.Fatalf("failed SDK-hosted transport was still advertised: %v", request)
+	// SDK-hosted MCP takes BOTH declarations; either alone is silent. The
+	// --mcp-config entry tells the CLI a server by this name exists and its
+	// transport is `sdk`; initialize.sdkMcpServers tells it we host that
+	// server, which is what routes mcp_message back to us.
+	servers, present := request["sdkMcpServers"].([]any)
+	if !present || len(servers) != 1 || servers[0] != toolsurface.ClaudeServer {
+		t.Fatalf("sdk-hosted server not advertised on initialize: %v", request)
 	}
 	if !containsArgs(h.args, "--mcp-config", "/dev/fd/3") {
-		t.Fatalf("loopback MCP config not inherited: args=%q", h.args)
+		t.Fatalf("MCP config not inherited: args=%q", h.args)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Type       string `json:"type"`
+			Name       string `json:"name"`
+			AlwaysLoad bool   `json:"alwaysLoad"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(sdkMcpConfig(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := cfg.MCPServers[toolsurface.ClaudeServer]
+	if !ok || entry.Type != "sdk" || entry.Name != toolsurface.ClaudeServer || !entry.AlwaysLoad {
+		t.Fatalf("mcp config entry=%+v", cfg.MCPServers)
 	}
 	id := requestID(init)
 	line := goldenLines(t, "probeA.out.jsonl")[0]

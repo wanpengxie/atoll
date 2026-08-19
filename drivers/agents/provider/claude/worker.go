@@ -14,7 +14,6 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/emit"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/mcpcodec"
-	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/mcphttp"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/toolsurface"
 	"github.com/wanpengxie/atoll/lib/metatool"
 )
@@ -29,7 +28,6 @@ type connection struct {
 	onTerminal   func(driverproto.WorkerEndCause, string)
 	wireClosed   chan error
 	mcp          *mcpcodec.Server
-	mcpHTTP      *mcphttp.Server
 }
 
 func (c *connection) startTerminalMonitor() {
@@ -78,9 +76,6 @@ func (c *connection) Retire() {
 	if c != nil && !c.retired.Swap(true) {
 		if c.mcp != nil {
 			c.mcp.Close()
-		}
-		if c.mcpHTTP != nil {
-			c.mcpHTTP.Close()
 		}
 		c.wire.retire()
 		c.process.stop()
@@ -197,21 +192,22 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	w.mu.Unlock()
 	spawnCfg := w.cfg
 	spawnCfg.Prompt = surface.AppendGuide(spawnCfg.Prompt)
-	httpMCP, err := mcphttp.Start(w.host.GenerationLife(), surface, w.toolSnapshot, w.host.Logger())
-	if err != nil {
-		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
-		return
-	}
+	// SDK-hosted MCP: the tool surface rides the control channel we already own
+	// (control_request{mcp_message} both ways), so there is no listener, no port
+	// and no bearer token — the pipe itself is the identity. It takes BOTH
+	// declarations, and either alone is silent: the --mcp-config entry tells the
+	// CLI a server by this name exists and its transport is `sdk`, and
+	// initialize.sdkMcpServers tells it we host that server. alwaysLoad blocks
+	// startup until the server is connected, because the tools must be present
+	// when the turn-1 prompt is built.
 	configReader, configWriter, err := os.Pipe()
 	if err != nil {
-		httpMCP.Close()
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 		return
 	}
-	if _, err = configWriter.Write(httpMCP.Config()); err != nil {
+	if _, err = configWriter.Write(sdkMcpConfig()); err != nil {
 		_ = configReader.Close()
 		_ = configWriter.Close()
-		httpMCP.Close()
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 		return
 	}
@@ -220,11 +216,10 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	p, err := w.cfg.processFactory(ctx, spawnCfg, spawnArgs(spawnCfg, session, resume, req.Options))
 	_ = configReader.Close()
 	if err != nil {
-		httpMCP.Close()
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 		return
 	}
-	c := &connection{process: p, wireClosed: make(chan error, 1), mcpHTTP: httpMCP}
+	c := &connection{process: p, wireClosed: make(chan error, 1)}
 	c.mcp = mcpcodec.New(w.host.GenerationLife(), surface)
 	c.wire = newWire(p)
 	c.onTerminal = func(cause driverproto.WorkerEndCause, detail string) { w.connectionEnded(c, cause, detail) }
@@ -258,7 +253,7 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	w.mu.Unlock()
 	c.wire.start()
 	c.startTerminalMonitor()
-	_, err = c.wire.sendControl("initialize", nil, func(reply controlReply) { w.afterInitialize(c, reply) })
+	_, err = c.wire.sendControl("initialize", map[string]any{"sdkMcpServers": []string{toolsurface.ClaudeServer}}, func(reply controlReply) { w.afterInitialize(c, reply) })
 	if err != nil {
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 	}
@@ -628,18 +623,18 @@ type sdkMCPRequest struct {
 	ToolName string          `json:"tool_name"`
 }
 
-func (w *worker) toolSnapshot() mcpcodec.InvokeFunc {
-	w.mu.Lock()
-	target, active := w.target, w.phase == phaseActive
-	w.mu.Unlock()
-	return func(ctx context.Context, invocation driverproto.ToolInvocation) driverproto.ToolResult {
-		if !active || !target.Valid() {
-			return driverproto.ToolResult{Text: toolsurface.ErrorText("internal_error", "tool call outside the active turn", "Wait for an active turn and do not reuse a late call"), IsError: true}
-		}
-		bounded, cancel := context.WithTimeout(ctx, metatool.MaxSynchronousWait)
-		defer cancel()
-		return w.host.Tools().Invoke(bounded, target, invocation)
+// sdkMcpConfig is the --mcp-config body declaring atoll's tool surface as an
+// SDK-hosted server. `type: "sdk"` is the CLI's transport kind for a server the
+// client hosts over the control channel; alwaysLoad makes startup block until
+// it is connected, so the tools exist when the turn-1 prompt is built.
+func sdkMcpConfig() []byte {
+	raw, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
+		toolsurface.ClaudeServer: map[string]any{"type": "sdk", "name": toolsurface.ClaudeServer, "alwaysLoad": true},
+	}})
+	if err != nil {
+		panic("claude: sdk mcp config: " + err.Error())
 	}
+	return raw
 }
 
 func (w *worker) prepareServerRequest(c *connection, subtype string, raw json.RawMessage) func() (any, bool) {
