@@ -21,17 +21,19 @@ return that result. Use this to collect a long call that returned an ack
 (status:"accepted") instead of an inline result.
 
   - request_id: the id from the ack's request_id / to_wait.params.request_id.
-  - timeout_ms: optional bound on how long to wait. On timeout you get a
-    still-pending ack back (the call keeps running; claim it explicitly later).
+  - timeout_ms: optional bound on how long to wait, capped at 115000 ms. A
+    larger value is clipped and reported in the still-pending ack, not rejected.
 
-If the request is unknown (already collected, cancelled, or lost to a cell
-restart), the result is an error explaining so.
+A worker restart preserves the cell's JobTable, so an in-flight request remains
+awaitable. A cell restart loses that table while downstream work may continue;
+an unknown id therefore returns result_unknown. First inspect target facts or use
+an application idempotency key; never assume it is safe to submit the action again.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "request_id": {"type": "string", "description": "The request_id returned in a prior call_actor ack."},
-    "timeout_ms": {"type": "integer", "description": "Optional max wait in milliseconds. Defaults to 30s. On timeout you get a still-pending ack."}
+	"timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional requested wait in milliseconds. Values above 115000 are accepted but clipped and reported in the still-pending ack."}
   },
   "required": ["request_id"]
 }`),
@@ -59,8 +61,15 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 	}
 
 	timeout := DefaultTimeout
+	requestedTimeoutMs := p.TimeoutMs
+	clipped := false
 	if p.TimeoutMs > 0 {
-		timeout = time.Duration(p.TimeoutMs) * time.Millisecond
+		if p.TimeoutMs > int64(MaxSynchronousWait/time.Millisecond) {
+			timeout = MaxSynchronousWait
+			clipped = true
+		} else {
+			timeout = time.Duration(p.TimeoutMs) * time.Millisecond
+		}
 	}
 
 	finalEnv, ok, observed, err := awaitWithProgress(ctx, x.Jobs, reqID, timeout)
@@ -70,9 +79,9 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 			// cell restart) — the JobTable equivalent of the old InFlight guard.
 			return attachProgress(NewError(
 				"await_result",
-				InternalError,
-				fmt.Sprintf("request_id %q is not in flight (already collected, cancelled, or lost to a cell restart)", reqID),
-				"Call list_pending() to see in-flight request ids; resubmit the call if needed",
+				ResultUnknown,
+				fmt.Sprintf("request_id %q has no row in this cell's JobTable; it was collected or cancelled, or the cell restarted while downstream work may still be running", reqID),
+				"Check list_pending and inspect the target's current facts or query by an application idempotency key; do not submit the action again merely because its result is unknown",
 				nil,
 			), observed)
 		}
@@ -87,7 +96,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 	if !ok {
 		// Still pending after the window — hand control back with an ack.
 		toWait, notWaiting := newCollectHint(reqID.String())
-		return attachProgress(AckResult("await_result", AckDescriptor{
+		ack := AckResult("await_result", AckDescriptor{
 			RequestID:  reqID,
 			Accepted:   true,
 			Status:     "accepted",
@@ -95,7 +104,14 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 			Guidance:   "Still running after the wait window. The call keeps running; claim it later with await_result.",
 			ToWait:     toWait,
 			NotWaiting: notWaiting,
-		}), observed)
+		})
+		if clipped {
+			ack.Value["wait_truncated"] = true
+			ack.Value["requested_timeout_ms"] = requestedTimeoutMs
+			ack.Value["effective_timeout_ms"] = int64(timeout / time.Millisecond)
+			ack.Value["guidance"] = "Still running after the provider-safe 115s wait cap. The request remains in flight; await it again later."
+		}
+		return attachProgress(ack, observed)
 	}
 	rv, _ := ResultFromResponse("await_result", *finalEnv)
 	// Stage two of the render→normalize pipeline (the same law every other

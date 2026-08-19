@@ -16,7 +16,7 @@ import (
 // behavior.Caller) alongside the
 // engine's callLedger. The spec collapses those "two historical fragments" into
 // lib/actorbase's JobTable: the机器 moved house, it is not a second one. So the
-// seven meta-tools no longer drive a private Shell; they drive the substrate's
+// meta-tools no longer drive a private Shell; they drive the substrate's
 // JobTable directly (the async invoke/collect/cancel tools) plus a synchronous
 // sys.Call face (the introspection queries) — both are the ONE engine ledger.
 //
@@ -114,7 +114,7 @@ func (x *Exec) now() time.Time {
 
 // buildRequestSpec is the ONE adapter (复审 P2-2) from a metatool RequestSpec +
 // the turn's RuntimeContext to a behavior.RequestSpec — the four elements the
-// seven tools share (parent request id, the closure deadline resolved from
+// tools share (parent request id, the closure deadline resolved from
 // spec.Timeout or DefaultTimeout, and — returned alongside for the ack/window —
 // the deadline the wait mode and fast-path window are derived from) are resolved
 // here once, never re-拼 per tool. It returns the behavior spec plus the resolved

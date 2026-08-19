@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
@@ -28,6 +29,9 @@ type Config struct {
 	// Prompt is the decl-authored static instruction block, passed as
 	// --append-system-prompt so it rides on Claude Code's own system prompt.
 	Prompt string
+	// mcpConfig is a generation-owned anonymous pipe inherited as fd 3. It
+	// carries the loopback MCP URL and bearer token without argv or disk.
+	mcpConfig *os.File
 }
 
 type specConfig struct {

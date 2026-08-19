@@ -37,6 +37,9 @@ func spawnArgs(cfg Config, session string, resume bool, options driverproto.Turn
 	// stay on (they are the good part). --strict-mcp-config keeps any
 	// project-scoped MCP registration for the cwd out as well.
 	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config"}
+	if cfg.mcpConfig != nil {
+		args = append(args, "--mcp-config", "/dev/fd/3")
+	}
 	if cfg.Prompt != "" {
 		args = append(args, "--append-system-prompt", cfg.Prompt)
 	}
@@ -65,6 +68,9 @@ func spawnProcess(ctx context.Context, cfg Config, args []string) (*childProcess
 	cmd := exec.Command(cfg.Binary, args...)
 	cmd.Dir = cfg.WorkspaceDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if cfg.mcpConfig != nil {
+		cmd.ExtraFiles = []*os.File{cfg.mcpConfig}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

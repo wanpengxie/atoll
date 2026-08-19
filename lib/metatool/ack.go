@@ -30,11 +30,12 @@ type ToWaitHint struct {
 // async_tools.go). The wording is parsed on the LLM side, so it is kept
 // byte-for-byte identical across both call sites.
 func newCollectHint(requestID string) (ToWaitHint, string) {
+	toolName := AwaitResultSpec.Name
 	return ToWaitHint{
-			Tool:   "await_result",
+			Tool:   toolName,
 			Params: map[string]any{"request_id": requestID},
 		},
-		"result stays in the caller job table; claim it with await_result(request_id=" + requestID + ")"
+		"result stays in the caller job table; claim it with " + toolName + "(request_id=" + requestID + ")"
 }
 
 // FastPathWindow is the default bounded-wait window for call_actor.

@@ -9,6 +9,8 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/toolsurface"
 )
 
 type rpcError struct {
@@ -42,13 +44,14 @@ type rpcClient struct {
 	closed         atomic.Bool
 	closeOnce      sync.Once
 	onNotification func(string, json.RawMessage)
-	onRequest      func(string, json.RawMessage) (any, *rpcError)
+	onRequest      func(string, json.RawMessage) func() (any, *rpcError)
 	onClose        func(error)
 	pumpDone       chan struct{}
+	requestSlots   chan struct{}
 }
 
 func newRPC(p *childProcess) *rpcClient {
-	return &rpcClient{in: p.stdin, out: p.stdout, pending: map[string]func(rpcReply){}, pumpDone: make(chan struct{})}
+	return &rpcClient{in: p.stdin, out: p.stdout, pending: map[string]func(rpcReply){}, pumpDone: make(chan struct{}), requestSlots: make(chan struct{}, 16)}
 }
 func (c *rpcClient) start() { go c.readPump() }
 func (c *rpcClient) callAsync(method string, params any, done func(json.RawMessage, error)) error {
@@ -102,11 +105,22 @@ func (c *rpcClient) readPump() {
 			return
 		}
 		if len(msg.ID) > 0 && msg.Method != "" {
-			// Server → client requests (approvals, dynamic tool calls) are
-			// answered off the pump: a tool call blocks on the host bridge for
-			// as long as the actor takes, and the pump must keep draining
-			// notifications meanwhile. write() is mutex-serialised.
-			go c.handleRequest(msg)
+			// Capture request ownership while still on the ordered read pump.
+			// The returned closure contains the turn snapshot; workers never
+			// consult mutable target state after this point.
+			var handler func() (any, *rpcError)
+			if c.onRequest != nil {
+				handler = c.onRequest(msg.Method, msg.Params)
+			}
+			select {
+			case c.requestSlots <- struct{}{}:
+				go func() {
+					defer func() { <-c.requestSlots }()
+					c.handleRequest(msg, handler)
+				}()
+			default:
+				c.rejectOverloaded(msg)
+			}
 			continue
 		}
 		if len(msg.ID) > 0 {
@@ -149,10 +163,10 @@ func readBoundedLine(r *bufio.Reader, max int) ([]byte, error) {
 		}
 	}
 }
-func (c *rpcClient) handleRequest(msg wireMessage) {
+func (c *rpcClient) handleRequest(msg wireMessage, handler func() (any, *rpcError)) {
 	result, rpcErr := any(nil), (*rpcError)(nil)
-	if c.onRequest != nil {
-		result, rpcErr = c.onRequest(msg.Method, msg.Params)
+	if handler != nil {
+		result, rpcErr = handler()
 	} else {
 		rpcErr = &rpcError{Code: -32601, Message: "method not supported"}
 	}
@@ -161,6 +175,16 @@ func (c *rpcClient) handleRequest(msg wireMessage) {
 		response["error"] = rpcErr
 	} else {
 		response["result"] = result
+	}
+	_ = c.write(response)
+}
+
+func (c *rpcClient) rejectOverloaded(msg wireMessage) {
+	response := map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(msg.ID)}
+	if msg.Method == "item/tool/call" {
+		response["result"] = dynamicToolResult(toolsurface.ErrorText("internal_error", "tool concurrency limit reached", "Wait for an in-flight tool call to finish, then retry if safe"), true)
+	} else {
+		response["error"] = &rpcError{Code: -32000, Message: "request concurrency limit reached"}
 	}
 	_ = c.write(response)
 }

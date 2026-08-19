@@ -8,6 +8,8 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/mcpcodec"
 )
 
 type controlReply struct {
@@ -49,14 +51,15 @@ type wireClient struct {
 	closeOnce       sync.Once
 	onLifecycle     func(string, string)
 	onFrame         func(string, string, json.RawMessage)
-	onServerRequest func(string, json.RawMessage) (any, bool)
+	onServerRequest func(string, json.RawMessage) func() (any, bool)
 	onClose         func(error)
 	onDebug         func(string, string)
 	pumpDone        chan struct{}
+	requestSlots    chan struct{}
 }
 
 func newWire(p *childProcess) *wireClient {
-	return &wireClient{in: p.stdin, out: p.stdout, pending: map[string]func(controlReply){}, pumpDone: make(chan struct{})}
+	return &wireClient{in: p.stdin, out: p.stdout, pending: map[string]func(controlReply){}, pumpDone: make(chan struct{}), requestSlots: make(chan struct{}, 16)}
 }
 
 func (c *wireClient) start() { go c.readPump() }
@@ -143,7 +146,7 @@ func (c *wireClient) readPump() {
 				c.onLifecycle(env.CommandUUID, env.State)
 			}
 		case "control_request":
-			c.handleServerRequest(env.RequestID, env.Request)
+			c.admitServerRequest(env.RequestID, env.Request)
 		default:
 			if c.onFrame != nil {
 				c.onFrame(env.Type, env.Subtype, line)
@@ -168,15 +171,57 @@ func stringsContains(s, sub string) bool {
 	return false
 }
 
-func (c *wireClient) handleServerRequest(id string, raw json.RawMessage) {
+func (c *wireClient) admitServerRequest(id string, raw json.RawMessage) {
 	var request wireRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
 		_ = c.writeFrame(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "error", "request_id": id, "error": err.Error()}})
 		return
 	}
-	result, isError := any(nil), true
+	var handler func() (any, bool)
 	if c.onServerRequest != nil {
-		result, isError = c.onServerRequest(request.Subtype, raw)
+		handler = c.onServerRequest(request.Subtype, raw)
+	}
+	// Cancellation is an O(1) request-table operation and must remain
+	// admissible even when every execution slot is occupied by slow tools.
+	if request.Subtype == "mcp_message" && mcpMethod(raw) == "notifications/cancelled" {
+		c.handleServerRequest(id, request.Subtype, handler)
+		return
+	}
+	select {
+	case c.requestSlots <- struct{}{}:
+		go func() {
+			defer func() { <-c.requestSlots }()
+			c.handleServerRequest(id, request.Subtype, handler)
+		}()
+	default:
+		result := any("control request concurrency limit reached")
+		if request.Subtype == "mcp_message" {
+			var mcp struct {
+				Message json.RawMessage `json:"message"`
+			}
+			_ = json.Unmarshal(raw, &mcp)
+			result = map[string]any{"mcp_response": mcpcodec.BusyResponse(mcp.Message)}
+		}
+		_ = c.writeFrame(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": id, "response": result}})
+	}
+}
+
+func mcpMethod(raw json.RawMessage) string {
+	var request struct {
+		Message struct {
+			Method string `json:"method"`
+		} `json:"message"`
+	}
+	_ = json.Unmarshal(raw, &request)
+	return request.Message.Method
+}
+
+func (c *wireClient) handleServerRequest(id, subtype string, handler func() (any, bool)) {
+	result, isError := any(nil), true
+	if handler != nil {
+		result, isError = handler()
+	} else {
+		result = "unsupported: " + subtype
 	}
 	response := map[string]any{"subtype": "success", "request_id": id, "response": result}
 	if isError {

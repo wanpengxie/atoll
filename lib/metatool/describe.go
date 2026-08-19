@@ -11,12 +11,10 @@ import (
 var DescribeActorSpec = ToolSpec{
 	Name: "describe_actor",
 	Description: strings.TrimSpace(`
-Returns the actor's live self-answer: its one-line description, a markdown
-skill_doc (typical workflows and error handling), and a types map documenting
-every request type it serves (payload docs, error codes, allowed kinds, wait
-budget). Call this after list_actors when you have identified which actor
-matches your need. Kind/presence/uptime/device status are directory facts — read them from
-list_actors, not from here.
+Returns the actor's live D21 manifest: {class, interfaces, capabilities, words}.
+Each word contains only its description, input/output schemas, error codes and
+examples. Call this after list_actors for a member you may use. Directory facts
+(kind, presence, uptime and device status) stay in list_actors.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",
@@ -65,12 +63,10 @@ func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, x *Exec, 
 var DescribeTypeSpec = ToolSpec{
 	Name: "describe_type",
 	Description: strings.TrimSpace(`
-Returns one type's metadata from the actor's live self-answer: description,
-payload documentation (example + field-by-field docs), error codes with
-recovery hints, allowed envelope kinds, and the wait-budget hint
-(max_pending_ms). Call this before call_actor when you need the payload shape
-for a single type; describe_actor returns the same metadata for ALL types at
-once.
+Returns one word selected from the actor's live D21 manifest: description,
+input/output schemas, error codes and examples. It does not report allowed
+envelope kinds or a wait budget. Call this before call_actor when you need one
+payload shape; describe_actor returns the complete words map.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",

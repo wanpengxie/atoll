@@ -16,6 +16,11 @@ type parentFrame struct {
 type systemFrame struct {
 	Capabilities      []string `json:"capabilities"`
 	ClaudeCodeVersion string   `json:"claude_code_version"`
+	Tools             []string `json:"tools"`
+	MCPServers        []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	} `json:"mcp_servers"`
 }
 type contentBlock struct {
 	Type      string          `json:"type"`
@@ -269,6 +274,9 @@ func (w *worker) onInit(c *connection, raw json.RawMessage) {
 		w.publish(driverproto.Diagnostic{Level: driverproto.DiagnosticError, Code: "capability_missing", Detail: detail})
 		w.terminal(driverproto.WorkerEnded{Cause: driverproto.WorkerProtocolFault, Detail: detail})
 		return
+	}
+	if w.host != nil && w.host.Logger() != nil {
+		w.host.Logger().Debug("claude.system_init", "mcp_servers", frame.MCPServers, "tools", frame.Tools)
 	}
 	w.debug("claude_code_version", frame.ClaudeCodeVersion)
 }

@@ -8,7 +8,11 @@ import (
 // DefaultTimeout is the closure deadline used when a RequestSpec leaves
 // Timeout unset. The fast-path Await window is derived from whatever deadline
 // is in force (min(FastPathWindow, deadline)), never a separate knob.
-const DefaultTimeout = 30 * time.Second
+const (
+	DefaultTimeout     = 30 * time.Second
+	ToolCallBudget     = 120 * time.Second
+	MaxSynchronousWait = ToolCallBudget - 5*time.Second
+)
 
 // WaitMode selects the caller-side wait policy for one channel request.
 type WaitMode int

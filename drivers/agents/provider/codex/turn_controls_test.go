@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
 type codexEventSink struct {
@@ -30,13 +32,35 @@ func (s *codexEventSink) Publish(event driverproto.DriverEvent) bool {
 	return true
 }
 
-type codexWorkerHost struct{ sink *codexEventSink }
+type codexWorkerHost struct {
+	sink  *codexEventSink
+	tools driverproto.ToolPort
+}
 
-func (h codexWorkerHost) GenerationLife() context.Context     { return context.Background() }
-func (h codexWorkerHost) Events() driverproto.EventSink       { return h.sink }
-func (h codexWorkerHost) Logger() *slog.Logger                { return slog.New(slog.DiscardHandler) }
-func (h codexWorkerHost) Tools() driverproto.ToolPort         { return nil }
+func (h codexWorkerHost) GenerationLife() context.Context { return context.Background() }
+func (h codexWorkerHost) Events() driverproto.EventSink   { return h.sink }
+func (h codexWorkerHost) Logger() *slog.Logger            { return slog.New(slog.DiscardHandler) }
+func (h codexWorkerHost) Tools() driverproto.ToolPort {
+	if h.tools != nil {
+		return h.tools
+	}
+	return codexTestToolPort{}
+}
 func (h codexWorkerHost) Resources() driverproto.ResourcePort { return nil }
+
+type codexTestToolPort struct{}
+
+func (codexTestToolPort) Catalog() []driverproto.ToolSpec {
+	tools := metatool.MetaTools()
+	out := make([]driverproto.ToolSpec, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, driverproto.ToolSpec{Name: tool.Spec.Name, Description: tool.Spec.Description, Schema: tool.Spec.Schema})
+	}
+	return out
+}
+func (codexTestToolPort) Invoke(context.Context, driverproto.WorkerTurnTarget, driverproto.ToolInvocation) driverproto.ToolResult {
+	return driverproto.ToolResult{Text: `{"ok":true}`}
+}
 
 type codexFakeProcess struct {
 	process *childProcess
@@ -163,12 +187,70 @@ func rpcParams(frame map[string]any) map[string]any {
 	return params
 }
 
+func (h *codexHarness) startTurn(attempt driverproto.AttemptToken, text string) driverproto.WorkerTurnTarget {
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: attempt, Messages: []driverproto.DriverMessage{{Text: text}}})
+	request := h.input()
+	h.respond(request, map[string]any{})
+	turnID := fmt.Sprintf("turn-%d", attempt)
+	h.notify("turn/started", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": turnID, "status": "inProgress"}})
+	return h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnStarted); return ok }).(driverproto.TurnStarted).Target
+}
+
 func TestOpenPassesSelectedModelToThreadStart(t *testing.T) {
 	newCodexHarness(t, driverproto.TurnOptions{Model: "gpt-test", Effort: "high"}, func(open map[string]any) {
 		if open["method"] != "thread/start" || rpcParams(open)["model"] != "gpt-test" {
 			t.Fatalf("open=%v", open)
 		}
 	})
+}
+
+func TestDynamicToolCallUsesEntryTargetSnapshotAndNativeCallID(t *testing.T) {
+	h := newCodexHarness(t, driverproto.TurnOptions{}, nil)
+	target := h.startTurn(41, "run")
+	port := &codexCapturePort{seen: make(chan codexCapturedInvocation, 1)}
+	h.worker.host = codexWorkerHost{sink: h.sink, tools: port}
+	params, _ := json.Marshal(map[string]any{"threadId": "thread-1", "turnId": string(target.Native), "callId": "native-call-9", "tool": "call_actor", "arguments": map[string]any{"actor_id": "tool:x", "type": "x.run"}})
+	handler := h.worker.prepareServerRequest(h.worker.conn, "item/tool/call", params)
+	h.worker.mu.Lock()
+	h.worker.target = driverproto.WorkerTurnTarget{Attempt: 99, Native: "new-turn"}
+	h.worker.mu.Unlock()
+	result, rpcErr := handler()
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	seen := <-port.seen
+	if seen.target != target || seen.invocation.CallID != "native-call-9" {
+		t.Fatalf("captured=%+v want target=%+v", seen, target)
+	}
+	if result.(map[string]any)["success"] != true {
+		t.Fatalf("result=%v", result)
+	}
+}
+
+type codexCapturedInvocation struct {
+	target     driverproto.WorkerTurnTarget
+	invocation driverproto.ToolInvocation
+}
+
+type codexCapturePort struct{ seen chan codexCapturedInvocation }
+
+func (p *codexCapturePort) Catalog() []driverproto.ToolSpec { return codexTestToolPort{}.Catalog() }
+func (p *codexCapturePort) Invoke(_ context.Context, target driverproto.WorkerTurnTarget, invocation driverproto.ToolInvocation) driverproto.ToolResult {
+	p.seen <- codexCapturedInvocation{target: target, invocation: invocation}
+	return driverproto.ToolResult{Text: `{"ok":true}`}
+}
+
+func TestResumeSeedDigestMismatchCannotResume(t *testing.T) {
+	seed := encodeResumeSeed("thread-1", "old-digest")
+	if thread, ok := decodeResumeSeed(seed, "new-digest"); ok || thread != "thread-1" {
+		t.Fatalf("mismatch decoded thread=%q ok=%v", thread, ok)
+	}
+	if thread, ok := decodeResumeSeed(seed, "old-digest"); !ok || thread != "thread-1" {
+		t.Fatalf("matching seed thread=%q ok=%v", thread, ok)
+	}
+	if _, ok := decodeResumeSeed([]byte("legacy-thread-id"), "old-digest"); ok {
+		t.Fatal("unverified legacy seed resumed")
+	}
 }
 
 func TestSelectStickyEffortIsSentOnceOnNextTurnStart(t *testing.T) {

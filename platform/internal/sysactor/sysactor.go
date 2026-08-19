@@ -235,10 +235,11 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 // the SAME convention every actor honours, rather than hand-rolling the API
 // list at the serve site.
 func systemManifest() introspect.Manifest {
+	docs := introspect.SystemWordSpecs()
 	words := map[string]introspect.WordSpec{}
 	for _, entry := range message.SystemEntries() {
 		if entry.Kind == message.KindRequest {
-			words[entry.Name] = introspect.WordSpec{Description: "reserved system request"}
+			words[entry.Name] = docs[entry.Name]
 		}
 	}
 	return introspect.Manifest{Class: "sysactor", Interfaces: []string{"actor"}, Words: words}

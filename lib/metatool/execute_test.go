@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// execute_test drives the SEVEN meta-tools against a fake Exec double. The
+// execute_test drives the meta-tools against a fake Exec double. The
 // out-station correlation machinery itself (Submit/Await/Cancel/List/the
 // author#2 timer) is the engine's callLedger — tested in lib/actorbase. Here we
 // pin only the tools' translation of params → JobTable/Call operations and the
@@ -34,7 +34,8 @@ type fakeJobs struct {
 	// cancelled records ids passed to Cancel.
 	cancelled []message.ID
 	// progress is the ordered A-ledger provisional stream for each request.
-	progress map[message.ID][]*message.Envelope
+	progress    map[message.ID][]*message.Envelope
+	awaitWindow time.Duration
 }
 
 func (f *fakeJobs) Submit(spec behavior.RequestSpec) (message.ID, error) {
@@ -43,7 +44,8 @@ func (f *fakeJobs) Submit(spec behavior.RequestSpec) (message.ID, error) {
 	return message.ID("req-" + itoa(int64(f.seq))), nil
 }
 
-func (f *fakeJobs) Await(_ context.Context, id message.ID, _ time.Duration) (*message.Envelope, bool, error) {
+func (f *fakeJobs) Await(_ context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
+	f.awaitWindow = window
 	if f.awaitFn != nil {
 		return f.awaitFn(id)
 	}
@@ -291,10 +293,10 @@ func TestExecuteAwaitResult_NotInFlight(t *testing.T) {
 	x := newExec(jobs, nil)
 	rv := metatool.ExecuteAwaitResult(context.Background(),
 		json.RawMessage(`{"request_id":"req-9"}`), x, defaultRC())
-	assertIsError(t, rv, "internal_error")
+	assertIsError(t, rv, "result_unknown")
 	blob, _ := json.Marshal(rv.Value)
-	if !containsStr(string(blob), "not in flight") {
-		t.Fatalf("expected 'not in flight' message, got %s", blob)
+	if !containsStr(string(blob), "JobTable") {
+		t.Fatalf("expected lost JobTable explanation, got %s", blob)
 	}
 }
 
@@ -306,6 +308,16 @@ func TestExecuteAwaitResult_StillPending(t *testing.T) {
 	assertNotError(t, rv)
 	if rv.Value["status"] != "accepted" {
 		t.Fatalf("still-pending should ack; got %+v", rv.Value)
+	}
+}
+
+func TestExecuteAwaitResultClipsProviderBudgetWithoutRejecting(t *testing.T) {
+	jobs := &fakeJobs{}
+	rv := metatool.ExecuteAwaitResult(context.Background(),
+		json.RawMessage(`{"request_id":"req-1","timeout_ms":9223372036854775807}`), newExec(jobs, nil), defaultRC())
+	assertNotError(t, rv)
+	if jobs.awaitWindow != metatool.MaxSynchronousWait || rv.Value["wait_truncated"] != true || rv.Value["effective_timeout_ms"] != int64(115000) {
+		t.Fatalf("window=%v result=%+v", jobs.awaitWindow, rv.Value)
 	}
 }
 

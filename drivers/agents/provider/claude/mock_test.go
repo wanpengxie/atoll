@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
 type eventSink struct {
@@ -37,13 +38,35 @@ func (s *eventSink) snapshot() []driverproto.DriverEvent {
 	return append([]driverproto.DriverEvent(nil), s.events...)
 }
 
-type workerHost struct{ sink *eventSink }
+type workerHost struct {
+	sink  *eventSink
+	tools driverproto.ToolPort
+}
 
-func (h workerHost) GenerationLife() context.Context     { return context.Background() }
-func (h workerHost) Events() driverproto.EventSink       { return h.sink }
-func (h workerHost) Logger() *slog.Logger                { return slog.New(slog.DiscardHandler) }
-func (h workerHost) Tools() driverproto.ToolPort         { return nil }
+func (h workerHost) GenerationLife() context.Context { return context.Background() }
+func (h workerHost) Events() driverproto.EventSink   { return h.sink }
+func (h workerHost) Logger() *slog.Logger            { return slog.New(slog.DiscardHandler) }
+func (h workerHost) Tools() driverproto.ToolPort {
+	if h.tools != nil {
+		return h.tools
+	}
+	return testToolPort{}
+}
 func (h workerHost) Resources() driverproto.ResourcePort { return nil }
+
+type testToolPort struct{}
+
+func (testToolPort) Catalog() []driverproto.ToolSpec {
+	tools := metatool.MetaTools()
+	out := make([]driverproto.ToolSpec, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, driverproto.ToolSpec{Name: tool.Spec.Name, Description: tool.Spec.Description, Schema: tool.Spec.Schema})
+	}
+	return out
+}
+func (testToolPort) Invoke(context.Context, driverproto.WorkerTurnTarget, driverproto.ToolInvocation) driverproto.ToolResult {
+	return driverproto.ToolResult{Text: `{"ok":true}`}
+}
 
 type fakeProcess struct {
 	process     *childProcess

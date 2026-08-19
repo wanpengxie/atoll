@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/emit"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/mcpcodec"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/mcphttp"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/toolsurface"
+	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
 const initialContextUsageTimeout = 5 * time.Second
@@ -23,6 +28,8 @@ type connection struct {
 	terminalOnce sync.Once
 	onTerminal   func(driverproto.WorkerEndCause, string)
 	wireClosed   chan error
+	mcp          *mcpcodec.Server
+	mcpHTTP      *mcphttp.Server
 }
 
 func (c *connection) startTerminalMonitor() {
@@ -69,6 +76,12 @@ func (c *connection) terminal(cause driverproto.WorkerEndCause, detail string) {
 
 func (c *connection) Retire() {
 	if c != nil && !c.retired.Swap(true) {
+		if c.mcp != nil {
+			c.mcp.Close()
+		}
+		if c.mcpHTTP != nil {
+			c.mcpHTTP.Close()
+		}
 		c.wire.retire()
 		c.process.stop()
 	}
@@ -112,6 +125,8 @@ type turnState struct {
 
 type worker struct {
 	cfg               Config
+	host              driverproto.WorkerHost
+	surface           toolsurface.Surface
 	gate              *emit.Gate
 	mu                sync.Mutex
 	phase             workerPhase
@@ -134,7 +149,7 @@ type worker struct {
 }
 
 func newWorker(cfg Config, host driverproto.WorkerHost) *worker {
-	return &worker{cfg: cfg, gate: emit.New(host.Events()), phase: phaseConstructed, reaped: make(chan struct{}), debugSeen: map[string]bool{}}
+	return &worker{cfg: cfg, host: host, gate: emit.New(host.Events()), phase: phaseConstructed, reaped: make(chan struct{}), debugSeen: map[string]bool{}}
 }
 
 func (w *worker) begin(allowed ...workerPhase) bool {
@@ -168,12 +183,49 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	}
 	session, resume := w.session, w.resume
 	w.mu.Unlock()
-	p, err := w.cfg.processFactory(ctx, w.cfg, spawnArgs(w.cfg, session, resume, req.Options))
+	if w.host == nil || w.host.Tools() == nil {
+		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: "tool host unavailable", Disposition: driverproto.RetireWorker})
+		return
+	}
+	surface, err := toolsurface.Assemble(w.host.Tools().Catalog(), toolsurface.Claude)
+	if err != nil {
+		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+		return
+	}
+	w.mu.Lock()
+	w.surface = surface
+	w.mu.Unlock()
+	spawnCfg := w.cfg
+	spawnCfg.Prompt = surface.AppendGuide(spawnCfg.Prompt)
+	httpMCP, err := mcphttp.Start(w.host.GenerationLife(), surface, w.toolSnapshot, w.host.Logger())
 	if err != nil {
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 		return
 	}
-	c := &connection{process: p, wireClosed: make(chan error, 1)}
+	configReader, configWriter, err := os.Pipe()
+	if err != nil {
+		httpMCP.Close()
+		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+		return
+	}
+	if _, err = configWriter.Write(httpMCP.Config()); err != nil {
+		_ = configReader.Close()
+		_ = configWriter.Close()
+		httpMCP.Close()
+		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+		return
+	}
+	_ = configWriter.Close()
+	spawnCfg.mcpConfig = configReader
+	p, err := w.cfg.processFactory(ctx, spawnCfg, spawnArgs(spawnCfg, session, resume, req.Options))
+	_ = configReader.Close()
+	if err != nil {
+		httpMCP.Close()
+		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+		return
+	}
+	c := &connection{process: p, wireClosed: make(chan error, 1), mcpHTTP: httpMCP}
+	c.mcp = mcpcodec.New(w.host.GenerationLife(), surface)
 	c.wire = newWire(p)
 	c.onTerminal = func(cause driverproto.WorkerEndCause, detail string) { w.connectionEnded(c, cause, detail) }
 	c.wire.onLifecycle = func(id, state string) {
@@ -186,7 +238,9 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 			w.onFrame(c, typ, subtype, raw)
 		}
 	}
-	c.wire.onServerRequest = handleServerRequest
+	c.wire.onServerRequest = func(subtype string, raw json.RawMessage) func() (any, bool) {
+		return w.prepareServerRequest(c, subtype, raw)
+	}
 	c.wire.onDebug = func(code, detail string) { w.debug(code, detail) }
 	c.wire.onClose = func(err error) {
 		select {
@@ -305,7 +359,11 @@ func (w *worker) initializeDiagnostic(raw json.RawMessage) {
 		return
 	}
 	delete(response, "account")
-	w.publish(driverproto.Diagnostic{Level: driverproto.DiagnosticDebug, Code: "initialize", Detail: boundedSummary(response)})
+	detail := boundedSummary(response)
+	if w.host != nil && w.host.Logger() != nil {
+		w.host.Logger().Debug("claude.initialize", "mcp_servers", boundedSummary(response["mcp_servers"]), "tools", boundedSummary(response["tools"]))
+	}
+	w.publish(driverproto.Diagnostic{Level: driverproto.DiagnosticDebug, Code: "initialize", Detail: detail})
 }
 
 func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
@@ -563,11 +621,59 @@ func (w *worker) String() string {
 	return fmt.Sprintf("claude worker session=%s", w.session)
 }
 
-func handleServerRequest(subtype string, _ json.RawMessage) (any, bool) {
-	if subtype == "can_use_tool" {
-		return map[string]any{"behavior": "deny", "message": "permission escalation unavailable"}, false
+type sdkMCPRequest struct {
+	Subtype  string          `json:"subtype"`
+	Server   string          `json:"server_name"`
+	Message  json.RawMessage `json:"message"`
+	ToolName string          `json:"tool_name"`
+}
+
+func (w *worker) toolSnapshot() mcpcodec.InvokeFunc {
+	w.mu.Lock()
+	target, active := w.target, w.phase == phaseActive
+	w.mu.Unlock()
+	return func(ctx context.Context, invocation driverproto.ToolInvocation) driverproto.ToolResult {
+		if !active || !target.Valid() {
+			return driverproto.ToolResult{Text: toolsurface.ErrorText("internal_error", "tool call outside the active turn", "Wait for an active turn and do not reuse a late call"), IsError: true}
+		}
+		bounded, cancel := context.WithTimeout(ctx, metatool.MaxSynchronousWait)
+		defer cancel()
+		return w.host.Tools().Invoke(bounded, target, invocation)
 	}
-	return "unsupported: " + subtype, true
+}
+
+func (w *worker) prepareServerRequest(c *connection, subtype string, raw json.RawMessage) func() (any, bool) {
+	var request sdkMCPRequest
+	_ = json.Unmarshal(raw, &request)
+	if subtype == "can_use_tool" {
+		allowed := strings.HasPrefix(request.ToolName, toolsurface.ClaudeExposedPrefix)
+		return func() (any, bool) {
+			if allowed {
+				return map[string]any{"behavior": "allow"}, false
+			}
+			return map[string]any{"behavior": "deny", "message": "permission escalation unavailable"}, false
+		}
+	}
+	if subtype != "mcp_message" {
+		return func() (any, bool) { return "unsupported: " + subtype, true }
+	}
+	w.mu.Lock()
+	target, active := w.target, w.conn == c && w.phase == phaseActive
+	w.mu.Unlock()
+	return func() (any, bool) {
+		if request.Server != toolsurface.ClaudeServer {
+			return "unknown MCP server: " + request.Server, true
+		}
+		response := c.mcp.Handle(w.host.GenerationLife(), request.Message, func(ctx context.Context, invocation driverproto.ToolInvocation) driverproto.ToolResult {
+			if !active || !target.Valid() {
+				return driverproto.ToolResult{Text: toolsurface.ErrorText("internal_error", "tool call outside the active turn", "Wait for an active turn and do not reuse a late call"), IsError: true}
+			}
+			bounded, cancel := context.WithTimeout(ctx, metatool.MaxSynchronousWait)
+			defer cancel()
+			return w.host.Tools().Invoke(bounded, target, invocation)
+		})
+		return map[string]any{"mcp_response": response}, false
+	}
 }
 
 var _ driverproto.Worker = (*worker)(nil)

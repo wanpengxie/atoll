@@ -14,6 +14,7 @@ const (
 	PayloadInvalid   ErrorCode = "payload_invalid"
 	ActorUnreachable ErrorCode = "actor_unreachable"
 	Timeout          ErrorCode = "timeout"
+	ResultUnknown    ErrorCode = "result_unknown"
 	InternalError    ErrorCode = "internal_error"
 )
 
@@ -63,7 +64,7 @@ func TerminalFailureToActorCLI(toolName, actorID, typeName, reason string, detai
 			toolName,
 			Timeout,
 			fmt.Sprintf("Actor %q timed out while handling type %q", actorID, typeName),
-			"Increase max_pending_ms or check adapter logs",
+			"Check the target's current facts and adapter logs before deciding whether a retry is safe",
 			detail,
 		)
 	case string(message.TerminalReceiverInternalError):

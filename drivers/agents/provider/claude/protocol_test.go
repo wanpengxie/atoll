@@ -31,6 +31,13 @@ func TestOpenInitializesThenReadyAndSeedIsClientSession(t *testing.T) {
 	if requestSubtype(init) != "initialize" {
 		t.Fatalf("initialize=%v", init)
 	}
+	request := init["request"].(map[string]any)
+	if _, present := request["sdkMcpServers"]; present {
+		t.Fatalf("failed SDK-hosted transport was still advertised: %v", request)
+	}
+	if !containsArgs(h.args, "--mcp-config", "/dev/fd/3") {
+		t.Fatalf("loopback MCP config not inherited: args=%q", h.args)
+	}
 	id := requestID(init)
 	line := goldenLines(t, "probeA.out.jsonl")[0]
 	h.proc.emitRaw(t, rewriteGolden(t, line, nil, map[string]string{"init-1": id}))
@@ -45,6 +52,53 @@ func TestOpenInitializesThenReadyAndSeedIsClientSession(t *testing.T) {
 	}
 	if strings.Contains(eventsAs[driverproto.Diagnostic](h.sink.snapshot())[0].Detail, "email") {
 		t.Fatal("initialize diagnostic leaked account email field")
+	}
+}
+
+func TestSDKMCPMessageUsesEntryTargetSnapshotAndNativeID(t *testing.T) {
+	h, target, _ := activeHarness(t)
+	port := &captureToolPort{seen: make(chan capturedInvocation, 1)}
+	h.worker.host = workerHost{sink: h.sink, tools: port}
+	raw := json.RawMessage(`{"subtype":"mcp_message","server_name":"atoll","message":{"jsonrpc":"2.0","id":"native-7","method":"tools/call","params":{"name":"call_actor","arguments":{"actor_id":"tool:x","type":"x.run"}}}}`)
+	handler := h.worker.prepareServerRequest(h.worker.conn, "mcp_message", raw)
+	h.worker.mu.Lock()
+	h.worker.target = driverproto.WorkerTurnTarget{Attempt: target.Attempt + 1, Native: "new-turn"}
+	h.worker.mu.Unlock()
+	result, isError := handler()
+	if isError {
+		t.Fatalf("mcp handler error=%v", result)
+	}
+	seen := <-port.seen
+	if seen.target != target || !strings.HasSuffix(string(seen.invocation.CallID), `:s:"native-7"`) {
+		t.Fatalf("captured=%+v want target=%+v", seen, target)
+	}
+	encoded, _ := json.Marshal(result)
+	if !strings.Contains(string(encoded), `mcp_response`) || !strings.Contains(string(encoded), `"isError":false`) {
+		t.Fatalf("response=%s", encoded)
+	}
+}
+
+type capturedInvocation struct {
+	target     driverproto.WorkerTurnTarget
+	invocation driverproto.ToolInvocation
+}
+
+type captureToolPort struct{ seen chan capturedInvocation }
+
+func (p *captureToolPort) Catalog() []driverproto.ToolSpec { return testToolPort{}.Catalog() }
+func (p *captureToolPort) Invoke(_ context.Context, target driverproto.WorkerTurnTarget, invocation driverproto.ToolInvocation) driverproto.ToolResult {
+	p.seen <- capturedInvocation{target: target, invocation: invocation}
+	return driverproto.ToolResult{Text: `{"ok":true}`}
+}
+
+func TestCanUseToolAllowsOnlyAtollServer(t *testing.T) {
+	h := readyHarness(t, "")
+	allow := h.worker.prepareServerRequest(h.worker.conn, "can_use_tool", json.RawMessage(`{"subtype":"can_use_tool","tool_name":"mcp__atoll__call_actor"}`))
+	deny := h.worker.prepareServerRequest(h.worker.conn, "can_use_tool", json.RawMessage(`{"subtype":"can_use_tool","tool_name":"mcp__other__call_actor"}`))
+	allowed, allowedErr := allow()
+	denied, deniedErr := deny()
+	if allowedErr || deniedErr || allowed.(map[string]any)["behavior"] != "allow" || denied.(map[string]any)["behavior"] != "deny" {
+		t.Fatalf("allow=%v/%v deny=%v/%v", allowed, allowedErr, denied, deniedErr)
 	}
 }
 

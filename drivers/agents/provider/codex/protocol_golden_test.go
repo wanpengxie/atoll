@@ -117,7 +117,7 @@ func protocolTokensForMethod(t *testing.T, method string, declarations map[strin
 	contexts := map[string][]string{
 		"initialize": {"Open", "afterInitialize"}, "initialized": {"afterInitialize"},
 		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom", "dynamicTools"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom"},
-		"item/tool/call":       {"serverRequest", "dynamicToolCallParams", "dynamicToolResult"},
+		"item/tool/call":       {"prepareServerRequest", "dynamicToolCallParams", "dynamicToolResult"},
 		"thread/compact/start": {"Start"}, "thread/tokenUsage/updated": {"notification", "tokenUsageNotice"},
 		"turn/start": {"Start"}, "turn/steer": {"Control"}, "turn/interrupt": {"Control"},
 		"turn/started": {"notification", "turnNotice", "turnWire"}, "turn/completed": {"notification", "turnNotice", "turnWire"},

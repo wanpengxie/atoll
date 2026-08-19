@@ -113,9 +113,20 @@ func TestRuntimeRetriesResumeInvalidWithFreshSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 2 || !strings.Contains(lines[0], "--resume stale-session") || strings.Contains(lines[1], "--resume") || !strings.Contains(lines[1], "--session-id ") {
-		t.Fatalf("spawn args=%q", lines)
+	var spawns [][]string
+	for scanner := bufio.NewScanner(strings.NewReader(string(raw))); scanner.Scan(); {
+		var args []string
+		if err := json.Unmarshal(scanner.Bytes(), &args); err != nil {
+			t.Fatalf("decode spawn args: %v", err)
+		}
+		spawns = append(spawns, args)
+	}
+	joined := make([]string, len(spawns))
+	for i := range spawns {
+		joined[i] = strings.Join(spawns[i], " ")
+	}
+	if len(joined) != 2 || !strings.Contains(joined[0], "--resume stale-session") || strings.Contains(joined[1], "--resume") || !strings.Contains(joined[1], "--session-id ") {
+		t.Fatalf("spawn args=%q", spawns)
 	}
 	events.mu.Lock()
 	defer events.mu.Unlock()
@@ -150,7 +161,8 @@ func TestClaudeMockProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(90)
 	}
-	_, _ = fmt.Fprintln(file, strings.Join(args, " "))
+	rawArgs, _ := json.Marshal(args)
+	_, _ = fmt.Fprintln(file, string(rawArgs))
 	_ = file.Close()
 	resume := false
 	for _, arg := range args {

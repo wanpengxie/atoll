@@ -28,16 +28,19 @@ type MetaTool struct {
 	Execute func(ctx context.Context, params json.RawMessage, x *Exec, rc RuntimeContext) ResultValue
 }
 
-// MetaTools returns the channel's meta-tool catalog: the 7 client-edge
+// MetaTools returns the channel's fixed nine-tool catalog: six member
+// discovery/invocation tools plus the three first-class system-door tools.
 // tools (invoke, collect, discover) each paired with its Execute binding.
 // This is the data-driven surface a runtime iterates to build its own
 // tool type — the catalog is authored once here, not restated per binding.
 func MetaTools() []MetaTool {
 	return []MetaTool{
-		{Spec: CallActorSpec, Execute: ExecuteCallActor},
 		{Spec: ListActorsSpec, Execute: ExecuteListActors},
+		{Spec: SystemDescribeSpec, Execute: ExecuteSystemDescribe},
+		{Spec: SystemCallSpec, Execute: ExecuteSystemCall},
 		{Spec: DescribeActorSpec, Execute: ExecuteDescribeActor},
 		{Spec: DescribeTypeSpec, Execute: ExecuteDescribeType},
+		{Spec: CallActorSpec, Execute: ExecuteCallActor},
 		{Spec: AwaitResultSpec, Execute: ExecuteAwaitResult},
 		{Spec: CancelSpec, Execute: ExecuteCancel},
 		{Spec: ListPendingSpec, Execute: ExecuteListPending},

@@ -15,11 +15,15 @@ import (
 var ListActorsSpec = ToolSpec{
 	Name: "list_actors",
 	Description: strings.TrimSpace(`
-Discover what actors (tool adapters, agents, system actors) exist in this
+Discover what member actors (tool adapters, agents, humans and registrar-like
+system members) exist in this
 channel RIGHT NOW. Returns a thin directory: per actor its actor_id, kind,
 present (live cell/port bound now), uptime_ms when live, and optional device
 status. Types and payload docs are NOT
 listed here — drill into one actor with describe_actor / describe_type.
+
+The fixed system door is not a member and never appears here. Use
+system_describe/system_call for it; use this tool whenever you need the roster.
 
 This is a LIVE query — the catalog reflects the channel's current membership at
 the moment you call. An actor that came online after this task started will

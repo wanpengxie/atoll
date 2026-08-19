@@ -1,6 +1,7 @@
 package metatool
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,18 @@ func TestActorDiscoveryDescriptionsMatchCatalogFields(t *testing.T) {
 	for _, field := range []string{"actor_id", "kind", "present", "uptime_ms", "device"} {
 		if !strings.Contains(ListActorsSpec.Description, field) || !strings.Contains(CallActorSpec.Description, field) {
 			t.Fatalf("actor discovery descriptions omit %q", field)
+		}
+	}
+}
+
+func TestAllMetaToolInputSchemasAreMCPObjects(t *testing.T) {
+	for _, tool := range MetaTools() {
+		var schema map[string]any
+		if err := json.Unmarshal(tool.Spec.Schema, &schema); err != nil {
+			t.Fatalf("%s schema: %v", tool.Spec.Name, err)
+		}
+		if schema["type"] != "object" {
+			t.Fatalf("%s input schema type=%v, want object", tool.Spec.Name, schema["type"])
 		}
 	}
 }

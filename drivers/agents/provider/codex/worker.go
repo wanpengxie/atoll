@@ -11,6 +11,8 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/emit"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/toolsurface"
+	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
 type connection struct {
@@ -55,6 +57,7 @@ type worker struct {
 	leases     sync.WaitGroup
 	reaped     chan struct{}
 	retireOnce sync.Once
+	surface    toolsurface.Surface
 }
 
 func newWorker(cfg Config, host driverproto.WorkerHost) *worker {
@@ -87,6 +90,18 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 	w.options = req.Options
 	w.pending.Effort = req.Options.Effort
 	w.mu.Unlock()
+	if w.host == nil || w.host.Tools() == nil {
+		w.publish(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: "tool host unavailable", Disposition: driverproto.RetireWorker})
+		return
+	}
+	surface, err := toolsurface.Assemble(w.host.Tools().Catalog(), toolsurface.Codex)
+	if err != nil {
+		w.publish(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: err.Error(), Disposition: driverproto.RetireWorker})
+		return
+	}
+	w.mu.Lock()
+	w.surface = surface
+	w.mu.Unlock()
 	p, err := w.cfg.processFactory(ctx, w.cfg)
 	if err != nil {
 		w.publish(driverproto.OpenRejected{Class: driverproto.FailureTransport, Detail: err.Error(), Disposition: driverproto.RetireWorker})
@@ -99,11 +114,11 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 			w.notification(c, method, params)
 		}
 	}
-	c.rpc.onRequest = func(method string, params json.RawMessage) (any, *rpcError) {
+	c.rpc.onRequest = func(method string, params json.RawMessage) func() (any, *rpcError) {
 		if c.retired.Load() {
-			return nil, &rpcError{Code: -32601, Message: "connection retired"}
+			return func() (any, *rpcError) { return nil, &rpcError{Code: -32601, Message: "connection retired"} }
 		}
-		return w.serverRequest(c, method, params)
+		return w.prepareServerRequest(c, method, params)
 	}
 	c.rpc.onClose = func(err error) {
 		if !c.retired.Load() {
@@ -152,26 +167,28 @@ func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage
 	// developer instruction; atoll's tool catalog rides along as dynamic
 	// tools so the model can call actors in its channel (served back to us
 	// via item/tool/call → WorkerHost.Tools().Invoke).
-	if w.cfg.Prompt != "" {
-		startParams["developerInstructions"] = w.cfg.Prompt
+	prompt := w.surface.AppendGuide(w.cfg.Prompt)
+	if prompt != "" {
+		startParams["developerInstructions"] = prompt
 	}
 	if tools := w.dynamicTools(); len(tools) > 0 {
 		startParams["dynamicTools"] = tools
 	}
 	method, params := "thread/start", any(startParams)
-	if len(seed) > 0 {
+	resumeThread, resumeOK := decodeResumeSeed(seed, w.surface.Digest())
+	if resumeOK {
 		// thread/resume has no dynamicTools field: codex persists a thread's
 		// dynamic tools with the thread and restores them on resume.
-		resumeParams := map[string]any{"threadId": string(seed), "excludeTurns": true}
+		resumeParams := map[string]any{"threadId": resumeThread, "excludeTurns": true}
 		if model != "" {
 			resumeParams["model"] = model
 		}
-		if w.cfg.Prompt != "" {
-			resumeParams["developerInstructions"] = w.cfg.Prompt
+		if prompt != "" {
+			resumeParams["developerInstructions"] = prompt
 		}
 		method, params = "thread/resume", resumeParams
 	}
-	if err := c.rpc.callAsync(method, params, func(raw json.RawMessage, err error) { w.afterSession(c, len(seed) > 0, raw, err) }); err != nil {
+	if err := c.rpc.callAsync(method, params, func(raw json.RawMessage, err error) { w.afterSession(c, resumeOK, raw, err) }); err != nil {
 		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 	}
 }
@@ -200,7 +217,7 @@ func (w *worker) afterSession(c *connection, resumed bool, raw json.RawMessage, 
 	}
 	w.thread, w.phase = id, phaseReady
 	w.mu.Unlock()
-	if !w.publish(driverproto.SeedUpdated{Value: []byte(id)}) {
+	if !w.publish(driverproto.SeedUpdated{Value: encodeResumeSeed(id, w.surface.Digest())}) {
 		return
 	}
 	w.publish(driverproto.WorkerReady{})
@@ -375,20 +392,10 @@ func (w *worker) String() string {
 // dynamicTools projects the host's tool catalog into codex dynamicTools
 // (FunctionDynamicToolSpec). Nil when the host has no tools.
 func (w *worker) dynamicTools() []map[string]any {
-	if w.host == nil || w.host.Tools() == nil {
-		return nil
-	}
-	catalog := w.host.Tools().Catalog()
-	out := make([]map[string]any, 0, len(catalog))
-	for _, spec := range catalog {
-		if spec.Name == "" {
-			continue
-		}
-		schema := json.RawMessage(`{"type":"object"}`)
-		if len(spec.Schema) > 0 {
-			schema = spec.Schema
-		}
-		out = append(out, map[string]any{"type": "function", "name": spec.Name, "description": spec.Description, "inputSchema": schema})
+	entries := w.surface.Entries()
+	out := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, map[string]any{"type": "function", "name": entry.Wire, "description": entry.Spec.Description, "inputSchema": entry.Spec.Schema})
 	}
 	return out
 }
@@ -403,32 +410,43 @@ type dynamicToolCallParams struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-// serverRequest answers app-server → client requests. item/tool/call is the
-// dynamic-tool callback: it runs on the rpc pump's request goroutine (see
-// rpcClient.handleRequest), so blocking on the host bridge here is fine.
-func (w *worker) serverRequest(c *connection, method string, params json.RawMessage) (any, *rpcError) {
+// prepareServerRequest snapshots the active target on the ordered read pump.
+// The returned closure may run concurrently but never rereads mutable target
+// state, so a late callback cannot be attributed to a newer turn.
+func (w *worker) prepareServerRequest(c *connection, method string, params json.RawMessage) func() (any, *rpcError) {
 	if method != "item/tool/call" {
-		return handleServerRequest(method, params)
+		return func() (any, *rpcError) { return handleServerRequest(method, params) }
 	}
 	var p dynamicToolCallParams
 	if err := json.Unmarshal(params, &p); err != nil || p.Tool == "" || p.CallID == "" {
-		return nil, &rpcError{Code: -32602, Message: "invalid item/tool/call params"}
+		return func() (any, *rpcError) { return nil, &rpcError{Code: -32602, Message: "invalid item/tool/call params"} }
 	}
 	w.mu.Lock()
 	thread, target, active := w.thread, w.target, w.conn == c && w.phase == phaseActive
+	surface := w.surface
 	w.mu.Unlock()
-	if !active || p.ThreadID != thread || string(target.Native) != p.TurnID {
-		return dynamicToolResult("tool call outside the active turn", true), nil
+	canonical, known := surface.Canonical(p.Tool)
+	return func() (any, *rpcError) {
+		if !active || p.ThreadID != thread || string(target.Native) != p.TurnID {
+			return dynamicToolResult(toolsurface.ErrorText("internal_error", "tool call outside the active turn", "Wait for an active turn and do not reuse a late call"), true), nil
+		}
+		if !known {
+			return nil, &rpcError{Code: -32601, Message: "unknown tool: " + p.Tool}
+		}
+		args := p.Arguments
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+		var object map[string]any
+		if json.Unmarshal(args, &object) != nil || object == nil {
+			return nil, &rpcError{Code: -32602, Message: "tool arguments must be an object"}
+		}
+		ctx, cancel := context.WithTimeout(w.host.GenerationLife(), metatool.MaxSynchronousWait)
+		defer cancel()
+		res := w.host.Tools().Invoke(ctx, target, driverproto.ToolInvocation{CallID: driverproto.ProviderToolCallID(p.CallID), Name: canonical, Params: args})
+		res = surface.MapResult(res)
+		return dynamicToolResult(res.Text, res.IsError), nil
 	}
-	if w.host == nil || w.host.Tools() == nil {
-		return dynamicToolResult("no tool host", true), nil
-	}
-	args := p.Arguments
-	if len(args) == 0 {
-		args = json.RawMessage(`{}`)
-	}
-	res := w.host.Tools().Invoke(w.host.GenerationLife(), target, driverproto.ToolInvocation{CallID: driverproto.ProviderToolCallID(p.CallID), Name: p.Tool, Params: args})
-	return dynamicToolResult(res.Text, res.IsError), nil
 }
 
 // dynamicToolResult is codex's DynamicToolCallResponse.
@@ -468,6 +486,22 @@ func threadIDFrom(raw json.RawMessage) string {
 	}
 	_ = json.Unmarshal(raw, &v)
 	return strings.TrimSpace(v.Thread.ID)
+}
+
+const resumeSeedPrefix = "atoll-codex-v1:"
+
+func encodeResumeSeed(thread, digest string) []byte {
+	return []byte(resumeSeedPrefix + digest + ":" + thread)
+}
+
+func decodeResumeSeed(seed []byte, digest string) (string, bool) {
+	value := string(seed)
+	if !strings.HasPrefix(value, resumeSeedPrefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(value, resumeSeedPrefix)
+	storedDigest, thread, ok := strings.Cut(rest, ":")
+	return thread, ok && thread != "" && storedDigest == digest
 }
 func deltaNotificationMethods() []string {
 	return []string{"item/agentMessage/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/plan/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "command/exec/outputDelta", "process/outputDelta", "thread/realtime/outputAudio/delta", "thread/realtime/transcript/delta"}

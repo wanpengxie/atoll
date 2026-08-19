@@ -11,14 +11,14 @@ import (
 var CallActorSpec = ToolSpec{
 	Name: "call_actor",
 	Description: strings.TrimSpace(`
-Invoke any tool actor or sub-agent in this channel by emitting a kind=request envelope.
-This is the universal invocation primitive — every adapter (browser automation, business APIs,
-device controllers) and every sub-agent is reached through this single tool.
+Invoke a discovered member actor in this channel by emitting a request envelope.
+The fixed system door has first-class system_describe/system_call tools and must
+not be reached through this generic member primitive.
 
 Workflow:
   1. Call list_actors first to see who is in the channel (thin directory:
      actor_id, kind, present, uptime_ms, and optional device; no types).
-  2. Call describe_actor for the chosen actor's skill doc and full type list.
+  2. Call describe_actor for the chosen actor's D21 manifest and words map.
   3. Call describe_type when you need the input/output schemas, examples, or
      adapter-specific error codes for the selected type.
   4. Call call_actor.

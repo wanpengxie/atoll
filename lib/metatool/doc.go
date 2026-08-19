@@ -10,8 +10,8 @@
 //
 // One package, one purpose:
 //
-//   - the 7 client-edge meta tool specs (call_actor, list_actors,
-//     describe_actor, describe_type, await_result, cancel, list_pending)
+//   - the fixed nine-tool catalog: the six member discovery/invocation tools
+//     plus list_actors, system_describe, and system_call
 //     and their Execute functions (the binding onto the Exec face)
 //   - the tool-result VOCABULARY: ResultValue, the ErrorCode closed set, ack
 //     shapes (AckDescriptor/AckResult), the tool-call spec
@@ -23,7 +23,7 @@
 //
 // 期10 S5 collapse: the historical metatool.Shell (a private correlator holding
 // its OWN author#2 timer (the since-拆删 behavior.Caller) alongside the engine's ledger — the
-// "two historical fragments") is GONE. The seven tools drive lib/actorbase's
+// "two historical fragments") is GONE. The nine tools drive lib/actorbase's
 // JobTable directly — the SAME machine, moved house, not a second one. The
 // subscribe-before-send correlator, the bounded-window await, the
 // timeout-vs-buffered-final reconcile, and closure author#2 all live in the
