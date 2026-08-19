@@ -25,10 +25,14 @@ type Config struct {
 	processFactory processFactory
 	Selections     []driverproto.TurnOptions
 	Default        int
+	// Prompt is the decl-authored static instruction block, passed as
+	// --append-system-prompt so it rides on Claude Code's own system prompt.
+	Prompt string
 }
 
 type specConfig struct {
 	Model      string `json:"model,omitempty"`
+	Prompt     string `json:"prompt,omitempty"`
 	Selections []struct {
 		Model  string `json:"model"`
 		Effort string `json:"effort"`
@@ -75,5 +79,5 @@ func ParseConfig(raw json.RawMessage, workspace string, logger *slog.Logger) (Co
 	for i, option := range spec.Selections {
 		selections[i] = driverproto.TurnOptions{Model: option.Model, Effort: option.Effort}
 	}
-	return Config{WorkspaceDir: workspace, Binary: "claude", Model: spec.Model, Logger: logger, processFactory: spawnProcess, Selections: selections, Default: spec.Default}, nil
+	return Config{WorkspaceDir: workspace, Binary: "claude", Model: spec.Model, Logger: logger, processFactory: spawnProcess, Selections: selections, Default: spec.Default, Prompt: spec.Prompt}, nil
 }

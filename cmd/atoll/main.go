@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
 	"github.com/wanpengxie/atoll/cmd/internal/engineboot"
 	"github.com/wanpengxie/atoll/cmd/internal/homelock"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/codex"
 	"github.com/wanpengxie/atoll/drivers/devicehost"
 
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
@@ -80,6 +81,18 @@ func main() {
 			log.Fatalf("up: %v", err)
 		}
 		defer release()
+	}
+
+	// Node-owned codex home (<dir>/server/.codex): borrows the user's codex
+	// authorization, nothing else from ~/.codex. codex agents pick it up via
+	// ATOLL_CODEX_HOME; if preparation fails they fall back to the user's
+	// ~/.codex (documented fallback for this version).
+	codexHome := codex.NodeHome(*dir)
+	if err := codex.PrepareHome(codexHome); err != nil {
+		logger.Warn("up: codex home not prepared; codex agents will use ~/.codex", "path", codexHome, "error", err)
+	} else {
+		_ = os.Setenv(codex.HomeEnv, codexHome)
+		logger.Info("up: codex home", "path", codexHome)
 	}
 
 	eng, err := engineboot.Boot(engineboot.Config{

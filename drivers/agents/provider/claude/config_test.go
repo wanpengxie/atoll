@@ -44,9 +44,12 @@ func TestSpawnArgsGolden(t *testing.T) {
 		resume  bool
 		want    []string
 	}{
-		{name: "new session", session: "new", want: []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--session-id", "new"}},
-		{name: "resume", session: "old", resume: true, want: []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--resume", "old"}},
-		{name: "model", cfg: Config{Model: "opus"}, session: "new", want: []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--session-id", "new", "--model", "opus"}},
+		{name: "new session", session: "new", want: []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config", "--session-id", "new"}},
+		{name: "resume", session: "old", resume: true, want: []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config", "--resume", "old"}},
+		{name: "model", cfg: Config{Model: "opus"}, session: "new", want: []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config", "--session-id", "new", "--model", "opus"}},
+		// The decl prompt rides on Claude Code's own system prompt; user
+		// settings (plugins, hooks, CLAUDE.md, user MCP) are never loaded.
+		{name: "prompt", cfg: Config{Prompt: "You are the Steward."}, session: "new", want: []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config", "--append-system-prompt", "You are the Steward.", "--session-id", "new"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

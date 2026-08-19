@@ -23,8 +23,9 @@ func TestRequiredMethodsAndFieldsGolden(t *testing.T) {
 	want := map[string][]string{
 		"initialize":                            {"capabilities.optOutNotificationMethods", "clientInfo.name", "clientInfo.title", "clientInfo.version", "result.userAgent"},
 		"initialized":                           {},
-		"thread/start":                          {"approvalPolicy", "cwd", "model", "result.thread.id", "sandbox"},
-		"thread/resume":                         {"excludeTurns", "model", "result.thread.id", "threadId"},
+		"thread/start":                          {"approvalPolicy", "cwd", "developerInstructions", "dynamicTools", "model", "result.thread.id", "sandbox"},
+		"thread/resume":                         {"developerInstructions", "excludeTurns", "model", "result.thread.id", "threadId"},
+		"item/tool/call":                        {"arguments", "callId", "result.contentItems", "result.success", "threadId", "tool", "turnId"},
 		"thread/compact/start":                  {"threadId"},
 		"thread/tokenUsage/updated":             {"threadId", "tokenUsage.last.totalTokens", "tokenUsage.modelContextWindow", "turnId"},
 		"turn/start":                            {"effort", "input", "model", "threadId"},
@@ -115,7 +116,8 @@ func protocolTokensForMethod(t *testing.T, method string, declarations map[strin
 	t.Helper()
 	contexts := map[string][]string{
 		"initialize": {"Open", "afterInitialize"}, "initialized": {"afterInitialize"},
-		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom"},
+		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom", "dynamicTools"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom"},
+		"item/tool/call":       {"serverRequest", "dynamicToolCallParams", "dynamicToolResult"},
 		"thread/compact/start": {"Start"}, "thread/tokenUsage/updated": {"notification", "tokenUsageNotice"},
 		"turn/start": {"Start"}, "turn/steer": {"Control"}, "turn/interrupt": {"Control"},
 		"turn/started": {"notification", "turnNotice", "turnWire"}, "turn/completed": {"notification", "turnNotice", "turnWire"},

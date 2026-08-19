@@ -22,6 +22,13 @@ type Config struct {
 	processFactory processFactory
 	Selections     []driverproto.TurnOptions
 	Default        int
+	// Prompt is the decl-authored static instruction block. It reaches the
+	// model as thread/start developerInstructions (appended to codex's own
+	// system prompt), so it is part of the thread from its first request.
+	Prompt string
+	// Home is the CODEX_HOME the app-server child runs under. Empty means
+	// the codex default (~/.codex). See ResolveHome.
+	Home string
 }
 
 type specConfig struct {
@@ -29,7 +36,8 @@ type specConfig struct {
 		Model  string `json:"model"`
 		Effort string `json:"effort"`
 	} `json:"selections,omitempty"`
-	Default int `json:"default,omitempty"`
+	Default int    `json:"default,omitempty"`
+	Prompt  string `json:"prompt,omitempty"`
 }
 
 func ValidateConfig(raw json.RawMessage) error {
@@ -69,5 +77,5 @@ func ParseConfig(raw json.RawMessage, workspace string, logger *slog.Logger) (Co
 	for i, option := range spec.Selections {
 		selections[i] = driverproto.TurnOptions{Model: option.Model, Effort: option.Effort}
 	}
-	return Config{WorkspaceDir: workspace, Binary: "codex", Logger: logger, processFactory: spawnProcess, Selections: selections, Default: spec.Default}, nil
+	return Config{WorkspaceDir: workspace, Binary: "codex", Logger: logger, processFactory: spawnProcess, Selections: selections, Default: spec.Default, Prompt: spec.Prompt, Home: ResolveHome()}, nil
 }

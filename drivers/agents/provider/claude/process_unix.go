@@ -31,7 +31,15 @@ type childProcess struct {
 type processFactory func(context.Context, Config, []string) (*childProcess, error)
 
 func spawnArgs(cfg Config, session string, resume bool, options driverproto.TurnOptions) []string {
-	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
+	// --setting-sources "" : load no user/project/local settings — no user
+	// plugins, hooks, custom commands, user MCP servers, no CLAUDE.md. Auth in
+	// ~/.claude is untouched by this flag and keeps working. Built-in tools
+	// stay on (they are the good part). --strict-mcp-config keeps any
+	// project-scoped MCP registration for the cwd out as well.
+	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config"}
+	if cfg.Prompt != "" {
+		args = append(args, "--append-system-prompt", cfg.Prompt)
+	}
 	if resume {
 		args = append(args, "--resume", session)
 	} else {

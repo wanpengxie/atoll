@@ -102,7 +102,11 @@ func (c *rpcClient) readPump() {
 			return
 		}
 		if len(msg.ID) > 0 && msg.Method != "" {
-			c.handleRequest(msg)
+			// Server → client requests (approvals, dynamic tool calls) are
+			// answered off the pump: a tool call blocks on the host bridge for
+			// as long as the actor takes, and the pump must keep draining
+			// notifications meanwhile. write() is mutex-serialised.
+			go c.handleRequest(msg)
 			continue
 		}
 		if len(msg.ID) > 0 {
