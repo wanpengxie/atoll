@@ -2,103 +2,70 @@
 
 English | [简体中文](README.zh-CN.md)
 
-**An operating system for agents.**
-
-Atoll is to agents what Linux is to programs. You install it on a machine; after
-that, any number of agents (codex, claude, your own), tools (MCP servers, devices)
-and people run on it side by side, in shared rooms, under one set of rules — and
-every one of them gets the things an OS is supposed to give a process for free:
-an identity, a place to live, a way to talk to the others, permissions, a durable
-record of what happened, and a way to be woken up later.
+**An operating system for agents.** Install it on a machine; agents (codex, claude,
+your own), tools (MCP servers, devices) and people then run on it side by side in
+shared channels, each with an identity, permissions, a durable ledger of what
+happened, and a way to be woken later. Linux gives programs processes, files and
+permissions; Atoll gives agents **actors**, **channels** and **membership**.
 
 | Unix | Atoll | |
 |---|---|---|
-| process | **actor** | anything that acts: a person, an agent, a tool, the system itself — one kind of identity |
-| file system + pipes | **channel** | where collaboration happens; also the authoritative ledger — everything that happens is a message in the channel's ordered log |
-| byte stream | **message** | the only way anything interacts: request / event / response; the OS does not interpret the content |
-| file | **resource** | passive objects — files, KV, external things; control plane in the OS, data plane delegated |
-| permission bits | **access** | who may enter which channel and do what — decided by structure (membership), not by a program |
-| cron | **timer** | a durable promise to wake an actor later; survives restarts |
+| process | **actor** | a person, an agent, a tool, the system — one kind of identity |
+| file system + pipes | **channel** | where work happens; also the ledger — everything is a message in its ordered log |
+| byte stream | **message** | request / event / response; the OS does not read the content |
+| file | **resource** | files, KV, external objects; control plane here, data plane delegated |
+| permission bits | **access** | channel membership decides who may do what |
+| cron | **timer** | a durable wake-up; survives restarts |
 
-"**Everything is a message, and every message is on the ledger**" is Atoll's
-everything-is-a-file. A person's sentence, an agent's tool call, the system creating
-a member, an approval — one kind of thing, appended to one ordered log per channel.
-Audit, replay, recovery and observation are not features bolted on; they fall out
-of the ledger. The shape is deliberately close to *Android + Slack*: every resident
-has an identity and a sandbox, residents only talk through messages, and the rooms
-are shared.
+> **v0.01 — pre-release, not data-safe.** Storage formats, APIs and the wire
+> protocol change without deprecation or migration; a newer build may refuse or
+> overwrite an older node home. Keep nothing in it you cannot recreate.
 
-> **Status: v0.01 — pre-release, not data-safe.**
-> Atoll runs end to end today (`atoll up` + the web UI), but it is early software,
-> not a product. **Storage formats, APIs and the wire protocol change without
-> deprecation cycles or migration paths** — a newer build may refuse or overwrite a
-> node home created by an older one. Do not keep anything in it you cannot recreate.
-> See [What works today](#what-works-today) and [Status](#status).
+## Features
 
----
+- **One command to a running node** — `atoll up` installs `c0`, the root account,
+  a local compute device, and seats a coding agent (codex or claude) as steward.
+- **Every message on the ledger** — one append-only SQLite log per channel; the
+  server is the only writer; sender identity is stamped by the runtime, not filled
+  in by the sender. Audit, replay and recovery come from the log.
+- **Channels as the unit of everything** — trust boundary, context, files and
+  lifecycle; a tree addressed by name (`c0`, `c0.dev`, `c0.alice`).
+- **Membership is the permission** — no per-object ACLs; an agent's act is its
+  principal's act.
+- **Agents are members, not sessions** — stable identity across restarts and model
+  swaps; `codex`, `claude`, `script` engines; many instances per template.
+- **Tools mount at runtime** — an MCP server becomes a member with two messages,
+  its tools become message types.
+- **Machines join as devices** — `atoll-daemon` on another box hosts agents and
+  tools with a real shell, files and git.
+- **Declarative convergence** — desired state on the ledger vs. host testimony;
+  crashes and restarts converge back, nothing is killed by absence.
+- **Three surfaces, no back door** — `/ws` frames to write, `/obs` to read,
+  `/files` for data; the web UI and scripts use exactly the same ones.
+- **Layering machine-checked** — `archtest/` fails the build when a layer is
+  crossed; it applies to agent-written code too.
 
-- [Why an OS](#why-an-os)
-- [What works today](#what-works-today)
-- [Quickstart](#quickstart)
-- [How a node is put together](#how-a-node-is-put-together)
-- [Using the node](#using-the-node)
-  - [From the web UI](#from-the-web-ui)
-  - [From a script](#from-a-script)
-  - [Recipes](#recipes)
-- [What the OS guarantees](#what-the-os-guarantees)
-- [Extending: write your own actor](#extending-write-your-own-actor)
-- [Repository layout](#repository-layout)
-- [Development](#development)
-- [Documentation](#documentation)
-- [Status](#status)
-- [License](#license)
+## What works today (2026-08)
 
----
-
-## Why an OS
-
-The last two years produced excellent agent *applications* — Claude Code, Codex,
-harnesses, workflow frameworks. They all run on bare metal: no OS underneath.
-
-- Each product brings its own sessions, permissions, tools, memory and scheduling;
-  none of it is shared, and switching models means switching the whole stack.
-- When several agents and several people work together there is no common truth:
-  who did what, who was allowed to, how far the task got — scattered across
-  private conversation logs.
-- Long tasks do not survive a context compaction; when something goes wrong there
-  is no ledger to read, no single switch to flip, no gate on cost.
-- The community is patching the same holes with the same folk remedies — spec
-  files, goal checkers, loops, state graphs — which are four faces of one missing
-  thing: what must hold, what counts as done and who decides, where state lives,
-  who picks the next step.
-
-This is the position application software was in around 1970. Unix's answer was
-not a stronger application but a tiny core, a handful of primitives that do not
-interpret content, and everything else in user space. Atoll carries that answer to
-agents — and has to answer a question Unix never faced: **when the "processes" are
-entities that make judgments, what is it that the OS organises?** Its answer is
-that the OS organises obligations and attention on top of a shared record, not
-instructions — but that organisation layer (think OTP on top of Erlang) is the
-next thing to build, not what ships today. See
-[docs/architecture](docs/architecture/README.md).
-
-## What works today
-
-Read this before the quickstart; it is the honest line.
-
-| | Today (2026-08) |
+| | |
 |---|---|
-| Install & run a node in one command | ✅ `scripts/install.sh` → `atoll up`; root account, `c0`, local device |
-| A coding agent seated in a channel | ✅ codex or claude CLI runs as the `c0` **steward** on your device; ask it, it answers |
-| Several channels, several agents, several people | ✅ channel tree, `agent`/`tool` templates, one template → many instances, accounts |
-| Mount an MCP server at runtime | ✅ two messages, no rebuild; its tools become message types |
-| Add another machine | ✅ `atoll-daemon` joins as a device |
-| Browser client | ✅ [`atoll-web`](https://github.com/wanpengxie/atoll-web) over the public contract (login / ws frames / obs) — it must track the node's wire dialect, which moves |
-| Script everything | ✅ bearer token, `/obs` reads, `/ws` writes — there is nothing the UI can do that a script cannot |
-| Agents using Atoll's own tools (`call_actor`, …) from inside their model loop | 🚧 the tool port exists; the codex / claude workers do not yet expose it to the model |
-| Programmatic prompt injection for agents (who am I, where am I, who is here) | 🚧 designed, not built |
+| Install, run, log in, talk to the steward, web UI, scripts, MCP mount, extra devices, multiple channels / agents / accounts | ✅ |
+| Agents calling Atoll's own tools from inside their model loop (`call_actor` …) | 🚧 tool port exists; codex / claude workers do not expose it yet |
+| Programmatic prompt injection for agents (who am I, where, who is here) | 🚧 designed |
 | Jobs, approvals, quotas, message interposition (the organisation layer) | 📐 design only |
 | Cross-node federation, DID identity | 📐 direction only |
+
+---
+
+- [Quickstart](#quickstart)
+- [How a node is put together](#how-a-node-is-put-together)
+- [Using the node](#using-the-node) · [web UI](#from-the-web-ui) · [script](#from-a-script) · [recipes](#recipes)
+- [Design notes](#design-notes)
+- [Extending: write your own actor](#extending-write-your-own-actor)
+- [Repository layout](#repository-layout) · [Development](#development) · [Documentation](#documentation)
+- [Status](#status) · [License](#license)
+
+---
 
 ## Quickstart
 
@@ -387,52 +354,28 @@ bin/atoll-daemon --home ~/.atoll/device --server "ws://<node>:8832/compute" --ke
 
 It shows up in `/obs/space/daemons` and can host agents and tools like the local one.
 
-## What the OS guarantees
+## Design notes
 
-These are the properties you can build on. They are structural — enforced by how
-the code is shaped, not by a prompt — and the layering is machine-checked
-(`archtest/`), which matters because some of the code on this OS will be written by
-the agents running on it.
+The properties below are structural (enforced by how the code is shaped, checked
+by `archtest/`), not conventions. The reasoning is in
+[docs/architecture](docs/architecture/README.md).
 
-1. **The channel ledger is the truth; it is replayable, recoverable, forkable.**
-   Every message is appended before anyone sees it; there is no side channel and no
-   REST "send". An actor that dies, changes model or moves machines recovers from
-   the ledger to the same state.
-2. **Identity outlives the incumbent.** An actor's id is stable; the model process
-   under it can be restarted, upgraded, swapped (codex today, claude tomorrow) and
-   it is still the same member. Any provider that writes usage/steps as events and
-   honours the stop protocol can be plugged in — model-neutral, harness-neutral.
-3. **Permission lives on the membrane, not in the prompt.** Who may enter a channel
-   and what they may say is decided at the gate, uniformly for the whole channel:
-   no per-object ACLs, no token impersonation. An agent's act is legally its
-   principal's act. "Agent overreach" becomes structurally unreachable instead of
-   a runtime whack-a-mole.
-4. **Declarative convergence; absence never destroys.** One mechanism: desired
-   state on the ledger minus the host's testimony → start or retire. No cascading
-   kills, no hidden timers; after a crash, disconnect or restart the system converges
-   back to what the ledger says.
-5. **Devices are compute; agents come with hands.** A machine, container or cloud
-   sandbox joins as a device; an agent placed there gets a shell, a filesystem,
-   git and a browser without per-tool adapters. Storage and compute sit behind
-   interfaces and can be swapped for cloud infrastructure wholesale.
-6. **The organisation layer is installable, with zero OS changes.** Long-task
-   governance (goals, claims, who decides, evidence, done), message interposition
-   (audit, rate limit, billing, approval, A/B), quotas — each is a protocol plus a
-   service member you add to a channel, Slack "add app to channel" style. This is
-   the OTP-to-Erlang layer; it is designed and not yet shipped.
-7. **People are first-class members.** A channel is a room where people and agents
-   speak, decide and hand over on the same ledger. An approval is a message to a
-   person, not a button outside the flow. The web UI is one client of that contract;
-   any app, browser or IDE plugin can be another.
-8. **Self-observing, self-managed by the same law, safely self-improving.** The
-   system watches and manages itself through no privileged path: `c0` governs every
-   channel under the same rules; operations is a channel with people and agents in
-   it; the next version is built and tested inside a forked Atoll before it is
-   switched in.
-
-Why it is shaped this way — and how it relates to harnesses, frameworks, MCP, A2A,
-Kubernetes and Erlang/OTP — is the subject of the
-[architecture series](docs/architecture/README.md).
+- **Ledger is truth.** Appended before anyone sees it; no side channel, no REST
+  "send"; replayable, recoverable, forkable.
+- **Identity outlives the incumbent.** Restart, upgrade or swap the model process;
+  it is the same member. Providers plug in by writing usage/steps as events and
+  honouring the stop protocol.
+- **Permission on the membrane, not in the prompt.** Gate decides at the channel
+  boundary, uniformly; no token impersonation.
+- **Absence never destroys.** One convergence loop; no cascading kills, no hidden
+  timers.
+- **Organisation layer = protocol + a service member.** Jobs, approvals, quotas,
+  interposition install by adding a member to a channel (Slack "add app" style);
+  zero OS changes. Designed, not shipped.
+- **People are members.** An approval is a message to a person; the web UI is one
+  client of the same contract.
+- **Self-managed by the same law.** `c0` governs channels through the same gate;
+  the next version is built in a forked Atoll before it is switched in.
 
 ## Extending: write your own actor
 
@@ -539,31 +482,18 @@ invariant is broken — read the header comment of a failing test before changin
 
 ## Status
 
-Atoll is **v0.01 — pre-release**. The OS core — identity, channels, ledger,
-membership, devices, timers — is implemented and enforced; a node installs in one
-command; coding agents sit in channels as members; the web client talks to it over
-the public contract. The project is now being used to develop itself: owner and
-agents in a channel, agents writing and reviewing code, people merging.
+**v0.01, pre-release.** The core (identity, channels, ledger, membership, devices,
+timers) is implemented and enforced and the project is used to develop itself;
+the organisation layer is next. Until 1.0:
 
-What that version number means in practice:
-
-- **No data guarantees.** There is no upgrade or migration path before 1.0. SQLite
-  schemas, the registry, on-disk homes and the wire dialect all change; a newer
-  binary may refuse an older home or silently re-carve it. Treat `~/.atoll` as
-  disposable — the installer offers to move a previous home aside for exactly this
-  reason.
-- **APIs move without deprecation cycles.** Message types, frame shapes and Go
-  package surfaces are revised as the system is reviewed; nothing is frozen. The
-  web client and the node move together; a mismatch shows up as `type_unsupported`
-  or a rejected frame, not as silent breakage.
-- **Known gaps** are listed in [What works today](#what-works-today): agents do not
-  yet see Atoll's own tools from inside their model loop, there is no prompt layer,
-  and the organisation layer is design only.
-- **Current boundaries:** one trust domain per node; the local device is the only
-  compute host `atoll up` manages for you (others are attached by hand).
-
-Core first, then the organisation layer, then polish. Watch the repo if you want
-to see the rest arrive.
+- **No data guarantees** — no upgrade or migration path; schemas, homes and the
+  wire dialect change; a newer binary may refuse or re-carve an older `~/.atoll`
+  (the installer offers to move it aside).
+- **No deprecation cycles** — message types, frames and Go package surfaces move;
+  the web client and the node must move together (a mismatch shows as
+  `type_unsupported` or a rejected frame).
+- **Boundaries** — one trust domain per node; `atoll up` manages only the local
+  device, others are attached by hand. Gaps: see [What works today](#what-works-today-2026-08).
 
 ## License
 
