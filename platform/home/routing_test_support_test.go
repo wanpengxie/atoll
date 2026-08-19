@@ -44,7 +44,7 @@ func (routingResolver) AdmitIntroduction(context.Context, channel.ID, channelspe
 }
 
 func routingDeclaration(source, class string) DeclareRequest {
-	return DeclareRequest{SourceDeclID: source, Kind: actor.KindAgent, Class: class,
+	return DeclareRequest{SourceDeclID: source, Seed: source, Kind: actor.KindAgent, Class: class,
 		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli()}
 }
 

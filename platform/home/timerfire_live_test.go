@@ -29,7 +29,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl-author", Class: "routing-live",
+			SourceDeclID: "decl-author", Seed: "decl-author", Class: "routing-live",
 			Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent,
 			CreatedAt: time.Now().UnixMilli(),
 		}},

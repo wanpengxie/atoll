@@ -244,16 +244,17 @@ curl -s -H "$AUTH" http://127.0.0.1:8832/obs/channel/c0/actors
 // 2. 让 c0 的门列出成员
 {"v":2,"frame_type":"submit","ref":"r1","payload":{
   "channel_id":"c0","msg_type":"system.member.list","kind":"request",
-  "visibility":"public","audience":["system"],"payload":{"body":{}}}}
+  "visibility":"public","audience":["system"],"payload":{}}}
 
-// 3. 问 steward 一句（它的 id 在 /obs/channel/c0/actors 里，kind 为 "agent"）
+// 3. 问 steward 一句（audience 允许省略 id 的段："steward" 会解到名册里的 agent:steward:<ts>）
 {"v":2,"frame_type":"submit","ref":"r2","payload":{
   "channel_id":"c0","msg_type":"agent.ask","kind":"request",
-  "visibility":"public","audience":["agent:<steward-seed>"],
-  "payload":{"body":{"text":"reply PONG"}}}}
+  "visibility":"public","audience":["steward"],
+  "payload":{"text":"reply PONG"}}}
 ```
 
-每条请求的 payload 只有一种形：`{"body": <参数>}`。回执带 `payload.message_id`；答复随后以
+submit 帧里写裸参数；账本把它包成请求唯一的那种形 `{"body": <参数>}`，你在 feed 上看到的就是包好的。
+回执带 `payload.message_id`；答复随后以
 `feed` 帧到达，`kind:"response"`、`parent_id` 等于那个 id、终态 `status` 为 `completed` 或
 `failed`。agent 的回合（`agent.turn.*`、`agent.tool.*`）作为事件出现在同一条 feed 上，然后才是
 它的最终响应。
@@ -283,20 +284,22 @@ class、能力、词）。完整形状就是 [`protocol/message/system.go`](prot
 
 ```jsonc
 // 在 c0 里，发给 system —— 声明模板
-{"msg_type":"system.actor.template.create","payload":{"body":{
-  "id":"reviewer","name":"Reviewer","class":"claude","visibility":"private",
-  "singleton":false,"config":{/* 各 class 自己的配置 */}}}}
+// id 是键；name 是坐进来的那个成员的名字（小写 a-z、0-9、'-'），它会成为该成员 actor id 的中间段
+{"msg_type":"system.actor.template.create","payload":{
+  "id":"reviewer","name":"reviewer","description":"负责评审。",
+  "class":"claude","visibility":"private",
+  "singleton":false,"config":{/* 各 class 自己的配置 */}}}
 
-// 在目标频道里，发给 system —— 坐进一个实例
-{"msg_type":"system.member.create","payload":{"body":{"decl_id":"reviewer"}}}
+// 在目标频道里，发给 system —— 坐进一个实例，成员是 agent:reviewer:<ts>
+{"msg_type":"system.member.create","payload":{"decl_id":"reviewer"}}
 ```
 
 **挂一个 MCP server——两条消息，不用重编。**
 
 ```jsonc
 // 在 c0 里，发给 system
-{"id":"my-mcp","name":"My MCP","class":"mcp","visibility":"private",
- "singleton":false,
+{"id":"my-mcp","name":"my-mcp","description":"我的 MCP server。",
+ "class":"mcp","visibility":"private","singleton":false,
  "config":{"name":"testsrv","transport":"http","url":"http://127.0.0.1:8931/mcp"}}
 
 // 在频道里，发给 system   -> {"status":"completed","member":"tool:my-mcp:<ts>"}
@@ -309,7 +312,8 @@ class、能力、词）。完整形状就是 [`protocol/message/system.go`](prot
 人、别的 actor——都可以对它 `submit` 一条 `testsrv.echo`。
 
 **建一个频道并给它一个 agent。** 在 `c0` 里 `system.channel.create {name, recipe}`；recipe
-列出要坐进去的模板。新频道按冻结的配方一步刻出来，并以 `peer:<name>` 出现在 `c0` 的名册里。
+列出要坐进去的模板。新频道按冻结的配方一步刻出来，并以 `peer:<qualified name>:<ts>` 出现在
+`c0` 的名册里——像任何成员一样可以直接对它说话。
 
 **把另一台机器接成 device。** 在 `c0` 里用 `system.device.create` 要一把 key，然后在另一台机器上：
 

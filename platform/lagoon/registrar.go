@@ -106,8 +106,8 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 		}
 	}
 	decls := []regspec.DeclRow{
-		{ID: SvcActorDeclID, Name: "Service Actor", Owner: channelspec.RootPrincipalID, DefaultClass: SvcActorClass, Config: json.RawMessage(`{}`), Status: regspec.DeclPresent, Visibility: "private", Singleton: true, CreatedAt: now, UpdatedAt: now},
-		{ID: RegistrarDeclID, Name: "Registrar Seat", Owner: channelspec.RootPrincipalID, DefaultClass: ClassRegistrar, Config: json.RawMessage(`{}`), Status: regspec.DeclPresent, Visibility: "private", Singleton: true, CreatedAt: now, UpdatedAt: now},
+		{ID: SvcActorDeclID, Name: SvcActorSeed, Description: "Channel service face.", Owner: channelspec.RootPrincipalID, DefaultClass: SvcActorClass, Config: json.RawMessage(`{}`), Status: regspec.DeclPresent, Visibility: "private", Singleton: true, CreatedAt: now, UpdatedAt: now},
+		{ID: RegistrarDeclID, Name: RegistrarSeed, Description: "Channel registry seat.", Owner: channelspec.RootPrincipalID, DefaultClass: ClassRegistrar, Config: json.RawMessage(`{}`), Status: regspec.DeclPresent, Visibility: "private", Singleton: true, CreatedAt: now, UpdatedAt: now},
 	}
 	for _, decl := range decls {
 		if err := r.registry.store.UpsertSystemDecl(ctx, decl); err != nil {
@@ -642,7 +642,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
-	declarations = append(declarations, GenesisDeclaration{DeclID: SvcActorDeclID, Kind: actor.KindPeer, Rendered: svc})
+	declarations = append(declarations, GenesisDeclaration{DeclID: SvcActorDeclID, Seed: SvcActorSeed, Kind: actor.KindPeer, Rendered: svc})
 	declarationKinds[SvcActorDeclID] = actor.KindPeer
 	for _, item := range body.Declarations {
 		if item.DeclID == "" || declarationKinds[item.DeclID] != "" {
@@ -685,7 +685,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if err != nil {
 			return regspec.ChannelRow{}, false, err
 		}
-		declarations = append(declarations, GenesisDeclaration{DeclID: item.DeclID, Kind: kind, Rendered: rendered})
+		declarations = append(declarations, GenesisDeclaration{DeclID: item.DeclID, Seed: decl.Name, Kind: kind, Rendered: rendered})
 		declarationKinds[item.DeclID] = kind
 	}
 	if parent != channelspec.C0ChannelID {
@@ -703,7 +703,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if err != nil {
 			return regspec.ChannelRow{}, false, err
 		}
-		declarations = append(declarations, GenesisDeclaration{DeclID: string(parent), Kind: actor.KindPeer, Rendered: parentRendered})
+		declarations = append(declarations, GenesisDeclaration{DeclID: string(parent), Seed: parentDecl.Name, Kind: actor.KindPeer, Rendered: parentRendered})
 		declarationKinds[string(parent)] = actor.KindPeer
 	}
 	if err := validateServiceProfile(profile, declarationKinds); err != nil {
@@ -783,15 +783,40 @@ func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]act
 	return nil
 }
 
+// postChannelEdges seats and unseats one channel's handle in the channels that
+// should hold it. Both words carry the same payload — the DECLARATION id, which
+// is the channel's own id — because both are the registry acting on a contract
+// it owns: this declaration is the door to that channel. The registry never
+// spells the seat's actor id: it does not know the birth name (that is the
+// seated channel's, and it can change), it does not know the birth timestamp,
+// and a component that holds the key has no business guessing an address.
+//
+// The audience is the one place a name is used, and there it is right: reaching
+// the parent means talking to a MEMBER of c0, which is what addressing is for.
+// It resolves to exactly one seat because c0 holds at most one handle per
+// channel and each is named by that channel's qualified name, which the
+// registry mints itself and no one may edit.
 func (r *Registrar) postChannelEdges(sys actorbase.Sys, row regspec.ChannelRow, word string) {
 	raw, _ := json.Marshal(map[string]any{"decl_id": string(row.ID)})
-	if word == message.TypeSystemMemberDelete {
-		raw, _ = json.Marshal(map[string]any{"member": "peer:" + string(row.ID)})
-	}
 	_, _ = sys.Post(behavior.RequestSpec{Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw})
 	if row.ParentID != channelspec.C0ChannelID {
-		_, _ = sys.Post(behavior.RequestSpec{Type: word, Audience: message.Audience{actor.ActorID("peer:" + string(row.ParentID))}, Payload: raw})
+		parent := parentQualifiedName(row.QualifiedName)
+		if parent == "" {
+			return
+		}
+		_, _ = sys.Post(behavior.RequestSpec{Type: word, Audience: message.Audience{actor.ActorID("peer:" + parent)}, Payload: raw})
 	}
+}
+
+// parentQualifiedName cuts the last label off a qualified channel name. The name
+// was built by JoinName as parent + "." + label, so the cut is exact rather than
+// a guess; a name with no separator has no parent and yields "".
+func parentQualifiedName(qualified string) string {
+	cut := strings.LastIndex(qualified, ".")
+	if cut <= 0 {
+		return ""
+	}
+	return qualified[:cut]
 }
 
 type ChannelRetireReply struct {
@@ -998,6 +1023,12 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 	if systemDecl(p.ID) {
 		return regspec.DeclRow{}, reserved("system declaration is reserved")
 	}
+	// The name is not a caption: every member seated from this declaration is
+	// called by it, and members are addressed by name. A sentence belongs in
+	// description.
+	if err := ValidateName(p.Name); err != nil {
+		return regspec.DeclRow{}, invalid(nameRule("declaration name", p.Name))
+	}
 	if r.systemClass(p.Class) {
 		return regspec.DeclRow{}, reserved("system class is reserved")
 	}
@@ -1078,7 +1109,11 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.
 	before := row
 	before.Config = cloneJSON(row.Config)
 	if p.Name != nil {
-		row.Name = strings.TrimSpace(*p.Name)
+		next := strings.TrimSpace(*p.Name)
+		if err := ValidateName(next); err != nil {
+			return regspec.DeclRow{}, invalid(nameRule("declaration name", next))
+		}
+		row.Name = next
 	}
 	if p.Description != nil {
 		row.Description = *p.Description

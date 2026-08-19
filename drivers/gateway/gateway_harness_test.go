@@ -408,7 +408,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 		if sealErr != nil {
 			t.Fatal(sealErr)
 		}
-		genesis.Declarations = []lagoon.GenesisDeclaration{{DeclID: source, Kind: actor.KindAgent, Rendered: rendered}}
+		genesis.Declarations = []lagoon.GenesisDeclaration{{DeclID: source, Seed: source, Kind: actor.KindAgent, Rendered: rendered}}
 	}
 	raw, err := json.Marshal(genesis)
 	if err != nil {

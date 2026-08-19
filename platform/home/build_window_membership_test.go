@@ -98,7 +98,7 @@ func (f *buildWindowFixture) BuildClass(
 
 func buildWindowDeclaration(source string) DeclareRequest {
 	return DeclareRequest{
-		SourceDeclID: source, Kind: actor.KindAgent, Class: buildWindowClass,
+		SourceDeclID: source, Seed: source, Kind: actor.KindAgent, Class: buildWindowClass,
 		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	}
 }

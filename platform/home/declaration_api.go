@@ -13,6 +13,7 @@ import (
 // Controller's back.
 type DeclareRequest struct {
 	SourceDeclID string
+	Seed         string
 	Kind         actor.Kind
 	Class        string
 	Config       *json.RawMessage
@@ -22,7 +23,7 @@ type DeclareRequest struct {
 }
 
 func validateDeclareRequest(in DeclareRequest) error {
-	if in.SourceDeclID == "" || in.Class == "" || in.CreatedAt <= 0 ||
+	if in.SourceDeclID == "" || in.Seed == "" || in.Class == "" || in.CreatedAt <= 0 ||
 		in.Placement.Validate() != nil {
 		return errors.New("platform: invalid declaration request")
 	}

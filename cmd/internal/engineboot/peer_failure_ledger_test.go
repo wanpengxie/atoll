@@ -3,7 +3,6 @@ package engineboot
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -84,15 +83,18 @@ func ensurePeerFailureReceiver() {
 	})
 }
 
-func waitPeerMember(t *testing.T, coreRoster func() ([]actor.ActorID, error), child channel.ID) actor.ActorID {
+// The peer member is found by the declaration it was seated from: the birth
+// name in the middle id segment is the peer declaration's name (the child's
+// qualified name), not the child channel id.
+func waitPeerMember(t *testing.T, coreRoster func() ([]channelspec.ObsRosterRow, error), child channel.ID) actor.ActorID {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		ids, err := coreRoster()
+		rows, err := coreRoster()
 		if err == nil {
-			for _, id := range ids {
-				if strings.HasPrefix(string(id), "peer:"+string(child)+":") {
-					return id
+			for _, row := range rows {
+				if row.Kind == actor.KindPeer && row.DeclID == string(child) {
+					return row.ID
 				}
 			}
 		}
@@ -212,10 +214,10 @@ func TestA9AllElevenFailureRowsTraverseFramesAndRealCallerLedger(t *testing.T) {
 	ensurePeerFailureReceiver()
 	eng, _, core, registrar := newProtocolDeliveryRig(t)
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{
-		"id": "failure-receiver", "name": "Failure Receiver", "class": peerFailureReceiverClass, "visibility": "public", "config": map[string]any{},
+		"id": "failure-receiver", "name": "failure-receiver", "class": peerFailureReceiverClass, "visibility": "public", "config": map[string]any{},
 	}), nil)
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{
-		"id": "inactive-receiver", "name": "Inactive Receiver", "class": peerFailureReceiverClass, "visibility": "public", "config": map[string]any{},
+		"id": "inactive-receiver", "name": "inactive-receiver", "class": peerFailureReceiverClass, "visibility": "public", "config": map[string]any{},
 	}), nil)
 	child := createdChannelID(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
 		"name": "peer-failure-ledger", "recipe": map[string]any{
@@ -232,13 +234,8 @@ func TestA9AllElevenFailureRowsTraverseFramesAndRealCallerLedger(t *testing.T) {
 		},
 	}))
 	waitBundle(t, eng, child)
-	peer := waitPeerMember(t, func() ([]actor.ActorID, error) {
-		roster, err := core.View().Roster(context.Background())
-		ids := make([]actor.ActorID, 0, len(roster))
-		for _, row := range roster {
-			ids = append(ids, row.ID)
-		}
-		return ids, err
+	peer := waitPeerMember(t, func() ([]channelspec.ObsRosterRow, error) {
+		return core.View().Roster(context.Background())
 	}, child)
 
 	assertCallerLedgerFailure(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, peer, "remote.shutdown", map[string]any{}), string(message.TerminalReceiverUnavailable))

@@ -134,6 +134,12 @@ func validateDraft(in storespec.ActorDraft) error {
 	if in.Kind == actor.KindHuman && in.SourceDeclID != "" {
 		return errors.New("store: human admission cannot carry declaration source")
 	}
+	if in.Kind == actor.KindHuman && in.Seed != "" {
+		return errors.New("store: human admission is named by its principal, not by a birth name")
+	}
+	if in.Kind != actor.KindHuman && in.Seed == "" {
+		return errors.New("store: declaration-backed admission requires a birth name")
+	}
 	if in.Kind != actor.KindHuman && in.Principal != "" && in.Kind != actor.KindAgent {
 		return errors.New("store: only human and agent admissions may carry a principal")
 	}
@@ -197,6 +203,10 @@ func (r *actorRegistry) Insert(
 		return record, nil
 	}
 
+	// Singleton is keyed on the declaration, never on the birth name: "only one
+	// live instance of this" is a statement about a recipe, and names are free
+	// to repeat. Two peers seated from two different target channels that happen
+	// to share a name are two seats, not a conflict.
 	switch {
 	case in.SourceDeclID != "" && (in.Singleton || in.Kind == actor.KindPeer || in.Kind == actor.KindSystem):
 		_, found, err := lookupExisting(`SELECT `+actorRecordColumns+` FROM actor_registry
@@ -351,14 +361,16 @@ func (r *actorRegistry) Deregister(
 }
 
 // seedFor is the naming input a birth id is derived from: the login principal
-// for a human admission, the declaration for everything else. Exactly one of
-// them is set — validateDraft has already refused a draft that carries the
-// wrong one for its kind.
+// for a human admission, the caller-supplied birth name for everything else.
+// A declaration-backed birth carries its name explicitly rather than reusing
+// its declaration id, because the id is a key and the name is a name — see the
+// ActorDraft.Seed contract. Exactly one of them is set: validateDraft has
+// already refused a draft that carries the wrong one for its kind.
 func seedFor(in storespec.ActorDraft) string {
 	if in.Kind == actor.KindHuman {
 		return in.Principal
 	}
-	return in.SourceDeclID
+	return in.Seed
 }
 
 func mintActorIDTx(ctx context.Context, tx *sql.Tx, kind actor.Kind, seed string, at int64) (actor.ActorID, error) {

@@ -29,7 +29,7 @@ func openStore(t *testing.T) (*actorstore.Store, *runtime.ChannelStores) {
 
 func declaredDraft(decl string) storespec.ActorDraft {
 	return storespec.ActorDraft{
-		Kind: actor.KindAgent, SourceDeclID: decl, CreatedAt: 1,
+		Kind: actor.KindAgent, SourceDeclID: decl, Seed: decl, CreatedAt: 1,
 		Definition: storespec.ActorDefinition{Class: "agent", Config: []byte(`{"n":1}`)},
 		Placement:  storespec.NewServerPlacement(),
 	}

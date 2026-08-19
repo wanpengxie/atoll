@@ -65,7 +65,7 @@ func TestProvisionGenesisIncludesRecipeUserDeclarations(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := genesisSpec("offline-declaration")
-	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
+	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl-a", Seed: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
 	if err := host.provisionGenesis(ctx, spec, "c0.test"); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := genesisSpec("first-sweep-declaration")
-	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Kind: actor.KindAgent, Rendered: snapshot}}
+	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Seed: lagoon.SvcActorSeed, Kind: actor.KindAgent, Rendered: snapshot}}
 	if err := host.provisionGenesis(ctx, spec, "c0.test"); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	spec := genesisSpec("child")
 	spec.ParentID = "parent"
 	spec.InitiatorPrincipal = "owner"
-	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl", Kind: actor.KindAgent, Rendered: snapshot}}
+	spec.Declarations = []lagoon.GenesisDeclaration{{DeclID: "decl", Seed: "decl", Kind: actor.KindAgent, Rendered: snapshot}}
 	if err := host.provisionGenesis(ctx, spec, "c0.test"); err != nil {
 		t.Fatal(err)
 	}

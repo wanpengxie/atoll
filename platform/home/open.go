@@ -473,6 +473,7 @@ func admitBootstrapDeclaration(
 	}
 	record, err := actors.Insert(ctx, storespec.ActorDraft{
 		Kind:         in.Kind,
+		Seed:         in.Seed,
 		SourceDeclID: in.SourceDeclID,
 		Singleton:    in.Singleton,
 		CreatedAt:    in.CreatedAt,

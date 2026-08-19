@@ -127,6 +127,7 @@ func agentDraft(declID, class string, createdAt int64) storespec.ActorDraft {
 	return storespec.ActorDraft{
 		Kind:         actor.KindAgent,
 		SourceDeclID: declID,
+		Seed:         declID,
 		CreatedAt:    createdAt,
 		Definition:   storespec.ActorDefinition{Class: class, Config: json.RawMessage(`{"v":1}`)},
 		Placement:    storespec.NewServerPlacement(),

@@ -96,7 +96,7 @@ func TestDeclarationPullAppliesChangeAndIsQuietWhenEqual(t *testing.T) {
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl-pull", Class: "routing-live", Kind: actor.KindAgent,
+			SourceDeclID: "decl-pull", Seed: "decl-pull", Class: "routing-live", Kind: actor.KindAgent,
 			Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 		}},
 	})

@@ -51,6 +51,39 @@ func resolveActorTarget(target string, active []storespec.ActiveIdentity) (actor
 	}
 }
 
+// memberOfDeclaration answers "which live seat came from this declaration".
+// It is a lookup by KEY, not a second addressing rule: nothing here matches
+// spellings, so no naming choice can make it right or wrong. The roster is the
+// same live list addressing reads, so this adds no new source of actor truth.
+//
+// It is deliberately single-valued. A declaration whose seats are not capped at
+// one has no "the seat"; that caller must name the member it means, and the
+// ambiguous verdict says so rather than picking one.
+func memberOfDeclaration(declID string, active []storespec.ActiveIdentity) (actor.ActorID, error) {
+	matches := make([]actor.ActorID, 0, 1)
+	for _, identity := range active {
+		if identity.SourceDeclID == declID {
+			matches = append(matches, identity.ID)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return "", &actorbase.TargetResolveError{Code: "not_found", Target: declID}
+	default:
+		return "", &actorbase.TargetResolveError{Code: "actor_ambiguous", Target: declID}
+	}
+}
+
+func (a *actorSystem) MemberOfDeclaration(declID string) (actor.ActorID, error) {
+	active, err := a.home.controller.ActiveIdentities()
+	if err != nil {
+		return "", err
+	}
+	return memberOfDeclaration(declID, active)
+}
+
 func (a *actorSystem) ResolveTarget(target string) (actor.ActorID, error) {
 	active, err := a.home.controller.ActiveIdentities()
 	if err != nil {

@@ -47,6 +47,7 @@ type AdmitRequest struct {
 // Platform door; the command carries only mechanical facts.
 type IntroduceRequest struct {
 	DeclID     string
+	Seed       string
 	Kind       actor.Kind
 	Principal  string
 	Singleton  bool

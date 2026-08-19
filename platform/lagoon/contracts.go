@@ -84,12 +84,19 @@ func LobbyWord(word Word) bool {
 	return false
 }
 
+// The *DeclID constants key the system declarations; the *Seed constants name
+// the members they seat. They read alike here only because a system seat has
+// nothing to hide behind an opaque key — the two are separate namespaces, and
+// the declaration row's name must agree with the seed constant so that a seat
+// is named the same whether it came from a recipe or from member.create.
 const (
 	PeerActorClass  = "peeractor"
 	SvcActorDeclID  = "svcactor"
+	SvcActorSeed    = "svcactor"
 	SvcActorClass   = "svcactor"
 	ClassRegistrar  = "registrar"
 	RegistrarDeclID = "registrar"
+	RegistrarSeed   = "registrar"
 )
 
 func StableBootstrapDeclID(owner, role string) string {
@@ -148,8 +155,13 @@ type GenesisSpec struct {
 	Profile            regspec.ChannelProfile `json:"profile"`
 }
 
+// Seed is the birth name the seated member is called by. It sits beside the
+// rendered snapshot rather than inside it: the snapshot's digest drives
+// reconciliation, and renaming a declaration must not restart the actor it
+// already seated.
 type GenesisDeclaration struct {
 	DeclID   string                       `json:"decl_id"`
+	Seed     string                       `json:"seed"`
 	Kind     actor.Kind                   `json:"kind"`
 	Rendered channelspec.RenderedSnapshot `json:"rendered_snapshot"`
 }

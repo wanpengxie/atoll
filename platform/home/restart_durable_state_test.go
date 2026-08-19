@@ -96,7 +96,7 @@ func (f *restartStateFixture) proc() actorbase.Proc {
 
 func restartStateDeclaration() DeclareRequest {
 	return DeclareRequest{
-		SourceDeclID: restartStateDecl, Kind: actor.KindAgent,
+		SourceDeclID: restartStateDecl, Seed: restartStateDecl, Kind: actor.KindAgent,
 		Class: restartStateClass, Placement: storespec.NewServerPlacement(),
 		CreatedAt: time.Now().UnixMilli(),
 	}

@@ -51,7 +51,7 @@ func TestClosedDB_ActorVerbsError(t *testing.T) {
 	h := closedChannel(t)
 
 	if _, err := h.Actors.Insert(ctx, storespec.ActorDraft{
-		Kind: actor.KindAgent, SourceDeclID: "decl-a",
+		Kind: actor.KindAgent, SourceDeclID: "decl-a", Seed: "decl-a",
 		Definition: storespec.ActorDefinition{Class: "agent"},
 		Placement:  storespec.NewServerPlacement(), CreatedAt: 1,
 	}); err == nil {

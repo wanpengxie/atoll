@@ -112,7 +112,7 @@ func (f *restartTimerFixture) proc() actorbase.Proc {
 
 func restartTimerDeclaration() DeclareRequest {
 	return DeclareRequest{
-		SourceDeclID: restartTimerDecl, Kind: actor.KindAgent,
+		SourceDeclID: restartTimerDecl, Seed: restartTimerDecl, Kind: actor.KindAgent,
 		Class: restartTimerClass, Placement: storespec.NewServerPlacement(),
 		CreatedAt: time.Now().UnixMilli(),
 	}

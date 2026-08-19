@@ -21,6 +21,7 @@ func admitDeclaredTest(ctx context.Context, cs *ChannelStores, kind actor.Kind, 
 		draft.Principal = principal
 	} else if kind == actor.KindAgent || kind == actor.KindTool {
 		draft.SourceDeclID = principal
+		draft.Seed = principal
 	}
 	record, err := cs.Actors.Insert(ctx, draft)
 	return record.ID, err

@@ -108,7 +108,7 @@ func (f *crashCutFixture) proc() actorbase.Proc {
 
 func crashCutDeclaration() DeclareRequest {
 	return DeclareRequest{
-		SourceDeclID: crashCutDecl, Kind: actor.KindAgent,
+		SourceDeclID: crashCutDecl, Seed: crashCutDecl, Kind: actor.KindAgent,
 		Class: crashCutClass, Placement: storespec.NewServerPlacement(),
 		CreatedAt: time.Now().UnixMilli(),
 	}

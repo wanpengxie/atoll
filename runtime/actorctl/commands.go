@@ -78,7 +78,7 @@ func (c *Controller) Introduce(
 	if err := c.runnableLocked(); err != nil {
 		return Transition[IntroduceResult]{}, err
 	}
-	if request.DeclID == "" || request.Definition.Class == "" {
+	if request.DeclID == "" || request.Seed == "" || request.Definition.Class == "" {
 		return Transition[IntroduceResult]{}, ErrInvalidMutation
 	}
 	for _, value := range c.actors {
@@ -92,6 +92,7 @@ func (c *Controller) Introduce(
 	}
 	record, err := c.store.Insert(ctx, storespec.ActorDraft{
 		Kind:         request.Kind,
+		Seed:         request.Seed,
 		Principal:    request.Principal,
 		SourceDeclID: request.DeclID,
 		Singleton:    request.Singleton,

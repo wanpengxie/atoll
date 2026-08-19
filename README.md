@@ -271,16 +271,18 @@ member's messages arrive on the same connection, so keep it open for the session
 // 2. ask the c0 gate to list members
 {"v":2,"frame_type":"submit","ref":"r1","payload":{
   "channel_id":"c0","msg_type":"system.member.list","kind":"request",
-  "visibility":"public","audience":["system"],"payload":{"body":{}}}}
+  "visibility":"public","audience":["system"],"payload":{}}}
 
-// 3. ask the steward something (its id is in /obs/channel/c0/actors, kind "agent")
+// 3. ask the steward something (an audience entry may omit id segments:
+//    "steward" resolves against the roster's agent:steward:<ts>)
 {"v":2,"frame_type":"submit","ref":"r2","payload":{
   "channel_id":"c0","msg_type":"agent.ask","kind":"request",
-  "visibility":"public","audience":["agent:<steward-seed>"],
-  "payload":{"body":{"text":"reply PONG"}}}}
+  "visibility":"public","audience":["steward"],
+  "payload":{"text":"reply PONG"}}}
 ```
 
-Every request payload has the one shape `{"body": <args>}`. The receipt carries
+A submit frame carries the bare arguments; the ledger wraps them into the one
+request shape `{"body": <args>}`, which is what you see on the feed. The receipt carries
 `payload.message_id`; the answer arrives later as a `feed` frame with
 `kind:"response"`, `parent_id` equal to that id and a terminal `status` of
 `completed` or `failed`. An agent's rounds (`agent.turn.*`, `agent.tool.*`) show
@@ -314,20 +316,23 @@ many instances unless declared `singleton`:
 
 ```jsonc
 // in c0, to system — declare the template
-{"msg_type":"system.actor.template.create","payload":{"body":{
-  "id":"reviewer","name":"Reviewer","class":"claude","visibility":"private",
-  "singleton":false,"config":{/* class-specific */}}}}
+// id is the key; name is what the seated member will be called (lowercase
+// a-z, 0-9, '-'), and it becomes the middle segment of its actor id
+{"msg_type":"system.actor.template.create","payload":{
+  "id":"reviewer","name":"reviewer","description":"Reviews changes.",
+  "class":"claude","visibility":"private",
+  "singleton":false,"config":{/* class-specific */}}}
 
-// in the target channel, to system — seat one instance
-{"msg_type":"system.member.create","payload":{"body":{"decl_id":"reviewer"}}}
+// in the target channel, to system — seat one instance as agent:reviewer:<ts>
+{"msg_type":"system.member.create","payload":{"decl_id":"reviewer"}}
 ```
 
 **Mount an MCP server — two messages, no rebuild.**
 
 ```jsonc
 // in c0, to system
-{"id":"my-mcp","name":"My MCP","class":"mcp","visibility":"private",
- "singleton":false,
+{"id":"my-mcp","name":"my-mcp","description":"My MCP server.",
+ "class":"mcp","visibility":"private","singleton":false,
  "config":{"name":"testsrv","transport":"http","url":"http://127.0.0.1:8931/mcp"}}
 
 // in the channel, to system   -> {"status":"completed","member":"tool:my-mcp:<ts>"}
@@ -343,7 +348,8 @@ to it.
 
 **Create a channel and give it an agent.** `system.channel.create {name, recipe}`
 in `c0`; the recipe lists the templates to seat. The new channel is carved in one
-step from the frozen recipe and shows up as `peer:<name>` in `c0`'s roster.
+step from the frozen recipe and shows up in `c0`'s roster as
+`peer:<qualified name>:<ts>` — a handle you can speak to like any other member.
 
 **Attach another machine as a device.** Ask `system.device.create` in `c0` for a
 key, then on the other box:

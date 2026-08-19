@@ -74,7 +74,7 @@ func openRealTimerFixture(t *testing.T) (timerspec.TimerStore, actor.ActorID) {
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 	record, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
-		Kind: actor.KindAgent, SourceDeclID: "timer-ack-author",
+		Kind: actor.KindAgent, SourceDeclID: "timer-ack-author", Seed: "timer-ack-author",
 		Definition: storespec.ActorDefinition{Class: "timer-ack-author"},
 		Placement:  storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})

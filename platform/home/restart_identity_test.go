@@ -131,12 +131,12 @@ func TestBootRestoresEveryDurableIdentityKindWholeAndImmediatelyGated(t *testing
 		BootstrapOwnerPrincipal: ownerPrincipal,
 		BootstrapDeclarations: []DeclareRequest{
 			{
-				SourceDeclID: "decl-restore-agent", Kind: actor.KindAgent,
+				SourceDeclID: "decl-restore-agent", Seed: "decl-restore-agent", Kind: actor.KindAgent,
 				Class: restartIdentityParkClass, Config: &agentConfig,
 				Placement: storespec.NewServerPlacement(), CreatedAt: createdAt,
 			},
 			{
-				SourceDeclID: "decl-restore-tool", Kind: actor.KindTool,
+				SourceDeclID: "decl-restore-tool", Seed: "decl-restore-tool", Kind: actor.KindTool,
 				Class:     restartIdentityParkClass,
 				Placement: mustDaemonPlacement(t, "daemon-a"), CreatedAt: createdAt,
 			},

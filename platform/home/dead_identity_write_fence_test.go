@@ -39,7 +39,7 @@ func TestEndedIdentityPenIsRefusedOnTheMessageWritePath(t *testing.T) {
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: writeFenceSource, Class: "routing-live",
+			SourceDeclID: writeFenceSource, Seed: writeFenceSource, Class: "routing-live",
 			Kind: actor.KindAgent, Placement: storespec.NewServerPlacement(),
 			CreatedAt: time.Now().UnixMilli(),
 		}},
@@ -142,7 +142,7 @@ func TestEndingAnActorLeavesItsResourceRowsUntouched(t *testing.T) {
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: deathCutSource, Class: "routing-live",
+			SourceDeclID: deathCutSource, Seed: deathCutSource, Class: "routing-live",
 			Kind: actor.KindAgent, Placement: storespec.NewServerPlacement(),
 			CreatedAt: time.Now().UnixMilli(),
 		}},

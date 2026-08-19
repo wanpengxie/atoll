@@ -280,7 +280,7 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 		}
 		config := json.RawMessage(append([]byte(nil), declaration.Rendered.Config...))
 		bootstrapDeclarations = append(bootstrapDeclarations, home.DeclareRequest{
-			SourceDeclID: declaration.DeclID, Kind: declaration.Kind,
+			SourceDeclID: declaration.DeclID, Seed: declaration.Seed, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
 			Singleton: declaration.Rendered.Singleton,
 			CreatedAt: spec.CreatedAt,

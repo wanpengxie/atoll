@@ -136,7 +136,7 @@ func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
 	defer storage.Close()
 	r := NewRegistrar(&Registry{store: storage}, nil, registrarClassStub{})
 	created, err := r.registerDecl(context.Background(), "alice", DeclRegister{
-		ID: "orders", Name: "Orders", Description: "Create and inspect orders.",
+		ID: "orders", Name: "orders", Description: "Create and inspect orders.",
 		Class: "mcp", Config: json.RawMessage(`{}`), Visibility: "private",
 	})
 	if err != nil || created.Description != "Create and inspect orders." {

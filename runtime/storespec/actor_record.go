@@ -108,8 +108,17 @@ func (r ActorRecord) Clone() ActorRecord {
 // way to ask for a particular one — an id chosen outside the transaction is an
 // id that was decided before anyone checked, and it would also sit outside the
 // naming the mint derives, free to occupy a value some later mint would produce.
+// Seed is the birth NAME the middle id segment is cut from, and it is a
+// separate input from SourceDeclID on purpose. The declaration id is a key:
+// unique, stable, and free to be opaque (a peer declaration is keyed by the
+// target channel's uuid, because a channel must stay the same channel across a
+// rename). A name is the opposite: readable, and under no obligation to be
+// unique — two actors may legitimately share one, and the birth timestamp
+// segment still tells them apart. Deriving the name from the key forces one of
+// the two to give up its nature; carrying both keeps each honest.
 type ActorDraft struct {
 	Kind         actor.Kind
+	Seed         string
 	Principal    string
 	SourceDeclID string
 	Singleton    bool

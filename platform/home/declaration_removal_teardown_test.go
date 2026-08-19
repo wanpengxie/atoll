@@ -84,7 +84,7 @@ func TestRemovingADeclaredInstanceUnpublishesItsDesiredRowAndTearsTheBodyDown(t 
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: declRemovalDecl, Kind: actor.KindAgent,
+			SourceDeclID: declRemovalDecl, Seed: declRemovalDecl, Kind: actor.KindAgent,
 			Class: declRemovalClass, Placement: storespec.NewServerPlacement(),
 			CreatedAt: time.Now().UnixMilli(),
 		}},

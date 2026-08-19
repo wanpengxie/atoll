@@ -112,12 +112,12 @@ func bootOpenDeclarations() []DeclareRequest {
 	at := time.Now().UnixMilli()
 	return []DeclareRequest{
 		{
-			SourceDeclID: bootOpenCallerDecl, Kind: actor.KindAgent,
+			SourceDeclID: bootOpenCallerDecl, Seed: bootOpenCallerDecl, Kind: actor.KindAgent,
 			Class: bootOpenCallerClass, Placement: storespec.NewServerPlacement(),
 			CreatedAt: at,
 		},
 		{
-			SourceDeclID: bootOpenReceiverDecl, Kind: actor.KindAgent,
+			SourceDeclID: bootOpenReceiverDecl, Seed: bootOpenReceiverDecl, Kind: actor.KindAgent,
 			Class: bootOpenReceiverClass, Placement: storespec.NewServerPlacement(),
 			CreatedAt: at,
 		},

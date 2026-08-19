@@ -35,7 +35,7 @@ func TestPeerPlacementIsServerWithoutCoreDeviceBindingAndCodexIsDaemon(t *testin
 	core, _ := eng.host.Acquire(channelspec.C0ChannelID)
 	registrar := onlyDecl(t, core, lagoon.RegistrarDeclID)
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{
-		"id": "codex-placement", "name": "Codex Placement", "class": "codex", "config": map[string]any{}, "visibility": "public",
+		"id": "codex-placement", "name": "codex-placement", "class": "codex", "config": map[string]any{}, "visibility": "public",
 	}), nil)
 	var created lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{

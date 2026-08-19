@@ -32,7 +32,7 @@ func TestOwnerTerminalGuardRefusesAtTheDoor(t *testing.T) {
 		},
 		BootstrapOwnerPrincipal: ownerPrincipal,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl-probe", Class: "routing-live",
+			SourceDeclID: "decl-probe", Seed: "decl-probe", Class: "routing-live",
 			Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent,
 			CreatedAt: time.Now().UnixMilli(),
 		}},

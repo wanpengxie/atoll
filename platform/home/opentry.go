@@ -140,13 +140,31 @@ func (e *opEntry) Execute(
 		return map[string]any{"member": result.ActorID}, nil
 
 	case sysactor.TypeMemberDelete:
+		// Two ways to say which seat, because there are two kinds of caller.
+		// A member points at another member and says its id: {member}, resolved
+		// by the ordinary segment rules. A caller that HOLDS the declaration —
+		// the registry unseating the handle it seated, a tool tearing down what
+		// it built — holds the key, not a spelling, and says {decl_id}. Making
+		// it spell an id out of the key is how a contract turns into a guess:
+		// the key is exact by construction and the spelling is only exact for
+		// as long as nothing about the naming changes.
 		var payload struct {
 			Member actor.ActorID `json:"member"`
+			DeclID string        `json:"decl_id"`
 		}
-		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil || payload.Member == "" {
-			return nil, &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: "member required"}
+		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil {
+			return nil, &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: "system.member.delete takes exactly one of {member} or {decl_id}"}
 		}
-		resolved, err := e.home.actors.ResolveTarget(string(payload.Member))
+		if (payload.Member == "") == (payload.DeclID == "") {
+			return nil, &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: "system.member.delete takes exactly one of {member} (an actor id or unambiguous segment) or {decl_id} (the declaration the member was seated from)"}
+		}
+		var resolved actor.ActorID
+		var err error
+		if payload.DeclID != "" {
+			resolved, err = e.home.actors.MemberOfDeclaration(payload.DeclID)
+		} else {
+			resolved, err = e.home.actors.ResolveTarget(string(payload.Member))
+		}
 		if err != nil {
 			return nil, asOperateError(err)
 		}

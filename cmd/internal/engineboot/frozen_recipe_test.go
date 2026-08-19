@@ -20,7 +20,7 @@ import (
 func TestFrozenRecipePersistsRenderedDeclarationsOverlayAndServiceCard(t *testing.T) {
 	eng, channelDir, core, registrar := newProtocolDeliveryRig(t)
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{
-		"id": "recipe-echo", "name": "Recipe Echo", "class": "echo", "visibility": "public", "config": map[string]any{"max_seconds": 1},
+		"id": "recipe-echo", "name": "recipe-echo", "class": "echo", "visibility": "public", "config": map[string]any{"max_seconds": 1},
 	}), nil)
 	invalidProfile := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
 		"name": "bad-service", "recipe": map[string]any{"profile": map[string]any{"svc_agent": "missing"}},

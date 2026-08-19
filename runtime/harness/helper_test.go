@@ -73,6 +73,7 @@ func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind
 		draft.Principal = identity
 	} else if kind == actor.KindAgent || kind == actor.KindTool {
 		draft.SourceDeclID = identity
+		draft.Seed = identity
 	}
 	record, err := cs.Actors.Insert(context.Background(), draft)
 	if err != nil {

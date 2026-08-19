@@ -126,7 +126,7 @@ func (r *declPullSpace) counts() (resolves, classKinds int) {
 func declPullDeclaration() DeclareRequest {
 	config := json.RawMessage(declPullSeed)
 	return DeclareRequest{
-		SourceDeclID: declPullSource, Kind: actor.KindAgent, Class: declPullClass,
+		SourceDeclID: declPullSource, Seed: declPullSource, Kind: actor.KindAgent, Class: declPullClass,
 		Config: &config, Placement: storespec.NewServerPlacement(),
 		CreatedAt: time.Now().UnixMilli(),
 	}
@@ -280,7 +280,7 @@ func TestDeclarationPullCannotCrossFromARemovedInstanceToItsRebornTwin(t *testin
 		t.Fatalf("remove the in-flight instance: %v", err)
 	}
 	born, err := h.actors.Introduce(ctx, actorctl.IntroduceRequest{
-		DeclID: declPullSource, Kind: actor.KindAgent,
+		DeclID: declPullSource, Seed: declPullSource, Kind: actor.KindAgent,
 		Definition: storespec.ActorDefinition{
 			Class: declPullClass, Config: json.RawMessage(declPullSeed),
 		},

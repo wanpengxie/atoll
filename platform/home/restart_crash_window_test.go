@@ -78,7 +78,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl-pre-crash", Kind: actor.KindAgent,
+			SourceDeclID: "decl-pre-crash", Seed: "decl-pre-crash", Kind: actor.KindAgent,
 			Class: crashWindowClass, Placement: storespec.NewServerPlacement(),
 			CreatedAt: createdAt,
 		}},
@@ -101,7 +101,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 		t.Fatalf("open registry handle: %v", err)
 	}
 	ghostRecord, err := registry.Actors.Insert(ctx, storespec.ActorDraft{
-		Kind: actor.KindAgent, SourceDeclID: "decl-in-window",
+		Kind: actor.KindAgent, SourceDeclID: "decl-in-window", Seed: "decl-in-window",
 		Definition: storespec.ActorDefinition{
 			Class: crashWindowClass, Config: json.RawMessage(`{"born":"in-window"}`),
 		},

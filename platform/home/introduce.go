@@ -52,6 +52,12 @@ func (h *Home) resolveIntroduction(
 			Code: code, Detail: err.Error(), Retryable: retryable,
 		}
 	}
+	if facts.Name == "" {
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+			Code:   channelspec.ErrCodeDeclNotFound,
+			Detail: "declaration " + declID + " has no name, so the member it would seat could not be named; give the declaration a name with system.actor.template.set",
+		}
+	}
 	admitCtx, admitCancel := context.WithTimeout(ctx, introductionResolveTimeout)
 	err = h.resolver.AdmitIntroduction(admitCtx, h.channelID, facts)
 	admitCancel()
@@ -139,8 +145,11 @@ func (h *Home) resolveIntroduction(
 	if kind == actor.KindAgent {
 		principal = facts.OwnerPrincipal
 	}
+	// The birth name comes from the declaration's name, never from its id: the
+	// id may be opaque (a peer declaration is keyed by the target channel's
+	// uuid) while the name is the readable word members address each other by.
 	return actorctl.IntroduceRequest{
-		DeclID: declID, Kind: kind, Principal: principal, Singleton: facts.Singleton, Placement: placement,
+		DeclID: declID, Seed: facts.Name, Kind: kind, Principal: principal, Singleton: facts.Singleton, Placement: placement,
 		Definition: storespec.ActorDefinition{
 			Class:  facts.Class,
 			Config: append(json.RawMessage(nil), facts.Config...),
