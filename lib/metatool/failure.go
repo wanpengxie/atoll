@@ -36,6 +36,7 @@ const (
 	hintUnavailable  = "A dependency was momentarily unavailable. This one is genuinely transient: a retry may succeed"
 	hintResultUnkown = "The outcome is unknown — the action may or may not have taken effect. Do NOT resubmit merely because the result is unclear; establish what happened first"
 	hintInternal     = "The target failed internally. Read error.detail; retry only if the detail says the condition was transient"
+	hintCancelled    = "The call was cancelled before it finished. Something asked for it to stop, so resending it repeats work that was deliberately abandoned — confirm the cancellation was not yours before trying again"
 )
 
 // PermissionDenied, NotFound, Unsupported, Conflict and Unavailable are the
@@ -110,6 +111,10 @@ var actorErrorClasses = map[string]failureClass{
 	"provider_failed":       {Unavailable, hintUnavailable, true},
 
 	"mcp_timeout": {Timeout, hintTimeout, false},
+
+	// Cancellation is a decision somebody already made, not a fault: repeating
+	// the call would simply undo it.
+	"mcp_cancelled": {Unsupported, hintCancelled, false},
 
 	// Outcome genuinely unknown — the one class where a blind retry can do
 	// real damage, so it is called out separately from a plain failure.

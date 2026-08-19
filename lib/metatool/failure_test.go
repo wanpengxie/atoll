@@ -1,6 +1,11 @@
 package metatool
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -77,5 +82,92 @@ func TestUnknownCodeFallsBackToReason(t *testing.T) {
 	obj := errObj(t, TerminalFailureToActorCLI("call_actor", "tool:x:1", "x.y", "unanswered_timeout", payload))
 	if obj["code"] != string(Timeout) {
 		t.Errorf("unknown code did not fall back to the reason: %v", obj["code"])
+	}
+}
+
+// What this pins: every error code an actor actually emits must have a known
+// class here. Nothing else in the tree connects the two — the codes are bare
+// string literals at ~40 Fail sites across five subsystems, and this table is
+// hand-written.
+//
+// What breaks without it: an unclassified code falls through to the
+// reason-based default, which for any actor that answered at all is
+// "internal_error / inspect adapter logs before retrying". That is exactly the
+// state this whole table was built to end, so a new code silently returns one
+// call path to it, and nothing anywhere goes red. This is not hypothetical:
+// mcp_cancelled was already missing when the table was first written, and was
+// found only by grepping by hand.
+//
+// Why it is not a stronger check: it could be — make Fail take a typed code
+// drawn from one closed set, and the compiler makes registration unavoidable.
+// That means changing actorbase.Fail's signature and every call site, which is
+// a decision the owner has not taken. Until then this scan is the only thing
+// standing between a new code and a silent regression. Retire it the moment
+// the typed set exists.
+func TestEveryEmittedErrorCodeIsClassified(t *testing.T) {
+	root := repoRoot(t)
+	// The literal in `sys.Fail(msg, "some_code", ...)`, in any of the receiver
+	// spellings used across the tree.
+	site := regexp.MustCompile(`Fail\((?:msg|request|env|m)\b[^,]*,\s*"([a-z_]+)"`)
+	emitted := map[string][]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".claude", "node_modules", "docs", "atoll-site":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, _ := filepath.Rel(root, path)
+		for _, m := range site.FindAllStringSubmatch(string(body), -1) {
+			if !slices.Contains(emitted[m[1]], rel) {
+				emitted[m[1]] = append(emitted[m[1]], rel)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emitted) < 10 {
+		t.Fatalf("scan found only %d codes; the pattern has stopped matching real call sites", len(emitted))
+	}
+	for code, sites := range emitted {
+		// internal_error is the fallback class itself, not a code needing one.
+		if code == "internal_error" {
+			continue
+		}
+		if _, known := classifyActorError(code); !known {
+			t.Errorf("error code %q is emitted (%s) but has no class in actorErrorClasses; add one so agents get a usable code, hint and retryable verdict instead of the internal_error fallback",
+				code, strings.Join(sites, ", "))
+		}
+	}
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above the test's working directory")
+		}
+		dir = parent
 	}
 }
