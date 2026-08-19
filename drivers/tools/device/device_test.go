@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -156,7 +158,7 @@ func startActor(t *testing.T) (*fakeSys, string) {
 }
 
 func request(typ string, payload any) actorbase.Msg {
-	raw, _ := json.Marshal(payload)
+	raw, _ := json.Marshal(map[string]any{"body": payload})
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:        message.ID("req-" + typ),
 		ChannelID: testChannel,
@@ -204,6 +206,36 @@ func TestReadLineSlice(t *testing.T) {
 	_ = json.Unmarshal(raw["content"], &content)
 	if content != "b\nc" {
 		t.Fatalf("sliced content = %q; want b\\nc", content)
+	}
+}
+
+func TestReadRejectsNegativeSlice(t *testing.T) {
+	sys, _ := startActor(t)
+	for i, payload := range []FileReadPayload{{Path: "f.txt", Offset: -1}, {Path: "f.txt", Limit: -1}} {
+		msg := request(TypeFileRead, payload)
+		msg.ID = message.ID("req-negative-" + string(rune('a'+i)))
+		sys.push(msg)
+		status, code, _ := waitTerminal(t, sys, msg.ID)
+		if status != "failed" || code != "invalid_args" {
+			t.Fatalf("payload=%+v status=%s code=%s", payload, status, code)
+		}
+	}
+}
+
+func TestWriteRejectsSymlinkEscape(t *testing.T) {
+	sys, root := startActor(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "outside")); err != nil {
+		t.Fatal(err)
+	}
+	msg := request(TypeFileWrite, FileWritePayload{Path: "outside/escaped.txt", Content: "must stay inside"})
+	sys.push(msg)
+	status, code, _ := waitTerminal(t, sys, msg.ID)
+	if status != "failed" || code != "path_invalid" {
+		t.Fatalf("status=%s code=%s failures=%+v", status, code, sys.failsSnapshot())
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped.txt")); !os.IsNotExist(err) {
+		t.Fatalf("outside target changed: %v", err)
 	}
 }
 
@@ -303,73 +335,5 @@ func TestExec(t *testing.T) {
 	status, ecode, _ = push("x4", ExecPayload{Command: "ls", Cwd: "../"})
 	if status != "failed" || ecode != "path_invalid" {
 		t.Fatalf("cwd escape: status=%s code=%s", status, ecode)
-	}
-}
-
-func TestDescribeAndUnknownType(t *testing.T) {
-	sys, _ := startActor(t)
-
-	pushRaw := func(id string, typ string, payload any) (string, string, map[string]json.RawMessage) {
-		raw, _ := json.Marshal(payload)
-		msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-			ID:        message.ID(id),
-			ChannelID: testChannel,
-			Kind:      message.KindRequest,
-			Type:      typ,
-			Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
-			Payload:   raw,
-		})
-		sys.push(msg)
-		return waitTerminal(t, sys, msg.ID)
-	}
-
-	status, _, raw := pushRaw("d1", "actor.describe", map[string]any{})
-	if status != "completed" {
-		t.Fatalf("describe status = %s", status)
-	}
-	var actorID string
-	_ = json.Unmarshal(raw["actor_id"], &actorID)
-	if actorID != string(testActorID) {
-		t.Fatalf("describe actor_id = %q; want %q", actorID, testActorID)
-	}
-	var skillDoc string
-	_ = json.Unmarshal(raw["skill_doc"], &skillDoc)
-	if skillDoc == "" {
-		t.Fatal("describe skill_doc empty")
-	}
-	if _, ok := raw["kind"]; ok {
-		t.Fatal("describe must not restate registry kind")
-	}
-	var types map[string]json.RawMessage
-	_ = json.Unmarshal(raw["types"], &types)
-	for _, typ := range AllTypes {
-		if _, ok := types[typ]; !ok {
-			t.Fatalf("describe missing type %s", typ)
-		}
-	}
-
-	status, _, raw = pushRaw("d2", "actor.describe", map[string]any{"type": TypeExec})
-	if status != "completed" {
-		t.Fatalf("describe_type status = %s", status)
-	}
-	var typ string
-	_ = json.Unmarshal(raw["type"], &typ)
-	if typ != TypeExec {
-		t.Fatalf("describe_type type = %q; want %q", typ, TypeExec)
-	}
-	var allowedKinds []string
-	_ = json.Unmarshal(raw["allowed_kinds"], &allowedKinds)
-	if len(allowedKinds) != 1 || allowedKinds[0] != string(message.KindRequest) {
-		t.Fatalf("describe_type allowed_kinds = %v; want [request]", allowedKinds)
-	}
-	var maxPendingMs int64
-	_ = json.Unmarshal(raw["max_pending_ms"], &maxPendingMs)
-	if maxPendingMs != MaxExecTimeoutMs {
-		t.Fatalf("describe_type max_pending_ms = %d; want %d", maxPendingMs, MaxExecTimeoutMs)
-	}
-
-	status, code, _ := pushRaw("d3", "device.nope", map[string]any{})
-	if status != "failed" || code != "type_unsupported" {
-		t.Fatalf("unknown type: status=%s code=%s", status, code)
 	}
 }

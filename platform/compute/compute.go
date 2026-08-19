@@ -96,7 +96,7 @@ func daemonBodyBuilder(
 		}
 		hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {
 			_ = prepared.Slot.CancelRequest(requestID)
-		}}
+		}, ResolveTarget: prepared.Slot.ResolveTarget}
 		body := prepared.Wrap(hostcommon.Build(prepared.Caps, hooks, factory))
 		if body != nil {
 			transferred = true

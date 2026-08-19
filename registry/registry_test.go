@@ -5,15 +5,16 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 func TestValidateConfig(t *testing.T) {
 	const class = "registry-validate-config-test"
 	called := false
 	Register(class, ClassDecl{
-		Kind: actor.KindAgent, Placement: channel.PlacementServer,
+		Kind: actor.KindAgent, Placement: channelspec.PlacementServer,
 		ValidateConfig: func(raw json.RawMessage) error {
 			called = true
 			if string(raw) != `{"ok":true}` {
@@ -52,4 +53,18 @@ func TestRegisterRejectsZeroPlacement(t *testing.T) {
 		}
 	}()
 	Register("registry-zero-placement-test", ClassDecl{Kind: actor.KindTool})
+}
+
+func TestRegisterRejectsGateErrorCodesButNotClassNames(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("gate error code registration did not panic")
+		}
+	}()
+	Register("device", ClassDecl{
+		Kind: actor.KindTool, Placement: channelspec.PlacementServer,
+		Manifest: introspect.Manifest{Class: "device", Interfaces: []string{"actor"}, Words: map[string]introspect.WordSpec{
+			"device.read": {ErrorCodes: []string{"endpoint_not_found"}},
+		}},
+	})
 }

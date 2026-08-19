@@ -60,7 +60,7 @@ func (g *lifecycleReconcileGate) ResolveDeclaration(
 func (g *lifecycleReconcileGate) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (g *lifecycleReconcileGate) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+func (g *lifecycleReconcileGate) ClassPlacement(context.Context, string) (channelspec.PlacementKind, bool, error) {
 	return "", false, nil
 }
 func (g *lifecycleReconcileGate) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {

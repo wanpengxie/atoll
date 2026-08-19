@@ -7,14 +7,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	regstore "github.com/wanpengxie/atoll/platform/lagoon/internal/store"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
-	"github.com/wanpengxie/atoll/platform/peerproto"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -39,8 +36,8 @@ func (registrarClassStub) ValidateConfig(string, json.RawMessage) error { return
 func (registrarClassStub) LookupClassKind(string) (actor.Kind, bool) {
 	return actor.KindTool, true
 }
-func (registrarClassStub) LookupClassPlacement(string) (channel.PlacementKind, bool) {
-	return channel.PlacementServer, true
+func (registrarClassStub) LookupClassPlacement(string) (channelspec.PlacementKind, bool) {
+	return channelspec.PlacementServer, true
 }
 
 func (s registrarFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
@@ -54,35 +51,6 @@ type registrarSysStub struct {
 	value  any
 }
 
-type registrarCanceledFacts struct{ registrarFactsStub }
-
-func (registrarCanceledFacts) WaitChannelService(context.Context, channel.ID) error { return nil }
-func (registrarCanceledFacts) DeclaredInstances(context.Context, channel.ID, string) ([]actor.ActorID, error) {
-	return []actor.ActorID{"tool:target-peer"}, nil
-}
-
-type registrarCanceledPending struct{ canceled bool }
-
-func (*registrarCanceledPending) RequestID() message.ID { return "canceled-request" }
-func (*registrarCanceledPending) Wait(ctx context.Context, _ time.Duration) (actorbase.Msg, error) {
-	return actorbase.Msg{}, ctx.Err()
-}
-func (p *registrarCanceledPending) Cancel() error {
-	p.canceled = true
-	return nil
-}
-
-type registrarCallSys struct {
-	actorbase.Sys
-	calls   int
-	pending *registrarCanceledPending
-}
-
-func (s *registrarCallSys) Call(actor.ActorID, string, any) (actorbase.Pending, error) {
-	s.calls++
-	return s.pending, nil
-}
-
 func (s *registrarSysStub) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	s.value = value
 	return "reply", nil
@@ -94,9 +62,12 @@ func (s *registrarSysStub) Fail(_ actorbase.Msg, code, detail string) (message.I
 }
 
 func registrarMessage(word Word, payload string) actorbase.Msg {
+	wrapped, _ := json.Marshal(struct {
+		Body json.RawMessage `json:"body"`
+	}{Body: json.RawMessage(payload)})
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "request", ChannelID: channel.ID("c0"), Type: string(word), Kind: message.KindRequest,
-		Sender: message.Sender{Kind: actor.KindHuman, ID: "human:root"}, Payload: json.RawMessage(payload),
+		Sender: message.Sender{Kind: actor.KindHuman, ID: "human:root"}, Payload: wrapped,
 	})
 }
 
@@ -108,7 +79,7 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	}
 	if _, err := db.Exec(`CREATE TABLE decls (
 		id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT,
-		status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`); err != nil {
+		status TEXT, visibility TEXT, singleton INTEGER NOT NULL DEFAULT 0, created_at INTEGER, updated_at INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`DROP TABLE decls`); err != nil {
@@ -124,7 +95,7 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	defer storage.Close()
 	commits := 0
 	r := NewRegistrar(&Registry{store: storage, onCommit: func(Change) { commits++ }}, nil, nil)
-	_, err = r.editDecl(context.Background(), "root", protocol.C0ChannelID, DeclEdit{ID: "decl"})
+	_, err = r.editDecl(context.Background(), "root", channelspec.C0ChannelID, DeclEdit{ID: "decl"})
 	if err == nil {
 		t.Fatal("decl.edit succeeded after its table was removed")
 	}
@@ -140,36 +111,6 @@ func TestEditDeclPropagatesQueryErrorBeforeInspectingRow(t *testing.T) {
 	}
 }
 
-func TestCanceledRecipeIntroductionCancelsPendingAndSkipsMemberCalls(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	facts := registrarCanceledFacts{}
-	r := NewRegistrar(&Registry{}, facts, nil)
-	pending := &registrarCanceledPending{}
-	sys := &registrarCallSys{pending: pending}
-	snapshot := channelspec.RenderedSnapshot{Class: "test", Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}
-	raw, err := json.Marshal(GenesisSpec{ChannelID: "target", ParentID: protocol.C0ChannelID, Declarations: []GenesisDeclaration{
-		{DeclID: "member-a", Kind: actor.KindTool, Rendered: snapshot},
-		{DeclID: "member-b", Kind: actor.KindTool, Rendered: snapshot},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	results := r.introduceChannel(sys, ctx, regspec.ChannelRow{ID: "target", ParentID: protocol.C0ChannelID, Spec: raw}, nil)
-	if sys.calls != 1 || !pending.canceled {
-		t.Fatalf("calls=%d pending canceled=%v", sys.calls, pending.canceled)
-	}
-	if len(results.Members) != 2 {
-		t.Fatalf("members=%+v", results.Members)
-	}
-	for _, member := range results.Members {
-		failure, ok := member.Result.(map[string]string)
-		if !ok || failure["detail"] != context.Canceled.Error() {
-			t.Fatalf("member=%+v", member)
-		}
-	}
-}
-
 func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
 	dbPath := t.TempDir() + "/registry.db"
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -178,7 +119,7 @@ func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
 	}
 	if _, err := db.Exec(`CREATE TABLE decls (
 		id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT,
-		status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`); err != nil {
+		status TEXT, visibility TEXT, singleton INTEGER NOT NULL DEFAULT 0, created_at INTEGER, updated_at INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -213,7 +154,7 @@ func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
 
 func TestDetachAuthorizesBeforeRevealingLocalDeviceReservation(t *testing.T) {
 	r := NewRegistrar(&Registry{}, nil, nil)
-	_, err := r.detachDevice(context.Background(), "alice", "source", DeviceBinding{ChannelID: "other", DeviceID: protocol.LocalDeviceID})
+	_, err := r.detachDevice(context.Background(), "alice", "source", DeviceBinding{ChannelID: "other", DeviceID: channelspec.LocalDeviceID})
 	var lagoonErr *Error
 	if !errors.As(err, &lagoonErr) || lagoonErr.Code != CodePermissionDenied {
 		t.Fatalf("cross-channel local detach error=%v, want permission_denied", err)
@@ -257,16 +198,16 @@ func TestRegistrarExecutionFailureUsesClosedResultUnknownCode(t *testing.T) {
 	}
 }
 
-func TestSvcactorWrappedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
+func TestEffectiveAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	dbPath := t.TempDir() + "/registry.db"
 	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
-		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, created_at INTEGER, updated_at INTEGER)`,
+		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, singleton INTEGER NOT NULL DEFAULT 0, created_at INTEGER, updated_at INTEGER)`,
 		`CREATE TABLE principals (id TEXT PRIMARY KEY, kind TEXT, email TEXT, display_name TEXT, status TEXT, created_at INTEGER)`,
-		`INSERT INTO decls VALUES ('agent-decl','agent',NULL,'root','codex','{}','present','private',1,1)`,
+		`INSERT INTO decls VALUES ('agent-decl','agent',NULL,'root','codex','{}','present','private',0,1,1)`,
 		`INSERT INTO principals VALUES ('root','human','root@example.test','Root','present',1)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
@@ -283,24 +224,22 @@ func TestSvcactorWrappedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	defer storage.Close()
 	r := NewRegistrar(&Registry{store: storage}, registrarFactsFunc(func(_ context.Context, ch channel.ID, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 		switch {
-		case ch == protocol.C0ChannelID && id == "svc":
-			return channelspec.ActorFacts{Active: true, SourceDeclID: SvcActorDeclID, Kind: actor.KindTool}, true, nil
-		case ch == "ordinary" && id == "agent:member":
+		case ch == "ordinary" && id == "agent:member:1":
 			return channelspec.ActorFacts{Active: true, SourceDeclID: "agent-decl", Kind: actor.KindAgent}, true, nil
 		default:
 			return channelspec.ActorFacts{}, false, nil
 		}
 	}), nil)
 	wrapped, err := json.Marshal(map[string]any{
-		"origin": peerproto.Origin{Channel: "ordinary", Actor: "agent:member", RequestID: "source-request"},
-		"args":   json.RawMessage(`{"unknown_field":true}`),
+		"_context": map[string]any{"caller": map[string]any{"channel": "ordinary", "actor": "agent:member:1"}},
+		"body":     map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "c0-request", ChannelID: protocol.C0ChannelID, Sender: message.Sender{Kind: actor.KindTool, ID: "svc"},
-		Kind: message.KindRequest, Type: string(WordPrincipalMe), Payload: wrapped,
+		ID: "c0-request", ChannelID: channelspec.C0ChannelID, Sender: message.Sender{Kind: actor.KindPeer, ID: "peer:svcactor:1"},
+		Kind: message.KindRequest, Type: string(WordPrincipalGet), Payload: wrapped,
 	})
 	sys := &registrarSysStub{}
 	r.handle(sys, msg)
@@ -311,8 +250,5 @@ func TestSvcactorWrappedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	var principal regspec.PrincipalRow
 	if err := reply.DecodeValue(&principal); err != nil || principal.ID != "root" {
 		t.Fatalf("receiver attribution principal=%+v err=%v", principal, err)
-	}
-	if reply.Source.ChannelID != "ordinary" || reply.Source.RequestID != "source-request" {
-		t.Fatalf("source=%+v", reply.Source)
 	}
 }

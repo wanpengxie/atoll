@@ -2,8 +2,10 @@ package actorbase
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Msg is the substrate's in-hand projection of one delivered envelope — pure,
@@ -43,6 +45,7 @@ type Msg struct {
 
 	ctx    context.Context
 	origin MsgOrigin
+	caller *harness.Caller
 }
 
 // MsgOrigin names WHICH ledger authorises a write against this Msg. It is the
@@ -99,6 +102,21 @@ const (
 // nothing about the request's own scope.
 func (m Msg) Ctx() context.Context { return m.ctx }
 
+func (m Msg) Caller() (harness.Caller, bool) {
+	if m.caller == nil {
+		return harness.Caller{}, false
+	}
+	return *m.caller, true
+}
+
+// EffectiveCaller is the only caller-attribution rule used by receivers.
+func EffectiveCaller(m Msg) harness.Caller {
+	if caller, ok := m.Caller(); ok {
+		return caller
+	}
+	return harness.Caller{Channel: m.ChannelID, Actor: m.Sender.ID}
+}
+
 // NewMsg projects env into a Msg bound to ctx and to the ledger that
 // authorises writes against it — the ONE constructor (the engine's Recv path,
 // the frame interpreter's from-log recovery, and any test fixture all go
@@ -119,5 +137,19 @@ func NewMsg(origin MsgOrigin, ctx context.Context, env message.Envelope) Msg {
 	if origin != OriginMailbox && origin != OriginLog {
 		panic("actorbase: NewMsg origin must be OriginMailbox or OriginLog (the zero value is illegal)")
 	}
-	return Msg{Envelope: env, ctx: ctx, origin: origin}
+	msg := Msg{Envelope: env, ctx: ctx, origin: origin}
+	if env.Kind == message.KindRequest {
+		var wrapped struct {
+			Context *harness.Context `json:"_context,omitempty"`
+			Body    json.RawMessage  `json:"body"`
+		}
+		if json.Unmarshal(env.Payload, &wrapped) == nil {
+			msg.Payload = append(json.RawMessage(nil), wrapped.Body...)
+			if wrapped.Context != nil {
+				caller := wrapped.Context.Caller
+				msg.caller = &caller
+			}
+		}
+	}
+	return msg
 }

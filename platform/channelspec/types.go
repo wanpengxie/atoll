@@ -94,20 +94,22 @@ type DeclarationFacts struct {
 	Visibility     string
 	Class          string
 	Config         json.RawMessage
+	Singleton      bool
 }
 
 // RenderedSnapshot is the complete, already-resolved declaration value accepted
 // by a channel. Channel storage has no global/local merge semantics.
 type RenderedSnapshot struct {
-	Class     string            `json:"class"`
-	Config    json.RawMessage   `json:"config,omitempty"`
-	Placement channel.Placement `json:"placement"`
-	Digest    string            `json:"digest"`
+	Class     string          `json:"class"`
+	Config    json.RawMessage `json:"config,omitempty"`
+	Placement Placement       `json:"placement"`
+	Singleton bool            `json:"singleton,omitempty"`
+	Digest    string          `json:"digest"`
 }
 
 func (s RenderedSnapshot) Validate() error {
 	if strings.TrimSpace(s.Class) == "" {
-		return channel.ErrInvalidRequest
+		return ErrInvalidRequest
 	}
 	if err := s.Placement.Validate(); err != nil {
 		return err
@@ -126,11 +128,12 @@ func (s RenderedSnapshot) Validate() error {
 // excluded so equal values can be detected across local declaration versions.
 func (s RenderedSnapshot) ContentDigest() (string, error) {
 	payload := struct {
-		Class     string            `json:"class"`
-		Config    json.RawMessage   `json:"config,omitempty"`
-		Placement channel.Placement `json:"placement"`
-	}{s.Class, s.Config, s.Placement}
-	return channel.Digest(payload)
+		Class     string          `json:"class"`
+		Config    json.RawMessage `json:"config,omitempty"`
+		Placement Placement       `json:"placement"`
+		Singleton bool            `json:"singleton,omitempty"`
+	}{s.Class, s.Config, s.Placement, s.Singleton}
+	return Digest(payload)
 }
 
 // Seal computes and installs the content digest.
@@ -156,6 +159,7 @@ const (
 	ErrCodeNotAcceptedSource    OperationErrorCode = "not_accepted_source"
 	ErrCodeMemberInactive       OperationErrorCode = "member_inactive"
 	ErrCodeAuthorityUnavailable OperationErrorCode = "authority_unavailable"
+	ErrCodeConflictExists       OperationErrorCode = "conflict_exists"
 )
 
 var operationErrorCodes = [...]OperationErrorCode{
@@ -163,6 +167,7 @@ var operationErrorCodes = [...]OperationErrorCode{
 	ErrCodeDeclNotFound, ErrCodeForbidden,
 	ErrCodeUnknownClass, ErrCodeProtectedActor,
 	ErrCodeNotAcceptedSource, ErrCodeMemberInactive, ErrCodeAuthorityUnavailable,
+	ErrCodeConflictExists,
 }
 
 type OperationError struct {

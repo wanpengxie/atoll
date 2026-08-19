@@ -26,7 +26,7 @@ import (
 
 const (
 	declRemovalClass = "decl-removal-body"
-	declRemovalDecl  = "decl:decl-removal"
+	declRemovalDecl  = "decl-decl-removal"
 )
 
 // declRemovalFixture reports both edges of one body's life, so the test can
@@ -113,7 +113,7 @@ func TestRemovingADeclaredInstanceUnpublishesItsDesiredRowAndTearsTheBodyDown(t 
 
 	// Link one: the declaration's projection is empty and the identity is gone
 	// from the ledger.
-	instances, err := h.controller.DeclaredInstances(declRemovalDecl)
+	instances, err := activeMembersForSource(h.controller, declRemovalDecl)
 	if err != nil || len(instances) != 0 {
 		t.Fatalf("declaration instances after removal = %v err=%v", instances, err)
 	}

@@ -16,7 +16,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/obs"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -55,17 +54,14 @@ func (v obsViewStub) Roster(context.Context) ([]channelspec.ObsRosterRow, error)
 func (obsViewStub) HumanRoster(context.Context) ([]channelspec.HumanRosterEntry, error) {
 	return nil, nil
 }
-func (obsViewStub) DeclaredInstances(context.Context, string) ([]actor.ActorID, error) {
-	return nil, nil
-}
-func (obsViewStub) HasDeclaredInstance(context.Context, string) (bool, error) { return false, nil }
 func (obsViewStub) ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error) {
 	return "", false, nil
 }
 func (obsViewStub) OwnerPrincipal(context.Context) (string, bool, error) { return "", false, nil }
-func (obsViewStub) ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error) {
+func (obsViewStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, error) {
 	return nil, 0, nil
 }
+func (obsViewStub) IsActive(context.Context, actor.ActorID) (bool, error) { return true, nil }
 func (obsViewStub) ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return channelspec.ActorFacts{}, false, nil
 }
@@ -112,11 +108,11 @@ func openObsGoldenRegistry(t *testing.T) *lagoon.Registry {
 		t.Fatal(err)
 	}
 	const channelID = "c/ 频道"
-	if _, err := db.ExecContext(context.Background(), `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,?,'child','group','present',?,'{}',?)`, channelID, protocol.C0ChannelID, protocol.RootPrincipalID, stamp+1); err != nil {
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,spec_json,created_at) VALUES(?,?,'child','group','present',?,'{}',?)`, channelID, channelspec.C0ChannelID, channelspec.RootPrincipalID, stamp+1); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(), `UPDATE devices SET name='desk' WHERE id=?`, protocol.LocalDeviceID); err != nil {
+	if _, err := db.ExecContext(context.Background(), `UPDATE devices SET name='desk' WHERE id=?`, channelspec.LocalDeviceID); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -168,7 +164,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 		},
 		{
 			name: "space decls", path: "/obs/space/decls",
-			golden: `{"subject":"space/decls","kind":"decls","complete":true,"items":[{"key":"5d3fb46c-2d36-57d3-a324-66628dfd67c8","declared":{"id":"5d3fb46c-2d36-57d3-a324-66628dfd67c8","name":"Steward","owner":"root","default_class":"codex","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"atoll-internal:registrar-seat","declared":{"id":"atoll-internal:registrar-seat","name":"Registrar Seat","owner":"root","default_class":"atoll-internal:registrar","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"atoll-internal:svcactor","declared":{"id":"atoll-internal:svcactor","name":"Service Actor","owner":"root","default_class":"svcactor","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"coreactor","declared":{"id":"coreactor","name":"Core Actor","owner":"root","default_class":"peeractor","config":{"channel":"c0"},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"peer:c0.lobby","declared":{"id":"peer:c0.lobby","name":"c0.lobby","owner":"root","default_class":"peeractor","config":{"channel":"c0.lobby"},"status":"present","visibility":"public","created_at":1700000000000,"updated_at":1700000000000},"actual":null}]}`,
+			golden: `{"subject":"space/decls","kind":"decls","complete":true,"items":[{"key":"5d3fb46c-2d36-57d3-a324-66628dfd67c8","declared":{"id":"5d3fb46c-2d36-57d3-a324-66628dfd67c8","name":"Steward","owner":"root","default_class":"codex","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"c0.lobby","declared":{"id":"c0.lobby","name":"c0.lobby","owner":"root","default_class":"peeractor","config":{"channel":"c0.lobby"},"status":"present","visibility":"public","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"registrar","declared":{"id":"registrar","name":"Registrar Seat","owner":"root","default_class":"registrar","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null},{"key":"svcactor","declared":{"id":"svcactor","name":"Service Actor","owner":"root","default_class":"svcactor","config":{},"status":"present","visibility":"private","created_at":1700000000000,"updated_at":1700000000000},"actual":null}]}`,
 		},
 		{
 			name: "channel profile", path: "/obs/channel/" + escapedChannel + "/profile",
@@ -181,7 +177,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			answer, err := plane.Pull(context.Background(), protocol.RootPrincipalID, test.path, test.query)
+			answer, err := plane.Pull(context.Background(), channelspec.RootPrincipalID, test.path, test.query)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +193,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 	if len(host.acquired) != 4 {
 		t.Fatalf("production channel adapter acquisitions=%v, want channels/profile/actors", host.acquired)
 	}
-	wantAcquired := []channel.ID{channel.ID(channelID), protocol.LobbyChannelID, channel.ID(channelID), channel.ID(channelID)}
+	wantAcquired := []channel.ID{channel.ID(channelID), channelspec.LobbyChannelID, channel.ID(channelID), channel.ID(channelID)}
 	for i, got := range host.acquired {
 		if got != wantAcquired[i] {
 			t.Fatalf("production channel adapter acquire[%d]=%q, want %q", i, got, wantAcquired[i])
@@ -208,7 +204,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 func TestProductionRegistryAdapterEmptySubjectKeepsItemsArray(t *testing.T) {
 	registry := openObsGoldenRegistry(t)
 	plane := obs.New(obs.Config{Registry: registryObsAdapter{registry: registry}})
-	answer, err := plane.Pull(context.Background(), protocol.RootPrincipalID, "/obs/channel/missing/profile", "")
+	answer, err := plane.Pull(context.Background(), channelspec.RootPrincipalID, "/obs/channel/missing/profile", "")
 	if err != nil {
 		t.Fatal(err)
 	}

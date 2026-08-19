@@ -102,7 +102,6 @@ type Minter interface {
 	MintAuthority(capauth.Authority, actor.Kind) Pen
 }
 
-
 // AdmittedWriter writes as an identity whose collaboration admission the caller
 // has ALREADY completed. Its one source boundary is timer fire, where the author
 // verdict is the fire gate itself — the caller needs that verdict's result in

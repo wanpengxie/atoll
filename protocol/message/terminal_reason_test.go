@@ -77,15 +77,15 @@ func TestIsFinalStatus(t *testing.T) {
 
 	notFinal := []string{
 		"",
-		"received",    // Layer-2 provisional
-		"queued",      // Layer-2 provisional
-		"processing",  // Layer-2 provisional
-		"deferred",    // Layer-2 provisional
-		"unavailable", // Layer-2 provisional
+		"received",              // Layer-2 provisional
+		"queued",                // Layer-2 provisional
+		"processing",            // Layer-2 provisional
+		"deferred",              // Layer-2 provisional
+		"unavailable",           // Layer-2 provisional
 		"example.custom_status", // a domain-defined Layer-3 status
-		"Completed",   // wrong case
-		"success",     // not in set
-		"done",        // not in set
+		"Completed",             // wrong case
+		"success",               // not in set
+		"done",                  // not in set
 	}
 	for _, s := range notFinal {
 		if IsFinalStatus(s) {

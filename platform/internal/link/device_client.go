@@ -36,6 +36,7 @@ type actorStream struct {
 	writer      *RemoteWriter
 	access      *relayClient
 	sched       *relayClient
+	target      *relayClient
 	lifecycleV2 *remoteActorLifecycle
 	dispatch    func(*message.Envelope) error
 	cancel      func(message.ID)
@@ -63,10 +64,11 @@ func (l *ClientActorLane) OpenActorStream(
 	writer := NewRemoteWriter(codec)
 	accessRelay := newRelayClient(codec, ipc.KindAccess)
 	scheduleRelay := newRelayClient(codec, ipc.KindSchedule)
+	targetRelay := newRelayClient(codec, ipc.KindResolveTarget)
 	lifecycle := newRemoteActorLifecycle(codec)
 	actorStream := &actorStream{
 		id: id, stream: stream, codec: codec, writer: writer,
-		access: accessRelay, sched: scheduleRelay, lifecycleV2: lifecycle,
+		access: accessRelay, sched: scheduleRelay, target: targetRelay, lifecycleV2: lifecycle,
 		dispatch: func(env *message.Envelope) error { return l.Host.Deliver(id, env) },
 		cancel:   func(requestID message.ID) { l.Host.CancelRequest(id, requestID) },
 		done:     make(chan struct{}),
@@ -92,6 +94,7 @@ func (l *ClientActorLane) OpenActorStream(
 			},
 			State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
 			Schedule: &remoteScheduleHandle{relay: scheduleRelay}, Lifecycle: lifecycle,
+			Target: &remoteTargetResolver{relay: targetRelay},
 		},
 		Close: stream.Close, Done: actorStream.done,
 		CancelRequest: writer.sendCancel, PublishObs: writer.publishObs,
@@ -215,6 +218,7 @@ func readDeviceActorStream(stream *actorStream, logger *slog.Logger) {
 		stream.writer.Close()
 		stream.access.close()
 		stream.sched.close()
+		stream.target.close()
 		stream.lifecycleV2.close()
 		stream.doneOnce.Do(func() { close(stream.done) })
 		_ = stream.stream.Close()
@@ -249,12 +253,12 @@ func readDeviceActorStream(stream *actorStream, logger *slog.Logger) {
 				return
 			}
 			stream.sched.deliverAck(payload)
-		case ipc.KindSpawnAck:
-			var payload ipc.SpawnAckPayload
+		case ipc.KindResolveTargetAck:
+			var payload ipc.RelayAckPayload
 			if json.Unmarshal(frame.Payload, &payload) != nil {
 				return
 			}
-			stream.lifecycleV2.fork.deliverAck(payload)
+			stream.target.deliverAck(payload)
 		case ipc.KindEndAck:
 			var payload ipc.EndAckPayload
 			if json.Unmarshal(frame.Payload, &payload) != nil {

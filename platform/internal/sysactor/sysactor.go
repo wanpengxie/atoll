@@ -3,13 +3,13 @@ package sysactor
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"slices"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -18,12 +18,20 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+func resolveErrorCode(err error) string {
+	var targetErr *actorbase.TargetResolveError
+	if errors.As(err, &targetErr) {
+		return targetErr.Code
+	}
+	return "internal_error"
+}
+
 type PresenceStat interface {
 	Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error)
 }
 
 // Directory is the narrow actor-truth surface the system actor consults: the
-// membership roster it composes actor.list from, and the one membership boolean
+// membership roster it composes the member directory from, and the one membership boolean
 // its operate gate asks. It never receives an actor record — the directory row
 // carries identity and liveness only.
 type Directory interface {
@@ -32,7 +40,7 @@ type Directory interface {
 }
 
 // SystemActor holds one incarnation's process state: it answers channel-wide
-// directory queries (actor.list) by composing the unified active-identity
+// directory queries by composing the unified active-identity
 // authority with volatile liveness (the injected seam). It is channel-agnostic
 // at the base — the composition root injects channel-scoped services (authority,
 // liveness/device seams), so this actor holds no channel id of its own.
@@ -48,6 +56,8 @@ type SystemActor struct {
 	clock     func() time.Time
 	presence  PresenceStat
 	operate   OperateExecutor
+	peer      Peer
+	resolve   func(string) (actor.ActorID, error)
 	logbook   interface {
 		MaxSeq(context.Context) (int64, error)
 		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
@@ -66,6 +76,10 @@ type Deps struct {
 	// implementation half; the gate here does permission + routing). Nil → the four
 	// control types are inert (no synthesis) — the injection point is unfilled.
 	Operate OperateExecutor
+	// Peer is the membrane's only external port: a space-level system request
+	// from a non-c0 channel is framed and sent to c0 through it.
+	Peer          Peer
+	ResolveTarget func(string) (actor.ActorID, error)
 	// Logbook is the channel-scoped read face. It intentionally exposes no
 	// append capability to the system actor.
 	Logbook interface {
@@ -92,6 +106,8 @@ func New(deps Deps) *SystemActor {
 		clock:     clock,
 		presence:  deps.Presence,
 		operate:   deps.Operate,
+		peer:      deps.Peer,
+		resolve:   deps.ResolveTarget,
 		logbook:   deps.Logbook,
 		logger:    logger,
 	}
@@ -101,7 +117,7 @@ func New(deps Deps) *SystemActor {
 // fresh SystemActor + run per incarnation, closing over deps.
 func Def(deps Deps) actorbase.Def {
 	return actorbase.Def{
-		Doc: systemDescribe().Description,
+		Manifest: systemManifest(),
 		New: func() (actorbase.Proc, error) {
 			return New(deps).run, nil
 		},
@@ -123,23 +139,21 @@ func (s *SystemActor) run(sys actorbase.Sys) error {
 // handle dispatches one delivered Msg (mirrors the former Receive).
 func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 	if msg.Kind == message.KindRequest {
+		if message.IsSpaceWord(msg.Type) {
+			s.routeSpace(sys, msg)
+			return
+		}
 		switch msg.Type {
-		case introspect.QueryList:
+		case message.TypeSystemMemberList:
 			s.respondList(sys, msg)
 			return
-		case introspect.QueryDescribe:
-			// The system actor is itself an actor: it self-answers the reserved
-			// actor.describe so the reserved surface is complete (no actor times
-			// out on a self-query).
-			s.respondDescribe(sys, msg)
-			return
-		case introspect.QueryStatus:
+		case message.TypeSystemMemberGet:
 			s.respondStatus(sys, msg)
 			return
-		case platform.TypeLogbookRecent:
+		case message.TypeSystemLogRecent:
 			s.respondLogbookRecent(sys, msg)
 			return
-		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor:
+		case TypeMemberCreate, TypeMemberAdmit, TypeMemberDelete, TypeMemberRestart:
 			// Channel operate face (NP-1=c): in-gate control plane. Permission +
 			// routing here; the injected executor does the intent write + Home call.
 			s.handleOperate(sys, msg)
@@ -151,8 +165,8 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 	// closure to time out.
 }
 
-// respondList answers actor.list with a composed channel-wide directory
-// (the membership ∧ liveness formula owned by introspect.QueryList), composed
+// respondList answers the member-list word with a composed channel-wide directory
+// (membership ∧ liveness), composed
 // INSIDE the actor so the channel only sees the result, never the raw rows. A
 // registry read failure writes nothing (the same "does not synthesize"
 // posture as an unrouted type — the caller's closure reaps it) rather than
@@ -243,46 +257,14 @@ func (s *SystemActor) kernelEntry(msg actorbase.Msg) introspect.CatalogEntry {
 // shape: identity + the reserved directory query it serves. Declared through
 // the SAME convention every actor honours, rather than hand-rolling the API
 // list at the serve site.
-func systemDescribe() introspect.Describe {
-	return introspect.Describe{
-		ActorID:     string(actor.SystemActorID),
-		Description: "Channel system actor: answers reserved directory, presence, and bounded logbook queries.",
-		SkillDoc: "# system\n\nReserved channel directory.\n\n## Tool surface\n\n" +
-			"- `actor.list` — channel-wide active-identity directory composed with presence.\n" +
-			"- `actor.status` — read-time presence view for one actor id.\n" +
-			"- `logbook.recent` — last five filtered request/response rows for catch-up.\n",
-		Types: map[string]introspect.TypeMeta{
-			introspect.QueryList: {
-				Description:  "channel-wide actor directory: membership ∧ liveness",
-				AllowedKinds: []string{string(message.KindRequest)},
-			},
-			introspect.QueryStatus: {
-				Description:  "read-time presence view for one actor id",
-				AllowedKinds: []string{string(message.KindRequest)},
-			},
-			platform.TypeLogbookRecent: {
-				Description:  "last filtered request/response rows in ascending log order",
-				AllowedKinds: []string{string(message.KindRequest)},
-			},
-		},
+func systemManifest() introspect.Manifest {
+	words := map[string]introspect.WordSpec{}
+	for _, entry := range message.SystemEntries() {
+		if entry.Kind == message.KindRequest {
+			words[entry.Name] = introspect.WordSpec{Description: "reserved system request"}
+		}
 	}
-}
-
-// respondDescribe self-answers the reserved actor.describe for the system actor
-// itself through the standard introspect dispatch (full answer or single-type
-// selector). Like every actor, it must answer the reserved self-query rather
-// than let the caller hang. A malformed or unknown selector is NOT synthesized
-// (this actor's stated philosophy): the caller's closure reaps it.
-func (s *SystemActor) respondDescribe(sys actorbase.Sys, msg actorbase.Msg) {
-	req, err := introspect.ParseDescribeRequest(msg.Payload)
-	if err != nil {
-		return
-	}
-	answer, ok := introspect.AnswerDescribe(systemDescribe(), req)
-	if !ok {
-		return
-	}
-	_, _ = sys.Reply(msg, answer)
+	return introspect.Manifest{Class: "membrane", Interfaces: []string{"actor"}, Words: words}
 }
 
 func (s *SystemActor) snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
@@ -318,16 +300,24 @@ func deviceTestimony(snapshot presence.Snapshot) *introspect.DevicePresence {
 func (s *SystemActor) respondStatus(sys actorbase.Sys, msg actorbase.Msg) {
 	req, err := introspect.ParseStatusRequest(msg.Payload)
 	if err != nil {
-		s.logger.Warn("sysactor.status.bad_request", "error", err)
+		s.logger.Warn("sysactor.member_get.bad_request", "error", err)
 		return
 	}
-	snapshot, err := s.snapshot(msg.Ctx(), actor.ActorID(req.ActorID))
+	target := actor.ActorID(req.Member)
+	if s.resolve != nil {
+		target, err = s.resolve(req.Member)
+		if err != nil {
+			_, _ = sys.Fail(msg, resolveErrorCode(err), err.Error())
+			return
+		}
+	}
+	snapshot, err := s.snapshot(msg.Ctx(), target)
 	if err != nil {
-		s.logger.Warn("sysactor.status.snapshot_failed", "actor", req.ActorID, "error", err)
+		s.logger.Warn("sysactor.member_get.snapshot_failed", "actor", req.Member, "error", err)
 		return
 	}
 	present, uptime := s.liveness(snapshot)
-	answer := introspect.Status{ActorID: req.ActorID, Member: snapshot.Member, Present: present, UptimeMs: uptime}
+	answer := introspect.Status{ActorID: string(target), Member: snapshot.Member, Present: present, UptimeMs: uptime}
 	if len(snapshot.L3) > 0 {
 		answer.L3 = make(map[string]introspect.StatusTestimony, len(snapshot.L3))
 	}

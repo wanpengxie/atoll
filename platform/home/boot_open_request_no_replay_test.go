@@ -34,8 +34,8 @@ import (
 const (
 	bootOpenCallerClass   = "boot-open-caller"
 	bootOpenReceiverClass = "boot-open-receiver"
-	bootOpenCallerDecl    = "decl:boot-open-caller"
-	bootOpenReceiverDecl  = "decl:boot-open-receiver"
+	bootOpenCallerDecl    = "decl-boot-open-caller"
+	bootOpenReceiverDecl  = "decl-boot-open-receiver"
 )
 
 // bootOpenFixture builds the two declared bodies. The caller always parks. The

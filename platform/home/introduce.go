@@ -7,7 +7,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -19,7 +18,6 @@ import (
 func (h *Home) resolveIntroduction(
 	ctx context.Context,
 	declID string,
-	principal string,
 	initiator actor.ActorID,
 ) (actorctl.IntroduceRequest, error) {
 	if declID == "" || initiator == "" {
@@ -127,9 +125,9 @@ func (h *Home) resolveIntroduction(
 	}
 	var placement storespec.Placement
 	switch placementKind {
-	case channel.PlacementServer:
+	case channelspec.PlacementServer:
 		placement = storespec.NewServerPlacement()
-	case channel.PlacementDaemon:
+	case channelspec.PlacementDaemon:
 		placement, err = h.resolveDaemonPlacement(ctx)
 	default:
 		err = &channelspec.OperationError{Code: channelspec.ErrCodeUnknownClass, Detail: "class has invalid placement"}
@@ -137,11 +135,12 @@ func (h *Home) resolveIntroduction(
 	if err != nil {
 		return actorctl.IntroduceRequest{}, err
 	}
-	if principal != "" && kind != actor.KindAgent {
-		return actorctl.IntroduceRequest{}, &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "only an agent declaration may carry principal"}
+	principal := ""
+	if kind == actor.KindAgent {
+		principal = facts.OwnerPrincipal
 	}
 	return actorctl.IntroduceRequest{
-		DeclID: declID, Kind: kind, Principal: principal, Placement: placement,
+		DeclID: declID, Kind: kind, Principal: principal, Singleton: facts.Singleton, Placement: placement,
 		Definition: storespec.ActorDefinition{
 			Class:  facts.Class,
 			Config: append(json.RawMessage(nil), facts.Config...),

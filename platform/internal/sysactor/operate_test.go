@@ -53,8 +53,8 @@ func (f *failSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, erro
 
 // stubExecutor records the calls the gate routes to it.
 type stubExecutor struct {
-	introduced int
-	removed    int
+	created    int
+	deleted    int
 	restarted  int
 	err        error
 	result     any
@@ -62,23 +62,23 @@ type stubExecutor struct {
 
 func (s *stubExecutor) Execute(ctx context.Context, operation string, req OperateRequest) (any, error) {
 	switch operation {
-	case TypeIntroduceActor:
-		return s.Introduce(ctx, req)
-	case TypeRemoveActor:
-		return s.Remove(ctx, req)
-	case TypeRestartActor:
+	case TypeMemberCreate:
+		return s.Create(ctx, req)
+	case TypeMemberDelete:
+		return s.Delete(ctx, req)
+	case TypeMemberRestart:
 		return s.Restart(ctx, req)
 	default:
 		return nil, errors.New("unsupported operation")
 	}
 }
 
-func (s *stubExecutor) Introduce(context.Context, OperateRequest) (any, error) {
-	s.introduced++
+func (s *stubExecutor) Create(context.Context, OperateRequest) (any, error) {
+	s.created++
 	return s.result, s.err
 }
-func (s *stubExecutor) Remove(context.Context, OperateRequest) (any, error) {
-	s.removed++
+func (s *stubExecutor) Delete(context.Context, OperateRequest) (any, error) {
+	s.deleted++
 	return s.result, s.err
 }
 func (s *stubExecutor) Restart(context.Context, OperateRequest) (any, error) {
@@ -91,7 +91,7 @@ func operateMsg(typ string, sender actor.ActorID) actorbase.Msg {
 		ID: "op1", ChannelID: "ch", Kind: message.KindRequest, Type: typ,
 		Sender:   message.Sender{Kind: actor.KindAgent, ID: sender},
 		Audience: message.Audience{actor.SystemActorID},
-		Payload:  json.RawMessage(`{}`),
+		Payload:  json.RawMessage(`{"body":{}}`),
 	})
 }
 
@@ -100,13 +100,13 @@ func operateMsg(typ string, sender actor.ActorID) actorbase.Msg {
 func TestOperate_MemberAllowed(t *testing.T) {
 	ex := &stubExecutor{result: map[string]string{"ok": "true"}}
 	s := New(Deps{
-		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"agent:alice:1": true}},
 		Operate:   ex,
 	})
 	sys := &failSys{}
-	s.handle(sys, operateMsg(TypeRemoveActor, "user:alice"))
-	if ex.removed != 1 {
-		t.Fatalf("executor.Remove called %d times, want 1", ex.removed)
+	s.handle(sys, operateMsg(TypeMemberDelete, "agent:alice:1"))
+	if ex.deleted != 1 {
+		t.Fatalf("executor.Delete called %d times, want 1", ex.deleted)
 	}
 	if len(sys.replies) != 1 || len(sys.fails) != 0 {
 		t.Fatalf("want 1 reply 0 fails, got %d replies %d fails", len(sys.replies), len(sys.fails))
@@ -120,13 +120,13 @@ func TestOperate_MemberAllowed(t *testing.T) {
 func TestOperate_NonMemberRejected(t *testing.T) {
 	ex := &stubExecutor{}
 	s := New(Deps{
-		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"agent:alice:1": true}},
 		Operate:   ex,
 	})
 	sys := &failSys{}
-	s.handle(sys, operateMsg(TypeIntroduceActor, "user:mallory"))
-	if ex.introduced != 0 {
-		t.Fatalf("executor.Introduce reached for non-member (called %d)", ex.introduced)
+	s.handle(sys, operateMsg(TypeMemberCreate, "agent:mallory:2"))
+	if ex.created != 0 {
+		t.Fatalf("executor.Create reached for non-member (called %d)", ex.created)
 	}
 	if len(sys.fails) != 1 || sys.fails[0].code != "unauthorized_sender" {
 		t.Fatalf("want 1 unauthorized_sender fail, got %+v", sys.fails)
@@ -137,11 +137,11 @@ func TestOperate_NonMemberRejected(t *testing.T) {
 func TestOperate_ExecutorErrorCoded(t *testing.T) {
 	ex := &stubExecutor{err: &OperateError{Code: "unknown_class", Detail: "no such class"}}
 	s := New(Deps{
-		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"agent:alice:1": true}},
 		Operate:   ex,
 	})
 	sys := &failSys{}
-	s.handle(sys, operateMsg(TypeIntroduceActor, "user:alice"))
+	s.handle(sys, operateMsg(TypeMemberCreate, "agent:alice:1"))
 	if len(sys.fails) != 1 || sys.fails[0].code != "unknown_class" {
 		t.Fatalf("want 1 unknown_class fail, got %+v", sys.fails)
 	}
@@ -150,9 +150,9 @@ func TestOperate_ExecutorErrorCoded(t *testing.T) {
 // TestOperate_NilExecutorInert proves an unfilled injection point synthesizes
 // nothing (no reply, no fail) — the caller's closure reaps it.
 func TestOperate_NilExecutorInert(t *testing.T) {
-	s := New(Deps{Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}}})
+	s := New(Deps{Authority: memberRegistry{active: map[actor.ActorID]bool{"agent:alice:1": true}}})
 	sys := &failSys{}
-	s.handle(sys, operateMsg(TypeRestartActor, "user:alice"))
+	s.handle(sys, operateMsg(TypeMemberRestart, "agent:alice:1"))
 	if len(sys.replies) != 0 || len(sys.fails) != 0 {
 		t.Fatalf("nil executor must synthesize nothing, got %d replies %d fails", len(sys.replies), len(sys.fails))
 	}

@@ -129,7 +129,7 @@ else
 bold "2/5 c0 的 steward（默认 agent）"
 CANDIDATES=(); for a in codex claude; do [ "${AGENT_OK[$a]}" = 1 ] && CANDIDATES+=("$a"); done
 if [ ${#CANDIDATES[@]} -eq 0 ]; then
-  warn "没有检测到可用且已登录的 agent。可以先装完再补：装好 codex/claude 后重跑本脚本选 [r] 重装，或用 actor.template.register 加。"
+  warn "没有检测到可用且已登录的 agent。可以先装完再补：装好 codex/claude 后重跑本脚本选 [r] 重装，或用 system.actor.template.create 加。"
   ask STEWARD "  仍要写哪个 class 作 steward（codex/claude，留空=codex）" "codex"
 else
   ask STEWARD "  选一个作 steward（可选：${CANDIDATES[*]}）" "${CANDIDATES[0]}"

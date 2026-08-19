@@ -8,8 +8,8 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -93,6 +93,9 @@ type Sys interface {
 	// Call writes a kind=request message addressed to target and returns the
 	// sealed ticket for its own out-station account entry.
 	Call(target actor.ActorID, msgType string, payload any) (Pending, error)
+	// CallFor writes with framework caller attribution while leaving args in
+	// the same application body seen by every receiver.
+	CallFor(caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error)
 
 	// --- State arm ------------------------------------------------------
 	State() StateHandle
@@ -111,15 +114,7 @@ type Sys interface {
 	After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error)
 	CancelTimer(id schedule.TimerID) error
 
-	// --- Spawn arm --------------------------------------------------
-	// Fork mints a child owned by this incarnation, returning the child's
-	// name only (never a live handle — the handle never leaves substrate).
-	// config is the parent's opaque per-instance委托 for the child (the fork
-	// counterpart of admission's InstanceSpec.Config — the argv/Args a parent
-	// hands its child); substrate passes it through verbatim to the domain's
-	// build table, never interpreting it. Server and daemon incarnations use the
-	// same lifecycle contract; the daemon arm relays this full spec over its port.
-	Fork(requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error)
+	// --- Lifecycle arm ----------------------------------------------
 	// End commits this identity's lifecycle end and fences subsequent effects.
 	End() error
 

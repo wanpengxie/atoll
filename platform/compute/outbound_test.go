@@ -142,10 +142,6 @@ func (p outboundProbeSchedule) Ack(context.Context, schedule.TimerID) error {
 
 type outboundProbeLifecycle struct{ probe *outboundProbe }
 
-func (p outboundProbeLifecycle) Fork(context.Context, message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
-	p.probe.lifecycleCalls.Add(1)
-	return "agent:child", nil
-}
 func (p outboundProbeLifecycle) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
 	p.probe.lifecycleCalls.Add(1)
 	return nil
@@ -766,15 +762,8 @@ func TestAcceptedPlanReplacementFencesRunArmsButKeepsIdentityArms(t *testing.T) 
 	if _, err := b1.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:stale-run", nil); !errors.Is(err, ErrOutboundNotCurrent) {
 		t.Fatalf("G1 Access after accepted G2 err=%v", err)
 	}
-	// Lifecycle is a run arm too — link's handler table makes carrying the
-	// attempt key the classification itself, and fork and end-self both carry
-	// one. A body this daemon has already begun retiring, on the authority of
-	// the very plan being read here, may not fork a child or end its identity.
-	if _, err := b1.prepared.Caps.Lifecycle.Fork(
-		t.Context(), message.ID("stale-fork"), actorcaps.ForkSpec{},
-	); !errors.Is(err, ErrOutboundNotCurrent) {
-		t.Fatalf("G1 Fork after accepted G2 err=%v", err)
-	}
+	// Lifecycle is a run arm too. A body this daemon has already begun retiring
+	// may not end its identity.
 	if err := b1.prepared.Caps.Lifecycle.EndSelf(
 		t.Context(), actorcaps.EndSelfRequest{},
 	); !errors.Is(err, ErrOutboundNotCurrent) {

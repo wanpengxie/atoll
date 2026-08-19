@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/capauth"
@@ -36,13 +36,12 @@ var (
 //
 // The permission matrix is welded into the arms and cannot be re-decided by a
 // caller: pen A/G, channel resource access A/G, state A, schedule A (its
-// signature carries no key at all), Fork/EndSelf A/G inside the Controller's
+// signature carries no key at all), EndSelf A/G inside the Controller's
 // own write door.
 type RemoteIngress interface {
 	Emit(context.Context, actor.ActorID, actorhost.AttemptKey, *message.Envelope) (harness.WriteResult, error)
 	Access(context.Context, actor.ActorID, actorhost.AttemptKey, AccessRequest) (AccessResponse, error)
 	Schedule(context.Context, actor.ActorID, ScheduleRequest) (ScheduleResponse, error)
-	Fork(context.Context, actor.ActorID, actorhost.AttemptKey, ForkRequest) (actor.ActorID, error)
 	EndSelf(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 }
 
@@ -58,12 +57,8 @@ type Authorities interface {
 	IdentityAuthorityFor(actor.ActorID) actorctl.IdentityAuthority
 }
 
-// SelfLifecycle is the completed Platform command face for the two typed
-// self-lifecycle commands. Fork/EndSelf go through the same face the local
-// Lifecycle arm uses, so a remote self-command settles exactly like a local
-// one, tail included (transition consumption, announcements, membership).
+// SelfLifecycle is the completed Platform command face for self termination.
 type SelfLifecycle interface {
-	Fork(context.Context, actorctl.ForkRequest) (actorctl.ForkResult, error)
 	End(context.Context, actorctl.EndRequest) (actorctl.EndResult, error)
 }
 
@@ -147,13 +142,6 @@ type ScheduleRequest struct {
 
 type ScheduleResponse struct {
 	ID schedule.TimerID
-}
-
-// ForkRequest is the remote self-fork operand. RequestID is the caller's own
-// idempotency coordinate, the one command that has one.
-type ForkRequest struct {
-	RequestID message.ID
-	Spec      actorcaps.ForkSpec
 }
 
 type ingress struct {
@@ -275,24 +263,6 @@ func (i *ingress) Schedule(
 	default:
 		return ScheduleResponse{}, ErrInvalidRequest
 	}
-}
-
-// Fork and EndSelf are the Controller's typed commands, unchanged: the caller
-// coordinate rides the request and the A/G verdict happens inside the ledger
-// lock, where the change itself settles.
-func (i *ingress) Fork(
-	ctx context.Context,
-	id actor.ActorID,
-	attempt actorhost.AttemptKey,
-	request ForkRequest,
-) (actor.ActorID, error) {
-	result, err := i.lifecycle.Fork(ctx, actorctl.ForkRequest{
-		CallerActorID: id,
-		CallerAttempt: attempt,
-		RequestID:     request.RequestID,
-		Spec:          request.Spec,
-	})
-	return result.ChildActorID, err
 }
 
 func (i *ingress) EndSelf(

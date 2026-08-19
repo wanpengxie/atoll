@@ -31,7 +31,7 @@ import (
 
 const (
 	crashCutClass     = "crash-cut-worker"
-	crashCutDecl      = "decl:crash-cut"
+	crashCutDecl      = "decl-crash-cut"
 	crashCutFenceKey  = resource.ResourceID("job-committed")
 	crashCutEventType = "test.crash_cut.business_effect"
 )

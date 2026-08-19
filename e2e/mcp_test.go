@@ -43,10 +43,10 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 
 	h := newHarness(t)
 	api, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
-	registrar := findTool(t, ws)
-	device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": "e2e-mcp-daemon"})
+	registrar := findRegistrar(t, ws)
+	device := registrarRequest(t, ws, c0ChannelID, registrar, "system.device.create", map[string]any{"name": "e2e-mcp-daemon"})
 	deviceID := stringField(t, device, "id")
-	registrarRequest(t, ws, registrar, "device.attach", map[string]any{
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.device.attach", map[string]any{
 		"channel_id": c0ChannelID, "device_id": deviceID,
 	})
 	daemonLog := filepath.Join(h.root, "logs", "mcp-daemon.log")
@@ -76,17 +76,15 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	assertMCPTimeoutSurvives(t, api, ws, stdioID, stdioName)
 
 	const scriptDecl = "e2e-mcp-script"
-	registrarRequest(t, ws, registrar, "actor.template.register", map[string]any{
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
 		"id": scriptDecl, "name": scriptDecl, "class": "script",
 		"config":     map[string]any{"tool_id": stdioID, "tool_type": stdioName + ".echo"},
 		"visibility": "private",
 	})
-	scriptIntro := ws.request(c0ChannelID, "channel.introduce_actor", systemActor, map[string]any{
-		"kind": "agent", "decl_id": scriptDecl,
-	})
-	scriptID := stringField(t, scriptIntro, "instance_id")
+	scriptIntro := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": scriptDecl})
+	scriptID := stringField(t, scriptIntro, "member")
 	waitActorPresence(t, ws, scriptID, true, daemon, daemonLog)
-	_, scriptReply, scriptErr := ws.tryRequest(c0ChannelID, "loop.chat", scriptID, map[string]any{"text": "through-script-agent"})
+	_, scriptReply, scriptErr := ws.tryRequest(c0ChannelID, "agent.ask", scriptID, map[string]any{"text": "through-script-agent"})
 	if scriptErr == nil || !strings.Contains(fmt.Sprint(scriptReply["detail"]), "resource_not_found") {
 		t.Fatalf("script's expected post-tool resource failure=%v err=%v", scriptReply, scriptErr)
 	}
@@ -184,9 +182,8 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	}
 	t.Logf("disconnected actor retained 15-type snapshot and subsequent call failed")
 
-	removed := ws.request(c0ChannelID, "channel.remove_actor", systemActor, map[string]any{"instance_id": stdioID})
-	removedIDs, _ := removed["removed"].([]any)
-	if len(removedIDs) != 1 || removedIDs[0] != stdioID {
+	removed := ws.request(c0ChannelID, "system.member.delete", systemActor, map[string]any{"member": stdioID})
+	if removed["removed"] != true {
 		t.Fatalf("remove stdio=%v", removed)
 	}
 	waitActorPresence(t, ws, stdioID, false, nil, daemonLog)
@@ -196,13 +193,11 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 
 func registerAndIntroduceMCP(t *testing.T, ws *wsClient, registrar, declID string, config map[string]any) string {
 	t.Helper()
-	registrarRequest(t, ws, registrar, "actor.template.register", map[string]any{
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
 		"id": declID, "name": declID, "class": "mcp", "config": config, "visibility": "private",
 	})
-	introduced := ws.request(c0ChannelID, "channel.introduce_actor", systemActor, map[string]any{
-		"kind": "tool", "decl_id": declID,
-	})
-	return stringField(t, introduced, "instance_id")
+	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID})
+	return stringField(t, introduced, "member")
 }
 
 func assertMCPDescribe(t *testing.T, describe map[string]any, prefix string, want int) {

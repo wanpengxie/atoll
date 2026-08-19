@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -274,7 +273,7 @@ func command(id, action string, args map[string]any) actorbase.Msg {
 	if args != nil {
 		payload["args"] = args
 	}
-	body, _ := json.Marshal(payload)
+	body, _ := json.Marshal(map[string]any{"body": payload})
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:         message.ID(id),
 		ChannelID:  testChannelID,
@@ -379,59 +378,6 @@ func TestTimeout(t *testing.T) {
 	}
 	if fail.code != "timeout" {
 		t.Errorf("code=%q want timeout", fail.code)
-	}
-}
-
-//  4. Describe: actor.describe returns the single kimi.command type with all 13
-//     actions visible.
-func TestDescribe(t *testing.T) {
-	_, sys := startActor(t, Config{})
-
-	req := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID:         message.ID("req-desc"),
-		ChannelID:  testChannelID,
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
-		Kind:       message.KindRequest,
-		Type:       "actor.describe",
-		Payload:    json.RawMessage(`{}`),
-		Visibility: message.VisibilityPublic,
-	})
-	sys.push(req)
-
-	rep, ok := sys.waitReply(t, "req-desc", time.Second)
-	if !ok {
-		t.Fatal("no describe Reply call")
-	}
-	// rep.v is the introspect.Describe answer describeCatalog built; re-marshal
-	// + decode to inspect its shape without importing introspect's concrete
-	// type here a second time.
-	raw, err := json.Marshal(rep.v)
-	if err != nil {
-		t.Fatalf("marshal describe reply: %v", err)
-	}
-	var payload struct {
-		ActorID string `json:"actor_id"`
-		Types   map[string]struct {
-			Notes string `json:"notes"`
-		} `json:"types"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		t.Fatalf("decode describe: %v", err)
-	}
-	if payload.ActorID != string(DefaultActorID) {
-		t.Errorf("actor_id=%q want %q", payload.ActorID, DefaultActorID)
-	}
-	if len(payload.Types) != 1 {
-		t.Errorf("describe has %d types, want 1", len(payload.Types))
-	}
-	meta, has := payload.Types[TypeCommand]
-	if !has {
-		t.Fatalf("describe missing type %s", TypeCommand)
-	}
-	for action := range actions {
-		if !strings.Contains(meta.Notes, action) {
-			t.Errorf("describe notes missing action %q", action)
-		}
 	}
 }
 

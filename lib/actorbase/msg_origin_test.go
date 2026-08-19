@@ -78,7 +78,7 @@ func TestZeroOriginMsgIsRefusedByEveryWriteVerb(t *testing.T) {
 // locally, is still OPEN in truth and must stay answerable.
 func TestLogOriginReplyWritesWithNoLedgerEntry(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
+	pen := &fakePen{self: "human:alice:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
@@ -120,7 +120,7 @@ func TestLogOriginReplyWritesWithNoLedgerEntry(t *testing.T) {
 // all this caller wanted.
 func TestLogOriginReplyAbsorbsAnExistingTerminal(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice", reject: harness.HarnessTerminalDuplicate}
+	pen := &fakePen{self: "human:alice:1", reject: harness.HarnessTerminalDuplicate}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
@@ -143,7 +143,7 @@ func TestTerminalWriteClosesTheLedgerEntryWhateverTheOrigin(t *testing.T) {
 	for _, verb := range terminalVerbs() {
 		t.Run(verb.name, func(t *testing.T) {
 			t.Parallel()
-			pen := &fakePen{self: "user:alice"}
+			pen := &fakePen{self: "human:alice:1"}
 			e := newTestEngine(t, pen, Hooks{}, 8, 8)
 			e.lifeCtx = context.Background()
 
@@ -209,7 +209,7 @@ func TestTerminalWriteClosesTheLedgerEntryOnAnAbsorbedDuplicate(t *testing.T) {
 	for _, verb := range terminalVerbs() {
 		t.Run(verb.name, func(t *testing.T) {
 			t.Parallel()
-			pen := &fakePen{self: "user:alice", reject: harness.HarnessTerminalDuplicate}
+			pen := &fakePen{self: "human:alice:1", reject: harness.HarnessTerminalDuplicate}
 			e := newTestEngine(t, pen, Hooks{}, 8, 8)
 			e.lifeCtx = context.Background()
 
@@ -248,7 +248,7 @@ func TestReplyMarshalsThePayloadExactlyOnce(t *testing.T) {
 
 	write := func(t *testing.T, v any) []byte {
 		t.Helper()
-		pen := &fakePen{self: "user:alice"}
+		pen := &fakePen{self: "human:alice:1"}
 		e := newTestEngine(t, pen, Hooks{}, 8, 8)
 		e.lifeCtx = context.Background()
 		env := newRequestEnv("r-resolve", -1)
@@ -308,7 +308,7 @@ func TestProgressNeverClosesTheLedgerEntry(t *testing.T) {
 // answering with a fake success would hide the mistake.
 func TestProgressRefusesALogOriginHandle(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
+	pen := &fakePen{self: "human:alice:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
@@ -391,7 +391,7 @@ func TestFailDerivesTheTerminalReasonFromWhoIsWriting(t *testing.T) {
 		e.actorCtx = &fakeActorContext{self: "agent:worker"}
 
 		env := newRequestEnv("r-receiver-fail", -1)
-		env.Sender.ID = "user:alice" // someone else asked
+		env.Sender.ID = "human:alice:1" // someone else asked
 		if !e.serve.admit(env) {
 			t.Fatal("expected admit to succeed")
 		}
@@ -426,16 +426,19 @@ func TestFailDerivesTheTerminalReasonFromWhoIsWriting(t *testing.T) {
 		if _, present := keys["cancelled"]; present {
 			t.Fatalf("a receiver failure must not carry the cancelled key at all, got %s", pen.last().Payload)
 		}
+		if _, present := keys["stage"]; present {
+			t.Fatalf("a peer receiver failure must not leak frame stage into the account, got %s", pen.last().Payload)
+		}
 	})
 
 	t.Run("failing a request I sent is closing my own account", func(t *testing.T) {
-		pen := &fakePen{self: "user:alice"}
+		pen := &fakePen{self: "human:alice:1"}
 		e := newTestEngine(t, pen, Hooks{}, 8, 8)
 		e.lifeCtx = context.Background()
-		e.actorCtx = &fakeActorContext{self: "user:alice"}
+		e.actorCtx = &fakeActorContext{self: "human:alice:1"}
 
 		env := newRequestEnv("r-self-close", -1)
-		env.Sender.ID = "user:alice" // I asked; I am now taking it back
+		env.Sender.ID = "human:alice:1" // I asked; I am now taking it back
 
 		if _, err := e.Fail(logMsg(t, env),
 			string(message.TerminalUnansweredTimeout), "cancelled by caller"); err != nil {

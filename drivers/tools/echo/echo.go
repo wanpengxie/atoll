@@ -30,6 +30,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -123,9 +124,20 @@ func parseConfig(raw json.RawMessage) (Config, error) {
 // §1.6): every incarnation is born with the same immutable config; a config
 // change replaces desired and rebuilds the body — there is no hot read.
 func Def(cfg Config) actorbase.Def {
-	return actorbase.Def{Doc: actorDoc, New: func() (actorbase.Proc, error) {
+	return actorbase.Def{Manifest: manifest(), New: func() (actorbase.Proc, error) {
 		return func(sys actorbase.Sys) error { return run(sys, cfg) }, nil
 	}}
+}
+
+func manifest() introspect.Manifest {
+	words := map[string]introspect.WordSpec{}
+	for _, name := range []string{
+		TypeSay, TypeCountdownStart, TypeCountdownAbort,
+		TypeFileRead, TypeFileWrite, TypeFileCreate,
+	} {
+		words[name] = introspect.WordSpec{Description: "echo development and capability-tour request"}
+	}
+	return introspect.Manifest{Class: "echo", Interfaces: []string{"actor"}, Words: words}
 }
 
 // startPayload is countdown.start's payload shape.
@@ -398,7 +410,7 @@ func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[mess
 	// event; parent/correlation tie it into this request's causal group.
 	evp, _ := json.Marshal(map[string]any{"note": p.Note, "seconds": p.Seconds})
 	_, _ = sys.Emit(behavior.EventSpec{
-		Type:          "echo.countdown-armed",
+		Type:          "echo.countdown_armed",
 		Payload:       evp,
 		ParentID:      msg.ID,
 		CorrelationID: msg.ID,
@@ -406,7 +418,7 @@ func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[mess
 
 	// ── Obs arm: push one opaque operational snapshot (kind/val are opaque
 	// to the substrate by design).
-	_ = sys.PublishObs("echo.countdown-armed", []byte(fmt.Sprintf(`{"held":%d}`, len(held))))
+	_ = sys.PublishObs("echo.countdown_armed", []byte(fmt.Sprintf(`{"held":%d}`, len(held))))
 }
 
 // settleFire closes the account a fire came home for. The fire itself is a

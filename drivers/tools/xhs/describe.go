@@ -1,9 +1,6 @@
 package xhs
 
-import (
-	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/protocol/message"
-)
+import "github.com/wanpengxie/atoll/lib/introspect"
 
 // describe.go is the actor.describe self-answer catalog — discovery is the
 // actor answering live (no external catalog). The shape mirrors echo's, scaled
@@ -33,36 +30,23 @@ const actorSkillDoc = "" +
 	"\n" +
 	"- `actor.describe` — returns the actor id, this skill doc, and the four type entries.\n"
 
-// requestKinds is the conventional allowed-kinds value for a request type.
-var requestKinds = []string{string(message.KindRequest)}
-
-// describeCatalog builds the full Describe self-answer for this actor id.
-func describeCatalog(actorID string) introspect.Describe {
-	return introspect.Describe{
-		ActorID:     actorID,
-		Description: actorDescription,
-		SkillDoc:    actorSkillDoc,
-		Types: map[string]introspect.TypeMeta{
+func manifest() introspect.Manifest {
+	return introspect.Manifest{
+		Class: "xhs", Interfaces: []string{"actor"},
+		Words: map[string]introspect.WordSpec{
 			TypePublish: {
-				Description:  "Publish a note to Xiaohongshu. Long-running (image upload + post).",
-				AllowedKinds: requestKinds,
-				MaxPendingMs: publishDeadline.Milliseconds(),
+				Description: "Publish a note to Xiaohongshu. Long-running (image upload + post).",
 				PayloadFields: []introspect.FieldDoc{
 					{Name: "title", Required: true, Description: "Note title."},
 					{Name: "content", Required: true, Description: "Note body text."},
 					{Name: "images", Description: "Image paths (workdir-relative) or urls.", Example: []string{"img/cover.png"}},
 					{Name: "tags", Description: "Topic tags.", Example: []string{"旅行"}},
 				},
-				ErrorCodes: []introspect.ErrorDoc{
-					{Code: "device_offline", Description: "No extension connected.", Recovery: "Attach a device and retry."},
-					{Code: "timeout", Description: "Device did not reply within ~600s.", Recovery: "Retry; check the extension."},
-				},
-				Notes: "out: {status, note_id, url}",
+				ErrorCodes: []string{"device_offline", "timeout"},
+				Notes:      "out: {status, note_id, url}",
 			},
 			TypeSearch: {
-				Description:  "Search Xiaohongshu by keyword.",
-				AllowedKinds: requestKinds,
-				MaxPendingMs: shortDeadline.Milliseconds(),
+				Description: "Search Xiaohongshu by keyword.",
 				PayloadFields: []introspect.FieldDoc{
 					{Name: "keyword", Required: true, Description: "Search keyword."},
 					{Name: "limit", Description: "Max results."},
@@ -70,9 +54,7 @@ func describeCatalog(actorID string) introspect.Describe {
 				Notes: "out: {results: []object}",
 			},
 			TypeNoteFetch: {
-				Description:  "Fetch one note. Locate by url, or by note_id + xsec_token.",
-				AllowedKinds: requestKinds,
-				MaxPendingMs: shortDeadline.Milliseconds(),
+				Description: "Fetch one note. Locate by url, or by note_id + xsec_token.",
 				PayloadFields: []introspect.FieldDoc{
 					{Name: "url", Description: "Note url (one valid locator)."},
 					{Name: "note_id", Description: "Note id (with xsec_token)."},
@@ -81,9 +63,7 @@ func describeCatalog(actorID string) introspect.Describe {
 				Notes: "out: {note: object}",
 			},
 			TypeRecentFetch: {
-				Description:  "Fetch the connected account's recent notes.",
-				AllowedKinds: requestKinds,
-				MaxPendingMs: shortDeadline.Milliseconds(),
+				Description: "Fetch the connected account's recent notes.",
 				PayloadFields: []introspect.FieldDoc{
 					{Name: "limit", Description: "Max notes."},
 				},

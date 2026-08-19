@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -143,13 +142,8 @@ func (a *actorSystem) Admit(ctx context.Context, request actorctl.AdmitRequest) 
 	return finishTransition(a, t, err)
 }
 
-func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (channel.IntroduceResult, error) {
+func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (actorctl.IntroduceResult, error) {
 	t, err := a.home.controller.Introduce(ctx, request)
-	return finishTransition(a, t, err)
-}
-
-func (a *actorSystem) Fork(ctx context.Context, request actorctl.ForkRequest) (actorctl.ForkResult, error) {
-	t, err := a.home.controller.Fork(ctx, request)
 	return finishTransition(a, t, err)
 }
 
@@ -174,7 +168,7 @@ func (a *actorSystem) End(ctx context.Context, request actorctl.EndRequest) (act
 	return result, err
 }
 
-func (a *actorSystem) Remove(ctx context.Context, request actorctl.RemoveRequest) (channel.RemoveResult, error) {
+func (a *actorSystem) Remove(ctx context.Context, request actorctl.RemoveRequest) (actorctl.RemoveResult, error) {
 	t, err := a.home.controller.Remove(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
@@ -300,10 +294,6 @@ func (a *actorSystem) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 
 func (a *actorSystem) ResolvePrincipal(principal string) (actor.ActorID, bool, error) {
 	return a.home.controller.ResolvePrincipal(principal)
-}
-
-func (a *actorSystem) DeclaredInstances(declID string) ([]actor.ActorID, error) {
-	return a.home.controller.DeclaredInstances(declID)
 }
 
 func (a *actorSystem) AdmitIdentity(

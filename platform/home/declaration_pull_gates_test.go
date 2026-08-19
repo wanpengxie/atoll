@@ -19,7 +19,7 @@ import (
 
 const (
 	declPullClass  = "routing-live"
-	declPullSource = "decl:pull-gates"
+	declPullSource = "decl-pull-gates"
 	declPullSeed   = `{"model":"v1"}`
 )
 
@@ -84,8 +84,8 @@ func (r *declPullSpace) ClassKind(context.Context, string) (actor.Kind, bool, er
 	r.classKinds++
 	return r.kind, r.kindFound, r.kindErr
 }
-func (r *declPullSpace) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
-	return channel.PlacementServer, true, nil
+func (r *declPullSpace) ClassPlacement(context.Context, string) (channelspec.PlacementKind, bool, error) {
+	return channelspec.PlacementServer, true, nil
 }
 func (r *declPullSpace) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
 	return nil
@@ -158,7 +158,7 @@ func openDeclPullHome(
 
 func declPullOnlyInstance(t *testing.T, h *Home) actor.ActorID {
 	t.Helper()
-	instances, err := h.controller.DeclaredInstances(declPullSource)
+	instances, err := activeMembersForSource(h.controller, declPullSource)
 	if err != nil || len(instances) != 1 {
 		t.Fatalf("declaration %q instances=%v err=%v", declPullSource, instances, err)
 	}

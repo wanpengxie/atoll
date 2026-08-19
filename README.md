@@ -140,8 +140,8 @@ later with zero migration:
 # generated root password is printed to the log)
 bin/atoll-server --home ~/.atoll/server --addr 127.0.0.1:8832
 
-# daemon (compute host) — first run binds with a device key (minted by
-# `atoll up` provisioning, or via the device.mint space word); later runs
+# daemon (compute host) — first run binds with a device key (created by
+# `atoll up` provisioning, or via the system.device.create space word); later runs
 # start bare (identity persists in the home)
 bin/atoll-daemon --home ~/.atoll/device --server "ws://127.0.0.1:8832/compute" --key <device-key>
 
@@ -216,8 +216,8 @@ else's messages arrive on the same connection:
 
 // 2. send a request into c0, addressed to one actor
 {"v":2,"frame_type":"submit","ref":"r1","payload":{
-  "channel_id":"c0","msg_type":"actor.list","kind":"request",
-  "visibility":"public","audience":["system"],"payload":{}}}
+  "channel_id":"c0","msg_type":"system.member.list","kind":"request",
+  "visibility":"public","audience":["system"],"payload":{"body":{}}}}
 ```
 
 The receipt carries `payload.message_id`; the answer arrives later as a `feed`
@@ -228,16 +228,17 @@ than reconnecting per command.
 
 ### Worked example: attach an MCP server at runtime
 
-Two messages, no rebuild. `actor.template.register` goes to the registrar (find its id in
-`actor.list`); `channel.introduce_actor` goes to `system`:
+Two messages, no rebuild. `system.actor.template.create` goes to
+`system:registrar`; `system.member.create` goes to `system`:
 
 ```jsonc
-// actor.template.register
+// system.actor.template.create (request body)
 {"id":"my-mcp","name":"My MCP","class":"mcp","visibility":"private",
+ "singleton":false,
  "config":{"name":"testsrv","transport":"http","url":"http://127.0.0.1:8931/mcp"}}
 
-// channel.introduce_actor  ->  {"instance_id":"tool:my-mcp:...","created":true}
-{"kind":"tool","decl_id":"my-mcp"}
+// system.member.create -> {"status":"completed","member":"tool:my-mcp:<ts>"}
+{"decl_id":"my-mcp"}
 ```
 
 The actor connects on birth and discovers its own tool surface, so

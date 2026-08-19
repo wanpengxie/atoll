@@ -112,6 +112,7 @@ type ActorDraft struct {
 	Kind         actor.Kind
 	Principal    string
 	SourceDeclID string
+	Singleton    bool
 	CreatedAt    int64
 	Definition   ActorDefinition
 	Placement    Placement
@@ -179,13 +180,6 @@ type PrincipalIdentity interface {
 	ResolvePrincipal(principal string) (actor.ActorID, bool, error)
 }
 
-// DeclaredInstanceReader answers "which actors did this declaration produce".
-// It returns ids alone: the definition axis belongs to the declaration pull
-// loop's own projection and never leaks into the business membrane.
-type DeclaredInstanceReader interface {
-	DeclaredInstances(string) ([]actor.ActorID, error)
-}
-
 // IdentityPresence answers only irreversible collaboration membership.
 type IdentityPresence interface {
 	IsActive(context.Context, actor.ActorID) (bool, error)
@@ -216,7 +210,6 @@ type ResourceActorAuthority interface {
 type ChannelAuthority interface {
 	ActorFactsAuthority
 	IdentityRoster
-	DeclaredInstanceReader
 	IdentityPresence
 	CollaborationAuthority
 	ResourceActorAuthority

@@ -13,12 +13,13 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 const (
 	restartStateClass = "restart-state-holder"
-	restartStateDecl  = "decl:restart-state"
+	restartStateDecl  = "decl-restart-state"
 	restartStateKey   = resource.ResourceID("boot-log")
 )
 
@@ -170,8 +171,12 @@ func TestDurableActorStateSurvivesAHomeRestart(t *testing.T) {
 	// The physical claim: one durable row, under the record's own id, holding
 	// the accumulated value. Home lends no leaf port, so the locus is read
 	// through a second handle the test opens itself.
-	durable := openDurableStateReader(t, channelID, dbPath)
-	value, exists, err := durable.Read(ctx, born.actorID, restartStateKey)
+	durable, err := runtime.OpenChannel(ctx, channelID, dbPath, runtime.OpenChannelOptions{MustExist: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer durable.Close()
+	value, exists, err := durable.Assembly.State.Read(ctx, born.actorID, restartStateKey)
 	if err != nil || !exists {
 		t.Fatalf("durable state row after restart: exists=%v err=%v", exists, err)
 	}

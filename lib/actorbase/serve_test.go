@@ -2,6 +2,7 @@ package actorbase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -9,8 +10,8 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -91,6 +92,10 @@ func (f *fakeSys) Call(target actor.ActorID, msgType string, payload any) (Pendi
 	panic("not implemented")
 }
 
+func (f *fakeSys) CallFor(harness.Caller, actor.ActorID, string, any) (Pending, error) {
+	panic("not implemented")
+}
+
 func (f *fakeSys) State() StateHandle { panic("not implemented") }
 
 func (f *fakeSys) Resource() ResourceHandle { panic("not implemented") }
@@ -100,10 +105,6 @@ func (f *fakeSys) After(d time.Duration, msgType string, payload any, home sched
 }
 
 func (f *fakeSys) CancelTimer(id schedule.TimerID) error { panic("not implemented") }
-
-func (f *fakeSys) Fork(message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
-	panic("not implemented")
-}
 
 func (f *fakeSys) End() error { panic("not implemented") }
 
@@ -128,9 +129,10 @@ var _ Sys = (*fakeSys)(nil)
 
 func newTestMsg(msgType string) Msg {
 	return NewMsg(OriginMailbox, context.Background(), message.Envelope{
-		ID:   "req-1",
-		Kind: message.KindRequest,
-		Type: msgType,
+		ID:      "req-1",
+		Kind:    message.KindRequest,
+		Type:    msgType,
+		Payload: json.RawMessage(`{"body":null}`),
 	})
 }
 
@@ -202,7 +204,7 @@ func TestDispatch_HandlerCtx_IsMsgCtx(t *testing.T) {
 	sys := &fakeSys{}
 	type ctxKey struct{}
 	want := context.WithValue(context.Background(), ctxKey{}, "value")
-	msg := NewMsg(OriginMailbox, want, message.Envelope{ID: "req-1", Kind: message.KindRequest, Type: "greet"})
+	msg := NewMsg(OriginMailbox, want, message.Envelope{ID: "req-1", Kind: message.KindRequest, Type: "greet", Payload: json.RawMessage(`{"body":null}`)})
 
 	var gotCtx context.Context
 	routes := map[string]Handler{

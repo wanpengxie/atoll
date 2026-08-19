@@ -6,8 +6,10 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // unauthorizedSenderCode belongs to the sysactor transport gate. It is not an
@@ -32,9 +34,10 @@ const unauthorizedSenderCode = "unauthorized_sender"
 // Linux's closed verb set + open file-name noun = the pattern; ioctl = the escape
 // hatch this law forbids).
 const (
-	TypeIntroduceActor = "channel.introduce_actor"
-	TypeRemoveActor    = "channel.remove_actor"
-	TypeRestartActor   = "channel.restart_actor"
+	TypeMemberCreate  = message.TypeSystemMemberCreate
+	TypeMemberAdmit   = message.TypeSystemMemberAdmit
+	TypeMemberDelete  = message.TypeSystemMemberDelete
+	TypeMemberRestart = message.TypeSystemMemberRestart
 )
 
 // OperateRequest is the decoded delivery an OperateExecutor acts on: the gate
@@ -44,7 +47,7 @@ const (
 // and payload-blind, it only routes the closed verb set and enforces membership).
 type OperateRequest struct {
 	ChannelID channel.ID
-	Sender    actor.ActorID
+	Caller    harness.Caller
 	Anchor    string
 	Payload   json.RawMessage
 }
@@ -81,18 +84,19 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	if s.operate == nil {
 		return
 	}
-	authed, err := s.senderIsActiveMember(msg)
+	caller := actorbase.EffectiveCaller(msg)
+	authed, err := s.callerIsAuthorized(msg, caller)
 	if err != nil {
 		_, _ = sys.Fail(msg, "internal_error", err.Error())
 		return
 	}
 	if !authed {
 		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
-			"sender", string(msg.Sender.ID), "code", unauthorizedSenderCode)
+			"sender", string(caller.Actor), "code", unauthorizedSenderCode)
 		_, _ = sys.Fail(msg, unauthorizedSenderCode, "sender is not an active channel member")
 		return
 	}
-	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Anchor: string(msg.ID), Payload: msg.Payload}
+	req := OperateRequest{ChannelID: msg.ChannelID, Caller: caller, Anchor: string(msg.ID), Payload: msg.Payload}
 	result, err := s.operate.Execute(msg.Ctx(), msg.Type, req)
 	if err != nil {
 		var oe *OperateError
@@ -118,9 +122,15 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 // unauthorized. The
 // window between this check and the value commit is the system's standard
 // in-flight tolerance (same doctrine as message delivery vs incarnation).
-func (s *SystemActor) senderIsActiveMember(msg actorbase.Msg) (bool, error) {
+func (s *SystemActor) callerIsAuthorized(msg actorbase.Msg, caller harness.Caller) (bool, error) {
+	if caller.Channel == channelspec.C0ChannelID {
+		return true, nil
+	}
+	if caller.Channel != msg.ChannelID {
+		return false, nil
+	}
 	if s.authority == nil {
 		return false, nil
 	}
-	return s.authority.IsActive(msg.Ctx(), msg.Sender.ID)
+	return s.authority.IsActive(msg.Ctx(), caller.Actor)
 }

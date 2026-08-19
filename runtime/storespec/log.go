@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
@@ -148,7 +147,7 @@ type MessageQuery interface {
 // VisibleMessageQuery is the reader-scoped history face. Raw MessageQuery is
 // retained for the delivery pump and audit internals.
 type VisibleMessageQuery interface {
-	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]StoredRow, int64, error)
+	ReadVisibleAfterSeq(context.Context, int64, int) ([]StoredRow, int64, error)
 }
 
 // RequestLookup recovers an original request envelope by id.

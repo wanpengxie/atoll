@@ -5,17 +5,17 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/wanpengxie/atoll/platform/peerproto"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 var ErrChannelClosed = errors.New("svcactor: channel closed")
 
 type portRequest struct {
-	ctx    context.Context
-	caller channel.ID
-	frame  peerproto.Request
-	done   chan peerproto.Result
+	ctx      context.Context
+	caller   channel.ID
+	frame    channel.Request
+	progress func(channel.Progress)
+	done     chan channel.Result
 }
 
 // Port belongs to one serving ChannelHost generation, not to one svcactor
@@ -30,20 +30,20 @@ func NewPort() *Port {
 	return &Port{requests: make(chan portRequest), done: make(chan struct{})}
 }
 
-func (p *Port) Call(ctx context.Context, caller channel.ID, frame peerproto.Request) (peerproto.Result, error) {
+func (p *Port) Call(ctx context.Context, caller channel.ID, frame channel.Request, onProgress func(channel.Progress)) (channel.Result, error) {
 	if p == nil {
-		return peerproto.Result{}, ErrChannelClosed
+		return channel.Result{}, ErrChannelClosed
 	}
 	select {
 	case <-p.done:
 		return closedResult(), nil
 	default:
 	}
-	req := portRequest{ctx: ctx, caller: caller, frame: cloneRequest(frame), done: make(chan peerproto.Result, 1)}
+	req := portRequest{ctx: ctx, caller: caller, frame: cloneRequest(frame), progress: onProgress, done: make(chan channel.Result, 1)}
 	select {
 	case p.requests <- req:
 	case <-ctx.Done():
-		return peerproto.Result{}, ctx.Err()
+		return channel.Result{}, ctx.Err()
 	case <-p.done:
 		return closedResult(), nil
 	}
@@ -51,7 +51,7 @@ func (p *Port) Call(ctx context.Context, caller channel.ID, frame peerproto.Requ
 	case result := <-req.done:
 		return result, nil
 	case <-ctx.Done():
-		return peerproto.Result{}, ctx.Err()
+		return channel.Result{}, ctx.Err()
 	case <-p.done:
 		return closedResult(), nil
 	}
@@ -75,11 +75,11 @@ func (p *Port) receive(ctx context.Context) (portRequest, error) {
 
 func (p *Port) Close() { p.once.Do(func() { close(p.done) }) }
 
-func cloneRequest(in peerproto.Request) peerproto.Request {
+func cloneRequest(in channel.Request) channel.Request {
 	in.Payload = append([]byte(nil), in.Payload...)
 	return in
 }
 
-func closedResult() peerproto.Result {
-	return peerproto.Result{Fail: &peerproto.Failure{Code: "channel_closed", Detail: "channel generation closed"}}
+func closedResult() channel.Result {
+	return channel.Result{Fail: &channel.Failure{Stage: channel.StageGate, Code: string(channel.GateChannelUnavailable), Detail: "channel generation closed"}}
 }

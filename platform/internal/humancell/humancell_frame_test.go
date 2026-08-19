@@ -380,13 +380,13 @@ func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
 }
 
 func TestInterpretResolveFiveStep(t *testing.T) {
-	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "tool:kimi"}, Audience: message.Audience{"human:alice"}}
+	req := &message.Envelope{ID: "r1", Type: subjectgate.WordHumanApprove, Sender: message.Sender{ID: "tool:kimi:1"}, Audience: message.Audience{"human:alice:1"}}
 	life := context.Background()
-	fs := &fakeSys{self: "human:alice", life: life, terminalID: "resp1"}
+	fs := &fakeSys{self: "human:alice:1", life: life, terminalID: "resp1"}
 
 	// happy path.
-	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{ChannelID: "c1", ReqID: "r1", Decision: "approved"})
-	got := interpretFrame(fs, newDeps("human:alice", req, true), f)
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{ChannelID: "c1", ReqID: "r1", Decision: "approve"})
+	got := interpretFrame(fs, newDeps("human:alice:1", req, true), f)
 	if got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("resolve happy path should receipt: %+v (%s)", got, decodeErr(t, got).Code)
 	}
@@ -400,21 +400,21 @@ func TestInterpretResolveFiveStep(t *testing.T) {
 	}
 
 	// invalid decision.
-	bad, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{ChannelID: "c1", ReqID: "r1", Decision: "maybe"})
-	if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", req, true), bad)); e.Code != subjectgate.CodeInvalidDecision {
+	bad, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{ChannelID: "c1", ReqID: "r1", Decision: "approved"})
+	if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice:1", req, true), bad)); e.Code != subjectgate.CodeInvalidDecision {
 		t.Fatalf("want invalid_decision, got %q", e.Code)
 	}
 	// not in audience.
-	other := newDeps("human:bob", req, true)
+	other := newDeps("human:bob:2", req, true)
 	if e := decodeErr(t, interpretFrame(fs, other, f)); e.Code != subjectgate.CodeNotInAudience {
 		t.Fatalf("want not_in_audience, got %q", e.Code)
 	}
 	// already closed.
-	if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", req, false), f)); e.Code != subjectgate.CodeAlreadyClosed {
+	if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice:1", req, false), f)); e.Code != subjectgate.CodeAlreadyClosed {
 		t.Fatalf("want already_closed, got %q", e.Code)
 	}
 	// not found.
-	if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, true), f)); e.Code != subjectgate.CodeRequestNotFound {
+	if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice:1", nil, true), f)); e.Code != subjectgate.CodeRequestNotFound {
 		t.Fatalf("want request_not_found, got %q", e.Code)
 	}
 }
@@ -426,13 +426,13 @@ func TestInterpretResolveFiveStep(t *testing.T) {
 // altogether. This test marshals exactly as Reply does and asserts the result is
 // still a decodable object carrying both the person's fields and the decision.
 func TestResolvePayloadIsMarshalledExactlyOnce(t *testing.T) {
-	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "tool:kimi"}, Audience: message.Audience{"human:alice"}}
-	fs := &fakeSys{self: "human:alice", terminalID: "resp1"}
+	req := &message.Envelope{ID: "r1", Type: subjectgate.WordHumanApprove, Sender: message.Sender{ID: "tool:kimi:1"}, Audience: message.Audience{"human:alice:1"}}
+	fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
+	note := "看过了"
 	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{
-		ChannelID: "c1", ReqID: "r1", Decision: "approved",
-		Payload: json.RawMessage(`{"note":"看过了","n":7}`),
+		ChannelID: "c1", ReqID: "r1", Decision: "approve", Note: &note,
 	})
-	if got := interpretFrame(fs, newDeps("human:alice", req, true), f); got.Type != subjectgate.FrameReceipt {
+	if got := interpretFrame(fs, newDeps("human:alice:1", req, true), f); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("resolve should receipt: %s", decodeErr(t, got).Code)
 	}
 	if _, isBytes := fs.replyVal.([]byte); isBytes {
@@ -447,8 +447,26 @@ func TestResolvePayloadIsMarshalledExactlyOnce(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("resolve payload is not a JSON object (base64 corruption?): %s", raw)
 	}
-	if out["decision"] != "approved" || out["note"] != "看过了" || out["n"] != float64(7) {
+	if out["decision"] != "approve" || out["note"] != "看过了" || len(out) != 2 {
 		t.Fatalf("resolve payload lost fields: %v", out)
+	}
+}
+
+func TestHumanAskResolveClosesWithTextOnly(t *testing.T) {
+	req := &message.Envelope{ID: "r1", Type: subjectgate.WordHumanAsk, Sender: message.Sender{ID: "agent:asker:1"}, Audience: message.Audience{"human:alice:1"}}
+	fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
+	text := "the answer"
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{ChannelID: "c1", ReqID: "r1", Text: &text})
+	if got := interpretFrame(fs, newDeps("human:alice:1", req, true), f); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("resolve should receipt: %s", decodeErr(t, got).Code)
+	}
+	answer, ok := fs.replyVal.(map[string]any)
+	if !ok || answer["text"] != text || len(answer) != 1 {
+		t.Fatalf("answer=%v", fs.replyVal)
+	}
+	bad, _ := subjectgate.NewFrame(subjectgate.FrameResolve, "r", subjectgate.ResolvePayload{ChannelID: "c1", ReqID: "r1", Text: &text, Decision: "approve"})
+	if e := decodeErr(t, interpretFrame(fs, newDeps("human:alice:1", req, true), bad)); e.Code != subjectgate.CodeBadPayload {
+		t.Fatalf("mixed human.ask answer code=%q", e.Code)
 	}
 }
 

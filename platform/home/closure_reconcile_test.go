@@ -26,8 +26,8 @@ import (
 // that a write fault on the way is really recorded instead of swallowed.
 
 const (
-	closureCallerDecl   = "decl:closure-caller"
-	closureReceiverDecl = "decl:closure-receiver"
+	closureCallerDecl   = "decl-closure-caller"
+	closureReceiverDecl = "decl-closure-receiver"
 	closureRequestType  = "test.closure.work"
 )
 

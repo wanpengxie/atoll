@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Event-landing gate. Invariant: every activity.* type on the wire is
+# Event-landing gate. Invariant: every agent.turn.* / agent.tool.* type on the wire is
 # registered in registry/activity.go (the one vocabulary source) — an
 # unregistered type is a phantom event no consumer knows about. Not
 # compiler-provable because the wire value is a string: producers can
@@ -24,7 +24,7 @@ valid_expiry() {
 
 declare -A known=()
 while IFS= read -r value; do known["$value"]=1; done < <(
-  rg -o '"activity\.[a-z.]+"' registry/activity.go | tr -d '"' | sort -u
+  rg -o '"agent\.(turn|tool)\.[a-z.]+"' registry/activity.go | tr -d '"' | sort -u
 )
 
 declare -A allowed=()
@@ -62,11 +62,11 @@ if [[ "${1:-}" == "--self-test" ]]; then
     echo "[activity-types] strict self-test failed: valid expiry was rejected" >&2
     exit 1
   fi
-  if is_registered_or_allowed "activity.unregistered.negative_fixture"; then
+  if is_registered_or_allowed "agent.turn.unregistered.negative_fixture"; then
     echo "[activity-types] strict self-test failed: unknown type was accepted" >&2
     exit 1
   fi
-  if ! is_registered_or_allowed "activity.turn.started"; then
+  if ! is_registered_or_allowed "agent.turn.started"; then
     echo "[activity-types] strict self-test failed: registered type was rejected" >&2
     exit 1
   fi
@@ -78,7 +78,7 @@ while IFS= read -r typ; do
   is_registered_or_allowed "$typ" && continue
   echo "[activity-types] unregistered activity type: $typ" >&2
   failures=$((failures + 1))
-done < <(rg -o '"activity\.[a-z.]+"' --glob '*.go' | sed -E 's/.*"(activity\.[a-z.]+)"/\1/' | sort -u)
+done < <(rg -o '"agent\.(turn|tool)\.[a-z.]+"' --glob '*.go' | sed -E 's/.*"(agent\.(turn|tool)\.[a-z.]+)"/\1/' | sort -u)
 
 # Production code must consume registry constants. Literal spellings outside
 # the single registry are accepted only in tests, where wire assertions need

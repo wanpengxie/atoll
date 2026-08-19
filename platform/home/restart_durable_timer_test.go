@@ -21,7 +21,7 @@ import (
 
 const (
 	restartTimerClass        = "restart-timer-worker"
-	restartTimerDecl         = "decl:restart-timer"
+	restartTimerDecl         = "decl-restart-timer"
 	restartTimerType         = "restart.timer.tick"
 	restartTimerFollowupType = "restart.timer.followup"
 	restartTimerPayload      = `{"round":1}`

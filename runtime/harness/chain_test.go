@@ -147,7 +147,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 	req := &message.Envelope{
 		ID: "req1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: callerID}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{toolID}, Payload: json.RawMessage(`{}`),
+		Audience: message.Audience{toolID}, Payload: json.RawMessage(`{"body":{}}`),
 	}
 	if res, err := c.write(ctxCallerKind(callerID, actor.KindAgent), req); err != nil || !res.Accepted() {
 		t.Fatalf("request write: err=%v reason=%q", err, res.RejectReason)

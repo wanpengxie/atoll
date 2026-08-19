@@ -37,14 +37,14 @@ func TestActorRegistryABA_DeclarationReuseMintsFreshIdentity(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
 
-	old := rig.mustInsert(agentDraft("decl:aba", "v1", 1000))
+	old := rig.mustInsert(agentDraft("decl-aba", "v1", 1000))
 	if err := rig.reg.Deregister(ctx, []actor.ActorID{old.ID}, 2000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 
 	// Same declaration, same mint seed: only the tombstone check can separate
 	// the two identities.
-	fresh := rig.mustInsert(agentDraft("decl:aba", "v2", 1000))
+	fresh := rig.mustInsert(agentDraft("decl-aba", "v2", 1000))
 	if fresh.ID == old.ID {
 		t.Fatalf("reused the dead identity %q; a re-declared actor must be a new identity", old.ID)
 	}
@@ -73,11 +73,11 @@ func TestActorRegistryABA_LateWriteFromDeadIdentityHitsNothing(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
 
-	old := rig.mustInsert(agentDraft("decl:aba", "v1", 1000))
+	old := rig.mustInsert(agentDraft("decl-aba", "v1", 1000))
 	if err := rig.reg.Deregister(ctx, []actor.ActorID{old.ID}, 2000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-	fresh := rig.mustInsert(agentDraft("decl:aba", "v2", 1000))
+	fresh := rig.mustInsert(agentDraft("decl-aba", "v2", 1000))
 	before := rig.commits
 
 	stale := storespec.ActorDefinition{Class: "stale", Config: json.RawMessage(`{"stale":true}`)}
@@ -118,11 +118,11 @@ func TestActorRegistryABA_LateDeregisterDoesNotReachSuccessor(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
 
-	old := rig.mustInsert(agentDraft("decl:aba", "v1", 1000))
+	old := rig.mustInsert(agentDraft("decl-aba", "v1", 1000))
 	if err := rig.reg.Deregister(ctx, []actor.ActorID{old.ID}, 2000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-	fresh := rig.mustInsert(agentDraft("decl:aba", "v2", 1000))
+	fresh := rig.mustInsert(agentDraft("decl-aba", "v2", 1000))
 
 	if err := rig.reg.Deregister(ctx, []actor.ActorID{old.ID}, 5000); err != nil {
 		t.Fatalf("replayed Deregister must be a silent no-op, got %v", err)
@@ -179,12 +179,12 @@ func TestActorRegistryABA_MintStepsPastATombstonedName(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
 
-	old := rig.mustInsert(agentDraft("decl:aba", "v1", 1000))
+	old := rig.mustInsert(agentDraft("decl-aba", "v1", 1000))
 	if err := rig.reg.Deregister(ctx, []actor.ActorID{old.ID}, 2000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 
-	fresh := rig.mustInsert(agentDraft("decl:aba", "v2", 1000))
+	fresh := rig.mustInsert(agentDraft("decl-aba", "v2", 1000))
 	if fresh.ID == old.ID {
 		t.Fatalf("the successor was minted onto the tombstoned name %q", old.ID)
 	}
@@ -199,20 +199,21 @@ func TestActorRegistryABA_MintStepsPastATombstonedName(t *testing.T) {
 	}
 }
 
-// While the predecessor is still ACTIVE, the same declaration updates it in
-// place — no second identity. Only death releases the key for a fresh birth.
-func TestActorRegistryABA_ActivePredecessorBlocksSecondIdentity(t *testing.T) {
+func TestActorRegistryABA_SingletonBlocksSecondActiveIdentity(t *testing.T) {
 	rig := newActorRegRig(t)
 
-	first := rig.mustInsert(agentDraft("decl:live", "v1", 1000))
-	second := rig.mustInsert(agentDraft("decl:live", "v2", 4000))
-	if second.ID != first.ID {
-		t.Fatalf("live declaration minted a second identity %q next to %q", second.ID, first.ID)
+	firstDraft := agentDraft("decl-live", "v1", 1000)
+	firstDraft.Singleton = true
+	first := rig.mustInsert(firstDraft)
+	secondDraft := agentDraft("decl-live", "v2", 4000)
+	secondDraft.Singleton = true
+	if _, err := rig.reg.Insert(context.Background(), secondDraft); !errors.Is(err, storespec.ErrConflictExists) {
+		t.Fatalf("second singleton birth err=%v", err)
 	}
 	if n := rig.rawRowCount(); n != 1 {
 		t.Fatalf("actor_registry rows = %d, want 1", n)
 	}
-	if second.Definition.Class != "v2" || second.CreatedAt != first.CreatedAt {
-		t.Fatalf("active update=%+v, want v2 with original birth time %d", second, first.CreatedAt)
+	if first.Definition.Class != "v1" {
+		t.Fatalf("first singleton changed: %+v", first)
 	}
 }

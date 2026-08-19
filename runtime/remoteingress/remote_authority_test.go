@@ -6,12 +6,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/capauth"
@@ -28,14 +28,12 @@ import (
 type recordStore struct {
 	mu       sync.Mutex
 	restored []storespec.ActorRecord
-	entries  map[actor.ActorID]storespec.ActorRecord
 	gone     map[actor.ActorID]bool
 }
 
 func newRecordStore(restored ...storespec.ActorRecord) *recordStore {
 	return &recordStore{
 		restored: restored,
-		entries:  make(map[actor.ActorID]storespec.ActorRecord),
 		gone:     make(map[actor.ActorID]bool),
 	}
 }
@@ -68,29 +66,13 @@ func (s *recordStore) Deregister(_ context.Context, ids []actor.ActorID) error {
 	defer s.mu.Unlock()
 	for _, id := range ids {
 		s.gone[id] = true
-		delete(s.entries, id)
 	}
 	return nil
 }
 
-func (s *recordStore) InstallEntry(record storespec.ActorRecord) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entries[record.ID] = record.Clone()
-}
-
 // ledger is the Controller face the ingress consumes: the narrow admission
-// questions plus the two typed self-commands (the Platform wraps the same two
-// with its post-commit tail; the verdict is identical either way).
+// questions plus the typed self-command.
 type ledger struct{ *actorctl.Controller }
-
-func (l ledger) Fork(
-	ctx context.Context,
-	request actorctl.ForkRequest,
-) (actorctl.ForkResult, error) {
-	transition, err := l.Controller.Fork(ctx, request)
-	return transition.Result, err
-}
 
 func (l ledger) End(
 	ctx context.Context,
@@ -557,32 +539,12 @@ func TestRestartWindowIsNeverHalfVisibleAtThePen(t *testing.T) {
 	wg.Wait()
 }
 
-// --- the self-lifecycle arms enter the Controller's own write door -----------
-func TestSelfLifecycleArmsGoThroughTheTypedCommands(t *testing.T) {
+// --- the self-lifecycle arm enters the Controller's own write door ------------
+func TestSelfLifecycleEndGoesThroughTheTypedCommand(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	key := currentKey(t, r.controller, remoteActor)
-
-	child, err := r.ingress.Fork(ctx, remoteActor, key, remoteingress.ForkRequest{
-		RequestID: message.ID("req-1"),
-		Spec:      actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	})
-	if err != nil || child == "" {
-		t.Fatalf("fork child=%q err=%v", child, err)
-	}
-	// A stale term cannot fork: the A/G verdict lives in the command itself.
-	if _, err := r.controller.Restart(ctx, actorctl.RestartRequest{ActorID: remoteActor}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.ingress.Fork(ctx, remoteActor, key, remoteingress.ForkRequest{
-		RequestID: message.ID("req-2"),
-		Spec:      actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	}); !errors.Is(err, actorctl.ErrStaleAttempt) {
-		t.Fatalf("stale fork err=%v, want stale attempt", err)
-	}
-
-	current := currentKey(t, r.controller, remoteActor)
-	if err := r.ingress.EndSelf(ctx, remoteActor, current, actorcaps.EndSelfRequest{
+	if err := r.ingress.EndSelf(ctx, remoteActor, key, actorcaps.EndSelfRequest{
 		Reason: "done",
 	}); err != nil {
 		t.Fatalf("end self err=%v", err)

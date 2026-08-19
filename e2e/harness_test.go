@@ -4,12 +4,9 @@
 //
 // The retired Codex-driver scenarios are intentionally not inherited: they
 // exercised the removed /api channel/declaration/control resources and real
-// provider behaviour, neither of which is a portal contract now. A newly
-// registered principal's random home channel is likewise not returned by the
-// identity endpoints or an empty websocket attach, so that home-specific
-// journey remains a reported contract-surface gap rather than a database read
-// hidden in this black-box package. Message and device journeys use the
-// production root -> c0 -> registrar-word path instead.
+// provider behaviour, neither of which is a portal contract now. Message,
+// identity, and device journeys use the production membrane and registrar
+// paths rather than hidden database reads.
 package e2e
 
 import (
@@ -557,63 +554,43 @@ func rootClient(t *testing.T, h *harness, since map[string]int64) (*apiClient, *
 	return api, dialWS(t, h.base, api.cookieHeader(), since)
 }
 
-func findTool(t *testing.T, ws *wsClient) string {
+func findRegistrar(t *testing.T, ws *wsClient) string {
 	t.Helper()
-	result := ws.request(c0ChannelID, "actor.list", systemActor, map[string]any{})
-	rows, _ := result["actors"].([]any)
-	for _, raw := range rows {
-		row, _ := raw.(map[string]any)
-		if row["kind"] == "tool" {
-			if id, _ := row["id"].(string); strings.HasPrefix(id, "tool:atoll-internal:registrar-seat:") {
-				return id
-			}
-		}
-	}
-	t.Fatalf("actor.list has no registrar tool: %v", result)
-	return ""
+	// The protocol deliberately exposes the registrar by its two-segment
+	// address; the engine resolves it to the sole active three-segment member.
+	return "system:registrar"
 }
 
-// awaitCoreactor waits for a channel to publish its own coreactor and returns
-// its actor id. A channel that has just been created reaches its first serving
-// generation asynchronously, so the poll is part of the contract rather than a
-// convenience.
-func awaitCoreactor(t *testing.T, ws *wsClient, channelID string) string {
+// awaitDoor waits for a newly created channel's intrinsic system door to serve.
+func awaitDoor(t *testing.T, ws *wsClient, channelID string) string {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, catalog, err := ws.tryRequest(channelID, "actor.list", systemActor, map[string]any{}); err == nil {
-			rows, _ := catalog["actors"].([]any)
-			for _, raw := range rows {
-				row, _ := raw.(map[string]any)
-				if row["kind"] == "tool" {
-					if id, _ := row["id"].(string); strings.HasPrefix(id, "tool:coreactor:") {
-						return id
-					}
-				}
-			}
+		if _, _, err := ws.tryRequest(channelID, "system.member.list", systemActor, map[string]any{}); err == nil {
+			return systemActor
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("channel %s never published its coreactor", channelID)
+	t.Fatalf("channel %s never served its system door", channelID)
 	return ""
 }
 
 // attachDevice binds a device to a channel. Binding is requested from inside
-// the target channel through that channel's own coreactor: the registrar in
+// the target channel through that channel's own door: the registrar in
 // c0 cannot bind on another channel's behalf.
 func attachDevice(t *testing.T, ws *wsClient, channelID, deviceID string) {
 	t.Helper()
-	tool := awaitCoreactor(t, ws, channelID)
-	ws.request(channelID, "device.attach", tool, map[string]any{
+	door := awaitDoor(t, ws, channelID)
+	registrarRequest(t, ws, channelID, door, "system.device.attach", map[string]any{
 		"channel_id": channelID, "device_id": deviceID,
 	})
 }
 
-// c0 seats the registrar itself. Its wire reply wraps the operation value in
-// {word,value,source}; per-channel coreactors unwrap that same result.
-func registrarRequest(t *testing.T, ws *wsClient, registrar, word string, payload any) map[string]any {
+// Registrar replies expose exactly one value field. channelID and target let
+// the same helper cover direct c0 calls and membrane-routed child calls.
+func registrarRequest(t *testing.T, ws *wsClient, channelID, target, word string, payload any) map[string]any {
 	t.Helper()
-	reply := ws.request(c0ChannelID, word, registrar, payload)
+	reply := ws.request(channelID, word, target, payload)
 	value, _ := reply["value"].(map[string]any)
 	if value == nil {
 		t.Fatalf("registrar %s reply omitted value: %v", word, reply)
@@ -630,7 +607,7 @@ func stringField(t *testing.T, row map[string]any, field string) string {
 	return value
 }
 
-// waitActorPresence polls actor.list until actorID's presence matches want,
+// waitActorPresence polls system.member.list until actorID's presence matches want,
 // failing early if the daemon expected to host it has already exited.
 func waitActorPresence(t *testing.T, ws *wsClient, actorID string, want bool, daemon *proc, logPath string) {
 	t.Helper()
@@ -639,7 +616,7 @@ func waitActorPresence(t *testing.T, ws *wsClient, actorID string, want bool, da
 		if daemon != nil && daemon.exited() {
 			t.Fatalf("daemon exited while waiting for actor presence=%v\n%s", want, tailLog(logPath, 100))
 		}
-		catalog := ws.request(c0ChannelID, "actor.list", systemActor, map[string]any{})
+		catalog := ws.request(c0ChannelID, "system.member.list", systemActor, map[string]any{})
 		present := false
 		rows, _ := catalog["actors"].([]any)
 		for _, raw := range rows {

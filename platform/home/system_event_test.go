@@ -70,11 +70,11 @@ func TestLifecycleNarrationLandsThroughSystemEventMouth(t *testing.T) {
 	defer func() { _ = h.closeInternal("test") }()
 	ctx := context.Background()
 
-	h.announceRegistered(ctx, "agent:new", actor.KindAgent)
-	h.announceEnded(ctx, []actor.ActorID{"agent:new"}, "test", actor.SystemActorID)
+	h.announceRegistered(ctx, "agent:new:1", map[string]any{"kind": actor.KindAgent})
+	h.announceEnded(ctx, []actor.ActorID{"agent:new:1"}, "test", actor.SystemActorID)
 	for _, typ := range []string{
-		actor.ReservedSystemActorRegistered,
-		actor.ReservedSystemActorEnded,
+		message.TypeSystemMemberCreated,
+		message.TypeSystemMemberDeleted,
 	} {
 		row, found, err := h.query.LatestBySenderAndType(ctx, actor.SystemActorID, typ)
 		if err != nil || !found || row.Envelope.Kind != message.KindEvent ||

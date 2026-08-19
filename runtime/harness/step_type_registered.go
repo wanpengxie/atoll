@@ -2,24 +2,12 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
-
-// reservedBootstrapTypeSet is the reserved bootstrap type set. Only the
-// channel system actor may emit these envelope.type values; any other
-// sender is rejected.
-//
-// Keys reference protocol/actor constants (the frozen closed set) rather
-// than bare literals so a kernel rename can never silently diverge here.
-var reservedBootstrapTypeSet = map[string]struct{}{
-	actor.ReservedSystemActorRegistered:   {},
-	actor.ReservedSystemActorDeregistered: {},
-	actor.ReservedSystemActorForked:       {},
-	actor.ReservedSystemActorEnded:        {},
-}
 
 // stepTypeRegistered enforces the substrate's RESERVED-NAMESPACE AUTHORITY for
 // the `system.*` events: those may only be emitted by the channel system actor,
@@ -40,19 +28,31 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (ou
 	// membership, reject any non-system sender trying to forge a reserved
 	// system event.
 	if strings.HasPrefix(env.Type, message.ReservedTypePrefix) {
-		if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
+		entry, ok := message.Parse(env.Type)
+		if !ok {
+			return outcome{
+				RejectReason: HarnessTypeUnknown,
+				Detail:       "unknown system type: " + env.Type,
+			}, nil
+		}
+		// A response inherits its request's type. The table constrains the
+		// authored word (request/event), while response pairing owns the reply
+		// shape and author rules.
+		if env.Kind != message.KindResponse && env.Kind != entry.Kind {
+			return outcome{
+				RejectReason: HarnessKindNotAllowedForType,
+				Detail:       fmt.Sprintf("system type %s requires kind=%s", env.Type, entry.Kind),
+			}, nil
+		}
+		if env.Kind == message.KindEvent {
 			if env.Sender.Kind != actor.KindSystem || env.Sender.ID != actor.SystemActorID {
 				return outcome{
 					RejectReason: HarnessReservedTypeUnauthorizedSender,
-					Detail:       "reserved system type may only be emitted by channel system actor: " + env.Type,
+					Detail:       "system event may only be emitted by channel system actor: " + env.Type,
 				}, nil
 			}
-			return outcome{}, nil
 		}
-		return outcome{
-			RejectReason: HarnessTypeUnknown,
-			Detail:       "non-reserved system namespace type is not installable: " + env.Type,
-		}, nil
+		return outcome{}, nil
 	}
 	// Any non-system type — business OR actor.* introspection — passes.
 	// The substrate does not gatekeep non-system vocabulary (type-agnostic); an

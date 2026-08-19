@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type inertIntroductionResolver struct{}
@@ -21,7 +22,7 @@ func (inertIntroductionResolver) ResolveDeclaration(context.Context, channel.ID,
 func (inertIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (inertIntroductionResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+func (inertIntroductionResolver) ClassPlacement(context.Context, string) (channelspec.PlacementKind, bool, error) {
 	return "", false, nil
 }
 func (inertIntroductionResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
@@ -65,19 +66,19 @@ func introduceHumanForTest(h *Home, ctx context.Context, kind actor.Kind, princi
 	if kind != actor.KindHuman {
 		return "", &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "human kind required"}
 	}
-	value, err := h.opEntry.Execute(ctx, "channel.introduce_actor", sysactor.OperateRequest{
-		Anchor: uuid.NewString(), Payload: json.RawMessage(`{"kind":"human","principal":"` + principal + `"}`),
+	value, err := h.opEntry.Execute(ctx, sysactor.TypeMemberAdmit, sysactor.OperateRequest{
+		Anchor: uuid.NewString(), Payload: json.RawMessage(`{"principal":"` + principal + `"}`),
 	})
 	if err != nil {
 		return "", err
 	}
-	return value.(map[string]any)["instance_id"].(actor.ActorID), nil
+	return value.(map[string]any)["member"].(actor.ActorID), nil
 }
 
 func removeActorForTest(h *Home, ctx context.Context, target actor.ActorID) error {
-	payload, _ := json.Marshal(map[string]any{"instance_id": target})
-	_, err := h.opEntry.Execute(ctx, "channel.remove_actor", sysactor.OperateRequest{
-		Sender: target, Anchor: uuid.NewString(), Payload: payload,
+	payload, _ := json.Marshal(map[string]any{"member": target})
+	_, err := h.opEntry.Execute(ctx, sysactor.TypeMemberDelete, sysactor.OperateRequest{
+		Caller: harness.Caller{Channel: h.channelID, Actor: target}, Anchor: uuid.NewString(), Payload: payload,
 	})
 	return err
 }

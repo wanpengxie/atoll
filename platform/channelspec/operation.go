@@ -1,4 +1,4 @@
-package channel
+package channelspec
 
 import (
 	"bytes"
@@ -12,8 +12,6 @@ import (
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
-
-	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // PlacementKind is the wire-level placement discriminator carried by a rendered
@@ -130,7 +128,7 @@ func appendCanonical(out *bytes.Buffer, value any) error {
 		}
 		out.WriteByte('}')
 	default:
-		return fmt.Errorf("channel: unsupported canonical JSON value %T", value)
+		return fmt.Errorf("channelspec: unsupported canonical JSON value %T", value)
 	}
 	return nil
 }
@@ -195,17 +193,6 @@ func formatJCSNumber(value float64) string {
 }
 
 var (
-	ErrInvalidPlacement = errors.New("channel: invalid placement")
-	ErrInvalidRequest   = errors.New("channel: invalid request")
+	ErrInvalidPlacement = errors.New("channelspec: invalid placement")
+	ErrInvalidRequest   = errors.New("channelspec: invalid request")
 )
-
-type AdmitResult struct {
-	ActorID actor.ActorID `json:"actor_id"`
-	Created bool          `json:"created"`
-}
-
-type IntroduceResult = AdmitResult
-
-type RemoveResult struct {
-	Removed []actor.ActorID `json:"removed"`
-}

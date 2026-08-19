@@ -18,9 +18,12 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const actorDoc = "External MCP server dynamically adapted as an Atoll tool actor."
+const typeRefresh = "mcp.refresh"
+const refreshInterval = time.Minute
 
 type snapshot struct {
 	description string
@@ -39,7 +42,9 @@ type mcpActor struct {
 }
 
 func Def(cfg Config) actorbase.Def {
-	return actorbase.Def{Doc: actorDoc, New: func() (actorbase.Proc, error) {
+	return actorbase.Def{Manifest: introspect.Manifest{
+		Class: "mcp", Interfaces: []string{"actor"}, Words: map[string]introspect.WordSpec{},
+	}, New: func() (actorbase.Proc, error) {
 		return (&mcpActor{cfg: cfg}).run, nil
 	}}
 }
@@ -54,12 +59,18 @@ func (a *mcpActor) run(sys actorbase.Sys) error {
 			_ = client.Close()
 			a.inflight.Wait()
 		}()
-		a.refresh(sys.Life())
+		a.refresh(sys, sys.Life())
+		_, _ = sys.After(refreshInterval, typeRefresh, struct{}{}, schedule.TimerHomeMemory)
 	}
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
 			return err
+		}
+		if msg.Kind == message.KindEvent && msg.Type == typeRefresh {
+			a.refresh(sys, sys.Life())
+			_, _ = sys.After(refreshInterval, typeRefresh, struct{}{}, schedule.TimerHomeMemory)
+			continue
 		}
 		if msg.Kind != message.KindRequest {
 			continue
@@ -77,14 +88,10 @@ func (a *mcpActor) run(sys actorbase.Sys) error {
 }
 
 func (a *mcpActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
-	if msg.Type == introspect.QueryDescribe {
-		a.describe(sys, msg)
-		return
-	}
 	a.call(sys, msg)
 }
 
-func (a *mcpActor) refresh(ctx context.Context) {
+func (a *mcpActor) refresh(sys actorbase.Sys, ctx context.Context) {
 	discover, err := a.client.discover(ctx)
 	if err != nil {
 		a.setLastError(err)
@@ -95,49 +102,20 @@ func (a *mcpActor) refresh(ctx context.Context) {
 		a.setLastError(err)
 		return
 	}
+	next := buildSnapshot(a.cfg.Name, discover, tools)
+	raw, err := json.Marshal(next.types)
+	if err != nil {
+		a.setLastError(err)
+		return
+	}
+	if _, err := sys.State().Put(actorbase.ManifestStateKey, raw); err != nil {
+		a.setLastError(err)
+		return
+	}
 	a.mu.Lock()
-	a.snapshot = buildSnapshot(a.cfg.Name, discover, tools)
+	a.snapshot = next
 	a.lastError = nil
 	a.mu.Unlock()
-}
-
-func (a *mcpActor) describe(sys actorbase.Sys, msg actorbase.Msg) {
-	req, err := introspect.ParseDescribeRequest(msg.Payload)
-	if err != nil {
-		_, _ = sys.Fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
-		return
-	}
-	// Refresh through the server's own cache hints before answering. A failed
-	// refresh never replaces or empties the last successful tool list — and is
-	// never itself a reason to stop refreshing: this is the actor's only path
-	// back from a transient outage, so it runs unconditionally.
-	if a.client != nil {
-		a.refresh(msg.Ctx())
-	}
-	a.mu.RLock()
-	current := a.snapshot
-	lastError := a.lastError
-	a.mu.RUnlock()
-	description := current.description
-	if description == "" {
-		description = "经 mcp 类接入的外部服务"
-	}
-	if lastError != nil {
-		if len(current.types) == 0 {
-			description += "; 从未成功连接: " + lastError.Error()
-		} else {
-			description += "; 当前够不着（保留最后一次成功快照）: " + lastError.Error()
-		}
-	}
-	answer, ok := introspect.AnswerDescribe(introspect.Describe{
-		ActorID: string(sys.Self()), Description: description,
-		SkillDoc: current.skillDoc, Types: current.types,
-	}, req)
-	if !ok {
-		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("mcp actor does not handle %s", req.Type))
-		return
-	}
-	_, _ = sys.Reply(msg, answer)
 }
 
 func (a *mcpActor) call(sys actorbase.Sys, msg actorbase.Msg) {

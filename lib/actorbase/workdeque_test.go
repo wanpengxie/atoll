@@ -7,7 +7,7 @@ import (
 )
 
 func reqEnv(id string) *message.Envelope {
-	return &message.Envelope{ID: message.ID(id), Kind: message.KindRequest}
+	return &message.Envelope{ID: message.ID(id), Kind: message.KindRequest, Payload: []byte(`{"body":null}`)}
 }
 func evEnv(id string) *message.Envelope {
 	return &message.Envelope{ID: message.ID(id), Kind: message.KindEvent}

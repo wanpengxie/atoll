@@ -152,7 +152,7 @@ func Fail(
 	request *message.Envelope,
 	errorCode, detail string,
 ) (message.ID, error) {
-	payload, _ := json.Marshal(map[string]string{"error_code": errorCode, "detail": detail})
+	payload, _ := json.Marshal(message.Failure{ErrorCode: errorCode, Detail: detail})
 	return Respond(ctx, pen, clock, request, ResponseSpec{
 		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalReceiverInternalError),

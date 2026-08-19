@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -117,7 +118,7 @@ func TestStepNormalize_TimeRelationGuard(t *testing.T) {
 			exp := tc.expiresAt
 			e := &message.Envelope{
 				ID: "m1", TS: tc.ts, ChannelID: testChannelID,
-				Kind: message.KindRequest, Type: "xhs.publish", ExpiresAt: &exp,
+				Kind: message.KindRequest, Type: "xhs.publish", ExpiresAt: &exp, Payload: json.RawMessage(`{"body":null}`),
 			}
 			out, err := runStep(t, newStepNormalize, deps, context.Background(), e)
 			if err != nil {

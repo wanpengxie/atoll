@@ -23,7 +23,7 @@ type testProvider struct {
 }
 
 func (p *testProvider) Spec() driverproto.ProviderSpec {
-	return driverproto.ProviderSpec{Name: "test", Capabilities: driverproto.Capabilities{Interrupt: true, Steer: true}, Describe: introspect.Describe{Description: "test"}}
+	return driverproto.ProviderSpec{Name: "test", Capabilities: map[string]bool{driverproto.CapabilityInterrupt: true, driverproto.CapabilitySteer: true}, Describe: introspect.Describe{Description: "test"}}
 }
 func (p *testProvider) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
 	w := &testWorker{host: h, reaped: make(chan struct{}), neverReap: p.neverReap}
@@ -69,7 +69,7 @@ type resumeRetryProvider struct {
 func (p *resumeRetryProvider) Spec() driverproto.ProviderSpec {
 	return driverproto.ProviderSpec{
 		Name:         "resume-retry",
-		Capabilities: driverproto.Capabilities{Resume: true},
+		Capabilities: map[string]bool{driverproto.CapabilityResume: true},
 		Describe:     introspect.Describe{Description: "resume retry test"},
 	}
 }
@@ -357,7 +357,7 @@ type controlCrashProvider struct {
 }
 
 func (p *controlCrashProvider) Spec() driverproto.ProviderSpec {
-	return driverproto.ProviderSpec{Name: "control-crash", Capabilities: driverproto.Capabilities{Interrupt: true}, Describe: introspect.Describe{Description: "control crash test"}}
+	return driverproto.ProviderSpec{Name: "control-crash", Capabilities: map[string]bool{driverproto.CapabilityInterrupt: true}, Describe: introspect.Describe{Description: "control crash test"}}
 }
 func (p *controlCrashProvider) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
 	w := &controlCrashWorker{host: h, reaped: make(chan struct{}), controlled: make(chan struct{})}

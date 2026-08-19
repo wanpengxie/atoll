@@ -137,9 +137,6 @@ func (s *failingAckSchedule) Ack(_ context.Context, id schedule.TimerID) error {
 // fakeSpawn is an actorcaps.LifecycleHandle double.
 type fakeSpawn struct{}
 
-func (fakeSpawn) Fork(_ context.Context, _ message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
-	return actor.ActorID("child/" + spec.NameHint), nil
-}
 func (fakeSpawn) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
 	return nil
 }
@@ -207,7 +204,7 @@ func newTestEngine(t *testing.T, pen *fakePen, hooks Hooks, serveCap, queueCap i
 }
 
 func newRequestEnv(id message.ID, expiresInMs int64) *message.Envelope {
-	env := &message.Envelope{ID: id, Kind: message.KindRequest, Type: "test.req"}
+	env := &message.Envelope{ID: id, Kind: message.KindRequest, Type: "test.req", Payload: json.RawMessage(`{"body":null}`)}
 	if expiresInMs >= 0 {
 		exp := time.Now().Add(time.Duration(expiresInMs) * time.Millisecond).UnixMilli()
 		env.ExpiresAt = &exp
@@ -785,19 +782,14 @@ func TestEngine_StopDrainsWorkerBeforeReturning(t *testing.T) {
 	}
 }
 
-// TestEngine_LifecycleMethodsReturnErrUnsupportedWhenLifecycleNil pins the
+// TestEngineEndReturnsErrUnsupportedWhenLifecycleNil pins the
 // defensive capability-absence contract: a deliberately incomplete host must
 // answer ErrUnsupported, never panic on a nil lifecycle handle.
-func TestEngine_LifecycleMethodsReturnErrUnsupportedWhenLifecycleNil(t *testing.T) {
+func TestEngineEndReturnsErrUnsupportedWhenLifecycleNil(t *testing.T) {
 	pen := &fakePen{self: "actor:daemon-hosted"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifecycle = nil
 
-	if _, err := e.Fork("fork-1", actorcaps.ForkSpec{
-		Kind: actor.KindTool, Class: "worker", NameHint: "hint",
-	}); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("Fork with nil lifecycle err = %v, want ErrUnsupported", err)
-	}
 	if err := e.End(); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("End with nil lifecycle err = %v, want ErrUnsupported", err)
 	}

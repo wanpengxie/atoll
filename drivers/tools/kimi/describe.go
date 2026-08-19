@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // describe.go is the actor.describe self-answer catalog — discovery is the
@@ -58,31 +57,19 @@ const actorSkillDoc = "" +
 	"- `actor.describe` — returns the actor id, this skill doc, and the single\n" +
 	"  kimi.command type entry.\n"
 
-// requestKinds is the conventional allowed-kinds value for a request type.
-var requestKinds = []string{string(message.KindRequest)}
-
-// describeCatalog builds the full Describe self-answer for this actor id.
-func describeCatalog(actorID string) introspect.Describe {
-	return introspect.Describe{
-		ActorID:     actorID,
-		Description: actorDescription,
-		SkillDoc:    actorSkillDoc,
-		Types: map[string]introspect.TypeMeta{
+func manifest() introspect.Manifest {
+	return introspect.Manifest{
+		Class: "kimi", Interfaces: []string{"actor"},
+		Words: map[string]introspect.WordSpec{
 			TypeCommand: {
 				Description:    "Forward one Kimi WebBridge browser command to the user's Chrome extension. The device verb is the payload's `action` (one of 13 primitives); `args` is forwarded verbatim.",
-				AllowedKinds:   requestKinds,
-				MaxPendingMs:   commandDeadline.Milliseconds(),
 				PayloadExample: json.RawMessage(`{"action":"navigate","args":{"url":"https://example.com"}}`),
 				PayloadFields: []introspect.FieldDoc{
 					{Name: "action", Required: true, Description: "Browser primitive: navigate / find_tab / snapshot / click / fill / evaluate / screenshot / network / upload / save_as_pdf / list_tabs / close_tab / close_session."},
 					{Name: "args", Description: "Action-specific arguments, forwarded to the extension verbatim.", Example: map[string]any{"url": "https://example.com"}},
 				},
-				ErrorCodes: []introspect.ErrorDoc{
-					{Code: "device_offline", Description: "No extension connected.", Recovery: "Attach a device and retry."},
-					{Code: "invalid_action", Description: "Action not in the 13-primitive set.", Recovery: "Use a supported action."},
-					{Code: "timeout", Description: "Device did not reply within ~60s.", Recovery: "Retry; check the extension."},
-				},
-				Notes: "Actions: navigate, find_tab, snapshot, click, fill, evaluate, screenshot, network, upload, save_as_pdf, list_tabs, close_tab, close_session. screenshot and save_as_pdf return a LOCAL file path (device writes to disk; bytes do not cross the wire).",
+				ErrorCodes: []string{"device_offline", "invalid_action", "timeout"},
+				Notes:      "Actions: navigate, find_tab, snapshot, click, fill, evaluate, screenshot, network, upload, save_as_pdf, list_tabs, close_tab, close_session. screenshot and save_as_pdf return a LOCAL file path (device writes to disk; bytes do not cross the wire).",
 			},
 		},
 	}

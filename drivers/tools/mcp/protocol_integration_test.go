@@ -19,9 +19,10 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
 func TestReferenceServerBothTransportsAndSSE(t *testing.T) {
@@ -119,6 +120,20 @@ type terminalRecorder struct {
 	failText string
 }
 
+type discardState struct{}
+
+func (discardState) Get(resource.ResourceID) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+func (discardState) Put(resource.ResourceID, []byte) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+func (discardState) Del(resource.ResourceID) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+
+func (s *terminalRecorder) State() actorbase.StateHandle { return discardState{} }
+
 func (s *terminalRecorder) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	s.reply, _ = value.(map[string]any)
 	return "reply", nil
@@ -142,7 +157,7 @@ func verifyActorTimeoutWithoutExpires(t *testing.T, c *client, transportName str
 	sys := &terminalRecorder{}
 	envelope := message.Envelope{
 		ID: "caller-unbounded", Kind: message.KindRequest, Type: "fixture.never_returns",
-		Payload: json.RawMessage(`{}`),
+		Payload: json.RawMessage(`{"body":{}}`),
 	}
 	if envelope.ExpiresAt != nil {
 		t.Fatal("test fixture unexpectedly set expires_at")
@@ -361,16 +376,15 @@ func verifyTTLRefreshAndPromptCache(t *testing.T, c *client) {
 	}
 
 	a := &mcpActor{cfg: Config{Name: "ttl", Transport: transportHTTP}, client: c}
-	a.refresh(context.Background())
+	sys := &terminalRecorder{}
+	a.refresh(sys, context.Background())
 	if got := len(a.snapshot.types); got != 15 {
 		t.Fatalf("initial types=%d", got)
 	}
 	if _, _, err := c.callTool(context.Background(), "toggle_extra_tool", json.RawMessage(`{}`), false); err != nil {
 		t.Fatal(err)
 	}
-	a.describe(&describeRecorder{}, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "describe-enabled", Kind: message.KindRequest, Type: introspect.QueryDescribe,
-	}))
+	a.refresh(sys, context.Background())
 	if got := len(a.snapshot.types); got != 16 {
 		t.Fatalf("types after enabling extra_tool=%d", got)
 	}
@@ -380,9 +394,7 @@ func verifyTTLRefreshAndPromptCache(t *testing.T, c *client) {
 	if _, _, err := c.callTool(context.Background(), "toggle_extra_tool", json.RawMessage(`{}`), false); err != nil {
 		t.Fatal(err)
 	}
-	a.describe(&describeRecorder{}, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "describe-disabled", Kind: message.KindRequest, Type: introspect.QueryDescribe,
-	}))
+	a.refresh(sys, context.Background())
 	if got := len(a.snapshot.types); got != 15 {
 		t.Fatalf("types after disabling extra_tool=%d", got)
 	}
@@ -439,14 +451,9 @@ func TestRejectsNonV2ServersWithActionableDescribe(t *testing.T) {
 				client: &http.Client{Transport: handlerRoundTripper{handler: handler}},
 			})
 			a := &mcpActor{cfg: Config{Name: "old", Transport: transportHTTP}, client: c}
-			a.refresh(context.Background())
-			recorder := &describeRecorder{}
-			a.describe(recorder, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-				ID: "describe-old", Kind: message.KindRequest, Type: introspect.QueryDescribe,
-			}))
-			answer, ok := recorder.reply.(introspect.Describe)
-			if !ok || len(answer.Types) != 0 || !stringsContains(answer.Description, tc.wantDetail) {
-				t.Fatalf("describe=%#v fail=%q", recorder.reply, recorder.fail)
+			a.refresh(&terminalRecorder{}, context.Background())
+			if err := a.currentLastError(); err == nil || !stringsContains(err.Error(), tc.wantDetail) {
+				t.Fatalf("last error=%v", err)
 			}
 		})
 	}

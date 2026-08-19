@@ -2,6 +2,7 @@ package home
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/platform/svcactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime"
@@ -125,7 +127,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// registry row, no admission and no record. Its identity reaches the kernel
 	// as a construction constant.
 	if cfg.Bootstrap {
-		if err := seedBootstrap(ctx, cs.Actors, cfg, h.nowMs); err != nil {
+		if err := seedBootstrap(ctx, cs.Actors, cs.Assembly.State, cfg, h.nowMs); err != nil {
 			return nil, err
 		}
 	}
@@ -173,7 +175,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
-	stateHandles, err := accessdoor.NewStateHandleResolver(organ.entries, access)
+	stateHandles, err := accessdoor.NewStateHandleResolver(access)
 	if err != nil {
 		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
 	}
@@ -296,6 +298,12 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: mint system caps: %w", err)
 	}
 	h.systemPen = systemCaps.Pen
+	var gatePeer sysactor.Peer
+	if peerResolver, ok := cfg.CompositionResolver.(PeerCompositionResolver); ok {
+		gatePeer = func(ctx context.Context, req channelpkg.Request, onProgress func(channelpkg.Progress)) (channelpkg.Result, error) {
+			return peerResolver.Peer(ctx, h.channelID, channelspec.C0ChannelID, req, onProgress)
+		}
+	}
 	systemUnit, err := actorrt.Prepare(actorrt.UnitConfig{
 		ActorID: actor.SystemActorID, Kind: actor.KindSystem, Logger: logger,
 	}, func(actorrt.Incarnation) actorrt.Actor {
@@ -305,7 +313,8 @@ func Open(cfg Config) (_ *Home, retErr error) {
 				return resolveDeclarationCatalog(ctx, h.resolver, h.channelID, declIDs)
 			},
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
-			Logger:   logger, Operate: h.opEntry, Logbook: h.query,
+			Logger:   logger, Operate: h.opEntry, Peer: gatePeer,
+			ResolveTarget: h.actors.ResolveTarget, Logbook: h.query,
 		}))
 	}, nil)
 	if err != nil {
@@ -333,6 +342,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		},
 		ObserveDown:   h.presenceFold.OnRemoteDown,
 		CancelRequest: h.handleCancelUpstream,
+		ResolveTarget: h.actors.ResolveTarget,
 		Plan:          h.planForDaemon,
 		IsBound: func(ctx context.Context, daemonID string) (bool, error) {
 			return h.registryBindings.IsBound(ctx, h.channelID, daemonID)
@@ -391,6 +401,7 @@ func validateGenesis(ctx context.Context, genesis storespec.GenesisStore, cfg Co
 func seedBootstrap(
 	ctx context.Context,
 	actors storespec.ActorRegistryStore,
+	state resourcespec.StateStore,
 	cfg Config,
 	nowMs func() int64,
 ) error {
@@ -403,10 +414,46 @@ func seedBootstrap(
 			return fmt.Errorf("platform: seed owner: %w", err)
 		}
 	}
+	instances := make(map[string]actor.ActorID, len(cfg.BootstrapDeclarations))
 	for _, declaration := range cfg.BootstrapDeclarations {
-		if err := admitBootstrapDeclaration(ctx, actors, declaration); err != nil {
+		record, err := admitBootstrapDeclaration(ctx, actors, declaration)
+		if err != nil {
 			return err
 		}
+		instances[declaration.SourceDeclID] = record.ID
+	}
+	if len(cfg.BootstrapService.Endpoints) == 0 && cfg.BootstrapService.SvcAgent == nil {
+		return nil
+	}
+	svcID := instances["svcactor"]
+	if svcID == "" {
+		return errors.New("platform: bootstrap service table has no svcactor")
+	}
+	table := svcactor.ServiceTable{Endpoints: make(map[string]actor.ActorID, len(cfg.BootstrapService.Endpoints))}
+	for word, declID := range cfg.BootstrapService.Endpoints {
+		id := instances[declID]
+		if id == "" {
+			return fmt.Errorf("platform: bootstrap endpoint %q has no declaration %q", word, declID)
+		}
+		table.Endpoints[word] = id
+	}
+	if cfg.BootstrapService.SvcAgent != nil {
+		value := *cfg.BootstrapService.SvcAgent
+		if value != "default" {
+			id := instances[value]
+			if id == "" {
+				return fmt.Errorf("platform: bootstrap svc_agent has no declaration %q", value)
+			}
+			value = string(id)
+		}
+		table.SvcAgent = &value
+	}
+	raw, err := json.Marshal(table)
+	if err != nil {
+		return err
+	}
+	if err := state.Create(ctx, svcID, svcactor.ServiceStateKey, raw); err != nil {
+		return fmt.Errorf("platform: seed service table: %w", err)
 	}
 	return nil
 }
@@ -417,25 +464,26 @@ func admitBootstrapDeclaration(
 	ctx context.Context,
 	actors storespec.ActorRegistryStore,
 	in DeclareRequest,
-) error {
+) (storespec.ActorRecord, error) {
 	if err := validateDeclareRequest(in); err != nil {
-		return err
+		return storespec.ActorRecord{}, err
 	}
 	var config []byte
 	if in.Config != nil {
 		config = append(config, (*in.Config)...)
 	}
-	_, err := actors.Insert(ctx, storespec.ActorDraft{
+	record, err := actors.Insert(ctx, storespec.ActorDraft{
 		Kind:         in.Kind,
 		SourceDeclID: in.SourceDeclID,
+		Singleton:    in.Singleton,
 		CreatedAt:    in.CreatedAt,
 		Definition:   storespec.ActorDefinition{Class: in.Class, Config: config},
 		Placement:    in.Placement,
 	})
 	if err != nil {
-		return err
+		return storespec.ActorRecord{}, err
 	}
-	return nil
+	return record, nil
 }
 
 // readOwnerPrincipal reads the channel's one owner pointer from genesis. Owner

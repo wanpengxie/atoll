@@ -1,12 +1,6 @@
 package device
 
-import (
-	"fmt"
-
-	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/protocol/message"
-)
+import "github.com/wanpengxie/atoll/lib/introspect"
 
 // actorDescription is the one-line actor positioning returned by
 // actor.describe.
@@ -31,53 +25,36 @@ const actorSkillDoc = "" +
 	"old_string must occur exactly once; on old_string_not_unique add more " +
 	"surrounding context lines and retry.\n"
 
-func requestMeta(meta introspect.TypeMeta, maxPendingMs int64) introspect.TypeMeta {
-	meta.AllowedKinds = []string{string(message.KindRequest)}
-	meta.MaxPendingMs = maxPendingMs
-	return meta
-}
-
 // typeMetas documents the four request types for actor.describe.
-var typeMetas = map[string]introspect.TypeMeta{
-	TypeExec: requestMeta(introspect.TypeMeta{
+var typeMetas = map[string]introspect.WordSpec{
+	TypeExec: {
 		Description: "Run a bash command inside the channel workspace.",
 		PayloadFields: []introspect.FieldDoc{
 			{Name: "command", Required: true, Description: "Bash command line.", Example: "grep -rn TODO ."},
 			{Name: "cwd", Description: "Working directory relative to the workspace; empty = workspace root."},
 			{Name: "timeout_ms", Description: "Execution bound; default 120000, cap 600000."},
 		},
-		ErrorCodes: []introspect.ErrorDoc{
-			{Code: "exec_timeout", Description: "Command exceeded timeout_ms.", Recovery: "Raise timeout_ms or split the work."},
-			{Code: "exec_spawn_failed", Description: "Command could not be started."},
-			{Code: "path_invalid", Description: "cwd is absolute or escapes the workspace."},
-		},
-		Notes: "Non-zero exit code is a completed result, not an error.",
-	}, MaxExecTimeoutMs),
-	TypeFileRead: requestMeta(introspect.TypeMeta{
+		ErrorCodes: []string{"exec_timeout", "exec_spawn_failed", "path_invalid"},
+		Notes:      "Non-zero exit code is a completed result, not an error.",
+	},
+	TypeFileRead: {
 		Description: "Read a workspace file, optionally a line slice.",
 		PayloadFields: []introspect.FieldDoc{
 			{Name: "path", Required: true, Description: "Workspace-relative file path."},
 			{Name: "offset", Description: "0-based start line."},
 			{Name: "limit", Description: "Max lines returned."},
 		},
-		ErrorCodes: []introspect.ErrorDoc{
-			{Code: "file_not_found", Description: "No such file."},
-			{Code: "file_too_large", Description: "File exceeds the whole-read cap.", Recovery: "Read in slices with offset/limit."},
-			{Code: "path_invalid", Description: "Path is absolute, escapes the workspace, or is a directory."},
-		},
-	}, DefaultExecTimeoutMs),
-	TypeFileWrite: requestMeta(introspect.TypeMeta{
+		ErrorCodes: []string{"file_not_found", "file_too_large", "path_invalid"},
+	},
+	TypeFileWrite: {
 		Description: "Create or fully replace a workspace file (parent dirs auto-created).",
 		PayloadFields: []introspect.FieldDoc{
 			{Name: "path", Required: true, Description: "Workspace-relative file path."},
 			{Name: "content", Required: true, Description: "Full file content."},
 		},
-		ErrorCodes: []introspect.ErrorDoc{
-			{Code: "path_invalid", Description: "Path is absolute or escapes the workspace."},
-			{Code: "write_failed", Description: "Filesystem write error."},
-		},
-	}, DefaultExecTimeoutMs),
-	TypeFileEdit: requestMeta(introspect.TypeMeta{
+		ErrorCodes: []string{"path_invalid", "write_failed"},
+	},
+	TypeFileEdit: {
 		Description: "Exact string replacement in a workspace file.",
 		PayloadFields: []introspect.FieldDoc{
 			{Name: "path", Required: true, Description: "Workspace-relative file path."},
@@ -85,33 +62,13 @@ var typeMetas = map[string]introspect.TypeMeta{
 			{Name: "new_string", Required: true, Description: "Replacement text."},
 			{Name: "replace_all", Description: "Replace every occurrence."},
 		},
-		ErrorCodes: []introspect.ErrorDoc{
-			{Code: "old_string_not_found", Description: "old_string not in file.", Recovery: "Re-read the file and retry with exact text."},
-			{Code: "old_string_not_unique", Description: "old_string occurs more than once.", Recovery: "Add surrounding context lines or set replace_all."},
-		},
-	}, DefaultExecTimeoutMs),
+		ErrorCodes: []string{"old_string_not_found", "old_string_not_unique"},
+	},
 }
 
-// handleDescribe serves the actor.describe self-answer through the standard
-// introspect dispatch: empty payload = full answer, {"type": ...} = single
-// type, unknown type = failed terminal. The actor id is taken live from
-// sys.Self() (spec §3 A2: no hard-coded id), so the self-answer always names
-// this incarnation's welded identity.
-func (a *Actor) handleDescribe(msg actorbase.Msg) {
-	req, err := introspect.ParseDescribeRequest(msg.Payload)
-	if err != nil {
-		a.fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
-		return
+func manifest() introspect.Manifest {
+	return introspect.Manifest{
+		Class: "device", Interfaces: []string{"actor"},
+		Words: introspect.CloneWords(typeMetas),
 	}
-	answer, ok := introspect.AnswerDescribe(introspect.Describe{
-		ActorID:     string(a.sys.Self()),
-		Description: actorDescription,
-		SkillDoc:    actorSkillDoc,
-		Types:       typeMetas,
-	}, req)
-	if !ok {
-		a.fail(msg, "type_unsupported", fmt.Sprintf("device actor does not handle %s", req.Type))
-		return
-	}
-	a.respond(msg, answer)
 }

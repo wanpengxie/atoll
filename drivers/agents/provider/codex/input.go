@@ -20,8 +20,8 @@ func buildInput(batch []driverproto.DriverMessage, background []driverproto.Cont
 	}
 	for _, m := range batch {
 		text := m.Text
-		if m.Sender != "" {
-			text = fmt.Sprintf("[from %s]\n%s", m.Sender, text)
+		if m.Caller.Actor != "" {
+			text = fmt.Sprintf("[from %s/%s]\n%s", m.Caller.Channel, m.Caller.Actor, text)
 		}
 		out = append(out, map[string]any{"type": "text", "text": text})
 	}

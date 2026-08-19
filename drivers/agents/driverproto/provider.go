@@ -24,14 +24,15 @@ type Worker interface {
 
 type ProviderSpec struct {
 	Name             string
-	Capabilities     Capabilities
+	Capabilities     map[string]bool
 	Describe         introspect.Describe
 	Selections       []TurnOptions
 	DefaultSelection int
 }
 
-type Capabilities struct {
-	Steer     bool
-	Interrupt bool
-	Resume    bool
-}
+const (
+	CapabilitySteer     = "steer"
+	CapabilityInterrupt = "interrupt"
+	CapabilityResume    = "resume"
+	CapabilityFork      = "fork"
+)

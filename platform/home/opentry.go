@@ -7,11 +7,12 @@ import (
 	"errors"
 	"io"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // opEntry is a transport adapter. Actor lifecycle and identity mutations all
@@ -42,19 +43,18 @@ func (e *opEntry) available() error {
 	return nil
 }
 
-func (e *opEntry) admit(ctx context.Context, principal string) (channel.AdmitResult, error) {
+func (e *opEntry) admit(ctx context.Context, principal string) (actorctl.AdmitResult, error) {
 	if err := e.available(); err != nil {
-		return channel.AdmitResult{}, err
+		return actorctl.AdmitResult{}, err
 	}
 	if principal == "" {
-		return channel.AdmitResult{}, &channelspec.OperationError{
+		return actorctl.AdmitResult{}, &channelspec.OperationError{
 			Code: channelspec.ErrCodeBadPayload, Detail: "principal required",
 		}
 	}
 	result, err := e.home.actors.Admit(ctx, actorctl.AdmitRequest{Principal: principal})
 	if err == nil && result.ActorID != "" {
 		e.home.ensureSubjectSlot(result.ActorID)
-		e.home.narrateBirth(ctx, result.ActorID, actor.KindHuman, result.Created)
 	}
 	return result, err
 }
@@ -66,33 +66,25 @@ func (e *opEntry) admit(ctx context.Context, principal string) (channel.AdmitRes
 func (e *opEntry) introduce(
 	ctx context.Context,
 	declID string,
-	principal string,
 	initiator actor.ActorID,
-	expected actor.Kind,
-) (channel.IntroduceResult, error) {
-	command, err := e.home.resolveIntroduction(ctx, declID, principal, initiator)
+) (actorctl.IntroduceResult, error) {
+	command, err := e.home.resolveIntroduction(ctx, declID, initiator)
 	if err != nil {
-		return channel.IntroduceResult{}, err
-	}
-	if command.Kind != expected {
-		return channel.IntroduceResult{}, &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "kind does not match declaration class"}
+		return actorctl.IntroduceResult{}, err
 	}
 	result, err := e.home.actors.Introduce(ctx, command)
-	if err == nil && result.ActorID != "" {
-		e.home.narrateBirth(ctx, result.ActorID, command.Kind, result.Created)
-	}
 	return result, err
 }
 
 func (e *opEntry) remove(
 	ctx context.Context,
 	req removeRequest,
-) (channel.RemoveResult, error) {
+) (actorctl.RemoveResult, error) {
 	if err := e.available(); err != nil {
-		return channel.RemoveResult{}, err
+		return actorctl.RemoveResult{}, err
 	}
 	if err := e.home.guardOwnerTerminal(ctx, req.Target); err != nil {
-		return channel.RemoveResult{}, err
+		return actorctl.RemoveResult{}, err
 	}
 	result, err := e.home.actors.Remove(ctx, actorctl.RemoveRequest{
 		Target: req.Target, InitiatorActorID: req.InitiatorActorID,
@@ -110,99 +102,94 @@ func (e *opEntry) Execute(
 		return nil, asOperateError(err)
 	}
 	switch operation {
-	case sysactor.TypeIntroduceActor:
+	case sysactor.TypeMemberCreate:
 		var payload struct {
-			Kind      actor.Kind `json:"kind"`
-			DeclID    string     `json:"decl_id"`
-			Principal string     `json:"principal"`
+			DeclID string `json:"decl_id"`
 		}
-		if err := decodeStrict(req.Payload, &payload); err != nil {
+		if err := decodeStrict(req.Payload, &payload); err != nil || payload.DeclID == "" {
 			return nil, &sysactor.OperateError{
-				Code: string(channelspec.ErrCodeBadPayload), Detail: "invalid introduce payload",
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "decl_id required",
 			}
 		}
-		switch payload.Kind {
-		case actor.KindHuman:
-			if payload.Principal == "" || payload.DeclID != "" {
-				return nil, badIntroduce("human requires principal and forbids decl_id")
-			}
-			result, err := e.admit(ctx, payload.Principal)
-			if err != nil {
-				return nil, asOperateError(err)
-			}
-			return map[string]any{"instance_id": result.ActorID, "created": result.Created}, nil
-		case actor.KindAgent, actor.KindTool:
-			if payload.DeclID == "" || (payload.Kind == actor.KindTool && payload.Principal != "") {
-				return nil, badIntroduce("agent/tool requires decl_id; tool forbids principal")
-			}
-			result, err := e.introduce(ctx, payload.DeclID, payload.Principal, req.Sender, payload.Kind)
-			if err != nil {
-				return nil, asOperateError(err)
-			}
-			return map[string]any{"instance_id": result.ActorID, "created": result.Created}, nil
-		default:
-			return nil, badIntroduce("kind must be human, agent, or tool")
+		result, err := e.introduce(ctx, payload.DeclID, req.Caller.Actor)
+		if err != nil {
+			return nil, asOperateError(err)
 		}
+		by := map[string]any{"caller": req.Caller}
+		if facts, active, factsErr := e.home.actors.ActorFacts(ctx, req.Caller.Actor); factsErr == nil && active && facts.SourceDeclID == payload.DeclID {
+			by = map[string]any{"fork_of": req.Caller.Actor}
+		}
+		e.home.narrateBirth(ctx, result.ActorID, result.Created, map[string]any{
+			"decl_id": payload.DeclID, "by": by,
+		})
+		return map[string]any{"member": result.ActorID}, nil
 
-	case sysactor.TypeRemoveActor:
+	case sysactor.TypeMemberAdmit:
 		var payload struct {
-			InstanceID actor.ActorID `json:"instance_id"`
-			DeclID     string        `json:"decl_id"`
+			Principal string `json:"principal"`
 		}
-		if err := decodeStrict(req.Payload, &payload); err != nil || (payload.InstanceID == "") == (payload.DeclID == "") {
+		if err := decodeStrict(req.Payload, &payload); err != nil || payload.Principal == "" {
 			return nil, &sysactor.OperateError{
-				Code: string(channelspec.ErrCodeBadPayload), Detail: "exactly one of instance_id or decl_id required",
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "principal required",
 			}
 		}
-		if payload.DeclID != "" {
-			ids, err := e.home.View().DeclaredInstances(ctx, payload.DeclID)
-			if err != nil {
-				return nil, asOperateError(err)
-			}
-			if len(ids) == 0 {
-				return map[string]any{"removed": false}, nil
-			}
-			if len(ids) != 1 {
-				return nil, &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: "declaration instance is ambiguous"}
-			}
-			payload.InstanceID = ids[0]
+		result, err := e.admit(ctx, payload.Principal)
+		if err != nil {
+			return nil, asOperateError(err)
+		}
+		e.home.narrateBirth(ctx, result.ActorID, result.Created, map[string]any{
+			"principal": payload.Principal, "by": map[string]any{"caller": req.Caller},
+		})
+		return map[string]any{"member": result.ActorID}, nil
+
+	case sysactor.TypeMemberDelete:
+		var payload struct {
+			Member actor.ActorID `json:"member"`
+		}
+		if err := decodeStrict(req.Payload, &payload); err != nil || payload.Member == "" {
+			return nil, &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: "member required"}
+		}
+		resolved, err := e.home.actors.ResolveTarget(string(payload.Member))
+		if err != nil {
+			return nil, asOperateError(err)
 		}
 		result, err := e.remove(ctx, removeRequest{
-			Target: payload.InstanceID, InitiatorActorID: req.Sender,
+			Target: resolved, InitiatorActorID: req.Caller.Actor,
 		})
 		if err != nil {
 			return nil, asOperateError(err)
 		}
 		return map[string]any{"removed": result.Removed}, nil
 
-	case sysactor.TypeRestartActor:
+	case sysactor.TypeMemberRestart:
 		var payload struct {
-			InstanceID actor.ActorID `json:"instance_id"`
+			Member actor.ActorID `json:"member"`
 		}
-		if err := decodeStrict(req.Payload, &payload); err != nil || payload.InstanceID == "" {
+		if err := decodeStrict(req.Payload, &payload); err != nil || payload.Member == "" {
 			return nil, &sysactor.OperateError{
-				Code: string(channelspec.ErrCodeBadPayload), Detail: "instance_id required",
+				Code: string(channelspec.ErrCodeBadPayload), Detail: "member required",
 			}
 		}
-		if err := e.home.guardOwnerTerminal(ctx, payload.InstanceID); err != nil {
+		resolved, err := e.home.actors.ResolveTarget(string(payload.Member))
+		if err != nil {
+			return nil, asOperateError(err)
+		}
+		payload.Member = resolved
+		if err := e.home.guardOwnerTerminal(ctx, payload.Member); err != nil {
 			return nil, asOperateError(err)
 		}
 		if err := e.home.actors.Restart(ctx, actorctl.RestartRequest{
-			ActorID: payload.InstanceID,
+			ActorID: payload.Member,
 		}); err != nil {
 			return nil, asOperateError(err)
 		}
-		return map[string]any{"restarted": payload.InstanceID}, nil
+		return map[string]any{"member": payload.Member}, nil
 
 	default:
 		return nil, &sysactor.OperateError{
 			Code: string(channelspec.ErrCodeNotAcceptedSource), Detail: "operation is not accepted",
 		}
 	}
-}
-
-func badIntroduce(detail string) *sysactor.OperateError {
-	return &sysactor.OperateError{Code: string(channelspec.ErrCodeBadPayload), Detail: detail}
 }
 
 func decodeStrict(raw json.RawMessage, out any) error {
@@ -224,11 +211,11 @@ func decodeStrict(raw json.RawMessage, out any) error {
 // narrateBirth writes the "joined the channel" narration for a freshly created
 // record. A replayed birth (created=false) narrates nothing. The narration is
 // composed from the command's own inputs — the tail never reads truth back.
-func (h *Home) narrateBirth(ctx context.Context, id actor.ActorID, kind actor.Kind, created bool) {
+func (h *Home) narrateBirth(ctx context.Context, id actor.ActorID, created bool, fields map[string]any) {
 	if !created {
 		return
 	}
-	h.announceRegistered(ctx, id, kind)
+	h.announceRegistered(ctx, id, fields)
 }
 
 func asOperateError(err error) error {
@@ -238,7 +225,15 @@ func asOperateError(err error) error {
 			Code: string(operationErr.Code), Detail: operationErr.Detail,
 		}
 	}
+	var targetErr *actorbase.TargetResolveError
+	if errors.As(err, &targetErr) {
+		return &sysactor.OperateError{Code: targetErr.Code, Detail: targetErr.Error()}
+	}
 	switch {
+	case errors.Is(err, storespec.ErrConflictExists):
+		return &sysactor.OperateError{
+			Code: string(channelspec.ErrCodeConflictExists), Detail: err.Error(),
+		}
 	case errors.Is(err, actorctl.ErrInvalidMutation):
 		return &sysactor.OperateError{
 			Code: string(channelspec.ErrCodeBadPayload), Detail: err.Error(),

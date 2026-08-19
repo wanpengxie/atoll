@@ -60,8 +60,8 @@ func TestObsRejectsUnauthenticatedAndRetiredPrincipalWithLiveCookie(t *testing.T
 		t.Fatalf("registered home channel lacks Registry-qualified name: %v", channels)
 	}
 	_, rootWS := rootClient(t, h, map[string]int64{c0ChannelID: 0})
-	registrar := findTool(t, rootWS)
-	registrarRequest(t, rootWS, registrar, "principal.retire", map[string]any{"principal_id": "obs-retired"})
+	registrar := findRegistrar(t, rootWS)
+	registrarRequest(t, rootWS, c0ChannelID, registrar, "system.principal.delete", map[string]any{"principal_id": "obs-retired"})
 	answer := user.request(http.MethodGet, "/obs/space/channels", nil, http.StatusForbidden)
 	if answer["code"] != "permission_denied" {
 		t.Fatalf("retired principal response=%v", answer)

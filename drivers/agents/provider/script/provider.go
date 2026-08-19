@@ -23,13 +23,13 @@ func NewProviderForTool(toolID, toolType string) driverproto.Provider {
 }
 func (provider) Spec() driverproto.ProviderSpec {
 	return driverproto.ProviderSpec{
-		Name: Class,
+		Name:         Class,
+		Capabilities: map[string]bool{driverproto.CapabilityFork: true},
 		Describe: introspect.Describe{
 			Description: ActorDoc,
 			SkillDoc:    "# script\n\nDeterministic regression provider.",
 			Types: map[string]introspect.TypeMeta{
-				TypeChat:   {Description: "call echo and persist payload", AllowedKinds: []string{string(message.KindRequest)}},
-				TypeVerify: {Description: "verify persisted resource", AllowedKinds: []string{string(message.KindRequest)}},
+				TypeAsk: {Description: "call echo and persist payload, or verify resource_id", AllowedKinds: []string{string(message.KindRequest)}},
 			},
 		},
 	}

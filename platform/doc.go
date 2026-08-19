@@ -17,7 +17,7 @@
 //     header comment).
 //   - ActorFactory (actorfactory.go) — a type alias onto
 //     platform/internal/hostcommon.ActorFactory, the one def shape every
-//     out-generation entry point (activation, fork, daemon build) speaks on
+//     out-generation entry point (activation and daemon build) speaks on
 //     BOTH hosts. The concrete representation + the shared Build/OutcomeString
 //     helpers live in platform/internal/hostcommon (T5a); the root only
 //     re-exports the name downstream code imports.

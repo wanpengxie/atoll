@@ -87,8 +87,8 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
   ON actor_registry(actor_kind, principal)
   WHERE deregistered_at IS NULL AND principal <> '';
-CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_source_decl
-  ON actor_registry(source_decl_id)
+CREATE INDEX IF NOT EXISTS ix_actor_registry_active_source_decl
+  ON actor_registry(actor_kind, source_decl_id)
   WHERE deregistered_at IS NULL AND source_decl_id <> '';
 
 -- Immutable self-truth written exactly once during ChannelHost provisioning.

@@ -45,6 +45,7 @@ type Config struct {
 	// Controller publishes one complete durable image.
 	BootstrapOwnerPrincipal string
 	BootstrapDeclarations   []DeclareRequest
+	BootstrapService        BootstrapService
 
 	Logger               *slog.Logger
 	ReconcileInterval    time.Duration
@@ -56,6 +57,11 @@ type Config struct {
 	DeviceDirectory      DeviceDirectory
 	RegistryBindings     BindingReader
 	ServicePort          *svcactor.Port
+}
+
+type BootstrapService struct {
+	SvcAgent  *string
+	Endpoints map[string]string
 }
 
 type DeviceDirectory interface {

@@ -6,7 +6,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/introspect"
 )
 
-// FormatCatalog projects an introspect.Catalog (the substrate's actor.list
+// FormatCatalog projects an introspect.Catalog (the substrate's member-list
 // response) into the grouped JSON shape the LLM consumes.
 func FormatCatalog(catalog introspect.Catalog) map[string]any {
 	out := make([]map[string]any, 0, len(catalog.Actors))

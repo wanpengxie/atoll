@@ -2,15 +2,12 @@ package lagoon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon/internal/store"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -27,7 +24,7 @@ type Change struct {
 type Registry struct {
 	store    *store.Store
 	onCommit func(Change)
-	// openRegistration is node policy: whether c0 exposes principal.register to
+	// openRegistration is node policy: whether c0 exposes system.principal.create to
 	// the lobby at all. Closed = the endpoint does not exist for the lobby, so
 	// the guest can neither see nor call it. Default closed.
 	openRegistration bool
@@ -36,7 +33,7 @@ type Registry struct {
 // Policy is node-level policy the registry face is constructed with; it is
 // not a mutation surface (Registry stays read-only after Open).
 type Policy struct {
-	// OpenRegistration exposes principal.register to the lobby. Default closed:
+	// OpenRegistration exposes system.principal.create to the lobby. Default closed:
 	// the endpoint then does not exist for the lobby — neither on c0's card nor
 	// dispatchable by its svcactor.
 	OpenRegistration bool
@@ -153,10 +150,6 @@ func (r *Registry) ResolveChannel(ctx context.Context, id channel.ID, qualified 
 	return regspec.ChannelRow{}, false, nil
 }
 
-func (r *Registry) ListEndpoints(ctx context.Context, ch channel.ID) ([]regspec.EndpointRow, error) {
-	return r.store.ListEndpoints(ctx, ch)
-}
-
 func (r *Registry) GetChannelTemplate(ctx context.Context, id string) (regspec.ChannelTemplateRow, bool, error) {
 	return r.store.GetChannelTemplate(ctx, id)
 }
@@ -166,7 +159,7 @@ func (r *Registry) ListChannelTemplates(ctx context.Context) ([]regspec.ChannelT
 }
 
 func (r *Registry) LocalDeviceKey(ctx context.Context) (string, error) {
-	row, ok, err := r.store.GetDevice(ctx, protocol.LocalDeviceID)
+	row, ok, err := r.store.GetDevice(ctx, channelspec.LocalDeviceID)
 	if err != nil {
 		return "", err
 	}
@@ -174,69 +167,6 @@ func (r *Registry) LocalDeviceKey(ctx context.Context) (string, error) {
 		return "", errors.New("lagoon: local device missing")
 	}
 	return row.Key, nil
-}
-
-// EndpointsFor is the endpoint table a caller channel sees on target: the
-// one place that decides what a channel exposes to whom. The lobby is outside
-// the trust domain, so c0 shows it only the doors in LobbyWords (and register
-// only while registration is open) — the svcactor dispatches from this same
-// table, so what is not shown is not callable either.
-func (r *Registry) EndpointsFor(ctx context.Context, target, caller channel.ID) ([]regspec.EndpointRow, error) {
-	rows, err := r.ListEndpoints(ctx, target)
-	if err != nil {
-		return nil, err
-	}
-	if target != protocol.C0ChannelID || caller != protocol.LobbyChannelID {
-		return rows, nil
-	}
-	exposed := rows[:0]
-	for _, row := range rows {
-		if !LobbyWord(Word(row.Name)) {
-			continue
-		}
-		if Word(row.Name) == WordPrincipalRegister && !r.openRegistration {
-			continue
-		}
-		exposed = append(exposed, row)
-	}
-	return exposed, nil
-}
-
-func (r *Registry) Describe(ctx context.Context, target channel.ID, caller channel.ID) (introspect.Describe, error) {
-	row, ok, err := r.GetChannelDesired(ctx, target)
-	if err != nil {
-		return introspect.Describe{}, err
-	}
-	if !ok || row.Status != regspec.ChannelPresent {
-		return introspect.Describe{}, errors.New("lagoon: channel not found")
-	}
-	endpoints, err := r.EndpointsFor(ctx, target, caller)
-	if err != nil {
-		return introspect.Describe{}, err
-	}
-	types := make(map[string]introspect.TypeMeta, len(endpoints)+3)
-	for _, endpoint := range endpoints {
-		meta := introspect.TypeMeta{Description: endpoint.Description}
-		if len(endpoint.Meta) > 0 {
-			var extra struct {
-				Examples []json.RawMessage `json:"examples"`
-				Schema   json.RawMessage   `json:"schema"`
-			}
-			if json.Unmarshal(endpoint.Meta, &extra) == nil {
-				if len(extra.Examples) > 0 {
-					meta.PayloadExample = extra.Examples[0]
-				}
-				meta.InputSchema = extra.Schema
-			}
-		}
-		types[endpoint.Name] = meta
-	}
-	if target != protocol.C0ChannelID && (caller == protocol.C0ChannelID || caller == row.ParentID) {
-		types["channel.introduce_actor"] = introspect.TypeMeta{Description: "Introduce a channel member."}
-		types["channel.remove_actor"] = introspect.TypeMeta{Description: "Remove a channel member."}
-		types["channel.restart_actor"] = introspect.TypeMeta{Description: "Restart a channel member."}
-	}
-	return introspect.Describe{ActorID: row.QualifiedName, Description: row.Description, Types: types}, nil
 }
 
 func qualifyChannelRows(rows []regspec.ChannelRow) ([]regspec.ChannelRow, error) {
@@ -263,7 +193,7 @@ func qualifyChannelRows(rows []regspec.ChannelRow) ([]regspec.ChannelRow, error)
 		state[id] = 1
 		row := &rows[i]
 		if row.ParentID == "" {
-			if row.ID != protocol.C0ChannelID || row.Name != string(protocol.C0ChannelID) {
+			if row.ID != channelspec.C0ChannelID || row.Name != string(channelspec.C0ChannelID) {
 				return "", fmt.Errorf("lagoon: non-c0 channel %q has no parent", id)
 			}
 			row.QualifiedName = row.Name

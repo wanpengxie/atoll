@@ -38,7 +38,68 @@ type callEntry struct {
 	// already in hand) and list hides it (it is no longer in-flight). This is
 	// the "缓冲 final 永远赢" invariant made structural rather than a scatter of
 	// if-guards.
-	final bool
+	final    bool
+	progress *progressQueue
+}
+
+type progressQueue struct {
+	mu     sync.Mutex
+	rows   []*message.Envelope
+	notify chan struct{}
+	closed bool
+	once   sync.Once
+	out    chan *message.Envelope
+}
+
+func newProgressQueue() *progressQueue {
+	return &progressQueue{notify: make(chan struct{}, 1), out: make(chan *message.Envelope)}
+}
+
+func (q *progressQueue) push(env *message.Envelope) {
+	q.mu.Lock()
+	if !q.closed {
+		q.rows = append(q.rows, env)
+	}
+	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (q *progressQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (q *progressQueue) channel() <-chan *message.Envelope {
+	q.once.Do(func() {
+		go func() {
+			defer close(q.out)
+			for {
+				q.mu.Lock()
+				if len(q.rows) > 0 {
+					row := q.rows[0]
+					q.rows = q.rows[1:]
+					q.mu.Unlock()
+					q.out <- row
+					continue
+				}
+				closed := q.closed
+				q.mu.Unlock()
+				if closed {
+					return
+				}
+				<-q.notify
+			}
+		}()
+	})
+	return q.out
 }
 
 // callLedger is the out-station account (spec §1.5): "InFlight →(回信对号|
@@ -80,7 +141,7 @@ func (l *callLedger) fault(id message.ID, err error) {
 // before-send — a response racing back before this returns can never find
 // no entry to match against).
 func (l *callLedger) register(env *message.Envelope, target actor.ActorID) *callEntry {
-	e := &callEntry{target: target, req: env, ch: make(chan *message.Envelope, 1)}
+	e := &callEntry{target: target, req: env, ch: make(chan *message.Envelope, 1), progress: newProgressQueue()}
 	l.mu.Lock()
 	l.entries[env.ID] = e
 	l.mu.Unlock()
@@ -92,6 +153,9 @@ func (l *callLedger) register(env *message.Envelope, target actor.ActorID) *call
 // to arm or wait for.
 func (l *callLedger) forget(id message.ID) {
 	l.mu.Lock()
+	if e := l.entries[id]; e != nil {
+		e.progress.close()
+	}
 	delete(l.entries, id)
 	l.mu.Unlock()
 }
@@ -151,9 +215,11 @@ func (l *callLedger) match(env *message.Envelope) bool {
 	}
 	_, final := behavior.ParseFinalStatus(env.Payload)
 	if !final {
+		e.progress.push(env)
 		l.mu.Unlock()
 		return true
 	}
+	e.progress.close()
 	if e.timer != nil {
 		e.timer.Stop()
 		e.timer = nil
@@ -229,6 +295,7 @@ func (l *callLedger) fireTimeout(id message.ID) {
 		return
 	}
 	delete(l.entries, id)
+	e.progress.close()
 	// Close ch to wake any parked waiter NOW (round-3/fable review): the
 	// account is closed, so a goroutine blocked in wait() must learn it here
 	// rather than sit out its whole window (or, on an unbounded wait, hang
@@ -274,6 +341,7 @@ func (l *callLedger) cancel(id message.ID) error {
 		return nil
 	}
 	delete(l.entries, id)
+	e.progress.close()
 	// Wake parked waiters, same as fireTimeout: account closed, no send can
 	// follow (match's lookup+send share one lock scope; entry is gone).
 	close(e.ch)
@@ -301,6 +369,18 @@ func (l *callLedger) cancel(id message.ID) error {
 		l.hooks.Canceller(e.target, id)
 	}
 	return nil
+}
+
+func (l *callLedger) progress(id message.ID) <-chan *message.Envelope {
+	l.mu.Lock()
+	e := l.entries[id]
+	l.mu.Unlock()
+	if e == nil {
+		ch := make(chan *message.Envelope)
+		close(ch)
+		return ch
+	}
+	return e.progress.channel()
 }
 
 // list returns the InFlight request ids (list_pending's engine-side source).
@@ -395,6 +475,7 @@ type JobTable interface {
 	// arrival, whichever first. An await parked when the account closes
 	// under it returns ErrCallClosed immediately.
 	Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error)
+	ProgressEvents(id message.ID) <-chan *message.Envelope
 	// List returns the in-flight request ids (list_pending).
 	List() []message.ID
 	// Cancel is pending.Cancel by id (the cancel tool) — idempotent to an id

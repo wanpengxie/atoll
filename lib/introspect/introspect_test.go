@@ -9,10 +9,10 @@ import (
 
 func sampleDescribe() Describe {
 	return Describe{
-		ActorID:     "device:laptop",
-		Description: "one-liner",
-		SkillDoc:    "# doc",
-		Types: map[string]TypeMeta{
+		Class:        "device",
+		Interfaces:   []string{"tool"},
+		Capabilities: map[string]bool{},
+		Words: map[string]WordSpec{
 			"device.exec": {
 				Description:  "run bash",
 				AllowedKinds: []string{"request"},
@@ -39,12 +39,12 @@ func TestAnswerDescribe_TypeSelector(t *testing.T) {
 	if !ok {
 		t.Fatal("type answer: ok=false")
 	}
-	dt, isDT := got.(DescribeType)
-	if !isDT {
-		t.Fatalf("type answer is %T; want DescribeType", got)
+	selected, isDescribe := got.(Describe)
+	if !isDescribe {
+		t.Fatalf("type answer is %T; want Describe", got)
 	}
-	if dt.ActorID != "device:laptop" || dt.Type != "device.exec" || dt.MaxPendingMs != 120_000 {
-		t.Fatalf("type answer = %+v", dt)
+	if len(selected.Words) != 1 || selected.Words["device.exec"].MaxPendingMs != 120_000 {
+		t.Fatalf("type answer = %+v", selected)
 	}
 }
 
@@ -67,28 +67,26 @@ func TestParseDescribeRequest(t *testing.T) {
 	}
 }
 
-// Guard the frozen convention constants so an accidental rename trips a test.
+// Guard the remaining standard query word.
 func TestReservedQueryNames(t *testing.T) {
 	if QueryDescribe != "actor.describe" {
 		t.Fatalf("QueryDescribe drifted: %q", QueryDescribe)
 	}
-	if QueryList != "actor.list" {
-		t.Fatalf("QueryList drifted: %q", QueryList)
-	}
-	if QueryStatus != "actor.status" {
-		t.Fatalf("QueryStatus drifted: %q", QueryStatus)
-	}
 }
 
-func TestParseStatusRequest(t *testing.T) {
-	req, err := ParseStatusRequest([]byte(`{"actor_id":"agent:a"}`))
-	if err != nil || req.ActorID != "agent:a" {
-		t.Fatalf("req=%+v err=%v", req, err)
-	}
-	for _, raw := range [][]byte{nil, []byte(`{}`), []byte(`{`)} {
-		if _, err := ParseStatusRequest(raw); err == nil {
-			t.Fatalf("ParseStatusRequest(%q) accepted invalid input", raw)
+func TestManifestReservationAppliesToWordsNotClassNames(t *testing.T) {
+	for _, class := range []string{"device", "svcactor"} {
+		manifest := Manifest{Class: class, Interfaces: []string{"actor"}, Words: map[string]WordSpec{"device.read": {}}}
+		if class == "svcactor" {
+			manifest.Interfaces = []string{"actor", "svcactor"}
+			manifest.Words = map[string]WordSpec{"svcactor.get": {}}
 		}
+		if err := ValidateManifest(manifest); err != nil {
+			t.Fatalf("class %q rejected: %v", class, err)
+		}
+	}
+	if err := ValidateManifest(Manifest{Class: "device", Interfaces: []string{"actor"}, Words: map[string]WordSpec{"system.channel.list": {}}}); err == nil {
+		t.Fatal("reserved word prefix accepted for a non-owner")
 	}
 }
 
@@ -131,7 +129,7 @@ func TestWireFieldNames(t *testing.T) {
 	full, _ := json.Marshal(sampleDescribe())
 	var fullKeys map[string]json.RawMessage
 	_ = json.Unmarshal(full, &fullKeys)
-	for _, k := range []string{"actor_id", "description", "skill_doc", "types"} {
+	for _, k := range []string{"class", "interfaces", "capabilities", "words"} {
 		if _, ok := fullKeys[k]; !ok {
 			t.Fatalf("Describe wire shape missing %q: %s", k, full)
 		}
@@ -141,9 +139,9 @@ func TestWireFieldNames(t *testing.T) {
 	single, _ := json.Marshal(dt)
 	var singleKeys map[string]json.RawMessage
 	_ = json.Unmarshal(single, &singleKeys)
-	for _, k := range []string{"actor_id", "type", "description", "allowed_kinds", "max_pending_ms"} {
+	for _, k := range []string{"class", "interfaces", "capabilities", "words"} {
 		if _, ok := singleKeys[k]; !ok {
-			t.Fatalf("DescribeType wire shape missing %q: %s", k, single)
+			t.Fatalf("selector wire shape missing %q: %s", k, single)
 		}
 	}
 }

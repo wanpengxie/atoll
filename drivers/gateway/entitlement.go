@@ -54,7 +54,7 @@ func (f ResolverFunc) Snapshot(ctx context.Context, principal string) ([]Route, 
 type ObserverRoute struct {
 	Channel channel.ID
 	Bundle  channelhost.Bundle
-	Reader  channel.Reader
+	Reader  Reader
 }
 
 // ObserverResolver evaluates injected public-observation policy. reason is a

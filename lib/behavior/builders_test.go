@@ -14,6 +14,7 @@ func TestBuildRequest(t *testing.T) {
 		Type:     "x.y",
 		Audience: message.Audience{"tool:t"},
 		ParentID: "p1",
+		Payload:  []byte(`{"body":null}`),
 	})
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
@@ -41,7 +42,7 @@ func TestBuildRequest(t *testing.T) {
 
 	// Caller id scheme override.
 	env, _ = BuildRequest(builderClock, RequestSpec{
-		Type: "x", Audience: message.Audience{"a"}, ID: "my-id",
+		Type: "x", Audience: message.Audience{"a"}, ID: "my-id", Payload: []byte(`{"body":null}`),
 	})
 	if env.ID != "my-id" {
 		t.Fatalf("id override = %q", env.ID)

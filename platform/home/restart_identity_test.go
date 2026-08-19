@@ -14,11 +14,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -26,85 +24,29 @@ import (
 
 const (
 	restartIdentityParkClass = "restart-identity-park"
-	restartForkParentClass   = "restart-fork-parent"
-	restartForkChildClass    = "restart-fork-child"
 	restartGateProbeKey      = resource.ResourceID("gate-probe")
 )
 
-type restartForkBirth struct {
-	parent actor.ActorID
-	child  actor.ActorID
-	err    string
-}
+type restartIdentityFixture struct{}
 
-// restartIdentityFixture builds the three bodies the identity-dimension tests
-// need. fork is the one thing that differs between two Home lives: the second
-// life must not fork a replacement, so a stale entry id can be interrogated
-// without a same-named successor confusing the reading.
-type restartIdentityFixture struct {
-	fork    bool
-	born    chan restartForkBirth
-	childUp chan actor.ActorID
-}
-
-func newRestartIdentityFixture(fork bool) *restartIdentityFixture {
-	return &restartIdentityFixture{
-		fork:    fork,
-		born:    make(chan restartForkBirth, 4),
-		childUp: make(chan actor.ActorID, 4),
-	}
+func newRestartIdentityFixture(bool) *restartIdentityFixture {
+	return &restartIdentityFixture{}
 }
 
 func (f *restartIdentityFixture) BuildClass(
 	_ channel.ID, _ actor.ActorID, class string, _ json.RawMessage,
 ) (platform.ActorFactory, bool) {
-	var proc actorbase.Proc
-	switch class {
-	case restartIdentityParkClass:
-		proc = restartParkProc
-	case restartForkParentClass:
-		proc = f.forkParentProc()
-	case restartForkChildClass:
-		proc = f.childProc()
-	default:
+	if class != restartIdentityParkClass {
 		return platform.ActorFactory{}, false
 	}
 	return platform.ActorFactory{Proc: actorbase.Def{New: func() (actorbase.Proc, error) {
-		return proc, nil
+		return restartParkProc, nil
 	}}}, true
 }
 
 func restartParkProc(sys actorbase.Sys) error {
 	<-sys.Life().Done()
 	return nil
-}
-
-func (f *restartIdentityFixture) forkParentProc() actorbase.Proc {
-	return func(sys actorbase.Sys) error {
-		if f.fork {
-			birth := restartForkBirth{parent: sys.Self()}
-			child, err := sys.Fork(
-				message.ID("fork:"+string(sys.Self())),
-				actorcaps.ForkSpec{
-					Kind: actor.KindAgent, Class: restartForkChildClass, NameHint: "entry",
-				})
-			if err != nil {
-				birth.err = err.Error()
-			}
-			birth.child = child
-			f.born <- birth
-		}
-		<-sys.Life().Done()
-		return nil
-	}
-}
-
-func (f *restartIdentityFixture) childProc() actorbase.Proc {
-	return func(sys actorbase.Sys) error {
-		f.childUp <- sys.Self()
-		<-sys.Life().Done()
-		return nil
-	}
 }
 
 // restartActiveRecords reads the durable registry's whole active image through
@@ -189,12 +131,12 @@ func TestBootRestoresEveryDurableIdentityKindWholeAndImmediatelyGated(t *testing
 		BootstrapOwnerPrincipal: ownerPrincipal,
 		BootstrapDeclarations: []DeclareRequest{
 			{
-				SourceDeclID: "decl:restore-agent", Kind: actor.KindAgent,
+				SourceDeclID: "decl-restore-agent", Kind: actor.KindAgent,
 				Class: restartIdentityParkClass, Config: &agentConfig,
 				Placement: storespec.NewServerPlacement(), CreatedAt: createdAt,
 			},
 			{
-				SourceDeclID: "decl:restore-tool", Kind: actor.KindTool,
+				SourceDeclID: "decl-restore-tool", Kind: actor.KindTool,
 				Class:     restartIdentityParkClass,
 				Placement: mustDaemonPlacement(t, "daemon-a"), CreatedAt: createdAt,
 			},
@@ -349,7 +291,7 @@ func TestBootRestoresEveryDurableIdentityKindWholeAndImmediatelyGated(t *testing
 		if record.SourceDeclID == "" {
 			continue
 		}
-		instances, err := h2.controller.DeclaredInstances(record.SourceDeclID)
+		instances, err := activeMembersForSource(h2.controller, record.SourceDeclID)
 		if err != nil || len(instances) != 1 || instances[0] != id {
 			t.Fatalf("declaration %q restored instances=%v err=%v",
 				record.SourceDeclID, instances, err)
@@ -387,171 +329,4 @@ func mustDaemonPlacement(t *testing.T, host string) storespec.Placement {
 		t.Fatal(err)
 	}
 	return placement
-}
-
-// T8. An entry record is process memory by construction: the entry table is
-// born empty with the process and is never reconstructed. So a forked child is
-// a first-class identity for the whole session that minted it and a stranger
-// the instant the process is gone — its state handle stops resolving, which is
-// the observable half of "the entry table did not come back".
-func TestForkedEntryIdentityDoesNotSurviveAHomeRestart(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
-	const channelID = channel.ID("restart-entry")
-	ctx := context.Background()
-
-	first := newRestartIdentityFixture(true)
-	h1, err := Open(Config{
-		ChannelID:            channelID,
-		DBPath:               dbPath,
-		CompositionResolver:  first,
-		IntroductionResolver: inertIntroductionResolver{},
-		ReconcileInterval:    time.Hour,
-		Bootstrap:            true,
-		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl:entry-parent", Kind: actor.KindAgent,
-			Class: restartForkParentClass, Placement: storespec.NewServerPlacement(),
-			CreatedAt: time.Now().UnixMilli(),
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	birth := restartRecv(t, "the parent to fork its child", first.born)
-	if birth.err != "" || birth.child == "" {
-		t.Fatalf("fork: child=%q err=%s", birth.child, birth.err)
-	}
-	restartRecv(t, "the forked child body to start", first.childUp)
-
-	// In-session, the entry identity is whole: a member, and its state handle
-	// resolves and round-trips.
-	if active, err := h1.controller.IsActive(ctx, birth.child); err != nil || !active {
-		t.Fatalf("entry child active=%v err=%v in its own session", active, err)
-	}
-	handle, err := h1.stateHandles.ResolveAuthority(
-		ctx, h1.controller.IdentityAuthorityFor(birth.child))
-	if err != nil {
-		t.Fatalf("entry child state handle in its own session: %v", err)
-	}
-	if out, err := handle.Invoke(
-		ctx, access.OpCreate, restartGateProbeKey, []byte(`"alive"`),
-	); err != nil || !out.Accepted() {
-		t.Fatalf("entry child state create: %+v err=%v", out, err)
-	}
-	if out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil); err != nil ||
-		!out.Accepted() || string(out.Value) != `"alive"` {
-		t.Fatalf("entry child state read: %+v err=%v", out, err)
-	}
-	if err := h1.closeInternal("test-restart"); err != nil {
-		t.Fatalf("close first Home: %v", err)
-	}
-
-	// The entry record never had a durable row to come back from.
-	if record, durable := restartActiveRecords(t, channelID, dbPath)[birth.child]; durable {
-		t.Fatalf("the forked entry child left a durable row: %+v", record)
-	}
-
-	h2, err := Open(Config{
-		ChannelID:            channelID,
-		DBPath:               dbPath,
-		CompositionResolver:  newRestartIdentityFixture(false),
-		IntroductionResolver: inertIntroductionResolver{},
-		ReconcileInterval:    time.Hour,
-		MustExistDB:          true,
-	})
-	if err != nil {
-		t.Fatalf("restart Open: %v", err)
-	}
-	t.Cleanup(func() { _ = h2.closeInternal("test") })
-
-	if active, err := h2.controller.IsActive(ctx, birth.child); err != nil || active {
-		t.Fatalf("entry child active=%v err=%v after restart", active, err)
-	}
-	if err := h2.controller.AuthorActive(birth.child); !errors.Is(err, actorctl.ErrInactive) {
-		t.Fatalf("entry child passed AuthorActive after restart: %v", err)
-	}
-	if _, err := h2.stateHandles.ResolveAuthority(
-		ctx, h2.controller.IdentityAuthorityFor(birth.child),
-	); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
-		t.Fatalf("entry child resolved a state handle after restart: %v", err)
-	}
-
-	// The contrast that makes the verdict about entry-ness rather than about
-	// the restart wiping everything: its durable parent came straight back.
-	if active, err := h2.controller.IsActive(ctx, birth.parent); err != nil || !active {
-		t.Fatalf("declared parent active=%v err=%v after restart", active, err)
-	}
-	if _, err := h2.stateHandles.ResolveAuthority(
-		ctx, h2.controller.IdentityAuthorityFor(birth.parent),
-	); err != nil {
-		t.Fatalf("declared parent state handle after restart: %v", err)
-	}
-}
-
-// T9. The fence around a dead identity's private state is not a sweep and not a
-// restart effect — it is the door's own verdict, and it lands the moment End
-// commits. This drives a REAL End through the Controller against both loci (a
-// declared durable record and a forked entry record) and reads the two
-// consequences: a handle already in hand stops being honoured, and no new one
-// can be minted at all.
-func TestEndedIdentityLosesItsStateHandleTheMomentEndCommits(t *testing.T) {
-	fixture := newRestartIdentityFixture(true)
-	ctx := context.Background()
-	h, err := Open(Config{
-		ChannelID:            "restart-end-fence",
-		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver:  fixture,
-		IntroductionResolver: inertIntroductionResolver{},
-		ReconcileInterval:    time.Hour,
-		Bootstrap:            true,
-		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl:end-fence", Kind: actor.KindAgent,
-			Class: restartForkParentClass, Placement: storespec.NewServerPlacement(),
-			CreatedAt: time.Now().UnixMilli(),
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = h.closeInternal("test") })
-
-	birth := restartRecv(t, "the parent to fork its child", fixture.born)
-	if birth.err != "" || birth.child == "" {
-		t.Fatalf("fork: child=%q err=%s", birth.child, birth.err)
-	}
-	restartRecv(t, "the forked child body to start", fixture.childUp)
-
-	for name, id := range map[string]actor.ActorID{
-		"durable": birth.parent, "entry": birth.child,
-	} {
-		handle, err := h.stateHandles.ResolveAuthority(
-			ctx, h.controller.IdentityAuthorityFor(id))
-		if err != nil {
-			t.Fatalf("%s identity %s: %v", name, id, err)
-		}
-		if out, err := handle.Invoke(
-			ctx, access.OpCreate, restartGateProbeKey, []byte(`"alive"`),
-		); err != nil || !out.Accepted() {
-			t.Fatalf("%s identity %s state create: %+v err=%v", name, id, out, err)
-		}
-
-		endIdentityForFixture(t, h, id)
-
-		// The handle already in hand carries the authority, never a snapshot:
-		// the door re-runs the verdict on every call, so it is refused now.
-		out, err := handle.Invoke(ctx, access.OpRead, restartGateProbeKey, nil)
-		if err != nil || out.RejectReason != access.OwnerInactive {
-			t.Fatalf("%s identity %s still served after End: %+v err=%v", name, id, out, err)
-		}
-		if out, err := handle.Invoke(
-			ctx, access.OpWrite, restartGateProbeKey, []byte(`"zombie"`),
-		); err != nil || out.RejectReason != access.OwnerInactive {
-			t.Fatalf("%s identity %s still writable after End: %+v err=%v", name, id, out, err)
-		}
-		// And no fresh handle can be minted for it at all.
-		if _, err := h.stateHandles.ResolveAuthority(
-			ctx, h.controller.IdentityAuthorityFor(id),
-		); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
-			t.Fatalf("%s identity %s minted a fresh state handle after End: %v", name, id, err)
-		}
-	}
 }

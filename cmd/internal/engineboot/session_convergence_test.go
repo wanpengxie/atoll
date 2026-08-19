@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -55,9 +55,9 @@ func TestRegistrarCommitPokeConvergesAnExistingSession(t *testing.T) {
 	if code := subjectgateErrorCode(t, session.Upstream(probe)); code == subjectgate.CodeForbidden {
 		t.Fatal("present principal session lacked its home route")
 	}
-	core, _ := eng.host.Acquire(protocol.C0ChannelID)
-	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
-	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordPrincipalRetire), map[string]any{"principal_id": "poke-user"}), nil)
+	core, _ := eng.host.Acquire(channelspec.C0ChannelID)
+	registrar := onlyDecl(t, core, lagoon.RegistrarDeclID)
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordPrincipalDelete), map[string]any{"principal_id": "poke-user"}), nil)
 
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()

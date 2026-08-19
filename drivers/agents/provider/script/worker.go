@@ -159,19 +159,21 @@ func (w *worker) resource(ctx context.Context, target driverproto.WorkerTurnTarg
 }
 
 func (w *worker) execute(ctx context.Context, target driverproto.WorkerTurnTarget, m driverproto.DriverMessage) (string, string) {
-	switch m.Type {
-	case TypeChat:
-		return w.chat(ctx, target, m)
-	case TypeVerify:
-		return w.verify(ctx, target, m)
-	default:
+	if m.Type != TypeAsk {
 		return "", "type_unsupported: script does not handle " + m.Type
 	}
+	var probe struct {
+		ResourceID string `json:"resource_id"`
+	}
+	if json.Unmarshal(m.Payload, &probe) == nil && strings.TrimSpace(probe.ResourceID) != "" {
+		return w.verify(ctx, target, m)
+	}
+	return w.chat(ctx, target, m)
 }
 func (w *worker) chat(ctx context.Context, target driverproto.WorkerTurnTarget, m driverproto.DriverMessage) (string, string) {
 	var payload map[string]any
 	if json.Unmarshal(m.Payload, &payload) != nil || payload == nil {
-		return "", "bad_payload: loop.chat payload must be a JSON object"
+		return "", "bad_payload: agent.ask payload must be a JSON object"
 	}
 	params, _ := json.Marshal(map[string]any{"actor_id": w.toolID, "type": w.toolType, "payload": payload, "wait": true})
 	tool := w.tool(ctx, target, driverproto.ToolInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("call-%d", target.Attempt)), Name: "call_actor", Params: params})
@@ -195,7 +197,7 @@ func (w *worker) verify(ctx context.Context, target driverproto.WorkerTurnTarget
 		ResourceID string `json:"resource_id"`
 	}
 	if json.Unmarshal(m.Payload, &p) != nil || strings.TrimSpace(p.ResourceID) == "" {
-		return "", "bad_payload: loop.verify requires resource_id"
+		return "", "bad_payload: agent.ask verification requires resource_id"
 	}
 	out := w.resource(ctx, target, driverproto.ResourceInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("read-%d", target.Attempt)), Operation: "read_file", ResourceID: p.ResourceID})
 	if out.Error != "" {

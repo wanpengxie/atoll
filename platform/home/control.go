@@ -14,7 +14,7 @@ import (
 // daemon body obtains the equivalent reach through its current
 // DaemonOutbound bundle; handleCancelUpstream below receives that frame.
 func (h *Home) hooks() actorbase.Hooks {
-	return actorbase.Hooks{Canceller: h.cancelRequest}
+	return actorbase.Hooks{Canceller: h.cancelRequest, ResolveTarget: h.actors.ResolveTarget}
 }
 
 // cancelRequest reaches the request-scope of cancel(scope) for one in-flight

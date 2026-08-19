@@ -5,9 +5,6 @@ import (
 	"slices"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -20,8 +17,6 @@ var (
 	ErrStaleAttempt    = errors.New("actorctl: stale attempt")
 	ErrAlreadyStarted  = errors.New("actorctl: already started")
 	ErrInvalidMutation = errors.New("actorctl: invalid mutation")
-	ErrForkInvalid     = errors.New("actorctl: invalid fork")
-	ErrForkConflict    = errors.New("actorctl: fork request replayed with a different payload")
 )
 
 type ControllerPhase uint8
@@ -47,8 +42,6 @@ type AdmitRequest struct {
 	Principal string
 }
 
-type AdmitResult = channel.AdmitResult
-
 // IntroduceRequest is the pre-resolved declaration admission. The declaration
 // was fetched, its visibility judged and its placement host chosen at the
 // Platform door; the command carries only mechanical facts.
@@ -56,6 +49,7 @@ type IntroduceRequest struct {
 	DeclID     string
 	Kind       actor.Kind
 	Principal  string
+	Singleton  bool
 	Definition storespec.ActorDefinition
 	Placement  storespec.Placement
 }
@@ -105,20 +99,7 @@ type TerminalCommand struct {
 
 type TerminalResult struct {
 	Ended  []actor.ActorID
-	Remove channel.RemoveResult
-}
-
-// ForkRequest is the only command carrying a RequestID: a child id is freshly
-// minted, so the ledger itself cannot answer "did I already do this".
-type ForkRequest struct {
-	CallerActorID actor.ActorID
-	CallerAttempt actorhost.AttemptKey
-	RequestID     message.ID
-	Spec          actorcaps.ForkSpec
-}
-
-type ForkResult struct {
-	ChildActorID actor.ActorID
+	Remove RemoveResult
 }
 
 // ReconcileHints is derived from an already committed transition. It carries no

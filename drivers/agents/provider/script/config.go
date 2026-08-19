@@ -9,10 +9,9 @@ import (
 
 const (
 	Class           = "script"
-	TypeChat        = "loop.chat"
-	TypeVerify      = "loop.verify"
+	TypeAsk         = "agent.ask"
 	defaultToolType = "echo.say"
-	ActorDoc        = "Deterministic scripted assistant: loop.chat calls echo and writes a file; loop.verify reads it."
+	ActorDoc        = "Deterministic scripted assistant: agent.ask calls echo and writes a file, or verifies a named resource."
 )
 
 type Config struct {

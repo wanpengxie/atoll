@@ -499,16 +499,16 @@ func TestTimer_DeregisterLeavesAuthorTimersInert(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
 
-	mustInsertActor(t, f.reg, "actor:a")
-	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
-	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t2", AuthorID: "actor:a", FireAt: 2000, Type: "wake", CreatedAt: 1})
-	mustInsertActor(t, f.reg, "actor:b")
-	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t3", AuthorID: "actor:b", FireAt: 1000, Type: "wake", CreatedAt: 1})
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", []byte("resource")); err != nil {
+	a := mustInsertActor(t, f.reg, "a")
+	b := mustInsertActor(t, f.reg, "b")
+	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: a, FireAt: 1000, Type: "wake", CreatedAt: 1})
+	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t2", AuthorID: a, FireAt: 2000, Type: "wake", CreatedAt: 1})
+	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t3", AuthorID: b, FireAt: 1000, Type: "wake", CreatedAt: 1})
+	if err := f.res.Create(ctx, "kv:doc", "kv", a, []byte("resource")); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 
-	if err := endActorForTest(ctx, f.reg, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, a, 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 
@@ -524,7 +524,7 @@ func TestTimer_DeregisterLeavesAuthorTimersInert(t *testing.T) {
 	}
 
 	// The latch is idempotent, and an id with no row is a plain no-op.
-	if err := endActorForTest(ctx, f.reg, "actor:a", 1001); err != nil {
+	if err := endActorForTest(ctx, f.reg, a, 1001); err != nil {
 		t.Fatalf("repeat Deregister must be a no-op, got: %v", err)
 	}
 	if err := endActorForTest(ctx, f.reg, "actor:ghost", 1); err != nil {

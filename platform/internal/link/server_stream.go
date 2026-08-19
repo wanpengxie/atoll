@@ -9,13 +9,11 @@ import (
 	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/ipc"
-	"github.com/wanpengxie/atoll/runtime/remoteingress"
 )
 
 // serverActorHandlers is the endpoint's outward call table. The identity
@@ -30,7 +28,7 @@ type serverActorHandlers struct {
 	emit          func(context.Context, actor.ActorID, actorhost.AttemptKey, *message.Envelope) (ipc.EmitResult, error)
 	access        func(context.Context, actor.ActorID, actorhost.AttemptKey, []byte) ([]byte, error)
 	schedule      func(context.Context, actor.ActorID, []byte) ([]byte, error)
-	fork          func(context.Context, actor.ActorID, actorhost.AttemptKey, remoteingress.ForkRequest) (actor.ActorID, error)
+	resolveTarget func(context.Context, string) (actor.ActorID, error)
 	endSelf       func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 	obs           func(actor.ActorID, actorhost.AttemptKey, actorrt.ObsKind, actorrt.ObsValue)
 	cancelRequest func(actor.ActorID, message.ID)
@@ -173,8 +171,23 @@ func (s *serverActorEndpoint) readLoop() error {
 			}); err != nil {
 				return err
 			}
-		case ipc.KindSpawn:
-			if err := s.handleFork(frame.Payload); err != nil {
+		case ipc.KindResolveTarget:
+			if err := s.handleRelay(ipc.KindResolveTargetAck, frame.Payload, func(
+				ctx context.Context, payload []byte,
+			) ([]byte, error) {
+				if s.handlers.resolveTarget == nil {
+					return nil, errRelayUnavailable
+				}
+				var request targetResolveRequest
+				if err := json.Unmarshal(payload, &request); err != nil {
+					return nil, err
+				}
+				resolved, err := s.handlers.resolveTarget(ctx, request.Target)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal(targetResolveResponse{Actor: resolved})
+			}); err != nil {
 				return err
 			}
 		case ipc.KindEnd:
@@ -252,42 +265,6 @@ func (s *serverActorEndpoint) handleRelay(
 		return err
 	}
 	return s.send(ipc.Frame{Kind: ackKind, Payload: raw})
-}
-
-func (s *serverActorEndpoint) handleFork(payload []byte) error {
-	var request ipc.SpawnPayload
-	if err := json.Unmarshal(payload, &request); err != nil {
-		return err
-	}
-	ack := ipc.SpawnAckPayload{}
-	if s.handlers.fork == nil {
-		ack.ErrorCode, ack.ErrorMessage = ipc.EncodeError(errors.New("link: fork handler unavailable"))
-	} else {
-		var placement *channel.Placement
-		if request.PlacementKind != "" || request.PlacementHost != "" {
-			placement = &channel.Placement{
-				Kind:        channel.PlacementKind(request.PlacementKind),
-				DesiredHost: request.PlacementHost,
-			}
-		}
-		child, err := s.handlers.fork(s.ctx, s.id, s.key, remoteingress.ForkRequest{
-			RequestID: request.RequestID,
-			Spec: actorcaps.ForkSpec{
-				Kind: request.Kind, Class: request.Class, NameHint: request.NameHint,
-				Config: append([]byte(nil), request.Config...), Placement: placement,
-			},
-		})
-		if err != nil {
-			ack.ErrorCode, ack.ErrorMessage = ipc.EncodeError(err)
-		} else {
-			ack.ChildID = child
-		}
-	}
-	raw, err := json.Marshal(ack)
-	if err != nil {
-		return err
-	}
-	return s.send(ipc.Frame{Kind: ipc.KindSpawnAck, Payload: raw})
 }
 
 func (s *serverActorEndpoint) handleEnd(payload []byte) error {

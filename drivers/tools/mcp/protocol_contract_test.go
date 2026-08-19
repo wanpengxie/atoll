@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -200,9 +199,7 @@ func TestDescribeRefreshesEvenWhenLastErrorIsSet(t *testing.T) {
 	a.setLastError(errors.New("dial tcp: connection refused"))
 
 	sys := &terminalRecorder{}
-	a.describe(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "d1", Kind: message.KindRequest, Type: introspect.QueryDescribe, Payload: json.RawMessage(`{}`),
-	}))
+	a.refresh(sys, context.Background())
 
 	if got := transport.count("tools/list"); got == 0 {
 		t.Fatal("describe skipped refresh while lastError was set: the outage is now permanent")
@@ -225,7 +222,7 @@ func TestCallIsNotGatedByAStaleLastError(t *testing.T) {
 
 	sys := &terminalRecorder{}
 	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "c1", Kind: message.KindRequest, Type: "fixture.echo", Payload: json.RawMessage(`{}`),
+		ID: "c1", Kind: message.KindRequest, Type: "fixture.echo", Payload: json.RawMessage(`{"body":{}}`),
 	}))
 
 	if sys.failCode != "" {
@@ -250,7 +247,7 @@ func TestActorMapsInputRequiredToCompletedReply(t *testing.T) {
 	}
 	sys := &terminalRecorder{}
 	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "input-required", Kind: message.KindRequest, Type: "fixture.interactive", Payload: json.RawMessage(`{}`),
+		ID: "input-required", Kind: message.KindRequest, Type: "fixture.interactive", Payload: json.RawMessage(`{"body":{}}`),
 	}))
 	if sys.failCode != "" {
 		t.Fatalf("input_required was failed: %s %s", sys.failCode, sys.failText)

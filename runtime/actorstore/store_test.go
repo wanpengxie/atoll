@@ -15,8 +15,7 @@ import (
 func openStore(t *testing.T) (*actorstore.Store, *runtime.ChannelStores) {
 	t.Helper()
 	ctx := context.Background()
-	cs, err := runtime.OpenChannel(ctx, "C-actorstore",
-		filepath.Join(t.TempDir(), "channel.sqlite"), runtime.OpenChannelOptions{})
+	cs, err := runtime.OpenChannel(ctx, "C-actorstore", filepath.Join(t.TempDir(), "channel.sqlite"), runtime.OpenChannelOptions{})
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
@@ -36,264 +35,129 @@ func declaredDraft(decl string) storespec.ActorDraft {
 	}
 }
 
-// The declaration birth is one transaction bed: a retry recovers the same id by
-// semantic key instead of minting a second record.
-func TestInsertReplaysBySemanticKey(t *testing.T) {
+func TestInsertAllowsMultipleInstancesUnlessSingleton(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openStore(t)
-
-	first, err := store.Insert(ctx, declaredDraft("decl:a"))
+	first, err := store.Insert(ctx, declaredDraft("a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.Insert(ctx, declaredDraft("decl:a"))
+	second, err := store.Insert(ctx, declaredDraft("a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ID != second.ID {
-		t.Fatalf("replayed birth minted a second id: %q vs %q", first.ID, second.ID)
+	if first.ID == second.ID {
+		t.Fatalf("non-singleton births reused id %q", first.ID)
+	}
+	if first.SourceDeclID != "a" || second.SourceDeclID != "a" {
+		t.Fatalf("source declaration was not retained: %+v %+v", first, second)
 	}
 }
 
-// Records handed out are always deep copies: a caller cannot reach into the
-// store through a retained Config slice. The probe runs on the ENTRY path —
-// the durable path re-deserializes from SQLite on every read and would pass
-// even without any Clone, so only the in-memory table can tell a real copy
-// from an alias (removing the store's Clone calls must turn this test red).
-func TestRecordHandoffIsAlwaysACopy(t *testing.T) {
+func TestDurableRecordHandoffIsAlwaysACopy(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openStore(t)
-
-	config := []byte(`{"n":1}`)
-	installed := storespec.ActorRecord{
-		ID: "agent:parent/copy-probe", Kind: actor.KindAgent, CreatedAt: 1,
-		Definition: storespec.ActorDefinition{Class: "worker", Config: config},
-		Placement:  storespec.NewServerPlacement(),
-	}
-	store.InstallEntry(installed)
-
-	// Mutating the caller's retained slice must not reach the table.
-	config[2] = 'X'
-	got, ok, err := store.Lookup(ctx, installed.ID)
-	if err != nil || !ok {
+	record, err := store.Insert(ctx, declaredDraft("copy"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got.Definition.Config) != `{"n":1}` {
-		t.Fatalf("entry table aliased the installer's slice: %s", got.Definition.Config)
-	}
-
-	// Mutating a handed-out record must not reach the table either.
-	got.Definition.Config[2] = 'Y'
-	again, ok, err := store.Lookup(ctx, installed.ID)
+	record.Definition.Config[2] = 'X'
+	again, ok, err := store.Lookup(ctx, record.ID)
 	if err != nil || !ok {
-		t.Fatal(err)
+		t.Fatalf("lookup ok=%v err=%v", ok, err)
 	}
 	if string(again.Definition.Config) != `{"n":1}` {
-		t.Fatalf("lookup handed out an alias of the entry table: %s", again.Definition.Config)
+		t.Fatalf("record handoff aliased config: %s", again.Definition.Config)
 	}
 }
 
-// The entry table is the whole classification fact: IsEntry is true only for
-// records installed into it, and the restore path never rebuilds it.
-func TestEntryTableIsTheWholeClassificationFact(t *testing.T) {
+func TestRestoreAndDeregisterUseOnlyTheDurableRegistry(t *testing.T) {
 	ctx := context.Background()
 	store, cs := openStore(t)
-
-	durable, err := store.Insert(ctx, declaredDraft("decl:a"))
+	record, err := store.Insert(ctx, declaredDraft("restore"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := storespec.ActorRecord{
-		ID: "agent:parent/worker-1", Kind: actor.KindAgent, CreatedAt: 1,
-		Definition: storespec.ActorDefinition{Class: "worker"},
-		Placement:  storespec.NewServerPlacement(),
-	}
-	store.InstallEntry(entry)
-
-	if isEntry, found, err := store.IsEntry(ctx, durable.ID); err != nil || !found || isEntry {
-		t.Fatalf("durable record: entry=%v found=%v err=%v", isEntry, found, err)
-	}
-	if isEntry, found, err := store.IsEntry(ctx, entry.ID); err != nil || !found || !isEntry {
-		t.Fatalf("entry record: entry=%v found=%v err=%v", isEntry, found, err)
-	}
-	if _, found, err := store.IsEntry(ctx, "agent:nobody"); err != nil || found {
-		t.Fatalf("unknown id: found=%v err=%v", found, err)
-	}
-
-	// A fresh process (fresh store over the same durable registry) restores the
-	// durable side only.
 	next, err := actorstore.New(cs.Actors, func() int64 { return 1000 })
 	if err != nil {
 		t.Fatal(err)
 	}
 	restored, err := next.RestoreActive(ctx)
-	if err != nil {
+	if err != nil || len(restored) != 1 || restored[0].ID != record.ID {
+		t.Fatalf("restore=%+v err=%v", restored, err)
+	}
+	if err := store.Deregister(ctx, []actor.ActorID{record.ID, "agent:ghost:1"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(restored) != 1 || restored[0].ID != durable.ID {
-		t.Fatalf("restore=%+v want only the durable record", restored)
-	}
-}
-
-// A record verb touches the registry and nothing else; the durable half of a
-// terminal must commit before any entry is dropped.
-func TestDeregisterIsIdempotentAndEntryScoped(t *testing.T) {
-	ctx := context.Background()
-	store, cs := openStore(t)
-
-	durable, err := store.Insert(ctx, declaredDraft("decl:a"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry := storespec.ActorRecord{
-		ID: "agent:parent/worker-1", Kind: actor.KindAgent, CreatedAt: 1,
-		Definition: storespec.ActorDefinition{Class: "worker"},
-		Placement:  storespec.NewServerPlacement(),
-	}
-	store.InstallEntry(entry)
-
-	// A mixed set is one verdict and one transaction; ids with no durable row
-	// are naturally no-ops.
-	if err := store.Deregister(ctx, []actor.ActorID{durable.ID, entry.ID, "agent:ghost"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, err := cs.Actors.LookupActive(ctx, durable.ID); err != nil || ok {
-		t.Fatalf("durable row still active: ok=%v err=%v", ok, err)
-	}
-	if _, found, err := store.IsEntry(ctx, entry.ID); err != nil || found {
-		t.Fatalf("entry survived terminal: found=%v err=%v", found, err)
-	}
-	// Repeating the whole thing is a no-op.
-	if err := store.Deregister(ctx, []actor.ActorID{durable.ID, entry.ID}); err != nil {
+	if err := store.Deregister(ctx, []actor.ActorID{record.ID}); err != nil {
 		t.Fatalf("repeat deregister: %v", err)
 	}
 }
 
-// failingRegistry is a durable half whose termination transaction always fails.
-// It exists to pin the ONE ordering rule of the two-step terminal: the entry
-// deletions run only after the durable transaction has committed.
 type failingRegistry struct {
 	storespec.ActorRegistryStore
 	err error
 }
 
-func (r failingRegistry) Deregister(context.Context, []actor.ActorID, int64) error {
-	return r.err
-}
+func (r failingRegistry) Deregister(context.Context, []actor.ActorID, int64) error { return r.err }
 
-// The durable transaction goes first and the entry table follows it: when the
-// transaction fails, NOTHING moves — the entries are still installed, and the
-// error is returned as-is.
-func TestDurableTerminalFailureLeavesEntriesUntouched(t *testing.T) {
+func TestDeregisterReturnsTheDurableFailure(t *testing.T) {
 	ctx := context.Background()
 	_, cs := openStore(t)
-
 	boom := errors.New("durable terminal refused")
-	store, err := actorstore.New(
-		failingRegistry{ActorRegistryStore: cs.Actors, err: boom},
-		func() int64 { return 1000 })
+	store, err := actorstore.New(failingRegistry{ActorRegistryStore: cs.Actors, err: boom}, func() int64 { return 1000 })
 	if err != nil {
 		t.Fatal(err)
 	}
-	durable, err := store.Insert(ctx, declaredDraft("decl:a"))
+	record, err := store.Insert(ctx, declaredDraft("failure"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := storespec.ActorRecord{
-		ID: "agent:parent/worker-1", Kind: actor.KindAgent, CreatedAt: 1,
-		Definition: storespec.ActorDefinition{Class: "worker"},
-		Placement:  storespec.NewServerPlacement(),
+	if err := store.Deregister(ctx, []actor.ActorID{record.ID}); !errors.Is(err, boom) {
+		t.Fatalf("Deregister err=%v", err)
 	}
-	store.InstallEntry(entry)
-
-	if err := store.Deregister(ctx, []actor.ActorID{durable.ID, entry.ID}); !errors.Is(err, boom) {
-		t.Fatalf("Deregister err=%v, want the durable failure verbatim", err)
-	}
-	if isEntry, found, err := store.IsEntry(ctx, entry.ID); err != nil || !found || !isEntry {
-		t.Fatalf("entry moved on a failed durable transaction: entry=%v found=%v err=%v",
-			isEntry, found, err)
-	}
-	if _, ok, err := cs.Actors.LookupActive(ctx, durable.ID); err != nil || !ok {
-		t.Fatalf("durable row moved on a failed terminal: ok=%v err=%v", ok, err)
+	if _, ok, err := cs.Actors.LookupActive(ctx, record.ID); err != nil || !ok {
+		t.Fatalf("failed transaction moved row: ok=%v err=%v", ok, err)
 	}
 }
 
-// A record with no durable declaration cannot take a definition change; that is
-// an operation verdict, not a species branch — the SAME typed error as the
-// durable declaration-less case, so the error face never reveals which table
-// the record lives in.
-func TestUpdateDefinitionRefusesAnEntryRecord(t *testing.T) {
+func TestUpdateDefinitionReturnsTheCommittedValue(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openStore(t)
-
-	entry := storespec.ActorRecord{
-		ID: "agent:parent/worker-1", Kind: actor.KindAgent, CreatedAt: 1,
-		Definition: storespec.ActorDefinition{Class: "worker"},
-		Placement:  storespec.NewServerPlacement(),
-	}
-	store.InstallEntry(entry)
-	if _, err := store.UpdateDefinition(ctx, entry.ID,
-		storespec.ActorDefinition{Class: "other"}); !errors.Is(err, storespec.ErrNoDeclaration) {
-		t.Fatalf("entry record: err=%v, want ErrNoDeclaration", err)
-	}
-
-	durable, err := store.Insert(ctx, declaredDraft("decl:a"))
+	record, err := store.Insert(ctx, declaredDraft("update"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := store.UpdateDefinition(ctx, durable.ID,
-		storespec.ActorDefinition{Class: "agent-v2", Config: []byte(`{"n":2}`)})
+	updated, err := store.UpdateDefinition(ctx, record.ID, storespec.ActorDefinition{Class: "agent-v2", Config: []byte(`{"n":2}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.Definition.Class != "agent-v2" || string(updated.Definition.Config) != `{"n":2}` {
-		t.Fatalf("update returned %+v", updated.Definition)
-	}
-	// The returned value is authoritative — no read-back needed, but it must
-	// match what the registry now holds.
-	stored, ok, err := store.Lookup(ctx, durable.ID)
-	if err != nil || !ok || !stored.Definition.Equal(updated.Definition) {
-		t.Fatalf("stored=%+v updated=%+v ok=%v err=%v", stored, updated, ok, err)
-	}
-	// The composed return preserves the untouched row fields — it is the in-tx
-	// read plus the new definition, not a partial value.
-	if updated.SourceDeclID != durable.SourceDeclID ||
-		updated.CreatedAt != durable.CreatedAt ||
-		updated.Placement != durable.Placement {
-		t.Fatalf("composed return lost row fields: %+v", updated)
+		t.Fatalf("updated=%+v", updated)
 	}
 }
 
-// A durable human admission has no declaration either: the registry verb
-// guards its own contract, not just the entry table.
 func TestUpdateDefinitionRefusesAHumanRecord(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openStore(t)
-
 	human, err := store.Insert(ctx, storespec.ActorDraft{
 		Kind: actor.KindHuman, Principal: "alice@example.com", CreatedAt: 1,
-		Definition: storespec.ActorDefinition{Class: "human"},
-		Placement:  storespec.NewServerPlacement(),
+		Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.UpdateDefinition(ctx, human.ID,
-		storespec.ActorDefinition{Class: "human-v2"}); !errors.Is(err, storespec.ErrNoDeclaration) {
+	if _, err := store.UpdateDefinition(ctx, human.ID, storespec.ActorDefinition{Class: "human-v2"}); !errors.Is(err, storespec.ErrNoDeclaration) {
 		t.Fatalf("err=%v, want ErrNoDeclaration", err)
 	}
 }
 
-// The kernel is a constant, not a member: the registry refuses to give it a
-// record at all.
 func TestKernelCannotBeInserted(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openStore(t)
-
 	if _, err := store.Insert(ctx, storespec.ActorDraft{
 		Kind: actor.KindSystem, CreatedAt: 1,
-		Definition: storespec.ActorDefinition{Class: "system"},
-		Placement:  storespec.NewServerPlacement(),
+		Definition: storespec.ActorDefinition{Class: "system"}, Placement: storespec.NewServerPlacement(),
 	}); err == nil {
 		t.Fatal("the kernel must never receive an actor record")
 	}

@@ -44,8 +44,8 @@ func (r *mutableDeclarationResolver) ClassKind(_ context.Context, class string) 
 	}
 	return "", false, nil
 }
-func (r *mutableDeclarationResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
-	return channel.PlacementServer, true, nil
+func (r *mutableDeclarationResolver) ClassPlacement(context.Context, string) (channelspec.PlacementKind, bool, error) {
+	return channelspec.PlacementServer, true, nil
 }
 func (r *mutableDeclarationResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
 	return nil
@@ -96,7 +96,7 @@ func TestDeclarationPullAppliesChangeAndIsQuietWhenEqual(t *testing.T) {
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl:pull", Class: "routing-live", Kind: actor.KindAgent,
+			SourceDeclID: "decl-pull", Class: "routing-live", Kind: actor.KindAgent,
 			Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 		}},
 	})
@@ -106,7 +106,7 @@ func TestDeclarationPullAppliesChangeAndIsQuietWhenEqual(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	instances, err := h.controller.DeclaredInstances("decl:pull")
+	instances, err := activeMembersForSource(h.controller, "decl-pull")
 	if err != nil || len(instances) != 1 {
 		t.Fatalf("declared instances=%v err=%v", instances, err)
 	}

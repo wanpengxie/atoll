@@ -3,6 +3,7 @@ package channelhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -11,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -91,7 +92,7 @@ func TestRebuildKeepsGenesisLineageAfterCurrentParentChanges(t *testing.T) {
 
 	// Retiring the old parent changes only the directory's current parent. The
 	// immutable genesis JSON deliberately keeps the child's original lineage.
-	row.ParentID = protocol.C0ChannelID
+	row.ParentID = channelspec.C0ChannelID
 	registry.put(row)
 	second, err := New(root, registry, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
 	if err != nil {
@@ -112,12 +113,12 @@ func TestRebuildKeepsGenesisLineageAfterCurrentParentChanges(t *testing.T) {
 func desiredRow(t *testing.T, id channel.ID) regspec.ChannelRow {
 	t.Helper()
 	now := time.Now().UnixMilli()
-	spec := lagoon.GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now, ParentID: protocol.C0ChannelID, InitiatorPrincipal: "owner"}
+	spec := lagoon.GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now, ParentID: channelspec.C0ChannelID, InitiatorPrincipal: "owner"}
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return regspec.ChannelRow{ID: id, ParentID: protocol.C0ChannelID, Name: string(id), QualifiedName: "c0.test", Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
+	return regspec.ChannelRow{ID: id, ParentID: channelspec.C0ChannelID, Name: string(id), QualifiedName: "c0.test", Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
 }
 
 func newConvergingHost(t *testing.T, registry RegistryReader) *ChannelHost {
@@ -139,6 +140,49 @@ func TestRegistryChangeDoesNotReconcileInline(t *testing.T) {
 	h.RegistryChanged(lagoon.Change{ChannelID: row.ID})
 	if _, ok := h.Acquire(row.ID); ok {
 		t.Fatal("post-commit edge reconciled inline")
+	}
+}
+
+func TestCrashBeforePublishConvergesFromCommittedRegistryOnRestart(t *testing.T) {
+	root := t.TempDir()
+	registry := newDesiredRegistry()
+	row := desiredRow(t, "crash-before-publish")
+	registry.put(row)
+	first, err := New(root, registry, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("crash cut before publish")
+	first.beforePublish = func(id channel.ID) error {
+		if id != row.ID {
+			t.Fatalf("hook id=%q", id)
+		}
+		return crash
+	}
+	if err := first.StartConvergence(); err != nil {
+		t.Fatalf("first convergence err=%v", err)
+	}
+	if _, serving := first.Acquire(row.ID); serving {
+		t.Fatal("crash-cut channel was published")
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := DBPath(root, row.ID)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("physical mirror missing after crash cut: %v", err)
+	}
+
+	second, err := New(root, registry, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
+	if err := second.StartConvergence(); err != nil {
+		t.Fatal(err)
+	}
+	if _, serving := second.Acquire(row.ID); !serving {
+		t.Fatal("restart did not publish the committed channel")
 	}
 }
 
@@ -258,7 +302,7 @@ func TestOrphanSweepProtectsOnlyC0(t *testing.T) {
 	if err := h.provisionGenesis(context.Background(), genesisSpec("orphan"), "c0.orphan"); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.provisionGenesis(context.Background(), genesisSpec(protocol.C0ChannelID), "c0"); err != nil {
+	if err := h.provisionGenesis(context.Background(), genesisSpec(channelspec.C0ChannelID), "c0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.StartConvergence(); err != nil {
@@ -266,7 +310,7 @@ func TestOrphanSweepProtectsOnlyC0(t *testing.T) {
 	}
 	if entries, err := h.Census(context.Background()); err != nil {
 		t.Fatal(err)
-	} else if len(entries) != 1 || entries[0].ChannelID != protocol.C0ChannelID {
+	} else if len(entries) != 1 || entries[0].ChannelID != channelspec.C0ChannelID {
 		t.Fatalf("orphan sweep census=%+v", entries)
 	}
 }
@@ -276,14 +320,14 @@ func TestTransientConvergenceUsesExponentialBackoff(t *testing.T) {
 	h := newConvergingHost(t, registry)
 	h.convergence.edgeDelay = 10 * time.Millisecond
 	now := time.Now().UnixMilli()
-	spec := lagoon.GenesisSpec{ChannelID: protocol.C0ChannelID, Type: "group", OwnerPrincipal: "owner", CreatedAt: now}
+	spec := lagoon.GenesisSpec{ChannelID: channelspec.C0ChannelID, Type: "group", OwnerPrincipal: "owner", CreatedAt: now}
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A missing c0 file is transient: installation/startup may still be making
 	// the well-known physical channel available.
-	row := regspec.ChannelRow{ID: protocol.C0ChannelID, Name: string(protocol.C0ChannelID), Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
+	row := regspec.ChannelRow{ID: channelspec.C0ChannelID, Name: string(channelspec.C0ChannelID), Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "owner", Spec: raw, CreatedAt: now}
 
 	if err := h.reconcileTracked(context.Background(), row); err == nil {
 		t.Fatal("missing c0 unexpectedly converged")

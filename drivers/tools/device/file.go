@@ -1,9 +1,9 @@
 package device
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"strings"
 
@@ -14,23 +14,32 @@ import (
 // without them the whole file is returned subject to MaxReadBytes.
 func (a *Actor) handleFileRead(msg actorbase.Msg) {
 	var p FileReadPayload
-	if err := json.Unmarshal(msg.Payload, &p); err != nil {
+	if err := decodePayload(msg.Payload, &p); err != nil {
 		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
-	ws, err := a.channelWorkspace(msg.ChannelID)
+	if p.Offset < 0 || p.Limit < 0 {
+		a.fail(msg, "invalid_args", "offset and limit must be non-negative")
+		return
+	}
+	root, err := a.channelWorkspace(msg.ChannelID)
 	if err != nil {
 		a.fail(msg, "workspace_unavailable", err.Error())
 		return
 	}
-	full, err := resolvePath(ws, p.Path)
+	defer root.Close()
+	path, err := resolvePath(p.Path)
 	if err != nil {
 		a.fail(msg, "path_invalid", err.Error())
 		return
 	}
 
-	info, err := os.Stat(full)
+	info, err := root.Stat(path)
 	if err != nil {
+		if pathEscaped(err) {
+			a.fail(msg, "path_invalid", err.Error())
+			return
+		}
 		a.fail(msg, "file_not_found", err.Error())
 		return
 	}
@@ -44,7 +53,7 @@ func (a *Actor) handleFileRead(msg actorbase.Msg) {
 		return
 	}
 
-	data, err := os.ReadFile(full)
+	data, err := root.ReadFile(path)
 	if err != nil {
 		a.fail(msg, "read_failed", err.Error())
 		return
@@ -77,25 +86,34 @@ func (a *Actor) handleFileRead(msg actorbase.Msg) {
 // directories created as needed.
 func (a *Actor) handleFileWrite(msg actorbase.Msg) {
 	var p FileWritePayload
-	if err := json.Unmarshal(msg.Payload, &p); err != nil {
+	if err := decodePayload(msg.Payload, &p); err != nil {
 		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
-	ws, err := a.channelWorkspace(msg.ChannelID)
+	root, err := a.channelWorkspace(msg.ChannelID)
 	if err != nil {
 		a.fail(msg, "workspace_unavailable", err.Error())
 		return
 	}
-	full, err := resolvePath(ws, p.Path)
+	defer root.Close()
+	path, err := resolvePath(p.Path)
 	if err != nil {
 		a.fail(msg, "path_invalid", err.Error())
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+	if err := root.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if pathEscaped(err) || errors.Is(err, fs.ErrExist) {
+			a.fail(msg, "path_invalid", err.Error())
+			return
+		}
 		a.fail(msg, "write_failed", fmt.Sprintf("create parent dir: %v", err))
 		return
 	}
-	if err := os.WriteFile(full, []byte(p.Content), 0o644); err != nil {
+	if err := root.WriteFile(path, []byte(p.Content), 0o644); err != nil {
+		if pathEscaped(err) {
+			a.fail(msg, "path_invalid", err.Error())
+			return
+		}
 		a.fail(msg, "write_failed", err.Error())
 		return
 	}
@@ -106,7 +124,7 @@ func (a *Actor) handleFileWrite(msg actorbase.Msg) {
 // Without replace_all, old_string must occur exactly once.
 func (a *Actor) handleFileEdit(msg actorbase.Msg) {
 	var p FileEditPayload
-	if err := json.Unmarshal(msg.Payload, &p); err != nil {
+	if err := decodePayload(msg.Payload, &p); err != nil {
 		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
@@ -118,19 +136,24 @@ func (a *Actor) handleFileEdit(msg actorbase.Msg) {
 		a.fail(msg, "payload_invalid", "device.file.edit: old_string and new_string are identical")
 		return
 	}
-	ws, err := a.channelWorkspace(msg.ChannelID)
+	root, err := a.channelWorkspace(msg.ChannelID)
 	if err != nil {
 		a.fail(msg, "workspace_unavailable", err.Error())
 		return
 	}
-	full, err := resolvePath(ws, p.Path)
+	defer root.Close()
+	path, err := resolvePath(p.Path)
 	if err != nil {
 		a.fail(msg, "path_invalid", err.Error())
 		return
 	}
 
-	data, err := os.ReadFile(full)
+	data, err := root.ReadFile(path)
 	if err != nil {
+		if pathEscaped(err) {
+			a.fail(msg, "path_invalid", err.Error())
+			return
+		}
 		a.fail(msg, "file_not_found", err.Error())
 		return
 	}
@@ -156,7 +179,11 @@ func (a *Actor) handleFileEdit(msg actorbase.Msg) {
 		content = strings.Replace(content, p.OldString, p.NewString, 1)
 	}
 
-	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+	if err := root.WriteFile(path, []byte(content), 0o644); err != nil {
+		if pathEscaped(err) {
+			a.fail(msg, "path_invalid", err.Error())
+			return
+		}
 		a.fail(msg, "write_failed", err.Error())
 		return
 	}

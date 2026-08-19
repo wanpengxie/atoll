@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/svcactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // CompositionResolver is the world-catalog half of actor construction. Home
@@ -17,7 +18,11 @@ type CompositionResolver interface {
 }
 
 type ServiceCompositionResolver interface {
-	BuildServiceClass(channelpkg.ID, actor.ActorID, *svcactor.Port, svcactor.Audit) (platform.ActorFactory, bool)
+	BuildServiceClass(channelpkg.ID, actor.ActorID, *svcactor.Port, svcactor.Audit, svcactor.Members) (platform.ActorFactory, bool)
+}
+
+type PeerCompositionResolver interface {
+	Peer(context.Context, channelpkg.ID, channelpkg.ID, channelpkg.Request, func(channelpkg.Progress)) (channelpkg.Result, error)
 }
 
 // ActorFactoryResolver resolves only an exact immutable construction input.
@@ -40,9 +45,29 @@ func (v *compositionView) LookupByClass(
 	if class == svcactor.Class {
 		if resolver, ok := v.resolver.(ServiceCompositionResolver); ok {
 			audit := func(ctx context.Context, payload map[string]any) error {
-				return v.h.emitSystemEvent(ctx, "svcactor.inbound", payload)
+				return v.h.emitSystemEvent(ctx, message.TypeSystemChannelInbound, payload)
 			}
-			return resolver.BuildServiceClass(v.h.channelID, id, v.h.servicePort, audit)
+			members := svcactor.Members{
+				IsActive: v.h.actors.IsActive,
+				ActorFacts: func(ctx context.Context, id actor.ActorID) (svcactor.MemberFacts, bool, error) {
+					facts, active, err := v.h.actors.ActorFacts(ctx, id)
+					return svcactor.MemberFacts{Kind: facts.Kind}, active, err
+				},
+				FirstActiveAgent: func(context.Context) (actor.ActorID, bool, error) {
+					rows, err := v.h.actors.ActiveIdentities()
+					if err != nil {
+						return "", false, err
+					}
+					var first actor.ActorID
+					for _, row := range rows {
+						if row.Kind == actor.KindAgent && (first == "" || row.ID < first) {
+							first = row.ID
+						}
+					}
+					return first, first != "", nil
+				},
+			}
+			return resolver.BuildServiceClass(v.h.channelID, id, v.h.servicePort, audit, members)
 		}
 		return platform.ActorFactory{}, false
 	}

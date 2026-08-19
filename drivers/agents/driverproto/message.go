@@ -3,14 +3,22 @@ package driverproto
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
+type Attachment struct {
+	Address string
+}
+
 type DriverMessage struct {
-	SourceID string
-	Type     string
-	Sender   string
-	Payload  json.RawMessage
-	Text     string
+	SourceID    string
+	Type        string
+	Sender      string
+	Caller      harness.Caller
+	Payload     json.RawMessage
+	Text        string
+	Attachments []Attachment
 }
 
 type ContextMessage struct {

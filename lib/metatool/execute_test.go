@@ -55,6 +55,12 @@ func (f *fakeJobs) Cancel(id message.ID) error {
 	return nil
 }
 
+func (f *fakeJobs) ProgressEvents(message.ID) <-chan *message.Envelope {
+	out := make(chan *message.Envelope)
+	close(out)
+	return out
+}
+
 var _ actorbase.JobTable = (*fakeJobs)(nil)
 
 // newExec builds an Exec over a fake JobTable + a scripted Call.
@@ -93,9 +99,10 @@ func defaultRC() metatool.RuntimeContext {
 	return metatool.RuntimeContext{
 		Trigger: metatool.Trigger{
 			Envelope: message.Envelope{
-				ID:   "trigger-1",
-				Kind: message.KindRequest,
-				Type: "agent.turn",
+				ID:      "trigger-1",
+				Kind:    message.KindRequest,
+				Type:    "agent.turn",
+				Payload: json.RawMessage(`{"body":null}`),
 			},
 			CorrelationID: "trigger-1",
 		},
@@ -434,7 +441,7 @@ func TestExecuteListActors_OutsideTurn(t *testing.T) {
 
 func TestExecuteListActors_RendersCatalog(t *testing.T) {
 	call := func(_ context.Context, spec behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
-		if spec.Type != "actor.list" {
+		if spec.Type != message.TypeSystemMemberList {
 			t.Fatalf("list spec type = %q", spec.Type)
 		}
 		body, _ := json.Marshal(map[string]any{

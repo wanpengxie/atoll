@@ -1,12 +1,13 @@
 package actor
 
 // Kind is the actor physical-position classifier:
-// the 4-value closed set human / agent / system / tool.
+// the 5-value closed set human / agent / peer / system / tool.
 type Kind string
 
 const (
 	KindHuman  Kind = "human"
 	KindAgent  Kind = "agent"
+	KindPeer   Kind = "peer"
 	KindSystem Kind = "system"
 	KindTool   Kind = "tool"
 )
@@ -14,7 +15,7 @@ const (
 // allKinds backs ParseKind. UNEXPORTED: a closed set's invariant is that it
 // cannot be extended, so the substrate must not hand callers a mutable slice of
 // it — the public contract is the ParseKind predicate, not the enumeration.
-var allKinds = []Kind{KindHuman, KindAgent, KindSystem, KindTool}
+var allKinds = []Kind{KindHuman, KindAgent, KindPeer, KindSystem, KindTool}
 
 // String returns the wire form.
 func (k Kind) String() string { return string(k) }

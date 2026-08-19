@@ -3,7 +3,6 @@ package engineboot
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform/lagoon"
-	"github.com/wanpengxie/atoll/protocol"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 )
 
 func TestGuestRegistrationConflictsNeverMintSessions(t *testing.T) {
@@ -49,13 +46,13 @@ func TestGuestRegistrationConflictsNeverMintSessions(t *testing.T) {
 	}
 	assertConflictWithoutCookie("same registration", register(`{"id":"repeat-user","email":"repeat@example.test","password":"different","display_name":"Repeat"}`))
 
-	if _, ok, err := eng.registry.GetPrincipalStatus(context.Background(), protocol.RootPrincipalID); err != nil || !ok {
+	if _, ok, err := eng.registry.GetPrincipalStatus(context.Background(), channelspec.RootPrincipalID); err != nil || !ok {
 		t.Fatalf("root disappeared ok=%v err=%v", ok, err)
 	}
 }
 
 // Registration is node policy and closed by default: c0 exposes no
-// principal.register endpoint to the lobby, so the guest can neither see it on
+// principal-create endpoint to the lobby, so the guest can neither see it on
 // c0's card nor call it, and the portal answers 403 registration_closed
 // without minting a session. Login stays open.
 func TestRegistrationClosedByDefaultIsInvisibleAndRefused(t *testing.T) {
@@ -66,7 +63,7 @@ func TestRegistrationClosedByDefaultIsInvisibleAndRefused(t *testing.T) {
 	defer eng.Close(context.Background())
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := eng.host.Acquire(protocol.LobbyChannelID); ok {
+		if _, ok := eng.host.Acquire(channelspec.LobbyChannelID); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -83,15 +80,6 @@ func TestRegistrationClosedByDefaultIsInvisibleAndRefused(t *testing.T) {
 	}
 	if _, found, _ := eng.registry.GetPrincipalStatus(context.Background(), "alice"); found {
 		t.Fatal("closed registration still created a principal")
-	}
-	lobby, _ := eng.host.Acquire(protocol.LobbyChannelID)
-	guestCore := onlyDecl(t, lobby, lagoon.CoreActorDeclID)
-	var card introspect.Describe
-	if err := json.Unmarshal(callMember(t, protocol.LobbyChannelID, lobby, protocol.GuestPrincipalID, guestCore, introspect.QueryDescribe, map[string]any{}), &card); err != nil {
-		t.Fatal(err)
-	}
-	if len(card.Types) != 1 || card.Types[string(lagoon.WordPrincipalLogin)].Description == "" {
-		t.Fatalf("c0 card as seen from lobby with registration closed=%v", card.Types)
 	}
 	login := httptest.NewRequest(http.MethodPost, "/api/identity/login", bytes.NewBufferString(`{"email":"root@atoll.local","password":"test-root-password"}`))
 	login.Header.Set("Content-Type", "application/json")

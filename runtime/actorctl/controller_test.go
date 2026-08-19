@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -18,7 +17,6 @@ type fakeRecordStore struct {
 	mu       sync.Mutex
 	restored []storespec.ActorRecord
 	durable  map[actor.ActorID]storespec.ActorRecord
-	entries  map[actor.ActorID]storespec.ActorRecord
 	nextID   int
 	insertN  int
 	updateN  int
@@ -28,7 +26,6 @@ func newFakeRecordStore(restored ...storespec.ActorRecord) *fakeRecordStore {
 	return &fakeRecordStore{
 		restored: restored,
 		durable:  make(map[actor.ActorID]storespec.ActorRecord),
-		entries:  make(map[actor.ActorID]storespec.ActorRecord),
 	}
 }
 
@@ -92,18 +89,8 @@ func (s *fakeRecordStore) Deregister(_ context.Context, ids []actor.ActorID) err
 	defer s.mu.Unlock()
 	for _, id := range ids {
 		delete(s.durable, id)
-		delete(s.entries, id)
 	}
 	return nil
-}
-
-func (s *fakeRecordStore) InstallEntry(record storespec.ActorRecord) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.entries[record.ID]; exists {
-		panic("entry already installed")
-	}
-	s.entries[record.ID] = record.Clone()
 }
 
 func newTestController(t *testing.T, store Store) *Controller {
@@ -121,11 +108,11 @@ func newTestController(t *testing.T, store Store) *Controller {
 func seedParent(t *testing.T) (*Controller, *fakeRecordStore, actor.ActorID) {
 	t.Helper()
 	store := newFakeRecordStore(storespec.ActorRecord{
-		ID: "agent:parent", Kind: actor.KindAgent, SourceDeclID: "decl:parent",
+		ID: "agent:parent:1", Kind: actor.KindAgent, SourceDeclID: "parent",
 		Definition: storespec.ActorDefinition{Class: "agent"},
 		Placement:  storespec.NewServerPlacement(),
 	})
-	return newTestController(t, store), store, "agent:parent"
+	return newTestController(t, store), store, "agent:parent:1"
 }
 
 func currentAttempt(t *testing.T, c *Controller, id actor.ActorID) string {
@@ -137,167 +124,6 @@ func currentAttempt(t *testing.T, c *Controller, id actor.ActorID) string {
 		t.Fatalf("actor %q is not in the ledger", id)
 	}
 	return string(value.Attempt)
-}
-
-// --- fork replay table -------------------------------------------------------
-
-// Humans are born by admission alone: a fork has no principal source, so a
-// human child would be a member the human roster cannot recognize — refused
-// at the mint point, mirroring the durable side's "human ⇔ principal" weld.
-func TestForkRefusesAHumanChild(t *testing.T) {
-	ctx := context.Background()
-	controller, _, parent := seedParent(t)
-
-	_, err := controller.Fork(ctx, ForkRequest{
-		CallerActorID: parent,
-		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, parent)),
-		RequestID:     "req-human",
-		Spec:          actorcaps.ForkSpec{Kind: actor.KindHuman, Class: "whatever"},
-	})
-	if !errors.Is(err, ErrForkInvalid) {
-		t.Fatalf("err=%v, want ErrForkInvalid", err)
-	}
-}
-
-// The verdict is the door's first step: a stale term is refused before the
-// replay table is consulted, while the current term retrying the same
-// RequestID still lands on the replay row.
-func TestForkReplayRequiresACurrentCaller(t *testing.T) {
-	ctx := context.Background()
-	controller, _, parent := seedParent(t)
-	g1 := attemptKeyOf(currentAttempt(t, controller, parent))
-
-	request := ForkRequest{
-		CallerActorID: parent,
-		CallerAttempt: g1,
-		RequestID:     "req-stale",
-		Spec:          actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	}
-	first, err := controller.Fork(ctx, request)
-	if err != nil {
-		t.Fatalf("first fork: %v", err)
-	}
-
-	if _, err := controller.Restart(ctx, RestartRequest{ActorID: parent}); err != nil {
-		t.Fatalf("restart: %v", err)
-	}
-
-	// The old term replays: refused at the gate, not answered from the table.
-	if _, err := controller.Fork(ctx, request); !errors.Is(err, ErrStaleAttempt) {
-		t.Fatalf("stale replay err=%v, want ErrStaleAttempt", err)
-	}
-
-	// The current term replays the same RequestID: same child, no second one.
-	request.CallerAttempt = attemptKeyOf(currentAttempt(t, controller, parent))
-	replay, err := controller.Fork(ctx, request)
-	if err != nil {
-		t.Fatalf("current replay: %v", err)
-	}
-	if replay.Result.ChildActorID != first.Result.ChildActorID {
-		t.Fatalf("replay child=%q want %q",
-			replay.Result.ChildActorID, first.Result.ChildActorID)
-	}
-}
-
-func TestForkReplayReturnsTheFirstChildForever(t *testing.T) {
-	ctx := context.Background()
-	controller, store, parent := seedParent(t)
-	attempt := currentAttempt(t, controller, parent)
-
-	request := ForkRequest{
-		CallerActorID: parent,
-		CallerAttempt: attemptKeyOf(attempt),
-		RequestID:     "req-1",
-		Spec:          actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	}
-	first, err := controller.Fork(ctx, request)
-	if err != nil {
-		t.Fatalf("first fork: %v", err)
-	}
-	child := first.Result.ChildActorID
-	if child == "" {
-		t.Fatal("fork produced no child")
-	}
-
-	// A retry inside the same process returns the first result, never a second
-	// child.
-	second, err := controller.Fork(ctx, request)
-	if err != nil {
-		t.Fatalf("retry fork: %v", err)
-	}
-	if second.Result.ChildActorID != child {
-		t.Fatalf("retry child=%q want %q", second.Result.ChildActorID, child)
-	}
-
-	// Even after the child is terminated, the same RequestID still answers with
-	// the original id: one request can never produce two live children.
-	if _, err := controller.End(ctx, EndRequest{
-		Target: child, CallerActorID: child,
-		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, child)),
-	}); err != nil {
-		t.Fatalf("end child: %v", err)
-	}
-	third, err := controller.Fork(ctx, request)
-	if err != nil {
-		t.Fatalf("post-terminal fork: %v", err)
-	}
-	if third.Result.ChildActorID != child {
-		t.Fatalf("post-terminal child=%q want %q", third.Result.ChildActorID, child)
-	}
-	if active, _ := controller.IsActive(ctx, child); active {
-		t.Fatal("the replayed id must not resurrect the dead child")
-	}
-
-	// The replay table is never pruned.
-	controller.ledger.RLock()
-	rows := len(controller.forks)
-	controller.ledger.RUnlock()
-	if rows != 1 {
-		t.Fatalf("fork replay rows=%d want 1 (never pruned)", rows)
-	}
-	if len(store.entries) != 0 {
-		t.Fatalf("terminated entry survived: %v", store.entries)
-	}
-}
-
-func TestForkReplayRejectsADifferentPayload(t *testing.T) {
-	ctx := context.Background()
-	controller, _, parent := seedParent(t)
-	attempt := attemptKeyOf(currentAttempt(t, controller, parent))
-
-	if _, err := controller.Fork(ctx, ForkRequest{
-		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
-		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	}); err != nil {
-		t.Fatalf("first fork: %v", err)
-	}
-	if _, err := controller.Fork(ctx, ForkRequest{
-		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
-		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "other"},
-	}); !errors.Is(err, ErrForkConflict) {
-		t.Fatalf("conflicting replay err=%v want ErrForkConflict", err)
-	}
-}
-
-func TestForkLeavesNoDurableFootprint(t *testing.T) {
-	ctx := context.Background()
-	controller, store, parent := seedParent(t)
-	attempt := attemptKeyOf(currentAttempt(t, controller, parent))
-	before := store.insertN
-
-	result, err := controller.Fork(ctx, ForkRequest{
-		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
-		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.insertN != before {
-		t.Fatal("fork wrote a durable row")
-	}
-	if _, ok := store.entries[result.Result.ChildActorID]; !ok {
-		t.Fatal("fork child was not installed into the entry table")
-	}
 }
 
 // --- restart / declaration ---------------------------------------------------
@@ -361,8 +187,8 @@ func TestApplyDeclarationEqualValueIsANoOp(t *testing.T) {
 
 // --- narrow projections ------------------------------------------------------
 
-// Every public projection is question-shaped: identity roster, declaration
-// instances, identity facts. None of them hands out a record, and none carries
+// Every public projection is question-shaped: identity roster and identity
+// facts. None of them hands out a record, and none carries
 // a field the asking question does not need.
 func TestNarrowProjectionsAnswerOneQuestionEach(t *testing.T) {
 	ctx := context.Background()
@@ -391,19 +217,6 @@ func TestNarrowProjectionsAnswerOneQuestionEach(t *testing.T) {
 	}
 	if identities[0].ID != "agent:a" || identities[2].ID != "human:c" {
 		t.Fatalf("active identities are not in canonical id order: %+v", identities)
-	}
-
-	instances, err := controller.DeclaredInstances("decl:x")
-	if err != nil || len(instances) != 2 ||
-		instances[0] != "agent:a" || instances[1] != "agent:b" {
-		t.Fatalf("declared instances=%v err=%v", instances, err)
-	}
-	// A human carries no declaration source, so no declaration owns it.
-	if instances, err := controller.DeclaredInstances(""); err != nil || len(instances) != 0 {
-		t.Fatalf("empty decl id matched %v err=%v", instances, err)
-	}
-	if instances, err := controller.DeclaredInstances("decl:absent"); err != nil || len(instances) != 0 {
-		t.Fatalf("absent decl id matched %v err=%v", instances, err)
 	}
 
 	facts, found, err := controller.ActorFacts(ctx, "human:c")
@@ -453,17 +266,15 @@ func mustApply(c *Controller, ctx context.Context, id actor.ActorID, class strin
 
 func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 	ctx := context.Background()
-	controller, _, parent := seedParent(t)
+	parent := actor.ActorID("agent:parent:1")
+	child := actor.ActorID("agent:child:2")
+	controller := newTestController(t, newFakeRecordStore(
+		storespec.ActorRecord{ID: parent, Kind: actor.KindAgent, SourceDeclID: "parent", Definition: storespec.ActorDefinition{Class: "agent"}, Placement: storespec.NewServerPlacement()},
+		storespec.ActorRecord{ID: child, Kind: actor.KindAgent, SourceDeclID: "child", Definition: storespec.ActorDefinition{Class: "agent"}, Placement: storespec.NewServerPlacement()},
+	))
 	attempt := attemptKeyOf(currentAttempt(t, controller, parent))
-	child, err := controller.Fork(ctx, ForkRequest{
-		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
-		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	// Ending the parent must NOT spread to its fork: there is no lineage.
+	// Ending the parent must not spread to another member.
 	transition, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerActorID: parent, CallerAttempt: attempt,
 	})
@@ -473,8 +284,8 @@ func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 	if len(transition.Result.Ended) != 1 || transition.Result.Ended[0] != parent {
 		t.Fatalf("terminal set=%v want exactly the target", transition.Result.Ended)
 	}
-	if active, _ := controller.IsActive(ctx, child.Result.ChildActorID); !active {
-		t.Fatal("the fork child was cascaded away with its parent")
+	if active, _ := controller.IsActive(ctx, child); !active {
+		t.Fatal("the other member was cascaded away with its parent")
 	}
 }
 
@@ -484,20 +295,17 @@ func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
 // Everyone else is refused, and so is a request that named nobody.
 func TestEndAcceptsTheTargetOrTheSystemFaceAndNoOneElse(t *testing.T) {
 	ctx := context.Background()
-	controller, _, parent := seedParent(t)
+	parent := actor.ActorID("agent:parent:1")
+	siblingID := actor.ActorID("agent:sibling:2")
+	controller := newTestController(t, newFakeRecordStore(
+		storespec.ActorRecord{ID: parent, Kind: actor.KindAgent, SourceDeclID: "parent", Definition: storespec.ActorDefinition{Class: "agent"}, Placement: storespec.NewServerPlacement()},
+		storespec.ActorRecord{ID: siblingID, Kind: actor.KindAgent, SourceDeclID: "sibling", Definition: storespec.ActorDefinition{Class: "agent"}, Placement: storespec.NewServerPlacement()},
+	))
 	parentAttempt := attemptKeyOf(currentAttempt(t, controller, parent))
 
 	// A member in good standing, acting as its current term, aimed at someone
 	// else. This is the case ErrEndForbidden exists for: identity is proven, the
 	// permission is what is missing.
-	sibling, err := controller.Fork(ctx, ForkRequest{
-		CallerActorID: parent, CallerAttempt: parentAttempt, RequestID: "req-sibling",
-		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	siblingID := sibling.Result.ChildActorID
 	if _, err := controller.End(ctx, EndRequest{
 		Target: parent, CallerActorID: siblingID,
 		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, siblingID)),

@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	writeFenceSource = "decl:write-fence"
+	writeFenceSource = "decl-write-fence"
 	writeFenceType   = "test.write_fence.tick"
 )
 
@@ -50,7 +50,7 @@ func TestEndedIdentityPenIsRefusedOnTheMessageWritePath(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	instances, err := h.controller.DeclaredInstances(writeFenceSource)
+	instances, err := activeMembersForSource(h.controller, writeFenceSource)
 	if err != nil || len(instances) != 1 {
 		t.Fatalf("bootstrap author missing: %v err=%v", instances, err)
 	}
@@ -108,7 +108,7 @@ func TestEndedIdentityPenIsRefusedOnTheMessageWritePath(t *testing.T) {
 }
 
 const (
-	deathCutSource   = "decl:death-cut"
+	deathCutSource   = "decl-death-cut"
 	deathCutChannel  = channel.ID("death-cut")
 	deathCutResource = resource.ResourceID("resource:creator-work")
 )
@@ -153,7 +153,7 @@ func TestEndingAnActorLeavesItsResourceRowsUntouched(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	instances, err := h.controller.DeclaredInstances(deathCutSource)
+	instances, err := activeMembersForSource(h.controller, deathCutSource)
 	if err != nil || len(instances) != 1 {
 		t.Fatalf("bootstrap creator missing: %v err=%v", instances, err)
 	}
