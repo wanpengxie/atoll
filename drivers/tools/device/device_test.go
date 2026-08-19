@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -235,14 +236,40 @@ func TestDeviceReceiverRejectsUnknownFields(t *testing.T) {
 
 func TestDeviceDescribePublishesCanonicalInputSchemas(t *testing.T) {
 	describe := manifest()
-	spec, ok := describe.Words[TypeExec]
-	if !ok || len(spec.InputSchema) == 0 || !json.Valid(spec.InputSchema) {
-		t.Fatalf("device.exec word spec=%+v", spec)
-	}
-	var schema map[string]any
-	_ = json.Unmarshal(spec.InputSchema, &schema)
-	if schema["type"] != "object" {
-		t.Fatalf("device.exec input schema=%s", spec.InputSchema)
+	for _, tc := range []struct {
+		word     string
+		required []string
+		props    []string
+	}{
+		{word: TypeExec, required: []string{"command"}, props: []string{"command", "cwd", "timeout_ms"}},
+		{word: TypeFileRead, required: []string{"path"}, props: []string{"path", "offset", "limit"}},
+		{word: TypeFileWrite, required: []string{"path", "content"}, props: []string{"path", "content"}},
+		{word: TypeFileEdit, required: []string{"path", "old_string", "new_string"}, props: []string{"path", "old_string", "new_string", "replace_all"}},
+	} {
+		t.Run(tc.word, func(t *testing.T) {
+			spec, ok := describe.Words[tc.word]
+			if !ok || len(spec.InputSchema) == 0 || !json.Valid(spec.InputSchema) {
+				t.Fatalf("word spec=%+v", spec)
+			}
+			var schema struct {
+				Type       string                     `json:"type"`
+				Required   []string                   `json:"required"`
+				Properties map[string]json.RawMessage `json:"properties"`
+			}
+			if err := json.Unmarshal(spec.InputSchema, &schema); err != nil || schema.Type != "object" {
+				t.Fatalf("input schema=%s err=%v", spec.InputSchema, err)
+			}
+			for _, name := range tc.required {
+				if !slices.Contains(schema.Required, name) {
+					t.Fatalf("required=%v missing %q", schema.Required, name)
+				}
+			}
+			for _, name := range tc.props {
+				if len(schema.Properties[name]) == 0 {
+					t.Fatalf("properties=%v missing %q", schema.Properties, name)
+				}
+			}
+		})
 	}
 }
 

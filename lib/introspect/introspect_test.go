@@ -53,19 +53,6 @@ func TestAnswerDescribe_UnknownType(t *testing.T) {
 	}
 }
 
-func TestParseDescribeRequest(t *testing.T) {
-	if req, err := ParseDescribeRequest(nil); err != nil || req.Type != "" {
-		t.Fatalf("nil payload: req=%+v err=%v", req, err)
-	}
-	req, err := ParseDescribeRequest([]byte(`{"type":"x.y"}`))
-	if err != nil || req.Type != "x.y" {
-		t.Fatalf("selector payload: req=%+v err=%v", req, err)
-	}
-	if _, err := ParseDescribeRequest([]byte(`{`)); err == nil {
-		t.Fatal("malformed payload: want error")
-	}
-}
-
 // Guard the remaining standard query word.
 func TestReservedQueryNames(t *testing.T) {
 	if QueryDescribe != "actor.describe" {

@@ -195,9 +195,8 @@ func (l *callLedger) stopTimers() {
 
 // match is the pump's (Receive's) O(1) response-side dispatch: env is a
 // response addressed to one of this ledger's InFlight requests iff its
-// ParentID resolves. A PROVISIONAL response is swallowed (the entry stays
-// InFlight — nothing here decides when a caller stops caring about
-// provisionals, that is Wait/Await's window, not the ledger's); only a
+// ParentID resolves. A PROVISIONAL response is published to the ordered
+// progress observation queue while the entry stays InFlight; only a
 // FINAL response disarms the timer and hands the envelope to whoever is (or
 // later will be) waiting on ch. The entry itself is NOT deleted here — a
 // final that lands before anyone calls Wait/Await must sit there for a LATER

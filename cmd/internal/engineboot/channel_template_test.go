@@ -81,7 +81,7 @@ func TestBootPublishesC0AndLobbyOnly(t *testing.T) {
 		seen := map[string]bool{}
 		for _, member := range roster {
 			seen[string(member.ID)] = true
-			if member.ID == "peer:c0" || member.DeclID == "c0" {
+			if member.ID == actor.ActorID(string(actor.KindPeer)+":c0") || member.DeclID == "c0" {
 				t.Fatalf("channel %s contains forbidden c0 peer: %+v", id, member)
 			}
 		}

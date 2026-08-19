@@ -1,10 +1,7 @@
 package introspect
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
-	"io"
 )
 
 // The reserved introspection queries — the standard questions any actor / the
@@ -22,21 +19,6 @@ const (
 type StatusRequest struct {
 	Member string `json:"member"`
 }
-
-func ParseStatusRequest(payload []byte) (StatusRequest, error) {
-	var req StatusRequest
-	err := json.Unmarshal(payload, &req)
-	if err == nil && req.Member == "" {
-		err = errMissingActorID
-	}
-	return req, err
-}
-
-type statusRequestError string
-
-func (e statusRequestError) Error() string { return string(e) }
-
-const errMissingActorID statusRequestError = "member required"
 
 type StatusTestimony struct {
 	ReceivedAt         int64           `json:"received_at"`
@@ -130,28 +112,6 @@ func AnswerDescribe(d Describe, req DescribeRequest) (any, bool) {
 	}
 	d.Words = map[string]WordSpec{req.Type: meta}
 	return d, true
-}
-
-// ParseDescribeRequest decodes an actor.describe request payload. A nil/empty
-// payload is the full-answer request.
-func ParseDescribeRequest(payload []byte) (DescribeRequest, error) {
-	var req DescribeRequest
-	if len(payload) == 0 {
-		return req, nil
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil {
-		return DescribeRequest{}, err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return DescribeRequest{}, errors.New("trailing JSON value")
-		}
-		return DescribeRequest{}, err
-	}
-	return req, nil
 }
 
 // CatalogEntry is one row of the channel member directory: membership

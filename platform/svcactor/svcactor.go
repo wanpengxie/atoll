@@ -83,7 +83,8 @@ func Def(deps Deps) actorbase.Def {
 		if deps.Logger == nil {
 			deps.Logger = slog.New(slog.DiscardHandler)
 		}
-		s := &service{deps: deps, table: emptyTable()}
+		table := emptyTable()
+		s := &service{deps: deps, table: table, card: skeletonCard(table)}
 		return s.serve, nil
 	}}
 }
@@ -382,7 +383,7 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 		if life.Err() != nil {
 			return gateFailure(channel.GateChannelUnavailable, "service actor stopped while request was in flight")
 		}
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, actorbase.ErrCallClosed) {
 			return receiverFailure(string(message.TerminalUnansweredTimeout), err.Error())
 		}
 		return receiverFailure("receiver_unavailable", err.Error())
@@ -426,6 +427,14 @@ func terminalResult(raw json.RawMessage) channel.Result {
 				code = reason
 			default:
 				code = "receiver_unavailable"
+			}
+		}
+		if detail == "" {
+			switch reason {
+			case string(message.TerminalReceiverUnavailable):
+				detail = "B-side receiver became unavailable"
+			case string(message.TerminalUnansweredTimeout):
+				detail = "B-side receiver did not answer before its deadline"
 			}
 		}
 		return receiverFailure(code, detail)

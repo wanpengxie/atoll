@@ -64,10 +64,10 @@ func (s *memoryState) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
 func (s *memoryState) Put(id resource.ResourceID, raw []byte) (accessdoor.Outcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.puts++
 	if s.putErr != nil {
 		return accessdoor.Outcome{}, s.putErr
 	}
-	s.puts++
 	s.values[id] = append([]byte(nil), raw...)
 	return accessdoor.Outcome{}, nil
 }
@@ -203,6 +203,40 @@ func TestInternalManifestAndPeerCardRemainSeparateSurfaces(t *testing.T) {
 	}
 	if card := s.cardSnapshot(); len(card.Words) != 1 || card.Words["agent.ask"] == nil {
 		t.Fatalf("peer card=%+v", card)
+	}
+}
+
+func TestConstructedServiceWithEmptyStateDescribesOnlyAgentAsk(t *testing.T) {
+	port := NewPort()
+	defer port.Close()
+	life, stop := context.WithCancel(context.Background())
+	deps := serviceDeps("target")
+	deps.Port = port
+	def := Def(deps)
+	proc, err := def.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv := make(chan struct{})
+	sys := &materializeSys{ctx: life, state: newMemoryState(), recv: recv}
+	done := make(chan error, 1)
+	go func() { done <- proc(sys) }()
+
+	describeCtx, cancelDescribe := context.WithTimeout(context.Background(), time.Second)
+	card, err := port.Describe(describeCtx, "caller", channel.Describe{From: channel.DescribeFrom{Channel: "caller"}})
+	cancelDescribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(card.Words) != 1 || card.Words["agent.ask"] == nil {
+		t.Fatalf("empty-state card=%+v", card)
+	}
+	stop()
+	close(recv)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("constructed service did not stop")
 	}
 }
 
@@ -391,7 +425,7 @@ func TestServiceSetPublishesTableAndCardOnlyAfterOneSuccessfulWrite(t *testing.T
 		Sender: message.Sender{ID: "agent:owner:1"}, Payload: json.RawMessage(`{"body":{"svc_agent":null,"endpoints":{}}}`),
 	})
 	s.handleMailbox(sys, msg)
-	if sys.fail != "internal_error" || state.puts != 0 || string(state.values[ServiceStateKey]) != string(before) {
+	if sys.fail != "internal_error" || state.puts != 1 || string(state.values[ServiceStateKey]) != string(before) {
 		t.Fatalf("fail=%q puts=%d state=%s", sys.fail, state.puts, state.values[ServiceStateKey])
 	}
 	if got := s.snapshot(); len(got.Endpoints) != 1 || got.Endpoints["old.run"] != "tool:old:1" {
@@ -399,6 +433,28 @@ func TestServiceSetPublishesTableAndCardOnlyAfterOneSuccessfulWrite(t *testing.T
 	}
 	if got := s.cardSnapshot(); string(got.Words["old.run"]) != `{"description":"old"}` {
 		t.Fatalf("in-memory card changed on failed write: %+v", got)
+	}
+
+	state.putErr = nil
+	state.puts = 0
+	sys.fail = ""
+	sys.reply = nil
+	s.handleMailbox(sys, msg)
+	if sys.fail != "" || state.puts != 1 {
+		t.Fatalf("successful set fail=%q puts=%d", sys.fail, state.puts)
+	}
+	persisted, found, err := readService(state)
+	if err != nil || !found || persisted.Card == nil || persisted.Table.SvcAgent != nil || len(persisted.Table.Endpoints) != 0 {
+		t.Fatalf("persisted composite=%+v found=%v err=%v", persisted, found, err)
+	}
+	if len(persisted.Card.Words) != 1 || persisted.Card.Words["agent.ask"] == nil {
+		t.Fatalf("persisted card=%+v", persisted.Card)
+	}
+	if got := s.snapshot(); got.SvcAgent != nil || len(got.Endpoints) != 0 {
+		t.Fatalf("in-memory table after success=%+v", got)
+	}
+	if got := s.cardSnapshot(); len(got.Words) != 1 || got.Words["agent.ask"] == nil {
+		t.Fatalf("in-memory card after success=%+v", got)
 	}
 }
 

@@ -243,14 +243,17 @@ func TestActorRegistryInsert_NonSingletonBirthsAreIndependent(t *testing.T) {
 
 func TestActorRegistryInsert_NonHumanPrincipalNeverMergesBirths(t *testing.T) {
 	rig := newActorRegRig(t)
-	firstDraft := agentDraft("decl-principal", "worker", 1000)
+	firstDraft := agentDraft("decl-principal-a", "worker", 1000)
 	firstDraft.Principal = "shared-operator"
-	secondDraft := agentDraft("decl-principal", "worker", 2000)
+	secondDraft := agentDraft("decl-principal-b", "worker", 2000)
 	secondDraft.Principal = "shared-operator"
 	first := rig.mustInsert(firstDraft)
 	second := rig.mustInsert(secondDraft)
 	if second.ID == first.ID || rig.rawRowCount() != 2 {
 		t.Fatalf("non-human births merged: first=%+v second=%+v rows=%d", first, second, rig.rawRowCount())
+	}
+	if first.SourceDeclID == second.SourceDeclID {
+		t.Fatalf("fixture did not cover distinct declarations: first=%+v second=%+v", first, second)
 	}
 	stored, found, err := rig.reg.LookupActive(context.Background(), first.ID)
 	if err != nil || !found || stored.CreatedAt != first.CreatedAt || stored.Principal != "shared-operator" {

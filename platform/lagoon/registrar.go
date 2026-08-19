@@ -259,6 +259,14 @@ func decodeClosed(raw json.RawMessage, out any) error {
 	return actorbase.DecodeStrict(raw, out)
 }
 
+func decodeEmpty(raw json.RawMessage) error {
+	var body struct{}
+	if err := actorbase.DecodeStrictEmpty(raw, &body); err != nil {
+		return invalid("invalid JSON payload")
+	}
+	return nil
+}
+
 func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal string, source channel.ID, word Word, raw json.RawMessage) (any, error) {
 	switch word {
 	case WordChannelCreate:
@@ -395,12 +403,14 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 		}
 		return r.channelView(ctx, row)
 	case WordPrincipalList:
-		var p struct{}
-		if err := decodeClosed(raw, &p); err != nil {
+		if err := decodeEmpty(raw); err != nil {
 			return nil, err
 		}
 		return r.registry.store.ListPrincipals(ctx)
 	case WordActorTemplateList:
+		if err := decodeEmpty(raw); err != nil {
+			return nil, err
+		}
 		return r.registry.ListDecls(ctx)
 	case WordActorTemplateGet:
 		var p DeclRevoke
@@ -416,6 +426,9 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 		}
 		return row, nil
 	case WordChannelTemplateList:
+		if err := decodeEmpty(raw); err != nil {
+			return nil, err
+		}
 		return r.registry.ListChannelTemplates(ctx)
 	case WordChannelTemplateGet:
 		var p ChannelTemplateGet
@@ -431,8 +444,14 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 		}
 		return row, nil
 	case WordDeviceList:
+		if err := decodeEmpty(raw); err != nil {
+			return nil, err
+		}
 		return r.readDevices(ctx)
 	case WordPrincipalGet:
+		if err := decodeEmpty(raw); err != nil {
+			return nil, err
+		}
 		return r.readPrincipal(ctx, principal)
 	default:
 		return nil, invalid("unknown registrar word")

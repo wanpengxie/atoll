@@ -13,12 +13,6 @@ import (
 
 const ManifestStateKey resource.ResourceID = "_manifest"
 
-// ManifestView is the engine's read-only projection seam used by a transport
-// adapter that must answer for this actor without exposing Sys.
-type ManifestView interface {
-	ProjectManifest(context.Context) (introspect.Describe, error)
-}
-
 func (e *engine) ProjectManifest(ctx context.Context) (introspect.Describe, error) {
 	manifest := e.def.Manifest
 	words := introspect.CloneWords(manifest.Words)
@@ -108,5 +102,3 @@ func (e *engine) respondManifest(env *message.Envelope) {
 	}
 	_, _ = e.Reply(msg, answer)
 }
-
-var _ ManifestView = (*engine)(nil)

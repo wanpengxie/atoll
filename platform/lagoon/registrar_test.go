@@ -209,6 +209,68 @@ func TestRegistrarRejectsUnknownPayloadFieldsAsInvalidArgs(t *testing.T) {
 	}
 }
 
+func TestRegistrarParameterlessWordsAcceptEmptyOrNullAndRejectFields(t *testing.T) {
+	dbPath := t.TempDir() + "/registry.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE principals (id TEXT PRIMARY KEY, kind TEXT, email TEXT, display_name TEXT, status TEXT, created_at INTEGER)`,
+		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, singleton INTEGER NOT NULL DEFAULT 0, created_at INTEGER, updated_at INTEGER)`,
+		`CREATE TABLE channel_templates (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, status TEXT, visibility TEXT, body_json TEXT, created_at INTEGER, updated_at INTEGER)`,
+		`CREATE TABLE devices (id TEXT PRIMARY KEY, owner_principal TEXT, name TEXT, key TEXT, status TEXT, created_at INTEGER)`,
+		`INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES('root','human','root@example.test','Root','present',1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := regstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	r := NewRegistrar(&Registry{store: storage}, registrarFactsStub{
+		facts: channelspec.ActorFacts{Active: true, Principal: "root", Kind: actor.KindHuman}, found: true,
+	}, nil)
+
+	for _, word := range []Word{
+		WordActorTemplateList,
+		WordChannelTemplateList,
+		WordDeviceList,
+		WordPrincipalGet,
+		WordPrincipalList,
+	} {
+		for _, tc := range []struct {
+			name    string
+			payload string
+			wantErr bool
+		}{
+			{name: "empty object", payload: `{}`},
+			{name: "null", payload: `null`},
+			{name: "unknown field", payload: `{"bogus":1}`, wantErr: true},
+		} {
+			t.Run(string(word)+"/"+tc.name, func(t *testing.T) {
+				sys := &registrarSysStub{}
+				r.handle(sys, registrarMessage(word, tc.payload))
+				if tc.wantErr {
+					if sys.value != nil || sys.code != string(CodeInvalidArgs) {
+						t.Fatalf("reply=%#v failure=(%q,%q)", sys.value, sys.code, sys.detail)
+					}
+					return
+				}
+				if sys.code != "" || sys.value == nil {
+					t.Fatalf("valid empty body reply=%#v failure=(%q,%q)", sys.value, sys.code, sys.detail)
+				}
+			})
+		}
+	}
+}
+
 func TestEffectiveAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	dbPath := t.TempDir() + "/registry.db"
 	db, err := sql.Open("sqlite", "file:"+dbPath)

@@ -38,9 +38,9 @@ func ValidateDynamicWords(static map[string]WordSpec, words map[string]WordSpec)
 	return validateDynamicWords(static, words)
 }
 
-// ValidateProjectedWords checks a live proxy projection. Unlike an instance
-// declaration, these words keep the remote owner's prefixes, so prefix
-// ownership was already checked at the remote class/state write boundary.
+// ValidateProjectedWords checks a live proxy projection with the same
+// collision and error-code rules used for an instance declaration. Word
+// prefixes are capability names, not an authorization boundary.
 func ValidateProjectedWords(static map[string]WordSpec, words map[string]WordSpec) error {
 	return validateDynamicWords(static, words)
 }
