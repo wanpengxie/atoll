@@ -50,5 +50,5 @@
 //     downstream send (write-deadline bounded).
 //   - wire.go     the minimal device frame structs.
 //   - types.go    inward type constants + per-type cmd mapping + per-type deadline.
-//   - describe.go the TypeMeta catalog for actor.describe.
+//   - describe.go the WordSpec catalog for actor.describe.
 package xhs

@@ -151,7 +151,7 @@ func TestActorRegistryInsert_StatementFaultLeavesNothing(t *testing.T) {
 	rig := newActorRegRig(t)
 
 	remove := rig.injectStatementFault("INSERT")
-	if _, err := rig.reg.Insert(ctx, agentDraft("decl:atomic", "worker", 1000)); err == nil {
+	if _, err := rig.reg.Insert(ctx, agentDraft("decl-atomic", "worker", 1000)); err == nil {
 		t.Fatal("Insert must fail while the row write aborts")
 	}
 	if n := rig.rawRowCount(); n != 0 {
@@ -162,7 +162,7 @@ func TestActorRegistryInsert_StatementFaultLeavesNothing(t *testing.T) {
 	}
 	remove()
 
-	rec := rig.mustInsert(agentDraft("decl:atomic", "worker", 1000))
+	rec := rig.mustInsert(agentDraft("decl-atomic", "worker", 1000))
 	if rec.ID == "" {
 		t.Fatal("retry after the fault must mint an id")
 	}
@@ -185,7 +185,7 @@ func TestActorRegistryInsert_CommitFaultDiscardsTheRow(t *testing.T) {
 	rig := newActorRegRig(t)
 
 	remove := rig.injectCommitFault("INSERT")
-	_, err := rig.reg.Insert(ctx, agentDraft("decl:atomic", "worker", 1000))
+	_, err := rig.reg.Insert(ctx, agentDraft("decl-atomic", "worker", 1000))
 	if err == nil {
 		t.Fatal("Insert must fail when its commit fails")
 	}
@@ -200,7 +200,7 @@ func TestActorRegistryInsert_CommitFaultDiscardsTheRow(t *testing.T) {
 	}
 	remove()
 
-	rec := rig.mustInsert(agentDraft("decl:atomic", "worker", 1000))
+	rec := rig.mustInsert(agentDraft("decl-atomic", "worker", 1000))
 	if n := rig.rawRowCount(); n != 1 {
 		t.Fatalf("rows after retry = %d, want exactly 1", n)
 	}
@@ -209,17 +209,12 @@ func TestActorRegistryInsert_CommitFaultDiscardsTheRow(t *testing.T) {
 	}
 }
 
-// Once the birth committed, introduce is add-or-update by semantic key: it
-// keeps the identity and immutable birth fields while replacing the requested
-// principal, definition, and placement.
-func TestActorRegistryInsert_CommittedBirthUpdatesBySemanticKey(t *testing.T) {
+func TestActorRegistryInsert_NonSingletonBirthsAreIndependent(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
 
-	first := rig.mustInsert(agentDraft("decl:replay", "worker", 1000))
-	before := rig.commits
-
-	update := agentDraft("decl:replay", "other-class", 5000)
+	first := rig.mustInsert(agentDraft("decl-replay", "worker", 1000))
+	update := agentDraft("decl-replay", "other-class", 5000)
 	update.Principal = "steward"
 	update.Definition.Config = json.RawMessage(`{"v":2}`)
 	update.Placement, _ = storespec.NewDaemonPlacement("device:one")
@@ -227,51 +222,98 @@ func TestActorRegistryInsert_CommittedBirthUpdatesBySemanticKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay Insert: %v", err)
 	}
-	if replay.ID != first.ID {
-		t.Fatalf("replay id = %q, want the committed id %q", replay.ID, first.ID)
+	if replay.ID == first.ID {
+		t.Fatalf("second birth reused %q", first.ID)
 	}
 	if replay.Principal != "steward" || replay.Definition.Class != "other-class" ||
 		string(replay.Definition.Config) != `{"v":2}` || replay.Placement != update.Placement {
 		t.Fatalf("replay did not return updated mutable fields: %+v", replay)
 	}
-	if replay.Kind != first.Kind || replay.SourceDeclID != first.SourceDeclID || replay.CreatedAt != first.CreatedAt {
-		t.Fatalf("replay changed immutable fields: first=%+v replay=%+v", first, replay)
+	if replay.Kind != first.Kind || replay.SourceDeclID != first.SourceDeclID || replay.CreatedAt != update.CreatedAt {
+		t.Fatalf("second birth fields: first=%+v replay=%+v", first, replay)
 	}
-	if n := rig.rawRowCount(); n != 1 {
-		t.Fatalf("rows after replay = %d, want 1 (no second birth)", n)
-	}
-	if rig.commits != before+1 {
-		t.Fatalf("update commit signals=%d want=1", rig.commits-before)
+	if n := rig.rawRowCount(); n != 2 {
+		t.Fatalf("rows after second birth = %d, want 2", n)
 	}
 	stored, found, err := rig.reg.LookupActive(ctx, first.ID)
-	if err != nil || !found || stored.Principal != "steward" || !stored.Definition.Equal(update.Definition) || stored.Placement != update.Placement {
-		t.Fatalf("stored update=%+v found=%v err=%v", stored, found, err)
+	if err != nil || !found || stored.Principal == "steward" || stored.Definition.Class != "worker" {
+		t.Fatalf("first birth changed=%+v found=%v err=%v", stored, found, err)
+	}
+}
+
+func TestActorRegistryInsert_NonHumanPrincipalNeverMergesBirths(t *testing.T) {
+	rig := newActorRegRig(t)
+	firstDraft := agentDraft("decl-principal-a", "worker", 1000)
+	firstDraft.Principal = "shared-operator"
+	secondDraft := agentDraft("decl-principal-b", "worker", 2000)
+	secondDraft.Principal = "shared-operator"
+	first := rig.mustInsert(firstDraft)
+	second := rig.mustInsert(secondDraft)
+	if second.ID == first.ID || rig.rawRowCount() != 2 {
+		t.Fatalf("non-human births merged: first=%+v second=%+v rows=%d", first, second, rig.rawRowCount())
+	}
+	if first.SourceDeclID == second.SourceDeclID {
+		t.Fatalf("fixture did not cover distinct declarations: first=%+v second=%+v", first, second)
+	}
+	stored, found, err := rig.reg.LookupActive(context.Background(), first.ID)
+	if err != nil || !found || stored.CreatedAt != first.CreatedAt || stored.Principal != "shared-operator" {
+		t.Fatalf("first birth changed: stored=%+v found=%v err=%v", stored, found, err)
 	}
 }
 
 func TestActorRegistryInsert_EqualReplayPreservesShape(t *testing.T) {
 	rig := newActorRegRig(t)
-	draft := agentDraft("decl:equal", "worker", 1000)
+	draft := agentDraft("decl-equal", "worker", 1000)
 	first := rig.mustInsert(draft)
 	replay := rig.mustInsert(draft)
-	if replay.ID != first.ID || replay.Kind != first.Kind || replay.Principal != first.Principal ||
-		replay.SourceDeclID != first.SourceDeclID || replay.CreatedAt != first.CreatedAt ||
-		!replay.Definition.Equal(first.Definition) || replay.Placement != first.Placement {
-		t.Fatalf("equal replay changed shape: first=%+v replay=%+v", first, replay)
+	if replay.ID == first.ID || replay.Kind != first.Kind || replay.Principal != first.Principal ||
+		replay.SourceDeclID != first.SourceDeclID || !replay.Definition.Equal(first.Definition) || replay.Placement != first.Placement {
+		t.Fatalf("equal draft did not mint an independent peer: first=%+v replay=%+v", first, replay)
 	}
 }
 
-func TestActorRegistryInsert_SourceKindConflictIsRejected(t *testing.T) {
+func TestActorRegistryInsert_NonSingletonSourceMayMintDifferentKinds(t *testing.T) {
 	rig := newActorRegRig(t)
-	first := rig.mustInsert(agentDraft("decl:kind", "worker", 1000))
-	conflict := agentDraft("decl:kind", "worker", 2000)
+	first := rig.mustInsert(agentDraft("decl-kind", "worker", 1000))
+	conflict := agentDraft("decl-kind", "worker", 2000)
 	conflict.Kind = actor.KindTool
-	if _, err := rig.reg.Insert(context.Background(), conflict); err == nil {
-		t.Fatal("kind-changing introduce succeeded")
+	second, err := rig.reg.Insert(context.Background(), conflict)
+	if err != nil || second.Kind != actor.KindTool || second.ID == first.ID {
+		t.Fatalf("second kind birth=%+v err=%v", second, err)
 	}
 	stored, found, err := rig.reg.LookupActive(context.Background(), first.ID)
 	if err != nil || !found || stored.Kind != actor.KindAgent {
 		t.Fatalf("kind conflict changed stored row: %+v found=%v err=%v", stored, found, err)
+	}
+}
+
+func TestActorRegistryInsert_ThreeSegmentKindsAndReservedSingletons(t *testing.T) {
+	rig := newActorRegRig(t)
+	ctx := context.Background()
+
+	systemDraft := agentDraft("registrar", "registrar", 1000)
+	systemDraft.Kind = actor.KindSystem
+	system := rig.mustInsert(systemDraft)
+	if system.ID != "system:registrar:1000" {
+		t.Fatalf("system id=%q", system.ID)
+	}
+	if _, err := rig.reg.Insert(ctx, systemDraft); !errors.Is(err, storespec.ErrConflictExists) {
+		t.Fatalf("second system identity err=%v", err)
+	}
+
+	peerDraft := agentDraft("remote", "peeractor", 2000)
+	peerDraft.Kind = actor.KindPeer
+	peer := rig.mustInsert(peerDraft)
+	if peer.ID != "peer:remote:2000" {
+		t.Fatalf("peer id=%q", peer.ID)
+	}
+	if _, err := rig.reg.Insert(ctx, peerDraft); !errors.Is(err, storespec.ErrConflictExists) {
+		t.Fatalf("second peer identity err=%v", err)
+	}
+
+	badSeed := agentDraft("bad:seed", "worker", 3000)
+	if _, err := rig.reg.Insert(ctx, badSeed); err == nil || !strings.Contains(err.Error(), "seed") {
+		t.Fatalf("colon seed err=%v", err)
 	}
 }
 
@@ -280,7 +322,7 @@ func TestActorRegistryInsert_SourceKindConflictIsRejected(t *testing.T) {
 func TestActorRegistryUpdateDefinition_StatementFaultLeavesDefinitionIntact(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
-	rec := rig.mustInsert(agentDraft("decl:update", "v1", 1000))
+	rec := rig.mustInsert(agentDraft("decl-update", "v1", 1000))
 	before := rig.commits
 
 	remove := rig.injectStatementFault("UPDATE")
@@ -306,7 +348,7 @@ func TestActorRegistryUpdateDefinition_StatementFaultLeavesDefinitionIntact(t *t
 func TestActorRegistryUpdateDefinition_CommitFaultDiscardsTheRewrite(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
-	rec := rig.mustInsert(agentDraft("decl:update", "v1", 1000))
+	rec := rig.mustInsert(agentDraft("decl-update", "v1", 1000))
 	before := rig.commits
 
 	remove := rig.injectCommitFault("UPDATE")
@@ -351,7 +393,7 @@ func TestActorRegistryUpdateDefinition_CommitFaultDiscardsTheRewrite(t *testing.
 func TestActorRegistryUpdateDefinition_ReturnsInTxRecord(t *testing.T) {
 	ctx := context.Background()
 	rig := newActorRegRig(t)
-	seed := agentDraft("decl:compose", "v1", 1234)
+	seed := agentDraft("decl-compose", "v1", 1234)
 	rec := rig.mustInsert(seed)
 
 	updated, err := rig.reg.UpdateDefinition(ctx, rec.ID,

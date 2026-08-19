@@ -78,7 +78,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl:pre-crash", Kind: actor.KindAgent,
+			SourceDeclID: "decl-pre-crash", Kind: actor.KindAgent,
 			Class: crashWindowClass, Placement: storespec.NewServerPlacement(),
 			CreatedAt: createdAt,
 		}},
@@ -86,7 +86,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	instances, err := h1.controller.DeclaredInstances("decl:pre-crash")
+	instances, err := activeMembersForSource(h1.controller, "decl-pre-crash")
 	if err != nil || len(instances) != 1 {
 		t.Fatalf("bootstrap declaration instances=%v err=%v", instances, err)
 	}
@@ -101,7 +101,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 		t.Fatalf("open registry handle: %v", err)
 	}
 	ghostRecord, err := registry.Actors.Insert(ctx, storespec.ActorDraft{
-		Kind: actor.KindAgent, SourceDeclID: "decl:in-window",
+		Kind: actor.KindAgent, SourceDeclID: "decl-in-window",
 		Definition: storespec.ActorDefinition{
 			Class: crashWindowClass, Config: json.RawMessage(`{"born":"in-window"}`),
 		},
@@ -121,7 +121,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 	if active, err := h1.controller.IsActive(ctx, ghostRecord.ID); err != nil || active {
 		t.Fatalf("the in-window birth was published after all: active=%v err=%v", active, err)
 	}
-	if found, err := h1.controller.DeclaredInstances("decl:in-window"); err != nil || len(found) != 0 {
+	if found, err := activeMembersForSource(h1.controller, "decl-in-window"); err != nil || len(found) != 0 {
 		t.Fatalf("the in-window birth reached the projection: %v err=%v", found, err)
 	}
 	if active, err := h1.controller.IsActive(ctx, preCrash); err != nil || !active {
@@ -153,7 +153,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 	if err != nil || !found || facts.Kind != actor.KindAgent {
 		t.Fatalf("in-window birth facts=%+v found=%v err=%v", facts, found, err)
 	}
-	if adopted, err := h2.controller.DeclaredInstances("decl:in-window"); err != nil ||
+	if adopted, err := activeMembersForSource(h2.controller, "decl-in-window"); err != nil ||
 		len(adopted) != 1 || adopted[0] != ghostRecord.ID {
 		t.Fatalf("in-window declaration instances=%v err=%v", adopted, err)
 	}
@@ -178,7 +178,7 @@ func TestBootConvergesOnDurableTruthAfterACommitPublishCrashWindow(t *testing.T)
 	if _, found, err := h2.controller.ActorFacts(ctx, preCrash); err != nil || found {
 		t.Fatalf("the in-window terminal still has facts: found=%v err=%v", found, err)
 	}
-	if stale, err := h2.controller.DeclaredInstances("decl:pre-crash"); err != nil || len(stale) != 0 {
+	if stale, err := activeMembersForSource(h2.controller, "decl-pre-crash"); err != nil || len(stale) != 0 {
 		t.Fatalf("the in-window terminal came back as an instance: %v err=%v", stale, err)
 	}
 	if _, planned := terms[preCrash]; planned {

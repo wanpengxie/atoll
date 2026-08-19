@@ -19,7 +19,7 @@ func (emptyIntroductionResolver) ResolveDeclaration(context.Context, channel.ID,
 func (emptyIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return "", false, nil
 }
-func (emptyIntroductionResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
+func (emptyIntroductionResolver) ClassPlacement(context.Context, string) (channelspec.PlacementKind, bool, error) {
 	return "", false, nil
 }
 func (emptyIntroductionResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {

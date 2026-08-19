@@ -15,22 +15,20 @@ import (
 // device key, and the daemon log path.
 func setupDaemonEcho(t *testing.T, h *harness, ws *wsClient, declID string) (*proc, string, string, string) {
 	t.Helper()
-	registrar := findTool(t, ws)
-	device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": "e2e-resilience"})
+	registrar := findRegistrar(t, ws)
+	device := registrarRequest(t, ws, c0ChannelID, registrar, "system.device.create", map[string]any{"name": "e2e-resilience"})
 	deviceID := stringField(t, device, "id")
 	deviceKey := stringField(t, device, "key")
-	registrarRequest(t, ws, registrar, "device.attach", map[string]any{
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.device.attach", map[string]any{
 		"channel_id": c0ChannelID,
 		"device_id":  deviceID,
 	})
-	registrarRequest(t, ws, registrar, "actor.template.register", map[string]any{
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
 		"id": declID, "name": "E2E resilience echo", "class": "echo",
 		"config": map[string]any{}, "visibility": "private",
 	})
-	introduced := ws.request(c0ChannelID, "channel.introduce_actor", systemActor, map[string]any{
-		"kind": "tool", "decl_id": declID,
-	})
-	echoID := stringField(t, introduced, "instance_id")
+	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID})
+	echoID := stringField(t, introduced, "member")
 
 	daemonLog := filepath.Join(h.root, "logs", "daemon.log")
 	daemon := startProc(t, "daemon", filepath.Join(e2eBinDir, "atoll-daemon"), []string{

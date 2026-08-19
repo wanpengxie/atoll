@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -45,16 +44,6 @@ func newStepKindAndAudience(d Deps) step { return &stepKindAndAudience{deps: d} 
 func (s *stepKindAndAudience) ID() stepID { return StepKindAndAudience }
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
-	// (1) reserved-bootstrap type→kind rule — kernel's OWN vocabulary. The
-	// reserved system.* bootstrap events are kind=event only.
-	if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
-		if env.Kind != message.KindEvent {
-			return outcome{
-				RejectReason: HarnessKindNotAllowedForType,
-				Detail:       fmt.Sprintf("reserved system type %s allows only kind=event", env.Type),
-			}, nil
-		}
-	}
 	// (business type AND actor.* introspection: no substrate kind rule — falls
 	// through. actor.* is type-agnostic to the substrate; its req/resp shape is
 	// an upper-layer convention, not a substrate gate.)

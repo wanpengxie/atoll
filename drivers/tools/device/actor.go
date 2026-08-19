@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -48,7 +47,7 @@ func NewActor(root string, logger *slog.Logger) *Actor {
 // by Def).
 func Def(root string, logger *slog.Logger) actorbase.Def {
 	return actorbase.Def{
-		Doc: actorDescription,
+		Manifest: manifest(),
 		New: func() (actorbase.Proc, error) {
 			return NewActor(root, logger).run, nil
 		},
@@ -86,40 +85,43 @@ func (a *Actor) handle(msg actorbase.Msg) {
 		a.handleFileWrite(msg)
 	case TypeFileEdit:
 		a.handleFileEdit(msg)
-	case introspect.QueryDescribe:
-		a.handleDescribe(msg)
 	default:
 		a.fail(msg, "type_unsupported", fmt.Sprintf("device actor does not handle %s", msg.Type))
 	}
 }
 
-// channelWorkspace returns the compartment root itself. The compute boundary
-// already selected the delivery's channel by its qualified name; adding the
-// opaque channel id here would create a second, nested channel directory.
-func (a *Actor) channelWorkspace(chID channel.ID) (string, error) {
+// channelWorkspace opens the compartment root. Every subsequent file-system
+// operation is relative to this handle, so symlink resolution cannot escape.
+func (a *Actor) channelWorkspace(chID channel.ID) (*os.Root, error) {
 	if chID == "" {
-		return "", errors.New("envelope has no channel id")
+		return nil, errors.New("envelope has no channel id")
 	}
 	if err := os.MkdirAll(a.root, 0o755); err != nil {
-		return "", fmt.Errorf("create workspace: %w", err)
+		return nil, fmt.Errorf("create workspace: %w", err)
 	}
-	return a.root, nil
+	root, err := os.OpenRoot(a.root)
+	if err != nil {
+		return nil, fmt.Errorf("open workspace: %w", err)
+	}
+	return root, nil
 }
 
-// resolvePath confines a caller-supplied relative path to the workspace.
-// Absolute paths and any path escaping the workspace are rejected.
-func resolvePath(workspace, p string) (string, error) {
+func resolvePath(p string) (string, error) {
 	if p == "" {
 		return "", errors.New("path required")
 	}
 	if filepath.IsAbs(p) {
 		return "", errors.New("path must be relative to the workspace")
 	}
-	full := filepath.Clean(filepath.Join(workspace, p))
-	if full != workspace && !strings.HasPrefix(full, workspace+string(os.PathSeparator)) {
+	clean := filepath.Clean(p)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
 		return "", errors.New("path escapes the workspace")
 	}
-	return full, nil
+	return clean, nil
+}
+
+func pathEscaped(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "path escapes from parent")
 }
 
 // respond commits a status=completed final with the given result payload.

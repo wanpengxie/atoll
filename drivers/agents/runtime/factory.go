@@ -29,8 +29,8 @@ func Build(provider driverproto.Provider, policy Policy) (runtimeproto.Factory, 
 		}
 	}
 	spec := runtimeproto.Spec{
-		Describe:         ps.Describe,
-		Capabilities:     runtimeproto.Capabilities{Steer: ps.Capabilities.Steer, Interrupt: ps.Capabilities.Interrupt, Resume: ps.Capabilities.Resume},
+		Documentation:    ps.Documentation,
+		Capabilities:     cloneCapabilities(ps.Capabilities),
 		Bounds:           runtimeproto.Bounds{ReceiptDeadline: receipt, EventCapacity: policy.EventCapacity},
 		Selections:       make([]runtimeproto.TurnOptions, len(ps.Selections)),
 		DefaultSelection: ps.DefaultSelection,
@@ -42,6 +42,14 @@ func Build(provider driverproto.Provider, policy Policy) (runtimeproto.Factory, 
 		return newEngine(provider, ps, policy, deps, seed, options, events)
 	}
 	return factory, spec, nil
+}
+
+func cloneCapabilities(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in))
+	for name, enabled := range in {
+		out[name] = enabled
+	}
+	return out
 }
 
 func Default(provider driverproto.Provider) (runtimeproto.Factory, runtimeproto.Spec, error) {

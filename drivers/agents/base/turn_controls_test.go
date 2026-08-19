@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type captureRuntime struct{ starts []runtimeproto.StartCommand }
@@ -73,6 +74,48 @@ func TestCommandRequestsFormSingleItemBatches(t *testing.T) {
 	}
 	if rt.starts[0].Kind != runtimeproto.TurnChat || rt.starts[1].Kind != runtimeproto.TurnCompact || rt.starts[2].Kind != runtimeproto.TurnChat {
 		t.Fatalf("batch kinds=%v/%v/%v", rt.starts[0].Kind, rt.starts[1].Kind, rt.starts[2].Kind)
+	}
+}
+
+func TestBatchingKeepsEffectiveCallersSeparate(t *testing.T) {
+	rt := &captureRuntime{}
+	vault := effectcap.NewVault()
+	l := &agentLoop{
+		def: definition{cfg: Config{BatchMaxCount: 32, ReceiptDeadline: time.Hour}}, state: book.New(),
+		exec: &executor{runtime: rt, vault: vault, handles: map[string]actorbase.Msg{}, writers: make(chan struct{}, 1)}, vault: vault,
+		receipts: map[string]receiptRow{}, receiptTimers: map[string]*time.Timer{}, logger: testLogger(),
+	}
+	defer func() {
+		for _, timer := range l.receiptTimers {
+			timer.Stop()
+		}
+	}()
+	add := func(id string, caller harness.Caller) {
+		requestID := book.RequestID(id)
+		l.state.Requests[requestID] = &book.Request{ID: requestID, Input: runtimeproto.Input{SourceID: id, Text: id, Caller: caller}}
+		l.state.Buffer = append(l.state.Buffer, requestID)
+	}
+	callerA := harness.Caller{Channel: "a", Actor: "agent:alice:1"}
+	callerB := harness.Caller{Channel: "b", Actor: "agent:alice:1"}
+	add("a1", callerA)
+	add("a2", callerA)
+	add("b1", callerB)
+	for len(l.state.Buffer) > 0 {
+		l.startNext()
+		owner := l.state.Turn.Owner
+		l.clearReceipt(receiptKey("start", uint64(l.state.Turn.StartOp)))
+		l.clearTurn()
+		l.state.RemoveRequest(owner)
+	}
+	if len(rt.starts) != 2 || len(rt.starts[0].Messages) != 2 || len(rt.starts[1].Messages) != 1 {
+		t.Fatalf("caller batches=%+v", rt.starts)
+	}
+}
+
+func TestAgentVocabularyRejectsLegacyAndUnknownWords(t *testing.T) {
+	d := definition{controls: map[string]struct{}{TypeAsk: {}, TypeContext: {}}}
+	if !d.supports(TypeAsk) || d.supports("chat.text") || d.supports("agent.unknown") {
+		t.Fatalf("agent vocabulary did not stay closed")
 	}
 }
 
@@ -166,6 +209,59 @@ type turnControlSys struct {
 	events  []behavior.EventSpec
 }
 
+type forkPending struct{ terminal actorbase.Msg }
+
+func (p forkPending) RequestID() message.ID { return p.terminal.ParentID }
+func (forkPending) Progress() <-chan actorbase.Msg {
+	out := make(chan actorbase.Msg)
+	close(out)
+	return out
+}
+func (p forkPending) Wait(context.Context, time.Duration) (actorbase.Msg, error) {
+	return p.terminal, nil
+}
+func (forkPending) Cancel() error { return nil }
+
+type forkSys struct {
+	actorbase.Sys
+	mu      sync.Mutex
+	done    chan struct{}
+	target  actor.ActorID
+	word    string
+	payload any
+	reply   any
+	fail    string
+}
+
+func (*forkSys) Self() actor.ActorID { return "agent:clone-source:1" }
+func (s *forkSys) Call(target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
+	s.mu.Lock()
+	s.target, s.word, s.payload = target, word, payload
+	s.mu.Unlock()
+	terminal := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ParentID: "member-create", Payload: json.RawMessage(`{"status":"completed","member":"agent:clone-source:2"}`)})
+	return forkPending{terminal: terminal}, nil
+}
+func (s *forkSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
+	s.mu.Lock()
+	s.reply = value
+	s.mu.Unlock()
+	close(s.done)
+	return "reply", nil
+}
+func (s *forkSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
+	s.mu.Lock()
+	s.fail = code
+	s.mu.Unlock()
+	close(s.done)
+	return "fail", nil
+}
+
+func (s *forkSys) snapshot() (actor.ActorID, string, any, any, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.target, s.word, s.payload, s.reply, s.fail
+}
+
 func (s *turnControlSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	s.mu.Lock()
 	s.replies = append(s.replies, value)
@@ -183,7 +279,7 @@ func (*turnControlSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { ret
 func (*turnControlSys) Self() actor.ActorID                                { return "agent:test" }
 
 func baseRequest(id, typ string) actorbase.Msg {
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "caller"}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{}`)})
+	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "caller"}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{"body":{}}`)})
 }
 
 func TestTurnEndedCarriesUsageIntoActivityAndReply(t *testing.T) {
@@ -251,6 +347,30 @@ func TestContextReadReturnsLastUsageWithoutTurn(t *testing.T) {
 	}
 	if l.state.Turn != nil {
 		t.Fatal("context read occupied a turn")
+	}
+}
+
+func TestAgentForkCallsTheDoorWithItsOwnDeclaration(t *testing.T) {
+	sys := &forkSys{done: make(chan struct{})}
+	vault := effectcap.NewVault()
+	exec := newExecutor(sys, vault)
+	msg := baseRequest("fork", TypeFork)
+	exec.install(msg)
+	l := &agentLoop{sys: sys, exec: exec, vault: vault}
+	l.handleFork(msg)
+	select {
+	case <-sys.done:
+	case <-time.After(time.Second):
+		t.Fatal("fork did not finish")
+	}
+	target, word, captured, reply, fail := sys.snapshot()
+	payload, _ := captured.(map[string]any)
+	if target != actor.SystemActorID || word != "system.member.create" || payload["decl_id"] != "clone-source" {
+		t.Fatalf("call target=%q word=%q payload=%v", target, word, captured)
+	}
+	raw, ok := reply.(json.RawMessage)
+	if !ok || string(raw) != `{"status":"completed","member":"agent:clone-source:2"}` {
+		t.Fatalf("reply=%T/%v fail=%q", reply, reply, fail)
 	}
 }
 

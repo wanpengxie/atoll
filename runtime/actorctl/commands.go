@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -50,7 +49,7 @@ func (c *Controller) Admit(
 	}
 	created := c.publishLocked(record, key)
 	transition := Transition[AdmitResult]{
-		Result: channel.AdmitResult{ActorID: record.ID, Created: created},
+		Result: AdmitResult{ActorID: record.ID, Created: created},
 	}
 	if created {
 		transition.Reconcile.add(record.Placement)
@@ -67,40 +66,41 @@ const humanClass = "human"
 func (c *Controller) Introduce(
 	ctx context.Context,
 	request IntroduceRequest,
-) (Transition[channel.IntroduceResult], error) {
+) (Transition[IntroduceResult], error) {
 	done, err := c.beginCommand()
 	if err != nil {
-		return Transition[channel.IntroduceResult]{}, err
+		return Transition[IntroduceResult]{}, err
 	}
 	defer done()
 
 	c.ledger.Lock()
 	defer c.ledger.Unlock()
 	if err := c.runnableLocked(); err != nil {
-		return Transition[channel.IntroduceResult]{}, err
+		return Transition[IntroduceResult]{}, err
 	}
 	if request.DeclID == "" || request.Definition.Class == "" {
-		return Transition[channel.IntroduceResult]{}, ErrInvalidMutation
+		return Transition[IntroduceResult]{}, ErrInvalidMutation
 	}
 	for _, value := range c.actors {
 		if value.Record.SourceDeclID == request.DeclID && value.Record.Kind != request.Kind {
-			return Transition[channel.IntroduceResult]{}, ErrInvalidMutation
+			return Transition[IntroduceResult]{}, ErrInvalidMutation
 		}
 	}
 	key, err := mintAttempt()
 	if err != nil {
-		return Transition[channel.IntroduceResult]{}, err
+		return Transition[IntroduceResult]{}, err
 	}
 	record, err := c.store.Insert(ctx, storespec.ActorDraft{
 		Kind:         request.Kind,
 		Principal:    request.Principal,
 		SourceDeclID: request.DeclID,
+		Singleton:    request.Singleton,
 		CreatedAt:    c.nowMs(),
 		Definition:   request.Definition,
 		Placement:    request.Placement,
 	})
 	if err != nil {
-		return Transition[channel.IntroduceResult]{}, err
+		return Transition[IntroduceResult]{}, err
 	}
 	previous, existed := c.actors[record.ID]
 	created := !existed
@@ -115,8 +115,8 @@ func (c *Controller) Introduce(
 		// does not change. Preserve its term while publishing the new record.
 		c.actors[record.ID] = managedActor{Record: record, Attempt: previous.Attempt}
 	}
-	transition := Transition[channel.IntroduceResult]{
-		Result: channel.IntroduceResult{ActorID: record.ID, Created: created},
+	transition := Transition[IntroduceResult]{
+		Result: IntroduceResult{ActorID: record.ID, Created: created},
 	}
 	if created {
 		transition.Reconcile.add(record.Placement)
@@ -214,9 +214,9 @@ func (c *Controller) End(
 func (c *Controller) Remove(
 	ctx context.Context,
 	request RemoveRequest,
-) (Transition[channel.RemoveResult], error) {
+) (Transition[RemoveResult], error) {
 	transition, err := c.Terminal(ctx, TerminalCommand{Kind: TerminalRemove, Remove: request})
-	return Transition[channel.RemoveResult]{
+	return Transition[RemoveResult]{
 		Result:     transition.Result.Remove,
 		Ended:      transition.Ended,
 		EndedFacts: transition.EndedFacts,
@@ -314,7 +314,7 @@ func (c *Controller) Terminal(
 	case TerminalEnd:
 		result.Ended = append([]actor.ActorID(nil), targets...)
 	case TerminalRemove:
-		result.Remove = channel.RemoveResult{Removed: append([]actor.ActorID(nil), targets...)}
+		result.Remove = RemoveResult{Removed: append([]actor.ActorID(nil), targets...)}
 	}
 	transition.Result = result
 	transition.Ended = append([]actor.ActorID(nil), targets...)

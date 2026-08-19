@@ -17,6 +17,7 @@ type DeclareRequest struct {
 	Class        string
 	Config       *json.RawMessage
 	Placement    storespec.Placement
+	Singleton    bool
 	CreatedAt    int64
 }
 

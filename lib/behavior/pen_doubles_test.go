@@ -85,7 +85,7 @@ func newRequest(id message.ID, expiresAt *int64) *message.Envelope {
 		Sender:     testSender(),
 		Kind:       message.KindRequest,
 		Type:       "ask",
-		Payload:    json.RawMessage(`{}`),
+		Payload:    json.RawMessage(`{"body":{}}`),
 		Visibility: message.Visibility("channel"),
 		Audience:   message.Audience{actor.ActorID("svc")},
 		ExpiresAt:  expiresAt,

@@ -18,8 +18,8 @@ import (
 
 const (
 	buildWindowClass    = "build-window-park"
-	buildWindowDoomed   = "decl:build-window-doomed"
-	buildWindowSurvivor = "decl:build-window-survivor"
+	buildWindowDoomed   = "decl-build-window-doomed"
+	buildWindowSurvivor = "decl-build-window-survivor"
 	// buildWindowSettle bounds the negative observation "the voided build never
 	// became a live body". It is deliberately generous: the positive control in
 	// the same test has already proved the released builds are being processed.
@@ -132,7 +132,7 @@ func openBuildWindowHome(
 
 func buildWindowInstance(t *testing.T, h *Home, source string) actor.ActorID {
 	t.Helper()
-	instances, err := h.controller.DeclaredInstances(source)
+	instances, err := activeMembersForSource(h.controller, source)
 	if err != nil || len(instances) != 1 {
 		t.Fatalf("declaration %q instances=%v err=%v", source, instances, err)
 	}

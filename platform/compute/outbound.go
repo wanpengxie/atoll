@@ -92,6 +92,7 @@ type OutboundArmsBundle struct {
 	State     accessdoor.AccessHandle
 	Schedule  schedule.ScheduleHandle
 	Lifecycle actorcaps.LifecycleHandle
+	Target    link.TargetResolver
 }
 
 var disconnectedOutboundBundle = &OutboundArmsBundle{}
@@ -446,6 +447,7 @@ func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session LaneSession) {
 			State:     raw.State,
 			Schedule:  raw.Schedule,
 			Lifecycle: raw.Lifecycle,
+			Target:    raw.Target,
 		}
 		old := slot.arms.Swap(next)
 		if old != nil && old.Stream != nil && old.Stream != stream {
@@ -572,6 +574,17 @@ func (s *OutboundSlot) PublishObs(kind actorrt.ObsKind, value actorrt.ObsValue) 
 		s.holdObs(kind, value)
 	}
 	return err
+}
+
+func (s *OutboundSlot) ResolveTarget(target string) (actor.ActorID, error) {
+	bundle, err := s.loadAttempt()
+	if err != nil {
+		return "", err
+	}
+	if bundle.Target == nil {
+		return "", errors.New("compute: target resolver unavailable")
+	}
+	return bundle.Target.ResolveTarget(s.owner.ctx, target)
 }
 
 // publishObsNow is the one wire attempt, with no holding.
@@ -869,8 +882,8 @@ func (s outboundSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
 
 // outboundLifecycle acts AS THE CURRENT TERM, alongside the pen and the
 // resource arm. The wire says so already: link's handler table states that
-// carrying the attempt key IS the permission matrix, and fork and end-self both
-// carry it while schedule — the one arm that acts as an identity across terms —
+// carrying the attempt key IS the permission matrix, and end-self carries it
+// while schedule — the one arm that acts as an identity across terms —
 // does not. This gate was the local half of that classification, missing.
 //
 // It is not a permission verdict. The Controller rules on permission and
@@ -881,13 +894,6 @@ func (s outboundSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
 // on the authority of the same plan is the daemon disagreeing with itself.
 type outboundLifecycle struct{ slot *OutboundSlot }
 
-func (l outboundLifecycle) Fork(ctx context.Context, requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
-	bundle, err := l.slot.loadAttempt()
-	if err != nil {
-		return "", err
-	}
-	return bundle.Lifecycle.Fork(ctx, requestID, spec)
-}
 func (l outboundLifecycle) EndSelf(ctx context.Context, request actorcaps.EndSelfRequest) error {
 	bundle, err := l.slot.loadAttempt()
 	if err != nil {

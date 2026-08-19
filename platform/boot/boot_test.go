@@ -13,8 +13,8 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/boot"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -36,7 +36,7 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if !result.Installed || result.RootPassword != "root-pass" {
 		t.Fatalf("result=%+v", result)
 	}
-	if boot.RegistryDDLCount() != 9 {
+	if boot.RegistryDDLCount() != 8 {
 		t.Fatalf("registry DDL count=%d", boot.RegistryDDLCount())
 	}
 	if filepath.Dir(result.RegistryDBPath) == filepath.Clean(root) {
@@ -50,7 +50,7 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"channels", "principals", "credentials", "decls", "decl_overlays", "channel_endpoints", "channel_templates", "devices", "bindings", "atoll_install"} {
+	for _, table := range []string{"channels", "principals", "credentials", "decls", "decl_overlays", "channel_templates", "devices", "bindings", "atoll_install"} {
 		var n int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("table %s count=%d err=%v", table, n, err)
@@ -62,22 +62,25 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 			t.Fatalf("channels.%s count=%d err=%v", column, n, err)
 		}
 	}
-	var channelCount, endpointCount, principalCount int
+	var channelCount, principalCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channels`).Scan(&channelCount); err != nil || channelCount != 2 {
 		t.Fatalf("channels=%d err=%v", channelCount, err)
 	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_endpoints WHERE channel_id=?`, protocol.C0ChannelID).Scan(&endpointCount); err != nil || endpointCount != len(lagoon.WriteWords)+len(lagoon.ReadWords) {
-		t.Fatalf("c0 endpoints=%d err=%v", endpointCount, err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM principals WHERE id IN (?,?,?)`, protocol.RootPrincipalID, protocol.StewardPrincipalID, protocol.GuestPrincipalID).Scan(&principalCount); err != nil || principalCount != 3 {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM principals WHERE id IN (?,?,?)`, channelspec.RootPrincipalID, channelspec.StewardPrincipalID, channelspec.GuestPrincipalID).Scan(&principalCount); err != nil || principalCount != 3 {
 		t.Fatalf("system principals=%d err=%v", principalCount, err)
+	}
+	// guest 的唯一 cell 是 lobby 里的 human cell，principal kind 必须与之一致：
+	// human 才走 store.Insert 的 principal 合并支。
+	var guestKind string
+	if err := db.QueryRowContext(ctx, `SELECT kind FROM principals WHERE id=?`, channelspec.GuestPrincipalID).Scan(&guestKind); err != nil || guestKind != "human" {
+		t.Fatalf("guest principal kind=%q err=%v", guestKind, err)
 	}
 	var lobbyServing int
 	var lobbyDescription string
-	if err := db.QueryRowContext(ctx, `SELECT serving,description FROM channels WHERE id=?`, protocol.LobbyChannelID).Scan(&lobbyServing, &lobbyDescription); err != nil || lobbyServing != 0 || lobbyDescription == "" {
+	if err := db.QueryRowContext(ctx, `SELECT serving,description FROM channels WHERE id=?`, channelspec.LobbyChannelID).Scan(&lobbyServing, &lobbyDescription); err != nil || lobbyServing != 0 || lobbyDescription == "" {
 		t.Fatalf("lobby serving=%d description=%q err=%v", lobbyServing, lobbyDescription, err)
 	}
-	for _, id := range []channel.ID{protocol.C0ChannelID, protocol.LobbyChannelID} {
+	for _, id := range []channel.ID{channelspec.C0ChannelID, channelspec.LobbyChannelID} {
 		var description, specRaw string
 		var serving int
 		if err := db.QueryRowContext(ctx, `SELECT description,serving,spec_json FROM channels WHERE id=?`, id).Scan(&description, &serving, &specRaw); err != nil {
@@ -87,12 +90,12 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 		if err := json.Unmarshal([]byte(specRaw), &spec); err != nil || spec.Profile.Description == nil || *spec.Profile.Description != description || spec.Profile.Serving == nil || *spec.Profile.Serving != serving {
 			t.Fatalf("channel %s frozen profile=%+v row=(%q,%d) err=%v", id, spec.Profile, description, serving, err)
 		}
-		if id == protocol.C0ChannelID && len(spec.Profile.Endpoints) != endpointCount {
-			t.Fatalf("c0 frozen endpoints=%d want=%d", len(spec.Profile.Endpoints), endpointCount)
+		if len(spec.Profile.Endpoints) != 0 {
+			t.Fatalf("channel %s unexpectedly froze endpoints=%d", id, len(spec.Profile.Endpoints))
 		}
 	}
 	var privateSystemDecls int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decls WHERE id IN (?,?) AND visibility='private' AND status='present'`, lagoon.SvcActorDeclID, lagoon.RegistrarSeatDeclID).Scan(&privateSystemDecls); err != nil || privateSystemDecls != 2 {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decls WHERE id IN (?,?) AND visibility='private' AND status='present'`, lagoon.SvcActorDeclID, lagoon.RegistrarDeclID).Scan(&privateSystemDecls); err != nil || privateSystemDecls != 2 {
 		t.Fatalf("private system declarations=%d err=%v", privateSystemDecls, err)
 	}
 	var descriptionColumns int
@@ -104,7 +107,7 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 		t.Fatalf("marker=%d err=%v", installedAt, err)
 	}
 	var localDeviceName string
-	if err := db.QueryRowContext(ctx, `SELECT name FROM devices WHERE id=?`, protocol.LocalDeviceID).Scan(&localDeviceName); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT name FROM devices WHERE id=?`, channelspec.LocalDeviceID).Scan(&localDeviceName); err != nil {
 		t.Fatal(err)
 	}
 	if err := lagoon.ValidateName(localDeviceName); err != nil {
@@ -127,17 +130,17 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	if err := channelDB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cs, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, result.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
+	cs, err := runtime.OpenChannel(ctx, channelspec.C0ChannelID, result.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
 	if err != nil {
 		t.Fatalf("reopen pure c0: %v", err)
 	}
 	_ = cs.Close()
-	assertBootRoster(t, result.C0DBPath, []string{lagoon.RegistrarSeatDeclID, lagoon.SvcActorDeclID, lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward"), "peer:" + string(protocol.LobbyChannelID)}, []string{protocol.RootPrincipalID}, 5)
-	lobbyPath, err := channelhost.DBPath(root, protocol.LobbyChannelID)
+	assertBootRoster(t, result.C0DBPath, []string{lagoon.RegistrarDeclID, lagoon.SvcActorDeclID, lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, "steward"), string(channelspec.LobbyChannelID)}, []string{channelspec.RootPrincipalID}, 5)
+	lobbyPath, err := channelhost.DBPath(root, channelspec.LobbyChannelID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertBootRoster(t, lobbyPath, []string{lagoon.SvcActorDeclID, lagoon.CoreActorDeclID}, []string{protocol.GuestPrincipalID}, 3)
+	assertBootRoster(t, lobbyPath, []string{lagoon.SvcActorDeclID}, []string{channelspec.GuestPrincipalID}, 2)
 }
 
 func assertBootRoster(t *testing.T, path string, decls, principals []string, total int) {
@@ -157,7 +160,7 @@ func assertBootRoster(t *testing.T, path string, decls, principals []string, tot
 			t.Fatalf("%s decl %s: %v", path, decl, err)
 		}
 		want := "server"
-		if decl == lagoon.StableBootstrapDeclID(protocol.RootPrincipalID, "steward") {
+		if decl == lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, "steward") {
 			want = "daemon"
 		}
 		if placement != want {
@@ -261,7 +264,7 @@ func TestEnsureRebuildsRegistryWithoutMarker(t *testing.T) {
 func TestEnsureRebuildsBothDatabaseFamiliesWithoutInstallTable(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	c0Path, err := channelhost.DBPath(root, protocol.C0ChannelID)
+	c0Path, err := channelhost.DBPath(root, channelspec.C0ChannelID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +346,7 @@ func TestRegistryAndC0WritersDoNotShareSQLiteLockDomain(t *testing.T) {
 	}
 	defer registry.Close()
 	registrar := lagoon.NewRegistrar(registry, nil, nil)
-	c0, err := runtime.OpenChannel(ctx, protocol.C0ChannelID, installed.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
+	c0, err := runtime.OpenChannel(ctx, channelspec.C0ChannelID, installed.C0DBPath, runtime.OpenChannelOptions{MustExist: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +365,7 @@ func TestRegistryAndC0WritersDoNotShareSQLiteLockDomain(t *testing.T) {
 				ID:         message.ID(fmt.Sprintf("lock-domain-%d", i)),
 				TS:         int64(i + 1),
 				TSReceived: int64(i + 1),
-				ChannelID:  protocol.C0ChannelID,
+				ChannelID:  channelspec.C0ChannelID,
 				Sender:     message.Sender{Kind: actor.KindHuman, ID: "root-writer"},
 				Kind:       message.KindEvent,
 				Type:       "test.concurrent_write",

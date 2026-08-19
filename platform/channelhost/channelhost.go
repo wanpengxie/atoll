@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/lagoon"
@@ -114,6 +115,10 @@ type ChannelHost struct {
 	registry    RegistryReader
 	convergence *convergenceState
 	shutdown    func(*home.Home, context.Context) error
+	// beforePublish is a crash-cut seam used only by same-package tests. A nil
+	// production value has no effect; an error simulates process loss after the
+	// physical mirror is complete but before the serving entry is published.
+	beforePublish func(channel.ID) error
 
 	mu      sync.RWMutex
 	closed  bool
@@ -266,9 +271,6 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	genesis.InitiatorPrincipal = spec.InitiatorPrincipal
 	bootstrapDeclarations := make([]home.DeclareRequest, 0, len(spec.Declarations))
 	for _, declaration := range spec.Declarations {
-		if declaration.DeclID != lagoon.SvcActorDeclID && declaration.DeclID != lagoon.CoreActorDeclID && declaration.DeclID != lagoon.RegistrarSeatDeclID {
-			continue
-		}
 		if err := declaration.Rendered.Validate(); err != nil {
 			return fmt.Errorf("channelhost: invalid genesis declaration %q: %w", declaration.DeclID, err)
 		}
@@ -280,13 +282,18 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 		bootstrapDeclarations = append(bootstrapDeclarations, home.DeclareRequest{
 			SourceDeclID: declaration.DeclID, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
+			Singleton: declaration.Rendered.Singleton,
 			CreatedAt: spec.CreatedAt,
 		})
+	}
+	bootstrapService := home.BootstrapService{SvcAgent: spec.Profile.SvcAgent, Endpoints: make(map[string]string, len(spec.Profile.Endpoints))}
+	for word, endpoint := range spec.Profile.Endpoints {
+		bootstrapService.Endpoints[word] = endpoint.Receiver
 	}
 	port := svcactor.NewPort()
 	homeInstance, err := h.openHome(
 		spec.ChannelID, name, main, true, &genesis,
-		spec.OwnerPrincipal, bootstrapDeclarations, port,
+		spec.OwnerPrincipal, bootstrapDeclarations, bootstrapService, port,
 	)
 	if err != nil {
 		return err
@@ -298,15 +305,6 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 			_ = home.Shutdown(homeInstance)
 		}
 	}()
-	for _, declaration := range spec.Declarations {
-		if declaration.DeclID != lagoon.SvcActorDeclID && declaration.DeclID != lagoon.CoreActorDeclID && declaration.DeclID != lagoon.RegistrarSeatDeclID {
-			continue
-		}
-		ids, err := homeInstance.View().DeclaredInstances(ctx, declaration.DeclID)
-		if err != nil || len(ids) != 1 {
-			return fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
-		}
-	}
 	if err := home.Shutdown(homeInstance); err != nil {
 		return fmt.Errorf("channelhost: close bootstrap home: %w", err)
 	}
@@ -315,14 +313,14 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	return nil
 }
 
-func storePlacement(in channel.Placement) (storespec.Placement, error) {
+func storePlacement(in channelspec.Placement) (storespec.Placement, error) {
 	switch in.Kind {
-	case channel.PlacementServer:
+	case channelspec.PlacementServer:
 		return storespec.NewServerPlacement(), nil
-	case channel.PlacementDaemon:
+	case channelspec.PlacementDaemon:
 		return storespec.NewDaemonPlacement(in.DesiredHost)
 	default:
-		return storespec.Placement{}, channel.ErrInvalidPlacement
+		return storespec.Placement{}, channelspec.ErrInvalidPlacement
 	}
 }
 
@@ -373,7 +371,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	// checks only that the pointer is present. There is no second account to
 	// cross-check it against.
 	port := svcactor.NewPort()
-	homeInstance, err := h.openHome(spec.ChannelID, spec.ChannelName, main, false, &genesis, "", nil, port)
+	homeInstance, err := h.openHome(spec.ChannelID, spec.ChannelName, main, false, &genesis, "", nil, home.BootstrapService{}, port)
 	if err != nil {
 		port.Close()
 		if errors.Is(err, home.ErrOwnerInvariant) {
@@ -383,6 +381,13 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 			return errors.Join(ErrSchemaIncompatible, err)
 		}
 		return err
+	}
+	if h.beforePublish != nil {
+		if err := h.beforePublish(spec.ChannelID); err != nil {
+			port.Close()
+			_ = home.Shutdown(homeInstance)
+			return err
+		}
 	}
 	generation := h.nextGen.Add(1)
 	h.mu.Lock()
@@ -411,6 +416,7 @@ func (h *ChannelHost) openHome(
 	genesis *storespec.ChannelGenesis,
 	bootstrapOwner string,
 	bootstrapDeclarations []home.DeclareRequest,
+	bootstrapService home.BootstrapService,
 	port *svcactor.Port,
 ) (*home.Home, error) {
 	config := home.Config{
@@ -418,6 +424,7 @@ func (h *ChannelHost) openHome(
 		CompositionResolver: h.deps.CompositionResolver, IntroductionResolver: h.deps.IntroductionResolver,
 		Logger: h.logger, BootstrapOwnerPrincipal: bootstrapOwner,
 		BootstrapDeclarations: bootstrapDeclarations,
+		BootstrapService:      bootstrapService,
 		DaemonRoutes:          h.deps.DaemonRoutes,
 		DataPlaneIssuer:       h.deps.DataPlaneIssuer,
 		DeviceDirectory:       h.deps.DeviceDirectory,

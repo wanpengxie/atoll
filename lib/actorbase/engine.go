@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -304,6 +305,10 @@ func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 		if existed {
 			// Redelivery of an already-admitted request is an account
 			// no-op, not a second handler invocation.
+			return nil
+		}
+		if env.Type == introspect.QueryDescribe {
+			e.respondManifest(env)
 			return nil
 		}
 		// Admitted: seat the delivery. The work deque never evicts a seated
@@ -638,6 +643,15 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 		return "", err
 	}
 	spec.Visibility = vis
+	audience, err := e.resolveAudience(spec.Audience)
+	if err != nil {
+		return "", err
+	}
+	spec.Audience = audience
+	spec.Payload, err = encodeRequestPayload(nil, spec.Payload)
+	if err != nil {
+		return "", err
+	}
 	env, err := behavior.BuildRequest(e.clockFn, spec)
 	if err != nil {
 		return "", err
@@ -656,7 +670,21 @@ func (e *engine) Call(target actor.ActorID, msgType string, payload any) (Pendin
 		Type:     msgType,
 		Payload:  raw,
 		Audience: message.Audience{target},
-	})
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &pendingTicket{call: e.call, id: id}, nil
+}
+
+func (e *engine) CallFor(caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	id, err := e.submit(behavior.RequestSpec{
+		Type: msgType, Payload: raw, Audience: message.Audience{target},
+	}, &caller)
 	if err != nil {
 		return nil, err
 	}
@@ -665,11 +693,16 @@ func (e *engine) Call(target actor.ActorID, msgType string, payload any) (Pendin
 
 // submit is Submit/Call's shared body: resolve a missing deadline, build,
 // register (subscribe-before-send), write, and arm author#2 on success.
-func (e *engine) submit(spec behavior.RequestSpec) (message.ID, error) {
+func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (message.ID, error) {
 	if len(spec.Audience) == 0 {
 		return "", fmt.Errorf("actorbase: submit audience required")
 	}
-	target := spec.Audience[0]
+	resolved, err := e.resolveTarget(spec.Audience[0])
+	if err != nil {
+		return "", err
+	}
+	spec.Audience[0] = resolved
+	target := resolved
 	// F3: a Call/Submit addressed to this incarnation's OWN id would deadlock
 	// the single worker (the reply can only be authored by the same goroutine
 	// then blocked in Wait). Fail fast BEFORE any build/register/write, so it
@@ -684,6 +717,10 @@ func (e *engine) submit(spec behavior.RequestSpec) (message.ID, error) {
 			t := e.clockFn().Add(d).UnixMilli()
 			spec.ExpiresAt = &t
 		}
+	}
+	spec.Payload, err = encodeRequestPayload(caller, spec.Payload)
+	if err != nil {
+		return "", err
 	}
 	env, err := behavior.BuildRequest(e.clockFn, spec)
 	if err != nil {
@@ -724,6 +761,17 @@ type pendingTicket struct {
 
 func (p *pendingTicket) RequestID() message.ID { return p.id }
 
+func (p *pendingTicket) Progress() <-chan Msg {
+	out := make(chan Msg)
+	go func() {
+		defer close(out)
+		for env := range p.call.progress(p.id) {
+			out <- NewMsg(OriginMailbox, p.call.life(), *env)
+		}
+	}()
+	return out
+}
+
 func (p *pendingTicket) Wait(ctx context.Context, d time.Duration) (Msg, error) {
 	env, ok, err := p.call.wait(ctx, p.id, d)
 	if err != nil {
@@ -745,7 +793,7 @@ func (p *pendingTicket) Cancel() error {
 // ledger sys.Call()/Pending touch (spec §1.5). ---------------------------
 
 func (e *engine) Submit(spec behavior.RequestSpec) (message.ID, error) {
-	return e.submit(spec)
+	return e.submit(spec, nil)
 }
 
 func (e *engine) Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
@@ -753,6 +801,10 @@ func (e *engine) Await(ctx context.Context, id message.ID, window time.Duration)
 		return nil, false, nil
 	}
 	return e.call.wait(ctx, id, window)
+}
+
+func (e *engine) ProgressEvents(id message.ID) <-chan *message.Envelope {
+	return e.call.progress(id)
 }
 
 func (e *engine) List() []message.ID {
@@ -771,9 +823,8 @@ type resourceAdapter struct {
 }
 
 // nil-arm底线 (S6): a host with no Access/State arm answers ErrUnsupported
-// rather than nil-pointer-panicking through the door — the same kernel defense
-// the Spawn arm carries. No host currently produces a nil arm here (only Spawn
-// crosses the wire zero), so this is a defensive floor, not a live path.
+// rather than nil-pointer-panicking through the door. This is a defensive
+// floor, not a live path.
 //
 // Create goes through the door's OWN Create method (期11 spec §3.1's "create
 // 单入口" — the resource face's Invoke no longer accepts a bare op=create at
@@ -850,8 +901,9 @@ func (r resourceAdapter) CreateFileDecided(id resource.ResourceID, withContent b
 }
 
 type stateAdapter struct {
-	h   accessdoor.AccessHandle
-	ctx func() context.Context
+	h        accessdoor.AccessHandle
+	ctx      func() context.Context
+	validate func(resource.ResourceID, []byte) error
 }
 
 func (s stateAdapter) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
@@ -871,6 +923,11 @@ func (s stateAdapter) Put(id resource.ResourceID, args []byte) (accessdoor.Outco
 	if s.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
+	if s.validate != nil {
+		if err := s.validate(id, args); err != nil {
+			return accessdoor.Outcome{}, err
+		}
+	}
 	out, err := s.h.Invoke(s.ctx(), access.OpWrite, id, args)
 	if err != nil {
 		return out, err
@@ -887,7 +944,9 @@ func (s stateAdapter) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 	return s.h.Invoke(s.ctx(), access.OpDelete, id, nil)
 }
 
-func (e *engine) State() StateHandle       { return stateAdapter{h: e.state, ctx: e.life} }
+func (e *engine) State() StateHandle {
+	return stateAdapter{h: e.state, ctx: e.life, validate: e.validateStatePut}
+}
 func (e *engine) Resource() ResourceHandle { return resourceAdapter{h: e.access, ctx: e.life} }
 
 // --- Sys: Schedule arm -----------------------------------------------------
@@ -925,7 +984,7 @@ func normaliseTimerPayload(raw []byte) []byte {
 // unexamined.
 func (e *engine) After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error) {
 	// nil-arm底线 (S6): a host with no Schedule arm answers ErrUnsupported, never
-	// nil-pointer-panics — the same kernel defense the Spawn arm carries.
+	// nil-pointer-panics.
 	if e.sched == nil {
 		return "", ErrUnsupported
 	}
@@ -986,18 +1045,6 @@ func (e *engine) ackTimer(id message.ID) error {
 		return ErrNotTimerMessage
 	}
 	return e.sched.Ack(e.lifeCtx, schedule.TimerID(strings.TrimPrefix(s, prefix)))
-}
-
-// --- Sys: Spawn arm --------------------------------------------------------
-
-func (e *engine) Fork(requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
-	// A nil lifecycle arm is an honest capability absence and must answer
-	// ErrUnsupported rather than nil-pointer-panic. Production server and daemon
-	// incarnations both receive a lifecycle arm; the latter relays over the wire.
-	if e.lifecycle == nil {
-		return "", ErrUnsupported
-	}
-	return e.lifecycle.Fork(e.lifeCtx, requestID, spec)
 }
 
 func (e *engine) End() error {

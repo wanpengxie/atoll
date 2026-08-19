@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -99,6 +100,9 @@ func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 				Sender: message.Sender{ID: "agent:p"}, Kind: tc.kind, Type: tc.typ,
 				Audience: tc.audience,
 			}
+			if tc.kind == message.KindRequest {
+				e.Payload = json.RawMessage(`{"body":null}`)
+			}
 			if tc.kind == message.KindResponse {
 				e.ParentID = "p1"
 			}
@@ -123,7 +127,7 @@ func TestStepKindAndAudience_DefaultRequestTTL(t *testing.T) {
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{toolID},
+		Audience: message.Audience{toolID}, Payload: json.RawMessage(`{"body":null}`),
 	}
 	out, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e)
 	if err != nil {
@@ -151,36 +155,12 @@ func TestStepKindAndAudience_CallerExpiresPreserved(t *testing.T) {
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{toolID}, ExpiresAt: &custom,
+		Audience: message.Audience{toolID}, ExpiresAt: &custom, Payload: json.RawMessage(`{"body":null}`),
 	}
 	if _, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if e.ExpiresAt == nil || *e.ExpiresAt != custom {
 		t.Fatalf("expires_at = %v, want caller value %d preserved", e.ExpiresAt, custom)
-	}
-}
-
-// NB: the former core-type AllowOverride constraint branch was removed with
-// the core-type table (2026-07-13, zero live subject); the reserved-bootstrap
-// kind rule below is the surviving enforcement path.
-
-// Reserved bootstrap system.* type allows only kind=event.
-func TestStepKindAndAudience_ReservedBootstrapKindRule(t *testing.T) {
-	cs := newTestStore(t)
-	deps := testDeps(t, cs)
-	e := &message.Envelope{
-		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender:   message.Sender{ID: actor.SystemActorID, Kind: actor.KindSystem},
-		Kind:     message.KindRequest, // illegal: reserved system event must be event
-		Type:     actor.ReservedSystemActorRegistered,
-		Audience: message.Audience{"x"},
-	}
-	out, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if out.RejectReason != HarnessKindNotAllowedForType {
-		t.Fatalf("reason = %q, want kind_not_allowed_for_type", out.RejectReason)
 	}
 }

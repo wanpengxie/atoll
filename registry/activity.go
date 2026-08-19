@@ -5,10 +5,10 @@ package registry
 type ActivityType string
 
 const (
-	ActivityTurnStarted ActivityType = "activity.turn.started"
-	ActivityTurnEnded   ActivityType = "activity.turn.ended"
-	ActivityToolStarted ActivityType = "activity.tool.started"
-	ActivityToolEnded   ActivityType = "activity.tool.ended"
+	ActivityTurnStarted ActivityType = "agent.turn.started"
+	ActivityTurnEnded   ActivityType = "agent.turn.ended"
+	ActivityToolStarted ActivityType = "agent.tool.started"
+	ActivityToolEnded   ActivityType = "agent.tool.ended"
 )
 
 const (

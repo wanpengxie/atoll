@@ -29,7 +29,6 @@ type viewAuthority interface {
 	storespec.IdentityPresence
 	storespec.ActorFactsAuthority
 	storespec.IdentityRoster
-	storespec.DeclaredInstanceReader
 	storespec.PrincipalIdentity
 }
 
@@ -64,25 +63,6 @@ func (h *Home) View() View {
 	}
 }
 
-// validateReader asks the one "is this legal right now" boolean question. A
-// reader gate needs existence, never a record.
-func validateReader(ctx context.Context, authority storespec.IdentityPresence, as channel.Reader) error {
-	if !as.Valid() {
-		return &channelspec.SpaceError{Code: channelspec.SpaceForbidden}
-	}
-	if as.Mode != channel.ReaderMember {
-		return nil
-	}
-	active, err := authority.IsActive(ctx, as.ActorID)
-	if err != nil {
-		return err
-	}
-	if !active {
-		return &channelspec.SpaceError{Code: channelspec.SpaceForbidden}
-	}
-	return nil
-}
-
 // Snapshot composes membership, current execution and testimony at read time. The
 // fields are advisory and intentionally not a linearizable transaction.
 func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
@@ -114,11 +94,14 @@ func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
 	return stat.StartedAt, true
 }
 
-func (v View) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
-	if err := validateReader(ctx, v.authority, reader); err != nil {
-		return nil, afterSeq, err
-	}
-	return v.visible.ReadVisibleAfterSeq(ctx, reader, afterSeq, limit)
+func (v View) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
+	return v.visible.ReadVisibleAfterSeq(ctx, afterSeq, limit)
+}
+
+// IsActive is the narrow membership question used by boundary readers before
+// they enter the unscoped visible-log read port.
+func (v View) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	return v.authority.IsActive(ctx, id)
 }
 
 // ActorFacts is the requester-authorization projection: who is behind this
@@ -264,18 +247,6 @@ func rosterDeviceState(snapshot presence.Snapshot) channelspec.DeviceState {
 		return channelspec.DeviceState{Kind: channelspec.DeviceMalformed}
 	}
 	return channelspec.DeviceState{Kind: channelspec.DeviceKnown, Online: value.Online, ReceivedAt: testimony.ReceivedAt}
-}
-
-// DeclaredInstances answers which actor ids one declaration currently has.
-func (v View) DeclaredInstances(_ context.Context, declID string) ([]actor.ActorID, error) {
-	return v.authority.DeclaredInstances(declID)
-}
-
-// HasDeclaredInstance is the availability question (peeractor and routing
-// fallback): does this declaration have a live instance at all.
-func (v View) HasDeclaredInstance(ctx context.Context, declID string) (bool, error) {
-	ids, err := v.DeclaredInstances(ctx, declID)
-	return len(ids) > 0, err
 }
 
 func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {

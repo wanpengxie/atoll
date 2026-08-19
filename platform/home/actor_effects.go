@@ -31,8 +31,7 @@ func (e homeActorEffects) PlanPoke(domain actorhost.ExecutionDomain) {
 // narrow ForgetActors release port. It is plain process resource hygiene —
 // idempotent, unclassified (no store is ever asked which kind of record an id
 // was), never retried, no tombstone. Durable rows belonging to the dead are
-// inert data and are deliberately left alone; the fork replay table is NOT
-// released here (it is Controller ledger state and is never pruned, §5.2).
+// inert data and are deliberately left alone.
 func (e homeActorEffects) ActorsEnded(ids []actor.ActorID) {
 	h := e.home
 	if h == nil {
@@ -60,13 +59,15 @@ func (e homeActorEffects) ActorsEnded(ids []actor.ActorID) {
 // channel" narration into the conversation stream with the system pen. They are
 // best effort: a crash window may drop one, and nothing ever back-fills or
 // reconciles them. No machine ever derives actor truth from message history.
-func (h *Home) announceRegistered(ctx context.Context, id actor.ActorID, kind actor.Kind) {
+func (h *Home) announceRegistered(ctx context.Context, id actor.ActorID, fields map[string]any) {
 	if h == nil || h.systemPen == nil || id == "" {
 		return
 	}
-	h.writeNarration(ctx, actor.ReservedSystemActorRegistered, map[string]any{
-		"actor_id": id, "actor_kind": kind, "registered_at": h.nowMs(),
-	})
+	payload := map[string]any{"member": id}
+	for name, value := range fields {
+		payload[name] = value
+	}
+	h.writeNarration(ctx, message.TypeSystemMemberCreated, payload)
 }
 
 func (h *Home) announceEnded(
@@ -81,11 +82,10 @@ func (h *Home) announceEnded(
 	if reason == "" {
 		reason = "ended"
 	}
-	at := h.nowMs()
 	for _, id := range ids {
-		h.writeNarration(ctx, actor.ReservedSystemActorEnded, map[string]any{
-			"target_id": id, "reason": reason,
-			"ended_at": at, "ended_by": endedBy,
+		h.writeNarration(ctx, message.TypeSystemMemberDeleted, map[string]any{
+			"member": id, "reason": reason,
+			"by": map[string]any{"caller": harness.Caller{Channel: h.channelID, Actor: endedBy}},
 		})
 	}
 }

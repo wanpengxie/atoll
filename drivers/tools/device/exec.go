@@ -3,7 +3,6 @@ package device
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -39,8 +38,8 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // timeout or a spawn failure fails the request.
 func (a *Actor) handleExec(msg actorbase.Msg) {
 	var p ExecPayload
-	if err := json.Unmarshal(msg.Payload, &p); err != nil {
-		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
+	if err := actorbase.DecodeStrict(msg.Payload, &p); err != nil {
+		a.fail(msg, "invalid_args", fmt.Sprintf("decode payload: %v", err))
 		return
 	}
 	if p.Command == "" {
@@ -48,18 +47,30 @@ func (a *Actor) handleExec(msg actorbase.Msg) {
 		return
 	}
 
-	ws, err := a.channelWorkspace(msg.ChannelID)
+	root, err := a.channelWorkspace(msg.ChannelID)
 	if err != nil {
 		a.fail(msg, "workspace_unavailable", err.Error())
 		return
 	}
-	cwd := ws
+	defer root.Close()
+	cwd := root.Name()
 	if p.Cwd != "" {
-		cwd, err = resolvePath(ws, p.Cwd)
-		if err != nil {
-			a.fail(msg, "path_invalid", fmt.Sprintf("cwd: %v", err))
+		path, pathErr := resolvePath(p.Cwd)
+		if pathErr != nil {
+			a.fail(msg, "path_invalid", fmt.Sprintf("cwd: %v", pathErr))
 			return
 		}
+		cwdRoot, openErr := root.OpenRoot(path)
+		if openErr != nil {
+			code := "workspace_unavailable"
+			if pathEscaped(openErr) {
+				code = "path_invalid"
+			}
+			a.fail(msg, code, fmt.Sprintf("cwd: %v", openErr))
+			return
+		}
+		defer cwdRoot.Close()
+		cwd = cwdRoot.Name()
 	}
 
 	timeout := p.TimeoutMs

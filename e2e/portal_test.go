@@ -11,7 +11,7 @@ func TestPortalIdentitySessionAndMessageRoundTrip(t *testing.T) {
 
 	user := newAPIClient(t, h.base)
 	registered := user.register("portal-e2e-user", "portal@example.test", "portal-password")
-	if registered["id"] != "portal-e2e-user" {
+	if registered["principal_id"] != "portal-e2e-user" || registered["home_channel_id"] == "" {
 		t.Fatalf("register=%v", registered)
 	}
 	user.request(http.MethodPost, "/api/identity/logout", nil, http.StatusOK)
@@ -19,10 +19,10 @@ func TestPortalIdentitySessionAndMessageRoundTrip(t *testing.T) {
 	if loggedIn["id"] != "portal-e2e-user" {
 		t.Fatalf("login=%v", loggedIn)
 	}
-	// The authenticated websocket itself is part of the identity loop. Its
-	// channel-blind attach is the only operation possible until the portal
-	// exposes this new principal's random home channel coordinate.
-	userWS := dialWS(t, h.base, user.cookieHeader(), map[string]int64{})
+	// Registration exposes the new home coordinate, so the authenticated
+	// websocket can attach directly to the freshly provisioned channel.
+	homeID, _ := registered["home_channel_id"].(string)
+	userWS := dialWS(t, h.base, user.cookieHeader(), map[string]int64{homeID: 0})
 	userWS.close()
 
 	_, rootWS := rootClient(t, h, map[string]int64{c0ChannelID: 0})

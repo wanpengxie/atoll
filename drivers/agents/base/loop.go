@@ -1,9 +1,12 @@
 package base
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -14,7 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
@@ -379,10 +382,6 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		return
 	}
 	l.exec.install(msg)
-	if msg.Type == introspect.QueryDescribe {
-		l.answerDescribe(msg)
-		return
-	}
 	if msg.Type == TypeContext {
 		value := any(map[string]any{})
 		if l.hasUsage {
@@ -391,12 +390,13 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		l.exec.terminal(string(msg.ID), terminalCandidate{value: value})
 		return
 	}
-	if strings.HasPrefix(msg.Type, "agent.") {
-		known := msg.Type == TypeCompact || msg.Type == TypeSelect || msg.Type == TypeContext || msg.Type == TypeSteer || msg.Type == TypeInterrupt || msg.Type == TypeQueue || msg.Type == TypeStop || msg.Type == TypeTerminate || msg.Type == TypeRestart
-		if !known || !l.def.supports(msg.Type) {
-			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported", detail: "agent does not support " + msg.Type})
-			return
-		}
+	if !l.def.supports(msg.Type) {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported", detail: "agent does not support " + msg.Type})
+		return
+	}
+	if msg.Type == TypeFork {
+		l.handleFork(msg)
+		return
 	}
 	if len(l.state.Requests) >= l.def.cfg.RequestMaxCount {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorBaseCapacity, detail: "agent live request table capacity exceeded"})
@@ -404,7 +404,31 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	}
 	id := book.RequestID(msg.ID)
 	corr := behavior.CorrelationID(msg.CorrelationID, msg.ID)
-	row := &book.Request{ID: id, Input: runtimeproto.Input{SourceID: string(msg.ID), Type: msg.Type, Sender: string(msg.Sender.ID), Payload: append(json.RawMessage(nil), msg.Payload...), Text: messageText(msg.Payload)}, Bytes: len(msg.Payload), Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(corr)}
+	caller := actorbase.EffectiveCaller(msg)
+	input := runtimeproto.Input{SourceID: string(msg.ID), Type: msg.Type, Sender: string(msg.Sender.ID), Caller: caller, Payload: append(json.RawMessage(nil), msg.Payload...), Text: messageText(msg.Payload)}
+	if msg.Type == TypeAsk {
+		var ask struct {
+			Text        string                    `json:"text"`
+			Attachments []runtimeproto.Attachment `json:"attachments,omitempty"`
+		}
+		if err := decodeStrict(msg.Payload, &ask); err != nil || strings.TrimSpace(ask.Text) == "" {
+			detail := "agent.ask requires text"
+			if err != nil {
+				detail = "invalid agent.ask payload: " + err.Error()
+			}
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: detail})
+			return
+		}
+		for _, attachment := range ask.Attachments {
+			if strings.TrimSpace(attachment.Address) == "" {
+				l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "attachment address required"})
+				return
+			}
+		}
+		input.Text = ask.Text
+		input.Attachments = append([]runtimeproto.Attachment(nil), ask.Attachments...)
+	}
+	row := &book.Request{ID: id, Input: input, Bytes: len(msg.Payload), Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(corr)}
 	row.Scope = l.vault.Mint(row.ParentID, row.CorrelationID)
 	if msg.Type == TypeSteer {
 		var payload struct {
@@ -447,13 +471,75 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		l.scheduleAction(book.ActionInterrupt, id)
 	case TypeStop:
 		l.scheduleAction(book.ActionStop, id)
-	case TypeTerminate:
-		l.scheduleAction(book.ActionTerminate, id)
-	case TypeRestart:
-		l.scheduleAction(book.ActionRestart, id)
 	default:
 		l.acceptContent(id, false)
 	}
+}
+
+func (l *agentLoop) handleFork(msg actorbase.Msg) {
+	var payload struct{}
+	if err := decodeStrict(msg.Payload, &payload); err != nil {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "agent.fork payload must be an object"})
+		return
+	}
+	parts := strings.Split(string(l.sys.Self()), ":")
+	if len(parts) != 3 || parts[1] == "" {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: "agent identity has no declaration seed"})
+		return
+	}
+	if kind, ok := actor.ParseKind(parts[0]); !ok || kind != actor.KindAgent {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: "agent identity is malformed"})
+		return
+	}
+	pending, err := l.sys.Call(actor.SystemActorID, "system.member.create", map[string]any{"decl_id": parts[1]})
+	if err != nil {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: err.Error()})
+		return
+	}
+	go func() {
+		terminal, waitErr := pending.Wait(msg.Ctx(), 0)
+		if waitErr != nil {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: waitErr.Error()})
+			return
+		}
+		var outcome struct {
+			Status string `json:"status"`
+			message.Failure
+		}
+		if json.Unmarshal(terminal.Payload, &outcome) != nil {
+			outcome = struct {
+				Status string `json:"status"`
+				message.Failure
+			}{Status: message.StatusFailed, Failure: message.Failure{ErrorCode: "internal_error", Detail: "member creation returned an invalid terminal"}}
+		}
+		if outcome.Status == message.StatusFailed {
+			if outcome.ErrorCode == "" {
+				outcome.Failure = message.Failure{ErrorCode: "internal_error", Detail: "member creation failed"}
+			}
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: outcome.ErrorCode, detail: outcome.Detail})
+			return
+		}
+		l.exec.terminal(string(msg.ID), terminalCandidate{value: append(json.RawMessage(nil), terminal.Payload...)})
+	}()
+}
+
+func decodeStrict(raw json.RawMessage, out any) error {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func messageText(raw json.RawMessage) string {
@@ -471,32 +557,6 @@ func steerInput(row *book.Request) runtimeproto.Input {
 	x.Payload = nil
 	x.Text = strings.TrimSpace(messageText(row.Input.Payload))
 	return x
-}
-
-func (l *agentLoop) answerDescribe(msg actorbase.Msg) {
-	req, err := introspect.ParseDescribeRequest(msg.Payload)
-	if err != nil {
-		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "payload_invalid", detail: err.Error()})
-		return
-	}
-	d := l.def.cfg.Runtime.Describe
-	d.ActorID = string(l.sys.Self())
-	if d.Types == nil {
-		d.Types = map[string]introspect.TypeMeta{}
-	}
-	for typ := range l.def.controls {
-		d.Types[typ] = introspect.TypeMeta{Description: "standard agent control", AllowedKinds: []string{string(message.KindRequest)}}
-	}
-	d.Types[TypeCompact] = introspect.TypeMeta{Description: "compact the provider conversation as one turn", AllowedKinds: []string{string(message.KindRequest)}}
-	selectExample, _ := json.Marshal(map[string]any{"selections": l.def.cfg.Runtime.Selections, "current": l.options})
-	d.Types[TypeSelect] = introspect.TypeMeta{Description: "select a configured model and effort for subsequent turns", AllowedKinds: []string{string(message.KindRequest)}, PayloadExample: selectExample}
-	d.Types[TypeContext] = introspect.TypeMeta{Description: "read the most recent turn context usage", AllowedKinds: []string{string(message.KindRequest)}}
-	answer, ok := introspect.AnswerDescribe(d, req)
-	if !ok {
-		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported", detail: "agent has no type " + req.Type})
-		return
-	}
-	l.exec.terminal(string(msg.ID), terminalCandidate{value: answer})
 }
 
 func (l *agentLoop) validateSelection(raw json.RawMessage) (runtimeproto.TurnOptions, string, string) {
@@ -541,7 +601,7 @@ func (l *agentLoop) acceptContent(id book.RequestID, explicitSteer bool) {
 		return
 	}
 	t := l.state.Turn
-	if t == nil || t.Phase != book.TurnActive || !l.def.cfg.Runtime.Capabilities.Steer {
+	if t == nil || t.Phase != book.TurnActive || !l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilitySteer] {
 		if explicitSteer && row.ExplicitCAS {
 			l.finish(id, terminalCandidate{fail: true, code: errorCASMismatch, detail: "no steerable turn"})
 			return
@@ -592,7 +652,7 @@ func (l *agentLoop) startNext() {
 			l.state.Buffer = l.state.Buffer[1:]
 			continue
 		}
-		if row.Sender != first.Sender {
+		if row.Input.Caller != first.Input.Caller {
 			break
 		}
 		if len(batch) > 0 && isCommandRequest(row) {
@@ -698,10 +758,6 @@ func (l *agentLoop) maybeRunAction() {
 		l.runInterrupt(a)
 	case book.ActionStop:
 		l.runStop(a)
-	case book.ActionTerminate:
-		l.runTerminate(a, false)
-	case book.ActionRestart:
-		l.runTerminate(a, true)
 	case book.ActionCleanup:
 		l.runCleanup(a)
 	}
@@ -752,7 +808,7 @@ func (l *agentLoop) runInterrupt(a *book.Action) {
 func (l *agentLoop) runStop(a *book.Action) {
 	l.revokeWork(true)
 	turn := l.state.Turn
-	if turn != nil && turn.Phase == book.TurnActive && l.def.cfg.Runtime.Capabilities.Interrupt {
+	if turn != nil && turn.Phase == book.TurnActive && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
 		a.Kind, a.Op, a.Target = book.ActionCleanup, l.opID(), turn.ID
 		if err := l.exec.runtimeControl(runtimeproto.ControlCommand{Op: a.Op, Kind: runtimeproto.ControlInterrupt, Target: turn.ID}); err != nil {
 			l.faultNow("command_admission", err.Error())
@@ -777,7 +833,7 @@ func (l *agentLoop) runCleanup(a *book.Action) {
 		l.completeAction()
 		return
 	}
-	if !l.def.cfg.Runtime.Capabilities.Interrupt {
+	if !l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
 		l.clearTurn()
 		l.completeAction()
 		return
@@ -791,27 +847,6 @@ func (l *agentLoop) runCleanup(a *book.Action) {
 		return
 	}
 	l.armReceipt(receiptKey("control", uint64(a.Op)))
-}
-
-func (l *agentLoop) runTerminate(a *book.Action, restart bool) {
-	l.revokeWork(false)
-	if err := l.exec.runtimeTerminate(); err != nil {
-		l.faultNow("command_admission", err.Error())
-		return
-	}
-	l.cancelWork(false, map[bool]string{false: "terminate", true: "restart"}[restart])
-	l.clearTurn()
-	if !restart {
-		l.finish(a.Request, terminalCandidate{value: map[string]any{"terminated": true}})
-		l.completeAction()
-		return
-	}
-	a.Op = l.opID()
-	if err := l.exec.runtimeEnsureReady(a.Op); err != nil {
-		l.faultNow("command_admission", err.Error())
-		return
-	}
-	l.armReceipt(receiptKey("ready", uint64(a.Op)))
 }
 
 func (l *agentLoop) cancelWork(clearBuffer bool, detail string) {

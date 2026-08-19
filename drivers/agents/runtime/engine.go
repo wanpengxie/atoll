@@ -341,11 +341,11 @@ func (e *engine) acceptControl(c runtimeproto.ControlCommand) {
 		e.contractFault("invalid_control", "Control does not match the single active turn")
 		return
 	}
-	if c.Kind == runtimeproto.ControlSteer && (!e.providerSpec.Capabilities.Steer || c.Content == nil) {
+	if c.Kind == runtimeproto.ControlSteer && (!e.providerSpec.Capabilities[driverproto.CapabilitySteer] || c.Content == nil) {
 		e.contractFault("invalid_control", "unsupported or empty steer command")
 		return
 	}
-	if c.Kind == runtimeproto.ControlInterrupt && (!e.providerSpec.Capabilities.Interrupt || c.Content != nil) {
+	if c.Kind == runtimeproto.ControlInterrupt && (!e.providerSpec.Capabilities[driverproto.CapabilityInterrupt] || c.Content != nil) {
 		e.contractFault("invalid_control", "unsupported or content-bearing interrupt command")
 		return
 	}
@@ -465,7 +465,7 @@ func (e *engine) dispatchDemand() {
 func toDriverInputs(in []runtimeproto.Input) []driverproto.DriverMessage {
 	out := make([]driverproto.DriverMessage, len(in))
 	for i, v := range in {
-		out[i] = driverproto.DriverMessage{SourceID: v.SourceID, Type: v.Type, Sender: v.Sender, Payload: append([]byte(nil), v.Payload...), Text: v.Text}
+		out[i] = driverproto.DriverMessage{SourceID: v.SourceID, Type: v.Type, Sender: v.Sender, Caller: v.Caller, Payload: append([]byte(nil), v.Payload...), Text: v.Text, Attachments: toDriverAttachments(v.Attachments)}
 	}
 	return out
 }
@@ -473,7 +473,15 @@ func toDriverInput(in *runtimeproto.Input) *driverproto.DriverMessage {
 	if in == nil {
 		return nil
 	}
-	return &driverproto.DriverMessage{SourceID: in.SourceID, Type: in.Type, Sender: in.Sender, Payload: append([]byte(nil), in.Payload...), Text: in.Text}
+	return &driverproto.DriverMessage{SourceID: in.SourceID, Type: in.Type, Sender: in.Sender, Caller: in.Caller, Payload: append([]byte(nil), in.Payload...), Text: in.Text, Attachments: toDriverAttachments(in.Attachments)}
+}
+
+func toDriverAttachments(in []runtimeproto.Attachment) []driverproto.Attachment {
+	out := make([]driverproto.Attachment, len(in))
+	for i, attachment := range in {
+		out[i] = driverproto.Attachment{Address: attachment.Address}
+	}
+	return out
 }
 func toDriverContexts(in []runtimeproto.ContextItem) []driverproto.ContextMessage {
 	out := make([]driverproto.ContextMessage, len(in))

@@ -24,7 +24,7 @@ import (
 // in half a minute is not a detail.
 func TestPostLeavesAnAbsentDeadlineAbsent(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
+	pen := &fakePen{self: "human:alice:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
@@ -44,7 +44,7 @@ func TestPostLeavesAnAbsentDeadlineAbsent(t *testing.T) {
 // accumulate: every answered request left behind as an unread buffered row.
 func TestPostRegistersNoCallLedgerEntry(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
+	pen := &fakePen{self: "human:alice:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
@@ -72,20 +72,20 @@ func TestPostRegistersNoCallLedgerEntry(t *testing.T) {
 // neither does the refusal.
 func TestPostAllowsASelfAddressedRequest(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
+	pen := &fakePen{self: "human:alice:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
-	e.actorCtx = &fakeActorContext{self: "user:alice"}
+	e.actorCtx = &fakeActorContext{self: "human:alice:1"}
 
 	if _, err := e.Post(behavior.RequestSpec{
 		Type:     "note.to.self",
-		Audience: message.Audience{actor.ActorID("user:alice")},
+		Audience: message.Audience{actor.ActorID("human:alice:1")},
 	}); err != nil {
 		t.Fatalf("Post to self = %v, want nil (ErrSelfCall guards Wait, not writing)", err)
 	}
 	// Call, on the same engine and the same target, still refuses — the guard
 	// belongs to the waiting verb, and this test is the contrast.
-	if _, err := e.Call(actor.ActorID("user:alice"), "note.to.self", nil); !errors.Is(err, ErrSelfCall) {
+	if _, err := e.Call(actor.ActorID("human:alice:1"), "note.to.self", nil); !errors.Is(err, ErrSelfCall) {
 		t.Fatalf("Call to self = %v, want ErrSelfCall", err)
 	}
 }
@@ -98,7 +98,7 @@ func TestEmitAndPostSurfaceHarnessRejectionsTyped(t *testing.T) {
 	const reason = "harness_id_duplicate_conflict"
 
 	t.Run("Emit", func(t *testing.T) {
-		e := newTestEngine(t, &fakePen{self: "user:alice", reject: harness.HarnessRejectReason(reason)}, Hooks{}, 8, 8)
+		e := newTestEngine(t, &fakePen{self: "human:alice:1", reject: harness.HarnessRejectReason(reason)}, Hooks{}, 8, 8)
 		e.lifeCtx = context.Background()
 		_, err := e.Emit(behavior.EventSpec{Type: "human.note"})
 		var rejected *WriteRejected
@@ -111,7 +111,7 @@ func TestEmitAndPostSurfaceHarnessRejectionsTyped(t *testing.T) {
 	})
 
 	t.Run("Post", func(t *testing.T) {
-		e := newTestEngine(t, &fakePen{self: "user:alice", reject: harness.HarnessRejectReason(reason)}, Hooks{}, 8, 8)
+		e := newTestEngine(t, &fakePen{self: "human:alice:1", reject: harness.HarnessRejectReason(reason)}, Hooks{}, 8, 8)
 		e.lifeCtx = context.Background()
 		_, err := e.Post(behavior.RequestSpec{
 			Type:     "human.approve",
@@ -134,7 +134,7 @@ func TestEmitAndPostSurfaceHarnessRejectionsTyped(t *testing.T) {
 // every existing frame relies on.
 func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
+	pen := &fakePen{self: "human:alice:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
@@ -181,7 +181,7 @@ func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 // table entry rather than sugar: nothing here is quietly overridden.
 func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	t.Parallel()
-	pen := &fakePen{self: "user:alice"}
+	pen := &fakePen{self: "human:alice:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
@@ -227,8 +227,8 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	if req.ID != "req-own-id" || req.Kind != message.KindRequest || req.Type != "human.approve" {
 		t.Fatalf("request identity = %+v", req)
 	}
-	if string(req.Payload) != `{"amount":10}` {
-		t.Fatalf("request payload = %s, want the RawMessage verbatim", req.Payload)
+	if string(req.Payload) != `{"body":{"amount":10}}` {
+		t.Fatalf("request payload = %s, want canonical body envelope", req.Payload)
 	}
 	if req.Visibility != message.VisibilityPublic {
 		t.Fatalf("request visibility = %q, want public", req.Visibility)

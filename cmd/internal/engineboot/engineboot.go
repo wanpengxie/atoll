@@ -17,12 +17,12 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/boot"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/obs"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -35,7 +35,7 @@ type Config struct {
 	TokenPath        string
 	RootPassword     string
 	StewardClass     string // agent class carved as c0 steward on first install; empty = codex
-	OpenRegistration bool   // node policy: expose principal.register to the lobby (default closed)
+	OpenRegistration bool   // node policy: expose system.principal.create to the lobby (default closed)
 }
 
 type Engine struct {
@@ -99,17 +99,17 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	host = e.host
 	resolver.host = e.host
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
-	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: channelspec.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("open c0: %w", err))
 	}
-	if _, ok := e.host.Acquire(protocol.C0ChannelID); !ok {
+	if _, ok := e.host.Acquire(channelspec.C0ChannelID); !ok {
 		return nil, e.fail(errors.New("c0 did not publish"))
 	}
 	if err := resolver.registrar.ReconcileSystem(context.Background()); err != nil {
 		return nil, e.fail(fmt.Errorf("reconcile registry system rows: %w", err))
 	}
 	if cfg.TokenPath != "" {
-		if _, err := gateway.MintAutomationToken(e.sessions, protocol.RootPrincipalID, cfg.TokenPath); err != nil {
+		if _, err := gateway.MintAutomationToken(e.sessions, channelspec.RootPrincipalID, cfg.TokenPath); err != nil {
 			return nil, e.fail(err)
 		}
 	}
@@ -168,10 +168,10 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	host = e.host
 	resolver.host = e.host
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{host: e.host, genesis: installed.C0Genesis}, resolver)
-	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: protocol.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
+	if err := e.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: channelspec.C0ChannelID, ChannelName: "c0", ExpectedType: "group"}); err != nil {
 		return nil, e.fail(fmt.Errorf("reopen c0 after init: %w", err))
 	}
-	if _, ok := e.host.Acquire(protocol.C0ChannelID); !ok {
+	if _, ok := e.host.Acquire(channelspec.C0ChannelID); !ok {
 		return nil, e.fail(errors.New("reopened c0 did not publish"))
 	}
 	e.gateway, err = gateway.New(gateway.Config{Resolver: gateway.ResolverFunc(e.resolveEntitlements), Logger: logger})
@@ -198,7 +198,7 @@ func (e *Engine) acquireLobby(ctx context.Context) (channelhost.Bundle, error) {
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if bundle, ok := e.host.Acquire(protocol.LobbyChannelID); ok {
+		if bundle, ok := e.host.Acquire(channelspec.LobbyChannelID); ok {
 			return bundle, nil
 		}
 		select {

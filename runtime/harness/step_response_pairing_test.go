@@ -23,7 +23,7 @@ func seedRequest(t *testing.T, cs *store.ChannelStores, id message.ID, caller, r
 		Kind:   message.KindRequest, Type: "xhs.publish",
 		Audience:   message.Audience{receiver},
 		Visibility: message.VisibilityPublic,
-		Payload:    json.RawMessage(`{}`),
+		Payload:    json.RawMessage(`{"body":{}}`),
 	}
 	if _, err := cs.Log.Append(context.Background(), parent, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed request %q: %v", id, err)
@@ -323,7 +323,7 @@ func requestParent() *storespec.StoredRow {
 	return &storespec.StoredRow{Envelope: message.Envelope{
 		ID: "req1", ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:caller"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:xhs"},
+		Audience: message.Audience{"tool:xhs"}, Payload: json.RawMessage(`{"body":null}`),
 	}}
 }
 

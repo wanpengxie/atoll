@@ -33,6 +33,8 @@ type fakeJobs struct {
 	listIDs []message.ID
 	// cancelled records ids passed to Cancel.
 	cancelled []message.ID
+	// progress is the ordered A-ledger provisional stream for each request.
+	progress map[message.ID][]*message.Envelope
 }
 
 func (f *fakeJobs) Submit(spec behavior.RequestSpec) (message.ID, error) {
@@ -53,6 +55,16 @@ func (f *fakeJobs) List() []message.ID { return f.listIDs }
 func (f *fakeJobs) Cancel(id message.ID) error {
 	f.cancelled = append(f.cancelled, id)
 	return nil
+}
+
+func (f *fakeJobs) ProgressEvents(id message.ID) <-chan *message.Envelope {
+	events := f.progress[id]
+	out := make(chan *message.Envelope, len(events))
+	for _, env := range events {
+		out <- env
+	}
+	close(out)
+	return out
 }
 
 var _ actorbase.JobTable = (*fakeJobs)(nil)
@@ -89,13 +101,19 @@ func finalResp(parentID message.ID, payload map[string]any) *message.Envelope {
 	}
 }
 
+func progressResp(parentID message.ID, seq int) *message.Envelope {
+	body, _ := json.Marshal(map[string]any{"status": "processing", "step": seq})
+	return &message.Envelope{Kind: message.KindResponse, ParentID: parentID, Payload: body}
+}
+
 func defaultRC() metatool.RuntimeContext {
 	return metatool.RuntimeContext{
 		Trigger: metatool.Trigger{
 			Envelope: message.Envelope{
-				ID:   "trigger-1",
-				Kind: message.KindRequest,
-				Type: "agent.turn",
+				ID:      "trigger-1",
+				Kind:    message.KindRequest,
+				Type:    "agent.turn",
+				Payload: json.RawMessage(`{"body":null}`),
 			},
 			CorrelationID: "trigger-1",
 		},
@@ -206,6 +224,21 @@ func TestExecuteCallActor_SyncResolvesInline(t *testing.T) {
 	}
 }
 
+func TestExecuteCallActorSurfacesOrderedProgressBeforeInlineFinal(t *testing.T) {
+	jobs := &fakeJobs{progress: map[message.ID][]*message.Envelope{
+		"req-1": {progressResp("req-1", 1), progressResp("req-1", 2)},
+	}}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return finalResp(id, map[string]any{"status": "completed", "value": "done"}), true, nil
+	}
+	rv := metatool.ExecuteCallActor(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","wait":true}`), newExec(jobs, nil), defaultRC())
+	assertNotError(t, rv)
+	events, ok := rv.Value["progress_events"].([]any)
+	if !ok || len(events) != 2 || events[0].(map[string]any)["step"] != float64(1) || events[1].(map[string]any)["step"] != float64(2) {
+		t.Fatalf("ordered progress=%#v", rv.Value["progress_events"])
+	}
+}
+
 // TestExecuteCallActor_TerminalFailureNormalized pins the actor-CLI error
 // mapping for a terminal failure reason.
 func TestExecuteCallActor_TerminalFailureNormalized(t *testing.T) {
@@ -287,6 +320,19 @@ func TestExecuteAwaitResult_ResolvesFinal(t *testing.T) {
 	assertNotError(t, rv)
 	if rv.Value["status"] != "completed" {
 		t.Fatalf("expected completed, got %+v", rv.Value)
+	}
+}
+
+func TestExecuteAwaitResultConsumesProgressFromTheCallerLedger(t *testing.T) {
+	jobs := &fakeJobs{progress: map[message.ID][]*message.Envelope{"req-1": {progressResp("req-1", 3)}}}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return finalResp(id, map[string]any{"status": "completed"}), true, nil
+	}
+	rv := metatool.ExecuteAwaitResult(context.Background(), json.RawMessage(`{"request_id":"req-1"}`), newExec(jobs, nil), defaultRC())
+	assertNotError(t, rv)
+	events, ok := rv.Value["progress_events"].([]any)
+	if !ok || len(events) != 1 || events[0].(map[string]any)["step"] != float64(3) {
+		t.Fatalf("await progress=%#v", rv.Value["progress_events"])
 	}
 }
 
@@ -434,7 +480,7 @@ func TestExecuteListActors_OutsideTurn(t *testing.T) {
 
 func TestExecuteListActors_RendersCatalog(t *testing.T) {
 	call := func(_ context.Context, spec behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
-		if spec.Type != "actor.list" {
+		if spec.Type != message.TypeSystemMemberList {
 			t.Fatalf("list spec type = %q", spec.Type)
 		}
 		body, _ := json.Marshal(map[string]any{

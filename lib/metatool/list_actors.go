@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // ListActorsSpec is the protocol-layer definition of list_actors.
@@ -37,7 +38,7 @@ func ExecuteListActors(ctx context.Context, _ json.RawMessage, x *Exec, rc Runti
 	}
 	raw, failure := x.CallSyncRaw(ctx, rc, RequestSpec{
 		ToolName:       "list_actors",
-		EnvelopeType:   "actor.list",
+		EnvelopeType:   message.TypeSystemMemberList,
 		HandlerActorID: string(actor.SystemActorID),
 		Payload:        CloneRawJSON(json.RawMessage(`{}`)),
 		Timeout:        DefaultTimeout,
@@ -51,7 +52,7 @@ func ExecuteListActors(ctx context.Context, _ json.RawMessage, x *Exec, rc Runti
 	var catalog introspect.Catalog
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		return NewError("list_actors", InternalError,
-			fmt.Sprintf("decode actor.list catalog: %v", err),
+			fmt.Sprintf("decode member catalog: %v", err),
 			"Inspect adapter logs and retry", nil)
 	}
 	return ResultValue{

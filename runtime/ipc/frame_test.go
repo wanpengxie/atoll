@@ -45,8 +45,6 @@ func TestKindClosedSet(t *testing.T) {
 		KindDetach:        "detach",
 		KindDeliverResult: "deliver_result",
 		KindCancelRequest: "cancel_request",
-		KindSpawn:         "spawn",
-		KindSpawnAck:      "spawn_ack",
 		KindEnd:           "end",
 		KindEndAck:        "end_ack",
 	}
@@ -55,8 +53,8 @@ func TestKindClosedSet(t *testing.T) {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 18 {
-		t.Fatalf("expected exactly 18 kinds, guard lists %d", len(want))
+	if len(want) != 16 {
+		t.Fatalf("expected exactly 16 kinds, guard lists %d", len(want))
 	}
 }
 
@@ -161,24 +159,6 @@ func TestWriteOmitsEmptyPayload(t *testing.T) {
 	}
 }
 
-func TestSpawnPayloadPreservesTaggedPlacementHost(t *testing.T) {
-	want := SpawnPayload{
-		RequestID: message.ID("fork-1"), Kind: actor.KindAgent, Class: "worker", NameHint: "child",
-		Config: json.RawMessage(`{"x":1}`), PlacementKind: "daemon", PlacementHost: "daemon-target",
-	}
-	raw := mustMarshal(t, want)
-	var got SpawnPayload
-	mustUnmarshal(t, raw, &got)
-	if got.RequestID != want.RequestID || got.Kind != want.Kind || got.Class != want.Class ||
-		got.NameHint != want.NameHint || string(got.Config) != string(want.Config) ||
-		got.PlacementKind != want.PlacementKind || got.PlacementHost != want.PlacementHost {
-		t.Fatalf("spawn payload=%+v want=%+v", got, want)
-	}
-	if bytes.Contains(raw, []byte(`"placement":`)) {
-		t.Fatalf("legacy kind-only placement field returned: %s", raw)
-	}
-}
-
 // --- round-trip per kind --------------------------------------------------
 
 // Each kind's payload survives Write→Read byte-for-byte at the struct level.
@@ -192,13 +172,13 @@ func TestRoundTripPerKind(t *testing.T) {
 		ID:         message.ID("msg-1"),
 		TS:         1717000000123,
 		ChannelID:  "chan-A",
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID("agent:writer")},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID("agent:writer:3")},
 		Kind:       message.KindRequest,
 		Type:       "agent.text",
-		Payload:    json.RawMessage(`{"text":"hi"}`),
+		Payload:    json.RawMessage(`{"body":{"text":"hi"}}`),
 		ParentID:   message.ID("msg-0"),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{actor.ActorID("user:bob"), actor.ActorID("agent:writer")},
+		Audience:   message.Audience{actor.ActorID("human:bob:2"), actor.ActorID("agent:writer:3")},
 		ExpiresAt:  &expires,
 	}
 

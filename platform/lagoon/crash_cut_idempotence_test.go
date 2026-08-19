@@ -9,10 +9,10 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform/boot"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -22,7 +22,7 @@ import (
 type cutFacts struct{}
 
 func (cutFacts) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
-	return channelspec.ActorFacts{Principal: protocol.RootPrincipalID, Kind: actor.KindHuman, Active: true}, true, nil
+	return channelspec.ActorFacts{Principal: channelspec.RootPrincipalID, Kind: actor.KindHuman, Active: true}, true, nil
 }
 
 type cutSys struct {
@@ -51,11 +51,14 @@ func (s *cutSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
 func (s *cutSys) Call(actor.ActorID, string, any) (actorbase.Pending, error) {
 	return nil, errors.New("simulated process cut before edge write")
 }
+func (s *cutSys) Post(behavior.RequestSpec) (message.ID, error) {
+	return "", errors.New("simulated process cut before edge write")
+}
 
 func cutMessage(word lagoon.Word, payload any) actorbase.Msg {
-	raw, _ := json.Marshal(payload)
+	raw, _ := json.Marshal(map[string]any{"body": payload})
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: message.ID("request-" + string(word)), ChannelID: protocol.C0ChannelID,
+		ID: message.ID("request-" + string(word)), ChannelID: channelspec.C0ChannelID,
 		Sender: message.Sender{Kind: actor.KindHuman, ID: "human:root"}, Kind: message.KindRequest, Type: string(word), Payload: raw,
 	})
 }
@@ -82,11 +85,8 @@ func TestCreateCommitSurvivesCutBeforeEdgeAndRetireCleansResidual(t *testing.T) 
 		t.Fatalf("create failed code=%s", createSys.code)
 	}
 	var created lagoon.ChannelCreateReply
-	if err := createSys.reply.DecodeValue(&created); err != nil || created.ID == "" {
+	if err := createSys.reply.DecodeValue(&created); err != nil || created.ChannelID == "" {
 		t.Fatalf("created=%+v reply=%+v err=%v", created, createSys.reply, err)
-	}
-	if created.Introduced.Core == "ok" {
-		t.Fatalf("cut unexpectedly wrote core edge: %+v", created.Introduced)
 	}
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestCreateCommitSurvivesCutBeforeEdgeAndRetireCleansResidual(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	row, found, err := reopened.GetChannelDesired(context.Background(), created.ID)
+	row, found, err := reopened.GetChannelDesired(context.Background(), created.ChannelID)
 	if err != nil || !found || row.Status != "present" {
 		t.Fatalf("post-restart row=%+v found=%v err=%v", row, found, err)
 	}
@@ -107,7 +107,7 @@ func TestCreateCommitSurvivesCutBeforeEdgeAndRetireCleansResidual(t *testing.T) 
 	}
 	defer c0db.Close()
 	var peers int
-	if err := c0db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE source_decl_id=? AND deregistered_at IS NULL`, "peer:"+string(created.ID)).Scan(&peers); err != nil || peers != 0 {
+	if err := c0db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE source_decl_id=? AND deregistered_at IS NULL`, "peer:"+string(created.ChannelID)).Scan(&peers); err != nil || peers != 0 {
 		t.Fatalf("residual peer count=%d err=%v", peers, err)
 	}
 
@@ -115,12 +115,12 @@ func TestCreateCommitSurvivesCutBeforeEdgeAndRetireCleansResidual(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	retireSys := &cutSys{msgs: []actorbase.Msg{cutMessage(lagoon.WordChannelRetire, map[string]any{"channel_id": created.ID})}}
+	retireSys := &cutSys{msgs: []actorbase.Msg{cutMessage(lagoon.WordChannelDelete, map[string]any{"channel_id": created.ChannelID})}}
 	_ = retireProc(retireSys)
 	if retireSys.code != "" {
 		t.Fatalf("retire failed code=%s", retireSys.code)
 	}
-	row, found, err = reopened.GetChannelDesired(context.Background(), created.ID)
+	row, found, err = reopened.GetChannelDesired(context.Background(), created.ChannelID)
 	if err != nil || !found || row.Status != "retired" {
 		t.Fatalf("retired row=%+v found=%v err=%v", row, found, err)
 	}

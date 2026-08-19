@@ -3,14 +3,12 @@ package channelspec
 import (
 	"encoding/json"
 	"testing"
-
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 func TestRenderedSnapshotDigestIsCanonicalContentIdentity(t *testing.T) {
 	one, err := (RenderedSnapshot{
 		Class: "agent", Config: json.RawMessage(`{"x":1}`),
-		Placement: channel.Placement{Kind: channel.PlacementServer},
+		Placement: Placement{Kind: PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +31,7 @@ func TestOperationErrorClosedSet(t *testing.T) {
 		ErrCodeUnknownClass: true, ErrCodeProtectedActor: true,
 		ErrCodeNotAcceptedSource: true, ErrCodeMemberInactive: true,
 		ErrCodeAuthorityUnavailable: true,
+		ErrCodeConflictExists:       true,
 	}
 	if len(operationErrorCodes) != len(want) {
 		t.Fatalf("operate error closed set has %d entries, want %d", len(operationErrorCodes), len(want))

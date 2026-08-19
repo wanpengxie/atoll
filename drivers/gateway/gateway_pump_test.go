@@ -110,9 +110,7 @@ func sourceSeqs(t *testing.T, h *testChannel) []int64 {
 	var seqs []int64
 	after := int64(0)
 	for {
-		rows, scanned, err := h.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
-			ActorID: h.memberID, Mode: channel.ReaderMember,
-		}, after, feedBatch)
+		rows, scanned, err := h.View().ReadVisibleAfterSeq(context.Background(), after, feedBatch)
 		if err != nil {
 			t.Fatalf("ReadAfterSeq(%d): %v", after, err)
 		}
@@ -205,7 +203,7 @@ func TestBusyLoopDrainsObserveControlsBeforeNextFeedBatch(t *testing.T) {
 		Observer: ObserverResolverFunc(func(context.Context, string, channel.ID) (ObserverRoute, string, error) {
 			return ObserverRoute{
 				Channel: "observed", Bundle: observed,
-				Reader: channel.Reader{Principal: principal, Mode: channel.ReaderObserver},
+				Reader: Reader{Principal: principal, Mode: ReaderObserver},
 			}, "", nil
 		}),
 	}, settings{clock: clk})

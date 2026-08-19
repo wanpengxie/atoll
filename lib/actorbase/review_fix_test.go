@@ -97,7 +97,7 @@ func TestEngine_SelfCallFailsFastZeroResidue(t *testing.T) {
 // registerEntry is the F4/F5 test setup helper: a bare in-flight out-station
 // entry, no timer, no write yet.
 func registerEntry(e *engine, id message.ID) {
-	e.call.register(&message.Envelope{ID: id, Kind: message.KindRequest}, "actor:callee")
+	e.call.register(&message.Envelope{ID: id, Kind: message.KindRequest, Payload: []byte(`{"body":null}`)}, "actor:callee")
 }
 
 // F4a: once a final is matched (buffered), a late-firing author#2 timer

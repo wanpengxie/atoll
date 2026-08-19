@@ -57,8 +57,7 @@ func TestReadVisibleAfterSeqFiltersSystemBeforeLimitAndSharesPublicTruth(t *test
 		t.Fatal(err)
 	}
 
-	bob := channel.Reader{ActorID: "bob", Mode: channel.ReaderMember}
-	rows, scanned, err := messages.ReadVisibleAfterSeq(ctx, bob, 0, batch)
+	rows, scanned, err := messages.ReadVisibleAfterSeq(ctx, 0, batch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,20 +65,17 @@ func TestReadVisibleAfterSeqFiltersSystemBeforeLimitAndSharesPublicTruth(t *test
 		t.Fatalf("bob rows=%v scanned=%d", rowSeqs(rows), scanned)
 	}
 
-	carol := channel.Reader{ActorID: "carol", Mode: channel.ReaderMember}
-	rows, _, err = messages.ReadVisibleAfterSeq(ctx, carol, 0, batch)
+	rows, _, err = messages.ReadVisibleAfterSeq(ctx, 0, batch)
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("carol rows=%v err=%v", rowSeqs(rows), err)
 	}
 
-	senderObserver := channel.Reader{Principal: "principal-a", Mode: channel.ReaderObserver}
-	rows, _, err = messages.ReadVisibleAfterSeq(ctx, senderObserver, 0, batch)
+	rows, _, err = messages.ReadVisibleAfterSeq(ctx, 0, batch)
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("sender observer rows=%v err=%v", rowSeqs(rows), err)
 	}
 
-	audienceObserver := channel.Reader{Principal: "principal-b", Mode: channel.ReaderObserver}
-	rows, _, err = messages.ReadVisibleAfterSeq(ctx, audienceObserver, 0, batch)
+	rows, _, err = messages.ReadVisibleAfterSeq(ctx, 0, batch)
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("audience observer rows=%v err=%v", rowSeqs(rows), err)
 	}
@@ -89,11 +85,10 @@ func TestReadVisibleAfterSeqSnapshotCursorDoesNotSkipLaterInsert(t *testing.T) {
 	ctx := context.Background()
 	messages, register := openVisibleMessages(t)
 	register("alice", "principal-a")
-	reader := channel.Reader{ActorID: "alice", Mode: channel.ReaderMember}
 	if _, err := messages.Append(ctx, visibleEnvelope("first", "alice", message.VisibilityPublic), false, storespec.AppendMetadata{}); err != nil {
 		t.Fatal(err)
 	}
-	rows, scanned, err := messages.ReadVisibleAfterSeq(ctx, reader, 0, 100)
+	rows, scanned, err := messages.ReadVisibleAfterSeq(ctx, 0, 100)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("first read rows=%v scanned=%d err=%v", rowSeqs(rows), scanned, err)
 	}
@@ -101,7 +96,7 @@ func TestReadVisibleAfterSeqSnapshotCursorDoesNotSkipLaterInsert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, next, err := messages.ReadVisibleAfterSeq(ctx, reader, scanned, 100)
+	rows, next, err := messages.ReadVisibleAfterSeq(ctx, scanned, 100)
 	if err != nil || len(rows) != 1 || rows[0].Seq != int64(second.Seq) || next != int64(second.Seq) {
 		t.Fatalf("boundary read rows=%v next=%d err=%v", rowSeqs(rows), next, err)
 	}

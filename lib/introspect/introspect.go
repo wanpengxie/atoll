@@ -1,6 +1,8 @@
 package introspect
 
-import "encoding/json"
+import (
+	"encoding/json"
+)
 
 // The reserved introspection queries — the standard questions any actor / the
 // channel answers about itself.
@@ -9,36 +11,14 @@ const (
 	// request payload is a DescribeRequest: empty for the full self-answer,
 	// or with Type set for a single-type answer.
 	QueryDescribe = "actor.describe"
-	// QueryList — who is in this channel: the membership ∧ liveness directory.
-	// This is the AUTHORITATIVE definition of the formula (durable registry
-	// membership composed with volatile liveness); other sites reference it
-	// rather than restating it.
-	QueryList = "actor.list"
-	// QueryStatus returns the system actor's read-time presence view for one id.
-	QueryStatus = "actor.status"
 )
 
-// NOTE: actor.status is advisory presence, not a serviceability promise.
+// Member presence is advisory, not a serviceability promise.
 // Serviceability remains the OUTCOME of send→terminal.
 
 type StatusRequest struct {
-	ActorID string `json:"actor_id"`
+	Member string `json:"member"`
 }
-
-func ParseStatusRequest(payload []byte) (StatusRequest, error) {
-	var req StatusRequest
-	err := json.Unmarshal(payload, &req)
-	if err == nil && req.ActorID == "" {
-		err = errMissingActorID
-	}
-	return req, err
-}
-
-type statusRequestError string
-
-func (e statusRequestError) Error() string { return string(e) }
-
-const errMissingActorID statusRequestError = "actor_id required"
 
 type StatusTestimony struct {
 	ReceivedAt         int64           `json:"received_at"`
@@ -100,25 +80,21 @@ func ParseDevicePresence(raw []byte) (p DevicePresence, ok bool) {
 // capability; a caller discovers it by asking the actor, live.
 //
 // Kind and binding are deliberately ABSENT: they are registry truth (see
-// CatalogEntry via actor.list), not capability — a self-answer restating
+// CatalogEntry via the member directory), not capability — a self-answer restating
 // registry facts can only drift from them.
 type Describe struct {
-	// ActorID is the actor's registry id (e.g. "device:laptop").
-	ActorID string `json:"actor_id"`
-	// Description is the one-line actor positioning.
-	Description string `json:"description"`
-	// SkillDoc is the markdown usage guide (workflows, error handling).
-	SkillDoc string `json:"skill_doc,omitempty"`
-	// Types documents every request type the actor serves.
-	Types map[string]TypeMeta `json:"types,omitempty"`
+	Class        string              `json:"class"`
+	Interfaces   []string            `json:"interfaces"`
+	Capabilities map[string]bool     `json:"capabilities"`
+	Words        map[string]WordSpec `json:"words"`
 }
 
 // DescribeType is the single-type actor.describe answer (selector form):
 // one type's metadata, inlined alongside the identifying pair.
 type DescribeType struct {
-	ActorID string `json:"actor_id"`
-	Type    string `json:"type"`
-	TypeMeta
+	Class string `json:"class"`
+	Type  string `json:"type"`
+	WordSpec
 }
 
 // AnswerDescribe resolves an actor.describe request against the actor's full
@@ -130,27 +106,15 @@ func AnswerDescribe(d Describe, req DescribeRequest) (any, bool) {
 	if req.Type == "" {
 		return d, true
 	}
-	meta, ok := d.Types[req.Type]
+	meta, ok := d.Words[req.Type]
 	if !ok {
 		return nil, false
 	}
-	return DescribeType{ActorID: d.ActorID, Type: req.Type, TypeMeta: meta}, true
+	d.Words = map[string]WordSpec{req.Type: meta}
+	return d, true
 }
 
-// ParseDescribeRequest decodes an actor.describe request payload. A nil/empty
-// payload is the full-answer request.
-func ParseDescribeRequest(payload []byte) (DescribeRequest, error) {
-	var req DescribeRequest
-	if len(payload) == 0 {
-		return req, nil
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
-		return DescribeRequest{}, err
-	}
-	return req, nil
-}
-
-// CatalogEntry is one row of the actor.list channel directory: membership
+// CatalogEntry is one row of the channel member directory: membership
 // (registry truth) ∧ liveness (volatile, read from the substrate's authoritative
 // obs). Name and Description are declaration facts supplied by the introducer,
 // not a restatement of the actor's self-description. No readiness axis —
@@ -176,7 +140,7 @@ type CatalogEntry struct {
 	Device *DevicePresence `json:"device,omitempty"`
 }
 
-// Catalog is the actor.list response: the channel-wide directory.
+// Catalog is the member-list response: the channel-wide directory.
 type Catalog struct {
 	Actors []CatalogEntry `json:"actors"`
 }

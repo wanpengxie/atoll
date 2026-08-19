@@ -127,7 +127,7 @@ var layerAllowlist = map[string][]string{
 	"runtime":  {"protocol"},
 	"lib":      {"protocol", "runtime"},
 	"platform": {"protocol", "runtime", "lib"},
-	"registry": {"protocol", "platform"},
+	"registry": {"protocol", "lib", "platform"},
 	"drivers":  {"protocol", "runtime", "lib", "platform", "registry"},
 	"cmd":      {"protocol", "runtime", "lib", "platform", "registry", "drivers"},
 	"e2e":      {}, // 纯测试目录，无生产文件；占位使其入表
@@ -175,6 +175,42 @@ func TestLayerGraphIsExactlyTheDeclaredArrows(t *testing.T) {
 	failWall(t, bad,
 		"一级包依赖图只有 layerAllowlist 正向枚举的箭头。",
 		"下游适配上游：把需要的词汇下放到更低层，或（确属层模型变更时）改这张表并过 review。")
+}
+
+// Protocol package direction wall:
+//  1. Invariant: actor, channel, and resource are roots; message may compose
+//     actor+channel, and access may compose actor+resource, so the vocabulary
+//     graph stays acyclic.
+//  2. Consequence: a reverse edge creates a protocol import cycle or makes a
+//     root vocabulary depend on a composed wire shape.
+//  3. Strength: Go cannot express cross-package direction through visibility;
+//     an import graph check is the highest available level and freezes neither
+//     symbols nor files.
+func TestProtocolPackageDirectionsStayAcyclic(t *testing.T) {
+	allowed := map[string]map[string]bool{
+		"protocol":          {},
+		"protocol/actor":    {},
+		"protocol/channel":  {},
+		"protocol/resource": {},
+		"protocol/message":  {"protocol/actor": true, "protocol/channel": true},
+		"protocol/access":   {"protocol/actor": true, "protocol/resource": true},
+	}
+	var bad []string
+	for _, f := range productionFiles(t) {
+		fromAllowed, inProtocol := allowed[f.dir]
+		if !inProtocol {
+			continue
+		}
+		for _, p := range f.imports {
+			rel, internal := atollPath(p)
+			if internal && rel != f.dir && !fromAllowed[rel] {
+				bad = append(bad, fmt.Sprintf("%s imports %q", f.path, p))
+			}
+		}
+	}
+	failWall(t, bad,
+		"protocol 词汇依赖恒单向且无环。",
+		"把共享词汇下沉到 actor/channel/resource，或让 message/access 只组合各自允许的根叶。")
 }
 
 // TestProtocolTakesNoSeamOrExternalImports —— protocol 除层图约束（不 import

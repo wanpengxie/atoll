@@ -14,15 +14,16 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/provider/script"
 	agentruntime "github.com/wanpengxie/atoll/drivers/agents/runtime"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
 func init() {
-	registry.Register(claude.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newClaude, ValidateConfig: claude.ValidateConfig})
-	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newCodex, ValidateConfig: codex.ValidateConfig})
-	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channel.PlacementDaemon, New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
+	full := map[string]bool{driverproto.CapabilitySteer: true, driverproto.CapabilityInterrupt: true, driverproto.CapabilityResume: true}
+	registry.Register(claude.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(claude.Class, full), New: newClaude, ValidateConfig: claude.ValidateConfig})
+	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(codex.Class, full), New: newCodex, ValidateConfig: codex.ValidateConfig})
+	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(script.Class, nil), New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
 }
 
 func newClaude(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
@@ -69,9 +70,9 @@ func compose(spec registry.InstanceSpec, provider driverproto.Provider) (platfor
 	if err != nil {
 		return platform.ActorDecl{}, err
 	}
-	doc := runtimeSpec.Describe.SkillDoc
+	doc := runtimeSpec.Documentation.SkillDoc
 	if doc == "" {
-		doc = runtimeSpec.Describe.Description
+		doc = runtimeSpec.Documentation.Description
 	}
 	definition, err := base.Def(doc, base.Config{NewRuntime: factory, Runtime: runtimeSpec})
 	if err != nil {

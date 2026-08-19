@@ -54,7 +54,7 @@ import (
 // Match plumbing.
 func humanCellFactory(h *Home, id actor.ActorID) platform.ActorFactory {
 	return platform.ActorFactory{Proc: actorbase.Def{
-		Doc: "home-side human actor (subjectgate): callable; three-choice per-type closure (immediate human.message / deferred human.approve) + describe; the person drives own actions via wire frames through the slot",
+		Manifest: humancell.Manifest(),
 		New: func() (actorbase.Proc, error) {
 			return func(sys actorbase.Sys) error { return h.runHumanCell(id, sys) }, nil
 		},

@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform/boot"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
-	"github.com/wanpengxie/atoll/protocol"
 )
 
 // A start is never a calibrator: boot carves c0 once, and every later
@@ -26,7 +26,7 @@ func TestReconcileSystemLeavesExistingC0RowUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE channels SET description=?, serving=0 WHERE id=?`, "operator description", protocol.C0ChannelID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE channels SET description=?, serving=0 WHERE id=?`, "operator description", channelspec.C0ChannelID); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -41,7 +41,7 @@ func TestReconcileSystemLeavesExistingC0RowUntouched(t *testing.T) {
 	if err := lagoon.NewRegistrar(registry, nil, nil).ReconcileSystem(ctx); err != nil {
 		t.Fatal(err)
 	}
-	row, found, err := registry.GetChannelDesired(ctx, protocol.C0ChannelID)
+	row, found, err := registry.GetChannelDesired(ctx, channelspec.C0ChannelID)
 	if err != nil || !found {
 		t.Fatalf("c0 row after reconcile: found=%v err=%v", found, err)
 	}
@@ -70,7 +70,7 @@ func TestReconcileSystemRefusesUnreadableOrForeignC0Genesis(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.ExecContext(ctx, `UPDATE channels SET spec_json=? WHERE id=?`, tc.spec, protocol.C0ChannelID); err != nil {
+			if _, err := db.ExecContext(ctx, `UPDATE channels SET spec_json=? WHERE id=?`, tc.spec, channelspec.C0ChannelID); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.Close(); err != nil {

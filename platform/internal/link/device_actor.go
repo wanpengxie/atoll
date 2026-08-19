@@ -18,7 +18,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/ipc"
-	"github.com/wanpengxie/atoll/runtime/remoteingress"
 )
 
 const attachHandshakeTimeout = 10 * time.Second
@@ -136,11 +135,14 @@ func ServeLaneActor(
 			}
 			return json.Marshal(scheduleResponse{ID: response.ID})
 		},
-		fork: func(callCtx context.Context, id actor.ActorID, key actorhost.AttemptKey, request remoteingress.ForkRequest) (actor.ActorID, error) {
+		resolveTarget: func(_ context.Context, target string) (actor.ActorID, error) {
 			if !current() {
 				return "", errLinkClosed
 			}
-			return membrane.Ingress.Fork(callCtx, id, key, request)
+			if membrane.ResolveTarget == nil {
+				return "", errRelayUnavailable
+			}
+			return membrane.ResolveTarget(target)
 		},
 		endSelf: func(callCtx context.Context, id actor.ActorID, key actorhost.AttemptKey, request actorcaps.EndSelfRequest) error {
 			if !current() {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -121,10 +122,6 @@ func validateDraft(in storespec.ActorDraft) error {
 	if _, ok := actor.ParseKind(string(in.Kind)); !ok {
 		return fmt.Errorf("store: invalid actor kind %q", in.Kind)
 	}
-	if in.Kind == actor.KindSystem {
-		// The kernel is a constant, never a member: it has no record.
-		return errors.New("store: the system kernel has no actor record")
-	}
 	if in.Definition.Class == "" || in.CreatedAt <= 0 {
 		return errors.New("store: actor insert requires class and timestamp")
 	}
@@ -137,19 +134,19 @@ func validateDraft(in storespec.ActorDraft) error {
 	if in.Kind == actor.KindHuman && in.SourceDeclID != "" {
 		return errors.New("store: human admission cannot carry declaration source")
 	}
-	if in.Kind == actor.KindTool && in.Principal != "" {
-		return errors.New("store: tool admissions cannot carry a principal")
+	if in.Kind != actor.KindHuman && in.Principal != "" && in.Kind != actor.KindAgent {
+		return errors.New("store: only human and agent admissions may carry a principal")
 	}
-	if (in.Kind == actor.KindAgent || in.Kind == actor.KindTool) && in.SourceDeclID == "" {
+	if in.Kind != actor.KindHuman && in.SourceDeclID == "" {
 		return errors.New("store: declaration-backed admission source required")
 	}
 	return nil
 }
 
-// Insert is the whole add-or-update introduce on ONE transaction bed: semantic
-// key lookup updates the mutable fields of an active row; otherwise id mint
-// (with tombstone avoidance) and row insert create it. There is no intermediate
-// state — a crash leaves either the old row or the complete new value.
+// Insert creates one actor record on ONE transaction bed. Human admissions are
+// the sole principal-keyed identity: re-admitting one principal updates that
+// person's live cell. Declaration-backed actors are births, not upserts;
+// singleton declarations and the peer/system domains reject a second live row.
 func (r *actorRegistry) Insert(
 	ctx context.Context,
 	in storespec.ActorDraft,
@@ -201,16 +198,16 @@ func (r *actorRegistry) Insert(
 	}
 
 	switch {
-	case in.SourceDeclID != "":
-		record, found, err := lookupExisting(`SELECT `+actorRecordColumns+` FROM actor_registry
-			WHERE source_decl_id=? AND deregistered_at IS NULL`, in.SourceDeclID)
+	case in.SourceDeclID != "" && (in.Singleton || in.Kind == actor.KindPeer || in.Kind == actor.KindSystem):
+		_, found, err := lookupExisting(`SELECT `+actorRecordColumns+` FROM actor_registry
+			WHERE actor_kind=? AND source_decl_id=? AND deregistered_at IS NULL`, string(in.Kind), in.SourceDeclID)
 		if err != nil {
 			return storespec.ActorRecord{}, err
 		}
 		if found {
-			return updateExisting(record)
+			return storespec.ActorRecord{}, storespec.ErrConflictExists
 		}
-	case in.Principal != "":
+	case in.Kind == actor.KindHuman && in.Principal != "":
 		record, found, err := lookupExisting(`SELECT `+actorRecordColumns+` FROM actor_registry
 			WHERE actor_kind=? AND principal=? AND deregistered_at IS NULL`,
 			string(in.Kind), in.Principal)
@@ -358,13 +355,16 @@ func (r *actorRegistry) Deregister(
 // them is set — validateDraft has already refused a draft that carries the
 // wrong one for its kind.
 func seedFor(in storespec.ActorDraft) string {
-	if in.Principal != "" {
+	if in.Kind == actor.KindHuman {
 		return in.Principal
 	}
 	return in.SourceDeclID
 }
 
 func mintActorIDTx(ctx context.Context, tx *sql.Tx, kind actor.Kind, seed string, at int64) (actor.ActorID, error) {
+	if seed == "" || strings.Contains(seed, ":") {
+		return "", errors.New("store: actor id seed must be non-empty and contain no colon")
+	}
 	for attempt := int64(0); attempt < 1000; attempt++ {
 		candidate := actor.ActorID(fmt.Sprintf("%s:%s:%d", kind, seed, at+attempt))
 		var used bool

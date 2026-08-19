@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -20,15 +20,14 @@ func TestEveryRegistrarWordReachesItsHandlerThroughDeclaredRoutes(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer eng.Close(context.Background())
-	core, _ := eng.host.Acquire(protocol.C0ChannelID)
-	registrar := onlyDecl(t, core, lagoon.RegistrarSeatDeclID)
+	core, _ := eng.host.Acquire(channelspec.C0ChannelID)
+	registrar := onlyDecl(t, core, lagoon.RegistrarDeclID)
 	var home lagoon.ChannelCreateReply
-	terminalValue(t, callMember(t, protocol.C0ChannelID, core, protocol.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "word-routing-home"}), &home)
-	bundle := waitBundle(t, eng, home.ID)
-	coreactor := onlyDecl(t, bundle, lagoon.CoreActorDeclID)
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "word-routing-home"}), &home)
+	bundle := waitBundle(t, eng, home.ChannelID)
 	words := append(append([]lagoon.Word{}, lagoon.WriteWords[:]...), lagoon.ReadWords[:]...)
-	if len(words) != 29 {
-		t.Fatalf("registrar word inventory=%d want=29", len(words))
+	if len(words) != 28 {
+		t.Fatalf("registrar word inventory=%d want=28", len(words))
 	}
 	seenTemplates := 0
 	routes := []struct {
@@ -37,19 +36,19 @@ func TestEveryRegistrarWordReachesItsHandlerThroughDeclaredRoutes(t *testing.T) 
 		bundle channelhost.Bundle
 		target actor.ActorID
 	}{
-		{name: "coreactor", ch: home.ID, bundle: bundle, target: coreactor},
-		{name: "c0-direct", ch: protocol.C0ChannelID, bundle: core, target: registrar},
+		{name: "membrane", ch: home.ChannelID, bundle: bundle, target: actor.SystemActorID},
+		{name: "c0-direct", ch: channelspec.C0ChannelID, bundle: core, target: registrar},
 	}
 	for _, word := range words {
 		for _, route := range routes {
 			t.Run(route.name+"/"+string(word), func(t *testing.T) {
-				terminal := decodeTerminal(t, callMember(t, route.ch, route.bundle, protocol.RootPrincipalID, route.target, string(word), map[string]any{}))
+				terminal := decodeTerminal(t, callMember(t, route.ch, route.bundle, channelspec.RootPrincipalID, route.target, string(word), map[string]any{}))
 				if terminal.ErrorCode == string(lagoon.CodeResultUnknown) || strings.Contains(terminal.Detail, "unknown registrar word") {
 					t.Fatalf("word did not reach handler: %+v", terminal)
 				}
 			})
 		}
-		if strings.HasPrefix(string(word), "channel.template.") {
+		if strings.HasPrefix(string(word), "system.channel.template.") {
 			seenTemplates++
 		}
 	}

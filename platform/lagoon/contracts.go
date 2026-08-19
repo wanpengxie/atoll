@@ -16,63 +16,63 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 type Word string
 
 const (
-	WordChannelCreate           Word = "channel.create"
-	WordChannelRetire           Word = "channel.retire"
-	WordPrincipalRegister       Word = "principal.register"
-	WordPrincipalLogin          Word = "principal.login"
-	WordPrincipalRetire         Word = "principal.retire"
-	WordCredentialSet           Word = "credential.set"
-	WordDeclRegister            Word = "actor.template.register"
-	WordDeclEdit                Word = "actor.template.edit"
-	WordDeclRevoke              Word = "actor.template.revoke"
-	WordOverlaySet              Word = "actor.overlay.set"
-	WordOverlayClear            Word = "actor.overlay.clear"
-	WordChannelTemplateRegister Word = "channel.template.register"
-	WordChannelTemplateEdit     Word = "channel.template.edit"
-	WordChannelTemplateRevoke   Word = "channel.template.revoke"
-	WordChannelProfileSet       Word = "channel.profile.set"
-	WordDeviceMint              Word = "device.mint"
-	WordDeviceClaim             Word = "device.claim"
-	WordDeviceRetire            Word = "device.retire"
-	WordDeviceAttach            Word = "device.attach"
-	WordDeviceDetach            Word = "device.detach"
+	WordChannelCreate         Word = message.TypeSystemChannelCreate
+	WordChannelDelete         Word = message.TypeSystemChannelDelete
+	WordPrincipalCreate       Word = message.TypeSystemPrincipalCreate
+	WordPrincipalLogin        Word = message.TypeSystemPrincipalLogin
+	WordPrincipalDelete       Word = message.TypeSystemPrincipalDelete
+	WordCredentialSet         Word = message.TypeSystemCredentialSet
+	WordActorTemplateCreate   Word = message.TypeSystemActorTemplateCreate
+	WordActorTemplateSet      Word = message.TypeSystemActorTemplateSet
+	WordActorTemplateDelete   Word = message.TypeSystemActorTemplateDelete
+	WordActorOverlaySet       Word = message.TypeSystemActorOverlaySet
+	WordActorOverlayDelete    Word = message.TypeSystemActorOverlayDelete
+	WordChannelTemplateCreate Word = message.TypeSystemChannelTemplateCreate
+	WordChannelTemplateSet    Word = message.TypeSystemChannelTemplateSet
+	WordChannelTemplateDelete Word = message.TypeSystemChannelTemplateDelete
+	WordChannelSet            Word = message.TypeSystemChannelSet
+	WordDeviceCreate          Word = message.TypeSystemDeviceCreate
+	WordDeviceDelete          Word = message.TypeSystemDeviceDelete
+	WordDeviceAttach          Word = message.TypeSystemDeviceAttach
+	WordDeviceDetach          Word = message.TypeSystemDeviceDetach
 
-	WordChannelList         Word = "channel.list"
-	WordChannelGet          Word = "channel.get"
-	WordChannelCandidates   Word = "channel.candidates"
-	WordDeclList            Word = "actor.template.list"
-	WordChannelTemplateList Word = "channel.template.list"
-	WordChannelTemplateGet  Word = "channel.template.get"
-	WordChannelDescribe     Word = "channel.describe"
-	WordDeviceList          Word = "device.list"
-	WordPrincipalMe         Word = "principal.me"
+	WordChannelList         Word = message.TypeSystemChannelList
+	WordChannelGet          Word = message.TypeSystemChannelGet
+	WordPrincipalList       Word = message.TypeSystemPrincipalList
+	WordActorTemplateList   Word = message.TypeSystemActorTemplateList
+	WordActorTemplateGet    Word = message.TypeSystemActorTemplateGet
+	WordChannelTemplateList Word = message.TypeSystemChannelTemplateList
+	WordChannelTemplateGet  Word = message.TypeSystemChannelTemplateGet
+	WordDeviceList          Word = message.TypeSystemDeviceList
+	WordPrincipalGet        Word = message.TypeSystemPrincipalGet
 )
 
 var WriteWords = [...]Word{
-	WordChannelCreate, WordChannelRetire,
-	WordPrincipalRegister, WordPrincipalRetire, WordCredentialSet,
-	WordDeclRegister, WordDeclEdit, WordDeclRevoke,
-	WordOverlaySet, WordOverlayClear,
-	WordChannelTemplateRegister, WordChannelTemplateEdit, WordChannelTemplateRevoke, WordChannelProfileSet,
-	WordDeviceMint, WordDeviceClaim, WordDeviceRetire, WordDeviceAttach, WordDeviceDetach,
+	WordChannelCreate, WordChannelDelete,
+	WordPrincipalCreate, WordPrincipalDelete, WordCredentialSet,
+	WordActorTemplateCreate, WordActorTemplateSet, WordActorTemplateDelete,
+	WordActorOverlaySet, WordActorOverlayDelete,
+	WordChannelTemplateCreate, WordChannelTemplateSet, WordChannelTemplateDelete, WordChannelSet,
+	WordDeviceCreate, WordDeviceDelete, WordDeviceAttach, WordDeviceDetach,
 }
 
 var ReadWords = [...]Word{
-	WordChannelList, WordChannelGet, WordChannelCandidates,
-	WordDeclList, WordDeviceList, WordPrincipalMe, WordPrincipalLogin,
-	WordChannelTemplateList, WordChannelTemplateGet, WordChannelDescribe,
+	WordChannelList, WordChannelGet, WordPrincipalList,
+	WordActorTemplateList, WordActorTemplateGet, WordDeviceList, WordPrincipalGet, WordPrincipalLogin,
+	WordChannelTemplateList, WordChannelTemplateGet,
 }
 
 // LobbyWords is everything c0 exposes to the lobby: the two doors an
 // unauthenticated guest may knock on. The lobby is outside the trust domain,
 // so c0's svcactor neither advertises nor dispatches any other endpoint to
 // it, and the registrar accepts these two words from the lobby only.
-var LobbyWords = [...]Word{WordPrincipalRegister, WordPrincipalLogin}
+var LobbyWords = [...]Word{WordPrincipalCreate, WordPrincipalLogin}
 
 func LobbyWord(word Word) bool {
 	for _, candidate := range LobbyWords {
@@ -84,15 +84,11 @@ func LobbyWord(word Word) bool {
 }
 
 const (
-	CoreActorDeclID     = "coreactor"
-	PeerActorClass      = "peeractor"
-	PeerActorDeclPrefix = "peer:"
-	SvcActorDeclID      = "atoll-internal:svcactor"
-	SvcActorClass       = "svcactor"
-	RegistrarClass      = "atoll-internal:registrar"
-	// RegistrarSeatDeclID is an installation detail, not a well-known public
-	// identity. Its stable source key lets channel genesis rebuild the seat.
-	RegistrarSeatDeclID = "atoll-internal:registrar-seat"
+	PeerActorClass  = "peeractor"
+	SvcActorDeclID  = "svcactor"
+	SvcActorClass   = "svcactor"
+	ClassRegistrar  = "registrar"
+	RegistrarDeclID = "registrar"
 )
 
 func StableBootstrapDeclID(owner, role string) string {
@@ -124,13 +120,6 @@ func (e *Error) Error() string {
 	}
 	return string(e.Code) + ": " + e.Detail
 }
-
-type SourceRef struct {
-	ChannelID channel.ID `json:"channel_id"`
-	RequestID string     `json:"request_id"`
-}
-
-func (r SourceRef) String() string { return string(r.ChannelID) + ":" + r.RequestID }
 
 // CredentialRow is intentionally private. CredentialReply is the only public
 // credential shape and structurally has no secret_hash field.
@@ -165,9 +154,8 @@ type GenesisDeclaration struct {
 }
 
 type ChannelCreate struct {
-	Name      string                `json:"name"`
-	Template  string                `json:"template,omitempty"`
-	Overrides *regspec.TemplateBody `json:"overrides,omitempty"`
+	Name   string               `json:"name"`
+	Recipe regspec.TemplateBody `json:"recipe"`
 }
 type ChannelRetire struct {
 	ChannelID channel.ID `json:"channel_id"`
@@ -199,6 +187,7 @@ type DeclRegister struct {
 	Class       string          `json:"class"`
 	Config      json.RawMessage `json:"config,omitempty"`
 	Visibility  string          `json:"visibility"`
+	Singleton   bool            `json:"singleton"`
 }
 type DeclEdit struct {
 	ID          string          `json:"id"`
@@ -207,6 +196,7 @@ type DeclEdit struct {
 	Class       *string         `json:"class,omitempty"`
 	Config      json.RawMessage `json:"config,omitempty"`
 	Visibility  *string         `json:"visibility,omitempty"`
+	Singleton   *bool           `json:"singleton,omitempty"`
 }
 type DeclRevoke struct {
 	ID string `json:"id"`
@@ -268,10 +258,9 @@ type ChannelTemplateGet struct {
 }
 
 type ChannelProfileSet struct {
-	ChannelID   channel.ID                      `json:"channel_id"`
-	Description string                          `json:"description"`
-	Serving     *int                            `json:"serving"`
-	Endpoints   map[string]regspec.EndpointSpec `json:"endpoints"`
+	ChannelID   channel.ID `json:"channel_id"`
+	Description string     `json:"description"`
+	Serving     *int       `json:"serving"`
 }
 
 type ChannelDescribe struct {
@@ -280,9 +269,7 @@ type ChannelDescribe struct {
 }
 
 type Reply struct {
-	Word   Word            `json:"word"`
-	Value  json.RawMessage `json:"value,omitempty"`
-	Source SourceRef       `json:"source,omitempty"`
+	Value json.RawMessage `json:"value,omitempty"`
 }
 
 func (r Reply) ValidValue() error {
@@ -317,19 +304,11 @@ type SystemGenesisResolver interface {
 type ClassCatalog interface {
 	ValidateConfig(class string, config json.RawMessage) error
 	LookupClassKind(class string) (actor.Kind, bool)
-	LookupClassPlacement(class string) (channel.PlacementKind, bool)
+	LookupClassPlacement(class string) (channelspec.PlacementKind, bool)
 }
 
 type SourceActorFactsResolver interface {
 	ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error)
-}
-
-type ChannelInstancesResolver interface {
-	DeclaredInstances(context.Context, channel.ID, string) ([]actor.ActorID, error)
-}
-
-type ChannelServiceResolver interface {
-	WaitChannelService(context.Context, channel.ID) error
 }
 
 type Clock func() time.Time

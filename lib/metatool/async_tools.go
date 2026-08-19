@@ -63,31 +63,31 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 		timeout = time.Duration(p.TimeoutMs) * time.Millisecond
 	}
 
-	finalEnv, ok, err := x.Jobs.Await(ctx, reqID, timeout)
+	finalEnv, ok, observed, err := awaitWithProgress(ctx, x.Jobs, reqID, timeout)
 	if err != nil {
 		if errors.Is(err, actorbase.ErrCallClosed) {
 			// The ledger row is gone (already collected, cancelled, or lost to a
 			// cell restart) — the JobTable equivalent of the old InFlight guard.
-			return NewError(
+			return attachProgress(NewError(
 				"await_result",
 				InternalError,
 				fmt.Sprintf("request_id %q is not in flight (already collected, cancelled, or lost to a cell restart)", reqID),
 				"Call list_pending() to see in-flight request ids; resubmit the call if needed",
 				nil,
-			)
+			), observed)
 		}
 		// A ctx / wait error releases YOUR wait; it does NOT drop the ledger
 		// entry (author#2 still owns the request's terminal) — the request keeps
 		// running and stays awaitable. No implicit cancel (an await error is not
 		// the caller deciding to abandon the work).
-		return NewError("await_result", InternalError,
+		return attachProgress(NewError("await_result", InternalError,
 			fmt.Sprintf("await_result %q failed: %v", reqID, err),
-			"Inspect adapter logs; the wait was released but the call keeps running", nil)
+			"Inspect adapter logs; the wait was released but the call keeps running", nil), observed)
 	}
 	if !ok {
 		// Still pending after the window — hand control back with an ack.
 		toWait, notWaiting := newCollectHint(reqID.String())
-		return AckResult("await_result", AckDescriptor{
+		return attachProgress(AckResult("await_result", AckDescriptor{
 			RequestID:  reqID,
 			Accepted:   true,
 			Status:     "accepted",
@@ -95,7 +95,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 			Guidance:   "Still running after the wait window. The call keeps running; claim it later with await_result.",
 			ToWait:     toWait,
 			NotWaiting: notWaiting,
-		})
+		}), observed)
 	}
 	rv, _ := ResultFromResponse("await_result", *finalEnv)
 	// Stage two of the render→normalize pipeline (the same law every other
@@ -105,7 +105,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 	// This mount was the pipeline's one missing outlet (purity 手动档 B3).
 	// The answering actor's identity and the response type ride on the final
 	// envelope itself.
-	return NormalizeCallActorResult(rv, string(finalEnv.Sender.ID), finalEnv.Type)
+	return attachProgress(NormalizeCallActorResult(rv, string(finalEnv.Sender.ID), finalEnv.Type), observed)
 }
 
 // CancelSpec is the protocol-layer definition of cancel.

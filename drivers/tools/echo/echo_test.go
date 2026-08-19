@@ -134,7 +134,7 @@ func (s fakeState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 var _ actorbase.Sys = (*fakeSys)(nil)
 
 func requestMsg(id, typ string, payload any) actorbase.Msg {
-	raw, _ := json.Marshal(payload)
+	raw, _ := json.Marshal(map[string]any{"body": payload})
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:      message.ID(id),
 		Kind:    message.KindRequest,

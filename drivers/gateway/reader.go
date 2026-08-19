@@ -1,4 +1,4 @@
-package channel
+package gateway
 
 import "github.com/wanpengxie/atoll/protocol/actor"
 

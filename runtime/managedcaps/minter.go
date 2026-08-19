@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -19,7 +18,6 @@ var ErrInvalidInput = errors.New("managedcaps: invalid mint input")
 // LifecycleOperations is the completed Platform command face used by the
 // Lifecycle arm. It does not expose Controller gates or transition internals.
 type LifecycleOperations interface {
-	Fork(context.Context, actorctl.ForkRequest) (actorctl.ForkResult, error)
 	End(context.Context, actorctl.EndRequest) (actorctl.EndResult, error)
 }
 
@@ -83,20 +81,6 @@ type lifecycleHandle struct {
 	operations LifecycleOperations
 	id         actor.ActorID
 	attempt    actorhost.AttemptKey
-}
-
-func (h lifecycleHandle) Fork(
-	ctx context.Context,
-	requestID message.ID,
-	spec actorcaps.ForkSpec,
-) (actor.ActorID, error) {
-	result, err := h.operations.Fork(ctx, actorctl.ForkRequest{
-		CallerActorID: h.id,
-		CallerAttempt: h.attempt,
-		RequestID:     requestID,
-		Spec:          spec,
-	})
-	return result.ChildActorID, err
 }
 
 func (h lifecycleHandle) EndSelf(

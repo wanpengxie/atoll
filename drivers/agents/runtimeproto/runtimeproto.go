@@ -10,7 +10,17 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
-	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/runtime/harness"
+)
+
+// Capability names cross the provider/runtime seam as manifest vocabulary.
+// These string values mirror the provider-side spellings without creating the
+// reverse driverproto-to-runtimeproto import edge.
+const (
+	CapabilitySteer     = "steer"
+	CapabilityInterrupt = "interrupt"
+	CapabilityResume    = "resume"
+	CapabilityFork      = "fork"
 )
 
 type OpID uint64
@@ -29,11 +39,17 @@ type TurnOptions struct {
 }
 
 type Input struct {
-	SourceID string
-	Type     string
-	Sender   string
-	Payload  json.RawMessage
-	Text     string
+	SourceID    string
+	Type        string
+	Sender      string
+	Caller      harness.Caller
+	Payload     json.RawMessage
+	Text        string
+	Attachments []Attachment
+}
+
+type Attachment struct {
+	Address string `json:"address"`
 }
 
 type ContextItem struct {
@@ -141,12 +157,6 @@ type Events interface {
 	RuntimeFault(string, string)
 }
 
-type Capabilities struct {
-	Steer     bool
-	Interrupt bool
-	Resume    bool
-}
-
 // Bounds are immutable construction-time facts used by Base for its coarse
 // cross-domain receipt and event-port capacity.
 type Bounds struct {
@@ -155,8 +165,8 @@ type Bounds struct {
 }
 
 type Spec struct {
-	Describe         introspect.Describe
-	Capabilities     Capabilities
+	Documentation    driverproto.Documentation
+	Capabilities     map[string]bool
 	Bounds           Bounds
 	Selections       []TurnOptions
 	DefaultSelection int
@@ -213,6 +223,7 @@ type Factory func(Deps, []byte, TurnOptions, Events) (Runtime, error)
 
 func CloneInput(v Input) Input {
 	v.Payload = append(json.RawMessage(nil), v.Payload...)
+	v.Attachments = append([]Attachment(nil), v.Attachments...)
 	return v
 }
 

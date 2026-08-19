@@ -29,7 +29,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
 		BootstrapDeclarations: []DeclareRequest{{
-			SourceDeclID: "decl:author", Class: "routing-live",
+			SourceDeclID: "decl-author", Class: "routing-live",
 			Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent,
 			CreatedAt: time.Now().UnixMilli(),
 		}},
@@ -40,7 +40,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	declared, err := h.View().DeclaredInstances(ctx, "decl:author")
+	declared, err := rosterMembersForSource(ctx, h.View(), "decl-author")
 	if err != nil || len(declared) != 1 {
 		t.Fatalf("bootstrap author missing: %v err=%v", declared, err)
 	}

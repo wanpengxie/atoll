@@ -9,14 +9,13 @@ import (
 
 func sampleDescribe() Describe {
 	return Describe{
-		ActorID:     "device:laptop",
-		Description: "one-liner",
-		SkillDoc:    "# doc",
-		Types: map[string]TypeMeta{
+		Class:        "device",
+		Interfaces:   []string{"tool"},
+		Capabilities: map[string]bool{},
+		Words: map[string]WordSpec{
 			"device.exec": {
-				Description:  "run bash",
-				AllowedKinds: []string{"request"},
-				MaxPendingMs: 120_000,
+				Description: "run bash",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
 			},
 		},
 	}
@@ -39,12 +38,12 @@ func TestAnswerDescribe_TypeSelector(t *testing.T) {
 	if !ok {
 		t.Fatal("type answer: ok=false")
 	}
-	dt, isDT := got.(DescribeType)
-	if !isDT {
-		t.Fatalf("type answer is %T; want DescribeType", got)
+	selected, isDescribe := got.(Describe)
+	if !isDescribe {
+		t.Fatalf("type answer is %T; want Describe", got)
 	}
-	if dt.ActorID != "device:laptop" || dt.Type != "device.exec" || dt.MaxPendingMs != 120_000 {
-		t.Fatalf("type answer = %+v", dt)
+	if len(selected.Words) != 1 || string(selected.Words["device.exec"].InputSchema) != `{"type":"object"}` {
+		t.Fatalf("type answer = %+v", selected)
 	}
 }
 
@@ -54,41 +53,32 @@ func TestAnswerDescribe_UnknownType(t *testing.T) {
 	}
 }
 
-func TestParseDescribeRequest(t *testing.T) {
-	if req, err := ParseDescribeRequest(nil); err != nil || req.Type != "" {
-		t.Fatalf("nil payload: req=%+v err=%v", req, err)
-	}
-	req, err := ParseDescribeRequest([]byte(`{"type":"x.y"}`))
-	if err != nil || req.Type != "x.y" {
-		t.Fatalf("selector payload: req=%+v err=%v", req, err)
-	}
-	if _, err := ParseDescribeRequest([]byte(`{`)); err == nil {
-		t.Fatal("malformed payload: want error")
-	}
-}
-
-// Guard the frozen convention constants so an accidental rename trips a test.
+// Guard the remaining standard query word.
 func TestReservedQueryNames(t *testing.T) {
 	if QueryDescribe != "actor.describe" {
 		t.Fatalf("QueryDescribe drifted: %q", QueryDescribe)
 	}
-	if QueryList != "actor.list" {
-		t.Fatalf("QueryList drifted: %q", QueryList)
-	}
-	if QueryStatus != "actor.status" {
-		t.Fatalf("QueryStatus drifted: %q", QueryStatus)
-	}
 }
 
-func TestParseStatusRequest(t *testing.T) {
-	req, err := ParseStatusRequest([]byte(`{"actor_id":"agent:a"}`))
-	if err != nil || req.ActorID != "agent:a" {
-		t.Fatalf("req=%+v err=%v", req, err)
-	}
-	for _, raw := range [][]byte{nil, []byte(`{}`), []byte(`{`)} {
-		if _, err := ParseStatusRequest(raw); err == nil {
-			t.Fatalf("ParseStatusRequest(%q) accepted invalid input", raw)
+func TestManifestValidationOnlyReservesGateErrorsAndDynamicCollisions(t *testing.T) {
+	for _, class := range []string{"device", "svcactor"} {
+		manifest := Manifest{Class: class, Interfaces: []string{"actor"}, Words: map[string]WordSpec{"device.read": {}}}
+		if class == "svcactor" {
+			manifest.Interfaces = []string{"actor", "svcactor"}
+			manifest.Words = map[string]WordSpec{"svcactor.get": {}}
 		}
+		if err := ValidateManifest(manifest); err != nil {
+			t.Fatalf("class %q rejected: %v", class, err)
+		}
+	}
+	if err := ValidateManifest(Manifest{Class: "device", Interfaces: []string{"actor"}, Words: map[string]WordSpec{"system.channel.list": {}, "no-dot": {}}}); err != nil {
+		t.Fatalf("prefix or word spelling was enforced: %v", err)
+	}
+	if err := ValidateManifest(Manifest{Words: map[string]WordSpec{"work.run": {ErrorCodes: []string{"endpoint_not_found"}}}}); err == nil {
+		t.Fatal("reserved gate error code accepted")
+	}
+	if err := ValidateDynamicWords(map[string]WordSpec{"work.run": {}}, map[string]WordSpec{"work.run": {}}); err == nil {
+		t.Fatal("dynamic/static collision accepted")
 	}
 }
 
@@ -131,7 +121,7 @@ func TestWireFieldNames(t *testing.T) {
 	full, _ := json.Marshal(sampleDescribe())
 	var fullKeys map[string]json.RawMessage
 	_ = json.Unmarshal(full, &fullKeys)
-	for _, k := range []string{"actor_id", "description", "skill_doc", "types"} {
+	for _, k := range []string{"class", "interfaces", "capabilities", "words"} {
 		if _, ok := fullKeys[k]; !ok {
 			t.Fatalf("Describe wire shape missing %q: %s", k, full)
 		}
@@ -141,9 +131,9 @@ func TestWireFieldNames(t *testing.T) {
 	single, _ := json.Marshal(dt)
 	var singleKeys map[string]json.RawMessage
 	_ = json.Unmarshal(single, &singleKeys)
-	for _, k := range []string{"actor_id", "type", "description", "allowed_kinds", "max_pending_ms"} {
+	for _, k := range []string{"class", "interfaces", "capabilities", "words"} {
 		if _, ok := singleKeys[k]; !ok {
-			t.Fatalf("DescribeType wire shape missing %q: %s", k, single)
+			t.Fatalf("selector wire shape missing %q: %s", k, single)
 		}
 	}
 }
@@ -165,25 +155,24 @@ func TestCatalogRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSchemaFieldsAreAdditiveAndOmittedForExistingActors(t *testing.T) {
-	legacy := TypeMeta{Description: "legacy", PayloadFields: []FieldDoc{{Name: "value", Description: "value"}}}
-	raw, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "input_schema") || strings.Contains(string(raw), "output_schema") {
-		t.Fatalf("empty additive schema fields changed legacy wire shape: %s", raw)
-	}
-	withSchemas := TypeMeta{
+func TestWordSpecWireShapeContainsOnlyCanonicalFields(t *testing.T) {
+	withSchemas := WordSpec{
 		Description:  "mcp",
 		InputSchema:  json.RawMessage(`{"type":"object","$defs":{"X":{"type":"string"}}}`),
 		OutputSchema: json.RawMessage(`{"type":"array","items":{"type":"number"}}`),
+		ErrorCodes:   []string{"tool_failed"},
+		Examples:     []json.RawMessage{json.RawMessage(`{"value":"x"}`)},
 	}
-	raw, err = json.Marshal(withSchemas)
+	raw, err := json.Marshal(withSchemas)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(raw), `"input_schema"`) || !strings.Contains(string(raw), `"output_schema"`) {
 		t.Fatalf("schema fields missing: %s", raw)
+	}
+	for _, removed := range []string{"allowed_kinds", "max_pending_ms", "payload_example", "payload_fields", "notes"} {
+		if strings.Contains(string(raw), removed) {
+			t.Fatalf("removed compatibility field %q leaked: %s", removed, raw)
+		}
 	}
 }

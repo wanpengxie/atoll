@@ -1,10 +1,9 @@
-package protocol
+package channelspec
 
 import "github.com/wanpengxie/atoll/protocol/channel"
 
-// Installation-wide identities are protocol constants because bootstrap must
-// be able to locate the first channel and its non-login system principals
-// before the registry is readable.
+// Installation identities belong to the platform recipe, not the wire
+// protocol. Bootstrap uses these names before registry truth is readable.
 const (
 	C0ChannelID        channel.ID = "c0"
 	LobbyChannelID     channel.ID = "c0.lobby"

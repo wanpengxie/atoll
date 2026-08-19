@@ -1,11 +1,7 @@
 package sysactor
 
 import (
-	"encoding/json"
-	"strings"
-
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -32,8 +28,8 @@ type LogbookMessage struct {
 
 func (s *SystemActor) respondLogbookRecent(sys actorbase.Sys, msg actorbase.Msg) {
 	var req LogbookRecentRequest
-	if err := json.Unmarshal(msg.Payload, &req); err != nil || req.Limit < 1 || req.Limit > logbookLimitMax {
-		_, _ = sys.Fail(msg, "payload_invalid", "logbook.recent requires {limit:1..5}")
+	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil || req.Limit < 1 || req.Limit > logbookLimitMax {
+		_, _ = sys.Fail(msg, "invalid_args", "system.log.recent requires {limit:1..5}")
 		return
 	}
 	if s.logbook == nil {
@@ -59,7 +55,7 @@ func (s *SystemActor) respondLogbookRecent(sys actorbase.Sys, msg actorbase.Msg)
 		}
 		for _, row := range rows {
 			after = row.Seq
-			if !includeLogbookRow(row, msg) {
+			if !includeLogbookRow(row) {
 				continue
 			}
 			if len(ring) == req.Limit {
@@ -81,19 +77,7 @@ func (s *SystemActor) respondLogbookRecent(sys actorbase.Sys, msg actorbase.Msg)
 	_, _ = sys.Reply(msg, out)
 }
 
-func includeLogbookRow(row storespec.StoredRow, caller actorbase.Msg) bool {
+func includeLogbookRow(row storespec.StoredRow) bool {
 	env := row.Envelope
-	if env.Kind != message.KindRequest && env.Kind != message.KindResponse {
-		return false
-	}
-	if env.Sender.ID == caller.Sender.ID {
-		return false
-	}
-	if strings.HasPrefix(env.Type, "logbook.") {
-		return false
-	}
-	// Responses to a logbook request inherit the request type in the current
-	// response machinery; the prefix check above deliberately applies to both
-	// request and response rows.
-	return env.Type != platform.TypeLogbookRecent
+	return env.Kind == message.KindRequest || env.Kind == message.KindResponse
 }

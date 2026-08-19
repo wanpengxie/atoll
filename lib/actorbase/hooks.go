@@ -12,6 +12,10 @@ import (
 // from inside the closed capability face alone. Both fields are OPTIONAL and
 // nil means an honest, documented degrade, never a silent one.
 type Hooks struct {
+	// ResolveTarget expands a one-, two-, or three-segment actor target against
+	// this channel's active roster before a request is written.
+	ResolveTarget func(string) (actor.ActorID, error)
+
 	// Canceller reaches the protocol-level cancel signal for one in-flight
 	// outbound request (pending.Cancel's "经 Canceller 投递" half, spec
 	// §1.5). Both production assembly paths fill it: server bodies wire it to

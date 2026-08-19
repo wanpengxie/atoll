@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -277,10 +276,7 @@ func (m *messages) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) 
 	return out, rows.Err()
 }
 
-func (m *messages) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
-	if !reader.Valid() {
-		return nil, afterSeq, errors.New("store: invalid visible reader")
-	}
+func (m *messages) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
 	if limit <= 0 {
 		limit = 256
 	}

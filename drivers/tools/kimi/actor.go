@@ -113,7 +113,7 @@ func NewActor(cfg Config) *Actor {
 // parameters — cfg is captured by this closure, not carried by Def).
 func Def(cfg Config) actorbase.Def {
 	return actorbase.Def{
-		Doc: actorDescription,
+		Manifest: manifest(),
 		New: func() (actorbase.Proc, error) {
 			return NewActor(cfg).run, nil
 		},
@@ -222,10 +222,6 @@ func (a *Actor) handle(msg actorbase.Msg) {
 	if msg.Kind != message.KindRequest {
 		return
 	}
-	if msg.Type == introspect.QueryDescribe {
-		a.handleDescribe(msg)
-		return
-	}
 
 	if msg.Type != TypeCommand {
 		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", msg.Type))
@@ -259,18 +255,4 @@ func (a *Actor) handle(msg actorbase.Msg) {
 		// being absent is a business failure, not a crash.
 		_, _ = a.sys.Fail(msg, "device_offline", err.Error())
 	}
-}
-
-func (a *Actor) handleDescribe(msg actorbase.Msg) {
-	req, err := introspect.ParseDescribeRequest(msg.Payload)
-	if err != nil {
-		_, _ = a.sys.Fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
-		return
-	}
-	answer, ok := introspect.AnswerDescribe(describeCatalog(string(a.sys.Self())), req)
-	if !ok {
-		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", req.Type))
-		return
-	}
-	_, _ = a.sys.Reply(msg, answer)
 }

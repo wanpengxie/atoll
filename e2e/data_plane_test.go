@@ -16,18 +16,18 @@ import (
 func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 	h := newHarness(t)
 	api, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
-	registrar := findTool(t, ws)
-	device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": "file-host"})
+	registrar := findRegistrar(t, ws)
+	device := registrarRequest(t, ws, c0ChannelID, registrar, "system.device.create", map[string]any{"name": "file-host"})
 	deviceID := stringField(t, device, "id")
 	deviceKey := stringField(t, device, "key")
-	registrarRequest(t, ws, registrar, "device.attach", map[string]any{"channel_id": c0ChannelID, "device_id": deviceID})
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.device.attach", map[string]any{"channel_id": c0ChannelID, "device_id": deviceID})
 	const declarationID = "file-host-readiness"
-	registrarRequest(t, ws, registrar, "actor.template.register", map[string]any{
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
 		"id": declarationID, "name": "file host readiness", "class": "echo",
 		"config": map[string]any{}, "visibility": "private",
 	})
-	introduced := ws.request(c0ChannelID, "channel.introduce_actor", systemActor, map[string]any{"kind": "tool", "decl_id": declarationID})
-	echoID := stringField(t, introduced, "instance_id")
+	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declarationID})
+	echoID := stringField(t, introduced, "member")
 
 	daemonLog := filepath.Join(h.root, "logs", "file-host.log")
 	daemon := startProc(t, "file-host", filepath.Join(e2eBinDir, "atoll-daemon"), []string{
@@ -81,16 +81,17 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T) {
 	h := newHarness(t)
 	api, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
-	registrar := findTool(t, ws)
+	registrar := findRegistrar(t, ws)
 	// parent is never a field: a channel is created from inside its parent, and
 	// the registrar in c0 makes c0 the parent.
-	createdChannel := registrarRequest(t, ws, registrar, "channel.create", map[string]any{"name": "archive"})
-	channelID := stringField(t, createdChannel, "id")
-	qualified := stringField(t, createdChannel, "qualified_name")
+	createdChannel := registrarRequest(t, ws, c0ChannelID, registrar, "system.channel.create", map[string]any{"name": "archive"})
+	channelID := stringField(t, createdChannel, "channel_id")
+	channelRow := registrarRequest(t, ws, c0ChannelID, registrar, "system.channel.get", map[string]any{"channel_id": channelID})
+	qualified := stringField(t, channelRow, "qualified_name")
 	if qualified != "c0.archive" {
 		t.Fatalf("qualified channel name=%q", qualified)
 	}
-	device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": "archive-host"})
+	device := registrarRequest(t, ws, c0ChannelID, registrar, "system.device.create", map[string]any{"name": "archive-host"})
 	deviceID := stringField(t, device, "id")
 	attachDevice(t, ws, channelID, deviceID)
 	daemonLog := filepath.Join(h.root, "logs", "archive-host.log")
@@ -130,7 +131,7 @@ func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T
 	if got := httpReadFile(t, api, h.base, ws, channelID, "daemon://archive-host/c0.archive/docs/from-disk.txt"); string(got) != "disk-visible" {
 		t.Fatalf("reverse disk read=%q", got)
 	}
-	registrarRequest(t, ws, registrar, "channel.retire", map[string]any{"channel_id": channelID})
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.channel.delete", map[string]any{"channel_id": channelID})
 	if got, err := os.ReadFile(physical); err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("retirement changed ordinary file bytes=%q err=%v", got, err)
 	}
@@ -139,7 +140,7 @@ func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T
 	// more. The files stay on disk as ordinary files for their owner to take.
 	retireDeadline := time.Now().Add(20 * time.Second)
 	for {
-		if _, _, err := ws.tryRequest(channelID, "actor.list", systemActor, map[string]any{}); err != nil {
+		if _, _, err := ws.tryRequest(channelID, "system.member.list", systemActor, map[string]any{}); err != nil {
 			break
 		}
 		if time.Now().After(retireDeadline) {
@@ -152,19 +153,19 @@ func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T
 func TestParentAndChildChannelsStayFlatOnDifferentDaemons(t *testing.T) {
 	h := newHarness(t)
 	_, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
-	registrar := findTool(t, ws)
-	parent := registrarRequest(t, ws, registrar, "channel.create", map[string]any{"name": "project"})
-	parentID := stringField(t, parent, "id")
+	registrar := findRegistrar(t, ws)
+	parent := registrarRequest(t, ws, c0ChannelID, registrar, "system.channel.create", map[string]any{"name": "project"})
+	parentID := stringField(t, parent, "channel_id")
 	// The child is created from inside the parent: root (owner, hence member of
-	// project) speaks channel.create to project's own coreactor, and project
+	// project) speaks system.channel.create to project's own door, and project
 	// becomes the parent because that is where the request was made.
-	projectCoreactor := awaitCoreactor(t, ws, parentID)
-	childReply := ws.request(parentID, "channel.create", projectCoreactor, map[string]any{"name": "backend"})
+	projectDoor := awaitDoor(t, ws, parentID)
+	childReply := ws.request(parentID, "system.channel.create", projectDoor, map[string]any{"name": "backend"})
 	child, _ := childReply["value"].(map[string]any)
 	if child == nil {
-		t.Fatalf("channel.create through project coreactor omitted value: %v", childReply)
+		t.Fatalf("system.channel.create through project door omitted value: %v", childReply)
 	}
-	childID := stringField(t, child, "id")
+	childID := stringField(t, child, "channel_id")
 
 	type daemonCase struct {
 		name, channelID, qualified string
@@ -172,7 +173,7 @@ func TestParentAndChildChannelsStayFlatOnDifferentDaemons(t *testing.T) {
 	cases := []daemonCase{{"parent-host", parentID, "c0.project"}, {"child-host", childID, "c0.project.backend"}}
 	var childChannels string
 	for _, tc := range cases {
-		device := registrarRequest(t, ws, registrar, "device.mint", map[string]any{"name": tc.name})
+		device := registrarRequest(t, ws, c0ChannelID, registrar, "system.device.create", map[string]any{"name": tc.name})
 		deviceID := stringField(t, device, "id")
 		attachDevice(t, ws, tc.channelID, deviceID)
 		logPath := filepath.Join(h.root, "logs", tc.name+".log")

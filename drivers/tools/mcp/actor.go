@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,14 +17,17 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const actorDoc = "External MCP server dynamically adapted as an Atoll tool actor."
+const typeRefresh = "mcp.refresh"
+const refreshInterval = time.Minute
 
 type snapshot struct {
 	description string
 	skillDoc    string
-	types       map[string]introspect.TypeMeta
+	types       map[string]introspect.WordSpec
 	tools       map[string]string
 }
 
@@ -39,7 +41,9 @@ type mcpActor struct {
 }
 
 func Def(cfg Config) actorbase.Def {
-	return actorbase.Def{Doc: actorDoc, New: func() (actorbase.Proc, error) {
+	return actorbase.Def{Manifest: introspect.Manifest{
+		Class: "mcp", Interfaces: []string{"actor"}, Words: map[string]introspect.WordSpec{},
+	}, New: func() (actorbase.Proc, error) {
 		return (&mcpActor{cfg: cfg}).run, nil
 	}}
 }
@@ -54,12 +58,18 @@ func (a *mcpActor) run(sys actorbase.Sys) error {
 			_ = client.Close()
 			a.inflight.Wait()
 		}()
-		a.refresh(sys.Life())
+		a.refresh(sys, sys.Life())
+		_, _ = sys.After(refreshInterval, typeRefresh, struct{}{}, schedule.TimerHomeMemory)
 	}
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
 			return err
+		}
+		if msg.Kind == message.KindEvent && msg.Type == typeRefresh {
+			a.refresh(sys, sys.Life())
+			_, _ = sys.After(refreshInterval, typeRefresh, struct{}{}, schedule.TimerHomeMemory)
+			continue
 		}
 		if msg.Kind != message.KindRequest {
 			continue
@@ -77,14 +87,10 @@ func (a *mcpActor) run(sys actorbase.Sys) error {
 }
 
 func (a *mcpActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
-	if msg.Type == introspect.QueryDescribe {
-		a.describe(sys, msg)
-		return
-	}
 	a.call(sys, msg)
 }
 
-func (a *mcpActor) refresh(ctx context.Context) {
+func (a *mcpActor) refresh(sys actorbase.Sys, ctx context.Context) {
 	discover, err := a.client.discover(ctx)
 	if err != nil {
 		a.setLastError(err)
@@ -95,49 +101,20 @@ func (a *mcpActor) refresh(ctx context.Context) {
 		a.setLastError(err)
 		return
 	}
+	next := buildSnapshot(a.cfg.Name, discover, tools)
+	raw, err := json.Marshal(next.types)
+	if err != nil {
+		a.setLastError(err)
+		return
+	}
+	if _, err := sys.State().Put(actorbase.ManifestStateKey, raw); err != nil {
+		a.setLastError(err)
+		return
+	}
 	a.mu.Lock()
-	a.snapshot = buildSnapshot(a.cfg.Name, discover, tools)
+	a.snapshot = next
 	a.lastError = nil
 	a.mu.Unlock()
-}
-
-func (a *mcpActor) describe(sys actorbase.Sys, msg actorbase.Msg) {
-	req, err := introspect.ParseDescribeRequest(msg.Payload)
-	if err != nil {
-		_, _ = sys.Fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
-		return
-	}
-	// Refresh through the server's own cache hints before answering. A failed
-	// refresh never replaces or empties the last successful tool list — and is
-	// never itself a reason to stop refreshing: this is the actor's only path
-	// back from a transient outage, so it runs unconditionally.
-	if a.client != nil {
-		a.refresh(msg.Ctx())
-	}
-	a.mu.RLock()
-	current := a.snapshot
-	lastError := a.lastError
-	a.mu.RUnlock()
-	description := current.description
-	if description == "" {
-		description = "经 mcp 类接入的外部服务"
-	}
-	if lastError != nil {
-		if len(current.types) == 0 {
-			description += "; 从未成功连接: " + lastError.Error()
-		} else {
-			description += "; 当前够不着（保留最后一次成功快照）: " + lastError.Error()
-		}
-	}
-	answer, ok := introspect.AnswerDescribe(introspect.Describe{
-		ActorID: string(sys.Self()), Description: description,
-		SkillDoc: current.skillDoc, Types: current.types,
-	}, req)
-	if !ok {
-		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("mcp actor does not handle %s", req.Type))
-		return
-	}
-	_, _ = sys.Reply(msg, answer)
 }
 
 func (a *mcpActor) call(sys actorbase.Sys, msg actorbase.Msg) {
@@ -287,7 +264,7 @@ func buildSnapshot(name string, discover discovery, list toolList) snapshot {
 	selfDescription := serverSelfDescription(name, discover)
 	s := snapshot{
 		description: selfDescription,
-		types:       make(map[string]introspect.TypeMeta, len(list.Tools)),
+		types:       make(map[string]introspect.WordSpec, len(list.Tools)),
 		tools:       make(map[string]string, len(list.Tools)),
 	}
 	var doc strings.Builder
@@ -325,67 +302,10 @@ func serverSelfDescription(name string, discover discovery) string {
 	return doc.String()
 }
 
-func translateTool(t tool) introspect.TypeMeta {
-	meta := introspect.TypeMeta{
+func translateTool(t tool) introspect.WordSpec {
+	return introspect.WordSpec{
 		Description:  t.Description,
-		AllowedKinds: []string{string(message.KindRequest)},
 		InputSchema:  append(json.RawMessage(nil), t.InputSchema...),
 		OutputSchema: append(json.RawMessage(nil), t.OutputSchema...),
 	}
-	var schema struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-		Required   []string                   `json:"required"`
-	}
-	if json.Unmarshal(t.InputSchema, &schema) != nil {
-		return meta
-	}
-	required := make(map[string]bool, len(schema.Required))
-	for _, name := range schema.Required {
-		required[name] = true
-	}
-	names := make([]string, 0, len(schema.Properties))
-	for name := range schema.Properties {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		raw := schema.Properties[name]
-		var field struct {
-			Description string `json:"description"`
-			Type        string `json:"type"`
-			Enum        []any  `json:"enum"`
-		}
-		_ = json.Unmarshal(raw, &field)
-		details := []string{}
-		if field.Type != "" {
-			details = append(details, "type: "+field.Type)
-		}
-		if len(field.Enum) > 0 {
-			details = append(details, "enum present")
-		}
-		if bytesContainSchemaDetail(raw) {
-			details = append(details, "see raw schema")
-		}
-		description := field.Description
-		if len(details) > 0 {
-			if description != "" {
-				description += " "
-			}
-			description += "(" + strings.Join(details, "; ") + ")"
-		}
-		meta.PayloadFields = append(meta.PayloadFields, introspect.FieldDoc{
-			Name: name, Required: required[name], Description: description,
-		})
-	}
-	return meta
-}
-
-func bytesContainSchemaDetail(raw []byte) bool {
-	text := string(raw)
-	for _, marker := range []string{`"$ref"`, `"oneOf"`, `"anyOf"`, `"items"`, `"properties"`, `"enum"`} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
 }

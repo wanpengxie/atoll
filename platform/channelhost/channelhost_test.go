@@ -50,7 +50,7 @@ func (r testResolver) ResolveDeclaration(context.Context, channel.ID, string) (c
 	return r.declaration, nil
 }
 
-func TestProvisionGenesisSkipsRecipeUserDeclarations(t *testing.T) {
+func TestProvisionGenesisIncludesRecipeUserDeclarations(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	liveResolver := testResolver{declarationLive: true, declaration: channelspec.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`)}}
@@ -59,7 +59,7 @@ func TestProvisionGenesisSkipsRecipeUserDeclarations(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (channelspec.RenderedSnapshot{
-		Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`), Placement: channel.Placement{Kind: channel.PlacementServer},
+		Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`), Placement: channelspec.Placement{Kind: channelspec.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +76,8 @@ func TestProvisionGenesisSkipsRecipeUserDeclarations(t *testing.T) {
 	}
 	defer db.Close()
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE source_decl_id='decl-a' AND deregistered_at IS NULL`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("recipe declaration was written during genesis: count=%d err=%v", count, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE source_decl_id='decl-a' AND deregistered_at IS NULL`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("recipe declaration count=%d err=%v", count, err)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (channelspec.RenderedSnapshot{
-		Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`), Placement: channel.Placement{Kind: channel.PlacementServer},
+		Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`), Placement: channelspec.Placement{Kind: channelspec.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +107,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if !ok {
 		t.Fatal("provisioned channel not serving")
 	}
-	initialRows, err := initial.View().DeclaredInstances(ctx, lagoon.SvcActorDeclID)
+	initialRows, err := membersForDecl(ctx, initial.View(), lagoon.SvcActorDeclID)
 	if err != nil || len(initialRows) != 1 {
 		t.Fatalf("equal first sweep double-wrote genesis: instances=%+v err=%v", initialRows, err)
 	}
@@ -130,10 +130,24 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	}
 	// The first sweep re-applies the latest declaration to the existing record;
 	// it does not introduce a second instance.
-	rows, err := bundle.View().DeclaredInstances(ctx, lagoon.SvcActorDeclID)
+	rows, err := membersForDecl(ctx, bundle.View(), lagoon.SvcActorDeclID)
 	if err != nil || len(rows) != 1 || rows[0] != initialRows[0] {
 		t.Fatalf("first-sweep declaration=(%+v,%v)", rows, err)
 	}
+}
+
+func membersForDecl(ctx context.Context, view View, declID string) ([]actor.ActorID, error) {
+	roster, err := view.Roster(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]actor.ActorID, 0)
+	for _, row := range roster {
+		if row.DeclID == declID {
+			out = append(out, row.ID)
+		}
+	}
+	return out, nil
 }
 
 func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
@@ -142,8 +156,8 @@ func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool
 	}
 	return "", false, nil
 }
-func (testResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
-	return channel.PlacementServer, true, nil
+func (testResolver) ClassPlacement(context.Context, string) (channelspec.PlacementKind, bool, error) {
+	return channelspec.PlacementServer, true, nil
 }
 func (testResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
 	return nil
@@ -374,7 +388,7 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	host := newTestHost(t)
 	snapshot, err := (channelspec.RenderedSnapshot{
 		Class: "test-agent", Config: json.RawMessage(`{"v":1}`),
-		Placement: channel.Placement{Kind: channel.PlacementServer},
+		Placement: channelspec.Placement{Kind: channelspec.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)

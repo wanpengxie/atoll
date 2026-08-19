@@ -25,7 +25,7 @@ const feedBatch = 100
 // expired (streaming stopped, awaiting resume).
 type subscription struct {
 	route     Route
-	reader    channel.Reader
+	reader    Reader
 	temporary bool
 	notify    <-chan struct{}
 	cancel    func()
@@ -520,7 +520,7 @@ func (s *Session) leaseOrPause(sub *subscription, now time.Time) {
 func (s *Session) subscribeMember(ch channel.ID, r Route, now time.Time) {
 	notify, cancel := r.Bundle.Gateway().Subscribe()
 	s.subs[ch] = &subscription{
-		route: r, reader: channel.Reader{ActorID: r.SubjectID, Mode: channel.ReaderMember},
+		route: r, reader: Reader{ActorID: r.SubjectID, Mode: ReaderMember},
 		notify: notify, cancel: cancel, lastOK: now,
 	}
 }
@@ -574,7 +574,7 @@ func (s *Session) resolveObservation(ch channel.ID) (ObserverRoute, string, stri
 		code := normalizeObservationCode(reason)
 		return ObserverRoute{}, code, "observation refused: " + code
 	}
-	if route.Channel != ch || route.Bundle == nil || route.Reader.Mode != channel.ReaderObserver {
+	if route.Channel != ch || route.Bundle == nil || route.Reader.Mode != ReaderObserver {
 		return ObserverRoute{}, subjectgate.CodeCapabilityUnavailable, "invalid observation route"
 	}
 	return route, "", ""
@@ -672,7 +672,13 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
 	at := s.lane.cursor.at(ch)
-	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, sub.reader, at, feedBatch)
+	if sub.reader.Mode == ReaderMember {
+		active, err := sub.route.Bundle.View().IsActive(rctx, sub.reader.ActorID)
+		if err != nil || !active {
+			return false, true
+		}
+	}
+	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, at, feedBatch)
 	if err != nil || (len(rows) == 0 && scanned == at) {
 		return false, true
 	}

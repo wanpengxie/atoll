@@ -4,15 +4,16 @@ import (
 	"encoding/json"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 )
 
 func init() {
 	registry.Register("echo", registry.ClassDecl{
 		Kind:      actor.KindTool,
-		Placement: channel.PlacementDaemon,
+		Placement: channelspec.PlacementDaemon,
+		Manifest:  manifest(),
 		New:       construct,
 		// ValidateConfig is the acceptance gate: it lets a declaration be
 		// refused at admit time ("this config can never build") instead of

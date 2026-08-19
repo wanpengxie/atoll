@@ -46,7 +46,8 @@ func openTestChannelOnCommit(t *testing.T, onCommit func()) *store.ChannelStores
 // envOpt mutates an envelope under construction.
 type envOpt func(*message.Envelope)
 
-// newEnv builds a minimally-valid envelope (payload materialized to `{}`)
+// newEnv builds a minimally-valid envelope (request payloads use the canonical
+// body envelope)
 // addressed to `audience`, with the given id/kind. Options override fields.
 func newEnv(id string, kind message.Kind, audience message.Audience, opts ...envOpt) *message.Envelope {
 	env := &message.Envelope{
@@ -63,6 +64,12 @@ func newEnv(id string, kind message.Kind, audience message.Audience, opts ...env
 	}
 	for _, o := range opts {
 		o(env)
+	}
+	if kind == message.KindRequest {
+		body := append(json.RawMessage(nil), env.Payload...)
+		env.Payload, _ = json.Marshal(struct {
+			Body json.RawMessage `json:"body"`
+		}{Body: body})
 	}
 	return env
 }

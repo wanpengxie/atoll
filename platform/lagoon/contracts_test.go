@@ -17,7 +17,7 @@ func TestRegistrarWordAndAdapterSurfacesAreClosed(t *testing.T) {
 		}
 		seen[word] = true
 	}
-	if len(WriteWords) != 19 {
+	if len(WriteWords) != 18 {
 		t.Fatalf("write words=%d", len(WriteWords))
 	}
 	for _, word := range ReadWords {
@@ -28,6 +28,13 @@ func TestRegistrarWordAndAdapterSurfacesAreClosed(t *testing.T) {
 	}
 	if len(ReadWords) != 10 {
 		t.Fatalf("read words=%d", len(ReadWords))
+	}
+}
+
+func TestRegistrarManifestAdvertisesNoPublicWords(t *testing.T) {
+	def := Def(&Registrar{registry: &Registry{}})
+	if def.Manifest.Class != "registrar" || len(def.Manifest.Words) != 0 {
+		t.Fatalf("manifest=%+v", def.Manifest)
 	}
 }
 

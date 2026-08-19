@@ -77,20 +77,12 @@ type ChannelProfile struct {
 	Description *string                 `json:"description,omitempty"`
 	Serving     *int                    `json:"serving,omitempty"`
 	Endpoints   map[string]EndpointSpec `json:"endpoints,omitempty"`
+	SvcAgent    *string                 `json:"svc_agent"`
 }
 
 type TemplateBody struct {
 	Declarations []TemplateDeclaration `json:"declarations"`
 	Profile      *ChannelProfile       `json:"profile,omitempty"`
-}
-
-type EndpointRow struct {
-	ChannelID   channel.ID      `json:"channel_id"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Receiver    string          `json:"receiver"`
-	Meta        json.RawMessage `json:"meta,omitempty"`
-	UpdatedAt   int64           `json:"updated_at"`
 }
 
 type ChannelTemplateRow struct {
@@ -123,6 +115,7 @@ type DeclRow struct {
 	Config       json.RawMessage `json:"config,omitempty"`
 	Status       DeclStatus      `json:"status"`
 	Visibility   string          `json:"visibility"`
+	Singleton    bool            `json:"singleton"`
 	CreatedAt    int64           `json:"created_at"`
 	UpdatedAt    int64           `json:"updated_at"`
 }
@@ -140,7 +133,7 @@ type DeviceRow struct {
 	Name           string `json:"name"`
 	// WARNING (2026-08-13, known and accepted by the owner): Key is the
 	// device's admission secret in cleartext, and it carries a json tag —
-	// ANY read path that serializes this row as-is leaks it. The device.list
+	// ANY read path that serializes this row as-is leaks it. The system device listing
 	// word does exactly that today (registrar.readDevices returns the row
 	// unchanged), so every principal able to send that word can read every
 	// device secret.

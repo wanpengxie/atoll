@@ -36,7 +36,7 @@ func main() {
 	addr := fs.String("addr", "127.0.0.1:8832", "listen address")
 	rootPassword := fs.String("root-password", "", "root password used only during installation")
 	steward := fs.String("steward", "", "agent class carved as the c0 steward on first install (default codex; env ATOLL_STEWARD)")
-	openReg := fs.Bool("open-registration", false, "expose principal.register to the lobby (default closed; env ATOLL_OPEN_REGISTRATION=1)")
+	openReg := fs.Bool("open-registration", false, "expose system.principal.create to the lobby (default closed; env ATOLL_OPEN_REGISTRATION=1)")
 	_ = fs.Parse(os.Args[2:])
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

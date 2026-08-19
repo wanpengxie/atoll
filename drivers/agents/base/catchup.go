@@ -11,7 +11,6 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -61,7 +60,7 @@ func loadCatchup(ctx context.Context, sys actorbase.Sys) []runtimeproto.ContextI
 	}
 	items := make([]runtimeproto.ContextItem, 0, len(response.Messages))
 	for _, row := range response.Messages {
-		if row.Message.Kind == string(message.KindEvent) && strings.HasPrefix(row.Message.Type, "activity.") && row.Message.Sender.ID != string(sys.Self()) {
+		if row.Message.Kind == string(message.KindEvent) && (strings.HasPrefix(row.Message.Type, "agent.turn.") || strings.HasPrefix(row.Message.Type, "agent.tool.")) && row.Message.Sender.ID != string(sys.Self()) {
 			continue
 		}
 		rendered := fmt.Sprintf("[%s %s %s] %s", row.Message.Sender.ID, row.Message.Kind, row.Message.Type, strings.TrimSpace(string(row.Message.Payload)))
@@ -80,7 +79,7 @@ func loadCatchup(ctx context.Context, sys actorbase.Sys) []runtimeproto.ContextI
 func callCatchupWithinBudget(ctx context.Context, sys actorbase.Sys) (actorbase.Pending, error) {
 	deadline := time.Now().Add(catchupQueryBudget)
 	for attempt := 0; ; attempt++ {
-		pending, err := sys.Call(actor.SystemActorID, platform.TypeLogbookRecent, map[string]any{"limit": catchupLimit})
+		pending, err := sys.Call(actor.SystemActorID, message.TypeSystemLogRecent, map[string]any{"limit": catchupLimit})
 		if err == nil {
 			if attempt > 0 {
 				slog.Info("agent catch-up query sent after link came up", "actor", sys.Self(), "attempts", attempt+1)

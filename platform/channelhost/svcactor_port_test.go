@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/peerproto"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -23,9 +22,9 @@ func TestAcquirePortDisappearsAtomicallyWhenEntryIsDestroyed(t *testing.T) {
 	if !ok || port == nil || generation == 0 {
 		t.Fatalf("port=%p generation=%d ok=%v", port, generation, ok)
 	}
-	done := make(chan peerproto.Result, 1)
+	done := make(chan channel.Result, 1)
 	go func() {
-		result, _ := port.Call(context.Background(), "caller", peerproto.Request{})
+		result, _ := port.Call(context.Background(), "caller", channel.Request{}, nil)
 		done <- result
 	}()
 	if err := host.Destroy(ctx, id); err != nil {
@@ -36,7 +35,7 @@ func TestAcquirePortDisappearsAtomicallyWhenEntryIsDestroyed(t *testing.T) {
 	}
 	select {
 	case result := <-done:
-		if result.Fail == nil || result.Fail.Code != "channel_closed" {
+		if result.Fail == nil || result.Fail.Code != "channel_unavailable" {
 			t.Fatalf("queued result=%+v", result)
 		}
 	case <-time.After(time.Second):
@@ -62,8 +61,8 @@ func TestReopenedChannelPublishesNewPortAndClosesOldGeneration(t *testing.T) {
 	if err := first.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	closed, err := oldPort.Call(ctx, "caller", peerproto.Request{})
-	if err != nil || closed.Fail == nil || closed.Fail.Code != "channel_closed" {
+	closed, err := oldPort.Call(ctx, "caller", channel.Request{}, nil)
+	if err != nil || closed.Fail == nil || closed.Fail.Code != "channel_unavailable" {
 		t.Fatalf("old port result=%+v err=%v", closed, err)
 	}
 

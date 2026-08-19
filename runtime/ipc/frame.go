@@ -94,6 +94,10 @@ const (
 	// KindScheduleAck (host→remote): the host's authoritative verdict for one
 	// KindSchedule (the opaque schedule response bytes + any host-side error).
 	KindScheduleAck Kind = "schedule_ack"
+	// KindResolveTarget is the daemon engine's internal D24 name-resolution
+	// dependency. It is not an application word and never reaches the ledger.
+	KindResolveTarget    Kind = "resolve_target"
+	KindResolveTargetAck Kind = "resolve_target_ack"
 	// KindDetach (remote→host) is an optional graceful close for this exact
 	// physical route. It does not mutate actor lifecycle truth.
 	KindDetach Kind = "detach"
@@ -122,12 +126,9 @@ const (
 	// closure already owns its own terminal. So it never rides the ack'd on-loop
 	// path.
 	KindCancelRequest Kind = "cancel_request"
-	// Lifecycle control is carried on the actor stream. Fork and End have
-	// operation results.
-	KindSpawn    Kind = "spawn"
-	KindSpawnAck Kind = "spawn_ack"
-	KindEnd      Kind = "end"
-	KindEndAck   Kind = "end_ack"
+	// Lifecycle termination is carried on the actor stream with an operation result.
+	KindEnd    Kind = "end"
+	KindEndAck Kind = "end_ack"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -146,22 +147,6 @@ type Frame struct {
 type HandshakePayload struct {
 	LeaseID    string `json:"lease_id"`
 	AttemptKey string `json:"attempt_key"`
-}
-
-type SpawnPayload struct {
-	RequestID     message.ID      `json:"request_id"`
-	Kind          actor.Kind      `json:"kind"`
-	Class         string          `json:"class"`
-	NameHint      string          `json:"name_hint,omitempty"`
-	Config        json.RawMessage `json:"config,omitempty"`
-	PlacementKind string          `json:"placement_kind,omitempty"`
-	PlacementHost string          `json:"placement_host,omitempty"`
-}
-
-type SpawnAckPayload struct {
-	ChildID      actor.ActorID `json:"child_id,omitempty"`
-	ErrorCode    string        `json:"error_code,omitempty"`
-	ErrorMessage string        `json:"error_message,omitempty"`
 }
 
 type EndPayload struct {

@@ -8,7 +8,9 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -62,7 +64,8 @@ type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 // the Register signature no longer changes when they arrive.
 type ClassDecl struct {
 	Kind           actor.Kind
-	Placement      channel.PlacementKind
+	Placement      channelspec.PlacementKind
+	Manifest       introspect.Manifest
 	New            Constructor
 	ValidateConfig func(json.RawMessage) error
 }
@@ -105,8 +108,14 @@ var (
 // actor package's init(); a duplicate class is a programmer error (panic, like
 // sql.Register).
 func Register(class string, d ClassDecl) {
-	if d.Placement != channel.PlacementServer && d.Placement != channel.PlacementDaemon {
+	if d.Placement != channelspec.PlacementServer && d.Placement != channelspec.PlacementDaemon {
 		panic("registry: class placement required: " + class)
+	}
+	if d.Manifest.Class == "" {
+		d.Manifest.Class = class
+	}
+	if err := introspect.ValidateManifest(d.Manifest); err != nil {
+		panic("registry: invalid manifest for " + class + ": " + err.Error())
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -118,7 +127,7 @@ func Register(class string, d ClassDecl) {
 
 // ClassPlacement returns the single class-level placement fact used by both
 // genesis rendering and runtime introduction.
-func ClassPlacement(class string) (channel.PlacementKind, bool) {
+func ClassPlacement(class string) (channelspec.PlacementKind, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
 	d, ok := reg[class]
@@ -179,5 +188,6 @@ func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error
 	if decl.Kind != d.Kind {
 		return platform.ActorDecl{}, fmt.Errorf("registry: build %q: constructed kind %q ≠ declared kind %q", class, decl.Kind, d.Kind)
 	}
+	decl.Factory.Proc.Manifest = d.Manifest
 	return decl, nil
 }

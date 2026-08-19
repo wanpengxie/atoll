@@ -9,7 +9,6 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
-	"github.com/wanpengxie/atoll/lib/introspect"
 )
 
 type turnControlProvider struct {
@@ -23,7 +22,7 @@ type turnControlProvider struct {
 }
 
 func (p *turnControlProvider) Spec() driverproto.ProviderSpec {
-	return driverproto.ProviderSpec{Name: "turn-controls", Describe: introspect.Describe{Description: "turn controls test"}, Selections: p.selections, DefaultSelection: p.defaultSelection}
+	return driverproto.ProviderSpec{Name: "turn-controls", Documentation: driverproto.Documentation{Description: "turn controls test"}, Selections: p.selections, DefaultSelection: p.defaultSelection}
 }
 
 func TestBuildCopiesProviderSelectionsIntoRuntimeSpec(t *testing.T) {

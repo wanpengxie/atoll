@@ -50,8 +50,8 @@ func (gatewayTestCompositionResolver) ResolveDeclaration(_ context.Context, _ ch
 func (gatewayTestCompositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
 	return actor.KindAgent, class == gatewayTestAgentClass, nil
 }
-func (gatewayTestCompositionResolver) ClassPlacement(context.Context, string) (channel.PlacementKind, bool, error) {
-	return channel.PlacementServer, true, nil
+func (gatewayTestCompositionResolver) ClassPlacement(context.Context, string) (channelspec.PlacementKind, bool, error) {
+	return channelspec.PlacementServer, true, nil
 }
 func (gatewayTestCompositionResolver) AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error {
 	return nil
@@ -316,7 +316,7 @@ func (h *testChannel) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool)
 func (h *testChannel) View() channelhost.View { return h.Bundle.View() }
 
 func (h *testChannel) Admit(ctx context.Context, _ actor.Kind, principal string) (actor.ActorID, error) {
-	err := h.submitOperate(ctx, "channel.introduce_actor", map[string]any{"kind": "human", "principal": principal})
+	err := h.submitOperate(ctx, "system.member.admit", map[string]any{"principal": principal})
 	if err != nil {
 		return "", err
 	}
@@ -337,7 +337,7 @@ func (h *testChannel) Remove(ctx context.Context, id actor.ActorID) error {
 	if h.ownerID == "" {
 		return context.Canceled
 	}
-	if err := h.submitOperate(ctx, "channel.remove_actor", map[string]any{"instance_id": id}); err != nil {
+	if err := h.submitOperate(ctx, "system.member.delete", map[string]any{"member": id}); err != nil {
 		return err
 	}
 	for {
@@ -401,9 +401,9 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	genesis := lagoon.GenesisSpec{ChannelID: chID, Type: "group", OwnerPrincipal: owner, CreatedAt: time.Now().UnixMilli()}
 	source := ""
 	if memberKind == actor.KindAgent {
-		source = "gateway-test:" + member
+		source = "gateway-test-" + member
 		rendered, sealErr := (channelspec.RenderedSnapshot{
-			Class: gatewayTestAgentClass, Placement: channel.Placement{Kind: channel.PlacementServer},
+			Class: gatewayTestAgentClass, Placement: channelspec.Placement{Kind: channelspec.PlacementServer},
 		}).Seal()
 		if sealErr != nil {
 			t.Fatal(sealErr)
@@ -440,20 +440,30 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	var id actor.ActorID
 	var found bool
 	if memberKind == actor.KindAgent {
-		if err := h.submitOperate(context.Background(), "channel.introduce_actor", map[string]any{"kind": actor.KindAgent, "decl_id": source, "principal": member}); err != nil {
+		if err := h.submitOperate(context.Background(), "system.member.create", map[string]any{"decl_id": source}); err != nil {
 			t.Fatal(err)
 		}
 		var ids []actor.ActorID
 		deadline := time.Now().Add(3 * time.Second)
 		for {
-			ids, err = bundle.View().DeclaredInstances(context.Background(), source)
+			roster, rosterErr := bundle.View().Roster(context.Background())
+			if rosterErr != nil {
+				err = rosterErr
+			} else {
+				ids = ids[:0]
+				for _, row := range roster {
+					if row.DeclID == source {
+						ids = append(ids, row.ID)
+					}
+				}
+			}
 			if err != nil || len(ids) != 0 || time.Now().After(deadline) {
 				break
 			}
 			time.Sleep(time.Millisecond)
 		}
 		if err != nil || len(ids) == 0 {
-			t.Fatalf("introduce_actor(%s): no instance within 3s (err=%v)", source, err)
+			t.Fatalf("member.create(%s): no instance within 3s (err=%v)", source, err)
 		}
 		id, found = ids[0], true
 	} else {
@@ -480,7 +490,7 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 }
 
 func openDeclaredAgentHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*testChannel, actor.ActorID) {
-	return openTestChannel(t, chID, "gateway-owner:"+principal, principal, actor.KindAgent, g)
+	return openTestChannel(t, chID, "gateway-owner-"+principal, principal, actor.KindAgent, g)
 }
 
 func newTestGateway(t testing.TB, cfg Config, set settings) *Gateway {

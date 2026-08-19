@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -202,7 +202,7 @@ func (h *ChannelHost) reconcileAll(ctx context.Context) error {
 		return err
 	}
 	for _, entry := range physical {
-		if entry.ChannelID == protocol.C0ChannelID {
+		if entry.ChannelID == channelspec.C0ChannelID {
 			continue
 		}
 		if _, ok := known[entry.ChannelID]; !ok {
@@ -220,7 +220,7 @@ func (h *ChannelHost) reconcileID(ctx context.Context, id channel.ID) error {
 		return err
 	}
 	if !ok {
-		if id == protocol.C0ChannelID {
+		if id == channelspec.C0ChannelID {
 			return nil
 		}
 		return h.Destroy(ctx, id)
@@ -287,7 +287,7 @@ func permanentConvergenceError(err error) bool {
 
 func (h *ChannelHost) reconcileRow(ctx context.Context, row regspec.ChannelRow) error {
 	if row.Status == regspec.ChannelRetired {
-		if row.ID == protocol.C0ChannelID {
+		if row.ID == channelspec.C0ChannelID {
 			return errors.Join(ErrChannelRetired, errors.New("channelhost: c0 cannot be retired"))
 		}
 		// Retirement leaves the bytes alone — the channel's directory on every
@@ -310,7 +310,7 @@ func (h *ChannelHost) reconcileRow(ctx context.Context, row regspec.ChannelRow) 
 	if !errors.Is(err, ErrChannelNotFound) {
 		return err
 	}
-	if row.ID == protocol.C0ChannelID {
+	if row.ID == channelspec.C0ChannelID {
 		return err
 	}
 	var genesis lagoon.GenesisSpec

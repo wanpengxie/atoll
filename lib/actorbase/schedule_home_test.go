@@ -39,7 +39,7 @@ func (r *recordingSchedule) only(t *testing.T) schedule.ScheduleReq {
 
 func schedulingEngine(t *testing.T) (*engine, *recordingSchedule) {
 	t.Helper()
-	e := newTestEngine(t, &fakePen{self: "user:alice"}, Hooks{}, 8, 8)
+	e := newTestEngine(t, &fakePen{self: "human:alice:1"}, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 	rec := &recordingSchedule{}
 	e.sched = rec

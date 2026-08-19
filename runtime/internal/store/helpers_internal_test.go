@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -15,7 +16,7 @@ import (
 // the insert transaction and there is no way to ask for a particular one.
 func (r *actorRegistry) insertTool(ctx context.Context, decl string) (actor.ActorID, error) {
 	record, err := r.Insert(ctx, storespec.ActorDraft{
-		Kind: actor.KindTool, SourceDeclID: "test:" + decl, CreatedAt: 1,
+		Kind: actor.KindTool, SourceDeclID: "test-" + strings.ReplaceAll(decl, ":", "-"), CreatedAt: 1,
 		Definition: storespec.ActorDefinition{Class: string(actor.KindTool)},
 		Placement:  storespec.NewServerPlacement(),
 	})

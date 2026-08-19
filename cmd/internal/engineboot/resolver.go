@@ -5,18 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"time"
 
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/peeractor"
-	"github.com/wanpengxie/atoll/platform/peerproto"
 	"github.com/wanpengxie/atoll/platform/svcactor"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	classregistry "github.com/wanpengxie/atoll/registry"
@@ -31,8 +27,8 @@ type assemblyResolver struct {
 
 func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {
 	switch class {
-	case lagoon.RegistrarClass:
-		if ch != protocol.C0ChannelID {
+	case lagoon.ClassRegistrar:
+		if ch != channelspec.C0ChannelID {
 			return platform.ActorFactory{}, false
 		}
 		return platform.ActorFactory{Proc: lagoon.Def(r.registrar)}, true
@@ -41,7 +37,7 @@ func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class str
 		if err != nil {
 			return platform.ActorFactory{}, false
 		}
-		return platform.ActorFactory{Proc: peeractor.Def(peeractor.Deps{Caller: ch, Target: target, Seam: r.callPeer, Card: r.card})}, true
+		return platform.ActorFactory{Proc: peeractor.Def(peeractor.Deps{Caller: ch, Target: target, Seam: r.callPeer, Describe: r.describePeer})}, true
 	}
 	decl, err := classregistry.Build(class, classregistry.InstanceSpec{ID: id, Config: config}, classregistry.Deps{ChannelID: ch, Logger: r.logger})
 	if err != nil {
@@ -50,63 +46,31 @@ func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class str
 	return decl.Factory, true
 }
 
-func (r *assemblyResolver) BuildServiceClass(ch channel.ID, _ actor.ActorID, port *svcactor.Port, audit svcactor.Audit) (platform.ActorFactory, bool) {
+func (r *assemblyResolver) BuildServiceClass(ch channel.ID, _ actor.ActorID, port *svcactor.Port, audit svcactor.Audit, members svcactor.Members) (platform.ActorFactory, bool) {
 	if port == nil {
 		return platform.ActorFactory{}, false
 	}
-	deps := svcactor.Deps{Port: port, Self: ch, Core: protocol.C0ChannelID, RegistrarClass: lagoon.RegistrarClass,
-		Audit: audit, Logger: r.logger,
-		Endpoints: func(ctx context.Context, caller channel.ID) ([]svcactor.Endpoint, error) {
-			rows, err := r.registry.EndpointsFor(ctx, ch, caller)
-			out := make([]svcactor.Endpoint, len(rows))
-			for i, row := range rows {
-				out[i] = svcactor.Endpoint{Name: row.Name, Receiver: row.Receiver}
-			}
-			return out, err
-		},
-		Instances: func(ctx context.Context, decl string) ([]actor.ActorID, error) {
-			bundle, ok := r.host.Acquire(ch)
-			if !ok {
-				return nil, errors.New("channel unavailable")
-			}
-			return bundle.View().DeclaredInstances(ctx, decl)
-		},
-		Parent: func(ctx context.Context) (channel.ID, error) {
-			row, ok, err := r.registry.GetChannelDesired(ctx, ch)
-			if err != nil {
-				return "", err
-			}
-			if !ok {
-				return "", errors.New("channel not found")
-			}
-			return row.ParentID, nil
-		},
-		ReceiverClass: func(ctx context.Context, decl string) (string, error) {
-			row, ok, err := r.registry.GetDecl(ctx, decl)
-			if err != nil {
-				return "", err
-			}
-			if !ok {
-				return "", errors.New("declaration not found")
-			}
-			return row.DefaultClass, nil
-		},
-		Card: func(ctx context.Context, caller channel.ID) (introspect.Describe, error) {
-			return r.registry.Describe(ctx, ch, caller)
-		},
-	}
+	deps := svcactor.Deps{Port: port, Self: ch, Core: channelspec.C0ChannelID, Members: members, Audit: audit, Logger: r.logger}
 	return platform.ActorFactory{Proc: svcactor.Def(deps)}, true
 }
 
-func (r *assemblyResolver) callPeer(ctx context.Context, caller, target channel.ID, req peerproto.Request) (peerproto.Result, error) {
+func (r *assemblyResolver) callPeer(ctx context.Context, caller, target channel.ID, req channel.Request, onProgress func(channel.Progress)) (channel.Result, error) {
 	port, _, ok := r.host.AcquirePort(target)
 	if !ok {
-		return peerproto.Result{}, errors.New("target channel unavailable")
+		return channel.Result{}, errors.New("target channel unavailable")
 	}
-	return port.Call(ctx, caller, req)
+	return port.Call(ctx, caller, req, onProgress)
 }
-func (r *assemblyResolver) card(ctx context.Context, target, caller channel.ID) (introspect.Describe, error) {
-	return r.registry.Describe(ctx, target, caller)
+
+func (r *assemblyResolver) Peer(ctx context.Context, caller, target channel.ID, req channel.Request, onProgress func(channel.Progress)) (channel.Result, error) {
+	return r.callPeer(ctx, caller, target, req, onProgress)
+}
+func (r *assemblyResolver) describePeer(ctx context.Context, caller, target channel.ID, frame channel.Describe) (channel.Card, error) {
+	port, _, ok := r.host.AcquirePort(target)
+	if !ok {
+		return channel.Card{}, errors.New("target channel unavailable")
+	}
+	return port.Describe(ctx, caller, frame)
 }
 func (r *assemblyResolver) ResolveDeclaration(ctx context.Context, ch channel.ID, id string) (channelspec.DeclarationFacts, error) {
 	decl, ok, err := r.registry.GetDecl(ctx, id)
@@ -129,7 +93,7 @@ func (r *assemblyResolver) ResolveDeclaration(ctx context.Context, ch channel.ID
 	}
 	return channelspec.DeclarationFacts{
 		OwnerPrincipal: decl.Owner, Name: decl.Name, Description: decl.Description,
-		Visibility: decl.Visibility, Class: decl.DefaultClass, Config: config,
+		Visibility: decl.Visibility, Class: decl.DefaultClass, Config: config, Singleton: decl.Singleton,
 	}, nil
 }
 
@@ -149,24 +113,26 @@ func (r *assemblyResolver) ResolveDeclarationCatalog(ctx context.Context, _ chan
 		}
 		out[decl.ID] = channelspec.DeclarationFacts{
 			OwnerPrincipal: decl.Owner, Name: decl.Name, Description: decl.Description,
-			Visibility: decl.Visibility, Class: decl.DefaultClass,
+			Visibility: decl.Visibility, Class: decl.DefaultClass, Singleton: decl.Singleton,
 		}
 	}
 	return out, nil
 }
 func (r *assemblyResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
 	switch class {
-	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.RegistrarClass:
-		return actor.KindTool, true, nil
+	case lagoon.PeerActorClass, lagoon.SvcActorClass:
+		return actor.KindPeer, true, nil
+	case lagoon.ClassRegistrar:
+		return actor.KindSystem, true, nil
 	}
 	kind, ok := classregistry.ClassKind(class)
 	return kind, ok, nil
 }
 
-func (r *assemblyResolver) ClassPlacement(_ context.Context, class string) (channel.PlacementKind, bool, error) {
+func (r *assemblyResolver) ClassPlacement(_ context.Context, class string) (channelspec.PlacementKind, bool, error) {
 	switch class {
-	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.RegistrarClass, "human":
-		return channel.PlacementServer, true, nil
+	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.ClassRegistrar, "human":
+		return channelspec.PlacementServer, true, nil
 	}
 	p, ok := classregistry.ClassPlacement(class)
 	return p, ok, nil
@@ -187,7 +153,7 @@ func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel
 	if !ok || row.Status != regspec.ChannelPresent {
 		return channelspec.ErrDeclarationNotFound
 	}
-	if holder == protocol.C0ChannelID || holder == row.ParentID {
+	if holder == channelspec.C0ChannelID || holder == row.ParentID {
 		return nil
 	}
 	if row.Serving == 0 {
@@ -197,7 +163,7 @@ func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel
 }
 
 func (r *assemblyResolver) ValidateConfig(class string, config json.RawMessage) error {
-	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.RegistrarClass {
+	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.ClassRegistrar {
 		if class == lagoon.PeerActorClass {
 			_, err := peeractor.ValidateConfig(config)
 			return err
@@ -208,16 +174,19 @@ func (r *assemblyResolver) ValidateConfig(class string, config json.RawMessage) 
 }
 
 func (r *assemblyResolver) LookupClassKind(class string) (actor.Kind, bool) {
-	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.RegistrarClass {
-		return actor.KindTool, true
+	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass {
+		return actor.KindPeer, true
+	}
+	if class == lagoon.ClassRegistrar {
+		return actor.KindSystem, true
 	}
 	return classregistry.ClassKind(class)
 }
 
-func (r *assemblyResolver) LookupClassPlacement(class string) (channel.PlacementKind, bool) {
+func (r *assemblyResolver) LookupClassPlacement(class string) (channelspec.PlacementKind, bool) {
 	switch class {
-	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.RegistrarClass, "human":
-		return channel.PlacementServer, true
+	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.ClassRegistrar, "human":
+		return channelspec.PlacementServer, true
 	}
 	return classregistry.ClassPlacement(class)
 }
@@ -233,29 +202,6 @@ func (f sourceFacts) ActorFacts(ctx context.Context, ch channel.ID, id actor.Act
 		return channelspec.ActorFacts{}, false, errors.New("source channel unavailable")
 	}
 	return bundle.View().ActorFacts(ctx, id)
-}
-
-func (f sourceFacts) DeclaredInstances(ctx context.Context, ch channel.ID, decl string) ([]actor.ActorID, error) {
-	bundle, ok := f.host.Acquire(ch)
-	if !ok {
-		return nil, errors.New("source channel unavailable")
-	}
-	return bundle.View().DeclaredInstances(ctx, decl)
-}
-
-func (f sourceFacts) WaitChannelService(ctx context.Context, ch channel.ID) error {
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if _, _, ok := f.host.AcquirePort(ch); ok {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }
 
 func (f sourceFacts) SystemGenesis(context.Context) (lagoon.GenesisSpec, bool, error) {

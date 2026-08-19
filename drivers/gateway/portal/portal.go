@@ -17,15 +17,14 @@ import (
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
-	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
-	"github.com/wanpengxie/atoll/protocol"
 	"github.com/wanpengxie/atoll/protocol/access"
-	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -234,7 +233,7 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	}
 	callCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	reply, err := p.callViaLobby(callCtx, lagoon.WordPrincipalRegister, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
+	reply, err := p.callViaLobby(callCtx, lagoon.WordPrincipalCreate, lagoon.PrincipalRegister{ID: in.ID, Email: in.Email, SecretHash: string(hash), DisplayName: in.DisplayName})
 	if err != nil {
 		// Registration closed = c0 exposes no such endpoint to the lobby: the
 		// svcactor answers endpoint_not_found. That is node policy, not an error.
@@ -250,18 +249,18 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 		writeLagoonError(w, err)
 		return
 	}
-	var principal regspec.PrincipalRow
-	if err := reply.DecodeValue(&principal); err != nil {
+	var registered lagoon.PrincipalRegisterReply
+	if err := reply.DecodeValue(&registered); err != nil {
 		writeError(w, 500, string(codeInternalError), "invalid registrar reply: "+err.Error())
 		return
 	}
-	p.setSession(w, principal.ID)
-	writeJSON(w, http.StatusCreated, principal)
+	p.setSession(w, registered.PrincipalID)
+	writeJSON(w, http.StatusCreated, registered)
 }
 
-// callViaLobby speaks one of the two lobby doors as the guest: the request is
-// submitted into the lobby ledger addressed to the lobby coreactor, crosses to
-// c0 through the peer port, and the terminal is read back from the lobby.
+// callViaLobby speaks one of the two lobby doors as the guest. The request is
+// addressed to the lobby membrane, which frames it to c0, and the terminal is
+// read back from the lobby.
 func (p *Portal) callViaLobby(ctx context.Context, word lagoon.Word, in any) (lagoon.Reply, error) {
 	if p.cfg.Lobby == nil {
 		return lagoon.Reply{}, errors.New("registration lobby unavailable")
@@ -270,19 +269,12 @@ func (p *Portal) callViaLobby(ctx context.Context, word lagoon.Word, in any) (la
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
-	guest, found, err := bundle.View().ResolvePrincipal(ctx, protocol.GuestPrincipalID)
+	guest, found, err := bundle.View().ResolvePrincipal(ctx, channelspec.GuestPrincipalID)
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
 	if !found {
 		return lagoon.Reply{}, errors.New("guest cell unavailable")
-	}
-	cores, err := bundle.View().DeclaredInstances(ctx, lagoon.CoreActorDeclID)
-	if err != nil {
-		return lagoon.Reply{}, err
-	}
-	if len(cores) != 1 {
-		return lagoon.Reply{}, errors.New("lobby coreactor unavailable")
 	}
 	slot, ok := bundle.Gateway().SubjectSlotFor(guest)
 	if !ok {
@@ -290,19 +282,23 @@ func (p *Portal) callViaLobby(ctx context.Context, word lagoon.Word, in any) (la
 	}
 	requestID := message.ID(uuid.NewString())
 	raw, _ := json.Marshal(in)
-	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(protocol.LobbyChannelID), ID: string(requestID), MsgType: string(word), Kind: string(message.KindRequest), Audience: []string{string(cores[0])}, Visibility: string(message.VisibilityPublic), Payload: raw})
+	frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, uuid.NewString(), subjectgate.SubmitPayload{ChannelID: string(channelspec.LobbyChannelID), ID: string(requestID), MsgType: string(word), Kind: string(message.KindRequest), Audience: []string{string(actor.SystemActorID)}, Visibility: string(message.VisibilityPublic), Payload: raw})
 	if err != nil {
 		return lagoon.Reply{}, err
 	}
 	if _, err := slot.Deliver(ctx, frame); err != nil {
 		return lagoon.Reply{}, err
 	}
-	reader := channel.Reader{ActorID: guest, Mode: channel.ReaderMember}
+	reader := gateway.Reader{ActorID: guest, Mode: gateway.ReaderMember}
 	var cursor int64
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		rows, next, err := bundle.View().ReadVisibleAfterSeq(ctx, reader, cursor, 256)
+		active, err := bundle.View().IsActive(ctx, reader.ActorID)
+		if err != nil || !active {
+			return lagoon.Reply{}, errors.New("guest cell unavailable")
+		}
+		rows, next, err := bundle.View().ReadVisibleAfterSeq(ctx, cursor, 256)
 		if err != nil {
 			return lagoon.Reply{}, err
 		}

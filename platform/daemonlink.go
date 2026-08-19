@@ -20,6 +20,7 @@ type DaemonMembrane struct {
 	Observe         func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding, actorrt.ObsKind, actorrt.ObsValue)
 	ObserveDown     func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding)
 	CancelRequest   func(actor.ActorID, message.ID)
+	ResolveTarget   func(string) (actor.ActorID, error)
 	Plan            func(context.Context, string) ([]PlanActor, error)
 	IsBound         func(context.Context, string) (bool, error)
 }

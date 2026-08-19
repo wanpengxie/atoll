@@ -45,6 +45,14 @@ const (
 	FrameObserveEnded FrameType = "observe_ended"
 )
 
+// Human words live at the membrane because resolve-frame validation depends
+// on the original request word as well as the human cell's dispatch table.
+const (
+	WordHumanMessage = "human.message"
+	WordHumanAsk     = "human.ask"
+	WordHumanApprove = "human.approve"
+)
+
 // Retired words (purity v3 C1/C2 — minted by the spec's frame table for
 // closed-set completeness, but with ZERO producers ever wired; a word enters
 // the closed set only WITH its producer, 词表第四问):
@@ -337,10 +345,11 @@ type SubmitPayload struct {
 }
 
 type ResolvePayload struct {
-	ChannelID string          `json:"channel_id"`
-	ReqID     string          `json:"req_id"`
-	Decision  string          `json:"decision"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
+	ChannelID string  `json:"channel_id"`
+	ReqID     string  `json:"req_id"`
+	Text      *string `json:"text,omitempty"`
+	Decision  string  `json:"decision,omitempty"`
+	Note      *string `json:"note,omitempty"`
 }
 
 type CancelPayload struct {

@@ -13,7 +13,7 @@
 //     able to NAME its birth capabilities without importing the heavy platform
 //     assembly root — so this type does not live in package platform.
 //   - It cannot live in runtime/actorrt (actorrt must never import
-//     runtime/harness — fork.go) nor in harness/accessdoor/schedule (none of
+//     runtime/harness) nor in harness/accessdoor/schedule (none of
 //     those may reach across to the others). Caps sits ABOVE all four, which is
 //     a downstream (lib) concern, not a runtime one — placed here rather than
 //     inventing a new runtime package.

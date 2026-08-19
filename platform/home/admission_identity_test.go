@@ -87,7 +87,7 @@ func TestAdmittingTheSamePrincipalTwiceIsOneIdentity(t *testing.T) {
 	// The same question asked by eight callers at once has exactly one answer.
 	const callers = 8
 	var wg sync.WaitGroup
-	answers := make(chan channel.AdmitResult, callers)
+	answers := make(chan actorctl.AdmitResult, callers)
 	failures := make(chan error, callers)
 	for i := range callers {
 		wg.Add(1)

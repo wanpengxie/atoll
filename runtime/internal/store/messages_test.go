@@ -111,7 +111,7 @@ func TestAppend_FindByID_RoundTrip(t *testing.T) {
 	if e.CorrelationID != "corr-7" {
 		t.Errorf("correlation=%q", e.CorrelationID)
 	}
-	if string(e.Payload) != `{"note":"hi"}` {
+	if string(e.Payload) != `{"body":{"note":"hi"}}` {
 		t.Errorf("payload=%s", e.Payload)
 	}
 	if e.ExpiresAt == nil || *e.ExpiresAt != exp {

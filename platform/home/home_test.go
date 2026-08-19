@@ -105,9 +105,7 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 // fresh channel. Genesis system records are deliberately hidden.
 func TestView_ReadVisibleAfterSeq_Empty(t *testing.T) {
 	h := openTestHome(t)
-	rows, _, err := h.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
-		Principal: "observer", Mode: channel.ReaderObserver,
-	}, 0, 100)
+	rows, _, err := h.View().ReadVisibleAfterSeq(context.Background(), 0, 100)
 	if err != nil {
 		t.Fatalf("ReadVisibleAfterSeq: %v", err)
 	}

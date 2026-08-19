@@ -12,33 +12,13 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/lib/jsondepth"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/schedule"
-)
-
-// Day-1 two of the three honest closure options (三层律 §3) a human cell
-// declares per request type. fail-fast (device_unreachable) is not a human's
-// option: the log IS the inbox, so a human is never structurally unreachable —
-// an unrecognised type degrades to the deferred (收件箱) default rather than a
-// fabricated failure.
-const (
-	// typeHumanMessage is IMMEDIATE: a message to the human's inbox, answered
-	// completed on receipt (durable delivery to the log IS the answer).
-	// Unexported (platform-topology 批 T5b 裁决9②): not part of humancell's
-	// five-name wiring seam (Deps/RequestLookup/InterpretFrames/HumanServe/
-	// WirePresenceSelfReport) — the request-type literal is a private detail
-	// of this package's own dispatch table, not a word a caller needs.
-	typeHumanMessage = "human.message"
-	// typeHumanApprove is DEFERRED: left OPEN until the person answers via the
-	// door (the resolve frame). Closure is the sender's caller-scoped timer.
-	// Unexported for the same reason as typeHumanMessage above.
-	typeHumanApprove = "human.approve"
 )
 
 // WirePresenceSelfReport wires the cell's device-presence self-report against its
@@ -82,47 +62,25 @@ func HumanServe(sys actorbase.Sys) error {
 }
 
 // humanServeRequest answers one delivered request per the three-choice type
-// table. It NEVER fabricates a Reply it did not earn: human.approve and any
-// unrecognised type are left OPEN (deferred) — the person's resolve frame is the
-// real answer, and closure is the sender's caller-scoped timer.
+// table. Deferred words remain open until the person's resolve frame arrives.
 func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
 	switch msg.Type {
-	case introspect.QueryDescribe:
-		req, err := introspect.ParseDescribeRequest(msg.Payload)
-		if err != nil {
-			_, _ = sys.Fail(msg, "payload_invalid", err.Error())
-			return
-		}
-		answer, ok := introspect.AnswerDescribe(humanDescribe(string(sys.Self())), req)
-		if !ok {
-			_, _ = sys.Fail(msg, "type_unsupported", "human cell does not serve "+req.Type)
-			return
-		}
-		_, _ = sys.Reply(msg, answer)
-	case typeHumanMessage:
+	case subjectgate.WordHumanMessage:
 		// immediate: 收件即 completed 回执 (log 即收件箱).
 		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
+	case subjectgate.WordHumanAsk, subjectgate.WordHumanApprove:
 	default:
-		// default-deferred (D9, owner 拍定): human.approve AND any
-		// unrecognised type are left OPEN — the log IS the inbox and a human
-		// is never structurally unreachable, so the honest default is "held
-		// for the person", never a fabricated failure. Closure of a
-		// never-answered deferred is the sender's declared deadline (expiry
-		// reaper). Declared in describe below as the default row.
+		_, _ = sys.Fail(msg, "type_unsupported", "human does not support "+msg.Type)
 	}
 }
 
-// humanDescribe is the human cell's actor.describe self-answer catalog.
-func humanDescribe(id string) introspect.Describe {
-	return introspect.Describe{
-		ActorID:     id,
-		Description: "human subject — occupant off-process; the log is the inbox",
-		Types: map[string]introspect.TypeMeta{
-			typeHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
-			typeHumanApprove: {Description: "deferred: left open until the person answers via the door (resolve)"},
-			// D9 default-deferred declaration: unrecognised types are accepted
-			// deferred — the log is the inbox, a human is never unreachable.
-			"*": {Description: "default-deferred: any unrecognised type is accepted and left open for the person (the log is the inbox)"},
+func Manifest() introspect.Manifest {
+	return introspect.Manifest{
+		Class: "person", Interfaces: []string{"actor", "human"},
+		Words: map[string]introspect.WordSpec{
+			subjectgate.WordHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
+			subjectgate.WordHumanAsk:     {Description: "deferred free-form question, resolved with text"},
+			subjectgate.WordHumanApprove: {Description: "deferred approval, resolved with approve or reject"},
 		},
 	}
 }
@@ -313,7 +271,7 @@ func submitFingerprint(p subjectgate.SubmitPayload) (string, error) {
 	if p.ExpiresAt != nil {
 		semantic["expires_at_ms"] = *p.ExpiresAt
 	}
-	return channel.Digest(semantic)
+	return channelspec.Digest(semantic)
 }
 
 func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {
@@ -321,10 +279,6 @@ func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subject
 	var p subjectgate.ResolvePayload
 	if err := f.DecodePayload(&p); err != nil {
 		return prepErr(subjectgate.CodeBadPayload, err.Error())
-	}
-	// decision闭集 BEFORE any log work — payload.decision becomes permanent truth.
-	if p.Decision != "approved" && p.Decision != "rejected" {
-		return prepErr(subjectgate.CodeInvalidDecision, "decision must be approved or rejected")
 	}
 	ctx := context.Background()
 	reqID := message.ID(p.ReqID)
@@ -345,19 +299,24 @@ func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subject
 	if !open {
 		return prepErr(subjectgate.CodeAlreadyClosed, "request already closed")
 	}
-	merged := map[string]any{}
-	if len(p.Payload) > 0 {
-		if derr := jsondepth.Bounded(p.Payload); derr != nil {
-			return prepErr(subjectgate.CodeBadPayload, derr.Error())
+	var answer map[string]any
+	switch req.Type {
+	case subjectgate.WordHumanAsk:
+		if p.Text == nil || p.Decision != "" || p.Note != nil {
+			return prepErr(subjectgate.CodeBadPayload, "human.ask resolve requires only text")
 		}
-		if uerr := json.Unmarshal(p.Payload, &merged); uerr != nil {
-			return prepErr(subjectgate.CodeBadPayload, uerr.Error())
+		answer = map[string]any{"text": *p.Text}
+	case subjectgate.WordHumanApprove:
+		if p.Text != nil || (p.Decision != "approve" && p.Decision != "reject") {
+			return prepErr(subjectgate.CodeInvalidDecision, "human.approve decision must be approve or reject")
 		}
-		if merged == nil { // JSON null → no payload (guard against nil-map panic).
-			merged = map[string]any{}
+		answer = map[string]any{"decision": p.Decision}
+		if p.Note != nil {
+			answer["note"] = *p.Note
 		}
+	default:
+		return prepErr(subjectgate.CodeBadPayload, "request type is not resolvable")
 	}
-	merged["decision"] = p.Decision
 	// The person holds no mailbox handle — the frame carried a bare req_id and
 	// the envelope came back from the LOG, so the write's authority is the log
 	// (actorbase.OriginLog). ctx is sys.Life(): the cell outlives the person
@@ -368,7 +327,7 @@ func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subject
 	// as a base64 JSON string — the decision would silently vanish from truth.
 	// Pinned by TestResolvePayloadIsMarshalledExactlyOnce.
 	msg := actorbase.NewMsg(actorbase.OriginLog, sys.Life(), *req)
-	if _, err := sys.Reply(msg, merged); err != nil {
+	if _, err := sys.Reply(msg, answer); err != nil {
 		return mapVerbErrFrame(err, f)
 	}
 	return receipt(f, subjectgate.ResolveReceipt{ReqID: p.ReqID})

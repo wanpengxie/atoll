@@ -2,11 +2,12 @@
 // shared agent runtime and provider adapters.
 package driverproto
 
-import (
-	"context"
+import "context"
 
-	"github.com/wanpengxie/atoll/lib/introspect"
-)
+type Documentation struct {
+	Description string
+	SkillDoc    string
+}
 
 type Provider interface {
 	Spec() ProviderSpec
@@ -24,14 +25,15 @@ type Worker interface {
 
 type ProviderSpec struct {
 	Name             string
-	Capabilities     Capabilities
-	Describe         introspect.Describe
+	Capabilities     map[string]bool
+	Documentation    Documentation
 	Selections       []TurnOptions
 	DefaultSelection int
 }
 
-type Capabilities struct {
-	Steer     bool
-	Interrupt bool
-	Resume    bool
-}
+const (
+	CapabilitySteer     = "steer"
+	CapabilityInterrupt = "interrupt"
+	CapabilityResume    = "resume"
+	CapabilityFork      = "fork"
+)

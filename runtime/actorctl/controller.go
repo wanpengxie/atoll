@@ -21,7 +21,6 @@ type Store interface {
 	Insert(context.Context, storespec.ActorDraft) (storespec.ActorRecord, error)
 	UpdateDefinition(context.Context, actor.ActorID, storespec.ActorDefinition) (storespec.ActorRecord, error)
 	Deregister(context.Context, []actor.ActorID) error
-	InstallEntry(storespec.ActorRecord)
 }
 
 // Controller is the sole owner of the managed actor value ledger.
@@ -37,12 +36,10 @@ type Controller struct {
 	nowMs func() int64
 	owner commandOwner
 
-	// ledger guards the entire ledger state: phase, the member ledger and the
-	// fork replay table. Readers take the read end; nothing bypasses it.
+	// ledger guards the entire ledger state: phase and the member ledger.
 	ledger sync.RWMutex
 	phase  ControllerPhase
 	actors map[actor.ActorID]managedActor
-	forks  map[forkKey]forkEntry
 }
 
 // New constructs a bootstrapping managed actor Controller.
@@ -58,7 +55,6 @@ func New(store Store, nowMs func() int64) (*Controller, error) {
 		nowMs:  nowMs,
 		phase:  Bootstrapping,
 		actors: make(map[actor.ActorID]managedActor),
-		forks:  make(map[forkKey]forkEntry),
 	}, nil
 }
 
@@ -290,25 +286,6 @@ func (c *Controller) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	return out, nil
 }
 
-// DeclaredInstances answers "which actors did this declaration produce", in
-// canonical id order. It returns ids alone — the business membrane asks for
-// instances, never for rows.
-func (c *Controller) DeclaredInstances(declID string) ([]actor.ActorID, error) {
-	c.ledger.RLock()
-	defer c.ledger.RUnlock()
-	if err := c.runnableLocked(); err != nil {
-		return nil, err
-	}
-	out := make([]actor.ActorID, 0, 1)
-	for id, value := range c.actors {
-		if declID != "" && value.Record.SourceDeclID == declID {
-			out = append(out, id)
-		}
-	}
-	slices.Sort(out)
-	return out, nil
-}
-
 // DeclaredReconcileList answers "what does declaration reconcile compare
 // against". Its only consumer is the Platform declaration pull loop.
 func (c *Controller) DeclaredReconcileList() ([]DeclaredInstance, error) {
@@ -457,6 +434,5 @@ func cloneRaw(raw []byte) []byte { return append([]byte(nil), raw...) }
 var _ storespec.ActorFactsAuthority = (*Controller)(nil)
 var _ storespec.PrincipalIdentity = (*Controller)(nil)
 var _ storespec.IdentityRoster = (*Controller)(nil)
-var _ storespec.DeclaredInstanceReader = (*Controller)(nil)
 var _ storespec.IdentityPresence = (*Controller)(nil)
 var _ storespec.CollaborationAuthority = (*Controller)(nil)

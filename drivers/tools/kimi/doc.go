@@ -64,5 +64,5 @@
 //     downstream send (write-deadline bounded).
 //   - wire.go     the minimal device frame structs.
 //   - types.go    the single inward type + action allowlist + payload shape + deadline.
-//   - describe.go the TypeMeta catalog for actor.describe.
+//   - describe.go the WordSpec catalog for actor.describe.
 package kimi

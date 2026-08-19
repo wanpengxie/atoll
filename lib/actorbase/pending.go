@@ -17,6 +17,9 @@ type Pending interface {
 	// available before the receiver reaches a terminal state so callers can
 	// write correlation records at dispatch time.
 	RequestID() message.ID
+	// Progress publishes provisional responses in ledger order and closes
+	// after the final response (or local cancellation) wins.
+	Progress() <-chan Msg
 	// Wait blocks until the matching response lands, ctx is done, or d
 	// elapses (selective receive on the out-station account) — whichever
 	// first. ctx is caller-supplied by design (spec's ctx-provenance rule:

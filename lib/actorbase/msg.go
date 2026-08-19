@@ -1,9 +1,16 @@
 package actorbase
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Msg is the substrate's in-hand projection of one delivered envelope — pure,
@@ -43,6 +50,7 @@ type Msg struct {
 
 	ctx    context.Context
 	origin MsgOrigin
+	caller *harness.Caller
 }
 
 // MsgOrigin names WHICH ledger authorises a write against this Msg. It is the
@@ -99,6 +107,21 @@ const (
 // nothing about the request's own scope.
 func (m Msg) Ctx() context.Context { return m.ctx }
 
+func (m Msg) Caller() (harness.Caller, bool) {
+	if m.caller == nil {
+		return harness.Caller{}, false
+	}
+	return *m.caller, true
+}
+
+// EffectiveCaller is the only caller-attribution rule used by receivers.
+func EffectiveCaller(m Msg) harness.Caller {
+	if caller, ok := m.Caller(); ok {
+		return caller
+	}
+	return harness.Caller{Channel: m.ChannelID, Actor: m.Sender.ID}
+}
+
 // NewMsg projects env into a Msg bound to ctx and to the ledger that
 // authorises writes against it — the ONE constructor (the engine's Recv path,
 // the frame interpreter's from-log recovery, and any test fixture all go
@@ -119,5 +142,73 @@ func NewMsg(origin MsgOrigin, ctx context.Context, env message.Envelope) Msg {
 	if origin != OriginMailbox && origin != OriginLog {
 		panic("actorbase: NewMsg origin must be OriginMailbox or OriginLog (the zero value is illegal)")
 	}
-	return Msg{Envelope: env, ctx: ctx, origin: origin}
+	msg := Msg{Envelope: env, ctx: ctx, origin: origin}
+	if env.Kind == message.KindRequest {
+		// Clear first: an invalid envelope must never leak its undecoded payload
+		// to a receiver as an accidental legacy protocol.
+		msg.Payload = nil
+		var wrapped struct {
+			Context json.RawMessage `json:"_context"`
+			Body    json.RawMessage `json:"body"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(env.Payload))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&wrapped); err != nil {
+			panic("actorbase: invalid request payload envelope: " + err.Error())
+		}
+		var trailing any
+		if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+			if err == nil {
+				panic("actorbase: invalid request payload envelope: multiple JSON values")
+			}
+			panic("actorbase: invalid request payload envelope: " + err.Error())
+		}
+		if len(wrapped.Body) == 0 {
+			panic("actorbase: invalid request payload envelope: body field required")
+		}
+		msg.Payload = append(json.RawMessage(nil), wrapped.Body...)
+		if len(wrapped.Context) != 0 {
+			// _context 若在场，只有一形 {caller:{channel,actor}}：显式 null、空对象、
+			// caller 为 null / 缺 channel / 缺 actor 一律 fail-loud，恒不静默退化为
+			// "无 context" 或零值 caller。
+			caller, err := decodeRequestContext(wrapped.Context)
+			if err != nil {
+				panic("actorbase: invalid request payload envelope: " + err.Error())
+			}
+			msg.caller = &caller
+		}
+	}
+	return msg
+}
+
+// decodeRequestContext decodes the request payload's `_context` value into
+// its one legal shape {caller:{channel,actor}}. Every level is checked for
+// presence AND non-emptiness: `null` at any level, `{}`, and a caller missing
+// channel or actor are all rejected — the engine (encodeRequestPayload) never
+// writes those, so seeing one means the payload is not canonical.
+func decodeRequestContext(raw json.RawMessage) (harness.Caller, error) {
+	var outer struct {
+		Caller json.RawMessage `json:"caller"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&outer); err != nil {
+		return harness.Caller{}, errors.New("_context: " + err.Error())
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || len(outer.Caller) == 0 {
+		return harness.Caller{}, errors.New("_context must be {caller:{channel,actor}}")
+	}
+	var callerRaw struct {
+		Channel *string `json:"channel"`
+		Actor   *string `json:"actor"`
+	}
+	dec = json.NewDecoder(bytes.NewReader(outer.Caller))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&callerRaw); err != nil {
+		return harness.Caller{}, errors.New("_context.caller: " + err.Error())
+	}
+	if callerRaw.Channel == nil || *callerRaw.Channel == "" || callerRaw.Actor == nil || *callerRaw.Actor == "" {
+		return harness.Caller{}, errors.New("_context.caller requires non-empty channel and actor")
+	}
+	return harness.Caller{Channel: channel.ID(*callerRaw.Channel), Actor: actor.ActorID(*callerRaw.Actor)}, nil
 }

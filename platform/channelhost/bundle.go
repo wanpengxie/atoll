@@ -7,7 +7,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -27,11 +26,10 @@ type GatewayHitch interface {
 // runtime storage or control DTO.
 type View interface {
 	HumanRoster(context.Context) ([]channelspec.HumanRosterEntry, error)
-	DeclaredInstances(context.Context, string) ([]actor.ActorID, error)
-	HasDeclaredInstance(context.Context, string) (bool, error)
 	ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
-	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
+	ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, error)
+	IsActive(context.Context, actor.ActorID) (bool, error)
 	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 	IsBound(context.Context, string) (bool, error)
 	Roster(context.Context) ([]channelspec.ObsRosterRow, error)
@@ -61,20 +59,17 @@ func (a viewAdapter) HumanRoster(ctx context.Context) ([]channelspec.HumanRoster
 func (a viewAdapter) Roster(ctx context.Context) ([]channelspec.ObsRosterRow, error) {
 	return a.home.View().Roster(ctx)
 }
-func (a viewAdapter) DeclaredInstances(ctx context.Context, d string) ([]actor.ActorID, error) {
-	return a.home.View().DeclaredInstances(ctx, d)
-}
-func (a viewAdapter) HasDeclaredInstance(ctx context.Context, d string) (bool, error) {
-	return a.home.View().HasDeclaredInstance(ctx, d)
-}
 func (a viewAdapter) ResolvePrincipal(ctx context.Context, principal string) (actor.ActorID, bool, error) {
 	return a.home.View().ResolvePrincipal(ctx, principal)
 }
 func (a viewAdapter) OwnerPrincipal(ctx context.Context) (string, bool, error) {
 	return a.home.View().OwnerPrincipal(ctx)
 }
-func (a viewAdapter) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, seq int64, limit int) ([]storespec.StoredRow, int64, error) {
-	return a.home.View().ReadVisibleAfterSeq(ctx, reader, seq, limit)
+func (a viewAdapter) ReadVisibleAfterSeq(ctx context.Context, seq int64, limit int) ([]storespec.StoredRow, int64, error) {
+	return a.home.View().ReadVisibleAfterSeq(ctx, seq, limit)
+}
+func (a viewAdapter) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	return a.home.View().IsActive(ctx, id)
 }
 func (a viewAdapter) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return a.home.View().ActorFacts(ctx, id)

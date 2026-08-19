@@ -37,7 +37,6 @@ type Caps struct {
 	// Schedule is the time-axis capability (self-targeted timers). Minted with
 	// the authority welded inside; every operation gates on Admit().
 	Schedule schedule.ScheduleHandle
-	// Lifecycle is the closed fork/despawn/end-self capability welded to this
-	// incarnation. Fork returns only a child's name, never a live handle.
+	// Lifecycle is the closed end-self capability welded to this incarnation.
 	Lifecycle LifecycleHandle
 }

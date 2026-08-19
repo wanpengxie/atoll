@@ -18,26 +18,29 @@ func TestStepTypeRegistered(t *testing.T) {
 		typ        string
 		senderID   actor.ActorID
 		senderKind actor.Kind
+		kind       message.Kind
 		reason     HarnessRejectReason
 	}{
 		// Business types: any vocabulary passes (no registry lookup).
-		{"arbitrary business type passes", "xhs.publish", "tool:xhs", actor.KindTool, ""},
-		{"typo'd business type still passes", "totally.made.up.type", "agent:p", actor.KindAgent, ""},
-		{"non-system business type passes", "agent.text", "agent:p", actor.KindAgent, ""},
+		{"arbitrary business type passes", "xhs.publish", "tool:xhs", actor.KindTool, message.KindEvent, ""},
+		{"typo'd business type still passes", "totally.made.up.type", "agent:p", actor.KindAgent, message.KindEvent, ""},
+		{"non-system business type passes", "agent.text", "agent:p", actor.KindAgent, message.KindEvent, ""},
 
 		// system.* reserved bootstrap types: only the channel system actor.
 		{
-			name:       "reserved system type from non-system sender rejected",
-			typ:        actor.ReservedSystemActorRegistered,
+			name:       "system event from non-system sender rejected",
+			typ:        message.TypeSystemMemberCreated,
 			senderID:   "agent:p",
 			senderKind: actor.KindAgent,
+			kind:       message.KindEvent,
 			reason:     HarnessReservedTypeUnauthorizedSender,
 		},
 		{
-			name:       "reserved system type from system actor accepted",
-			typ:        actor.ReservedSystemActorRegistered,
+			name:       "system event from gate accepted",
+			typ:        message.TypeSystemMemberCreated,
 			senderID:   actor.SystemActorID,
 			senderKind: actor.KindSystem,
+			kind:       message.KindEvent,
 			reason:     "",
 		},
 		{
@@ -45,7 +48,38 @@ func TestStepTypeRegistered(t *testing.T) {
 			typ:        "system.made.up",
 			senderID:   actor.SystemActorID,
 			senderKind: actor.KindSystem,
+			kind:       message.KindEvent,
 			reason:     HarnessTypeUnknown,
+		},
+		{
+			name:       "system event from registrar rejected",
+			typ:        message.TypeSystemMemberCreated,
+			senderID:   "system:registrar:1",
+			senderKind: actor.KindSystem,
+			kind:       message.KindEvent,
+			reason:     HarnessReservedTypeUnauthorizedSender,
+		},
+		{
+			name:       "system request from member accepted",
+			typ:        message.TypeSystemMemberCreate,
+			senderID:   "agent:p:1",
+			senderKind: actor.KindAgent,
+			kind:       message.KindRequest,
+		},
+		{
+			name:       "system response inherits request type",
+			typ:        message.TypeSystemMemberCreate,
+			senderID:   "system:registrar:1",
+			senderKind: actor.KindSystem,
+			kind:       message.KindResponse,
+		},
+		{
+			name:       "system word kind mismatch rejected",
+			typ:        message.TypeSystemMemberCreate,
+			senderID:   "agent:p:1",
+			senderKind: actor.KindAgent,
+			kind:       message.KindEvent,
+			reason:     HarnessKindNotAllowedForType,
 		},
 
 		// actor.* introspection: NOT substrate-gated — passes like any type.
@@ -54,6 +88,7 @@ func TestStepTypeRegistered(t *testing.T) {
 			typ:        "actor.describe",
 			senderID:   "agent:p",
 			senderKind: actor.KindAgent,
+			kind:       message.KindEvent,
 			reason:     "",
 		},
 		{
@@ -61,6 +96,7 @@ func TestStepTypeRegistered(t *testing.T) {
 			typ:        "actor.made_up",
 			senderID:   "agent:p",
 			senderKind: actor.KindAgent,
+			kind:       message.KindEvent,
 			reason:     "",
 		},
 	}
@@ -68,6 +104,7 @@ func TestStepTypeRegistered(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := validEvent("m1", tc.senderID)
 			e.Type = tc.typ
+			e.Kind = tc.kind
 			e.Sender = message.Sender{ID: tc.senderID, Kind: tc.senderKind}
 			// type step takes no deps; pass empty Deps via constructor.
 			out, err := runStep(t, newStepTypeRegistered, Deps{}, context.Background(), e)

@@ -205,7 +205,7 @@ func TestFireSinkMapsReservedTypeToFireRejected(t *testing.T) {
 			// emit — a timer author is never that actor.
 			name:    "reserved bootstrap type from a non-system author",
 			timerID: "reserved-bootstrap",
-			typ:     actor.ReservedSystemActorRegistered,
+			typ:     message.TypeSystemMemberCreated,
 			reason:  harness.HarnessReservedTypeUnauthorizedSender,
 		},
 		{
