@@ -20,7 +20,7 @@ import (
 
 func TestGenerationScopedHTTPMCPAuthCatalogAndRetirement(t *testing.T) {
 	life, retire := context.WithCancel(context.Background())
-	surface, err := toolsurface.Assemble([]driverproto.ToolSpec{{Name: "call_actor", Description: "call", Schema: json.RawMessage(`{"type":"object"}`)}}, toolsurface.Claude)
+	surface, err := toolsurface.Assemble([]driverproto.ToolSpec{{Name: "call_actor", Description: "call", Schema: json.RawMessage(`{"type":"object"}`)}}, toolsurface.Claude, driverproto.Situation{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestGenerationScopedHTTPMCPAuthCatalogAndRetirement(t *testing.T) {
 func TestCallbackSaturationRejectsOneCallWithoutRetiringGeneration(t *testing.T) {
 	life, retire := context.WithCancel(context.Background())
 	defer retire()
-	surface, err := toolsurface.Assemble([]driverproto.ToolSpec{{Name: "call_actor", Description: "call", Schema: json.RawMessage(`{"type":"object"}`)}}, toolsurface.Claude)
+	surface, err := toolsurface.Assemble([]driverproto.ToolSpec{{Name: "call_actor", Description: "call", Schema: json.RawMessage(`{"type":"object"}`)}}, toolsurface.Claude, driverproto.Situation{})
 	if err != nil {
 		t.Fatal(err)
 	}

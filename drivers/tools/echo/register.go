@@ -22,6 +22,7 @@ func init() {
 			_, err := parseConfig(raw)
 			return err
 		},
+		ConfigSchema: json.RawMessage(ConfigSchema),
 	})
 }
 

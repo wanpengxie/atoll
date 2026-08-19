@@ -63,11 +63,17 @@ type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 // (unreachable pre-Build). Future class-level facts are additive fields here;
 // the Register signature no longer changes when they arrive.
 type ClassDecl struct {
-	Kind           actor.Kind
-	Placement      channelspec.PlacementKind
-	Manifest       introspect.Manifest
-	New            Constructor
+	Kind      actor.Kind
+	Placement channelspec.PlacementKind
+	Manifest  introspect.Manifest
+	New       Constructor
+	// ValidateConfig is the acceptance gate. ConfigSchema is the same contract
+	// stated forward: the gate can only say no after the fact, and a caller
+	// writing a declaration has nothing else to go on — the shape lives in Go
+	// types a template author cannot read. Optional, because a class taking no
+	// config has nothing to describe.
 	ValidateConfig func(json.RawMessage) error
+	ConfigSchema   json.RawMessage
 }
 
 // ErrUnknownClass distinguishes "no such class" from "config invalid": the
@@ -148,6 +154,19 @@ func ClassKind(class string) (actor.Kind, bool) {
 		return "", false
 	}
 	return d.Kind, true
+}
+
+// ClassConfigSchema returns a class's published config shape, if it declared
+// one. It is a pure table lookup like the two above, and answers the question
+// a declaration author has to answer before writing config at all.
+func ClassConfigSchema(class string) (json.RawMessage, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	d, ok := reg[class]
+	if !ok || len(d.ConfigSchema) == 0 {
+		return nil, false
+	}
+	return append(json.RawMessage(nil), d.ConfigSchema...), true
 }
 
 // classes returns the registered class keys, sorted (stable iteration order).

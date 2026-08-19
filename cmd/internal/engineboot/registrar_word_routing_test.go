@@ -26,8 +26,8 @@ func TestEveryRegistrarWordReachesItsHandlerThroughDeclaredRoutes(t *testing.T) 
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "word-routing-home"}), &home)
 	bundle := waitBundle(t, eng, home.ChannelID)
 	words := append(append([]lagoon.Word{}, lagoon.WriteWords[:]...), lagoon.ReadWords[:]...)
-	if len(words) != 28 {
-		t.Fatalf("registrar word inventory=%d want=28", len(words))
+	if len(words) != 29 {
+		t.Fatalf("registrar word inventory=%d want=29", len(words))
 	}
 	seenTemplates := 0
 	routes := []struct {

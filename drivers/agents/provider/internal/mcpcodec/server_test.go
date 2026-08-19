@@ -14,7 +14,7 @@ import (
 
 func testServer(t *testing.T, life context.Context) *Server {
 	t.Helper()
-	surface, err := toolsurface.Assemble([]driverproto.ToolSpec{{Name: "call_actor", Description: "call", Schema: json.RawMessage(`{"type":"object"}`)}}, toolsurface.Claude)
+	surface, err := toolsurface.Assemble([]driverproto.ToolSpec{{Name: "call_actor", Description: "call", Schema: json.RawMessage(`{"type":"object"}`)}}, toolsurface.Claude, driverproto.Situation{})
 	if err != nil {
 		t.Fatal(err)
 	}

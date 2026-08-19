@@ -39,6 +39,10 @@ func (registrarClassStub) LookupClassKind(string) (actor.Kind, bool) {
 func (registrarClassStub) LookupClassPlacement(string) (channelspec.PlacementKind, bool) {
 	return channelspec.PlacementServer, true
 }
+func (registrarClassStub) Classes() []string { return []string{"echo"} }
+func (registrarClassStub) ClassConfigSchema(string) (json.RawMessage, bool) {
+	return json.RawMessage(`{"type":"object"}`), true
+}
 
 func (s registrarFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return s.facts, s.found, s.err

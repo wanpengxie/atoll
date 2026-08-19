@@ -37,3 +37,17 @@ const (
 	CapabilityResume    = "resume"
 	CapabilityFork      = "fork"
 )
+
+// Situation is who one agent is and where it sits. It is host context, never
+// declaration config: composition knows the member id and channel, the model
+// does not — every tool an agent has answers about OTHER actors, so without
+// this it cannot tell its own facts from its sender's. Providers project it
+// into the system prompt; nothing on the wire carries it.
+type Situation struct {
+	ActorID string // this agent's full member id
+	Kind    string // its actor kind, from the closed set
+	Seed    string // its declaration id (agents are declaration-minted)
+	Class   string // the class backing it, e.g. codex
+	Channel string // the channel it lives in
+	IsCore  bool   // whether that channel is c0, the space registry channel
+}

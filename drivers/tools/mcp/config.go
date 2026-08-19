@@ -102,3 +102,22 @@ func ensureEOF(dec *json.Decoder) error {
 	}
 	return err
 }
+
+// ConfigSchema publishes what Config above accepts, for the same reason the
+// strict decoder exists: an undeclared field is a hard rejection, so a caller
+// needs the field list before writing one, not after.
+const ConfigSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "transport"],
+  "properties": {
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+    "transport": {"type": "string", "enum": ["stdio", "http"]},
+    "command": {"type": "string", "description": "stdio transport: the executable to run"},
+    "args": {"type": "array", "items": {"type": "string"}},
+    "cwd": {"type": "string"},
+    "env": {"type": "object", "additionalProperties": {"type": "string"}},
+    "url": {"type": "string", "description": "http transport: the server endpoint"},
+    "call_timeout_ms": {"type": "integer", "minimum": 1}
+  }
+}`

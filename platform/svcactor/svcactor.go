@@ -271,6 +271,39 @@ func skeletonCard(table ServiceTable) channel.Card {
 	return channel.Card{Words: words}
 }
 
+// membraneOpen is the SINGLE judgement behind both what the port accepts and
+// what the card advertises. c0 is the one caller a channel's membrane answers
+// to; every other origin reaches this channel through agent.ask or the
+// endpoint table alone. Keeping dispatch and cardFor on one predicate is the
+// whole point: a card that advertises more than dispatch accepts sends callers
+// into guaranteed failures, and one that advertises less hides a real power —
+// the second is what actually happened, and why c0 believed for an entire
+// conversation that it could not read a sub-channel's roster.
+func membraneOpen(caller, core channel.ID) bool { return caller == core }
+
+// cardFor projects the service card for one caller. The stored card is the
+// caller-independent half — agent.ask plus the explicit endpoint table, whose
+// specs cost a round trip per receiver to materialise. The membrane words are
+// static protocol facts, so they are added per caller and never persisted.
+func (s *service) cardFor(caller channel.ID) channel.Card {
+	card := s.cardSnapshot()
+	if !membraneOpen(caller, s.deps.Core) {
+		return card
+	}
+	docs := introspect.SystemWordSpecs()
+	for _, entry := range message.SystemEntries() {
+		if entry.Kind != message.KindRequest || entry.Locus != message.SystemLocusMembrane {
+			continue
+		}
+		raw, err := json.Marshal(docs[entry.Name])
+		if err != nil {
+			continue
+		}
+		card.Words[entry.Name] = raw
+	}
+	return card
+}
+
 func (s *service) servePort(life context.Context, sys actorbase.Sys) {
 	var inFlight sync.WaitGroup
 	defer inFlight.Wait()
@@ -295,7 +328,7 @@ func (s *service) servePort(life context.Context, sys actorbase.Sys) {
 					req.describe.done <- describeResponse{err: errors.New("svcactor: describe origin channel does not match bound caller")}
 					return
 				}
-				req.describe.done <- describeResponse{card: s.cardSnapshot()}
+				req.describe.done <- describeResponse{card: s.cardFor(req.describe.caller)}
 			}
 		}(req)
 	}
@@ -331,7 +364,7 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 				return gateFailure(channel.GateReceiverInactive, "service agent is inactive")
 			}
 		}
-	case req.From.Channel == s.deps.Core && message.IsMembraneWord(req.Type):
+	case membraneOpen(req.From.Channel, s.deps.Core) && message.IsMembraneWord(req.Type):
 		target = actor.SystemActorID
 	case message.IsSpaceWord(req.Type):
 		target = actor.ActorID("system:registrar")

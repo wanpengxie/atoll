@@ -44,6 +44,7 @@ const (
 	TypeSystemDeviceDetach          = "system.device.detach"
 	TypeSystemDeviceList            = "system.device.list"
 	TypeSystemDeviceDelete          = "system.device.delete"
+	TypeSystemClassList             = "system.class.list"
 	TypeSystemMemberCreate          = "system.member.create"
 	TypeSystemMemberAdmit           = "system.member.admit"
 	TypeSystemMemberList            = "system.member.list"
@@ -85,6 +86,7 @@ var systemEntries = [...]SystemEntry{
 	{Name: TypeSystemDeviceDetach, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemDeviceList, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemDeviceDelete, Kind: KindRequest, Locus: SystemLocusC0},
+	{Name: TypeSystemClassList, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemMemberCreate, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberAdmit, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberList, Kind: KindRequest, Locus: SystemLocusMembrane},

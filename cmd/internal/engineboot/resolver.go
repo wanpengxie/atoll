@@ -183,6 +183,16 @@ func (r *assemblyResolver) LookupClassKind(class string) (actor.Kind, bool) {
 	return classregistry.ClassKind(class)
 }
 
+// Classes and ClassConfigSchema answer what a declaration author needs before
+// writing one. The platform-internal classes above are minted by genesis and
+// never named in a template, so they are absent here for the same reason they
+// are special-cased above: listing them would offer a choice that is not one.
+func (r *assemblyResolver) Classes() []string { return classregistry.RegisteredClasses() }
+
+func (r *assemblyResolver) ClassConfigSchema(class string) (json.RawMessage, bool) {
+	return classregistry.ClassConfigSchema(class)
+}
+
 func (r *assemblyResolver) LookupClassPlacement(class string) (channelspec.PlacementKind, bool) {
 	switch class {
 	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.ClassRegistrar, "human":

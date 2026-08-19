@@ -29,6 +29,11 @@ type Config struct {
 	// Home is the CODEX_HOME the app-server child runs under. Empty means
 	// the codex default (~/.codex). See ResolveHome.
 	Home string
+	// Situation is who this agent is and where it sits. It reaches the model
+	// as the system prompt's identity block and the tool guide's reach
+	// paragraph. Composition fills it from the host context and the instance
+	// spec; it is never decl config.
+	Situation driverproto.Situation
 }
 
 type specConfig struct {
@@ -79,3 +84,23 @@ func ParseConfig(raw json.RawMessage, workspace string, logger *slog.Logger) (Co
 	}
 	return Config{WorkspaceDir: workspace, Binary: "codex", Logger: logger, processFactory: spawnProcess, Selections: selections, Default: spec.Default, Prompt: spec.Prompt, Home: ResolveHome()}, nil
 }
+
+// ConfigSchema publishes what specConfig above accepts. Decoding is strict, so
+// an undeclared field is a hard rejection; stating the fields forward is the
+// only way a declaration author learns them without reading this file.
+const ConfigSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "prompt": {"type": "string", "description": "static instruction block prepended to this agent's system prompt"},
+    "selections": {
+      "type": "array",
+      "description": "model/effort options this agent may be switched between at runtime",
+      "items": {"type": "object", "additionalProperties": false, "properties": {
+        "model": {"type": "string"},
+        "effort": {"type": "string"}
+      }}
+    },
+    "default": {"type": "integer", "minimum": 0, "description": "index into selections; requires selections to be non-empty"}
+  }
+}`

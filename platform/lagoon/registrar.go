@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -259,6 +260,44 @@ func decodeClosed(raw json.RawMessage, out any) error {
 	return actorbase.DecodeStrict(raw, out)
 }
 
+// decodeArgs decodes one word's closed argument struct and, when that fails,
+// says why and what the word wanted instead. Strict decoding rejects a payload
+// for reasons only the decoder knows — an unknown field, an array where an
+// object belongs — so replacing its account with a fixed sentence leaves the
+// sender to guess which of those it was. That is not hypothetical: one observed
+// session burned two extra attempts on a bare "invalid JSON payload" from this
+// path, and in the same session corrected an agent.ask payload on the first
+// retry, because that path had kept the decoder's own message.
+func decodeArgs(raw json.RawMessage, out any, shape string) error {
+	err := decodeClosed(raw, out)
+	if err == nil {
+		return nil
+	}
+	detail := "invalid payload: " + err.Error()
+	if shape != "" {
+		detail += "; this word takes " + shape
+	}
+	return invalid(detail)
+}
+
+// nameRule states the name law from ValidateName instead of only enforcing it.
+// "lagoon: invalid name" names the package that refused and nothing a caller
+// can act on; the first name an agent tried here was a non-ASCII one, which
+// the rule rules out in its first clause.
+func nameRule(what, got string) string {
+	return fmt.Sprintf("%s %q is not a valid name: use 1-63 characters of lowercase a-z, 0-9 or '-', starting and ending with a letter or digit (no spaces, uppercase, or non-ASCII)", what, got)
+}
+
+const (
+	shapeRecipe = `{"name": "<1-63 chars, lowercase a-z 0-9 and '-'>", "recipe": {"declarations": [{"decl_id": "<an actor template id>"}], "profile": {"description": "...", "serving": 0 or 1, "svc_agent": "<a decl_id listed in declarations>"}}}`
+
+	shapeChannelTemplate = `{"id": "...", "name": "...", "visibility": "public" or "private", "body": {"declarations": [{"decl_id": "..."}], "profile": {...}}}`
+
+	shapeChannelTemplateEdit = `{"id": "..."} plus any of name, description, visibility, body`
+
+	shapeChannelProfile = `{"channel_id": "...", "description": "...", "serving": 0 or 1}`
+)
+
 func decodeEmpty(raw json.RawMessage) error {
 	var body struct{}
 	if err := actorbase.DecodeStrictEmpty(raw, &body); err != nil {
@@ -271,20 +310,20 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 	switch word {
 	case WordChannelCreate:
 		var p ChannelCreate
-		if err := decodeClosed(raw, &p); err != nil {
-			return nil, invalid("invalid JSON payload")
+		if err := decodeArgs(raw, &p, shapeRecipe); err != nil {
+			return nil, err
 		}
 		return r.createChannel(sys, ctx, principal, source, p)
 	case WordChannelTemplateCreate:
 		var p ChannelTemplateRegister
-		if err := decodeClosed(raw, &p); err != nil {
-			return nil, invalid("invalid JSON payload")
+		if err := decodeArgs(raw, &p, shapeChannelTemplate); err != nil {
+			return nil, err
 		}
 		return r.registerChannelTemplate(ctx, principal, p)
 	case WordChannelTemplateSet:
 		var p ChannelTemplateEdit
-		if err := decodeClosed(raw, &p); err != nil {
-			return nil, invalid("invalid JSON payload")
+		if err := decodeArgs(raw, &p, shapeChannelTemplateEdit); err != nil {
+			return nil, err
 		}
 		return r.editChannelTemplate(ctx, principal, p)
 	case WordChannelTemplateDelete:
@@ -295,8 +334,8 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 		return r.revokeChannelTemplate(ctx, principal, p)
 	case WordChannelSet:
 		var p ChannelProfileSet
-		if err := decodeClosed(raw, &p); err != nil {
-			return nil, invalid("invalid JSON payload")
+		if err := decodeArgs(raw, &p, shapeChannelProfile); err != nil {
+			return nil, err
 		}
 		return r.setChannelProfile(ctx, source, p)
 	case WordChannelDelete:
@@ -448,6 +487,11 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 			return nil, err
 		}
 		return r.readDevices(ctx)
+	case WordClassList:
+		if err := decodeEmpty(raw); err != nil {
+			return nil, err
+		}
+		return r.readClasses()
 	case WordPrincipalGet:
 		if err := decodeEmpty(raw); err != nil {
 			return nil, err
@@ -494,7 +538,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		return regspec.ChannelRow{}, false, invalid("name required")
 	}
 	if err := ValidateName(name); err != nil {
-		return regspec.ChannelRow{}, false, invalid(err.Error())
+		return regspec.ChannelRow{}, false, invalid(nameRule("channel name", name))
 	}
 	if parent == "" {
 		return regspec.ChannelRow{}, false, invalid("parent required")
@@ -569,7 +613,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			return regspec.ChannelRow{}, false, notFound("declaration")
 		}
 		if decl.Visibility != "public" && decl.Owner != owner {
-			return regspec.ChannelRow{}, false, denied("declaration is private")
+			return regspec.ChannelRow{}, false, denied(fmt.Sprintf("declaration %q is private and owned by %q, not you; use a public declaration, one you own, or create your own with system.actor.template.create and visibility \"public\"", item.DeclID, decl.Owner))
 		}
 		config := decl.Config
 		if len(item.Config) > 0 {
@@ -658,6 +702,23 @@ func targetConfig(id channel.ID) json.RawMessage {
 	raw, _ := json.Marshal(map[string]channel.ID{"channel": id})
 	return raw
 }
+
+// declaredIn lists what the recipe actually declared. Every rejection in
+// validateServiceProfile is a mismatch between a name the profile used and the
+// declarations above it, and the sender cannot see that set from the refusal
+// alone — it wrote the payload, but not necessarily the template ids inside it.
+func declaredIn(kinds map[string]actor.Kind) string {
+	if len(kinds) == 0 {
+		return "this recipe declares no members at all"
+	}
+	names := make([]string, 0, len(kinds))
+	for name, kind := range kinds {
+		names = append(names, fmt.Sprintf("%s (%s)", name, kind))
+	}
+	sort.Strings(names)
+	return "this recipe declares: " + strings.Join(names, ", ")
+}
+
 func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]actor.Kind) error {
 	for name, endpoint := range profile.Endpoints {
 		if strings.TrimSpace(name) == "" || name == introspect.QueryDescribe || name == "agent.ask" || strings.HasPrefix(name, "svcactor.") || strings.HasPrefix(name, "system.") {
@@ -665,15 +726,15 @@ func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]act
 		}
 		kind, ok := kinds[endpoint.Receiver]
 		if !ok {
-			return invalid("endpoint receiver is not in the recipe")
+			return invalid(fmt.Sprintf("endpoint %q names receiver %q, which is not in this recipe; %s", name, endpoint.Receiver, declaredIn(kinds)))
 		}
 		if kind != actor.KindTool && kind != actor.KindAgent && kind != actor.KindHuman {
-			return invalid("endpoint receiver kind is not serviceable")
+			return invalid(fmt.Sprintf("endpoint %q names receiver %q, a %s declaration; only tool, agent and human declarations can answer an endpoint", name, endpoint.Receiver, kind))
 		}
 	}
 	if profile.SvcAgent != nil && *profile.SvcAgent != "default" {
 		if kinds[*profile.SvcAgent] != actor.KindAgent {
-			return invalid("svc_agent must name an agent declaration in the recipe")
+			return invalid(fmt.Sprintf("svc_agent %q must name an agent declaration listed in this recipe's declarations; %s. Either add that declaration, name one of them, or use \"default\" for the first active agent", *profile.SvcAgent, declaredIn(kinds)))
 		}
 	}
 	return nil
@@ -1139,7 +1200,7 @@ func (r *Registrar) clearOverlay(ctx context.Context, source channel.ID, p Overl
 
 func (r *Registrar) createDevice(ctx context.Context, owner, name string) (regspec.DeviceRow, error) {
 	if err := ValidateName(name); err != nil {
-		return regspec.DeviceRow{}, invalid(err.Error())
+		return regspec.DeviceRow{}, invalid(nameRule("device name", name))
 	}
 	if row, found, err := r.registry.GetDeviceByName(ctx, name); err != nil {
 		return regspec.DeviceRow{}, err
@@ -1477,6 +1538,39 @@ func (r *Registrar) readChannels(ctx context.Context, p ChannelList) ([]regspec.
 // did, see ListPrincipals/ListDevices).
 func (r *Registrar) readDevices(ctx context.Context) ([]regspec.DeviceRow, error) {
 	return r.registry.store.ListDevices(ctx)
+}
+
+// ClassRow is one runnable class as a declaration author needs to see it: what
+// to name in `class`, what kind of member that mints, and what `config` may
+// contain. The schema is the class's own published contract, not a copy — a
+// copy here would drift from the parser that actually rejects config.
+type ClassRow struct {
+	Class        string          `json:"class"`
+	Kind         string          `json:"kind"`
+	Placement    string          `json:"placement"`
+	ConfigSchema json.RawMessage `json:"config_schema,omitempty"`
+}
+
+func (r *Registrar) readClasses() ([]ClassRow, error) {
+	if r.classes == nil {
+		return nil, invalid("class catalog unavailable")
+	}
+	names := r.classes.Classes()
+	out := make([]ClassRow, 0, len(names))
+	for _, class := range names {
+		row := ClassRow{Class: class}
+		if kind, ok := r.classes.LookupClassKind(class); ok {
+			row.Kind = string(kind)
+		}
+		if placement, ok := r.classes.LookupClassPlacement(class); ok {
+			row.Placement = string(placement)
+		}
+		if schema, ok := r.classes.ClassConfigSchema(class); ok {
+			row.ConfigSchema = schema
+		}
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 func (r *Registrar) readPrincipal(ctx context.Context, id string) (regspec.PrincipalRow, error) {

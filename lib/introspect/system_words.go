@@ -2,6 +2,7 @@ package introspect
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -11,12 +12,20 @@ import (
 // manifest layer owns the human-facing contract projected by actor.describe.
 func SystemWordSpecs() map[string]WordSpec {
 	return map[string]WordSpec{
-		message.TypeSystemChannelCreate:         systemWord("Create a channel from an inline recipe.", "name (string), recipe (object).", objectSchema(`"name":{"type":"string"},"recipe":{"type":"object"}`, "name", "recipe")),
-		message.TypeSystemChannelGet:            systemWord("Get one channel's registered facts.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
-		message.TypeSystemChannelList:           systemWord("List registered channels, optionally below one parent.", "parent_id (optional string).", objectSchema(`"parent_id":{"type":"string"}`)),
-		message.TypeSystemChannelSet:            systemWord("Update a channel's profile.", "channel_id, description (strings), serving (integer 0 or 1).", objectSchema(`"channel_id":{"type":"string"},"description":{"type":"string"},"serving":{"type":"integer","enum":[0,1]}`, "channel_id", "description", "serving")),
-		message.TypeSystemChannelDelete:         systemWord("Retire a channel.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
-		message.TypeSystemChannelTemplateCreate: systemWord("Create a reusable channel template.", "id, name (strings), body (object); description and visibility optional.", objectSchema(`"id":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"visibility":{"type":"string","enum":["private","public"]},"body":{"type":"object"}`, "id", "name", "body")),
+		message.TypeSystemChannelCreate: systemWordWithExamples(
+			"Create a channel from an inline recipe. The new channel is a child of the channel you send this from.",
+			"name (string), recipe (object). A channel whose recipe names no svc_agent accepts nothing through its service door afterwards.",
+			objectSchema(channelNameSchema+","+recipeSchema, "name", "recipe"),
+			recipeExampleMinimal, recipeExampleServing),
+		message.TypeSystemChannelGet:    systemWord("Get one channel's registered facts.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
+		message.TypeSystemChannelList:   systemWord("List registered channels, optionally below one parent.", "parent_id (optional string).", objectSchema(`"parent_id":{"type":"string"}`)),
+		message.TypeSystemChannelSet:    systemWord("Update a channel's profile.", "channel_id, description (strings), serving (integer 0 or 1).", objectSchema(`"channel_id":{"type":"string"},"description":{"type":"string"},"serving":{"type":"integer","enum":[0,1]}`, "channel_id", "description", "serving")),
+		message.TypeSystemChannelDelete: systemWord("Retire a channel.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
+		message.TypeSystemChannelTemplateCreate: systemWordWithExamples(
+			"Create a reusable channel template. Its body is the same recipe system.channel.create takes inline.",
+			"id, name (strings), body (object); description and visibility optional. visibility defaults to private, and a private template can only be used by its owner.",
+			objectSchema(`"id":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"visibility":{"type":"string","enum":["private","public"]},`+strings.Replace(recipeSchema, `"recipe":`, `"body":`, 1), "id", "name", "body"),
+			templateBodyExample),
 		message.TypeSystemChannelTemplateGet:    systemWord("Get one channel template.", "id (string).", objectSchema(`"id":{"type":"string"}`, "id")),
 		message.TypeSystemChannelTemplateList:   systemWord("List channel templates visible to the caller.", "No parameters.", objectSchema("")),
 		message.TypeSystemChannelTemplateSet:    systemWord("Update fields of a channel template.", "id (string); name, description, visibility, body are optional.", objectSchema(`"id":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"visibility":{"type":"string"},"body":{"type":"object"}`, "id")),
@@ -31,7 +40,7 @@ func SystemWordSpecs() map[string]WordSpec {
 		message.TypeSystemPrincipalCreate:       systemWord("Create a principal account.", "email, secret_hash (strings); id and display_name optional.", objectSchema(`"id":{"type":"string"},"email":{"type":"string"},"secret_hash":{"type":"string"},"display_name":{"type":"string"}`, "email", "secret_hash")),
 		message.TypeSystemPrincipalLogin:        systemWord("Authenticate a principal by email and password.", "email, password (strings).", objectSchema(`"email":{"type":"string"},"password":{"type":"string"}`, "email", "password")),
 		message.TypeSystemPrincipalDelete:       systemWord("Retire a principal account.", "principal_id (string).", objectSchema(`"principal_id":{"type":"string"}`, "principal_id")),
-		message.TypeSystemPrincipalGet:          systemWord("Get the effective caller's principal facts.", "No parameters.", objectSchema("")),
+		message.TypeSystemPrincipalGet:          systemWord("Get YOUR OWN principal facts. You are the effective caller, so this answers about you — it is NOT a lookup of whoever sent you the request you are handling. Use system.member.get or system.principal.list to learn about somebody else.", "No parameters.", objectSchema("")),
 		message.TypeSystemPrincipalList:         systemWord("List principals visible to the caller.", "No parameters.", objectSchema("")),
 		message.TypeSystemCredentialSet:         systemWord("Replace a principal's credential hash.", "principal_id, secret_hash (strings).", objectSchema(`"principal_id":{"type":"string"},"secret_hash":{"type":"string"}`, "principal_id", "secret_hash")),
 		message.TypeSystemDeviceCreate:          systemWord("Create a device owned by the caller.", "name (string).", objectSchema(`"name":{"type":"string"}`, "name")),
@@ -39,9 +48,10 @@ func SystemWordSpecs() map[string]WordSpec {
 		message.TypeSystemDeviceDetach:          systemWord("Detach a device from a channel.", "device_id, channel_id (strings).", objectSchema(`"device_id":{"type":"string"},"channel_id":{"type":"string"}`, "device_id", "channel_id")),
 		message.TypeSystemDeviceList:            systemWord("List devices visible to the caller.", "No parameters.", objectSchema("")),
 		message.TypeSystemDeviceDelete:          systemWord("Retire a device.", "device_id (string).", objectSchema(`"device_id":{"type":"string"}`, "device_id")),
-		message.TypeSystemMemberCreate:          systemWord("Create this channel's member from an actor declaration.", "decl_id (string).", objectSchema(`"decl_id":{"type":"string"}`, "decl_id")),
-		message.TypeSystemMemberAdmit:           systemWord("Admit a principal as a human member of this channel.", "principal (string).", objectSchema(`"principal":{"type":"string"}`, "principal")),
-		message.TypeSystemMemberList:            systemWord("List this channel's current members and presence facts.", "No parameters.", objectSchema("")),
+		message.TypeSystemClassList:             systemWord("List the actor classes this node can run, each with the config shape its declarations must follow. Read this before writing an actor template: class decides what config means, and config is decoded strictly, so a field the schema does not list is rejected. A class with no config_schema takes no config at all.", "No parameters.", objectSchema("")),
+		message.TypeSystemMemberCreate:          systemWord("Create a member of the channel this request reaches, from an actor declaration. Sent to your own system door it acts on your channel; sent to a peer it acts on that peer's channel.", "decl_id (string): an actor template visible to you.", objectSchema(`"decl_id":{"type":"string"}`, "decl_id")),
+		message.TypeSystemMemberAdmit:           systemWord("Admit a principal as a human member of the channel this request reaches. Sent to your own system door it acts on your channel; sent to a peer it acts on that peer's channel.", "principal (string): a principal id, not an actor id.", objectSchema(`"principal":{"type":"string"}`, "principal")),
+		message.TypeSystemMemberList:            systemWord("List the current members and presence facts of the channel this request reaches. Sent to your own system door it lists your channel; sent to a peer it lists that peer's channel.", "No parameters.", objectSchema("")),
 		message.TypeSystemMemberGet:             systemWord("Get one member's membership and presence facts.", "member (string actor id or unambiguous segment).", objectSchema(`"member":{"type":"string"}`, "member")),
 		message.TypeSystemMemberDelete:          systemWord("Remove a member from this channel.", "member (string actor id or unambiguous segment).", objectSchema(`"member":{"type":"string"}`, "member")),
 		message.TypeSystemMemberRestart:         systemWord("Restart a live member's cell generation.", "member (string actor id or unambiguous segment).", objectSchema(`"member":{"type":"string"}`, "member")),
@@ -55,6 +65,45 @@ func SystemWordSpecs() map[string]WordSpec {
 func systemWord(description, params string, schema json.RawMessage) WordSpec {
 	return WordSpec{Description: description + "\nParameters: " + params, InputSchema: schema}
 }
+
+// systemWordWithExamples is for the words whose argument is a nested structure
+// rather than a few scalars. A schema describes such an argument correctly and
+// still leaves a caller guessing at the arrangement; a worked example does not.
+// The recipe words are the ones that cost real attempts to guess: one observed
+// session spent five failed submissions on system.channel.create alone.
+func systemWordWithExamples(description, params string, schema json.RawMessage, examples ...string) WordSpec {
+	spec := systemWord(description, params, schema)
+	for _, example := range examples {
+		spec.Examples = append(spec.Examples, json.RawMessage(example))
+	}
+	return spec
+}
+
+// channelNameSchema carries the name law from lagoon.ValidateName as a pattern.
+// The law is enforced there and stated here; a caller that reads this cannot
+// send the rejected form, and one that cannot read it has no other source —
+// the previous schema said only "string", and the first thing an agent tried
+// was a non-ASCII name.
+const channelNameSchema = `"name":{"type":"string","pattern":"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$","description":"1-63 chars, lowercase a-z, 0-9 and '-', not starting or ending with '-'"}`
+
+// recipeSchema is the inline channel recipe: the declarations a new channel is
+// born with, plus the service profile that decides whether anyone outside can
+// reach it. It is spelled out here because it exists nowhere a caller can read
+// — regspec.TemplateBody is a Go type, and the word previously published it as
+// a bare object.
+const recipeSchema = `"recipe":{"type":"object","additionalProperties":false,"description":"what the new channel is born with","properties":{` +
+	`"declarations":{"type":"array","description":"members minted at genesis; each decl_id must name an actor template visible to you (public, or one you own)","items":{"type":"object","additionalProperties":false,"required":["decl_id"],"properties":{"decl_id":{"type":"string"},"config":{"type":"object","description":"per-channel config overlay for this declaration"}}}},` +
+	`"profile":{"type":"object","additionalProperties":false,"description":"how the channel serves callers from outside","properties":{` +
+	`"description":{"type":"string"},` +
+	`"serving":{"type":"integer","enum":[0,1],"description":"1 makes the channel reachable through its service door"},` +
+	`"svc_agent":{"type":"string","description":"which agent answers agent.ask from outside. Must be a decl_id listed in declarations above and that declaration must be an agent, or the literal \"default\" to use the first active agent. Omit it and the channel answers nothing from outside."},` +
+	`"endpoints":{"type":"object","description":"extra words the service door accepts, mapped to the declaration that answers them","additionalProperties":{"type":"object","required":["receiver"],"properties":{"description":{"type":"string"},"receiver":{"type":"string"},"schema":{"type":"object"},"examples":{"type":"array"}}}}}}}}`
+
+const recipeExampleMinimal = `{"name":"research","recipe":{"declarations":[],"profile":{"description":"a channel with no members and no service door"}}}`
+
+const recipeExampleServing = `{"name":"research","recipe":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"analysis workspace","serving":1,"svc_agent":"my-analyst"}}}`
+
+const templateBodyExample = `{"id":"team-channel","name":"Team channel","visibility":"public","body":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"a team workspace","serving":1,"svc_agent":"my-analyst"}}}`
 
 func objectSchema(properties string, required ...string) json.RawMessage {
 	shape := map[string]any{"type": "object", "additionalProperties": false}

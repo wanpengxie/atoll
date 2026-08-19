@@ -441,3 +441,14 @@ func settleFire(sys actorbase.Sys, msg actorbase.Msg, held map[message.ID]actorb
 	delete(held, fp.Origin)
 	delete(timers, fp.Origin)
 }
+
+// ConfigSchema publishes what Config above accepts. Decoding is strict, so an
+// undeclared field is a hard rejection; the field list has to be readable
+// before a declaration is written, not only enforced after.
+const ConfigSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_seconds": {"type": "integer", "minimum": 0, "description": "cap on countdown.start seconds; 0 or absent uses the class default"}
+  }
+}`

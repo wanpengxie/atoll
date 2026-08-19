@@ -51,6 +51,7 @@ const (
 	WordChannelTemplateGet  Word = message.TypeSystemChannelTemplateGet
 	WordDeviceList          Word = message.TypeSystemDeviceList
 	WordPrincipalGet        Word = message.TypeSystemPrincipalGet
+	WordClassList           Word = message.TypeSystemClassList
 )
 
 var WriteWords = [...]Word{
@@ -65,7 +66,7 @@ var WriteWords = [...]Word{
 var ReadWords = [...]Word{
 	WordChannelList, WordChannelGet, WordPrincipalList,
 	WordActorTemplateList, WordActorTemplateGet, WordDeviceList, WordPrincipalGet, WordPrincipalLogin,
-	WordChannelTemplateList, WordChannelTemplateGet,
+	WordChannelTemplateList, WordChannelTemplateGet, WordClassList,
 }
 
 // LobbyWords is everything c0 exposes to the lobby: the two doors an
@@ -303,6 +304,8 @@ type SystemGenesisResolver interface {
 
 type ClassCatalog interface {
 	ValidateConfig(class string, config json.RawMessage) error
+	ClassConfigSchema(class string) (json.RawMessage, bool)
+	Classes() []string
 	LookupClassKind(class string) (actor.Kind, bool)
 	LookupClassPlacement(class string) (channelspec.PlacementKind, bool)
 }

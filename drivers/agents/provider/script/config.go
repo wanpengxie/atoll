@@ -36,3 +36,12 @@ func ParseConfig(raw json.RawMessage) (Config, error) {
 	}
 	return c, nil
 }
+
+// ConfigSchema publishes what Config above accepts.
+const ConfigSchema = `{
+  "type": "object",
+  "properties": {
+    "tool_id": {"type": "string"},
+    "tool_type": {"type": "string"}
+  }
+}`

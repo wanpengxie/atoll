@@ -32,6 +32,11 @@ type Config struct {
 	// mcpConfig is a generation-owned anonymous pipe inherited as fd 3. It
 	// carries the loopback MCP URL and bearer token without argv or disk.
 	mcpConfig *os.File
+	// Situation is who this agent is and where it sits. It reaches the model
+	// as the system prompt's identity block and the tool guide's reach
+	// paragraph. Composition fills it from the host context and the instance
+	// spec; it is never decl config.
+	Situation driverproto.Situation
 }
 
 type specConfig struct {
@@ -85,3 +90,24 @@ func ParseConfig(raw json.RawMessage, workspace string, logger *slog.Logger) (Co
 	}
 	return Config{WorkspaceDir: workspace, Binary: "claude", Model: spec.Model, Logger: logger, processFactory: spawnProcess, Selections: selections, Default: spec.Default, Prompt: spec.Prompt}, nil
 }
+
+// ConfigSchema publishes what specConfig above accepts. Decoding is strict, so
+// an undeclared field is a hard rejection; stating the fields forward is the
+// only way a declaration author learns them without reading this file.
+const ConfigSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "prompt": {"type": "string", "description": "static instruction block appended to this agent's system prompt"},
+    "model": {"type": "string", "description": "model used when selections are not configured"},
+    "selections": {
+      "type": "array",
+      "description": "model/effort options this agent may be switched between at runtime",
+      "items": {"type": "object", "additionalProperties": false, "properties": {
+        "model": {"type": "string"},
+        "effort": {"type": "string"}
+      }}
+    },
+    "default": {"type": "integer", "minimum": 0, "description": "index into selections; requires selections to be non-empty"}
+  }
+}`

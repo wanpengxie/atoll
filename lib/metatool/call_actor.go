@@ -12,8 +12,11 @@ var CallActorSpec = ToolSpec{
 	Name: "call_actor",
 	Description: strings.TrimSpace(`
 Invoke a discovered member actor in this channel by emitting a request envelope.
-The fixed system door has first-class system_describe/system_call tools and must
-not be reached through this generic member primitive.
+This channel's own fixed system door has first-class system_describe/system_call
+tools and is not reached through this generic member primitive. A peer member is
+different: it is an ordinary member that happens to be a door onto another
+channel, so every word it accepts — including system words, when describe_actor
+lists them — is sent through call_actor, addressed to the peer.
 
 Workflow:
   1. Call list_actors first to see who is in the channel (thin directory:

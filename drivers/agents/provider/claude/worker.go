@@ -182,7 +182,7 @@ func (w *worker) Open(ctx context.Context, req driverproto.OpenRequest) {
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: "tool host unavailable", Disposition: driverproto.RetireWorker})
 		return
 	}
-	surface, err := toolsurface.Assemble(w.host.Tools().Catalog(), toolsurface.Claude)
+	surface, err := toolsurface.Assemble(w.host.Tools().Catalog(), toolsurface.Claude, w.cfg.Situation)
 	if err != nil {
 		w.terminal(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: err.Error(), Disposition: driverproto.RetireWorker})
 		return

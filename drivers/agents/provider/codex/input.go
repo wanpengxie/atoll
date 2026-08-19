@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
@@ -21,7 +20,7 @@ func buildInput(batch []driverproto.DriverMessage, background []driverproto.Cont
 	for _, m := range batch {
 		text := m.Text
 		if m.Caller.Actor != "" {
-			text = fmt.Sprintf("[from %s/%s]\n%s", m.Caller.Channel, m.Caller.Actor, text)
+			text = driverproto.CallerLine(m.Caller) + "\n" + text
 		}
 		out = append(out, map[string]any{"type": "text", "text": text})
 	}

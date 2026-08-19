@@ -21,9 +21,9 @@ import (
 
 func init() {
 	full := map[string]bool{driverproto.CapabilitySteer: true, driverproto.CapabilityInterrupt: true, driverproto.CapabilityResume: true}
-	registry.Register(claude.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(claude.Class, full), New: newClaude, ValidateConfig: claude.ValidateConfig})
-	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(codex.Class, full), New: newCodex, ValidateConfig: codex.ValidateConfig})
-	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(script.Class, nil), New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }})
+	registry.Register(claude.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(claude.Class, full), New: newClaude, ValidateConfig: claude.ValidateConfig, ConfigSchema: json.RawMessage(claude.ConfigSchema)})
+	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(codex.Class, full), New: newCodex, ValidateConfig: codex.ValidateConfig, ConfigSchema: json.RawMessage(codex.ConfigSchema)})
+	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(script.Class, nil), New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }, ConfigSchema: json.RawMessage(script.ConfigSchema)})
 }
 
 func newClaude(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
@@ -37,6 +37,7 @@ func newClaude(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDe
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("claude config: %w", err)
 	}
+	cfg.Situation = situation(spec, deps, claude.Class)
 	return compose(spec, claude.NewProvider(cfg))
 }
 
@@ -51,6 +52,7 @@ func newCodex(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDec
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("codex config: %w", err)
 	}
+	cfg.Situation = situation(spec, deps, codex.Class)
 	return compose(spec, codex.NewProvider(cfg))
 }
 
@@ -63,6 +65,23 @@ func newScript(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 		return platform.ActorDecl{}, err
 	}
 	return compose(spec, script.NewProviderForTool(cfg.ToolID, cfg.ToolType))
+}
+
+// situation is where composition — the one place that knows both the instance
+// and its host — tells the agent who and where it is. The model has no tool
+// that answers either question about itself, so anything not passed here is
+// simply unknown to it for the life of the cell.
+func situation(spec registry.InstanceSpec, deps registry.Deps, class string) driverproto.Situation {
+	out := driverproto.Situation{
+		ActorID: string(spec.ID),
+		Class:   class,
+		Channel: string(deps.ChannelID),
+		IsCore:  deps.ChannelID == channelspec.C0ChannelID,
+	}
+	if kind, seed, ok := driverproto.ActorSegments(spec.ID); ok {
+		out.Kind, out.Seed = string(kind), seed
+	}
+	return out
 }
 
 func compose(spec registry.InstanceSpec, provider driverproto.Provider) (platform.ActorDecl, error) {
