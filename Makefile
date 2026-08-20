@@ -1,16 +1,25 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-release test test-full test-strict lint check-activity-types check-data-plane-scope dev clean e2e-loop
+.PHONY: deps install build build-go build-release test test-full test-strict lint check-activity-types check-data-plane-scope dev clean e2e-loop
 
 # server/daemon ship namespaced (atoll-server / atoll-daemon); the entry
 # command itself is plain `atoll` — its own name IS the namespace.
 GO_BINARIES := server daemon atoll
 
 # ----------------------------------------------------------------------------
-# install — 拉全部依赖
+# deps — 拉全部依赖（此前叫 install；那个名字现在归下面的装机向导，因为
+# 「装一个 atoll」是别人敲 make install 时想要的东西，不是拉依赖）
 # ----------------------------------------------------------------------------
-install:
+deps:
 	go mod download
+
+# ----------------------------------------------------------------------------
+# install — 装一个节点：编译，然后跑交互式装机向导。
+# 向导自己会问 home / 地址 / steward / 密码；--yes 全取默认（CI / 脚本）：
+#   make install ARGS=--yes
+# ----------------------------------------------------------------------------
+install: build-go
+	./scripts/install.sh $(ARGS)
 
 # ----------------------------------------------------------------------------
 # build

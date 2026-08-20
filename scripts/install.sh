@@ -66,8 +66,11 @@ if [ -f "$HOME_DIR/server/registry.db" ] && command -v sqlite3 >/dev/null; then
 elif [ -f "$HOME_DIR/server/registry.db" ]; then
   PREV_MARKER="unknown"
 fi
+fmt_epoch() { # GNU date takes -d @<epoch>, BSD/macOS takes -r <epoch>
+  date -d "@$1" '+%F %T' 2>/dev/null || date -r "$1" '+%F %T' 2>/dev/null || printf '%s' "$1"
+}
 if [ -n "$PREV_MARKER" ]; then
-  when="$PREV_MARKER"; [ "$PREV_MARKER" != unknown ] && when=$(date -d @$((PREV_MARKER/1000)) '+%F %T' 2>/dev/null || echo "$PREV_MARKER")
+  when="$PREV_MARKER"; [ "$PREV_MARKER" != unknown ] && when=$(fmt_epoch $((PREV_MARKER/1000)))
   warn "检测到已安装的 atoll：$HOME_DIR（装于 $when）"
   echo "    1.0 之前没有升级/兼容路径：库形变了就重装。两种处理："
   echo "      [o] 直接打开这个实例（不重装，密码/agent 保持原样）"
@@ -89,33 +92,48 @@ mkdir -p "$HOME_DIR"
 ok "home 可写: $HOME_DIR"
 
 # agent CLIs — deliberately blunt: binary present? version? credential present?
-declare -A AGENT_OK AGENT_NOTE
+# Per-agent state lives in AGENT_OK_<name>/AGENT_NOTE_<name>, not an associative
+# array: macOS still ships bash 3.2, which has no `declare -A`.
+AGENT_OK_codex=0;  AGENT_NOTE_codex=""
+AGENT_OK_claude=0; AGENT_NOTE_claude=""
+agent_set()  { eval "AGENT_OK_$1=\$2; AGENT_NOTE_$1=\$3"; }
+agent_ok()   { local __v="AGENT_OK_$1";   printf '%s' "${!__v}"; }
+agent_note() { local __v="AGENT_NOTE_$1"; printf '%s' "${!__v}"; }
 detect_codex() {
-  if ! command -v codex >/dev/null; then AGENT_OK[codex]=0; AGENT_NOTE[codex]="未安装（npm i -g @openai/codex）"; return; fi
+  if ! command -v codex >/dev/null; then agent_set codex 0 "未安装（npm i -g @openai/codex）"; return; fi
   local v; v=$(codex --version 2>/dev/null | head -1)
   if [ -s "$HOME/.codex/auth.json" ] || codex login status >/dev/null 2>&1; then
-    AGENT_OK[codex]=1; AGENT_NOTE[codex]="$v · 已登录"
+    agent_set codex 1 "$v · 已登录"
   else
-    AGENT_OK[codex]=0; AGENT_NOTE[codex]="$v · 未登录（codex login）"
+    agent_set codex 0 "$v · 未登录（codex login）"
   fi
 }
 detect_claude() {
-  if ! command -v claude >/dev/null; then AGENT_OK[claude]=0; AGENT_NOTE[claude]="未安装（npm i -g @anthropic-ai/claude-code）"; return; fi
+  if ! command -v claude >/dev/null; then agent_set claude 0 "未安装（npm i -g @anthropic-ai/claude-code）"; return; fi
   local v; v=$(claude --version 2>/dev/null | head -1)
   if [ -s "$HOME/.claude/.credentials.json" ] || claude auth status 2>/dev/null | grep -q '"loggedIn": *true'; then
-    AGENT_OK[claude]=1; AGENT_NOTE[claude]="$v · 已登录"
+    agent_set claude 1 "$v · 已登录"
   else
-    AGENT_OK[claude]=0; AGENT_NOTE[claude]="$v · 未登录（claude auth login）"
+    agent_set claude 0 "$v · 未登录（claude auth login）"
   fi
 }
 detect_codex; detect_claude
 for a in codex claude; do
-  if [ "${AGENT_OK[$a]}" = 1 ]; then ok "$a: ${AGENT_NOTE[$a]}"; else warn "$a: ${AGENT_NOTE[$a]}"; fi
+  if [ "$(agent_ok "$a")" = 1 ]; then ok "$a: $(agent_note "$a")"; else warn "$a: $(agent_note "$a")"; fi
 done
 
 ask ADDR "  监听地址" "${EXISTING_ADDR:-$DEFAULT_ADDR}"
 PORT="${ADDR##*:}"
-if command -v ss >/dev/null && ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${PORT}\$"; then
+port_busy() { # ss on linux, lsof on macOS; no tool = no opinion
+  if command -v ss >/dev/null; then
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$1\$"
+  elif command -v lsof >/dev/null; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+if port_busy "$PORT"; then
   warn "端口 $PORT 已被占用；换一个或先停掉占用者"
   ask ADDR "  监听地址" "$ADDR"
 fi
@@ -127,7 +145,7 @@ if [ "${OPEN_EXISTING:-0}" = 1 ]; then
 else
 # ---------------------------------------------------------------- 2. steward
 bold "2/5 c0 的 steward（默认 agent）"
-CANDIDATES=(); for a in codex claude; do [ "${AGENT_OK[$a]}" = 1 ] && CANDIDATES+=("$a"); done
+CANDIDATES=(); for a in codex claude; do [ "$(agent_ok "$a")" = 1 ] && CANDIDATES+=("$a"); done
 if [ ${#CANDIDATES[@]} -eq 0 ]; then
   warn "没有检测到可用且已登录的 agent。可以先装完再补：装好 codex/claude 后重跑本脚本选 [r] 重装，或用 system.actor.template.create 加。"
   ask STEWARD "  仍要写哪个 class 作 steward（codex/claude，留空=codex）" "codex"
