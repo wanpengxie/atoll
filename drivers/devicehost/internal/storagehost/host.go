@@ -44,6 +44,22 @@ func (h *Host) Delete(path string) error { return h.cr.root.Remove(path) }
 type FileInfo struct {
 	Path string
 	Size int64
+	// ModifiedAt is Unix milliseconds, and zero when the filesystem gave none.
+	// It travels with Size because the same syscall answers both: a listing
+	// that dropped it made every reader that wanted a modified date go back and
+	// stat each row for something already in hand.
+	ModifiedAt int64
+}
+
+// modifiedAt reads a stat result's mtime as Unix milliseconds, matching how
+// every other timestamp on this wire is spelled. A zero time stays zero rather
+// than becoming the epoch, so "not reported" and "1970" cannot be confused.
+func modifiedAt(info fs.FileInfo) int64 {
+	t := info.ModTime()
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
 }
 
 func (h *Host) Stat(path string) (FileInfo, bool, error) {
@@ -54,7 +70,7 @@ func (h *Host) Stat(path string) (FileInfo, bool, error) {
 	if err != nil {
 		return FileInfo{}, false, err
 	}
-	return FileInfo{Path: path, Size: info.Size()}, true, nil
+	return FileInfo{Path: path, Size: info.Size(), ModifiedAt: modifiedAt(info)}, true, nil
 }
 
 func (h *Host) List(prefix string) ([]FileInfo, error) {
@@ -93,7 +109,7 @@ func (h *Host) List(prefix string) ([]FileInfo, error) {
 		if dir != "." {
 			path = filepath.Join(dir, path)
 		}
-		out = append(out, FileInfo{Path: path, Size: info.Size()})
+		out = append(out, FileInfo{Path: path, Size: info.Size(), ModifiedAt: modifiedAt(info)})
 	}
 	return out, nil
 }

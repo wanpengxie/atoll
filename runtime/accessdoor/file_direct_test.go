@@ -13,10 +13,18 @@ import (
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
-type directMounts struct{}
+type directMounts struct {
+	root   string
+	others []StorageMount
+}
 
-func (directMounts) ResolveStorageDaemon(context.Context, channel.ID, string) (StorageMount, bool, error) {
-	return StorageMount{DaemonID: "daemon-a", Name: "laptop-a", Online: true}, true, nil
+func (m directMounts) ResolveStorageDaemon(context.Context, channel.ID, string) (StorageMount, bool, error) {
+	return StorageMount{DaemonID: "daemon-a", Name: "laptop-a", Online: true, Root: m.root}, true, nil
+}
+
+func (m directMounts) ListStorageMounts(context.Context, channel.ID) ([]StorageMount, error) {
+	out := []StorageMount{{DaemonID: "daemon-a", Name: "laptop-a", Online: true, Root: m.root}}
+	return append(out, m.others...), nil
 }
 
 type countingTransfers struct {
@@ -68,9 +76,9 @@ func TestARemoteFileRouteCarriesTheActorItWasDecidedFor(t *testing.T) {
 	transfers := &countingTransfers{}
 	d := &door{deps: Deps{
 		Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Authority:     &fakeMembership{lookupFound: true, lookupHost: "somewhere-else"},
-		State:         &fakeStateStore{},
-		ChannelID:     "c", ChannelName: "c0.c",
+		Authority: &fakeMembership{lookupFound: true, lookupHost: "somewhere-else"},
+		State:     &fakeStateStore{},
+		ChannelID: "c", ChannelName: "c0.c",
 		StorageMounts: directMounts{}, TransferControl: transfers,
 	}}
 	route, err := d.resolveFileRoute(t.Context(), "human:alice:7", "daemon://laptop-a/c0.c/docs/report.txt", access.OpWrite)
@@ -92,9 +100,9 @@ func TestAnActorInThisProcessRedeemsItsOwnRoute(t *testing.T) {
 	redeem := &recordingRedeem{}
 	d := &door{deps: Deps{
 		Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Authority:     &fakeMembership{lookupFound: true, lookupHost: "somewhere-else"},
-		State:         &fakeStateStore{},
-		ChannelID:     "c", ChannelName: "c0.c",
+		Authority: &fakeMembership{lookupFound: true, lookupHost: "somewhere-else"},
+		State:     &fakeStateStore{},
+		ChannelID: "c", ChannelName: "c0.c",
 		StorageMounts: directMounts{}, TransferControl: &countingTransfers{}, TransferRedeem: redeem,
 	}}
 	h := boundHandle{door: d, caller: "agent:steward:9", authority: accessAuthority("agent:steward:9")}
@@ -132,9 +140,9 @@ func (r *recordingRedeem) RedeemTransfer(_ context.Context, caller actor.ActorID
 func TestAnUnwiredDoorRefusesInsteadOfPretending(t *testing.T) {
 	d := &door{deps: Deps{
 		Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Authority:     &fakeMembership{lookupFound: true, lookupHost: "somewhere-else"},
-		State:         &fakeStateStore{},
-		ChannelID:     "c", ChannelName: "c0.c",
+		Authority: &fakeMembership{lookupFound: true, lookupHost: "somewhere-else"},
+		State:     &fakeStateStore{},
+		ChannelID: "c", ChannelName: "c0.c",
 		StorageMounts: directMounts{}, TransferControl: &countingTransfers{},
 	}}
 	h := boundHandle{door: d, caller: "agent:steward:9", authority: accessAuthority("agent:steward:9")}

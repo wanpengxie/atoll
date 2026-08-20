@@ -30,11 +30,63 @@ func (m daemonStorageMounts) ResolveStorageDaemon(ctx context.Context, ch channe
 	if err != nil || !found || !present {
 		return accessdoor.StorageMount{}, false, err
 	}
+	return m.mount(ctx, ch, id, name)
+}
+
+// ListStorageMounts enumerates the channel's devices so the door can ask which
+// one holds a given absolute path. A device that resolves to no name is skipped
+// rather than reported blank: a mount with no name cannot appear in an address,
+// so it can hold nothing the door could go on to open.
+func (m daemonStorageMounts) ListStorageMounts(ctx context.Context, ch channelpkg.ID) ([]accessdoor.StorageMount, error) {
+	if m.routes == nil || m.bindings == nil || m.directory == nil {
+		return nil, nil
+	}
+	ids, err := m.bindings.ListBoundDeviceIDs(ctx, ch)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]accessdoor.StorageMount, 0, len(ids))
+	for _, id := range ids {
+		name, found, err := m.directory.ResolveDeviceID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !found || name == "" {
+			continue
+		}
+		mount, ok, err := m.mount(ctx, ch, id, name)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, mount)
+		}
+	}
+	return out, nil
+}
+
+// mount completes a resolved (id, name) pair. The root is asked for only when
+// the lane is up: it is the device's own answer about its own filesystem, and
+// there is nobody to ask when the lane is gone. An offline mount therefore
+// carries an empty root, and a caller needing one says so in its own words
+// rather than inheriting "offline" for a question it did not ask.
+func (m daemonStorageMounts) mount(ctx context.Context, ch channelpkg.ID, id, name string) (accessdoor.StorageMount, bool, error) {
 	bound, err := m.bindings.IsBound(ctx, ch, id)
 	if err != nil || !bound {
 		return accessdoor.StorageMount{}, false, err
 	}
-	return accessdoor.StorageMount{DaemonID: id, Name: name, Online: m.routes.LaneAttached(id, string(ch))}, true, nil
+	online := m.routes.LaneAttached(id, string(ch))
+	mount := accessdoor.StorageMount{DaemonID: id, Name: name, Online: online}
+	if online {
+		root, ok, err := m.routes.LaneWorkspace(ctx, id, string(ch))
+		if err != nil {
+			return accessdoor.StorageMount{}, false, err
+		}
+		if ok {
+			mount.Root = root
+		}
+	}
+	return mount, true, nil
 }
 
 type daemonFiles struct {
@@ -50,13 +102,13 @@ func (f daemonFiles) Delete(ctx context.Context, daemonID, path string) error {
 }
 func (f daemonFiles) Stat(ctx context.Context, daemonID, path string) (accessdoor.FileInfo, bool, error) {
 	info, found, err := f.routes.FileStat(ctx, daemonID, string(f.chID), path)
-	return accessdoor.FileInfo{Path: info.Path, Size: info.Size}, found, err
+	return accessdoor.FileInfo{Path: info.Path, Size: info.Size, ModifiedAt: info.ModifiedAt}, found, err
 }
 func (f daemonFiles) List(ctx context.Context, daemonID, prefix string) ([]accessdoor.FileInfo, error) {
 	rows, err := f.routes.FileList(ctx, daemonID, string(f.chID), prefix)
 	out := make([]accessdoor.FileInfo, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, accessdoor.FileInfo{Path: row.Path, Size: row.Size})
+		out = append(out, accessdoor.FileInfo{Path: row.Path, Size: row.Size, ModifiedAt: row.ModifiedAt})
 	}
 	return out, err
 }

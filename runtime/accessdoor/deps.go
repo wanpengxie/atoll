@@ -17,15 +17,29 @@ type StorageMount struct {
 	DaemonID string
 	Name     string
 	Online   bool
+	// Root is this device's channel directory on its own filesystem, as the
+	// device reported it. Empty when the device has not answered (offline, or
+	// a mount resolved without asking). It exists so the door can normalize a
+	// device-local absolute path into the channel-relative one it addresses by
+	// — see normalizeFileName.
+	Root string
 }
 
 type StorageMounts interface {
 	ResolveStorageDaemon(context.Context, channel.ID, string) (StorageMount, bool, error)
+	// ListStorageMounts enumerates every device bound to the channel. A
+	// device-local absolute path names its device by lying under that device's
+	// channel directory, so answering "which file is this" means asking the
+	// mounts, not the caller — the same path is the same file whoever names it,
+	// including a browser that runs on no device at all.
+	ListStorageMounts(context.Context, channel.ID) ([]StorageMount, error)
 }
 
 type FileInfo struct {
 	Path string
 	Size int64
+	// ModifiedAt is Unix milliseconds, zero when the device reported none.
+	ModifiedAt int64
 }
 
 // FileControl performs metadata operations on the host's channel directory.

@@ -1386,7 +1386,7 @@ func (h *Host) FileStat(ctx context.Context, daemonID, chID, path string) (platf
 	if err != nil || !reply.Found || len(reply.Entries) == 0 {
 		return platform.DaemonFileInfo{}, reply.Found, err
 	}
-	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, Size: reply.Entries[0].Size}, true, nil
+	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, Size: reply.Entries[0].Size, ModifiedAt: reply.Entries[0].ModifiedAt}, true, nil
 }
 func (h *Host) FileList(ctx context.Context, daemonID, chID, path string) ([]platform.DaemonFileInfo, error) {
 	reply, err := h.file(ctx, daemonID, chID, link.FileList, path)
@@ -1395,9 +1395,26 @@ func (h *Host) FileList(ctx context.Context, daemonID, chID, path string) ([]pla
 	}
 	out := make([]platform.DaemonFileInfo, 0, len(reply.Entries))
 	for _, row := range reply.Entries {
-		out = append(out, platform.DaemonFileInfo{Path: row.Path, Size: row.Size})
+		out = append(out, platform.DaemonFileInfo{Path: row.Path, Size: row.Size, ModifiedAt: row.ModifiedAt})
 	}
 	return out, nil
+}
+
+// LaneWorkspace answers where this daemon keeps this channel's directory on
+// its own filesystem, as the daemon itself reported it. The value is the one
+// the device's storage host was opened on, so the layout rule
+// ($ATOLL_HOME/daemons/<id>/channels/<name>) stays single-sourced in compute
+// and is never recomputed here.
+func (h *Host) LaneWorkspace(ctx context.Context, daemonID, chID string) (string, bool, error) {
+	lane := h.currentLane(daemonID, channel.ID(chID))
+	if lane == nil {
+		return "", false, nil
+	}
+	root, err := lane.workspace(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	return root, true, nil
 }
 
 func (h *Host) Online(daemonID string, chID channel.ID) bool {

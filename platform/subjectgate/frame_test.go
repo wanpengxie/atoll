@@ -234,13 +234,24 @@ func TestResourceResultsAreSpelledForTheWire(t *testing.T) {
 		},
 		{
 			name:  "stat",
-			value: ResourceStat{Exists: true, Meta: &ResourceMeta{Kind: "file", CreatedAt: 7, CreatedBy: "human:root:1", Size: 9}},
-			want:  `{"exists":true,"meta":{"kind":"file","created_at":7,"created_by":"human:root:1","size":9}}`,
+			value: ResourceStat{Exists: true, Meta: &ResourceMeta{Kind: "file", CreatedAt: 7, CreatedBy: "human:root:1", Size: 9, ModifiedAt: 1787245669712}},
+			want:  `{"exists":true,"meta":{"kind":"file","created_at":7,"created_by":"human:root:1","size":9,"modified_at":1787245669712}}`,
 		},
 		{
+			// A device that reports no mtime omits the field rather than sending
+			// zero: a file listing that shows "1970" is worse than one that shows
+			// nothing where the date should be.
+			name:  "stat without a modified time",
+			value: ResourceStat{Exists: true, Meta: &ResourceMeta{Kind: "file", Size: 9}},
+			want:  `{"exists":true,"meta":{"kind":"file","size":9}}`,
+		},
+		{
+			// A file listing carries its sizes: the device answers them with the
+			// names, and dropping them made every reader stat each row to fill
+			// in a file list.
 			name:  "page",
-			value: ResourcePage{Items: []ResourceEntry{{ID: "daemon://host/c0/a.png", Kind: "file", Ops: []string{"read", "write"}}}, Next: "cur2"},
-			want:  `{"items":[{"id":"daemon://host/c0/a.png","kind":"file","ops":["read","write"]}],"next":"cur2"}`,
+			value: ResourcePage{Items: []ResourceEntry{{ID: "daemon://host/c0/a.png", Kind: "file", Ops: []string{"read", "write"}, Meta: ResourceMeta{Size: 9, ModifiedAt: 1787245669712}}}, Next: "cur2"},
+			want:  `{"items":[{"id":"daemon://host/c0/a.png","kind":"file","ops":["read","write"],"meta":{"size":9,"modified_at":1787245669712}}],"next":"cur2"}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

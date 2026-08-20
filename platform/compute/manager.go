@@ -156,6 +156,11 @@ type compartment struct {
 	manager *compartmentManager
 	chID    string
 	chName  string
+	// workspace is the channel directory this coordinate built, kept so the
+	// lane can answer link.FileRoot with the value the storage host was
+	// actually opened on. The server needs it to turn a device-local absolute
+	// path into a channel-relative one, and only this side knows $ATOLL_HOME.
+	workspace string
 
 	mu           sync.Mutex
 	state        string
@@ -889,6 +894,9 @@ func (c *compartment) build() (retErr error) {
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	c.workspace = workspace
+	c.mu.Unlock()
 	if resources.Factories == nil {
 		var closeErr error
 		if resources.Close != nil {
@@ -1040,10 +1048,12 @@ func (c *compartment) bindLane(lane *clientLane) {
 	}
 	host, outbound := c.host, c.outbound
 	resources := c.resources
+	workspace := c.workspace
 	c.mu.Unlock()
 	lane.setHost(host)
 	lane.mu.Lock()
 	lane.local = resources.LocalFileOpener
+	lane.workspace = workspace
 	lane.outbound = outbound
 	lane.bound = true
 	lane.mu.Unlock()
@@ -1244,9 +1254,12 @@ type clientLane struct {
 	// its own field rather than a nil check on the two below, because a bound
 	// compartment may legitimately have no storage host configured — that is a
 	// standing verdict, while not-yet-bound is the absence of one.
-	bound    bool
-	local    LocalFileOpener
-	outbound *DaemonOutbound
+	bound bool
+	local LocalFileOpener
+	// workspace answers link.FileRoot. It is installed with local, by the same
+	// bind, so a lane never reports a root for a storage host it does not hold.
+	workspace string
+	outbound  *DaemonOutbound
 }
 
 type laneSession struct{ lane *clientLane }
@@ -1360,6 +1373,12 @@ func (l *clientLane) boundResources() (LocalFileOpener, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.local, l.bound
+}
+
+func (l *clientLane) boundWorkspace() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.workspace
 }
 func (l *clientLane) setRetire(fn func(*clientLane)) {
 	l.mu.Lock()
@@ -1541,7 +1560,18 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 					if err != nil {
 						reply.Reason = err.Error()
 					} else if found {
-						reply.Entries = []link.FileEntry{{Path: info.Path, Size: info.Size}}
+						reply.Entries = []link.FileEntry{{Path: info.Path, Size: info.Size, ModifiedAt: info.ModifiedAt}}
+					}
+				case link.FileRoot:
+					// Answered from the value bindLane installed, not from a
+					// re-derivation of $ATOLL_HOME/daemons/<id>/channels/<name>:
+					// a second copy of that rule drifts, and the drift shows up
+					// as an authorization decision quietly using the wrong root.
+					root := l.boundWorkspace()
+					reply.OK = root != ""
+					reply.Root = root
+					if !reply.OK {
+						reply.Reason = "compute: channel workspace unavailable"
 					}
 				case link.FileList:
 					rows, err := files.List(request.Path)
@@ -1550,7 +1580,7 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 						reply.Reason = err.Error()
 					} else {
 						for _, row := range rows {
-							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, Size: row.Size})
+							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, Size: row.Size, ModifiedAt: row.ModifiedAt})
 						}
 					}
 				}

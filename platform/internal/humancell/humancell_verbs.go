@@ -42,6 +42,26 @@ func mapVerbErr(err error, errFrame frameErr) subjectgate.Frame {
 		}
 		return errFrame(wr.Reason, wr.Detail)
 	}
+	// The path family. This picks the code and passes the error's own words
+	// through: the recovery for each of these lives next to the condition that
+	// produces it, so this boundary decides which bucket a caller lands in and
+	// nothing about what a path is.
+	var outside *accessdoor.PathOutsideChannelError
+	if errors.As(err, &outside) {
+		return errFrame(subjectgate.CodePathOutsideChannel, outside.Error())
+	}
+	var relative *accessdoor.PathRelativeError
+	if errors.As(err, &relative) {
+		return errFrame(subjectgate.CodePathRelative, relative.Error())
+	}
+	var offline *accessdoor.HostOfflineError
+	if errors.As(err, &offline) {
+		return errFrame(subjectgate.CodeHostOffline, offline.Error())
+	}
+	var ambiguous *accessdoor.PathAmbiguousError
+	if errors.As(err, &ambiguous) {
+		return errFrame(subjectgate.CodeBadPayload, ambiguous.Error())
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return errFrame(subjectgate.CodeUnavailable, "cell is stopping")
 	}

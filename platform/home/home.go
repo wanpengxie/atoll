@@ -67,6 +67,9 @@ type BootstrapService struct {
 
 type DeviceDirectory interface {
 	ResolveDeviceName(context.Context, string) (id string, present bool, found bool, err error)
+	// ResolveDeviceID crosses back the other way. A file address spells a
+	// device by name; an actor's placement records it by id.
+	ResolveDeviceID(context.Context, string) (name string, found bool, err error)
 }
 
 type BindingReader interface {

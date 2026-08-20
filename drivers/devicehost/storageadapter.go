@@ -22,13 +22,13 @@ func (a storageHostAdapter) Create(path string) error { return a.host.Create(pat
 func (a storageHostAdapter) Delete(path string) error { return a.host.Delete(path) }
 func (a storageHostAdapter) Stat(path string) (compute.FileInfo, bool, error) {
 	info, found, err := a.host.Stat(path)
-	return compute.FileInfo{Path: info.Path, Size: info.Size}, found, err
+	return compute.FileInfo{Path: info.Path, Size: info.Size, ModifiedAt: info.ModifiedAt}, found, err
 }
 func (a storageHostAdapter) List(prefix string) ([]compute.FileInfo, error) {
 	rows, err := a.host.List(prefix)
 	out := make([]compute.FileInfo, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, compute.FileInfo{Path: row.Path, Size: row.Size})
+		out = append(out, compute.FileInfo{Path: row.Path, Size: row.Size, ModifiedAt: row.ModifiedAt})
 	}
 	return out, err
 }

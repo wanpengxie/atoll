@@ -31,8 +31,13 @@ type serverLane struct {
 	// syscall — can freeze without freezing plan traffic. It shares this
 	// lane's generation and has no lifecycle of its own: admitted only against
 	// this exact lane, retired with it, and its death retires the lane.
-	storage      *link.LaneStream
-	pending      map[string]chan link.LaneFrame
+	storage *link.LaneStream
+	// workspaceRoot caches this lane's channel directory on the device, as the
+	// device reported it. It is lane-scoped: constant while the lane lives and
+	// gone with it, so it is not the stale copy LaneAttached refuses — that one
+	// tracks compartment readiness, which varies under a live lane.
+	workspaceRoot string
+	pending       map[string]chan link.LaneFrame
 	actors       map[uint64]func()
 	nextActor    uint64
 	exchanges    map[uint64]net.Conn
@@ -332,6 +337,33 @@ func (l *serverLane) storageRoundTrip(ctx context.Context, frame link.LaneFrame)
 		l.mu.Unlock()
 		return link.LaneFrame{}, fmt.Errorf("daemonhost: lane RPC %s: %w", id, link.ErrLaneRPCTimeout)
 	}
+}
+
+// workspace answers where this lane's channel directory lives on the device,
+// asking once and remembering the answer for the lane's life. Only the device
+// knows $ATOLL_HOME, and the server needs the root to turn a device-local
+// absolute path into the channel-relative one the access plane addresses by.
+func (l *serverLane) workspace(ctx context.Context) (string, error) {
+	l.mu.Lock()
+	cached, retired := l.workspaceRoot, l.retired
+	l.mu.Unlock()
+	if retired {
+		return "", ErrLaneUnavailable
+	}
+	if cached != "" {
+		return cached, nil
+	}
+	reply, err := l.file(ctx, link.FileRoot, "")
+	if err != nil {
+		return "", err
+	}
+	if reply.Root == "" {
+		return "", errors.New("daemonhost: device reported an empty channel workspace")
+	}
+	l.mu.Lock()
+	l.workspaceRoot = reply.Root
+	l.mu.Unlock()
+	return reply.Root, nil
 }
 
 func (l *serverLane) file(ctx context.Context, op, path string) (link.FileReply, error) {

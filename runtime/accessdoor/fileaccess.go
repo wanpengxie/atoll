@@ -73,5 +73,13 @@ var ErrFileCapabilityUnavailable = errors.New("accessdoor: capability_unavailabl
 
 type HostOfflineError struct{ Host string }
 
-func (e *HostOfflineError) Error() string   { return "accessdoor: daemon host offline: " + e.Host }
+// Error states the one thing a caller must not conclude on its own. "Offline"
+// and "absent" call for opposite moves — wait, or create — and a caller told
+// only that something failed picks the wrong one; a model picks it confidently
+// and then rebuilds a file that was never gone.
+func (e *HostOfflineError) Error() string {
+	return "device " + e.Host + " is attached to this channel but not reachable right now. " +
+		"The file is most likely still there — do NOT treat it as missing and do NOT recreate it. " +
+		"Check the device with system.device.list; retry the same request once it is back."
+}
 func NewHostOfflineError(host string) error { return &HostOfflineError{Host: host} }

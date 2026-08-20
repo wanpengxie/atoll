@@ -36,6 +36,8 @@ type StatMeta struct {
 	CreatedAt int64
 	CreatedBy actor.ActorID
 	Size      int64
+	// ModifiedAt is Unix milliseconds, zero when the device reported none.
+	ModifiedAt int64
 }
 
 type StatResult struct {
@@ -54,6 +56,13 @@ type ListEntry struct {
 	ID   resource.ResourceID
 	Kind resourcespec.ResourceKind
 	Ops  OpSet
+	// Size is the byte count, which a channel's file listing gets from the
+	// device's filesystem in the same breath as the name. Other kinds leave it
+	// zero, exactly as stat already does for them — every entry carries its
+	// Kind, so a reader never has to guess whether a size means anything.
+	Size int64
+	// ModifiedAt is Unix milliseconds, zero when the device reported none.
+	ModifiedAt int64
 }
 
 type ListPage struct {
@@ -139,6 +148,10 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 }
 
 func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (StatResult, error) {
+	id, err := d.normalizeFileName(ctx, caller, id)
+	if err != nil {
+		return StatResult{}, err
+	}
 	address, file, addressErr := d.fileAddress(id)
 	if addressErr != nil {
 		return StatResult{}, addressErr
@@ -161,7 +174,7 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 		if !found {
 			return StatResult{Reject: QueryNotFound}, nil
 		}
-		return StatResult{Meta: StatMeta{Kind: resourcespec.KindFile, Size: info.Size}, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}}, nil
+		return StatResult{Meta: StatMeta{Kind: resourcespec.KindFile, Size: info.Size, ModifiedAt: info.ModifiedAt}, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}}, nil
 	}
 	meta, found, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
@@ -182,6 +195,11 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 }
 
 func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (ListPage, error) {
+	normalized, err := d.normalizeFilePrefix(ctx, caller, q.Prefix)
+	if err != nil {
+		return ListPage{}, err
+	}
+	q.Prefix = normalized
 	if strings.HasPrefix(q.Prefix, resourcespec.DaemonScheme+"://") {
 		prefix, err := resourcespec.ParseFilePrefix(q.Prefix)
 		if err != nil {
@@ -213,7 +231,7 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 			if err != nil {
 				return ListPage{}, err
 			}
-			entries = append(entries, ListEntry{ID: resource.ResourceID(address), Kind: resourcespec.KindFile, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}})
+			entries = append(entries, ListEntry{ID: resource.ResourceID(address), Kind: resourcespec.KindFile, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}, Size: row.Size, ModifiedAt: row.ModifiedAt})
 		}
 		return ListPage{Entries: entries}, nil
 	}

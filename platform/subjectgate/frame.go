@@ -108,6 +108,13 @@ const (
 	CodeCapabilityUnavailable = "capability_unavailable"
 	CodeForbidden             = "forbidden"
 	CodeClosed                = "closed"
+	// The path family. They are three codes rather than one because the next
+	// move differs: change the path, change how you spell it, or wait for a
+	// device. Folding them into one leaves the caller — increasingly a model,
+	// which acts on the code it reads — to guess which.
+	CodePathOutsideChannel = "path_outside_channel"
+	CodePathRelative       = "path_relative"
+	CodeHostOffline        = "host_offline"
 	// (CodeNotMember / CodeStaleBinding retired with the client-visible binding
 	// axis — see the retired-words note by the FrameType consts. Eligibility
 	// refusal is uniformly CodeForbidden.)
@@ -505,6 +512,11 @@ type ResourceEntry struct {
 	ID   string   `json:"id"`
 	Kind string   `json:"kind,omitempty"`
 	Ops  []string `json:"ops,omitempty"`
+	// Meta carries the resource's own facts, in the same shape stat answers
+	// with — a file listing already holds the sizes the device sent back with
+	// the names, and dropping them made every reader stat each row to fill in a
+	// file list.
+	Meta ResourceMeta `json:"meta"`
 }
 
 type ResourceMeta struct {
@@ -512,6 +524,10 @@ type ResourceMeta struct {
 	CreatedAt int64  `json:"created_at,omitempty"`
 	CreatedBy string `json:"created_by,omitempty"`
 	Size      int64  `json:"size"`
+	// ModifiedAt is Unix milliseconds. It is omitted rather than zeroed when
+	// the device reported none, because a reader showing "1970" is worse than
+	// one showing nothing.
+	ModifiedAt int64 `json:"modified_at,omitempty"`
 }
 
 // ResourceStat is the resource-result form for stat.

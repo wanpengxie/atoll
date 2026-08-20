@@ -86,6 +86,17 @@ func (r *Registry) ResolveDeviceName(ctx context.Context, name string) (string, 
 	return row.ID, row.Status == regspec.DevicePresent, found, err
 }
 
+// ResolveDeviceID is ResolveDeviceName's inverse: a file address spells a
+// device by name, while an actor's placement records it by id, so completing a
+// path for the caller's own device has to cross back.
+func (r *Registry) ResolveDeviceID(ctx context.Context, id string) (string, bool, error) {
+	row, found, err := r.store.GetDevice(ctx, id)
+	if err != nil || !found || row.Status != regspec.DevicePresent {
+		return "", false, err
+	}
+	return row.Name, true, nil
+}
+
 func (r *Registry) GetDeviceFact(ctx context.Context, id string) (regspec.DeviceStatus, bool, error) {
 	return r.store.GetDeviceStatus(ctx, id)
 }

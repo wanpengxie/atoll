@@ -62,4 +62,6 @@ type LocalFileOpener interface {
 type FileInfo struct {
 	Path string
 	Size int64
+	// ModifiedAt is Unix milliseconds, zero when the device reported none.
+	ModifiedAt int64
 }

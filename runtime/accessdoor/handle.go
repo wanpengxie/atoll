@@ -98,6 +98,14 @@ func (h boundHandle) Open(ctx context.Context, id resource.ResourceID, mode acce
 	if err := h.authorize(ctx); err != nil {
 		return FileAccess{}, Outcome{RejectReason: access.OwnerInactive}, nil
 	}
+	// Open is the file byte verb, so it may be strict where invoke cannot: a
+	// bare "a.pdf" is a legal opaque id for a kv resource, but as a file name
+	// it has no base — the caller has a shell and moves its working directory.
+	// Saying so beats letting it arrive as resource_not_found, which reads as
+	// "that file is gone" and sends a model off rebuilding it.
+	if raw := string(id); raw != "" && !isFileAddress(raw) && !looksAbsolute(raw) {
+		return FileAccess{}, Outcome{}, &PathRelativeError{Path: raw}
+	}
 	out, err := h.door.invoke(ctx, h.caller, mode, id, nil)
 	if err != nil || !out.Accepted() || out.Route == nil {
 		return FileAccess{}, out, err

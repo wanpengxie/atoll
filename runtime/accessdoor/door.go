@@ -32,7 +32,7 @@ func (d *door) fileAddress(id resource.ResourceID) (resourcespec.FileAddress, bo
 
 func (d *door) storageMount(ctx context.Context, host string) (StorageMount, error) {
 	if d.deps.StorageMounts == nil {
-		return StorageMount{}, errors.New("accessdoor: storage mounts unavailable")
+		return StorageMount{}, errNoStorageMounts
 	}
 	mount, found, err := d.deps.StorageMounts.ResolveStorageDaemon(ctx, d.deps.ChannelID, host)
 	if err != nil {
@@ -107,6 +107,14 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 }
 
 func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
+	// Completing a device-local path needs the caller's placement, so the
+	// membership check that produces it runs before the name is parsed. An
+	// opaque id is unaffected: normalizeFileName returns it untouched without
+	// asking anything.
+	id, err := d.normalizeFileName(ctx, caller, id)
+	if err != nil {
+		return Outcome{}, err
+	}
 	address, file, addressErr := d.fileAddress(id)
 	if addressErr != nil {
 		return Outcome{}, addressErr

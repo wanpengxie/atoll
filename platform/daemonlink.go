@@ -28,6 +28,8 @@ type DaemonMembrane struct {
 type DaemonFileInfo struct {
 	Path string
 	Size int64
+	// ModifiedAt is Unix milliseconds, zero when the device reported none.
+	ModifiedAt int64
 }
 
 type DaemonRoutes interface {
@@ -38,4 +40,9 @@ type DaemonRoutes interface {
 	FileList(context.Context, string, string, string) ([]DaemonFileInfo, error)
 	AttachedDaemons(string) []string
 	LaneAttached(string, string) bool
+	// LaneWorkspace answers where a daemon keeps a channel's directory on its
+	// own filesystem. The access plane needs it to turn a device-local absolute
+	// path into the channel-relative one it addresses by, and the device is the
+	// only side that knows $ATOLL_HOME.
+	LaneWorkspace(context.Context, string, string) (string, bool, error)
 }
