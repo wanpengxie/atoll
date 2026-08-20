@@ -220,6 +220,18 @@ func (t *Tx) GetDecl(ctx context.Context, id string) (regspec.DeclRow, bool, err
 	return row, err == nil, err
 }
 
+// GetDevice inside the transaction: a recipe that names which machine runs a
+// seat has to be checked against the device table in the same transaction that
+// writes the channel, or the check answers about a world that no longer exists
+// by the time the row lands.
+func (t *Tx) GetDevice(ctx context.Context, id string) (regspec.DeviceRow, bool, error) {
+	row, err := scanDevice(t.tx.QueryRowContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE devices.id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.DeviceRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
 func (t *Tx) GetOverlay(ctx context.Context, declID string, ch channel.ID) (regspec.OverlayRow, bool, error) {
 	row, err := scanOverlay(t.tx.QueryRowContext(ctx, `SELECT `+overlayColumns+` FROM decl_overlays WHERE decl_overlays.decl_id=? AND decl_overlays.channel_id=?`, declID, ch))
 	if errors.Is(err, sql.ErrNoRows) {

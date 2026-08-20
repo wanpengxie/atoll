@@ -65,9 +65,10 @@ func (e *opEntry) admit(ctx context.Context, principal string) (actorctl.AdmitRe
 func (e *opEntry) introduce(
 	ctx context.Context,
 	declID string,
+	desiredHost string,
 	initiator actor.ActorID,
 ) (actorctl.IntroduceResult, error) {
-	command, err := e.home.resolveIntroduction(ctx, declID, initiator)
+	command, err := e.home.resolveIntroduction(ctx, declID, desiredHost, initiator)
 	if err != nil {
 		return actorctl.IntroduceResult{}, err
 	}
@@ -104,13 +105,16 @@ func (e *opEntry) Execute(
 	case sysactor.TypeMemberCreate:
 		var payload struct {
 			DeclID string `json:"decl_id"`
+			// Optional: which of this channel's bound devices runs it. Omitted
+			// means no preference. Only meaningful for a daemon-placed class.
+			DesiredHost string `json:"desired_host,omitempty"`
 		}
 		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil || payload.DeclID == "" {
 			return nil, &sysactor.OperateError{
 				Code: string(channelspec.ErrCodeBadPayload), Detail: "decl_id required",
 			}
 		}
-		result, err := e.introduce(ctx, payload.DeclID, req.Caller.Actor)
+		result, err := e.introduce(ctx, payload.DeclID, payload.DesiredHost, req.Caller.Actor)
 		if err != nil {
 			return nil, asOperateError(err)
 		}

@@ -315,7 +315,7 @@ func nameRule(what, got string) string {
 }
 
 const (
-	shapeRecipe = `{"name": "<1-63 chars, lowercase a-z 0-9 and '-'>", "recipe": {"declarations": [{"decl_id": "<an actor template id>"}], "profile": {"description": "...", "serving": 0 or 1, "svc_agent": "<a decl_id listed in declarations>"}}}`
+	shapeRecipe = `{"name": "<1-63 chars, lowercase a-z 0-9 and '-'>", "recipe": {"declarations": [{"decl_id": "<an actor template id>", "desired_host": "<optional device id; attaches that device to the new channel and runs this seat there>"}], "profile": {"description": "...", "serving": 0 or 1, "svc_agent": "<a decl_id listed in declarations>"}}}`
 
 	shapeChannelTemplate = `{"id": "...", "name": "...", "visibility": "public" or "private", "body": {"declarations": [{"decl_id": "..."}], "profile": {...}}}`
 
@@ -642,6 +642,10 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		return regspec.ChannelRow{}, false, invalid("serving must be 0 or 1")
 	}
 	declarations := make([]GenesisDeclaration, 0, len(body.Declarations)+2)
+	// Devices a recipe entry named. They get bound to the new channel below: a
+	// seat placed on a machine the channel cannot reach is a member that is
+	// declared, placed, and never arrives.
+	extraHosts := make([]string, 0, 1)
 	overlays := make([]regspec.OverlayRow, 0, len(body.Declarations))
 	declarationKinds := make(map[string]actor.Kind, len(body.Declarations)+1)
 	svc, err := r.renderSystem(SvcActorClass, json.RawMessage(`{}`))
@@ -684,8 +688,23 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("class %q declares no valid placement, so no host can be chosen for it; this is a defect in the class itself rather than in your request", decl.DefaultClass))
 		}
 		rendered := channelspec.RenderedSnapshot{Class: decl.DefaultClass, Config: cloneJSON(config), Placement: channelspec.Placement{Kind: placement}, Singleton: decl.Singleton}
+		if item.DesiredHost != "" && placement != channelspec.PlacementDaemon {
+			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("declaration %q names class %q, which runs on the server rather than on a device, so it cannot be given a desired_host", item.DeclID, decl.DefaultClass))
+		}
 		if placement == channelspec.PlacementDaemon {
-			rendered.Placement.DesiredHost = channelspec.LocalDeviceID
+			host := channelspec.LocalDeviceID
+			if item.DesiredHost != "" {
+				device, found, err := tx.GetDevice(ctx, item.DesiredHost)
+				if err != nil {
+					return regspec.ChannelRow{}, false, err
+				}
+				if !found || device.Status != regspec.DevicePresent {
+					return regspec.ChannelRow{}, false, notFound("device", item.DesiredHost, "system.device.list")
+				}
+				host = item.DesiredHost
+				extraHosts = append(extraHosts, host)
+			}
+			rendered.Placement.DesiredHost = host
 		}
 		rendered, err = rendered.Seal()
 		if err != nil {
@@ -735,6 +754,14 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	if err := tx.InsertBinding(ctx, regspec.BindingRow{ChannelID: row.ID, DeviceID: channelspec.LocalDeviceID, AttachedAt: now}); err != nil {
 		return regspec.ChannelRow{}, false, err
+	}
+	for _, host := range extraHosts {
+		if host == channelspec.LocalDeviceID {
+			continue
+		}
+		if err := tx.InsertBinding(ctx, regspec.BindingRow{ChannelID: row.ID, DeviceID: host, AttachedAt: now}); err != nil {
+			return regspec.ChannelRow{}, false, err
+		}
 	}
 	peerID := string(id)
 	if err := tx.InsertDecl(ctx, regspec.DeclRow{ID: peerID, Name: qualified, Owner: owner, DefaultClass: PeerActorClass, Config: targetConfig(id), Status: regspec.DeclPresent, Visibility: "public", CreatedAt: now, UpdatedAt: now}); err != nil {

@@ -64,6 +64,12 @@ type ChannelRow struct {
 type TemplateDeclaration struct {
 	DeclID string          `json:"decl_id"`
 	Config json.RawMessage `json:"config,omitempty"`
+	// DesiredHost names which device runs this seat, for a daemon-placed class.
+	// It sits on the RECIPE ENTRY rather than on the declaration because a
+	// declaration is reusable across channels while a device is bound to one:
+	// the same template belongs on the phone in one channel and on the
+	// workstation in another. Empty = no preference.
+	DesiredHost string `json:"desired_host,omitempty"`
 }
 
 type EndpointSpec struct {

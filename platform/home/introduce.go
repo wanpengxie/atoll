@@ -15,9 +15,15 @@ import (
 // declaration admission: fetch the declaration, judge its visibility against
 // the initiator, resolve the class kind, and pick the placement host. Policy
 // lives here, at the door; the Controller command that follows is mechanical.
+// desiredHost names which of this channel's bound devices should run the
+// member. It is asked HERE, at the seating, and not on the declaration: a
+// declaration is a recipe and travels between channels, while a device is bound
+// per channel — the same template seated in two channels may well belong on two
+// different machines. Empty means "no preference", and the channel picks.
 func (h *Home) resolveIntroduction(
 	ctx context.Context,
 	declID string,
+	desiredHost string,
 	initiator actor.ActorID,
 ) (actorctl.IntroduceRequest, error) {
 	if declID == "" || initiator == "" {
@@ -132,9 +138,18 @@ func (h *Home) resolveIntroduction(
 	var placement storespec.Placement
 	switch placementKind {
 	case channelspec.PlacementServer:
+		// A server-placed class runs where the channel runs; there is no machine
+		// to choose, so naming one is a misunderstanding worth saying out loud
+		// rather than ignoring.
+		if desiredHost != "" {
+			return actorctl.IntroduceRequest{}, &channelspec.OperationError{
+				Code:   channelspec.ErrCodeInvalidDesiredHost,
+				Detail: "class " + facts.Class + " runs on the server, not on a device, so it cannot be given a desired_host",
+			}
+		}
 		placement = storespec.NewServerPlacement()
 	case channelspec.PlacementDaemon:
-		placement, err = h.resolveDaemonPlacement(ctx)
+		placement, err = h.resolveDaemonPlacement(ctx, desiredHost)
 	default:
 		err = &channelspec.OperationError{Code: channelspec.ErrCodeUnknownClass, Detail: "class has invalid placement"}
 	}
@@ -159,7 +174,17 @@ func (h *Home) resolveIntroduction(
 
 // resolveDaemonPlacement picks the placement host for a declaration-backed
 // actor: the first bound daemon.
-func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement, error) {
+// resolveDaemonPlacement settles which machine runs a daemon-placed member.
+//
+// A named host is CHECKED, never trusted: it must be a device bound to this
+// channel, or the seating is refused. Naming a device the channel cannot reach
+// would produce a member that is declared, placed, and permanently absent.
+//
+// An unnamed host still falls back to the first bound device, and that fallback
+// is a guess — the binding order carries no intent. It is honest only while a
+// channel has one device; the moment there are several (a laptop, a phone, a
+// rented sandbox) the caller has to say which, because nothing here can know.
+func (h *Home) resolveDaemonPlacement(ctx context.Context, desiredHost string) (storespec.Placement, error) {
 	bound, err := h.registryBindings.ListBoundDeviceIDs(ctx, h.channelID)
 	if err != nil {
 		return storespec.Placement{}, err
@@ -169,5 +194,16 @@ func (h *Home) resolveDaemonPlacement(ctx context.Context) (storespec.Placement,
 			Code: channelspec.ErrCodeInvalidDesiredHost, Detail: "daemon is not bound to this channel",
 		}
 	}
-	return storespec.NewDaemonPlacement(bound[0])
+	if desiredHost == "" {
+		return storespec.NewDaemonPlacement(bound[0])
+	}
+	for _, id := range bound {
+		if id == desiredHost {
+			return storespec.NewDaemonPlacement(desiredHost)
+		}
+	}
+	return storespec.Placement{}, &channelspec.OperationError{
+		Code:   channelspec.ErrCodeInvalidDesiredHost,
+		Detail: "device " + desiredHost + " is not attached to this channel; attach it with system.device.attach, or list this channel's devices and name one of those",
+	}
 }
