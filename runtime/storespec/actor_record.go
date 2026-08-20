@@ -205,15 +205,8 @@ type CollaborationAuthority interface {
 // ActorRecord nor raw Placement; the owner-derivation basis stays behind the
 // Platform door that fills Owner.
 type ResourceActorFacts struct {
-	Active bool
-	Owner  bool
-	// Principal is the person this actor answers for, empty for an actor that
-	// answers for no person (an agent, a tool). A byte transfer the door
-	// authorizes here is finished later, on another connection, and whoever
-	// arrives there has to be the same somebody — so the door has to be able to
-	// say who that is at the moment it decides. Empty is a real answer: it says
-	// no human entrance may finish this actor's transfers.
-	Principal            string
+	Active               bool
+	Owner                bool
 	PreferredStorageHost string
 }
 

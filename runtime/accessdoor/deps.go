@@ -37,21 +37,28 @@ type FileControl interface {
 	List(context.Context, string, string) ([]FileInfo, error)
 }
 
-// TransferSpec is one authorized-but-unfinished byte transfer. Caller and
-// Principal travel with it because the bytes move later, on a connection the
-// door never sees: whatever finishes this transfer has to be answerable as the
-// same actor, and an empty Principal means no human entrance can.
+// TransferSpec is one authorized-but-unfinished byte transfer. Caller travels
+// with it because the bytes move later, on a connection this door never sees,
+// and the actor is half of what makes that later connection the same operation
+// as this decision (the channel is the other half, and the issuer knows it).
 type TransferSpec struct {
-	Address   resource.ResourceID
-	HostID    string
-	HostName  string
-	Mode      access.Operation
-	Caller    actor.ActorID
-	Principal string
+	Address  resource.ResourceID
+	HostID   string
+	HostName string
+	Mode     access.Operation
+	Caller   actor.ActorID
 }
 
 type TransferControl interface {
 	IssueTransfer(context.Context, TransferSpec) (string, error)
+}
+
+// TransferRedeem finishes a transfer this door authorized, for a caller running
+// in this same process. It is the exact counterpart of TransferControl — one
+// issues, one redeems — and its absence is why a server-resident actor could
+// hold a file route it had no way to turn into bytes.
+type TransferRedeem interface {
+	RedeemTransfer(ctx context.Context, caller actor.ActorID, route FileRoute) (FileAccess, error)
 }
 
 type Deps struct {
@@ -65,4 +72,5 @@ type Deps struct {
 	StorageMounts   StorageMounts
 	Files           FileControl
 	TransferControl TransferControl
+	TransferRedeem  TransferRedeem
 }

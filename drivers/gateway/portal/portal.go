@@ -24,6 +24,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"golang.org/x/crypto/bcrypt"
@@ -66,18 +67,21 @@ func New(cfg Config) *Portal {
 	return p
 }
 
-// files is the byte half of a resource operation the access door has already
-// decided. It is a person's entrance like /ws and /obs are, so it establishes
-// who is asking the same way they do — a ticket says what was granted, never
-// who is holding it, and bytes that reach a channel's disk must be answerable
-// to a member of that channel.
+// files is the byte half of a resource operation the access door already
+// decided, and it is the outside edge of the business domain. What arrives here
+// is a session, which names a principal — an identity an outside party can
+// claim and therefore one that has to be authenticated. What the door decided
+// for is an actor, which the runtime mints and nobody asserts. So this entrance
+// does the one translation that edge exists for: authenticate the principal,
+// look up which actor that principal is in the named channel, and hand the
+// plane the actor. Every other frame from a browser crosses the same way.
 //
-// A transfer names nothing but its ticket. Which machine, which channel, which
-// path and which direction were all fixed when the door issued it, and the
-// redeeming side reads them from the ticket; an address on the URL could only
-// ever be the client repeating a decision it has no power to change.
+// The channel is named by the request, as it is on every other business frame,
+// because a ticket's scope is (channel, actor) and a scope neither side states
+// is not checked. Nothing else is named: the machine, the path and the
+// direction were fixed when the ticket was issued.
 func (p *Portal) files(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.DataPlane == nil {
+	if p.cfg.DataPlane == nil || p.cfg.Gateway == nil {
 		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), "data plane unavailable")
 		return
 	}
@@ -86,15 +90,25 @@ func (p *Portal) files(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, string(codeNotAuthenticated), "invalid session")
 		return
 	}
+	chID := channel.ID(strings.TrimSpace(r.URL.Query().Get("channel_id")))
 	ticket := r.URL.Query().Get("t")
-	if ticket == "" {
-		writeError(w, http.StatusForbidden, string(codeNotAuthenticated), "file ticket required")
+	if chID == "" || ticket == "" {
+		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), "channel_id and a file ticket are required")
+		return
+	}
+	caller, member, err := p.cfg.Gateway.SubjectIn(r.Context(), principal, chID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), "channel eligibility unavailable — retry")
+		return
+	}
+	if !member {
+		writeError(w, http.StatusForbidden, string(codePermissionDenied), "no eligibility for channel")
 		return
 	}
 	mode := access.OpRead
 	if r.Method == http.MethodPut {
 		mode = access.OpWrite
-	} else if filename, named := p.cfg.DataPlane.TicketFile(principal, ticket); named {
+	} else if filename, named := p.cfg.DataPlane.TicketFile(chID, caller, ticket); named {
 		// Naming the download is presentation, and the name has to be on the
 		// wire before the first byte — so it is asked for up front. It grants
 		// nothing: the ticket is still redeemed below.
@@ -102,7 +116,7 @@ func (p *Portal) files(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 	tracked := &trackingResponseWriter{ResponseWriter: w}
-	if err := p.cfg.DataPlane.ServeHTTP(r.Context(), principal, ticket, mode, tracked, r.Body); err != nil {
+	if err := p.cfg.DataPlane.ServeHTTP(r.Context(), chID, caller, ticket, mode, tracked, r.Body); err != nil {
 		if tracked.wrote {
 			panic(http.ErrAbortHandler)
 		}

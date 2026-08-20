@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -452,21 +453,22 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 	// --- write ops ---
 	case subjectgate.ResCreate:
 		if p.Address != "" {
-			out, err := rh.CreateFileDecided(resource.ResourceID(p.Address), p.WithContent)
-			return resourceOutcomeFrameFor(f, out, err)
+			id := resource.ResourceID(p.Address)
+			out, err := rh.CreateFileDecided(id, p.WithContent)
+			return resourceOutcomeFrameFor(f, id, out, err)
 		}
 		out, err := rh.Create(rid, p.Args)
-		return resourceOutcomeFrameFor(f, out, err)
+		return resourceOutcomeFrameFor(f, rid, out, err)
 	case subjectgate.ResWrite:
 		out, err := rh.Write(rid, p.Args)
-		return resourceOutcomeFrameFor(f, out, err)
+		return resourceOutcomeFrameFor(f, rid, out, err)
 	case subjectgate.ResDelete:
 		out, err := rh.Delete(rid)
-		return resourceOutcomeFrameFor(f, out, err)
+		return resourceOutcomeFrameFor(f, rid, out, err)
 	// --- pure-read ops ---
 	case subjectgate.ResRead:
 		out, err := rh.Read(rid)
-		return resourceOutcomeFrameFor(f, out, err)
+		return resourceOutcomeFrameFor(f, rid, out, err)
 	case subjectgate.ResStat:
 		st, err := rh.Stat(rid)
 		if err != nil {
@@ -474,22 +476,41 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 		}
 		// exists = the resource resolved & is visible to this subject (a
 		// not-found / denied verdict rides Reject, not a Go error — §3.9').
-		meta, _ := json.Marshal(st.Meta)
-		return receipt(f, subjectgate.ResourceStat{Exists: st.Reject == "", Meta: meta})
+		return receipt(f, subjectgate.ResourceStat{Exists: st.Reject == "", Meta: wireMeta(st.Meta)})
 	case subjectgate.ResList:
 		page, err := rh.List(listQueryOf(p.Query))
 		if err != nil {
 			return mapVerbErrFrame(err, f)
 		}
-		items := make([]json.RawMessage, 0, len(page.Entries))
+		items := make([]subjectgate.ResourceEntry, 0, len(page.Entries))
 		for _, it := range page.Entries {
-			raw, _ := json.Marshal(it)
-			items = append(items, raw)
+			items = append(items, subjectgate.ResourceEntry{
+				ID: string(it.ID), Kind: string(it.Kind), Ops: wireOps(it.Ops),
+			})
 		}
 		return receipt(f, subjectgate.ResourcePage{Items: items, Next: page.Next})
 	default:
 		return errFrame(f, subjectgate.CodeBadPayload, "unknown resource op: "+string(p.Op))
 	}
+}
+
+// wireMeta and wireOps translate the door's own vocabulary into this
+// protocol's. The translation is written out rather than delegated to
+// json.Marshal on the door type because the wire spelling is a promise to
+// clients, and a promise cannot be whatever a Go field happens to be named.
+func wireMeta(meta accessdoor.StatMeta) *subjectgate.ResourceMeta {
+	return &subjectgate.ResourceMeta{
+		Kind: string(meta.Kind), CreatedAt: meta.CreatedAt,
+		CreatedBy: string(meta.CreatedBy), Size: meta.Size,
+	}
+}
+
+func wireOps(ops accessdoor.OpSet) []string {
+	out := make([]string, 0, len(ops))
+	for _, op := range ops {
+		out = append(out, string(op))
+	}
+	return out
 }
 
 func operationsOf(ops []string) []access.Operation {

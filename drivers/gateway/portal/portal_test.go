@@ -16,11 +16,13 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 type filePlaneStub struct {
-	principal string
+	channelID channel.ID
+	caller    actor.ActorID
 	ticket    string
 	mode      access.Operation
 	body      []byte
@@ -39,13 +41,18 @@ func (s *obsPlaneStub) Pull(_ context.Context, principal, path, query string) (o
 	return s.answer, s.err
 }
 
-func (f *filePlaneStub) Resolve(channel.ID, string) (dataplane.Ticket, error) {
+func (f *filePlaneStub) Resolve(channel.ID, actor.ActorID, string) (dataplane.Ticket, error) {
 	return dataplane.Ticket{}, errors.New("unused")
 }
 func (f *filePlaneStub) ServeExchange(context.Context, channel.ID, io.ReadWriteCloser) {}
-func (f *filePlaneStub) TicketFile(string, string) (string, bool)                     { return f.name, f.name != "" }
-func (f *filePlaneStub) ServeHTTP(_ context.Context, principal, ticket string, mode access.Operation, dst io.Writer, src io.Reader) error {
-	f.principal, f.ticket, f.mode = principal, ticket, mode
+func (f *filePlaneStub) OpenTransfer(context.Context, channel.ID, actor.ActorID, string, access.Operation) (io.ReadWriteCloser, error) {
+	return nil, errors.New("unused")
+}
+func (f *filePlaneStub) TicketFile(channel.ID, actor.ActorID, string) (string, bool) {
+	return f.name, f.name != ""
+}
+func (f *filePlaneStub) ServeHTTP(_ context.Context, ch channel.ID, caller actor.ActorID, ticket string, mode access.Operation, dst io.Writer, src io.Reader) error {
+	f.channelID, f.caller, f.ticket, f.mode = ch, caller, ticket, mode
 	if f.err != nil {
 		return f.err
 	}
@@ -110,6 +117,25 @@ func TestFallbacksReturnContractJSONWithoutCORS(t *testing.T) {
 	}
 }
 
+// The one membership this entrance's tests are about: alice is human:alice:7 in
+// c0 and nothing anywhere else.
+func filePortal(t *testing.T, plane *filePlaneStub) (*Portal, *gateway.SessionStore) {
+	t.Helper()
+	gw, err := gateway.New(gateway.Config{Resolver: gateway.ResolverFunc(
+		func(_ context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
+			if principal != "alice" {
+				return nil, nil, nil
+			}
+			return []gateway.Route{{Channel: "c0", SubjectID: "human:alice:7"}}, nil, nil
+		})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gw.Close() })
+	sessions := gateway.NewSessionStore()
+	return New(Config{DataPlane: plane, Gateway: gw, Sessions: sessions, ContractVersion: "test"}), sessions
+}
+
 // fileRequest is a transfer by an authenticated person, the only kind this
 // entrance answers.
 func fileRequest(t *testing.T, sessions *gateway.SessionStore, principal, method, target string, body string) *http.Request {
@@ -119,16 +145,14 @@ func fileRequest(t *testing.T, sessions *gateway.SessionStore, principal, method
 	return req
 }
 
-// A transfer carries its ticket and nothing else. The direction comes from the
-// method, and the name a browser saves the download under comes from the ticket
-// too — the client never spells out where the bytes live, so there is no second
-// place for the two sides to disagree about how to spell it.
+// A transfer names its channel and its ticket, and nothing else: the direction
+// comes from the method, the download name comes from the ticket, and the actor
+// is looked up rather than stated.
 func TestFileGetIsNamedByItsTicketAlone(t *testing.T) {
-	sessions := gateway.NewSessionStore()
 	plane := &filePlaneStub{body: []byte("payload"), name: "report final.pdf"}
-	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
+	p, sessions := filePortal(t, plane)
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodGet, "/files?t=ticket-a", ""))
+	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodGet, "/files?channel_id=c0&t=ticket-a", ""))
 	if rec.Code != http.StatusOK || rec.Body.String() != "payload" {
 		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
 	}
@@ -141,11 +165,10 @@ func TestFileGetIsNamedByItsTicketAlone(t *testing.T) {
 }
 
 func TestFilePutStreamsThroughRedeemer(t *testing.T) {
-	sessions := gateway.NewSessionStore()
 	plane := &filePlaneStub{}
-	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
+	p, sessions := filePortal(t, plane)
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodPut, "/files?t=write-ticket", "bytes"))
+	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodPut, "/files?channel_id=c0&t=write-ticket", "bytes"))
 	if rec.Code != http.StatusNoContent || string(plane.body) != "bytes" || plane.mode != access.OpWrite {
 		t.Fatalf("status=%d body=%q mode=%q", rec.Code, plane.body, plane.mode)
 	}
@@ -154,49 +177,60 @@ func TestFilePutStreamsThroughRedeemer(t *testing.T) {
 	}
 }
 
-// Bytes landing on a channel's disk are an operation by somebody, so this
-// entrance establishes who — exactly as /ws and /obs do. A ticket says what was
-// granted, never who is holding it, so an unauthenticated request must not be
-// able to finish somebody else's transfer by presenting one.
-func TestAFileTransferIsPerformedAsTheAuthenticatedPerson(t *testing.T) {
-	sessions := gateway.NewSessionStore()
+// This entrance is where an outside identity becomes an inside one. A session
+// names a principal, which is a claim an outsider can make and therefore must be
+// authenticated; the plane is driven with an actor, which the runtime mints and
+// nobody claims. So what the plane must be told is the actor that principal IS
+// in the named channel — not the principal, and not anything the request says
+// about itself.
+func TestAFileTransferIsPerformedAsTheActorThePrincipalIsInThatChannel(t *testing.T) {
 	plane := &filePlaneStub{body: []byte("payload")}
-	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
+	p, sessions := filePortal(t, plane)
 
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodPut, "/files?t=write-ticket", "bytes"))
-	if plane.principal != "alice" {
-		t.Fatalf("plane was told principal=%q", plane.principal)
+	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodPut, "/files?channel_id=c0&t=write-ticket", "bytes"))
+	if plane.channelID != "c0" || plane.caller != "human:alice:7" {
+		t.Fatalf("plane was driven as (%q,%q)", plane.channelID, plane.caller)
 	}
 
-	plane.principal, plane.ticket, plane.body = "", "", nil
+	// A principal with no membership in the named channel has no actor there, so
+	// there is nothing it could be doing this as.
+	plane.channelID, plane.caller, plane.ticket = "", "", ""
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, fileRequest(t, sessions, "mallory", http.MethodPut, "/files?channel_id=c0&t=write-ticket", "bytes"))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-member status=%d", rec.Code)
+	}
+
+	// And with no session at all there is no claim to resolve in the first place.
 	for _, method := range []string{http.MethodGet, http.MethodPut} {
 		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, httptest.NewRequest(method, "/files?t=stolen-ticket", strings.NewReader("bytes")))
+		p.ServeHTTP(rec, httptest.NewRequest(method, "/files?channel_id=c0&t=stolen-ticket", strings.NewReader("bytes")))
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s with no session status=%d", method, rec.Code)
 		}
 	}
-	if plane.ticket != "" || plane.body != nil {
-		t.Fatalf("plane was reached without a session: ticket=%q body=%q", plane.ticket, plane.body)
+	if plane.caller != "" || plane.ticket != "" {
+		t.Fatalf("plane was reached without a resolved actor: caller=%q ticket=%q", plane.caller, plane.ticket)
 	}
 }
 
-// The ticket is the other half: a session says who, a ticket says what was
-// granted, and neither alone reaches the plane.
-func TestFileTransferWithoutATicketNeverReachesThePlane(t *testing.T) {
-	sessions := gateway.NewSessionStore()
+// A ticket's scope is (channel, actor), so a transfer that names neither its
+// channel nor its ticket is not a weaker request — it is not one.
+func TestAFileTransferMustNameItsChannelAndItsTicket(t *testing.T) {
 	plane := &filePlaneStub{body: []byte("payload")}
-	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
-	for _, method := range []string{http.MethodGet, http.MethodPut} {
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, fileRequest(t, sessions, "alice", method, "/files", "bytes"))
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("%s without a ticket status=%d", method, rec.Code)
+	p, sessions := filePortal(t, plane)
+	for _, target := range []string{"/files", "/files?channel_id=c0", "/files?t=ticket-a"} {
+		for _, method := range []string{http.MethodGet, http.MethodPut} {
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, fileRequest(t, sessions, "alice", method, target, "bytes"))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s %s status=%d", method, target, rec.Code)
+			}
 		}
 	}
-	if plane.principal != "" || plane.ticket != "" {
-		t.Fatalf("plane was reached: principal=%q ticket=%q", plane.principal, plane.ticket)
+	if plane.caller != "" || plane.ticket != "" {
+		t.Fatalf("plane was reached: caller=%q ticket=%q", plane.caller, plane.ticket)
 	}
 }
 

@@ -13,8 +13,14 @@ import (
 
 const MaxExchangeChunk = 1 << 20
 
+// ExchangeTicketHeader opens the redeeming leg of a transfer. Caller rides with
+// the ticket because a ticket's scope is (channel, actor): the lane says which
+// channel and which device, and this says which of that device's actors is
+// redeeming — without it the actor half of the scope has nobody to check
+// against.
 type ExchangeTicketHeader struct {
 	Ticket string `json:"ticket"`
+	Caller string `json:"caller"`
 }
 
 type ExchangeHostHeader struct {

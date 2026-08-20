@@ -87,7 +87,7 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id re
 	}
 	token, err := d.deps.TransferControl.IssueTransfer(ctx, TransferSpec{
 		Address: id, HostID: mount.DaemonID, HostName: address.Host,
-		Mode: mode, Caller: caller, Principal: facts.Principal,
+		Mode: mode, Caller: caller,
 	})
 	if err != nil {
 		return nil, err

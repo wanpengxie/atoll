@@ -48,15 +48,15 @@ type Ticket struct {
 	Path   string
 	Mode   access.Operation
 	HostID string
-	// Caller and Principal are whose transfer this is. The door decides on one
-	// connection and the bytes move on another, so without them the second
-	// connection has nobody on it — a transfer the door granted to one member
-	// would be finishable by anyone at all, member or not. Principal is empty
-	// for an actor that answers for no person; such a ticket is redeemable only
-	// on a device lane, never through a human entrance.
-	Caller    actor.ActorID
-	Principal string
-	Expires   time.Time
+	// Caller is whose transfer this is. A ticket's scope is exactly
+	// (ChannelID, Caller) and neither half is optional: there are no bytes that
+	// belong to no channel — bytes outside one are not addressable by any actor
+	// on this plane at all — and there is no access without an actor as the
+	// subject doing the reading or writing. The door decides on one connection
+	// and the bytes move on another; these two fields are what makes the second
+	// connection the same operation as the first.
+	Caller  actor.ActorID
+	Expires time.Time
 }
 
 type IssueSpec struct {
@@ -67,7 +67,6 @@ type IssueSpec struct {
 	HostID    string
 	HostName  string
 	Caller    actor.ActorID
-	Principal string
 }
 
 type Grant struct {
@@ -79,10 +78,11 @@ type Issuer interface {
 }
 
 type Redeemer interface {
-	Resolve(channel.ID, string) (Ticket, error)
+	Resolve(ch channel.ID, caller actor.ActorID, token string) (Ticket, error)
 	ServeExchange(context.Context, channel.ID, io.ReadWriteCloser)
-	ServeHTTP(ctx context.Context, principal, token string, mode access.Operation, dst io.Writer, src io.Reader) error
-	TicketFile(principal, token string) (string, bool)
+	ServeHTTP(ctx context.Context, ch channel.ID, caller actor.ActorID, token string, mode access.Operation, dst io.Writer, src io.Reader) error
+	TicketFile(ch channel.ID, caller actor.ActorID, token string) (string, bool)
+	OpenTransfer(ctx context.Context, ch channel.ID, caller actor.ActorID, token string, mode access.Operation) (io.ReadWriteCloser, error)
 }
 
 type Binder interface {
@@ -143,7 +143,11 @@ func (b binder) UnbindHostStreamOpener() {
 }
 
 func (i issuer) Issue(_ context.Context, spec IssueSpec) (Grant, error) {
-	if spec.Address == "" || spec.Path == "" || spec.ChannelID == "" || spec.HostID == "" || spec.HostName == "" ||
+	// Caller sits in this list beside ChannelID because the two together ARE the
+	// ticket's scope. A ticket with no actor on it is an access with no subject,
+	// which is not a weaker ticket — it is not a ticket.
+	if spec.Address == "" || spec.Path == "" || spec.ChannelID == "" || spec.Caller == "" ||
+		spec.HostID == "" || spec.HostName == "" ||
 		(spec.Mode != access.OpRead && spec.Mode != access.OpWrite) {
 		return Grant{}, errors.New("dataplane: invalid issue spec")
 	}
@@ -162,15 +166,19 @@ func (i issuer) Issue(_ context.Context, spec IssueSpec) (Grant, error) {
 	i.p.sweepLocked(now)
 	token := uuid.NewString()
 	i.p.tickets[token] = Ticket{Address: spec.Address, Path: spec.Path, ChannelID: spec.ChannelID, Mode: spec.Mode,
-		HostID: spec.HostID, Caller: spec.Caller, Principal: spec.Principal, Expires: now.Add(TicketTTL)}
+		HostID: spec.HostID, Caller: spec.Caller, Expires: now.Add(TicketTTL)}
 	return Grant{Ticket: token}, nil
 }
 
-func (r redeemer) Resolve(ch channel.ID, token string) (Ticket, error) {
-	return r.p.resolve(ch, token, "")
+func (r redeemer) Resolve(ch channel.ID, caller actor.ActorID, token string) (Ticket, error) {
+	return r.p.resolve(ch, caller, token)
 }
 
-func (p *plane) resolve(ch channel.ID, token, _ string) (Ticket, error) {
+// resolve is the ONLY way a ticket comes back out of this table, and it always
+// asks for the ticket's whole scope. There is deliberately no channel-blind or
+// actor-blind variant: a lookup that omits half the scope does not check it, so
+// the scope would hold only for whoever remembered to pass it.
+func (p *plane) resolve(ch channel.ID, caller actor.ActorID, token string) (Ticket, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -178,25 +186,8 @@ func (p *plane) resolve(ch channel.ID, token, _ string) (Ticket, error) {
 	}
 	now := p.now()
 	ticket, ok := p.tickets[token]
-	if !ok || ticket.ChannelID != ch || !now.Before(ticket.Expires) {
+	if !ok || ticket.ChannelID != ch || ticket.Caller != caller || !now.Before(ticket.Expires) {
 		if ok && !now.Before(ticket.Expires) {
-			delete(p.tickets, token)
-		}
-		return Ticket{}, ErrInvalidTicket
-	}
-	return ticket, nil
-}
-
-func (p *plane) resolveAny(token string) (Ticket, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return Ticket{}, ErrClosed
-	}
-	now := p.now()
-	ticket, ok := p.tickets[token]
-	if !ok || !now.Before(ticket.Expires) {
-		if ok {
 			delete(p.tickets, token)
 		}
 		return Ticket{}, ErrInvalidTicket
@@ -245,11 +236,11 @@ func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.Re
 		_ = link.WriteExchangeControl(caller, link.ExchangeStatus{OK: false, Code: code, Detail: detail})
 	}
 	var head link.ExchangeTicketHeader
-	if err := link.ReadExchangeControl(caller, &head); err != nil || head.Ticket == "" {
+	if err := link.ReadExchangeControl(caller, &head); err != nil || head.Ticket == "" || head.Caller == "" {
 		fail("protocol_error", err)
 		return
 	}
-	ticket, err := r.Resolve(ch, head.Ticket)
+	ticket, err := r.Resolve(ch, actor.ActorID(head.Caller), head.Ticket)
 	if err != nil {
 		fail("invalid_ticket", err)
 		return
@@ -324,43 +315,63 @@ func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.Re
 	<-terminalDone
 }
 
-// resolveFor is the human-entrance lookup: a ticket answers only to the person
-// the door issued it to. A ticket with no person on it (an agent's, a tool's)
-// answers to nobody here — its only redemption is on a device lane.
-func (p *plane) resolveFor(principal, token string) (Ticket, error) {
-	ticket, err := p.resolveAny(token)
+// OpenTransfer hands back the live byte stream for one ticket instead of
+// pumping it somewhere. This is what an actor running in this process redeems
+// with: it is the same table, the same scope check and the same stream to the
+// same machine that a browser's transfer uses — the server has always been the
+// one opening these streams, it just never had a way to keep one.
+//
+// The stream's host header is already written, so the caller reads or writes
+// exchange frames on it directly and closes it when done.
+func (r redeemer) OpenTransfer(ctx context.Context, ch channel.ID, caller actor.ActorID, token string, mode access.Operation) (io.ReadWriteCloser, error) {
+	if !r.p.begin() {
+		return nil, ErrClosed
+	}
+	defer r.p.wg.Done()
+	ticket, err := r.p.resolve(ch, caller, token)
 	if err != nil {
-		return Ticket{}, err
+		return nil, err
 	}
-	if principal == "" || ticket.Principal != principal {
-		return Ticket{}, ErrInvalidTicket
+	if ticket.Mode != mode {
+		return nil, ErrInvalidTicket
 	}
-	return ticket, nil
+	opener, err := r.p.openerFor(ticket)
+	if err != nil {
+		return nil, err
+	}
+	host, err := opener.OpenHost(ctx, ticket)
+	if err != nil {
+		if errors.Is(err, ErrHostOffline) {
+			return nil, NewHostOfflineError(ticketHost(ticket))
+		}
+		return nil, err
+	}
+	return host, nil
 }
 
-// TicketFile answers the file name a live ticket will move, so an HTTP entrance
-// can name a download before the first byte goes out. It resolves nothing and
-// opens nothing: the ticket still has to survive redemption in ServeHTTP.
-func (r redeemer) TicketFile(principal, token string) (string, bool) {
-	ticket, err := r.p.resolveFor(principal, token)
+// TicketFile answers the file name a live ticket will move, so an entrance can
+// name a download before the first byte goes out. It opens nothing: the ticket
+// still has to survive redemption in ServeHTTP.
+func (r redeemer) TicketFile(ch channel.ID, caller actor.ActorID, token string) (string, bool) {
+	ticket, err := r.p.resolve(ch, caller, token)
 	if err != nil {
 		return "", false
 	}
 	return path.Base(ticket.Path), true
 }
 
-// ServeHTTP moves one transfer's bytes for one authenticated person. The ticket
-// fixes the machine, the channel, the path and the direction, all decided at
-// issue time by the access door; the principal is who is standing at the
-// entrance now, and it has to be the person the door decided for. The caller
-// supplies only the direction it believes it is in, and a ticket for the other
-// direction is refused.
-func (r redeemer) ServeHTTP(ctx context.Context, principal, token string, mode access.Operation, dst io.Writer, src io.Reader) error {
+// ServeHTTP moves one transfer's bytes. The ticket fixes the machine, the path
+// and the direction, all decided at issue time by the access door; the channel
+// and the actor are its scope, and the entrance supplies both — an entrance
+// facing outward has resolved an outside claim into that actor by the time it
+// gets here. The direction it believes it is in is checked too: a read grant is
+// not a licence to write.
+func (r redeemer) ServeHTTP(ctx context.Context, ch channel.ID, caller actor.ActorID, token string, mode access.Operation, dst io.Writer, src io.Reader) error {
 	if !r.p.begin() {
 		return ErrClosed
 	}
 	defer r.p.wg.Done()
-	ticket, err := r.p.resolveFor(principal, token)
+	ticket, err := r.p.resolve(ch, caller, token)
 	if err != nil {
 		return err
 	}

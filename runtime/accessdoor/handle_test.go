@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
-	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
@@ -116,8 +115,5 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	mustAccept(t, out, err)
 	if len(reg.createCalls) != 1 || reg.createCalls[0].creator != "a" {
 		t.Fatalf("create call = %+v", reg.createCalls)
-	}
-	if _, _, err := h.Open(t.Context(), resource.ResourceID("file:server"), access.OpRead); !errors.Is(err, ErrFileCapabilityUnavailable) {
-		t.Fatalf("server file face err=%v, want capability unavailable", err)
 	}
 }

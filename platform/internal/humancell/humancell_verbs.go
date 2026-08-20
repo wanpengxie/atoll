@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -63,11 +64,11 @@ func listQueryOf(q *subjectgate.ResourceQuery) accessdoor.ListQuery {
 // error is infra/transport and maps through mapVerbErr. A read value that is not
 // itself valid JSON is wrapped as a JSON string so the receipt always marshals
 // (the wire field is json.RawMessage — arbitrary bytes must not break it).
-func resourceOutcomeFrame(out accessdoor.Outcome, err error, receipt frameBuild, errFrame frameErr) subjectgate.Frame {
+func resourceOutcomeFrame(id resource.ResourceID, out accessdoor.Outcome, err error, receipt frameBuild, errFrame frameErr) subjectgate.Frame {
 	if err != nil {
 		return mapVerbErr(err, errFrame)
 	}
-	o := subjectgate.ResourceOutcome{Status: "ok"}
+	o := subjectgate.ResourceOutcome{Status: "ok", ResourceID: string(id)}
 	if !out.Accepted() {
 		o.Status = "rejected"
 		o.Detail = string(out.RejectReason)
@@ -94,8 +95,8 @@ func resourceOutcomeFrame(out accessdoor.Outcome, err error, receipt frameBuild,
 
 // resourceOutcomeFrameFor adapts resourceOutcomeFrame to f's receipt/error frame
 // builders (连接模型勘误期: the gen-stamping was整删 with the binding axis).
-func resourceOutcomeFrameFor(f subjectgate.Frame, out accessdoor.Outcome, err error) subjectgate.Frame {
-	return resourceOutcomeFrame(out, err,
+func resourceOutcomeFrameFor(f subjectgate.Frame, id resource.ResourceID, out accessdoor.Outcome, err error) subjectgate.Frame {
+	return resourceOutcomeFrame(id, out, err,
 		func(load any) subjectgate.Frame { return receipt(f, load) },
 		func(code, detail string) subjectgate.Frame { return errFrame(f, code, detail) },
 	)

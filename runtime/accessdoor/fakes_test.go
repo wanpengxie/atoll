@@ -82,7 +82,6 @@ type fakeMembership struct {
 	lookupHost  string
 	lookupFound bool
 	lookupErr   error
-	principal   string
 	lookupCalls []actor.ActorID
 }
 
@@ -99,7 +98,7 @@ func (m *fakeMembership) ResourceActorFacts(_ context.Context, id actor.ActorID)
 	if m.lookupFound {
 		host = m.lookupHost
 	}
-	return storespec.ResourceActorFacts{Active: m.isMember || m.lookupFound, Owner: m.isOwner, Principal: m.principal, PreferredStorageHost: host}, nil
+	return storespec.ResourceActorFacts{Active: m.isMember || m.lookupFound, Owner: m.isOwner, PreferredStorageHost: host}, nil
 }
 
 func accessAuthority(id actor.ActorID) capauth.Authority { return liveAuthority{id: id} }

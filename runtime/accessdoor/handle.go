@@ -89,18 +89,38 @@ type ResourceAccessHandle interface {
 	List(ctx context.Context, q ListQuery) (ListPage, error)
 }
 
-func (h boundHandle) Open(ctx context.Context, _ resource.ResourceID, _ access.Operation) (FileAccess, Outcome, error) {
+// Open decides and redeems in one call, under this handle's welded caller. The
+// decision half was always here; the redeeming half used to answer
+// capability_unavailable, which meant an actor living in this process could be
+// granted a file route and then have no way to turn it into bytes — even though
+// this process is the one that opens every byte stream on this plane.
+func (h boundHandle) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (FileAccess, Outcome, error) {
 	if err := h.authorize(ctx); err != nil {
 		return FileAccess{}, Outcome{RejectReason: access.OwnerInactive}, nil
 	}
-	return FileAccess{}, Outcome{}, ErrFileCapabilityUnavailable
+	out, err := h.door.invoke(ctx, h.caller, mode, id, nil)
+	if err != nil || !out.Accepted() || out.Route == nil {
+		return FileAccess{}, out, err
+	}
+	fa, err := h.redeem(ctx, *out.Route)
+	return fa, out, err
 }
 
-func (h boundHandle) Redeem(ctx context.Context, _ FileRoute) (FileAccess, error) {
+// Redeem turns an ALREADY-decided route into bytes. It re-checks the welded
+// caller rather than trusting the route: a route is a value, and a value can be
+// carried to a handle that was never the one it was decided for.
+func (h boundHandle) Redeem(ctx context.Context, route FileRoute) (FileAccess, error) {
 	if err := h.authorize(ctx); err != nil {
 		return FileAccess{}, ErrAuthorInactive
 	}
-	return FileAccess{}, ErrFileCapabilityUnavailable
+	return h.redeem(ctx, route)
+}
+
+func (h boundHandle) redeem(ctx context.Context, route FileRoute) (FileAccess, error) {
+	if h.door.deps.TransferRedeem == nil {
+		return FileAccess{}, ErrFileCapabilityUnavailable
+	}
+	return h.door.deps.TransferRedeem.RedeemTransfer(ctx, h.caller, route)
 }
 
 // boundHandle is a ResourceAccessHandle welded to one caller (the cell

@@ -3,9 +3,13 @@ package home
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/dataplane"
+	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
@@ -78,7 +82,7 @@ func (c daemonTransferControl) IssueTransfer(ctx context.Context, spec accessdoo
 	grant, err := c.issuer.Issue(ctx, dataplane.IssueSpec{
 		Address: address, Path: parsed.Path, ChannelID: c.chID, Mode: spec.Mode,
 		HostID: spec.HostID, HostName: spec.HostName,
-		Caller: spec.Caller, Principal: spec.Principal,
+		Caller: spec.Caller,
 	})
 	if err != nil {
 		var offline *dataplane.HostOfflineError
@@ -90,6 +94,45 @@ func (c daemonTransferControl) IssueTransfer(ctx context.Context, spec accessdoo
 	return grant.Ticket, nil
 }
 
+// daemonTransferRedeem finishes a transfer for an actor living in this process.
+// The stream it opens is the same one a browser's transfer rides — the server
+// has always been the side that opens these, so redeeming here is not a new
+// path to a machine, it is the existing path kept instead of pumped away.
+type daemonTransferRedeem struct {
+	redeemer dataplane.Redeemer
+	chID     channelpkg.ID
+}
+
+func (c daemonTransferRedeem) RedeemTransfer(ctx context.Context, caller actor.ActorID, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	if c.redeemer == nil {
+		return accessdoor.FileAccess{}, errors.New("platform: dataplane redeemer unavailable")
+	}
+	// A local route says the caller's own machine holds the bytes. Nothing in
+	// this process is a machine that holds channel files, so a local route
+	// reaching here is a routing fault, not a case to handle.
+	if route.Redeem != accessdoor.FileRedeemRemote {
+		return accessdoor.FileAccess{}, fmt.Errorf("platform: server-side actor cannot redeem a %q file route", route.Redeem)
+	}
+	conn, err := c.redeemer.OpenTransfer(ctx, c.chID, caller, route.Token, route.Mode)
+	if err != nil {
+		var offline *dataplane.HostOfflineError
+		if errors.As(err, &offline) {
+			return accessdoor.FileAccess{}, accessdoor.NewHostOfflineError(offline.Host)
+		}
+		return accessdoor.FileAccess{}, err
+	}
+	switch route.Mode {
+	case access.OpRead:
+		return accessdoor.FileAccess{Remote: &accessdoor.RemoteFile{Read: link.NewExchangeReader(conn)}}, nil
+	case access.OpWrite:
+		return accessdoor.FileAccess{Remote: &accessdoor.RemoteFile{Write: link.NewExchangeWriteHandle(conn)}}, nil
+	default:
+		_ = conn.Close()
+		return accessdoor.FileAccess{}, fmt.Errorf("platform: unknown file route mode %q", route.Mode)
+	}
+}
+
 var _ accessdoor.StorageMounts = daemonStorageMounts{}
 var _ accessdoor.FileControl = daemonFiles{}
 var _ accessdoor.TransferControl = daemonTransferControl{}
+var _ accessdoor.TransferRedeem = daemonTransferRedeem{}

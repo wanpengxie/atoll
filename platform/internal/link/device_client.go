@@ -90,7 +90,7 @@ func (l *ClientActorLane) OpenActorStream(
 		Arms: RawActorArms{
 			Pen: writer, Access: &remoteResourceHandle{
 				relay:    accessRelay,
-				redeemer: &deviceFileRedeemer{files: l.Files, dial: l.DialExchange},
+				redeemer: &deviceFileRedeemer{caller: id, files: l.Files, dial: l.DialExchange},
 			},
 			State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
 			Schedule: &remoteScheduleHandle{relay: scheduleRelay}, Lifecycle: lifecycle,
@@ -103,8 +103,9 @@ func (l *ClientActorLane) OpenActorStream(
 }
 
 type deviceFileRedeemer struct {
-	files LocalFileOpener
-	dial  func(context.Context) (io.ReadWriteCloser, error)
+	caller actor.ActorID
+	files  LocalFileOpener
+	dial   func(context.Context) (io.ReadWriteCloser, error)
 }
 
 func (r *deviceFileRedeemer) redeemFileRoute(
@@ -119,7 +120,7 @@ func (r *deviceFileRedeemer) redeemFileRoute(
 		if err != nil {
 			return accessdoor.FileAccess{}, err
 		}
-		if err := WriteExchangeControl(conn, ExchangeTicketHeader{Ticket: route.Token}); err != nil {
+		if err := WriteExchangeControl(conn, ExchangeTicketHeader{Ticket: route.Token, Caller: string(r.caller)}); err != nil {
 			_ = conn.Close()
 			return accessdoor.FileAccess{}, err
 		}

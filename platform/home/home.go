@@ -54,6 +54,7 @@ type Config struct {
 	Clock                schedule.Clock
 	DaemonRoutes         platform.DaemonRoutes
 	DataPlaneIssuer      dataplane.Issuer
+	DataPlaneRedeemer    dataplane.Redeemer
 	DeviceDirectory      DeviceDirectory
 	RegistryBindings     BindingReader
 	ServicePort          *svcactor.Port

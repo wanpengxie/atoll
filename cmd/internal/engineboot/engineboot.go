@@ -148,6 +148,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		Logger:               logger,
 		DaemonRoutes:         e.daemonHost,
 		DataPlaneIssuer:      e.dataIssuer,
+		DataPlaneRedeemer:    e.dataRedeemer,
 		DeviceDirectory:      e.registry,
 		OnMembraneOpen: func(ch channel.ID, generation uint64, membrane platform.DaemonMembrane) {
 			e.daemonHost.Register(ch, generation, membrane)

@@ -49,7 +49,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 		t.Fatalf("create outcome=%v", created)
 	}
 	want := bytes.Repeat([]byte("data-plane-e2e\n"), 4096)
-	endpoint := h.base + "/files?t=" + url.QueryEscape(ticket)
+	endpoint := h.base + "/files?channel_id=" + url.QueryEscape(c0ChannelID) + "&t=" + url.QueryEscape(ticket)
 	req, err := http.NewRequest(http.MethodPut, endpoint, bytes.NewReader(want))
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 
 	opened := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
 	readTicket := stringField(t, opened, "ticket")
-	resp, err = api.http.Get(h.base + "/files?t=" + url.QueryEscape(readTicket))
+	resp, err = api.http.Get(h.base + "/files?channel_id=" + url.QueryEscape(c0ChannelID) + "&t=" + url.QueryEscape(readTicket))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T
 		t.Fatalf("qualified channel file route did not become ready\n%s", tailLog(daemonLog, 100))
 	}
 	want := []byte("qualified-channel-bytes")
-	httpPutFile(t, api, h.base, address, stringField(t, outcome, "ticket"), want)
+	httpPutFile(t, api, h.base, channelID, address, stringField(t, outcome, "ticket"), want)
 	channelRoot := filepath.Join(h.root, "archive-host", "daemons", deviceID, "channels", qualified)
 	physical := filepath.Join(channelRoot, "docs", "report.txt")
 	if got, err := os.ReadFile(physical); err != nil || !bytes.Equal(got, want) {
@@ -211,9 +211,9 @@ func TestParentAndChildChannelsStayFlatOnDifferentDaemons(t *testing.T) {
 	}
 }
 
-func httpPutFile(t *testing.T, api *apiClient, base, address, ticket string, content []byte) {
+func httpPutFile(t *testing.T, api *apiClient, base, channelID, address, ticket string, content []byte) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, base+"/files?t="+url.QueryEscape(ticket), bytes.NewReader(content))
+	req, err := http.NewRequest(http.MethodPut, base+"/files?channel_id="+url.QueryEscape(channelID)+"&t="+url.QueryEscape(ticket), bytes.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func httpPutFile(t *testing.T, api *apiClient, base, address, ticket string, con
 func httpReadFile(t *testing.T, api *apiClient, base string, ws *wsClient, channelID, address string) []byte {
 	t.Helper()
 	opened := ws.resource(map[string]any{"channel_id": channelID, "op": "read", "resource_id": address})
-	endpoint := base + "/files?t=" + url.QueryEscape(stringField(t, opened, "ticket"))
+	endpoint := base + "/files?channel_id=" + url.QueryEscape(channelID) + "&t=" + url.QueryEscape(stringField(t, opened, "ticket"))
 	resp, err := api.http.Get(endpoint)
 	if err != nil {
 		t.Fatal(err)

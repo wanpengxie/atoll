@@ -486,20 +486,44 @@ type ResourceOutcome struct {
 	Status string          `json:"status"`
 	Detail string          `json:"detail,omitempty"`
 	Value  json.RawMessage `json:"value,omitempty"`
-	Ticket string          `json:"ticket,omitempty"`
-	Redeem string          `json:"redeem,omitempty"`
+	// ResourceID names what this is a receipt for. A caller that asked by
+	// address gets the same string back, and a caller that asked the door to
+	// decide learns which resource it decided on — without that, a receipt is
+	// only meaningful to whoever still remembers the request.
+	ResourceID string `json:"resource_id,omitempty"`
+	Ticket     string `json:"ticket,omitempty"`
+	Redeem     string `json:"redeem,omitempty"`
+}
+
+// ResourceEntry and ResourceMeta are the wire spellings of one listed resource
+// and one resource's metadata. They exist as their own types because the wire
+// vocabulary is this package's to declare: a door's internal struct handed
+// straight to json.Marshal publishes whatever its Go field names happen to be,
+// which is neither this protocol's spelling nor anything a client can rely on
+// staying put across a rename.
+type ResourceEntry struct {
+	ID   string   `json:"id"`
+	Kind string   `json:"kind,omitempty"`
+	Ops  []string `json:"ops,omitempty"`
+}
+
+type ResourceMeta struct {
+	Kind      string `json:"kind,omitempty"`
+	CreatedAt int64  `json:"created_at,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+	Size      int64  `json:"size"`
 }
 
 // ResourceStat is the resource-result form for stat.
 type ResourceStat struct {
-	Exists bool            `json:"exists"`
-	Meta   json.RawMessage `json:"meta,omitempty"`
+	Exists bool          `json:"exists"`
+	Meta   *ResourceMeta `json:"meta,omitempty"`
 }
 
 // ResourcePage is the resource-result form for list.
 type ResourcePage struct {
-	Items []json.RawMessage `json:"items"`
-	Next  string            `json:"next,omitempty"`
+	Items []ResourceEntry `json:"items"`
+	Next  string          `json:"next,omitempty"`
 }
 
 // ErrorPayload carries which frame errored (frame), a flat closed-set code

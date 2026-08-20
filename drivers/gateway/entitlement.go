@@ -41,6 +41,28 @@ type EntitlementResolver interface {
 	Snapshot(ctx context.Context, principal string) (routes []Route, failed []channel.ID, err error)
 }
 
+// SubjectIn answers which actor a principal IS inside one channel — the single
+// translation from an outside identity to an inside one. A principal is what an
+// outside claim can be made in and therefore what has to be authenticated; an
+// actor id is minted by the runtime and never asserted from outside, so it is
+// not something to verify but something to look up. Every entrance that takes
+// an outside request and drives it at a channel crosses here.
+//
+// found=false is a confirmed no: this principal holds no membership in that
+// channel. An error is a failure to find out, which is not the same answer.
+func (g *Gateway) SubjectIn(ctx context.Context, principal string, ch channel.ID) (actor.ActorID, bool, error) {
+	routes, _, err := g.resolver.Snapshot(ctx, principal)
+	if err != nil {
+		return "", false, err
+	}
+	for _, route := range routes {
+		if route.Channel == ch {
+			return route.SubjectID, route.SubjectID != "", nil
+		}
+	}
+	return "", false, nil
+}
+
 // ResolverFunc adapts a bare function to EntitlementResolver (like http.HandlerFunc).
 type ResolverFunc func(ctx context.Context, principal string) ([]Route, []channel.ID, error)
 

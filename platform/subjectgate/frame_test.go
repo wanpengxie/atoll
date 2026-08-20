@@ -214,33 +214,43 @@ func TestRequireChannelID(t *testing.T) {
 	}
 }
 
-// TestResourceOutcomeJSON pins the three resource-result wire forms
-// (outcome/stat/page) round-trip (DoD-12).
-func TestResourceOutcomeJSON(t *testing.T) {
-	out := ResourceOutcome{Status: "ok", Value: json.RawMessage(`{"v":1}`)}
-	stat := ResourceStat{Exists: true, Meta: json.RawMessage(`{"size":9}`)}
-	page := ResourcePage{Items: []json.RawMessage{json.RawMessage(`{"a":1}`), json.RawMessage(`{"b":2}`)}, Next: "cur2"}
-	for _, v := range []any{out, stat, page} {
-		b, err := json.Marshal(v)
-		if err != nil {
-			t.Fatalf("marshal %T: %v", v, err)
-		}
-		switch want := v.(type) {
-		case ResourceOutcome:
-			var got ResourceOutcome
-			if err := json.Unmarshal(b, &got); err != nil || got.Status != want.Status {
-				t.Fatalf("outcome round-trip: %v %+v", err, got)
+// The three resource-result forms are read by clients written in another
+// language, so what is pinned here is the TEXT, not a Go round-trip. A
+// round-trip passes no matter what the fields are called — it marshals and
+// unmarshals with the same struct, so it agrees with itself by construction.
+// That is how a page of entries reached browsers spelled "ID"/"Kind"/"Ops":
+// the entries were json.Marshal'd straight off an internal door struct that
+// had no tags, and every Go-side test still passed.
+func TestResourceResultsAreSpelledForTheWire(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{
+			name:  "outcome",
+			value: ResourceOutcome{Status: "ok", ResourceID: "daemon://host/c0/a.png", Ticket: "t-1", Redeem: "http"},
+			want:  `{"status":"ok","resource_id":"daemon://host/c0/a.png","ticket":"t-1","redeem":"http"}`,
+		},
+		{
+			name:  "stat",
+			value: ResourceStat{Exists: true, Meta: &ResourceMeta{Kind: "file", CreatedAt: 7, CreatedBy: "human:root:1", Size: 9}},
+			want:  `{"exists":true,"meta":{"kind":"file","created_at":7,"created_by":"human:root:1","size":9}}`,
+		},
+		{
+			name:  "page",
+			value: ResourcePage{Items: []ResourceEntry{{ID: "daemon://host/c0/a.png", Kind: "file", Ops: []string{"read", "write"}}}, Next: "cur2"},
+			want:  `{"items":[{"id":"daemon://host/c0/a.png","kind":"file","ops":["read","write"]}],"next":"cur2"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
 			}
-		case ResourceStat:
-			var got ResourceStat
-			if err := json.Unmarshal(b, &got); err != nil || got.Exists != want.Exists {
-				t.Fatalf("stat round-trip: %v %+v", err, got)
+			if string(b) != tc.want {
+				t.Fatalf("on the wire:\n got %s\nwant %s", b, tc.want)
 			}
-		case ResourcePage:
-			var got ResourcePage
-			if err := json.Unmarshal(b, &got); err != nil || len(got.Items) != 2 || got.Next != "cur2" {
-				t.Fatalf("page round-trip: %v %+v", err, got)
-			}
-		}
+		})
 	}
 }

@@ -78,6 +78,7 @@ type HomeDeps struct {
 	IntroductionResolver home.IntroductionResolver
 	DaemonRoutes         platform.DaemonRoutes
 	DataPlaneIssuer      dataplane.Issuer
+	DataPlaneRedeemer    dataplane.Redeemer
 	DeviceDirectory      home.DeviceDirectory
 	RegistryBindings     home.BindingReader
 	OnMembraneOpen       func(channel.ID, uint64, platform.DaemonMembrane)
@@ -427,6 +428,7 @@ func (h *ChannelHost) openHome(
 		BootstrapService:      bootstrapService,
 		DaemonRoutes:          h.deps.DaemonRoutes,
 		DataPlaneIssuer:       h.deps.DataPlaneIssuer,
+		DataPlaneRedeemer:     h.deps.DataPlaneRedeemer,
 		DeviceDirectory:       h.deps.DeviceDirectory,
 		RegistryBindings:      h.deps.RegistryBindings,
 		ServicePort:           port,

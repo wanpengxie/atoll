@@ -12,6 +12,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -55,7 +56,7 @@ func openTestPlane(t *testing.T, opener *testOpener) (Issuer, Redeemer) {
 	return issue, redeem
 }
 
-const testPrincipal = "alice"
+const testCaller = actor.ActorID("human:alice:7")
 
 func issueTestTicket(t *testing.T, issue Issuer, mode access.Operation) Grant {
 	t.Helper()
@@ -63,7 +64,7 @@ func issueTestTicket(t *testing.T, issue Issuer, mode access.Operation) Grant {
 		Address: "daemon://host/c0.test/docs/a.txt", Path: "docs/a.txt",
 		ChannelID: "channel-a", Mode: mode,
 		HostID:    "daemon-a", HostName: "host",
-		Caller:    "human:alice:7", Principal: testPrincipal,
+		Caller:    testCaller,
 	})
 	if err != nil || grant.Ticket == "" {
 		t.Fatalf("Issue = (%+v, %v)", grant, err)
@@ -74,7 +75,7 @@ func issueTestTicket(t *testing.T, issue Issuer, mode access.Operation) Grant {
 func TestTicketLedgerKeepsOnlyRemoteByteFacts(t *testing.T) {
 	issue, redeem := openTestPlane(t, &testOpener{online: true})
 	grant := issueTestTicket(t, issue, access.OpRead)
-	ticket, err := redeem.Resolve("channel-a", grant.Ticket)
+	ticket, err := redeem.Resolve("channel-a", testCaller, grant.Ticket)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,12 +87,13 @@ func TestTicketLedgerKeepsOnlyRemoteByteFacts(t *testing.T) {
 	if ticket.Path != "docs/a.txt" {
 		t.Fatalf("ticket path=%q", ticket.Path)
 	}
-	if ticket.Caller != "human:alice:7" || ticket.Principal != testPrincipal {
-		t.Fatalf("ticket subject=(%q,%q)", ticket.Caller, ticket.Principal)
+	if ticket.Caller != testCaller {
+		t.Fatalf("ticket subject=%q", ticket.Caller)
 	}
-	// The enumeration is the claim: this table holds a route and its subject,
-	// and is not a place other facts about a person or a channel accumulate.
-	want := []string{"ChannelID", "Address", "Path", "Mode", "HostID", "Caller", "Principal", "Expires"}
+	// The enumeration is the claim: this table holds a route and the scope it
+	// belongs to (ChannelID + Caller), and is not a place other facts about a
+	// person or a channel accumulate.
+	want := []string{"ChannelID", "Address", "Path", "Mode", "HostID", "Caller", "Expires"}
 	typ := reflect.TypeOf(Ticket{})
 	got := make([]string, typ.NumField())
 	for i := range got {
@@ -102,12 +104,28 @@ func TestTicketLedgerKeepsOnlyRemoteByteFacts(t *testing.T) {
 	}
 }
 
-func TestTicketRejectsExpiryAndCrossChannelUse(t *testing.T) {
+// A ticket's scope is (channel, actor) and both halves are checked on the way
+// out. Neither is optional and neither is inferred from the ticket itself —
+// reading the scope off the ticket and then comparing it to itself would agree
+// every time.
+func TestTicketRejectsExpiryAndUseOutsideItsScope(t *testing.T) {
 	issue, redeem := openTestPlane(t, &testOpener{online: true})
 
-	crossChannel := issueTestTicket(t, issue, access.OpRead)
-	if _, err := redeem.Resolve("channel-b", crossChannel.Ticket); !errors.Is(err, ErrInvalidTicket) {
-		t.Fatalf("cross-channel Resolve error = %v, want ErrInvalidTicket", err)
+	scoped := issueTestTicket(t, issue, access.OpRead)
+	for _, tc := range []struct {
+		name   string
+		ch     channel.ID
+		caller actor.ActorID
+	}{
+		{name: "another channel", ch: "channel-b", caller: testCaller},
+		{name: "another actor", ch: "channel-a", caller: "human:mallory:3"},
+		{name: "no actor", ch: "channel-a", caller: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := redeem.Resolve(tc.ch, tc.caller, scoped.Ticket); !errors.Is(err, ErrInvalidTicket) {
+				t.Fatalf("Resolve error = %v, want ErrInvalidTicket", err)
+			}
+		})
 	}
 
 	expired := issueTestTicket(t, issue, access.OpRead)
@@ -117,58 +135,52 @@ func TestTicketRejectsExpiryAndCrossChannelUse(t *testing.T) {
 	ticket.Expires = p.now()
 	p.tickets[expired.Ticket] = ticket
 	p.mu.Unlock()
-	if _, err := redeem.Resolve("channel-a", expired.Ticket); !errors.Is(err, ErrInvalidTicket) {
+	if _, err := redeem.Resolve("channel-a", testCaller, expired.Ticket); !errors.Is(err, ErrInvalidTicket) {
 		t.Fatalf("expired Resolve error = %v, want ErrInvalidTicket", err)
 	}
 }
 
-// The door granted one member one direction on one file. Bytes arrive later, on
-// a connection the door never saw, so this is where the grant is matched to
-// whoever showed up: a different person, or nobody at all, is not the person the
-// door decided for, and a read grant is not a licence to write.
-func TestHTTPRedemptionAnswersOnlyToTheGrantedPersonAndDirection(t *testing.T) {
-	issue, redeem := openTestPlane(t, &testOpener{online: true})
-	grant := issueTestTicket(t, issue, access.OpRead)
-	tests := []struct {
-		name      string
-		principal string
-		mode      access.Operation
-	}{
-		{name: "another person", principal: "mallory", mode: access.OpRead},
-		{name: "nobody", principal: "", mode: access.OpRead},
-		{name: "the other direction", principal: testPrincipal, mode: access.OpWrite},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := redeem.ServeHTTP(t.Context(), test.principal, grant.Ticket, test.mode, io.Discard, bytes.NewReader(nil))
-			if !errors.Is(err, ErrInvalidTicket) {
-				t.Fatalf("ServeHTTP error = %v, want ErrInvalidTicket", err)
-			}
-		})
+// An access without an actor as its subject is not a weaker grant, it is not a
+// grant — so the table refuses to hold one at all.
+func TestATicketWithoutAnActorIsNeverMinted(t *testing.T) {
+	issue, _ := openTestPlane(t, &testOpener{online: true})
+	if _, err := issue.Issue(t.Context(), IssueSpec{
+		Address: "daemon://host/c0.test/docs/a.txt", Path: "docs/a.txt",
+		ChannelID: "channel-a", Mode: access.OpRead,
+		HostID: "daemon-a", HostName: "host",
+	}); err == nil {
+		t.Fatal("a ticket with no actor was minted")
 	}
 }
 
-// A transfer decided for an actor that answers for no person has no person to
-// match at a human entrance, so no principal — including the empty one — can
-// finish it there. Its lane redemption is unaffected.
-func TestAPersonlessTransferCannotBeFinishedAtAHumanEntrance(t *testing.T) {
+// The door granted one actor one direction on one file. Bytes arrive later, on
+// a connection the door never saw, so this is where the grant is matched to
+// what showed up: another actor, no actor, another channel, or the other
+// direction are each a different operation than the one that was decided.
+func TestRedemptionAnswersOnlyWithinItsScopeAndDirection(t *testing.T) {
 	issue, redeem := openTestPlane(t, &testOpener{online: true})
-	grant, err := issue.Issue(t.Context(), IssueSpec{
-		Address: "daemon://host/c0.test/docs/a.txt", Path: "docs/a.txt",
-		ChannelID: "channel-a", Mode: access.OpRead,
-		HostID:    "daemon-a", HostName: "host",
-		Caller:    "agent:a:1",
-	})
-	if err != nil {
-		t.Fatal(err)
+	grant := issueTestTicket(t, issue, access.OpRead)
+	tests := []struct {
+		name   string
+		ch     channel.ID
+		caller actor.ActorID
+		mode   access.Operation
+	}{
+		{name: "another actor", ch: "channel-a", caller: "human:mallory:3", mode: access.OpRead},
+		{name: "no actor", ch: "channel-a", caller: "", mode: access.OpRead},
+		{name: "another channel", ch: "channel-b", caller: testCaller, mode: access.OpRead},
+		{name: "the other direction", ch: "channel-a", caller: testCaller, mode: access.OpWrite},
 	}
-	for _, principal := range []string{"", "alice"} {
-		if err := redeem.ServeHTTP(t.Context(), principal, grant.Ticket, access.OpRead, io.Discard, nil); !errors.Is(err, ErrInvalidTicket) {
-			t.Fatalf("principal %q: error = %v, want ErrInvalidTicket", principal, err)
-		}
-	}
-	if _, err := redeem.Resolve("channel-a", grant.Ticket); err != nil {
-		t.Fatalf("lane redemption broke: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := redeem.ServeHTTP(t.Context(), test.ch, test.caller, grant.Ticket, test.mode, io.Discard, bytes.NewReader(nil))
+			if !errors.Is(err, ErrInvalidTicket) {
+				t.Fatalf("ServeHTTP error = %v, want ErrInvalidTicket", err)
+			}
+			if _, err := redeem.OpenTransfer(t.Context(), test.ch, test.caller, grant.Ticket, test.mode); !errors.Is(err, ErrInvalidTicket) {
+				t.Fatalf("OpenTransfer error = %v, want ErrInvalidTicket", err)
+			}
+		})
 	}
 }
 
@@ -178,7 +190,7 @@ func TestHostOpenFailureIsReturnedToHTTPAndExchangeCallers(t *testing.T) {
 
 	t.Run("HTTP", func(t *testing.T) {
 		grant := issueTestTicket(t, issue, access.OpRead)
-		err := redeem.ServeHTTP(t.Context(), testPrincipal, grant.Ticket, access.OpRead, io.Discard, nil)
+		err := redeem.ServeHTTP(t.Context(), "channel-a", testCaller, grant.Ticket, access.OpRead, io.Discard, nil)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("ServeHTTP error = %v, want host open error", err)
 		}
@@ -192,7 +204,7 @@ func TestHostOpenFailureIsReturnedToHTTPAndExchangeCallers(t *testing.T) {
 			redeem.ServeExchange(t.Context(), "channel-a", server)
 			close(serveDone)
 		}()
-		if err := link.WriteExchangeControl(caller, link.ExchangeTicketHeader{Ticket: grant.Ticket}); err != nil {
+		if err := link.WriteExchangeControl(caller, link.ExchangeTicketHeader{Ticket: grant.Ticket, Caller: string(testCaller)}); err != nil {
 			t.Fatal(err)
 		}
 		var status link.ExchangeStatus
@@ -249,7 +261,7 @@ func TestExchangeReadDistinguishesSuccessfulEOFAndTruncation(t *testing.T) {
 				redeem.ServeExchange(t.Context(), "channel-a", server)
 				close(serveDone)
 			}()
-			if err := link.WriteExchangeControl(caller, link.ExchangeTicketHeader{Ticket: grant.Ticket}); err != nil {
+			if err := link.WriteExchangeControl(caller, link.ExchangeTicketHeader{Ticket: grant.Ticket, Caller: string(testCaller)}); err != nil {
 				t.Fatal(err)
 			}
 			got, err := io.ReadAll(link.NewExchangeReader(caller))
@@ -302,7 +314,7 @@ func TestInterruptedHTTPWriteAfterPartialBytesNeverSucceeds(t *testing.T) {
 	issue, redeem := openTestPlane(t, opener)
 	grant := issueTestTicket(t, issue, access.OpWrite)
 	wantErr := errors.New("upload interrupted")
-	err := redeem.ServeHTTP(t.Context(), testPrincipal, grant.Ticket, access.OpWrite,
+	err := redeem.ServeHTTP(t.Context(), "channel-a", testCaller, grant.Ticket, access.OpWrite,
 		io.Discard, &partialErrorReader{data: []byte("partial"), err: wantErr})
 	if err == nil {
 		t.Fatal("partially transferred write returned success")
@@ -334,7 +346,7 @@ func TestExchangeWriteForwardsEarlyFailureAndJoins(t *testing.T) {
 		redeem.ServeExchange(t.Context(), "channel-a", server)
 		close(serveDone)
 	}()
-	if err := link.WriteExchangeControl(caller, link.ExchangeTicketHeader{Ticket: grant.Ticket}); err != nil {
+	if err := link.WriteExchangeControl(caller, link.ExchangeTicketHeader{Ticket: grant.Ticket, Caller: string(testCaller)}); err != nil {
 		t.Fatal(err)
 	}
 	uploadDone := make(chan error, 1)

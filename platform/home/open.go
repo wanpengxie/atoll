@@ -163,6 +163,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		StorageMounts:   daemonStorageMounts{routes: cfg.DaemonRoutes, bindings: cfg.RegistryBindings, directory: cfg.DeviceDirectory, chID: cfg.ChannelID},
 		Files:           daemonFiles{routes: cfg.DaemonRoutes, chID: cfg.ChannelID},
 		TransferControl: daemonTransferControl{issuer: cfg.DataPlaneIssuer, chID: cfg.ChannelID},
+		TransferRedeem:  daemonTransferRedeem{redeemer: cfg.DataPlaneRedeemer, chID: cfg.ChannelID},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build access door: %w", err)
