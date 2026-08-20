@@ -479,7 +479,7 @@ func toDriverInput(in *runtimeproto.Input) *driverproto.DriverMessage {
 func toDriverAttachments(in []runtimeproto.Attachment) []driverproto.Attachment {
 	out := make([]driverproto.Attachment, len(in))
 	for i, attachment := range in {
-		out[i] = driverproto.Attachment{Address: attachment.Address}
+		out[i] = driverproto.Attachment{Address: attachment.Address, Name: attachment.Name}
 	}
 	return out
 }

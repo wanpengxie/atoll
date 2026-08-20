@@ -50,6 +50,7 @@ type Input struct {
 
 type Attachment struct {
 	Address string `json:"address"`
+	Name    string `json:"name,omitempty"`
 }
 
 type ContextItem struct {

@@ -7,7 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
 
-func buildContent(batch []driverproto.DriverMessage, background []driverproto.ContextMessage) []map[string]any {
+func buildContent(batch []driverproto.DriverMessage, background []driverproto.ContextMessage, self driverproto.Situation) []map[string]any {
 	out := make([]map[string]any, 0, len(batch)+1)
 	if len(background) > 0 {
 		var b strings.Builder
@@ -22,6 +22,9 @@ func buildContent(batch []driverproto.DriverMessage, background []driverproto.Co
 		text := m.Text
 		if m.Caller.Actor != "" {
 			text = driverproto.CallerLine(m.Caller) + "\n" + text
+		}
+		if lines := driverproto.AttachmentLines(m.Attachments, self); lines != "" {
+			text = text + "\n" + lines
 		}
 		out = append(out, map[string]any{"type": "text", "text": text})
 	}

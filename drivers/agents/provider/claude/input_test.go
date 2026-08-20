@@ -1,21 +1,12 @@
-package codex
+package claude
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
 
-func TestInputHasNoProviderCharacterCeiling(t *testing.T) {
-	text := strings.Repeat("🙂", (1<<20)+1)
-	got := buildInput([]driverproto.DriverMessage{{Text: text}}, nil, driverproto.Situation{})
-	if len(got) != 1 || got[0]["text"] != text {
-		t.Fatal("large input was not preserved")
-	}
-}
-
-func TestBuildInputAppendsAttachmentLineToTextBlock(t *testing.T) {
+func TestBuildContentAppendsAttachmentLineToTextBlock(t *testing.T) {
 	self := driverproto.Situation{DeviceName: "local-device", WorkspaceDir: "/var/atoll/channels/c0.proj"}
 	message := driverproto.DriverMessage{
 		Text: "please read",
@@ -24,9 +15,9 @@ func TestBuildInputAppendsAttachmentLineToTextBlock(t *testing.T) {
 			Name:    "研究 文档.md",
 		}},
 	}
-	got := buildInput([]driverproto.DriverMessage{message}, nil, self)
+	got := buildContent([]driverproto.DriverMessage{message}, nil, self)
 	want := "please read\n[附件 name=\"研究 文档.md\" path=\"uploads/research.md\"]"
 	if len(got) != 1 || got[0]["type"] != "text" || got[0]["text"] != want {
-		t.Fatalf("input=%+v, want attachment in text block", got)
+		t.Fatalf("content=%+v, want attachment in text block", got)
 	}
 }

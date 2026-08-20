@@ -162,6 +162,13 @@ func (w *worker) execute(ctx context.Context, target driverproto.WorkerTurnTarge
 	if m.Type != TypeAsk {
 		return "", "type_unsupported: script does not handle " + m.Type
 	}
+	// An attachment names a file the sender wants this turn to act on, so this
+	// provider — the programmatic one the runtime's seams are proven against —
+	// reads it. Without a consumer here, attachments reach the driver boundary
+	// and stop, which is the shape of a seam that was cast and never connected.
+	if len(m.Attachments) > 0 && strings.TrimSpace(m.Attachments[0].Address) != "" {
+		return w.read(ctx, target, m.Attachments[0].Address)
+	}
 	var probe struct {
 		ResourceID string `json:"resource_id"`
 	}
@@ -199,7 +206,15 @@ func (w *worker) verify(ctx context.Context, target driverproto.WorkerTurnTarget
 	if json.Unmarshal(m.Payload, &p) != nil || strings.TrimSpace(p.ResourceID) == "" {
 		return "", "bad_payload: agent.ask verification requires resource_id"
 	}
-	out := w.resource(ctx, target, driverproto.ResourceInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("read-%d", target.Attempt)), Operation: "read_file", ResourceID: p.ResourceID})
+	return w.read(ctx, target, p.ResourceID)
+}
+
+// read is the one place this provider turns a name into bytes, whether the name
+// arrived as an attachment or in the payload. The name is passed through
+// untouched: what counts as a file name is the access door's judgement, and a
+// provider that pre-filtered it would be answering that question twice.
+func (w *worker) read(ctx context.Context, target driverproto.WorkerTurnTarget, id string) (string, string) {
+	out := w.resource(ctx, target, driverproto.ResourceInvocation{CallID: driverproto.ProviderToolCallID(fmt.Sprintf("read-%d", target.Attempt)), Operation: "read_file", ResourceID: id})
 	if out.Error != "" {
 		return "", "resource_failed: " + out.Error
 	}

@@ -408,8 +408,8 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	input := runtimeproto.Input{SourceID: string(msg.ID), Type: msg.Type, Sender: string(msg.Sender.ID), Caller: caller, Payload: append(json.RawMessage(nil), msg.Payload...), Text: messageText(msg.Payload)}
 	if msg.Type == TypeAsk {
 		var ask struct {
-			Text        string                    `json:"text"`
-			Attachments []runtimeproto.Attachment `json:"attachments,omitempty"`
+			Text        string            `json:"text"`
+			Attachments []json.RawMessage `json:"attachments,omitempty"`
 		}
 		if err := decodeStrict(msg.Payload, &ask); err != nil || strings.TrimSpace(ask.Text) == "" {
 			detail := "agent.ask requires text"
@@ -419,14 +419,16 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: detail})
 			return
 		}
-		for _, attachment := range ask.Attachments {
-			if strings.TrimSpace(attachment.Address) == "" {
-				l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "attachment address required"})
-				return
+		attachments := make([]runtimeproto.Attachment, 0, len(ask.Attachments))
+		for _, raw := range ask.Attachments {
+			var attachment runtimeproto.Attachment
+			if json.Unmarshal(raw, &attachment) != nil || strings.TrimSpace(attachment.Address) == "" {
+				continue
 			}
+			attachments = append(attachments, attachment)
 		}
 		input.Text = ask.Text
-		input.Attachments = append([]runtimeproto.Attachment(nil), ask.Attachments...)
+		input.Attachments = attachments
 	}
 	row := &book.Request{ID: id, Input: input, Bytes: len(msg.Payload), Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(corr)}
 	row.Scope = l.vault.Mint(row.ParentID, row.CorrelationID)

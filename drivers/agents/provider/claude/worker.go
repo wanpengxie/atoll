@@ -366,7 +366,7 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 		return
 	}
 	defer w.end()
-	content := buildContent(req.Messages, req.Background)
+	content := buildContent(req.Messages, req.Background, w.cfg.Situation)
 	if req.Kind == driverproto.TurnCompact {
 		content = []map[string]any{{"type": "text", "text": "/compact"}}
 	}
@@ -510,7 +510,7 @@ func (w *worker) Control(_ context.Context, req driverproto.ControlRequest) {
 		s := newTurnUUID()
 		w.turn.steers[s] = steerState{action: req.Action}
 		w.mu.Unlock()
-		if err := c.wire.writeFrame(userFrame(s, session, buildContent([]driverproto.DriverMessage{*req.Message}, nil))); err != nil {
+		if err := c.wire.writeFrame(userFrame(s, session, buildContent([]driverproto.DriverMessage{*req.Message}, nil, w.cfg.Situation))); err != nil {
 			w.mu.Lock()
 			if w.turn != nil {
 				delete(w.turn.steers, s)

@@ -3,6 +3,9 @@ package driverproto
 import (
 	"context"
 	"encoding/json"
+	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -11,7 +14,9 @@ import (
 )
 
 type Attachment struct {
-	Address string
+	Address   string
+	Name      string
+	LocalPath string
 }
 
 type DriverMessage struct {
@@ -113,4 +118,66 @@ func CallerLine(caller harness.Caller) string {
 	}
 	fields = append(fields, "actor="+string(caller.Actor))
 	return "[from " + strings.Join(fields, " ") + "]"
+}
+
+// ResolveAttachment strips daemon://<device>/<channel>/<path> into a path
+// relative to the agent cwd. A device or channel mismatch leaves LocalPath
+// empty. Multi-device routing can later return a non-local result here without
+// changing callers.
+//
+// This cannot reuse runtime/resourcespec.ParseFileAddress: archtest confines
+// that kernel contract leaf to runtime and platform/home. Keep this parser to
+// the minimum provider-facing projection needed here.
+func ResolveAttachment(a Attachment, self Situation) Attachment {
+	a.LocalPath = ""
+	u, err := url.Parse(a.Address)
+	if err != nil || strings.Contains(strings.ToLower(a.Address), "%2f") ||
+		u.Scheme != "daemon" || u.Opaque != "" || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		u.Host != self.DeviceName || !strings.HasPrefix(u.Path, "/") {
+		return a
+	}
+	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[0] != filepath.Base(filepath.Clean(self.WorkspaceDir)) || !validAttachmentPath(parts[1]) {
+		return a
+	}
+	a.LocalPath = parts[1]
+	return a
+}
+
+func validAttachmentPath(value string) bool {
+	if value == "" || strings.HasPrefix(value, "/") {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// AttachmentLines renders one model-visible line per attachment, without a
+// trailing newline. It returns an empty string when there are no attachments.
+func AttachmentLines(atts []Attachment, self Situation) string {
+	lines := make([]string, 0, len(atts))
+	for _, attachment := range atts {
+		resolved := ResolveAttachment(attachment, self)
+		var line strings.Builder
+		line.WriteString("[附件")
+		if resolved.Name != "" {
+			line.WriteString(" name=")
+			line.WriteString(strconv.Quote(resolved.Name))
+		}
+		line.WriteString(" path=")
+		if resolved.LocalPath != "" {
+			line.WriteString(strconv.Quote(resolved.LocalPath))
+		} else {
+			line.WriteString(strconv.Quote(resolved.Address))
+			line.WriteString(` note="not on this device"`)
+		}
+		line.WriteByte(']')
+		lines = append(lines, line.String())
+	}
+	return strings.Join(lines, "\n")
 }

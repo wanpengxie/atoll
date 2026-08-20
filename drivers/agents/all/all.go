@@ -73,10 +73,12 @@ func newScript(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 // simply unknown to it for the life of the cell.
 func situation(spec registry.InstanceSpec, deps registry.Deps, class string) driverproto.Situation {
 	out := driverproto.Situation{
-		ActorID: string(spec.ID),
-		Class:   class,
-		Channel: string(deps.ChannelID),
-		IsCore:  deps.ChannelID == channelspec.C0ChannelID,
+		ActorID:      string(spec.ID),
+		Class:        class,
+		Channel:      string(deps.ChannelID),
+		DeviceName:   deps.DeviceName,
+		WorkspaceDir: deps.WorkspaceDir,
+		IsCore:       deps.ChannelID == channelspec.C0ChannelID,
 	}
 	if kind, seed, ok := driverproto.ActorSegments(spec.ID); ok {
 		out.Kind, out.Seed = string(kind), seed

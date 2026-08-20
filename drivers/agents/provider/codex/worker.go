@@ -274,7 +274,7 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	params := map[string]any{"threadId": thread}
 	if req.Kind == driverproto.TurnChat {
 		method = "turn/start"
-		params["input"] = buildInput(req.Messages, req.Background)
+		params["input"] = buildInput(req.Messages, req.Background, w.cfg.Situation)
 		if pending.Model != "" {
 			params["model"] = pending.Model
 		}
@@ -337,7 +337,7 @@ func (w *worker) Control(_ context.Context, req driverproto.ControlRequest) {
 			w.publish(driverproto.ControlOutcome{Action: req.Action, Target: target, Verdict: driverproto.ControlRejected, Detail: "empty steer", Disposition: driverproto.KeepWorker})
 			return
 		}
-		input := buildInput([]driverproto.DriverMessage{*req.Message}, nil)
+		input := buildInput([]driverproto.DriverMessage{*req.Message}, nil, w.cfg.Situation)
 		method, params = "turn/steer", map[string]any{"threadId": thread, "expectedTurnId": string(target.Native), "input": input}
 	}
 	if err := c.rpc.callAsync(method, params, func(_ json.RawMessage, err error) { w.publish(classifyControlOutcome(req, err)) }); err != nil {
