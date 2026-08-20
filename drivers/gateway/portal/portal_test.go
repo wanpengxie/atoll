@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -18,15 +17,15 @@ import (
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 type filePlaneStub struct {
-	address resource.ResourceID
-	ticket  string
-	mode    access.Operation
-	body    []byte
-	err     error
+	principal string
+	ticket    string
+	mode      access.Operation
+	body      []byte
+	name      string
+	err       error
 }
 
 type obsPlaneStub struct {
@@ -44,8 +43,9 @@ func (f *filePlaneStub) Resolve(channel.ID, string) (dataplane.Ticket, error) {
 	return dataplane.Ticket{}, errors.New("unused")
 }
 func (f *filePlaneStub) ServeExchange(context.Context, channel.ID, io.ReadWriteCloser) {}
-func (f *filePlaneStub) ServeHTTP(_ context.Context, address resource.ResourceID, ticket string, mode access.Operation, dst io.Writer, src io.Reader) error {
-	f.address, f.ticket, f.mode = address, ticket, mode
+func (f *filePlaneStub) TicketFile(string, string) (string, bool)                     { return f.name, f.name != "" }
+func (f *filePlaneStub) ServeHTTP(_ context.Context, principal, ticket string, mode access.Operation, dst io.Writer, src io.Reader) error {
+	f.principal, f.ticket, f.mode = principal, ticket, mode
 	if f.err != nil {
 		return f.err
 	}
@@ -110,43 +110,93 @@ func TestFallbacksReturnContractJSONWithoutCORS(t *testing.T) {
 	}
 }
 
-func TestFileRouteUsesOneCanonicalEncodedAddress(t *testing.T) {
-	address := "daemon://host/c0/docs/report%20final.pdf"
-	plane := &filePlaneStub{body: []byte("payload")}
-	p := New(Config{DataPlane: plane, ContractVersion: "test"})
-	req := httptest.NewRequest(http.MethodGet, "/files/"+url.PathEscape(address)+"?t=ticket-a", nil)
+// fileRequest is a transfer by an authenticated person, the only kind this
+// entrance answers.
+func fileRequest(t *testing.T, sessions *gateway.SessionStore, principal, method, target string, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sessions.Mint(principal, time.Minute)})
+	return req
+}
+
+// A transfer carries its ticket and nothing else. The direction comes from the
+// method, and the name a browser saves the download under comes from the ticket
+// too — the client never spells out where the bytes live, so there is no second
+// place for the two sides to disagree about how to spell it.
+func TestFileGetIsNamedByItsTicketAlone(t *testing.T) {
+	sessions := gateway.NewSessionStore()
+	plane := &filePlaneStub{body: []byte("payload"), name: "report final.pdf"}
+	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
+	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodGet, "/files?t=ticket-a", ""))
 	if rec.Code != http.StatusOK || rec.Body.String() != "payload" {
 		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
 	}
-	if plane.address != resource.ResourceID(address) || plane.ticket != "ticket-a" || plane.mode != access.OpRead {
-		t.Fatalf("plane call=(%q,%q,%q)", plane.address, plane.ticket, plane.mode)
+	if plane.ticket != "ticket-a" || plane.mode != access.OpRead {
+		t.Fatalf("plane call=(%q,%q)", plane.ticket, plane.mode)
 	}
 	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, "report%20final.pdf") {
 		t.Fatalf("content-disposition=%q", got)
 	}
-
-	for _, raw := range []string{
-		"/files/daemon://host/c0/x?t=ticket-a",
-		"/files/" + strings.ReplaceAll(url.PathEscape(address), "%2F", "%2f") + "?t=ticket-a",
-	} {
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, raw, nil))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("non-canonical %q status=%d", raw, rec.Code)
-		}
-	}
 }
 
 func TestFilePutStreamsThroughRedeemer(t *testing.T) {
-	address := "daemon://host/c0/docs/new.bin"
+	sessions := gateway.NewSessionStore()
 	plane := &filePlaneStub{}
-	p := New(Config{DataPlane: plane, ContractVersion: "test"})
+	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/files/"+url.PathEscape(address)+"?t=write-ticket", strings.NewReader("bytes")))
+	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodPut, "/files?t=write-ticket", "bytes"))
 	if rec.Code != http.StatusNoContent || string(plane.body) != "bytes" || plane.mode != access.OpWrite {
 		t.Fatalf("status=%d body=%q mode=%q", rec.Code, plane.body, plane.mode)
+	}
+	if plane.ticket != "write-ticket" {
+		t.Fatalf("ticket=%q", plane.ticket)
+	}
+}
+
+// Bytes landing on a channel's disk are an operation by somebody, so this
+// entrance establishes who — exactly as /ws and /obs do. A ticket says what was
+// granted, never who is holding it, so an unauthenticated request must not be
+// able to finish somebody else's transfer by presenting one.
+func TestAFileTransferIsPerformedAsTheAuthenticatedPerson(t *testing.T) {
+	sessions := gateway.NewSessionStore()
+	plane := &filePlaneStub{body: []byte("payload")}
+	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, fileRequest(t, sessions, "alice", http.MethodPut, "/files?t=write-ticket", "bytes"))
+	if plane.principal != "alice" {
+		t.Fatalf("plane was told principal=%q", plane.principal)
+	}
+
+	plane.principal, plane.ticket, plane.body = "", "", nil
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(method, "/files?t=stolen-ticket", strings.NewReader("bytes")))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s with no session status=%d", method, rec.Code)
+		}
+	}
+	if plane.ticket != "" || plane.body != nil {
+		t.Fatalf("plane was reached without a session: ticket=%q body=%q", plane.ticket, plane.body)
+	}
+}
+
+// The ticket is the other half: a session says who, a ticket says what was
+// granted, and neither alone reaches the plane.
+func TestFileTransferWithoutATicketNeverReachesThePlane(t *testing.T) {
+	sessions := gateway.NewSessionStore()
+	plane := &filePlaneStub{body: []byte("payload")}
+	p := New(Config{DataPlane: plane, Sessions: sessions, ContractVersion: "test"})
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, fileRequest(t, sessions, "alice", method, "/files", "bytes"))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s without a ticket status=%d", method, rec.Code)
+		}
+	}
+	if plane.principal != "" || plane.ticket != "" {
+		t.Fatalf("plane was reached: principal=%q ticket=%q", plane.principal, plane.ticket)
 	}
 }
 

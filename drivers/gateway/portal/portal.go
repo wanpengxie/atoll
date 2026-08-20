@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -26,7 +25,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -61,33 +59,31 @@ func New(cfg Config) *Portal {
 	p.mux.HandleFunc("POST /api/identity/logout", p.logout)
 	p.mux.HandleFunc("GET /ws", p.serveWS)
 	p.mux.HandleFunc("GET /compute", p.compute)
-	p.mux.HandleFunc("GET /files/", p.files)
-	p.mux.HandleFunc("PUT /files/", p.files)
+	p.mux.HandleFunc("GET /files", p.files)
+	p.mux.HandleFunc("PUT /files", p.files)
 	p.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	p.mux.HandleFunc("/", p.fallback)
 	return p
 }
 
+// files is the byte half of a resource operation the access door has already
+// decided. It is a person's entrance like /ws and /obs are, so it establishes
+// who is asking the same way they do — a ticket says what was granted, never
+// who is holding it, and bytes that reach a channel's disk must be answerable
+// to a member of that channel.
+//
+// A transfer names nothing but its ticket. Which machine, which channel, which
+// path and which direction were all fixed when the door issued it, and the
+// redeeming side reads them from the ticket; an address on the URL could only
+// ever be the client repeating a decision it has no power to change.
 func (p *Portal) files(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.DataPlane == nil {
 		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), "data plane unavailable")
 		return
 	}
-	escapedPath := r.URL.EscapedPath()
-	const prefix = "/files/"
-	if !strings.HasPrefix(escapedPath, prefix) {
-		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), "invalid file address")
-		return
-	}
-	escaped := strings.TrimPrefix(escapedPath, prefix)
-	address, err := url.PathUnescape(escaped)
-	if err != nil || escaped == "" || url.PathEscape(address) != escaped {
-		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), "non-canonical file address encoding")
-		return
-	}
-	parsed, err := accessdoor.ParseFileAddress(address)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, string(codeInvalidArgs), err.Error())
+	principal, ok := p.authenticate(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, string(codeNotAuthenticated), "invalid session")
 		return
 	}
 	ticket := r.URL.Query().Get("t")
@@ -98,13 +94,15 @@ func (p *Portal) files(w http.ResponseWriter, r *http.Request) {
 	mode := access.OpRead
 	if r.Method == http.MethodPut {
 		mode = access.OpWrite
-	} else {
-		filename := path.Base(parsed.Path)
+	} else if filename, named := p.cfg.DataPlane.TicketFile(principal, ticket); named {
+		// Naming the download is presentation, and the name has to be on the
+		// wire before the first byte — so it is asked for up front. It grants
+		// nothing: the ticket is still redeemed below.
 		w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+url.PathEscape(filename))
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 	tracked := &trackingResponseWriter{ResponseWriter: w}
-	if err := p.cfg.DataPlane.ServeHTTP(r.Context(), resource.ResourceID(address), ticket, mode, tracked, r.Body); err != nil {
+	if err := p.cfg.DataPlane.ServeHTTP(r.Context(), principal, ticket, mode, tracked, r.Body); err != nil {
 		if tracked.wrote {
 			panic(http.ErrAbortHandler)
 		}
@@ -116,8 +114,6 @@ func (p *Portal) files(w http.ResponseWriter, r *http.Request) {
 			var offline *dataplane.HostOfflineError
 			if errors.As(err, &offline) {
 				err = accessdoor.NewHostOfflineError(offline.Host)
-			} else {
-				err = accessdoor.NewHostOfflineError(parsed.Host)
 			}
 		}
 		writeError(w, status, string(codeUnavailable), err.Error())
@@ -151,7 +147,7 @@ func (p *Portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if strings.HasPrefix(r.URL.EscapedPath(), "/files/") {
+	if r.URL.EscapedPath() == "/files" {
 		if r.Method == http.MethodGet || r.Method == http.MethodPut {
 			p.files(w, r)
 		} else {

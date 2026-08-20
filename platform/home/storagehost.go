@@ -6,9 +6,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/dataplane"
-	"github.com/wanpengxie/atoll/protocol/access"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
@@ -64,10 +62,11 @@ type daemonTransferControl struct {
 	chID   channelpkg.ID
 }
 
-func (c daemonTransferControl) IssueTransfer(ctx context.Context, address resource.ResourceID, targetID, targetName string, mode access.Operation) (string, error) {
+func (c daemonTransferControl) IssueTransfer(ctx context.Context, spec accessdoor.TransferSpec) (string, error) {
 	if c.issuer == nil {
 		return "", errors.New("platform: dataplane issuer unavailable")
 	}
+	address := spec.Address
 	// The ticket carries the path the holder may touch, relative to the
 	// channel's own directory on that machine. It is resolved once, here, where
 	// the address is already understood — the redeeming side reads the ticket
@@ -76,7 +75,11 @@ func (c daemonTransferControl) IssueTransfer(ctx context.Context, address resour
 	if err != nil {
 		return "", err
 	}
-	grant, err := c.issuer.Issue(ctx, dataplane.IssueSpec{Address: address, Path: parsed.Path, ChannelID: c.chID, Mode: mode, HostID: targetID, HostName: targetName})
+	grant, err := c.issuer.Issue(ctx, dataplane.IssueSpec{
+		Address: address, Path: parsed.Path, ChannelID: c.chID, Mode: spec.Mode,
+		HostID: spec.HostID, HostName: spec.HostName,
+		Caller: spec.Caller, Principal: spec.Principal,
+	})
 	if err != nil {
 		var offline *dataplane.HostOfflineError
 		if errors.As(err, &offline) {

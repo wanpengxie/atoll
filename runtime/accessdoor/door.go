@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type door struct{ deps Deps }
@@ -46,15 +47,20 @@ func (d *door) storageMount(ctx context.Context, host string) (StorageMount, err
 	return mount, nil
 }
 
-func (d *door) authorizeMember(ctx context.Context, caller actor.ActorID) (string, error) {
+// authorizeMember is the file plane's membership check: inside the membrane
+// every member reads and writes alike, so being an active member IS the right
+// (the same rule effectiveOps states for objects). It answers with the facts
+// rather than one field because a transfer that will be finished on another
+// connection also has to record whose transfer it is.
+func (d *door) authorizeMember(ctx context.Context, caller actor.ActorID) (storespec.ResourceActorFacts, error) {
 	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
-		return "", err
+		return storespec.ResourceActorFacts{}, err
 	}
 	if !facts.Active {
-		return "", ErrFileCapabilityUnavailable
+		return storespec.ResourceActorFacts{}, ErrFileCapabilityUnavailable
 	}
-	return facts.PreferredStorageHost, nil
+	return facts, nil
 }
 
 func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id resource.ResourceID, mode access.Operation) (*FileRoute, error) {
@@ -65,7 +71,7 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id re
 	if !file {
 		return nil, fmt.Errorf("%w: file address required", ErrMalformed)
 	}
-	callerHost, err := d.authorizeMember(ctx, caller)
+	facts, err := d.authorizeMember(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
@@ -73,13 +79,16 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id re
 	if err != nil {
 		return nil, err
 	}
-	if callerHost != "" && callerHost == mount.DaemonID {
+	if facts.PreferredStorageHost != "" && facts.PreferredStorageHost == mount.DaemonID {
 		return &FileRoute{Path: address.Path, Mode: mode, Redeem: FileRedeemLocal}, nil
 	}
 	if d.deps.TransferControl == nil {
 		return nil, errors.New("accessdoor: transfer control unavailable")
 	}
-	token, err := d.deps.TransferControl.IssueTransfer(ctx, id, mount.DaemonID, address.Host, mode)
+	token, err := d.deps.TransferControl.IssueTransfer(ctx, TransferSpec{
+		Address: id, HostID: mount.DaemonID, HostName: address.Host,
+		Mode: mode, Caller: caller, Principal: facts.Principal,
+	})
 	if err != nil {
 		return nil, err
 	}

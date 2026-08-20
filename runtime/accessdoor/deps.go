@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
@@ -36,8 +37,21 @@ type FileControl interface {
 	List(context.Context, string, string) ([]FileInfo, error)
 }
 
+// TransferSpec is one authorized-but-unfinished byte transfer. Caller and
+// Principal travel with it because the bytes move later, on a connection the
+// door never sees: whatever finishes this transfer has to be answerable as the
+// same actor, and an empty Principal means no human entrance can.
+type TransferSpec struct {
+	Address   resource.ResourceID
+	HostID    string
+	HostName  string
+	Mode      access.Operation
+	Caller    actor.ActorID
+	Principal string
+}
+
 type TransferControl interface {
-	IssueTransfer(context.Context, resource.ResourceID, string, string, access.Operation) (string, error)
+	IssueTransfer(context.Context, TransferSpec) (string, error)
 }
 
 type Deps struct {

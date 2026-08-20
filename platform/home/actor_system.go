@@ -332,6 +332,7 @@ func (a *actorSystem) ResourceActorFacts(
 		Owner: a.home.isOwner(storespec.ActorFacts{
 			Kind: basis.Kind, Principal: basis.Principal,
 		}),
+		Principal:            basis.Principal,
 		PreferredStorageHost: basis.PreferredStorageHost,
 	}, nil
 }

@@ -49,7 +49,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 		t.Fatalf("create outcome=%v", created)
 	}
 	want := bytes.Repeat([]byte("data-plane-e2e\n"), 4096)
-	endpoint := h.base + "/files/" + url.PathEscape(address) + "?t=" + url.QueryEscape(ticket)
+	endpoint := h.base + "/files?t=" + url.QueryEscape(ticket)
 	req, err := http.NewRequest(http.MethodPut, endpoint, bytes.NewReader(want))
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 
 	opened := ws.resource(map[string]any{"channel_id": c0ChannelID, "op": "read", "resource_id": address})
 	readTicket := stringField(t, opened, "ticket")
-	resp, err = api.http.Get(h.base + "/files/" + url.PathEscape(address) + "?t=" + url.QueryEscape(readTicket))
+	resp, err = api.http.Get(h.base + "/files?t=" + url.QueryEscape(readTicket))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestParentAndChildChannelsStayFlatOnDifferentDaemons(t *testing.T) {
 
 func httpPutFile(t *testing.T, api *apiClient, base, address, ticket string, content []byte) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, base+"/files/"+url.PathEscape(address)+"?t="+url.QueryEscape(ticket), bytes.NewReader(content))
+	req, err := http.NewRequest(http.MethodPut, base+"/files?t="+url.QueryEscape(ticket), bytes.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func httpPutFile(t *testing.T, api *apiClient, base, address, ticket string, con
 func httpReadFile(t *testing.T, api *apiClient, base string, ws *wsClient, channelID, address string) []byte {
 	t.Helper()
 	opened := ws.resource(map[string]any{"channel_id": channelID, "op": "read", "resource_id": address})
-	endpoint := base + "/files/" + url.PathEscape(address) + "?t=" + url.QueryEscape(stringField(t, opened, "ticket"))
+	endpoint := base + "/files?t=" + url.QueryEscape(stringField(t, opened, "ticket"))
 	resp, err := api.http.Get(endpoint)
 	if err != nil {
 		t.Fatal(err)

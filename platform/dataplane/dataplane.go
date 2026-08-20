@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
@@ -43,10 +45,18 @@ type Ticket struct {
 	// Path is the file's location inside that channel's directory on the host
 	// machine — the address minus its host and channel segments. It is resolved
 	// once at issue time so the redeeming side never re-parses the address.
-	Path    string
-	Mode    access.Operation
-	HostID  string
-	Expires time.Time
+	Path   string
+	Mode   access.Operation
+	HostID string
+	// Caller and Principal are whose transfer this is. The door decides on one
+	// connection and the bytes move on another, so without them the second
+	// connection has nobody on it — a transfer the door granted to one member
+	// would be finishable by anyone at all, member or not. Principal is empty
+	// for an actor that answers for no person; such a ticket is redeemable only
+	// on a device lane, never through a human entrance.
+	Caller    actor.ActorID
+	Principal string
+	Expires   time.Time
 }
 
 type IssueSpec struct {
@@ -56,6 +66,8 @@ type IssueSpec struct {
 	Mode      access.Operation
 	HostID    string
 	HostName  string
+	Caller    actor.ActorID
+	Principal string
 }
 
 type Grant struct {
@@ -69,7 +81,8 @@ type Issuer interface {
 type Redeemer interface {
 	Resolve(channel.ID, string) (Ticket, error)
 	ServeExchange(context.Context, channel.ID, io.ReadWriteCloser)
-	ServeHTTP(context.Context, resource.ResourceID, string, access.Operation, io.Writer, io.Reader) error
+	ServeHTTP(ctx context.Context, principal, token string, mode access.Operation, dst io.Writer, src io.Reader) error
+	TicketFile(principal, token string) (string, bool)
 }
 
 type Binder interface {
@@ -149,7 +162,7 @@ func (i issuer) Issue(_ context.Context, spec IssueSpec) (Grant, error) {
 	i.p.sweepLocked(now)
 	token := uuid.NewString()
 	i.p.tickets[token] = Ticket{Address: spec.Address, Path: spec.Path, ChannelID: spec.ChannelID, Mode: spec.Mode,
-		HostID: spec.HostID, Expires: now.Add(TicketTTL)}
+		HostID: spec.HostID, Caller: spec.Caller, Principal: spec.Principal, Expires: now.Add(TicketTTL)}
 	return Grant{Ticket: token}, nil
 }
 
@@ -311,16 +324,47 @@ func (r redeemer) ServeExchange(ctx context.Context, ch channel.ID, caller io.Re
 	<-terminalDone
 }
 
-func (r redeemer) ServeHTTP(ctx context.Context, address resource.ResourceID, token string, mode access.Operation, dst io.Writer, src io.Reader) error {
+// resolveFor is the human-entrance lookup: a ticket answers only to the person
+// the door issued it to. A ticket with no person on it (an agent's, a tool's)
+// answers to nobody here — its only redemption is on a device lane.
+func (p *plane) resolveFor(principal, token string) (Ticket, error) {
+	ticket, err := p.resolveAny(token)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if principal == "" || ticket.Principal != principal {
+		return Ticket{}, ErrInvalidTicket
+	}
+	return ticket, nil
+}
+
+// TicketFile answers the file name a live ticket will move, so an HTTP entrance
+// can name a download before the first byte goes out. It resolves nothing and
+// opens nothing: the ticket still has to survive redemption in ServeHTTP.
+func (r redeemer) TicketFile(principal, token string) (string, bool) {
+	ticket, err := r.p.resolveFor(principal, token)
+	if err != nil {
+		return "", false
+	}
+	return path.Base(ticket.Path), true
+}
+
+// ServeHTTP moves one transfer's bytes for one authenticated person. The ticket
+// fixes the machine, the channel, the path and the direction, all decided at
+// issue time by the access door; the principal is who is standing at the
+// entrance now, and it has to be the person the door decided for. The caller
+// supplies only the direction it believes it is in, and a ticket for the other
+// direction is refused.
+func (r redeemer) ServeHTTP(ctx context.Context, principal, token string, mode access.Operation, dst io.Writer, src io.Reader) error {
 	if !r.p.begin() {
 		return ErrClosed
 	}
 	defer r.p.wg.Done()
-	ticket, err := r.p.resolveAny(token)
+	ticket, err := r.p.resolveFor(principal, token)
 	if err != nil {
 		return err
 	}
-	if ticket.Address != address || ticket.Mode != mode {
+	if ticket.Mode != mode {
 		return ErrInvalidTicket
 	}
 	opener, err := r.p.openerFor(ticket)
@@ -329,6 +373,12 @@ func (r redeemer) ServeHTTP(ctx context.Context, address resource.ResourceID, to
 	}
 	host, err := opener.OpenHost(ctx, ticket)
 	if err != nil {
+		// The lane can retire between openerFor's liveness check and this open.
+		// Name the machine here, where the ticket is still in hand, so the
+		// entrance never needs an address to say who went away.
+		if errors.Is(err, ErrHostOffline) {
+			return NewHostOfflineError(ticketHost(ticket))
+		}
 		return err
 	}
 	defer host.Close()
