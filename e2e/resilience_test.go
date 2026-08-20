@@ -24,8 +24,11 @@ func setupDaemonEcho(t *testing.T, h *harness, ws *wsClient, declID string) (*pr
 		"device_id":  deviceID,
 	})
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
-		"id": declID, "name": "E2E resilience echo", "class": "echo",
-		"config": map[string]any{}, "visibility": "private",
+		// A declaration's name is the word the member it seats is called by, so
+		// it obeys the name law; the sentence goes in description.
+		"id": declID, "name": "e2e-resilience-echo", "class": "echo",
+		"description": "Echo seat for the resilience runs.",
+		"config":      map[string]any{}, "visibility": "private",
 	})
 	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID})
 	echoID := stringField(t, introduced, "member")

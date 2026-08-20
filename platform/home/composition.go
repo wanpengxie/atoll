@@ -44,8 +44,8 @@ func (v *compositionView) LookupByClass(
 ) (platform.ActorFactory, bool) {
 	if class == svcactor.Class {
 		if resolver, ok := v.resolver.(ServiceCompositionResolver); ok {
-			audit := func(ctx context.Context, payload map[string]any) error {
-				return v.h.emitSystemEvent(ctx, message.TypeSystemChannelInbound, payload)
+			audit := func(ctx context.Context, cause message.Cause, payload map[string]any) error {
+				return v.h.emitSystemEvent(ctx, cause, message.TypeSystemChannelInbound, payload)
 			}
 			members := svcactor.Members{
 				IsActive: v.h.actors.IsActive,

@@ -100,7 +100,7 @@ func (s *materializeSys) Recv() (actorbase.Msg, error) {
 	}
 	return actorbase.Msg{}, context.Canceled
 }
-func (s *materializeSys) Call(_ actor.ActorID, _ string, _ any) (actorbase.Pending, error) {
+func (s *materializeSys) Call(_ message.Cause, _ actor.ActorID, _ string, _ any) (actorbase.Pending, error) {
 	s.calls++
 	env := message.Envelope{Payload: json.RawMessage(`{"status":"completed","class":"echo","interfaces":["actor"],"capabilities":{},"words":{"echo.say":{"description":"live echo"},"echo.alt":{"description":"live alternate"}}}`)}
 	return svcPending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
@@ -117,7 +117,7 @@ func (s *svcSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
 
 func (s *svcSys) State() actorbase.StateHandle { return s.state }
 
-func (s *svcSys) CallFor(caller harness.Caller, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
+func (s *svcSys) CallFor(_ message.Cause, caller harness.Caller, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	s.caller, s.target, s.word = caller, target, word
 	s.payload, _ = json.Marshal(payload)
 	if s.callErr != nil {
@@ -137,7 +137,7 @@ func serviceDeps(self channel.ID) Deps {
 			},
 			FirstActiveAgent: func(context.Context) (actor.ActorID, bool, error) { return "agent:default:1", true, nil },
 		},
-		Audit: func(context.Context, map[string]any) error { return nil },
+		Audit: func(context.Context, message.Cause, map[string]any) error { return nil },
 	}
 }
 
@@ -394,7 +394,7 @@ func TestServiceManifestMaterializesOnceSurvivesRestartAndUpdates(t *testing.T) 
 	}
 
 	updated := ServiceTable{Endpoints: map[string]actor.ActorID{"echo.alt": "tool:echo:1"}}
-	updatedCard := restarted.buildCard(sys, updated)
+	updatedCard := restarted.buildCard(sys, message.Root(), updated)
 	if err := writeService(state, updated, updatedCard); err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +573,7 @@ type concurrentSys struct {
 
 func (s *concurrentSys) Life() context.Context      { return s.ctx }
 func (*concurrentSys) State() actorbase.StateHandle { return emptyState{} }
-func (s *concurrentSys) CallFor(harness.Caller, actor.ActorID, string, any) (actorbase.Pending, error) {
+func (s *concurrentSys) CallFor(message.Cause, harness.Caller, actor.ActorID, string, any) (actorbase.Pending, error) {
 	return s.pending, nil
 }
 

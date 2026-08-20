@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
@@ -67,7 +68,8 @@ func introduceHumanForTest(h *Home, ctx context.Context, kind actor.Kind, princi
 		return "", &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "human kind required"}
 	}
 	value, err := h.opEntry.Execute(ctx, sysactor.TypeMemberAdmit, sysactor.OperateRequest{
-		Anchor: uuid.NewString(), Payload: json.RawMessage(`{"principal":"` + principal + `"}`),
+		Anchor: uuid.NewString(), Cause: message.Root(),
+		Payload: json.RawMessage(`{"principal":"` + principal + `"}`),
 	})
 	if err != nil {
 		return "", err
@@ -78,7 +80,8 @@ func introduceHumanForTest(h *Home, ctx context.Context, kind actor.Kind, princi
 func removeActorForTest(h *Home, ctx context.Context, target actor.ActorID) error {
 	payload, _ := json.Marshal(map[string]any{"member": target})
 	_, err := h.opEntry.Execute(ctx, sysactor.TypeMemberDelete, sysactor.OperateRequest{
-		Caller: harness.Caller{Channel: h.channelID, Actor: target}, Anchor: uuid.NewString(), Payload: payload,
+		Caller: harness.Caller{Channel: h.channelID, Actor: target}, Anchor: uuid.NewString(),
+		Cause: message.Root(), Payload: payload,
 	})
 	return err
 }

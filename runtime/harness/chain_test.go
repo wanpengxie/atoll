@@ -43,7 +43,7 @@ func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: author}, Kind: message.KindEvent, Type: "agent.text",
-		Audience: nil,
+		Audience: nil, CorrelationID: "m1",
 	}
 	res, err := c.write(ctxCallerKind(author, actor.KindAgent), e)
 	if err != nil {
@@ -105,7 +105,7 @@ func TestChain_WriteShortCircuitsOnFirstReject(t *testing.T) {
 			e := &message.Envelope{
 				ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 				Sender: message.Sender{ID: "agent:p"}, Kind: message.KindEvent, Type: "agent.text",
-				Audience: message.Audience{"x"},
+				Audience: message.Audience{"x"}, CorrelationID: "m1",
 			}
 			tc.mutate(e)
 			res, err := c.write(tc.ctx, e)
@@ -148,6 +148,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ID: "req1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: callerID}, Kind: message.KindRequest, Type: "xhs.publish",
 		Audience: message.Audience{toolID}, Payload: json.RawMessage(`{"body":{}}`),
+		CorrelationID: "req1",
 	}
 	if res, err := c.write(ctxCallerKind(callerID, actor.KindAgent), req); err != nil || !res.Accepted() {
 		t.Fatalf("request write: err=%v reason=%q", err, res.RejectReason)
@@ -158,7 +159,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ID: "resp1", TS: fixedNowMs, ChannelID: testChannelID,
 		Sender: message.Sender{ID: toolID}, Kind: message.KindResponse, Type: "xhs.publish",
 		ParentID: "req1", Audience: message.Audience{callerID},
-		Payload: json.RawMessage(`{"status":"completed"}`),
+		Payload: json.RawMessage(`{"status":"completed"}`), CorrelationID: "req1",
 	}
 	res, err := c.write(ctxCallerKind(toolID, actor.KindTool), resp)
 	if err != nil || !res.Accepted() {
@@ -179,6 +180,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		Sender: message.Sender{ID: toolID}, Kind: message.KindResponse, Type: "xhs.publish",
 		ParentID: "req1", Audience: message.Audience{callerID},
 		Payload: json.RawMessage(`{"status":"failed","reason":"receiver_internal_error"}`),
+		CorrelationID: "req1",
 	}
 	res2, err := c.write(ctxCallerKind(toolID, actor.KindTool), resp2)
 	if err != nil {
@@ -199,7 +201,7 @@ func TestChain_DuplicateEnvelopeIDRejectsAtAppend(t *testing.T) {
 		return &message.Envelope{
 			ID: "dup", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 			Sender: message.Sender{ID: author}, Kind: message.KindEvent, Type: "agent.text",
-			Audience: message.Audience{"x"},
+			Audience: message.Audience{"x"}, CorrelationID: "dup",
 		}
 	}
 	if res, err := c.write(ctxCallerKind(author, actor.KindAgent), mk()); err != nil || !res.Accepted() {

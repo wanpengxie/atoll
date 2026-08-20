@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -186,6 +187,7 @@ func TestBuildEvent_FillsOwnFieldsAndLeavesPenInjectedZero(t *testing.T) {
 		Payload:    json.RawMessage(`{"hi":1}`),
 		Visibility: message.Visibility("channel"),
 		Audience:   message.Audience{actor.ActorID("a")},
+		Cause:      message.Root(),
 	})
 	if err != nil {
 		t.Fatalf("BuildEvent err: %v", err)
@@ -213,7 +215,8 @@ func TestBuildEvent_FillsOwnFieldsAndLeavesPenInjectedZero(t *testing.T) {
 
 // BuildEvent rejects an empty event type.
 func TestBuildEvent_EmptyType(t *testing.T) {
-	if _, err := BuildEvent(fixedClock(1), EventSpec{}); err == nil {
+	// Cause is supplied so the only thing missing is the type this test names.
+	if _, err := BuildEvent(fixedClock(1), EventSpec{Cause: message.Root()}); err == nil {
 		t.Fatal("empty type must error")
 	}
 }
@@ -222,12 +225,22 @@ func TestBuildEvent_EmptyType(t *testing.T) {
 // into the spec's RawMessage payload and folds the variadic audience. A
 // payload that cannot be marshalled is an error, never a silently empty spec.
 func TestEventSpecJSON(t *testing.T) {
-	spec, err := EventSpecJSON("agent.text", map[string]string{"text": "hi"}, actor.ActorID("a"))
+	trigger := message.Envelope{ID: "req-1", CorrelationID: "errand-1"}
+	spec, err := EventSpecJSON(message.From(trigger), "agent.text", map[string]string{"text": "hi"}, actor.ActorID("a"))
 	if err != nil {
 		t.Fatalf("EventSpecJSON err: %v", err)
 	}
 	if spec.Type != "agent.text" {
 		t.Fatalf("type = %q", spec.Type)
+	}
+	// The sugar carries the cause through rather than handing back a spec with
+	// a required answer still blank for the caller to remember.
+	built, err := BuildEvent(func() time.Time { return time.UnixMilli(1) }, spec)
+	if err != nil {
+		t.Fatalf("BuildEvent on the sugar's spec: %v", err)
+	}
+	if built.ParentID != "req-1" || built.CorrelationID != "errand-1" {
+		t.Fatalf("built parent %q correlation %q, want req-1 / errand-1", built.ParentID, built.CorrelationID)
 	}
 	if string(spec.Payload) != `{"text":"hi"}` {
 		t.Fatalf("payload = %s, want the marshalled map", spec.Payload)
@@ -238,7 +251,7 @@ func TestEventSpecJSON(t *testing.T) {
 
 	// No audience at all stays nil rather than becoming an empty slice: an
 	// event addressed to nobody in particular is a real shape.
-	spec, err = EventSpecJSON("agent.text", nil)
+	spec, err = EventSpecJSON(message.Root(), "agent.text", nil)
 	if err != nil {
 		t.Fatalf("EventSpecJSON(no audience) err: %v", err)
 	}
@@ -246,7 +259,7 @@ func TestEventSpecJSON(t *testing.T) {
 		t.Fatalf("audience = %v, want nil", spec.Audience)
 	}
 
-	if _, err := EventSpecJSON("agent.text", make(chan int)); err == nil {
+	if _, err := EventSpecJSON(message.Root(), "agent.text", make(chan int)); err == nil {
 		t.Fatal("an unmarshallable payload must error")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -69,9 +70,14 @@ type RestartRequest struct {
 	ActorID actor.ActorID
 }
 
+// Cause on these two is what the "so-and-so left the channel" narration is
+// written under. The narration is a consequence of whatever asked for the
+// removal, and only the asker knows what that was — three layers down, where
+// the event is actually written, there is nothing left to derive it from.
 type RemoveRequest struct {
 	Target           actor.ActorID
 	InitiatorActorID actor.ActorID
+	Cause            message.Cause
 }
 
 type EndRequest struct {
@@ -79,6 +85,7 @@ type EndRequest struct {
 	CallerAttempt actorhost.AttemptKey
 	Target        actor.ActorID
 	Reason        string
+	Cause         message.Cause
 }
 
 type EndResult struct {

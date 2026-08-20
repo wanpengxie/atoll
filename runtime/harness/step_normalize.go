@@ -51,11 +51,15 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 	// code. kind is sender-required and is a pure CONSTRAINT, not a normalize
 	// fill. See stepEnvelopeShape + stepKindAndAudience.
 
-	// correlation_id default: a self-rooted fallback — an envelope with no
-	// correlation_id roots a new correlation tree at its own id.
-	if env.CorrelationID == "" && env.ID != "" {
-		env.CorrelationID = env.ID
-	}
+	// There is deliberately NO correlation_id fill. This used to root a
+	// correlation-less envelope at its own id, which reads as a fill and is
+	// actually a CLAIM: "nothing caused this". It is wrong for every envelope
+	// written to serve another one, and it was wrong silently — a relay that
+	// had no way to state its cause got a plausible answer instead of an error,
+	// and its row floated beside the request that provoked it with nothing on
+	// the ledger connecting the two. Cause is now a required builder input
+	// (lib/behavior), so an empty correlation here means something skipped the
+	// builder; stepEnvelopeShape rejects it rather than inventing an answer.
 
 	// payload baseline: the canonical wire form is a JSON object. normalize
 	// substitutes `{}` when the caller omits payload so every appended row

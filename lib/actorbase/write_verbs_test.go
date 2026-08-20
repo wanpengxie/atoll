@@ -31,6 +31,7 @@ func TestPostLeavesAnAbsentDeadlineAbsent(t *testing.T) {
 	if _, err := e.Post(behavior.RequestSpec{
 		Type:     "human.approve",
 		Audience: message.Audience{actor.ActorID("agent:worker")},
+		Cause:    message.Root(),
 	}); err != nil {
 		t.Fatalf("Post = %v", err)
 	}
@@ -52,6 +53,7 @@ func TestPostRegistersNoCallLedgerEntry(t *testing.T) {
 		ID:       "req-posted",
 		Type:     "human.approve",
 		Audience: message.Audience{actor.ActorID("agent:worker")},
+		Cause:    message.Root(),
 	})
 	if err != nil {
 		t.Fatalf("Post = %v", err)
@@ -80,12 +82,13 @@ func TestPostAllowsASelfAddressedRequest(t *testing.T) {
 	if _, err := e.Post(behavior.RequestSpec{
 		Type:     "note.to.self",
 		Audience: message.Audience{actor.ActorID("human:alice:1")},
+		Cause:    message.Root(),
 	}); err != nil {
 		t.Fatalf("Post to self = %v, want nil (ErrSelfCall guards Wait, not writing)", err)
 	}
 	// Call, on the same engine and the same target, still refuses — the guard
 	// belongs to the waiting verb, and this test is the contrast.
-	if _, err := e.Call(actor.ActorID("human:alice:1"), "note.to.self", nil); !errors.Is(err, ErrSelfCall) {
+	if _, err := e.Call(message.Root(), actor.ActorID("human:alice:1"), "note.to.self", nil); !errors.Is(err, ErrSelfCall) {
 		t.Fatalf("Call to self = %v, want ErrSelfCall", err)
 	}
 }
@@ -100,7 +103,7 @@ func TestEmitAndPostSurfaceHarnessRejectionsTyped(t *testing.T) {
 	t.Run("Emit", func(t *testing.T) {
 		e := newTestEngine(t, &fakePen{self: "human:alice:1", reject: harness.HarnessRejectReason(reason)}, Hooks{}, 8, 8)
 		e.lifeCtx = context.Background()
-		_, err := e.Emit(behavior.EventSpec{Type: "human.note"})
+		_, err := e.Emit(behavior.EventSpec{Type: "human.note", Cause: message.Root()})
 		var rejected *WriteRejected
 		if !errors.As(err, &rejected) {
 			t.Fatalf("Emit reject = %v (%T), want a *WriteRejected", err, err)
@@ -116,6 +119,7 @@ func TestEmitAndPostSurfaceHarnessRejectionsTyped(t *testing.T) {
 		_, err := e.Post(behavior.RequestSpec{
 			Type:     "human.approve",
 			Audience: message.Audience{actor.ActorID("agent:worker")},
+			Cause:    message.Root(),
 		})
 		var rejected *WriteRejected
 		if !errors.As(err, &rejected) {
@@ -139,7 +143,7 @@ func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 	e.lifeCtx = context.Background()
 
 	for _, visibility := range []message.Visibility{message.VisibilitySystem, message.Visibility("private")} {
-		_, err := e.Emit(behavior.EventSpec{Type: "human.note", Visibility: visibility})
+		_, err := e.Emit(behavior.EventSpec{Type: "human.note", Visibility: visibility, Cause: message.Root()})
 		var invalid *InvalidVisibilityError
 		if !errors.As(err, &invalid) {
 			t.Fatalf("Emit(visibility=%s) error = %v, want typed InvalidVisibilityError", visibility, err)
@@ -148,6 +152,7 @@ func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 			Type:       "human.approve",
 			Audience:   message.Audience{actor.ActorID("agent:worker")},
 			Visibility: visibility,
+			Cause:      message.Root(),
 		})
 		if !errors.As(err, &invalid) {
 			t.Fatalf("Post(visibility=%s) error = %v, want typed InvalidVisibilityError", visibility, err)
@@ -158,7 +163,7 @@ func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 	}
 
 	// Absent normalises to public rather than reaching truth empty.
-	if _, err := e.Emit(behavior.EventSpec{Type: "human.note"}); err != nil {
+	if _, err := e.Emit(behavior.EventSpec{Type: "human.note", Cause: message.Root()}); err != nil {
 		t.Fatalf("Emit = %v", err)
 	}
 	if got := pen.last().Visibility; got != message.VisibilityPublic {
@@ -167,6 +172,7 @@ func TestEmitAndPostRestrictVisibilityToTheActorFacingSet(t *testing.T) {
 	if _, err := e.Post(behavior.RequestSpec{
 		Type:     "human.approve",
 		Audience: message.Audience{actor.ActorID("agent:worker")},
+		Cause:    message.Root(),
 	}); err != nil {
 		t.Fatalf("Post = %v", err)
 	}
@@ -191,8 +197,7 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 		Payload:       json.RawMessage(`{"text":"hi"}`),
 		Visibility:    message.VisibilityPublic,
 		Audience:      message.Audience{actor.ActorID("agent:worker")},
-		ParentID:      "req-parent",
-		CorrelationID: "corr-1",
+		Cause:         message.Anchored("req-parent", "corr-1"),
 	}); err != nil {
 		t.Fatalf("Emit = %v", err)
 	}
@@ -217,8 +222,7 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 		Payload:       json.RawMessage(`{"amount":10}`),
 		Audience:      message.Audience{actor.ActorID("agent:worker")},
 		Visibility:    message.VisibilityPublic,
-		ParentID:      "ev-parent",
-		CorrelationID: "corr-2",
+		Cause:         message.Anchored("ev-parent", "corr-2"),
 		ExpiresAt:     &deadline,
 	}); err != nil {
 		t.Fatalf("Post = %v", err)

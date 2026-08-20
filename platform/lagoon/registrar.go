@@ -188,7 +188,7 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "endpoint_not_found", "this node is not accepting self-registration, so new principals cannot be created from the lobby; an existing principal must create the account")
 		return
 	}
-	value, err := r.execute(sys, msg.Ctx(), principal, caller.Channel, word, msg.Payload)
+	value, err := r.execute(sys, msg, principal, caller.Channel, word, msg.Payload)
 	if err != nil {
 		var le *Error
 		if errors.As(err, &le) {
@@ -332,14 +332,19 @@ func decodeEmpty(raw json.RawMessage) error {
 	return nil
 }
 
-func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal string, source channel.ID, word Word, raw json.RawMessage) (any, error) {
+// execute carries the triggering message, not merely its context: three of
+// these words post follow-up requests of their own, and a follow-up that cannot
+// name what caused it lands on the ledger with nothing explaining why it is
+// there.
+func (r *Registrar) execute(sys actorbase.Sys, trigger actorbase.Msg, principal string, source channel.ID, word Word, raw json.RawMessage) (any, error) {
+	ctx := trigger.Ctx()
 	switch word {
 	case WordChannelCreate:
 		var p ChannelCreate
 		if err := decodeArgs(raw, &p, shapeRecipe); err != nil {
 			return nil, err
 		}
-		return r.createChannel(sys, ctx, principal, source, p)
+		return r.createChannel(sys, trigger, principal, source, p)
 	case WordChannelTemplateCreate:
 		var p ChannelTemplateRegister
 		if err := decodeArgs(raw, &p, shapeChannelTemplate); err != nil {
@@ -369,13 +374,13 @@ func (r *Registrar) execute(sys actorbase.Sys, ctx context.Context, principal st
 		if err := decodePayload(raw, &p); err != nil {
 			return nil, err
 		}
-		return r.retireChannel(sys, ctx, principal, source, p)
+		return r.retireChannel(sys, trigger, principal, source, p)
 	case WordPrincipalCreate:
 		var p PrincipalRegister
 		if err := decodePayload(raw, &p); err != nil {
 			return nil, err
 		}
-		return r.registerPrincipal(sys, ctx, p)
+		return r.registerPrincipal(sys, trigger, p)
 	case WordPrincipalLogin:
 		var p PrincipalLogin
 		if err := decodePayload(raw, &p); err != nil {
@@ -555,7 +560,8 @@ type ChannelCreateReply struct {
 	ChannelID channel.ID `json:"channel_id"`
 }
 
-func (r *Registrar) createChannel(sys actorbase.Sys, ctx context.Context, owner string, source channel.ID, p ChannelCreate) (ChannelCreateReply, error) {
+func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owner string, source channel.ID, p ChannelCreate) (ChannelCreateReply, error) {
+	ctx := trigger.Ctx()
 	var row regspec.ChannelRow
 	var created bool
 	err := r.registry.store.InTx(ctx, func(tx *store.Tx) error {
@@ -572,7 +578,7 @@ func (r *Registrar) createChannel(sys actorbase.Sys, ctx context.Context, owner 
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: row.ID})
 	}
-	r.postChannelEdges(sys, row, message.TypeSystemMemberCreate)
+	r.postChannelEdges(sys, trigger, row, message.TypeSystemMemberCreate)
 	return ChannelCreateReply{ChannelID: row.ID}, nil
 }
 
@@ -796,15 +802,17 @@ func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]act
 // It resolves to exactly one seat because c0 holds at most one handle per
 // channel and each is named by that channel's qualified name, which the
 // registry mints itself and no one may edit.
-func (r *Registrar) postChannelEdges(sys actorbase.Sys, row regspec.ChannelRow, word string) {
+// Both posts continue the errand that asked for the channel — they are
+// consequences of that word, not errands the registry started on its own.
+func (r *Registrar) postChannelEdges(sys actorbase.Sys, trigger actorbase.Msg, row regspec.ChannelRow, word string) {
 	raw, _ := json.Marshal(map[string]any{"decl_id": string(row.ID)})
-	_, _ = sys.Post(behavior.RequestSpec{Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw})
+	_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw})
 	if row.ParentID != channelspec.C0ChannelID {
 		parent := parentQualifiedName(row.QualifiedName)
 		if parent == "" {
 			return
 		}
-		_, _ = sys.Post(behavior.RequestSpec{Type: word, Audience: message.Audience{actor.ActorID("peer:" + parent)}, Payload: raw})
+		_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.ActorID("peer:" + parent)}, Payload: raw})
 	}
 }
 
@@ -823,7 +831,8 @@ type ChannelRetireReply struct {
 	regspec.ChannelRow
 }
 
-func (r *Registrar) retireChannel(sys actorbase.Sys, ctx context.Context, principal string, source channel.ID, p ChannelRetire) (ChannelRetireReply, error) {
+func (r *Registrar) retireChannel(sys actorbase.Sys, trigger actorbase.Msg, principal string, source channel.ID, p ChannelRetire) (ChannelRetireReply, error) {
+	ctx := trigger.Ctx()
 	if p.ChannelID == "" {
 		return ChannelRetireReply{}, invalid("channel_id required: name the channel to act on; list them with system.channel.list")
 	}
@@ -854,7 +863,7 @@ func (r *Registrar) retireChannel(sys actorbase.Sys, ctx context.Context, princi
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: p.ChannelID, AllPrincipals: true})
 	}
-	r.postChannelEdges(sys, row, message.TypeSystemMemberDelete)
+	r.postChannelEdges(sys, trigger, row, message.TypeSystemMemberDelete)
 	return ChannelRetireReply{ChannelRow: row}, nil
 }
 
@@ -863,7 +872,8 @@ type PrincipalRegisterReply struct {
 	HomeChannelID channel.ID `json:"home_channel_id"`
 }
 
-func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p PrincipalRegister) (PrincipalRegisterReply, error) {
+func (r *Registrar) registerPrincipal(sys actorbase.Sys, trigger actorbase.Msg, p PrincipalRegister) (PrincipalRegisterReply, error) {
+	ctx := trigger.Ctx()
 	p.Email = strings.TrimSpace(p.Email)
 	if p.Email == "" || p.SecretHash == "" {
 		return PrincipalRegisterReply{}, invalid("email and secret_hash are both required to create a principal")
@@ -924,7 +934,7 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, ctx context.Context, p 
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: home.ID, Principal: id})
 	}
-	r.postChannelEdges(sys, home, message.TypeSystemMemberCreate)
+	r.postChannelEdges(sys, trigger, home, message.TypeSystemMemberCreate)
 	return PrincipalRegisterReply{PrincipalID: row.ID, HomeChannelID: home.ID}, nil
 }
 

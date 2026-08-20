@@ -129,6 +129,7 @@ func TestRealJobTableProgressReachesMetatoolInCallerLedgerOrder(t *testing.T) {
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
 		Type: "test.observe.progress", Payload: json.RawMessage(`{"body":{}}`), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
+		Cause: message.Root(),
 	})
 	if err != nil {
 		t.Fatal(err)

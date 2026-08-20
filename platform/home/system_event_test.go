@@ -32,7 +32,7 @@ func TestEmitSystemEventSealsEnvelopeAndChecksAccepted(t *testing.T) {
 			return harness.WriteResult{MessageID: env.ID, Seq: 7}, nil
 		}),
 	}
-	if err := h.emitSystemEvent(context.Background(), "test.event", map[string]any{"x": 1}); err != nil {
+	if err := h.emitSystemEvent(context.Background(), message.Root(), "test.event", map[string]any{"x": 1}); err != nil {
 		t.Fatal(err)
 	}
 	if captured == nil || captured.ID == "" || captured.TS != 1234 ||
@@ -52,7 +52,7 @@ func TestEmitSystemEventSealsEnvelopeAndChecksAccepted(t *testing.T) {
 			RejectReason: harness.HarnessTypeUnknown, RejectDetail: "rejected",
 		}, nil
 	})
-	err := h.emitSystemEvent(context.Background(), "test.rejected", map[string]any{})
+	err := h.emitSystemEvent(context.Background(), message.Root(), "test.rejected", map[string]any{})
 	var rejected *systemEventWriteError
 	if !errors.As(err, &rejected) || rejected.Reason != harness.HarnessTypeUnknown {
 		t.Fatalf("reject err=%v", err)
@@ -70,8 +70,8 @@ func TestLifecycleNarrationLandsThroughSystemEventMouth(t *testing.T) {
 	defer func() { _ = h.closeInternal("test") }()
 	ctx := context.Background()
 
-	h.announceRegistered(ctx, "agent:new:1", map[string]any{"kind": actor.KindAgent})
-	h.announceEnded(ctx, []actor.ActorID{"agent:new:1"}, "test", actor.SystemActorID)
+	h.announceRegistered(ctx, message.Root(), "agent:new:1", map[string]any{"kind": actor.KindAgent})
+	h.announceEnded(ctx, message.Root(), []actor.ActorID{"agent:new:1"}, "test", actor.SystemActorID)
 	for _, typ := range []string{
 		message.TypeSystemMemberCreated,
 		message.TypeSystemMemberDeleted,

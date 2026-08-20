@@ -48,10 +48,23 @@ const durableRestartAuthor actor.ActorID = "agent:durable-restart"
 //   - it rings at all (the row, not the process, owns the intent);
 //   - it rings ONCE — a deadline missed by three hours is not three hours of
 //     backlog to catch up on; one-shot means one fire no matter how late;
-//   - it rings AS SCHEDULED — type / payload / correlation / audience are the
-//     ones written down before the restart, with only TS reading the instant it
-//     actually fired (the fire is honest about being late, it does not
-//     back-date itself to the deadline it missed).
+//   - it rings AS SCHEDULED — type / payload / audience are the ones written
+//     down before the restart, with only TS reading the instant it actually
+//     fired (the fire is honest about being late, it does not back-date itself
+//     to the deadline it missed).
+//
+// What it deliberately does NOT ring as: a continuation of whatever errand was
+// being served when the timer was set. The row still carries the correlation
+// captured back then, and buildFireEnvelope deliberately ignores it — see the
+// comment there. By the time a timer goes off its scheduling request has long
+// since reached its terminal, so re-entering that tree would mean the tree
+// never ends, and a recurring timer would keep growing one tree for as long as
+// it ran. The fire begins its own errand instead. What actually scheduled it is
+// not lost: it is recorded in the timer row's author, and in the `timer:<id>`
+// message id, which is what ties repeated triggers of one timer together.
+//
+// This is a REVERSAL of the earlier behaviour, where the fire inherited the
+// scheduling correlation. The assertion below pins the reversal on purpose.
 func TestDurableTimerSurvivesEngineRestartAndFiresLateExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	timers := openDurableTimerRows(t, "timer-durable-restart")
@@ -118,8 +131,12 @@ func TestDurableTimerSurvivesEngineRestartAndFiresLateExactlyOnce(t *testing.T) 
 		t.Fatalf("fire type = %q, want the scheduled type", call.env.Type)
 	case string(call.env.Payload) != `{"round":1}`:
 		t.Fatalf("fire payload = %s, want the scheduled payload", call.env.Payload)
-	case string(call.env.CorrelationID) != "corr-across-restart":
-		t.Fatalf("fire correlation = %q, want the scheduled correlation", call.env.CorrelationID)
+	// A fire heads its own tree: correlation is the fire's OWN id, and NOT the
+	// "corr-across-restart" the row still holds from scheduling time.
+	case call.env.CorrelationID != fireMessageID(id):
+		t.Fatalf("fire correlation = %q, want the fire's own id %q (a fire begins its own errand; re-entering the long-terminal scheduling tree would mean that tree never ends)", call.env.CorrelationID, fireMessageID(id))
+	case call.env.ParentID != "":
+		t.Fatalf("fire parent = %q, want none — a message that heads its own tree has no parent", call.env.ParentID)
 	case len(call.env.Audience) != 1 || call.env.Audience[0] != durableRestartAuthor:
 		t.Fatalf("fire audience = %v, want the author alone", call.env.Audience)
 	}

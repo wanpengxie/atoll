@@ -92,10 +92,21 @@ type Sys interface {
 	// --- Pen: request write + caller closure ---------------------------
 	// Call writes a kind=request message addressed to target and returns the
 	// sealed ticket for its own out-station account entry.
-	Call(target actor.ActorID, msgType string, payload any) (Pending, error)
-	// CallFor writes with framework caller attribution while leaving args in
-	// the same application body seen by every receiver.
-	CallFor(caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error)
+	//
+	// cause is first and required, on the same footing as the Msg that
+	// Reply/Fail/Progress take: a request written while serving another one
+	// says msg.Cause(), and a request that begins an errand says
+	// message.Root(). Before it existed this verb built a full envelope out of
+	// three arguments and left the cause fields zero, which the ledger read as
+	// "nothing caused this" — every relay in the tree said so, and none of them
+	// meant it.
+	Call(cause message.Cause, target actor.ActorID, msgType string, payload any) (Pending, error)
+	// CallFor is Call with framework caller attribution, leaving args in the
+	// same application body seen by every receiver. Attribution and cause are
+	// separate arguments because they are separate questions: a request
+	// forwarded on behalf of a foreign caller may still legitimately begin a
+	// new errand on THIS ledger (a frame arriving across the membrane does).
+	CallFor(cause message.Cause, caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error)
 
 	// --- State arm ------------------------------------------------------
 	State() StateHandle

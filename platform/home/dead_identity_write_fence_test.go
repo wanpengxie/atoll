@@ -72,6 +72,9 @@ func TestEndedIdentityPenIsRefusedOnTheMessageWritePath(t *testing.T) {
 			Kind: message.KindEvent, Type: writeFenceType,
 			Payload:  json.RawMessage(`{}`),
 			Audience: message.Audience{author},
+			// Self-rooted: the harness now refuses an empty correlation, so a
+			// hand-built envelope must spell the root the builder would have.
+			CorrelationID: message.ID(id),
 		}
 	}
 

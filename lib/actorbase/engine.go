@@ -661,12 +661,13 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 
 // --- Sys: request write + caller closure ---------------------------------
 
-func (e *engine) Call(target actor.ActorID, msgType string, payload any) (Pending, error) {
+func (e *engine) Call(cause message.Cause, target actor.ActorID, msgType string, payload any) (Pending, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 	id, err := e.submit(behavior.RequestSpec{
+		Cause:    cause,
 		Type:     msgType,
 		Payload:  raw,
 		Audience: message.Audience{target},
@@ -677,13 +678,13 @@ func (e *engine) Call(target actor.ActorID, msgType string, payload any) (Pendin
 	return &pendingTicket{call: e.call, id: id}, nil
 }
 
-func (e *engine) CallFor(caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error) {
+func (e *engine) CallFor(cause message.Cause, caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error) {
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
 	}
 	id, err := e.submit(behavior.RequestSpec{
-		Type: msgType, Payload: raw, Audience: message.Audience{target},
+		Cause: cause, Type: msgType, Payload: raw, Audience: message.Audience{target},
 	}, &caller)
 	if err != nil {
 		return nil, err

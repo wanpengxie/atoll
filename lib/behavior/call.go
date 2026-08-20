@@ -29,13 +29,16 @@ import (
 type RequestSpec struct {
 	// ID is optional: empty = a fresh uuid. Callers with their own id scheme
 	// (e.g. deterministic per-worker ids) override it.
-	ID            message.ID
-	Type          string // required
-	Payload       json.RawMessage
-	Audience      message.Audience // required
-	Visibility    message.Visibility
-	ParentID      message.ID
-	CorrelationID message.ID
+	ID         message.ID
+	Type       string // required
+	Payload    json.RawMessage
+	Audience   message.Audience // required
+	Visibility message.Visibility
+	// Cause is REQUIRED: why this request exists. See the Cause type — the
+	// parent and correlation fields it replaced were optional, and optional is
+	// how "nobody said" became "there is none" on every request written to
+	// serve another one.
+	Cause message.Cause
 	// ExpiresAt is the request's declared deadline — durable truth the
 	// substrate reaper enforces (a live caller's own timer merely races it).
 	ExpiresAt *int64
@@ -63,10 +66,14 @@ func BuildRequest(
 	if len(spec.Audience) == 0 {
 		return nil, fmt.Errorf("behavior: BuildRequest audience required")
 	}
+	if !spec.Cause.Stated() {
+		return nil, fmt.Errorf("behavior: BuildRequest cause required: say message.From(<the message this is written to serve>), or message.Root() when this errand starts here")
+	}
 	id := spec.ID
 	if id == "" {
 		id = message.ID(uuid.NewString())
 	}
+	parentID, correlationID := spec.Cause.Resolve(id)
 	return &message.Envelope{
 		ID:            id,
 		TS:            clock().UnixMilli(),
@@ -75,8 +82,8 @@ func BuildRequest(
 		Audience:      spec.Audience,
 		Payload:       spec.Payload,
 		Visibility:    spec.Visibility,
-		ParentID:      spec.ParentID,
-		CorrelationID: spec.CorrelationID,
+		ParentID:      parentID,
+		CorrelationID: correlationID,
 		ExpiresAt:     spec.ExpiresAt,
 	}, nil
 }

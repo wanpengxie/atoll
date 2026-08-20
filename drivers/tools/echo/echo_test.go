@@ -222,8 +222,17 @@ func TestRun_CountdownHoldsAccountUntilFireSettlesIt(t *testing.T) {
 	if len(sys.timers) != 1 || sys.timers[0].home != schedule.TimerHomeDurable || sys.timers[0].msgType != TypeCountdownFire {
 		t.Fatalf("timers = %+v, want one durable %s", sys.timers, TypeCountdownFire)
 	}
-	if len(sys.events) != 1 || sys.events[0].CorrelationID != start.ID {
-		t.Fatalf("events = %+v, want one correlated to %q", sys.events, start.ID)
+	if len(sys.events) != 1 {
+		t.Fatalf("events = %+v, want exactly one", sys.events)
+	}
+	// The spec carries a Cause rather than a correlation field, and the
+	// correlation it stands for only appears once the envelope is built.
+	armed, err := behavior.BuildEvent(func() time.Time { return time.UnixMilli(0) }, sys.events[0])
+	if err != nil {
+		t.Fatalf("BuildEvent from the emitted spec: %v", err)
+	}
+	if armed.ParentID != start.ID || armed.CorrelationID != start.ID {
+		t.Fatalf("armed event parent/correlation = %q/%q, want both %q", armed.ParentID, armed.CorrelationID, start.ID)
 	}
 	if sys.events[0].Audience != nil {
 		t.Fatalf("countdown-armed audience=%#v, want pure-log event", sys.events[0].Audience)

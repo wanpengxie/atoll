@@ -53,10 +53,13 @@ func response(parentID message.ID, sender, caller actor.ActorID, payload string)
 		ID: "resp-" + parentID, TS: fixedNowMs, ChannelID: testChannelID,
 		Sender: message.Sender{ID: sender, Kind: actor.KindTool},
 		Kind:   message.KindResponse, Type: "xhs.publish",
-		ParentID:   parentID,
-		Audience:   message.Audience{caller},
-		Visibility: message.VisibilityPublic,
-		Payload:    json.RawMessage(payload),
+		ParentID: parentID,
+		// A response continues the request's errand: correlation is the
+		// parent's, and an empty one is now refused outright.
+		CorrelationID: parentID,
+		Audience:      message.Audience{caller},
+		Visibility:    message.VisibilityPublic,
+		Payload:       json.RawMessage(payload),
 	}
 }
 

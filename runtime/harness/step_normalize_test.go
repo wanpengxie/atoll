@@ -14,11 +14,12 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	deps := testDeps(t, cs)
 
 	e := &message.Envelope{
-		ID:        "m1",
-		TS:        fixedNowMs - 1000,
-		ChannelID: testChannelID,
-		Kind:      message.KindEvent,
-		Type:      "agent.text",
+		ID:            "m1",
+		TS:            fixedNowMs - 1000,
+		ChannelID:     testChannelID,
+		Kind:          message.KindEvent,
+		Type:          "agent.text",
+		CorrelationID: "m1",
 	}
 	out, err := runStep(t, newStepNormalize, deps, context.Background(), e)
 	if err != nil {
@@ -30,9 +31,6 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	if e.Visibility != message.VisibilityPublic {
 		t.Fatalf("visibility = %q, want public default", e.Visibility)
 	}
-	if e.CorrelationID != "m1" {
-		t.Fatalf("correlation_id = %q, want self-rooted to id", e.CorrelationID)
-	}
 	if string(e.Payload) != "{}" {
 		t.Fatalf("payload = %q, want {} baseline", e.Payload)
 	}
@@ -41,6 +39,38 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	}
 	// ts_received is engine-owned and filled at the append sink (Chain.Write),
 	// not by normalize — the full-Write contract is pinned in chain_test.go.
+}
+
+// Correlation is NOT a normalize default any more. It used to be self-rooted
+// here when empty, which silently turned "the writer never said why this
+// message exists" into the claim "nothing caused it" — wrong exactly on the
+// messages written to serve another one. It is now derived at build time from
+// the required cause, and an empty one is a shape rejection instead of a fill.
+func TestStepNormalize_DoesNotFillCorrelation(t *testing.T) {
+	cs := newTestStore(t)
+	deps := testDeps(t, cs)
+
+	e := &message.Envelope{
+		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
+		Kind: message.KindEvent, Type: "agent.text",
+	}
+	if _, err := runStep(t, newStepNormalize, deps, context.Background(), e); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if e.CorrelationID != "" {
+		t.Fatalf("normalize filled correlation_id = %q, want it left empty for the shape step to refuse", e.CorrelationID)
+	}
+
+	out, err := runStep(t, newStepEnvelopeShape, deps, ctxCaller("agent:p"), &message.Envelope{
+		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
+		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindEvent, Type: "agent.text",
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out.Continue() || out.RejectReason != HarnessEnvelopeFieldMissing {
+		t.Fatalf("empty correlation_id outcome = %+v, want field_missing", out)
+	}
 }
 
 // TestStepNormalize_DoesNotFillKind pins the invariant: normalize NEVER

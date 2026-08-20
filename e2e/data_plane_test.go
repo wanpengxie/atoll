@@ -23,8 +23,11 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.device.attach", map[string]any{"channel_id": c0ChannelID, "device_id": deviceID})
 	const declarationID = "file-host-readiness"
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
-		"id": declarationID, "name": "file host readiness", "class": "echo",
-		"config": map[string]any{}, "visibility": "private",
+		// A declaration's name is the word the member it seats is called by, so
+		// it obeys the name law; the sentence goes in description.
+		"id": declarationID, "name": "file-host-readiness", "class": "echo",
+		"description": "File host readiness probe.",
+		"config":      map[string]any{}, "visibility": "private",
 	})
 	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declarationID})
 	echoID := stringField(t, introduced, "member")

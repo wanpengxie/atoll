@@ -163,7 +163,7 @@ func (a *actorSystem) End(ctx context.Context, request actorctl.EndRequest) (act
 	t, err := a.home.controller.End(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
-		a.home.announceEnded(ctx, t.Ended, request.Reason, endedBy(request.CallerActorID))
+		a.home.announceEnded(ctx, request.Cause, t.Ended, request.Reason, endedBy(request.CallerActorID))
 	}
 	return result, err
 }
@@ -172,7 +172,7 @@ func (a *actorSystem) Remove(ctx context.Context, request actorctl.RemoveRequest
 	t, err := a.home.controller.Remove(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
-		a.home.announceEnded(ctx, t.Ended, "system_remove", actor.SystemActorID)
+		a.home.announceEnded(ctx, request.Cause, t.Ended, "system_remove", actor.SystemActorID)
 	}
 	return result, err
 }

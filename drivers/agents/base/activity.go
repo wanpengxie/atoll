@@ -14,17 +14,15 @@ func (l *agentLoop) emit(typ registry.ActivityType, payload any) {
 	if t == nil || t.AnchorParent == "" {
 		return
 	}
-	spec, err := behavior.EventSpecJSON(string(typ), payload)
+	// A turn event reports on the request that started the turn. The anchor is
+	// that request's id and correlation, held here rather than the envelope
+	// because a turn outlives a restart and the envelope does not.
+	cause := message.Anchored(message.ID(t.AnchorParent), message.ID(t.AnchorCorrelation))
+	spec, err := behavior.EventSpecJSON(cause, string(typ), payload)
 	if err != nil {
 		return
 	}
-	spec = emptyAudiencePublic(spec)
-	spec.ParentID = message.ID(t.AnchorParent)
-	spec.CorrelationID = message.ID(t.AnchorCorrelation)
-	if spec.CorrelationID == "" {
-		spec.CorrelationID = spec.ParentID
-	}
-	l.exec.emit(spec)
+	l.exec.emit(emptyAudiencePublic(spec))
 }
 func (l *agentLoop) emitTurnStarted() {
 	if t := l.state.Turn; t != nil {

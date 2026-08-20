@@ -83,11 +83,12 @@ func TestAuthorityPenAdmitsOnceAndLetsAcceptedWriteFinish(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		result, err := pen.Write(context.Background(), &message.Envelope{
-			ID:       "accepted",
-			TS:       fixedNowMs - 1,
-			Kind:     message.KindEvent,
-			Type:     "authority.accepted",
-			Audience: message.Audience{"agent:receiver"},
+			ID:            "accepted",
+			TS:            fixedNowMs - 1,
+			Kind:          message.KindEvent,
+			Type:          "authority.accepted",
+			Audience:      message.Audience{"agent:receiver"},
+			CorrelationID: "accepted",
 		})
 		if err == nil && !result.Accepted() {
 			err = errors.New("write rejected")
@@ -104,11 +105,12 @@ func TestAuthorityPenAdmitsOnceAndLetsAcceptedWriteFinish(t *testing.T) {
 		t.Fatalf("admission calls=%d, want 1", got)
 	}
 	if _, err := pen.Write(context.Background(), &message.Envelope{
-		ID:       "stale",
-		TS:       fixedNowMs - 1,
-		Kind:     message.KindEvent,
-		Type:     "authority.stale",
-		Audience: message.Audience{"agent:receiver"},
+		ID:            "stale",
+		TS:            fixedNowMs - 1,
+		Kind:          message.KindEvent,
+		Type:          "authority.stale",
+		Audience:      message.Audience{"agent:receiver"},
+		CorrelationID: "stale",
 	}); !errors.Is(err, errRunStale) {
 		t.Fatalf("next stale write err=%v", err)
 	}

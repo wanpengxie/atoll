@@ -48,7 +48,7 @@ func (s *cutSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
 	s.code = code
 	return "fail", nil
 }
-func (s *cutSys) Call(actor.ActorID, string, any) (actorbase.Pending, error) {
+func (s *cutSys) Call(message.Cause, actor.ActorID, string, any) (actorbase.Pending, error) {
 	return nil, errors.New("simulated process cut before edge write")
 }
 func (s *cutSys) Post(behavior.RequestSpec) (message.ID, error) {

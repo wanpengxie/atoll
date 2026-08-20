@@ -21,7 +21,9 @@ func (s *SystemActor) routeSpace(sys actorbase.Sys, msg actorbase.Msg) {
 	caller := actorbase.EffectiveCaller(msg)
 	go func() {
 		if msg.ChannelID == channelspec.C0ChannelID {
-			pending, err := sys.CallFor(caller, actor.ActorID("system:registrar"), msg.Type, json.RawMessage(msg.Payload))
+			// A relay continues the errand that arrived here; it does not start
+			// one. The registrar hop belongs to the caller's tree.
+			pending, err := sys.CallFor(msg.Cause(), caller, actor.ActorID("system:registrar"), msg.Type, json.RawMessage(msg.Payload))
 			if err != nil {
 				_, _ = sys.Fail(msg, routeErrorCode(err), err.Error())
 				return

@@ -163,13 +163,16 @@ func Fail(
 // EventSpec is the caller-supplied shape of a kind=event envelope.
 type EventSpec struct {
 	// ID is optional: empty = a fresh uuid.
-	ID            message.ID
-	Type          string // required
-	Payload       json.RawMessage
-	Visibility    message.Visibility
-	Audience      message.Audience
-	ParentID      message.ID
-	CorrelationID message.ID
+	ID         message.ID
+	Type       string // required
+	Payload    json.RawMessage
+	Visibility message.Visibility
+	Audience   message.Audience
+	// Cause is REQUIRED, on the same law as a request's: an event is caused by
+	// something too. An agent's turn event is caused by the request it is
+	// working on; a membership event is caused by the word that changed the
+	// membership. Only an event that genuinely begins something says Root().
+	Cause message.Cause
 	// ClientFingerprint is shell-ingress persistence metadata and never a
 	// protocol envelope field.
 	ClientFingerprint string
@@ -189,10 +192,14 @@ func BuildEvent(
 	if spec.Type == "" {
 		return nil, fmt.Errorf("behavior: event type required")
 	}
+	if !spec.Cause.Stated() {
+		return nil, fmt.Errorf("behavior: BuildEvent cause required: say message.From(<the message this event reports on>), or message.Root() when nothing on this ledger caused it")
+	}
 	id := spec.ID
 	if id == "" {
 		id = message.ID(uuid.NewString())
 	}
+	parentID, correlationID := spec.Cause.Resolve(id)
 	return &message.Envelope{
 		ID:            id,
 		TS:            clock().UnixMilli(),
@@ -201,25 +208,29 @@ func BuildEvent(
 		Payload:       spec.Payload,
 		Visibility:    spec.Visibility,
 		Audience:      spec.Audience,
-		ParentID:      spec.ParentID,
-		CorrelationID: spec.CorrelationID,
+		ParentID:      parentID,
+		CorrelationID: correlationID,
 	}, nil
 }
 
 // EventSpecJSON is the narrow "type + value + audience" sugar for EventSpec:
 // it marshals an ordinary Go value into the spec's json.RawMessage payload.
 //
-// The verb table carries the FULL event surface (own id, parent, correlation,
-// visibility) because that is what an event can be; the three-argument shape
-// most Proc bodies actually want is convenience, and convenience belongs in a
-// library rather than in a second verb.
+// The verb table carries the FULL event surface because that is what an event
+// can be; the shape most Proc bodies actually want is convenience, and
+// convenience belongs in a library rather than in a second verb.
+//
+// It takes the cause even though it is sugar: a convenience that hands back a
+// spec with a required field still empty invites the caller to forget it, which
+// is the whole shape being removed here. Sugar may express LESS than the full
+// form; it may not leave a required answer blank for someone else to notice.
 //
 // This function does NOT write. The pen-writing counterpart that used to live
 // here was deleted with the identity verbs: it flattened a harness rejection
 // into a formatted error, which a caller mapping verdicts to protocol codes
 // cannot tell apart from any other failure — so the write, and the typed
 // carrier it must produce, live at the verb.
-func EventSpecJSON(eventType string, payload any, audience ...actor.ActorID) (EventSpec, error) {
+func EventSpecJSON(cause message.Cause, eventType string, payload any, audience ...actor.ActorID) (EventSpec, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return EventSpec{}, fmt.Errorf("behavior: event payload marshal: %w", err)
@@ -228,5 +239,5 @@ func EventSpecJSON(eventType string, payload any, audience ...actor.ActorID) (Ev
 	if len(audience) > 0 {
 		aud = message.Audience(audience)
 	}
-	return EventSpec{Type: eventType, Payload: raw, Audience: aud}, nil
+	return EventSpec{Cause: cause, Type: eventType, Payload: raw, Audience: aud}, nil
 }

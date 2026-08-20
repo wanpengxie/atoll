@@ -99,15 +99,18 @@ func ctxCallerKind(id actor.ActorID, kind actor.Kind) context.Context {
 }
 
 // validEvent builds a minimally-valid kind=event envelope authored by sender.
+// Correlation is the envelope's own id: minimally-valid now includes a stated
+// cause, and a root's correlation is itself.
 func validEvent(id message.ID, sender actor.ActorID) *message.Envelope {
 	return &message.Envelope{
-		ID:        id,
-		TS:        fixedNowMs - 1000,
-		ChannelID: testChannelID,
-		Sender:    message.Sender{ID: sender},
-		Kind:      message.KindEvent,
-		Type:      "agent.text",
-		Audience:  message.Audience{actor.ActorID("someone")},
+		ID:            id,
+		TS:            fixedNowMs - 1000,
+		ChannelID:     testChannelID,
+		Sender:        message.Sender{ID: sender},
+		Kind:          message.KindEvent,
+		Type:          "agent.text",
+		Audience:      message.Audience{actor.ActorID("someone")},
+		CorrelationID: id,
 	}
 }
 

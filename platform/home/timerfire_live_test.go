@@ -56,6 +56,9 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 			Kind: message.KindEvent, Type: "test.timer.tick",
 			Payload:  json.RawMessage(`{}`),
 			Audience: message.Audience{author},
+			// Self-rooted: the harness now refuses an empty correlation, so a
+			// hand-built envelope must spell the root the builder would have.
+			CorrelationID: message.ID(id),
 		}
 	}
 

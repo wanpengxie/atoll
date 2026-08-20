@@ -50,7 +50,12 @@ type OperateRequest struct {
 	ChannelID channel.ID
 	Caller    harness.Caller
 	Anchor    string
-	Payload   json.RawMessage
+	// Cause is the control word itself. Everything the executor writes as a
+	// consequence — the membership narration above all — is caused by it, and
+	// the executor is several layers away from the message, with nothing left
+	// to derive it from.
+	Cause   message.Cause
+	Payload json.RawMessage
 }
 
 // OperateError is an executor's typed failure carrying the {error_code, detail}
@@ -97,7 +102,7 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, unauthorizedSenderCode, fmt.Sprintf("%q is not an active member of this channel, so it may not use the channel control words; check the roster with system.member.list", caller.Actor))
 		return
 	}
-	req := OperateRequest{ChannelID: msg.ChannelID, Caller: caller, Anchor: string(msg.ID), Payload: msg.Payload}
+	req := OperateRequest{ChannelID: msg.ChannelID, Caller: caller, Anchor: string(msg.ID), Cause: msg.Cause(), Payload: msg.Payload}
 	result, err := s.operate.Execute(msg.Ctx(), msg.Type, req)
 	if err != nil {
 		var oe *OperateError

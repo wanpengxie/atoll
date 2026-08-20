@@ -32,16 +32,6 @@ func TestParseFinalStatus(t *testing.T) {
 	}
 }
 
-// CorrelationID picks chain when pinned, else falls back to rootID.
-func TestCorrelationID(t *testing.T) {
-	if got := CorrelationID("chain", "root"); got != "chain" {
-		t.Fatalf("want pinned chain, got %q", got)
-	}
-	if got := CorrelationID("", "root"); got != "root" {
-		t.Fatalf("want rootID fallback, got %q", got)
-	}
-}
-
 // BuildResponseFromRequest rejects a nil request.
 func TestBuildResponseFromRequest_NilRequest(t *testing.T) {
 	_, err := BuildResponseFromRequest(nil, fixedClock(1), ResponseSpec{Status: "completed"})

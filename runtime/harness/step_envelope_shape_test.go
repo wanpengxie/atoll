@@ -62,6 +62,7 @@ func TestChannelStampComesFromTheHarnessBindingAlone(t *testing.T) {
 	stamped := &message.Envelope{
 		ID: "stamped", TS: fixedNowMs - 1000, Kind: message.KindEvent,
 		Type: "agent.text", Audience: message.Audience{"agent:b"},
+		CorrelationID: "stamped",
 	}
 	result, err := mint.WriteAdmitted(context.Background(), admission, stamped)
 	if err != nil || !result.Accepted() {

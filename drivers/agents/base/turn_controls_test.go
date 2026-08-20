@@ -226,6 +226,7 @@ type forkSys struct {
 	actorbase.Sys
 	mu      sync.Mutex
 	done    chan struct{}
+	cause   message.Cause
 	target  actor.ActorID
 	word    string
 	payload any
@@ -234,9 +235,9 @@ type forkSys struct {
 }
 
 func (*forkSys) Self() actor.ActorID { return "agent:clone-source:1" }
-func (s *forkSys) Call(target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
+func (s *forkSys) Call(cause message.Cause, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	s.mu.Lock()
-	s.target, s.word, s.payload = target, word, payload
+	s.cause, s.target, s.word, s.payload = cause, target, word, payload
 	s.mu.Unlock()
 	terminal := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ParentID: "member-create", Payload: json.RawMessage(`{"status":"completed","member":"agent:clone-source:2"}`)})
 	return forkPending{terminal: terminal}, nil
@@ -256,10 +257,10 @@ func (s *forkSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
 	return "fail", nil
 }
 
-func (s *forkSys) snapshot() (actor.ActorID, string, any, any, string) {
+func (s *forkSys) snapshot() (message.Cause, actor.ActorID, string, any, any, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.target, s.word, s.payload, s.reply, s.fail
+	return s.cause, s.target, s.word, s.payload, s.reply, s.fail
 }
 
 func (s *turnControlSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
@@ -363,10 +364,15 @@ func TestAgentForkCallsTheDoorWithItsOwnDeclaration(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("fork did not finish")
 	}
-	target, word, captured, reply, fail := sys.snapshot()
+	cause, target, word, captured, reply, fail := sys.snapshot()
 	payload, _ := captured.(map[string]any)
 	if target != actor.SystemActorID || word != "system.member.create" || payload["decl_id"] != "clone-source" {
 		t.Fatalf("call target=%q word=%q payload=%v", target, word, captured)
+	}
+	// The door call is made to serve the fork request, so it continues that
+	// request's errand instead of opening one of its own.
+	if !cause.Stated() || cause.IsRoot() {
+		t.Fatalf("fork call cause stated=%v root=%v, want a cause naming the fork request", cause.Stated(), cause.IsRoot())
 	}
 	raw, ok := reply.(json.RawMessage)
 	if !ok || string(raw) != `{"status":"completed","member":"agent:clone-source:2"}` {

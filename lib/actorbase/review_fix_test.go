@@ -82,7 +82,7 @@ func TestEngine_SelfCallFailsFastZeroResidue(t *testing.T) {
 	e.lifeCtx = context.Background()
 	e.actorCtx = &fakeActorContext{self: "actor:self"}
 
-	_, err := e.Call("actor:self", "greet", map[string]string{"x": "1"})
+	_, err := e.Call(message.Root(), "actor:self", "greet", map[string]string{"x": "1"})
 	if !errors.Is(err, ErrSelfCall) {
 		t.Fatalf("expected ErrSelfCall, got %v", err)
 	}

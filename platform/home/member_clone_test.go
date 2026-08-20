@@ -68,6 +68,7 @@ func TestMemberCloneCreatesAnotherIdentityAndNarratesForkOrigin(t *testing.T) {
 		ChannelID: h.channelID,
 		Caller:    harness.Caller{Channel: h.channelID, Actor: parent},
 		Anchor:    "clone-request",
+		Cause:     message.Root(),
 		Payload:   json.RawMessage(`{"decl_id":"clone-source"}`),
 	})
 	if err != nil {
@@ -134,6 +135,7 @@ func TestAgentForkTraversesAgentDoorAndStoreIntoRoster(t *testing.T) {
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	req, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
 		Type: base.TypeFork, Payload: json.RawMessage(`{"body":{}}`), Audience: message.Audience{parent},
+		Cause: message.Root(),
 	})
 	if err != nil {
 		t.Fatal(err)

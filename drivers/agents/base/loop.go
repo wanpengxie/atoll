@@ -16,7 +16,6 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -404,7 +403,7 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		return
 	}
 	id := book.RequestID(msg.ID)
-	corr := behavior.CorrelationID(msg.CorrelationID, msg.ID)
+	corr := message.CorrelationID(msg.CorrelationID, msg.ID)
 	caller := actorbase.EffectiveCaller(msg)
 	input := runtimeproto.Input{SourceID: string(msg.ID), Type: msg.Type, Sender: string(msg.Sender.ID), Caller: caller, Payload: append(json.RawMessage(nil), msg.Payload...), Text: messageText(msg.Payload)}
 	if msg.Type == TypeAsk {
@@ -492,7 +491,7 @@ func (l *agentLoop) handleFork(msg actorbase.Msg) {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: "agent identity is malformed"})
 		return
 	}
-	pending, err := l.sys.Call(actor.SystemActorID, "system.member.create", map[string]any{"decl_id": parts[1]})
+	pending, err := l.sys.Call(msg.Cause(), actor.SystemActorID, "system.member.create", map[string]any{"decl_id": parts[1]})
 	if err != nil {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: err.Error()})
 		return

@@ -30,19 +30,19 @@ func TestRequestWritersUseOnePayloadEnvelopeAndNewMsgUnwrapsBody(t *testing.T) {
 		write      func(*engine, json.RawMessage, any) error
 	}{
 		{name: "Call", write: func(e *engine, _ json.RawMessage, args any) error {
-			_, err := e.Call("tool:echo:1", "echo.say", args)
+			_, err := e.Call(message.Root(), "tool:echo:1", "echo.say", args)
 			return err
 		}},
 		{name: "Post", write: func(e *engine, raw json.RawMessage, _ any) error {
-			_, err := e.Post(behavior.RequestSpec{Type: "echo.say", Audience: message.Audience{"tool:echo:1"}, Payload: raw})
+			_, err := e.Post(behavior.RequestSpec{Type: "echo.say", Audience: message.Audience{"tool:echo:1"}, Payload: raw, Cause: message.Root()})
 			return err
 		}},
 		{name: "JobTable.Submit", write: func(e *engine, raw json.RawMessage, _ any) error {
-			_, err := e.Submit(behavior.RequestSpec{Type: "echo.say", Audience: message.Audience{"tool:echo:1"}, Payload: raw})
+			_, err := e.Submit(behavior.RequestSpec{Type: "echo.say", Audience: message.Audience{"tool:echo:1"}, Payload: raw, Cause: message.Root()})
 			return err
 		}},
 		{name: "CallFor", withCaller: true, write: func(e *engine, _ json.RawMessage, args any) error {
-			_, err := e.CallFor(harness.Caller{Channel: "c0", Actor: "agent:caller:1"}, "tool:echo:1", "echo.say", args)
+			_, err := e.CallFor(message.Root(), harness.Caller{Channel: "c0", Actor: "agent:caller:1"}, "tool:echo:1", "echo.say", args)
 			return err
 		}},
 	}
@@ -93,7 +93,7 @@ func TestRequestWritersUseOnePayloadEnvelopeAndNewMsgUnwrapsBody(t *testing.T) {
 func TestEmitDoesNotUseRequestPayloadEnvelope(t *testing.T) {
 	pen := &fakePen{self: "agent:sender:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
-	if _, err := e.Emit(behavior.EventSpec{Type: "echo.event", Payload: json.RawMessage(`{"x":1}`)}); err != nil {
+	if _, err := e.Emit(behavior.EventSpec{Type: "echo.event", Payload: json.RawMessage(`{"x":1}`), Cause: message.Root()}); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(pen.last().Payload); got != `{"x":1}` {

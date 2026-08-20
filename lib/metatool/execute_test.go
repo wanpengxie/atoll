@@ -180,8 +180,8 @@ func TestExecuteCallActor_InvalidJSON(t *testing.T) {
 // --- call_actor: dispatch --------------------------------------------------
 
 // TestExecuteCallActor_FanOutSubmitsRequest pins the behavior.RequestSpec the
-// adapter builds: audience=target, type, ParentID=trigger, and an ExpiresAt
-// derived from the deadline.
+// adapter builds: audience=target, type, a Cause naming the trigger, and an
+// ExpiresAt derived from the deadline.
 func TestExecuteCallActor_FanOutSubmitsRequest(t *testing.T) {
 	jobs := &fakeJobs{}
 	x := newExec(jobs, nil)
@@ -198,8 +198,18 @@ func TestExecuteCallActor_FanOutSubmitsRequest(t *testing.T) {
 	if len(got.Audience) != 1 || got.Audience[0] != actor.ActorID("tool:xhs") {
 		t.Fatalf("submit audience = %v, want [tool:xhs]", got.Audience)
 	}
-	if got.ParentID != "trigger-1" {
-		t.Fatalf("submit parent = %q, want trigger-1", got.ParentID)
+	// The spec no longer carries parent/correlation as fields; it carries the
+	// Cause they are derived from, and the derivation is only observable on the
+	// built envelope. Build it and read the parent there.
+	env, err := behavior.BuildRequest(func() time.Time { return time.UnixMilli(0) }, got)
+	if err != nil {
+		t.Fatalf("BuildRequest from the submitted spec: %v", err)
+	}
+	if env.ParentID != "trigger-1" {
+		t.Fatalf("submit parent = %q, want trigger-1", env.ParentID)
+	}
+	if env.CorrelationID != "trigger-1" {
+		t.Fatalf("submit correlation = %q, want the trigger's errand trigger-1", env.CorrelationID)
 	}
 	if got.ExpiresAt == nil {
 		t.Fatal("submit ExpiresAt nil — the closure deadline must be stamped")

@@ -79,7 +79,9 @@ func loadCatchup(ctx context.Context, sys actorbase.Sys) []runtimeproto.ContextI
 func callCatchupWithinBudget(ctx context.Context, sys actorbase.Sys) (actorbase.Pending, error) {
 	deadline := time.Now().Add(catchupQueryBudget)
 	for attempt := 0; ; attempt++ {
-		pending, err := sys.Call(actor.SystemActorID, message.TypeSystemLogRecent, map[string]any{"limit": catchupLimit})
+		// Boot-time catch-up: the agent asks what it missed while it was gone.
+		// Nothing on this ledger asked for it, so it begins its own errand.
+		pending, err := sys.Call(message.Root(), actor.SystemActorID, message.TypeSystemLogRecent, map[string]any{"limit": catchupLimit})
 		if err == nil {
 			if attempt > 0 {
 				slog.Info("agent catch-up query sent after link came up", "actor", sys.Self(), "attempts", attempt+1)

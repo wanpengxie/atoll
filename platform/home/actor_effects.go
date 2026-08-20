@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
-	"github.com/google/uuid"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -59,7 +60,7 @@ func (e homeActorEffects) ActorsEnded(ids []actor.ActorID) {
 // channel" narration into the conversation stream with the system pen. They are
 // best effort: a crash window may drop one, and nothing ever back-fills or
 // reconciles them. No machine ever derives actor truth from message history.
-func (h *Home) announceRegistered(ctx context.Context, id actor.ActorID, fields map[string]any) {
+func (h *Home) announceRegistered(ctx context.Context, cause message.Cause, id actor.ActorID, fields map[string]any) {
 	if h == nil || h.systemPen == nil || id == "" {
 		return
 	}
@@ -67,11 +68,12 @@ func (h *Home) announceRegistered(ctx context.Context, id actor.ActorID, fields 
 	for name, value := range fields {
 		payload[name] = value
 	}
-	h.writeNarration(ctx, message.TypeSystemMemberCreated, payload)
+	h.writeNarration(ctx, cause, message.TypeSystemMemberCreated, payload)
 }
 
 func (h *Home) announceEnded(
 	ctx context.Context,
+	cause message.Cause,
 	ids []actor.ActorID,
 	reason string,
 	endedBy actor.ActorID,
@@ -83,15 +85,15 @@ func (h *Home) announceEnded(
 		reason = "ended"
 	}
 	for _, id := range ids {
-		h.writeNarration(ctx, message.TypeSystemMemberDeleted, map[string]any{
+		h.writeNarration(ctx, cause, message.TypeSystemMemberDeleted, map[string]any{
 			"member": id, "reason": reason,
 			"by": map[string]any{"caller": harness.Caller{Channel: h.channelID, Actor: endedBy}},
 		})
 	}
 }
 
-func (h *Home) writeNarration(ctx context.Context, typ string, payload map[string]any) {
-	if err := h.emitSystemEvent(ctx, typ, payload); err != nil {
+func (h *Home) writeNarration(ctx context.Context, cause message.Cause, typ string, payload map[string]any) {
+	if err := h.emitSystemEvent(ctx, cause, typ, payload); err != nil {
 		h.logger.Warn("platform.narration.dropped",
 			"channel", h.channelID, "type", typ, "err", err)
 	}
@@ -111,6 +113,7 @@ func (e *systemEventWriteError) Error() string {
 // visibility, id, time, and serialization are sealed here.
 func (h *Home) emitSystemEvent(
 	ctx context.Context,
+	cause message.Cause,
 	typ string,
 	payload map[string]any,
 ) error {
@@ -121,14 +124,19 @@ func (h *Home) emitSystemEvent(
 	if err != nil {
 		return fmt.Errorf("platform: marshal system event %q: %w", typ, err)
 	}
-	env := &message.Envelope{
-		ID:         message.ID(uuid.NewString()),
-		TS:         h.nowMs(),
-		Kind:       message.KindEvent,
+	// Through the shared builder rather than hand-assembled: the builder is
+	// where an envelope's cause is required and its parent/correlation derived,
+	// and a second assembly site here is exactly how these events came to have
+	// no cause at all.
+	env, err := behavior.BuildEvent(func() time.Time { return time.UnixMilli(h.nowMs()) }, behavior.EventSpec{
 		Type:       typ,
 		Payload:    raw,
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{},
+		Cause:      cause,
+	})
+	if err != nil {
+		return fmt.Errorf("platform: build system event %q: %w", typ, err)
 	}
 	result, err := h.systemPen.Write(ctx, env)
 	if err != nil {

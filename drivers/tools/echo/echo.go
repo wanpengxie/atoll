@@ -367,7 +367,7 @@ func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[mess
 	// rather than hidden.
 	askAnswer := json.RawMessage(nil)
 	if p.Ask != "" {
-		pd, err := sys.Call(p.Ask, TypeSay, p.Note)
+		pd, err := sys.Call(msg.Cause(), p.Ask, TypeSay, p.Note)
 		switch {
 		case errors.Is(err, actorbase.ErrSelfCall):
 			askAnswer = json.RawMessage(`"self-call refused (single-worker deadlock guard)"`)
@@ -408,13 +408,12 @@ func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[mess
 	_, _ = sys.Progress(msg, message.StatusProcessing, map[string]any{"armed": true, "seconds": p.Seconds, "ask": askAnswer})
 
 	// ── Emit arm: a kind=event bystander note. No one owes anything on an
-	// event; parent/correlation tie it into this request's causal group.
+	// event, but it is still caused by something — this request.
 	evp, _ := json.Marshal(map[string]any{"note": p.Note, "seconds": p.Seconds})
 	_, _ = sys.Emit(behavior.EventSpec{
-		Type:          "echo.countdown_armed",
-		Payload:       evp,
-		ParentID:      msg.ID,
-		CorrelationID: msg.ID,
+		Type:    "echo.countdown_armed",
+		Payload: evp,
+		Cause:   msg.Cause(),
 	})
 
 	// ── Obs arm: push one opaque operational snapshot (kind/val are opaque

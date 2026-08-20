@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -25,6 +26,7 @@ type opEntry struct {
 type removeRequest struct {
 	Target           actor.ActorID
 	InitiatorActorID actor.ActorID
+	Cause            message.Cause
 }
 
 var (
@@ -84,7 +86,7 @@ func (e *opEntry) remove(
 		return actorctl.RemoveResult{}, err
 	}
 	result, err := e.home.actors.Remove(ctx, actorctl.RemoveRequest{
-		Target: req.Target, InitiatorActorID: req.InitiatorActorID,
+		Target: req.Target, InitiatorActorID: req.InitiatorActorID, Cause: req.Cause,
 	})
 	return result, err
 }
@@ -116,7 +118,7 @@ func (e *opEntry) Execute(
 		if facts, active, factsErr := e.home.actors.ActorFacts(ctx, req.Caller.Actor); factsErr == nil && active && facts.SourceDeclID == payload.DeclID {
 			by = map[string]any{"fork_of": req.Caller.Actor}
 		}
-		e.home.narrateBirth(ctx, result.ActorID, result.Created, map[string]any{
+		e.home.narrateBirth(ctx, req.Cause, result.ActorID, result.Created, map[string]any{
 			"decl_id": payload.DeclID, "by": by,
 		})
 		return map[string]any{"member": result.ActorID}, nil
@@ -134,7 +136,7 @@ func (e *opEntry) Execute(
 		if err != nil {
 			return nil, asOperateError(err)
 		}
-		e.home.narrateBirth(ctx, result.ActorID, result.Created, map[string]any{
+		e.home.narrateBirth(ctx, req.Cause, result.ActorID, result.Created, map[string]any{
 			"principal": payload.Principal, "by": map[string]any{"caller": req.Caller},
 		})
 		return map[string]any{"member": result.ActorID}, nil
@@ -169,7 +171,7 @@ func (e *opEntry) Execute(
 			return nil, asOperateError(err)
 		}
 		result, err := e.remove(ctx, removeRequest{
-			Target: resolved, InitiatorActorID: req.Caller.Actor,
+			Target: resolved, InitiatorActorID: req.Caller.Actor, Cause: req.Cause,
 		})
 		if err != nil {
 			return nil, asOperateError(err)
@@ -210,11 +212,11 @@ func (e *opEntry) Execute(
 // narrateBirth writes the "joined the channel" narration for a freshly created
 // record. A replayed birth (created=false) narrates nothing. The narration is
 // composed from the command's own inputs — the tail never reads truth back.
-func (h *Home) narrateBirth(ctx context.Context, id actor.ActorID, created bool, fields map[string]any) {
+func (h *Home) narrateBirth(ctx context.Context, cause message.Cause, id actor.ActorID, created bool, fields map[string]any) {
 	if !created {
 		return
 	}
-	h.announceRegistered(ctx, id, fields)
+	h.announceRegistered(ctx, cause, id, fields)
 }
 
 func asOperateError(err error) error {

@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -81,7 +82,9 @@ func (f *crashCutFixture) proc() actorbase.Proc {
 		}
 		if run.err == "" && !run.fenced {
 			// The business effect: one committed row in the channel log.
-			spec, err := behavior.EventSpecJSON(crashCutEventType,
+			// Root: this effect runs on the actor's own boot, not to serve any
+			// message on the ledger.
+			spec, err := behavior.EventSpecJSON(message.Root(), crashCutEventType,
 				map[string]string{"unit": "the-one-job"}, sys.Self())
 			if err == nil {
 				_, err = sys.Emit(spec)

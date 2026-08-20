@@ -653,23 +653,31 @@ func (e *Engine) clearTransient(kind, id string) {
 // Sender/ChannelID stay zero (the FireSink's pen welds them —
 // pen.Write fail-fasts on a non-empty value, so the engine must never fill
 // them); Visibility stays zero (StepNormalize defaults to public);
-// ParentID/ExpiresAt are never set (fire is not a reply, and event kind
-// carries no request-expiry semantics). fireMessageID's `timer:`
-// namespace + the never-reused TimerID make this id permanently unique
-// — crash-window replay is caught by messages.id UNIQUE, not by any
-// state this engine keeps.
-func buildFireEnvelope(id TimerID, author actor.ActorID, typ string, payload []byte, correlationID message.ID, now time.Time) *message.Envelope {
+// ExpiresAt is never set (event kind carries no request-expiry semantics).
+// fireMessageID's `timer:` namespace + the never-reused TimerID make this id
+// permanently unique — crash-window replay is caught by messages.id UNIQUE, not
+// by any state this engine keeps.
+//
+// A FIRE ALWAYS BEGINS A NEW ERRAND. It would be tempting to hang it from
+// whatever was being served when the timer was set, and the row even carries a
+// correlation captured back then — but by the time a timer goes off, that
+// request has long since reached its terminal. Re-entering its tree would give
+// the tree no end, and a recurring timer would grow one tree for as long as it
+// ran. What scheduled this fire is recorded where it belongs: the timer row's
+// author and id, which the fire's own id carries.
+func buildFireEnvelope(id TimerID, author actor.ActorID, typ string, payload []byte, _ message.ID, now time.Time) *message.Envelope {
 	if len(payload) == 0 {
 		payload = []byte("{}") // proto baseline: payload={} legal, payload=null is not
 	}
+	fireID := fireMessageID(id)
 	return &message.Envelope{
-		ID:            fireMessageID(id),
+		ID:            fireID,
 		TS:            now.UnixMilli(),
 		Kind:          message.KindEvent,
 		Type:          typ,
 		Payload:       payload,
 		Audience:      message.Audience{author},
-		CorrelationID: correlationID,
+		CorrelationID: fireID,
 	}
 }
 

@@ -204,6 +204,24 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	// Two kinds, two verbs — the dispatch the deleted SubjectWriteSpec used to
 	// hide behind one call. An event carries no deadline (nothing waits on it),
 	// which is why ExpiresAt rides only the request arm.
+	// A person at a keyboard is where errands begin, so the default cause here
+	// is Root. A submit that names a parent is claiming to continue an errand
+	// already on this ledger — steering a running turn is the real case — and
+	// continuing means joining THAT message's tree, which only that message can
+	// say. So the claim is checked against the log rather than taken on the
+	// client's word: an id this channel never saw is refused, not silently
+	// turned into a second root wearing a parent.
+	cause := message.Root()
+	if p.ParentID != "" {
+		parent, found, lookupErr := deps.Requests.FindByID(sys.Life(), message.ID(p.ParentID))
+		if lookupErr != nil {
+			return errFrame(f, subjectgate.CodeUnavailable, "could not read the message this submit says it continues: "+lookupErr.Error())
+		}
+		if !found {
+			return errFrame(f, subjectgate.CodeBadPayload, "parent_id "+p.ParentID+" is not a message in this channel, so there is no errand to continue; omit parent_id to start a new one")
+		}
+		cause = message.From(*parent)
+	}
 	var msgID message.ID
 	if kind == message.KindEvent {
 		msgID, err = sys.Emit(behavior.EventSpec{
@@ -212,7 +230,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 			Payload:           p.Payload,
 			Audience:          aud,
 			Visibility:        message.Visibility(p.Visibility),
-			ParentID:          message.ID(p.ParentID),
+			Cause:             cause,
 			ClientFingerprint: fingerprint,
 		})
 	} else {
@@ -226,7 +244,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 			Payload:           p.Payload,
 			Audience:          aud,
 			Visibility:        message.Visibility(p.Visibility),
-			ParentID:          message.ID(p.ParentID),
+			Cause:             cause,
 			ExpiresAt:         p.ExpiresAt,
 			ClientFingerprint: fingerprint,
 		})

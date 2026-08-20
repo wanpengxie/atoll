@@ -42,7 +42,11 @@ type Members struct {
 	FirstActiveAgent func(context.Context) (actor.ActorID, bool, error)
 }
 
-type Audit func(context.Context, map[string]any) error
+// Audit records that a request crossed into this channel from another one. It
+// takes a cause like every other write: the arrival is reported ABOUT the local
+// request the frame was turned into, so it hangs from that request rather than
+// floating loose beside it.
+type Audit func(context.Context, message.Cause, map[string]any) error
 
 type Deps struct {
 	Port    *Port
@@ -110,7 +114,8 @@ func (s *service) serve(sys actorbase.Sys) error {
 		startup.Add(1)
 		go func(table ServiceTable) {
 			defer startup.Done()
-			card := s.buildCard(sys, table)
+			// Startup materialisation: nothing on this ledger asked for it.
+			card := s.buildCard(sys, message.Root(), table)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if s.revision != 0 || sys.Life().Err() != nil {
@@ -180,7 +185,7 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = sys.Fail(msg, "invalid_args", err.Error())
 			return
 		}
-		card := s.buildCard(sys, table)
+		card := s.buildCard(sys, msg.Cause(), table)
 		s.mu.Lock()
 		if err := writeService(sys.State(), table, card); err != nil {
 			s.mu.Unlock()
@@ -231,7 +236,11 @@ func fullActorID(id actor.ActorID) bool {
 	return len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != ""
 }
 
-func (s *service) buildCard(sys actorbase.Sys, table ServiceTable) channel.Card {
+// buildCard asks each endpoint receiver to describe itself. cause says what
+// prompted the asking: rebuilding the card because someone reset the service
+// table continues that request's errand; materialising it at startup continues
+// nothing, so it says Root.
+func (s *service) buildCard(sys actorbase.Sys, cause message.Cause, table ServiceTable) channel.Card {
 	card := skeletonCard(table)
 	words := card.Words
 	byReceiver := map[actor.ActorID][]string{}
@@ -239,7 +248,7 @@ func (s *service) buildCard(sys actorbase.Sys, table ServiceTable) channel.Card 
 		byReceiver[receiver] = append(byReceiver[receiver], word)
 	}
 	for receiver, names := range byReceiver {
-		pending, err := sys.Call(receiver, introspect.QueryDescribe, map[string]any{})
+		pending, err := sys.Call(cause, receiver, introspect.QueryDescribe, map[string]any{})
 		if err != nil {
 			continue
 		}
@@ -384,7 +393,12 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	}
 
 	from := harnessCaller(req.From)
-	pending, err := sys.CallFor(from, target, req.Type, json.RawMessage(req.Payload))
+	// A frame crossing the membrane genuinely begins an errand HERE: its cause
+	// is a message on the sending channel's ledger, which this one does not
+	// hold and could not point at. The link between the two trees is recorded
+	// as the inbound audit event below, carrying the远端 request id — that is
+	// the seam between two ledgers, and it is not a parent relation.
+	pending, err := sys.CallFor(message.Root(), from, target, req.Type, json.RawMessage(req.Payload))
 	if err != nil {
 		var resolveErr *actorbase.TargetResolveError
 		if errors.As(err, &resolveErr) {
@@ -395,7 +409,9 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	localRequestID := pending.RequestID()
 	stopPendingCancel := context.AfterFunc(ctx, func() { _ = pending.Cancel() })
 	defer stopPendingCancel()
-	if err := s.deps.Audit(ctx, map[string]any{"from": req.From, "type": req.Type, "local_request_id": localRequestID}); err != nil {
+	// The local request this frame became is a root here, so its correlation is
+	// its own id; the audit note hangs from it.
+	if err := s.deps.Audit(ctx, message.Anchored(localRequestID, localRequestID), map[string]any{"from": req.From, "type": req.Type, "local_request_id": localRequestID}); err != nil {
 		s.deps.Logger.Warn("svcactor.audit_failed", "request_id", localRequestID, "err", err)
 	}
 	progressDone := make(chan struct{})

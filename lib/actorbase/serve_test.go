@@ -88,11 +88,11 @@ func (f *fakeSys) Post(spec behavior.RequestSpec) (message.ID, error) {
 	panic("not implemented")
 }
 
-func (f *fakeSys) Call(target actor.ActorID, msgType string, payload any) (Pending, error) {
+func (f *fakeSys) Call(cause message.Cause, target actor.ActorID, msgType string, payload any) (Pending, error) {
 	panic("not implemented")
 }
 
-func (f *fakeSys) CallFor(harness.Caller, actor.ActorID, string, any) (Pending, error) {
+func (f *fakeSys) CallFor(message.Cause, harness.Caller, actor.ActorID, string, any) (Pending, error) {
 	panic("not implemented")
 }
 

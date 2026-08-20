@@ -80,14 +80,18 @@ func BuildResponseFromRequest(
 		vis = request.Visibility
 	}
 	audience := message.Audience{request.Sender.ID}
-	correlationID := CorrelationID(request.CorrelationID, request.ID)
+	// A response's cause is never in doubt — it is the request in hand. It goes
+	// through the same derivation every other envelope uses, so there is one
+	// account of what parent and correlation mean, not two that could drift.
+	id := message.ID(uuid.NewString())
+	parentID, correlationID := message.From(*request).Resolve(id)
 	return &message.Envelope{
-		ID:            message.ID(uuid.NewString()),
+		ID:            id,
 		TS:            clock().UnixMilli(),
 		Kind:          message.KindResponse,
 		Type:          request.Type,
 		Payload:       merged,
-		ParentID:      request.ID,
+		ParentID:      parentID,
 		CorrelationID: correlationID,
 		Visibility:    vis,
 		Audience:      audience,

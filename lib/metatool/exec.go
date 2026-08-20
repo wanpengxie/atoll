@@ -130,12 +130,12 @@ func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.R
 		Payload:    spec.Payload,
 		Audience:   message.Audience{actor.ActorID(spec.HandlerActorID)},
 		Visibility: message.VisibilityPublic,
-		ParentID:   rc.Trigger.Envelope.ID,
-		// Correlation root falls back to the trigger's own id when the trigger
-		// carries no correlation_id (the same defensive derivation the closure
-		// gives — a request never roots correlation at itself by accident).
-		CorrelationID: behavior.CorrelationID(rc.Trigger.CorrelationID, rc.Trigger.Envelope.ID),
-		ExpiresAt:     &expiresAt,
+		// A tool call is work done on the trigger's behalf, so it continues the
+		// trigger's errand. This used to be two hand-copied fields here — the
+		// one place in the tree that remembered to copy them; everywhere else
+		// silently claimed to be a root. It is one required input now.
+		Cause:     message.From(rc.Trigger.Envelope),
+		ExpiresAt: &expiresAt,
 	}, deadline
 }
 

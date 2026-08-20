@@ -51,6 +51,14 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		return rejectFieldMissing("envelope.sender required"), nil
 	case env.TS == 0:
 		return rejectFieldMissing("envelope.ts required"), nil
+	case env.CorrelationID == "":
+		// Every message states why it exists, and correlation is the half of
+		// that answer no envelope may omit: which errand it belongs to. It is
+		// derived at build time from the required cause (lib/behavior), so an
+		// empty one here means the envelope skipped the builder. This used to
+		// be defaulted to the message's own id, which quietly turned every
+		// unstated cause into "nothing caused this".
+		return rejectFieldMissing("envelope.correlation_id required: it is derived from the builder's cause, so an empty one means the envelope was not built through lib/behavior"), nil
 	}
 
 	// (2) payload wellformedness — payload={} is legal, payload=null is

@@ -95,7 +95,7 @@ func (f *restartTimerFixture) proc() actorbase.Proc {
 			fire := restartTimerFire{actorID: sys.Self(), env: msg.Envelope}
 			// A fire that only lands in the log proves nothing about the actor
 			// being driven by it. Doing real work back into the channel does.
-			spec, err := behavior.EventSpecJSON(restartTimerFollowupType,
+			spec, err := behavior.EventSpecJSON(msg.Cause(), restartTimerFollowupType,
 				map[string]string{"timer": string(msg.ID)}, sys.Self())
 			var followup message.ID
 			if err == nil {

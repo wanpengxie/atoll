@@ -106,19 +106,23 @@ func liveAuthorFixture(t *testing.T) fireMapFixture {
 
 // fireMapEnvelope mirrors the engine's buildFireEnvelope field table: the
 // deterministic `timer:` id, engine-stamped TS, welded kind=event, self
-// audience, and — critically — an EMPTY Sender.ID / ChannelID, because those
-// are pen-injected and a pre-stuffed value is itself a reject. A fresh
-// envelope per call is not cosmetic: Write mutates the envelope in place, so
-// re-submitting the same struct would trip the not-caller-settable guard
-// instead of the duplicate-id path the replay test is aiming at.
+// audience, a correlation_id equal to the fire's own id (a fire heads its own
+// errand, so it is its own correlation root), and — critically — an EMPTY
+// Sender.ID / ChannelID, because those are pen-injected and a pre-stuffed
+// value is itself a reject. A fresh envelope per call is not cosmetic: Write
+// mutates the envelope in place, so re-submitting the same struct would trip
+// the not-caller-settable guard instead of the duplicate-id path the replay
+// test is aiming at.
 func fireMapEnvelope(timerID, typ string) *message.Envelope {
+	id := message.ID("timer:" + timerID)
 	return &message.Envelope{
-		ID:       message.ID("timer:" + timerID),
-		TS:       fireMapNowMs - 1_000,
-		Kind:     message.KindEvent,
-		Type:     typ,
-		Payload:  []byte(`{}`),
-		Audience: message.Audience{fireMapAuthor},
+		ID:            id,
+		TS:            fireMapNowMs - 1_000,
+		Kind:          message.KindEvent,
+		Type:          typ,
+		Payload:       []byte(`{}`),
+		Audience:      message.Audience{fireMapAuthor},
+		CorrelationID: id,
 	}
 }
 

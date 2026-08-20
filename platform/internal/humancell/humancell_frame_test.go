@@ -231,21 +231,31 @@ func TestInterpretSubmitExpiresAt(t *testing.T) {
 // unchanged on BOTH arms — the event arm carries no ExpiresAt because an event
 // has no closure to deadline.
 func TestInterpretSubmitCarriesTheFullSurfaceOnBothArms(t *testing.T) {
+	// The parent named by the frame must be a message this channel really
+	// holds — the interpreter looks it up — and the errand the submit joins is
+	// THAT message's correlation, not its id. Parent and correlation are no
+	// longer spec fields, so both arms are checked on the envelope the spec
+	// builds: that is where the cause becomes observable.
+	parent := &message.Envelope{ID: "parent-1", CorrelationID: "errand-9"}
 	fs := &fakeSys{self: "human:alice", writeID: "m1"}
 	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{
 		ChannelID: "c1", MsgType: "chat.text", Kind: "event", Audience: []string{"agent:a"},
 		ID: "own-id", ParentID: "parent-1", Visibility: "public", Payload: json.RawMessage(`{"t":"hi"}`),
 	})
-	if got := interpretFrame(fs, newDeps("human:alice", nil, false), f); got.Type != subjectgate.FrameReceipt {
+	if got := interpretFrame(fs, newDeps("human:alice", parent, false), f); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("event submit should receipt: %s", decodeErr(t, got).Code)
 	}
 	if !fs.emitted || fs.posted {
 		t.Fatalf("kind=event must Emit, not Post")
 	}
 	got := fs.emitSpec
-	if got.ID != "own-id" || got.ParentID != "parent-1" || got.Visibility != message.VisibilityPublic ||
+	if got.ID != "own-id" || got.Visibility != message.VisibilityPublic ||
 		got.Type != "chat.text" || string(got.Payload) != `{"t":"hi"}` {
 		t.Fatalf("event spec lost a field: %+v", got)
+	}
+	eventEnv, err := behavior.BuildEvent(time.Now, got)
+	if err != nil || eventEnv.ParentID != "parent-1" || eventEnv.CorrelationID != "errand-9" {
+		t.Fatalf("event cause lost the parent's errand: env=%+v err=%v", eventEnv, err)
 	}
 
 	fs2 := &fakeSys{self: "human:alice", writeID: "m2"}
@@ -253,12 +263,15 @@ func TestInterpretSubmitCarriesTheFullSurfaceOnBothArms(t *testing.T) {
 		ChannelID: "c1", MsgType: "human.approve", Kind: "request", Audience: []string{"agent:a"},
 		ID: "own-id", ParentID: "parent-1", Visibility: "public",
 	})
-	if got := interpretFrame(fs2, newDeps("human:alice", nil, false), f2); got.Type != subjectgate.FrameReceipt {
+	if got := interpretFrame(fs2, newDeps("human:alice", parent, false), f2); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("request submit should receipt: %s", decodeErr(t, got).Code)
 	}
-	if fs2.postSpec.ID != "own-id" || fs2.postSpec.ParentID != "parent-1" ||
-		fs2.postSpec.Visibility != message.VisibilityPublic {
+	if fs2.postSpec.ID != "own-id" || fs2.postSpec.Visibility != message.VisibilityPublic {
 		t.Fatalf("request spec lost a field: %+v", fs2.postSpec)
+	}
+	reqEnv, err := behavior.BuildRequest(time.Now, fs2.postSpec)
+	if err != nil || reqEnv.ParentID != "parent-1" || reqEnv.CorrelationID != "errand-9" {
+		t.Fatalf("request cause lost the parent's errand: env=%+v err=%v", reqEnv, err)
 	}
 }
 
