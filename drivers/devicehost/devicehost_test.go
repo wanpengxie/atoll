@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 )
@@ -16,13 +17,15 @@ import (
 // a body build (real classes need creds/config to fail deterministically).
 func init() {
 	registry.Register("test-ok-daemon", registry.ClassDecl{
-		Kind: actor.KindAgent,
+		Kind:      actor.KindAgent,
+		Placement: channelspec.PlacementDaemon,
 		New: func(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
 			return platform.ActorDecl{ID: spec.ID, Kind: actor.KindAgent}, nil
 		},
 	})
 	registry.Register("test-fail-daemon", registry.ClassDecl{
-		Kind: actor.KindAgent,
+		Kind:      actor.KindAgent,
+		Placement: channelspec.PlacementDaemon,
 		New: func(registry.InstanceSpec, registry.Deps) (platform.ActorDecl, error) {
 			return platform.ActorDecl{}, fmt.Errorf("forced build failure")
 		},
@@ -32,7 +35,8 @@ func init() {
 	// plan InstanceID, not the built decl.ID, so a drift is caught as no_builder
 	// rather than filed under an unreachable derived id.
 	registry.Register("test-rewrite-id-daemon", registry.ClassDecl{
-		Kind: actor.KindAgent,
+		Kind:      actor.KindAgent,
+		Placement: channelspec.PlacementDaemon,
 		New: func(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
 			return platform.ActorDecl{ID: spec.ID + ":derived", Kind: actor.KindAgent}, nil
 		},
