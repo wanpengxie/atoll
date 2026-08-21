@@ -628,8 +628,17 @@ func (l *agentLoop) handleHold(msg actorbase.Msg) {
 	if targetID != "" {
 		row := l.state.Requests[targetID]
 		turnOwner := l.state.Turn != nil && l.state.Turn.Owner == targetID
-		if row == nil || (row.Location != book.Buffered && !((row.Location == book.Starting || row.Location == book.Workspace) && turnOwner)) {
+		if row == nil {
 			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorCASMismatch, detail: "hold target is not buffered or the current turn owner"})
+			return
+		}
+		if turnOwner && l.interruptBusy() {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "busy", detail: "current turn cannot be interrupted while it is starting or another control action is running"})
+			return
+		}
+		activeOwner := turnOwner && l.state.Turn.Phase == book.TurnActive && row.Location == book.Workspace
+		if row.Location != book.Buffered && !activeOwner {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorCASMismatch, detail: "hold target is not buffered or the current active turn owner"})
 			return
 		}
 		if row.Sender != string(msg.Sender.ID) {
@@ -644,7 +653,7 @@ func (l *agentLoop) handleHold(msg actorbase.Msg) {
 	id := book.RequestID(msg.ID)
 	l.freeze(id, duration)
 	if targetID != "" && l.state.Turn != nil && l.state.Turn.Owner == targetID && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
-		l.scheduleAction(book.ActionInterrupt, id, book.DispRebufferOwner, id, targetID)
+		l.runAdmittedInterrupt(id, book.DispRebufferOwner, id, targetID)
 	}
 	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
 }
@@ -661,10 +670,14 @@ func (l *agentLoop) handleInterrupt(msg actorbase.Msg) {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "agent.interrupt payload must be an empty object"})
 		return
 	}
+	if l.interruptBusy() {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "busy", detail: "current turn cannot be interrupted while it is starting or another control action is running"})
+		return
+	}
 	id := book.RequestID(msg.ID)
 	l.freeze(id, defaultHoldDuration)
 	if l.state.Turn != nil && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
-		l.scheduleAction(book.ActionInterrupt, id, book.DispFailOwner, id, "")
+		l.runAdmittedInterrupt(id, book.DispFailOwner, id, "")
 	}
 	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
 }
@@ -721,7 +734,6 @@ func (l *agentLoop) validateReplace(msg actorbase.Msg) (replacePayload, string, 
 }
 
 func (l *agentLoop) freeze(holdID book.RequestID, duration time.Duration) {
-	l.detachFreezeAction()
 	l.clearHoldTimer()
 	l.frozenUntil = l.now().Add(duration)
 	l.heldBy = holdID
@@ -731,16 +743,9 @@ func (l *agentLoop) freeze(holdID book.RequestID, duration time.Duration) {
 }
 
 func (l *agentLoop) clearFreeze() {
-	l.detachFreezeAction()
 	l.frozenUntil = time.Time{}
 	l.heldBy = ""
 	l.clearHoldTimer()
-}
-
-func (l *agentLoop) detachFreezeAction() {
-	if action := l.state.Pending; action != nil && action.HolderID == l.heldBy && action.Disposition == book.DispRebufferOwner {
-		l.state.Pending = nil
-	}
 }
 
 func (l *agentLoop) clearHoldTimer() {
@@ -916,7 +921,7 @@ func (l *agentLoop) acceptContent(id book.RequestID, explicitSteer bool) {
 			detail: fmt.Sprintf("turn target mismatch: expected_turn_id %q, but the active turn is %q. Re-read turn_id from the most recent processing reply and resend; the turn you named has already ended", row.ExpectedTurn, t.ID)})
 		return
 	}
-	l.scheduleAction(book.ActionSteer, id, book.DispFailOwner, "", "")
+	l.scheduleSteer(id)
 }
 
 func (l *agentLoop) enqueue(id book.RequestID) {
@@ -1042,17 +1047,24 @@ func resumedInputText(row *book.Request) string {
 	return "请继续刚才被打断的工作。"
 }
 
-func (l *agentLoop) scheduleAction(kind book.ActionKind, id book.RequestID, disposition book.ActionDisposition, holder, ownerAtAdmit book.RequestID) {
-	l.scheduleActionAt(kind, id, disposition, holder, ownerAtAdmit, false, -1)
+func (l *agentLoop) scheduleSteer(id book.RequestID) {
+	l.scheduleSteerAt(id, false, -1)
 }
 
-func (l *agentLoop) scheduleSteerTarget(id book.RequestID, idx int) {
-	l.scheduleActionAt(book.ActionSteer, id, book.DispFailOwner, "", "", true, idx)
+func (l *agentLoop) interruptBusy() bool {
+	turn := l.state.Turn
+	if turn == nil {
+		return false
+	}
+	return turn.Phase == book.TurnStarting || l.state.Running != nil
 }
 
-func (l *agentLoop) scheduleActionAt(kind book.ActionKind, id book.RequestID, disposition book.ActionDisposition, holder, ownerAtAdmit book.RequestID, steerTarget bool, bufferIndex int) {
-	row := l.state.Requests[id]
-	if row == nil && kind == book.ActionSteer {
+// Interrupt actions are admitted only when they can run immediately. Keeping
+// them out of Pending makes the no-queue rule structural instead of relying on
+// a later unfreeze or turn-start path to detach them.
+func (l *agentLoop) runAdmittedInterrupt(id book.RequestID, disposition book.ActionDisposition, holder, ownerAtAdmit book.RequestID) {
+	turn := l.state.Turn
+	if turn == nil || turn.Phase != book.TurnActive || l.state.Running != nil {
 		return
 	}
 	l.nextAction++
@@ -1060,7 +1072,26 @@ func (l *agentLoop) scheduleActionAt(kind book.ActionKind, id book.RequestID, di
 		l.faultNow("counter_overflow", "Base action serial overflow")
 		return
 	}
-	a := &book.Action{Serial: l.nextAction, Kind: kind, Request: id, Disposition: disposition, HolderID: holder, OwnerAtAdmit: ownerAtAdmit, SteerTarget: steerTarget, BufferIndex: bufferIndex}
+	a := &book.Action{Serial: l.nextAction, Kind: book.ActionInterrupt, Request: id, Disposition: disposition, HolderID: holder, OwnerAtAdmit: ownerAtAdmit}
+	l.state.Running = a
+	l.runInterrupt(a)
+}
+
+func (l *agentLoop) scheduleSteerTarget(id book.RequestID, idx int) {
+	l.scheduleSteerAt(id, true, idx)
+}
+
+func (l *agentLoop) scheduleSteerAt(id book.RequestID, steerTarget bool, bufferIndex int) {
+	row := l.state.Requests[id]
+	if row == nil {
+		return
+	}
+	l.nextAction++
+	if l.nextAction == 0 {
+		l.faultNow("counter_overflow", "Base action serial overflow")
+		return
+	}
+	a := &book.Action{Serial: l.nextAction, Kind: book.ActionSteer, Request: id, SteerTarget: steerTarget, BufferIndex: bufferIndex}
 	if row != nil {
 		row.Location = book.ControlPending
 	}
@@ -1093,7 +1124,7 @@ func (l *agentLoop) maybeRunAction() {
 		return
 	}
 	a := l.state.Pending
-	if (a.Kind == book.ActionSteer || a.Kind == book.ActionInterrupt) && l.state.Turn != nil && l.state.Turn.Phase == book.TurnStarting {
+	if a.Kind == book.ActionSteer && l.state.Turn != nil && l.state.Turn.Phase == book.TurnStarting {
 		return
 	}
 	l.state.Pending = nil

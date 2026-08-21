@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -261,22 +262,23 @@ func TestAgentControl06UnholdIsIdempotentAndRestartsQueue(t *testing.T) {
 	}
 }
 
-func TestAgentControl07LaterHoldDetachesEarlierPendingInterrupt(t *testing.T) {
-	l, _, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true})
-	owner := &book.Request{ID: "owner", Sender: "caller", Location: book.Starting}
-	l.state.Requests[owner.ID] = owner
-	l.state.Turn = &book.Turn{Phase: book.TurnStarting, Owner: owner.ID}
-	l.handleIntake(v7Request("h1", TypeHold, "caller", `{"target":"owner","duration_ms":1000}`))
-	if l.state.Pending == nil {
-		t.Fatal("first hold did not queue interrupt")
+func TestAgentControl07LaterHoldResetsHolderAndDeadline(t *testing.T) {
+	l, _, _ := newV7Loop(t, nil)
+	now := time.Unix(100, 0)
+	l.nowFn = func() time.Time { return now }
+	l.handleIntake(v7Request("h1", TypeHold, "caller", `{"duration_ms":1000}`))
+	if l.heldBy != "h1" || !l.frozenUntil.Equal(now.Add(time.Second)) {
+		t.Fatalf("first hold heldBy=%q until=%v", l.heldBy, l.frozenUntil)
 	}
+	now = now.Add(250 * time.Millisecond)
 	l.handleIntake(v7Request("h2", TypeHold, "caller", `{"duration_ms":2000}`))
-	if l.state.Pending != nil || l.heldBy != "h2" {
-		t.Fatalf("pending=%+v heldBy=%q", l.state.Pending, l.heldBy)
+	wantUntil := now.Add(2 * time.Second)
+	if l.heldBy != "h2" || !l.frozenUntil.Equal(wantUntil) {
+		t.Fatalf("replacement hold heldBy=%q until=%v want=%v", l.heldBy, l.frozenUntil, wantUntil)
 	}
 	l.handleHoldExpired(json.RawMessage(`{"hold_id":"h1"}`))
-	if l.heldBy != "h2" {
-		t.Fatal("late fire cleared newer hold")
+	if l.heldBy != "h2" || !l.frozenUntil.Equal(wantUntil) {
+		t.Fatal("late fire changed the newer hold")
 	}
 }
 
@@ -323,34 +325,69 @@ func TestAgentControl11CancelBufferedRequestDoesNotUnfreeze(t *testing.T) {
 }
 
 func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
-	l, sys, rt := newV7Loop(t, nil)
-	now := time.Unix(100, 0)
-	l.nowFn = func() time.Time { return now }
-	l.freeze("h", time.Second)
-	l.handleHoldExpired(json.RawMessage(`{"hold_id":"old"}`))
-	if l.heldBy != "h" {
-		t.Fatal("mismatched fire changed hold")
-	}
-	l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
-	if l.heldBy != "h" || len(sys.timers) != 2 {
-		t.Fatalf("early fire heldBy=%q timers=%d", l.heldBy, len(sys.timers))
-	}
-	now = now.Add(2 * time.Second)
-	l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
-	if l.heldBy != "" {
-		t.Fatal("expired matching fire did not clear")
-	}
-	l.freeze("h2", time.Second)
-	now = now.Add(2 * time.Second)
-	l.handleIntake(v7Request("ask", TypeAsk, "caller", `{"text":"go"}`))
-	if l.frozen(now) || len(rt.starts) != 1 {
-		t.Fatal("clock fallback did not advance ask")
-	}
-	sys.afterErr = true
-	l.freeze("h3", time.Second)
-	if !l.frozen(now) {
-		t.Fatal("After failure prevented freeze")
-	}
+	t.Run("clock expiry advances without another message", func(t *testing.T) {
+		l, _, rt := newV7Loop(t, nil)
+		now := time.Unix(100, 0)
+		l.nowFn = func() time.Time { return now }
+		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint("queued", "queued")}
+		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
+		l.freeze("h", time.Second)
+		now = now.Add(2 * time.Second)
+		l.startNext()
+		if len(rt.starts) != 1 || l.state.Turn == nil {
+			t.Fatalf("starts=%d turn=%+v", len(rt.starts), l.state.Turn)
+		}
+	})
+	t.Run("fire mismatch early and expired", func(t *testing.T) {
+		l, sys, rt := newV7Loop(t, nil)
+		now := time.Unix(100, 0)
+		l.nowFn = func() time.Time { return now }
+		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint("queued", "queued")}
+		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
+		l.freeze("h", time.Second)
+		l.handleHoldExpired(json.RawMessage(`{"hold_id":"old"}`))
+		if l.heldBy != "h" || len(rt.starts) != 0 {
+			t.Fatal("mismatched fire changed hold")
+		}
+		l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
+		if l.heldBy != "h" || len(sys.timers) != 2 || sys.timers[1].d != time.Second {
+			t.Fatalf("early fire heldBy=%q timers=%+v", l.heldBy, sys.timers)
+		}
+		now = now.Add(2 * time.Second)
+		l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
+		if l.heldBy != "" || len(rt.starts) != 1 {
+			t.Fatalf("expired fire heldBy=%q starts=%d", l.heldBy, len(rt.starts))
+		}
+	})
+	t.Run("After failure still expires by clock", func(t *testing.T) {
+		l, sys, rt := newV7Loop(t, nil)
+		now := time.Unix(100, 0)
+		l.nowFn = func() time.Time { return now }
+		sys.afterErr = true
+		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint("queued", "queued")}
+		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
+		l.freeze("h", time.Second)
+		if !l.frozen(now) || len(sys.timers) != 0 {
+			t.Fatal("After failure prevented freeze")
+		}
+		now = now.Add(2 * time.Second)
+		l.startNext()
+		if l.frozen(now) || len(rt.starts) != 1 {
+			t.Fatalf("frozen=%v starts=%d", l.frozen(now), len(rt.starts))
+		}
+	})
+	t.Run("late fire after CancelTimer is a no-op", func(t *testing.T) {
+		l, sys, rt := newV7Loop(t, nil)
+		l.freeze("h", time.Second)
+		l.clearFreeze()
+		if len(sys.cancelled) != 1 {
+			t.Fatalf("cancelled=%v", sys.cancelled)
+		}
+		l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
+		if l.heldBy != "" || !l.frozenUntil.IsZero() || len(rt.starts) != 0 {
+			t.Fatalf("heldBy=%q until=%v starts=%d", l.heldBy, l.frozenUntil, len(rt.starts))
+		}
+	})
 }
 
 func TestAgentControl13CapacityFailureStillUnfreezesAndAdvancesExistingQueue(t *testing.T) {
@@ -417,11 +454,21 @@ func TestAgentControl15HoldAndInterruptSettleOwnersDifferently(t *testing.T) {
 	})
 }
 
-func TestAgentControl16MatchingRunningInterruptWinsOverLaterHold(t *testing.T) {
+func TestAgentControl16RunningInterruptRejectsEveryNewInterrupt(t *testing.T) {
 	l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true})
 	v7Activate(t, l, "owner")
 	l.handleIntake(v7Request("i", TypeInterrupt, "caller", `{}`))
+	until := l.frozenUntil
 	l.handleIntake(v7Request("h", TypeHold, "caller", `{"target":"owner"}`))
+	l.handleIntake(v7Request("i2", TypeInterrupt, "caller", `{}`))
+	for _, id := range []string{"h", "i2"} {
+		if got := sys.terminal(id); len(got) != 1 || got[0].code != "busy" {
+			t.Fatalf("%s terminal=%v", id, got)
+		}
+	}
+	if l.heldBy != "i" || l.frozenUntil != until || l.state.Pending != nil || l.state.Running == nil || l.state.Running.Kind != book.ActionInterrupt {
+		t.Fatalf("heldBy=%q until=%v pending=%+v running=%+v", l.heldBy, l.frozenUntil, l.state.Pending, l.state.Running)
+	}
 	l.onTurnEnded(runtimeEvent{kind: evTurnEnded, turnID: "turn-owner", status: runtimeproto.TurnStatusInterrupted})
 	got := sys.terminal("owner")
 	if len(got) != 1 || got[0].code != errorInterrupted || l.state.Requests["owner"] != nil {
@@ -443,45 +490,66 @@ func TestAgentControl17RunningHoldKeepsDispositionAfterUnfreeze(t *testing.T) {
 	}
 }
 
-func TestAgentControl18PendingHoldInterruptIsDetachedOnUnfreeze(t *testing.T) {
-	l, _, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true})
-	l.handleIntake(v7Request("owner", TypeAsk, "caller", `{"text":"owner"}`))
-	l.handleIntake(v7Request("h", TypeHold, "caller", `{"target":"owner"}`))
-	if l.state.Pending == nil {
-		t.Fatal("hold interrupt not pending")
-	}
-	l.handleIntake(v7Request("new", TypeAsk, "caller", `{"text":"new"}`))
-	if l.state.Pending != nil {
-		t.Fatal("hold interrupt survived unfreeze")
-	}
-	l.onTurnStarted(runtimeEvent{kind: evTurnStarted, op: l.state.Turn.StartOp, turnID: "turn"})
-	if len(rt.controls) != 0 {
-		t.Fatalf("controls=%v", rt.controls)
+func TestAgentControl18StartingWindowRejectsInterruptsWithoutEffects(t *testing.T) {
+	for _, typ := range []string{TypeInterrupt, TypeHold} {
+		t.Run(typ, func(t *testing.T) {
+			l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true})
+			l.handleIntake(v7Request("owner", TypeAsk, "caller", `{"text":"owner"}`))
+			payload := `{}`
+			if typ == TypeHold {
+				payload = `{"target":"owner"}`
+			}
+			l.handleIntake(v7Request("control", typ, "caller", payload))
+			if got := sys.terminal("control"); len(got) != 1 || got[0].code != "busy" {
+				t.Fatalf("terminal=%v", got)
+			}
+			if l.frozen(l.now()) || l.heldBy != "" || l.state.Pending != nil || l.state.Running != nil || len(rt.controls) != 0 {
+				t.Fatalf("frozen=%v heldBy=%q pending=%+v running=%+v controls=%v", l.frozen(l.now()), l.heldBy, l.state.Pending, l.state.Running, rt.controls)
+			}
+			l.onTurnStarted(runtimeEvent{kind: evTurnStarted, op: l.state.Turn.StartOp, turnID: "turn"})
+			l.handleIntake(v7Request("retry", typ, "caller", payload))
+			if got := sys.terminal("retry"); len(got) != 1 || got[0].fail || !l.frozen(l.now()) || len(rt.controls) != 1 {
+				t.Fatalf("retry=%v frozen=%v controls=%v", got, l.frozen(l.now()), rt.controls)
+			}
+		})
 	}
 }
 
-func TestAgentControl19PendingInterruptSurvivesUnfreeze(t *testing.T) {
-	l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true})
+func TestAgentControl19PendingSlotNeverContainsInterrupt(t *testing.T) {
+	assertPending := func(t *testing.T, l *agentLoop) {
+		t.Helper()
+		if l.state.Pending != nil && l.state.Pending.Kind == book.ActionInterrupt {
+			t.Fatalf("interrupt entered Pending: %+v", l.state.Pending)
+		}
+	}
+	l, _, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true, runtimeproto.CapabilitySteer: true})
 	l.handleIntake(v7Request("owner", TypeAsk, "caller", `{"text":"owner"}`))
-	l.handleIntake(v7Request("i", TypeInterrupt, "caller", `{}`))
-	l.handleIntake(v7Request("new", TypeAsk, "caller", `{"text":"new"}`))
-	if l.state.Pending == nil || l.state.Pending.Disposition != book.DispFailOwner {
-		t.Fatalf("pending=%+v", l.state.Pending)
-	}
+	l.handleIntake(v7Request("i-starting", TypeInterrupt, "caller", `{}`))
+	assertPending(t, l)
 	l.onTurnStarted(runtimeEvent{kind: evTurnStarted, op: l.state.Turn.StartOp, turnID: "turn"})
-	if len(rt.controls) != 1 {
-		t.Fatalf("controls=%v", rt.controls)
-	}
-	l.onTurnEnded(runtimeEvent{kind: evTurnEnded, turnID: "turn", status: runtimeproto.TurnStatusInterrupted})
-	if got := sys.terminal("owner"); len(got) != 1 || got[0].code != errorInterrupted {
-		t.Fatalf("owner terminal=%v", got)
-	}
+	l.handleIntake(v7Request("i-running", TypeInterrupt, "caller", `{}`))
+	assertPending(t, l)
+	l.handleIntake(v7Request("i-busy", TypeInterrupt, "caller", `{}`))
+	assertPending(t, l)
+	l.clearFreeze()
+	assertPending(t, l)
 }
 
 func TestAgentControl20ControlAndTurnArrivalOrdersHaveSingleTerminals(t *testing.T) {
-	orders := []string{"control-first", "turn-first", "provider-lost-first"}
+	orders := []struct {
+		name  string
+		steps []string
+		code  string
+	}{
+		{name: "control-turn-lost", steps: []string{"control", "turn", "lost"}, code: errorInterrupted},
+		{name: "control-lost-turn", steps: []string{"control", "lost", "turn"}, code: errorProviderCrash},
+		{name: "turn-control-lost", steps: []string{"turn", "control", "lost"}, code: errorInterrupted},
+		{name: "turn-lost-control", steps: []string{"turn", "lost", "control"}, code: errorInterrupted},
+		{name: "lost-control-turn", steps: []string{"lost", "control", "turn"}, code: errorProviderCrash},
+		{name: "lost-turn-control", steps: []string{"lost", "turn", "control"}, code: errorProviderCrash},
+	}
 	for _, order := range orders {
-		t.Run(order, func(t *testing.T) {
+		t.Run(order.name, func(t *testing.T) {
 			l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true})
 			v7Activate(t, l, "owner")
 			l.handleIntake(v7Request("i", TypeInterrupt, "caller", `{}`))
@@ -489,21 +557,18 @@ func TestAgentControl20ControlAndTurnArrivalOrdersHaveSingleTerminals(t *testing
 			control := runtimeEvent{kind: evControlDone, op: a.Op, turnID: a.Target, verdict: runtimeproto.ControlAccepted}
 			ended := runtimeEvent{kind: evTurnEnded, turnID: a.Target, status: runtimeproto.TurnStatusInterrupted}
 			lost := runtimeEvent{kind: evProviderLost, turnID: a.Target, cause: runtimeproto.LostCrash}
-			switch order {
-			case "control-first":
-				l.onControlDone(control)
-				l.onTurnEnded(ended)
-				l.onProviderLost(lost)
-			case "turn-first":
-				l.onTurnEnded(ended)
-				l.onControlDone(control)
-				l.onProviderLost(lost)
-			case "provider-lost-first":
-				l.onProviderLost(lost)
-				l.onControlDone(control)
-				l.onTurnEnded(ended)
+			for _, step := range order.steps {
+				switch step {
+				case "control":
+					l.onControlDone(control)
+				case "turn":
+					l.onTurnEnded(ended)
+				case "lost":
+					l.onProviderLost(lost)
+				}
 			}
-			if owner, interrupt := sys.terminal("owner"), sys.terminal("i"); len(owner) != 1 || len(interrupt) != 1 || l.state.Requests["i"] != nil {
+			owner, interrupt := sys.terminal("owner"), sys.terminal("i")
+			if len(owner) != 1 || owner[0].code != order.code || len(interrupt) != 1 || interrupt[0].fail || l.state.Requests["i"] != nil {
 				t.Fatalf("owner=%v interrupt=%v row=%v", owner, interrupt, l.state.Requests["i"])
 			}
 		})
@@ -572,9 +637,11 @@ func TestAgentControl23DurationMillisecondsDomainIsClosed(t *testing.T) {
 	}
 	for _, payload := range []string{`{}`, `{"duration_ms":1800000}`} {
 		l, sys, _ := newV7Loop(t, nil)
+		now := time.Unix(100, 0)
+		l.nowFn = func() time.Time { return now }
 		l.handleIntake(v7Request("h", TypeHold, "caller", payload))
-		if got := sys.terminal("h"); len(got) != 1 || got[0].fail || !l.frozen(l.now()) {
-			t.Fatalf("payload=%s terminal=%v", payload, got)
+		if got := sys.terminal("h"); len(got) != 1 || got[0].fail || !l.frozen(l.now()) || !l.frozenUntil.Equal(now.Add(30*time.Minute)) {
+			t.Fatalf("payload=%s terminal=%v until=%v", payload, got, l.frozenUntil)
 		}
 	}
 }
@@ -590,30 +657,52 @@ func TestAgentControl24InterruptWithoutCapabilityStillFreezesAndCompletes(t *tes
 }
 
 func TestAgentControl25ReplaceFailuresAreAtomicAndSuccessNeedsNoFreeze(t *testing.T) {
+	tests := []struct {
+		name, sender, payload, code string
+		location                    book.Location
+		maxBytes                    int
+	}{
+		{name: "format", sender: "caller", payload: `{"target":"target","old_text":"old"}`, code: "invalid_args", location: book.Buffered},
+		{name: "attachment format", sender: "caller", payload: `{"target":"target","old_text":"old","new_text":"new","attachments":{}}`, code: "invalid_args", location: book.Buffered},
+		{name: "missing target", sender: "caller", payload: `{"target":"missing","old_text":"old","new_text":"new"}`, code: errorCASMismatch, location: book.Buffered},
+		{name: "ownership", sender: "other", payload: `{"target":"target","old_text":"old","new_text":"new"}`, code: "target_not_owned", location: book.Buffered},
+		{name: "location", sender: "caller", payload: `{"target":"target","old_text":"old","new_text":"new"}`, code: errorCASMismatch, location: book.Workspace},
+		{name: "old text", sender: "caller", payload: `{"target":"target","old_text":"wrong","new_text":"new"}`, code: errorCASMismatch, location: book.Buffered},
+		{name: "capacity", sender: "caller", payload: `{"target":"target","old_text":"old","new_text":"much larger"}`, code: errorBaseCapacity, location: book.Buffered, maxBytes: 14},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			l, sys, _ := newV7Loop(t, nil)
+			l.state.Turn = &book.Turn{Phase: book.TurnActive, ID: "busy"}
+			if test.maxBytes > 0 {
+				l.def.cfg.BufferMaxBytes = test.maxBytes
+			}
+			before := &book.Request{ID: "before", Sender: "caller", Input: runtimeproto.Input{Text: "before"}, Bytes: 6, Location: book.Buffered}
+			target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: test.location, Scope: l.vault.Mint("target", "target")}
+			after := &book.Request{ID: "after", Sender: "caller", Input: runtimeproto.Input{Text: "after"}, Bytes: 5, Location: book.Buffered}
+			l.state.Requests[before.ID], l.state.Requests[target.ID], l.state.Requests[after.ID] = before, target, after
+			l.state.Buffer = []book.RequestID{before.ID, target.ID, after.ID}
+			l.state.BufferBytes = before.Bytes + target.Bytes + after.Bytes
+			l.freeze("h", time.Minute)
+			beforeUntil := l.frozenUntil
+			l.handleIntake(v7Request("replacement", TypeReplace, test.sender, test.payload))
+			got := sys.terminal("replacement")
+			if len(got) != 1 || got[0].code != test.code || l.state.Requests["target"] != target || l.state.Requests["replacement"] != nil ||
+				fmt.Sprint(l.state.Buffer) != "[before target after]" || l.state.IndexInBuffer("target") != 1 || l.state.BufferBytes != 14 || l.heldBy != "h" || l.frozenUntil != beforeUntil {
+				t.Fatalf("terminal=%v requests=%v buffer=%v bytes=%d heldBy=%q until=%v", got, l.state.Requests, l.state.Buffer, l.state.BufferBytes, l.heldBy, l.frozenUntil)
+			}
+		})
+	}
+
 	l, sys, _ := newV7Loop(t, nil)
 	l.state.Turn = &book.Turn{Phase: book.TurnActive, ID: "busy"}
 	target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Scope: l.vault.Mint("target", "target")}
-	l.state.Requests[target.ID], l.state.Buffer, l.state.BufferBytes = target, []book.RequestID{target.ID}, target.Bytes
-	l.freeze("h", time.Minute)
-	beforeUntil := l.frozenUntil
-	l.handleIntake(v7Request("bad", TypeReplace, "caller", `{"target":"target","old_text":"wrong","new_text":"new"}`))
-	if got := sys.terminal("bad"); len(got) != 1 || got[0].code != errorCASMismatch || l.state.Buffer[0] != "target" || l.state.BufferBytes != 3 || l.frozenUntil != beforeUntil {
-		t.Fatalf("terminal=%v state=%+v", got, l.state)
-	}
-	l.clearFreeze()
+	after := &book.Request{ID: "after", Sender: "caller", Input: runtimeproto.Input{Text: "after"}, Bytes: 5, Location: book.Buffered}
+	l.state.Requests[target.ID], l.state.Requests[after.ID] = target, after
+	l.state.Buffer, l.state.BufferBytes = []book.RequestID{target.ID, after.ID}, target.Bytes+after.Bytes
 	l.handleIntake(v7Request("good", TypeReplace, "caller", `{"target":"target","old_text":"old","new_text":"new"}`))
-	if l.state.Requests["target"] != nil || l.state.Requests["good"] == nil || len(sys.progresses("good")) != 1 {
-		t.Fatalf("requests=%v progress=%v", l.state.Requests, sys.progresses("good"))
-	}
-
-	l2, sys2, _ := newV7Loop(t, nil)
-	l2.state.Turn = &book.Turn{Phase: book.TurnActive, ID: "busy"}
-	l2.def.cfg.BufferMaxBytes = 3
-	t2 := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered}
-	l2.state.Requests[t2.ID], l2.state.Buffer, l2.state.BufferBytes = t2, []book.RequestID{t2.ID}, 3
-	l2.handleIntake(v7Request("large", TypeReplace, "caller", `{"target":"target","old_text":"old","new_text":"much larger"}`))
-	if got := sys2.terminal("large"); len(got) != 1 || got[0].code != errorBaseCapacity || l2.state.Buffer[0] != "target" || l2.state.BufferBytes != 3 {
-		t.Fatalf("terminal=%v state=%+v", got, l2.state)
+	if l.state.Requests["target"] != nil || l.state.Requests["good"] == nil || len(sys.progresses("good")) != 1 || l.state.IndexInBuffer("good") != 0 || l.state.Buffer[1] != "after" {
+		t.Fatalf("requests=%v buffer=%v progress=%v", l.state.Requests, l.state.Buffer, sys.progresses("good"))
 	}
 }
 
@@ -653,15 +742,20 @@ func TestAgentControl27MergedOwnerReplaceKeepsChainAndRunsCorrectionAlone(t *tes
 	a := l.state.Running
 	l.onControlDone(runtimeEvent{kind: evControlDone, op: a.Op, turnID: a.Target, verdict: runtimeproto.ControlAccepted})
 	l.handleIntake(v7Request("r3-new", TypeReplace, "caller", `{"target":"r3","old_text":"three","new_text":"three-new"}`))
-	if got := sys.terminal("r2"); len(got) != 1 || got[0].fail {
-		t.Fatalf("r2 terminal=%v", got)
+	r2 := sys.terminal("r2")
+	r3 := sys.terminal("r3")
+	if len(r2) != 1 || r2[0].fail || r2[0].value.(map[string]any)["merged_into"] != book.RequestID("r3") {
+		t.Fatalf("r2 terminal=%v", r2)
+	}
+	if len(r3) != 1 || r3[0].fail || r3[0].value.(map[string]any)["replaced_by"] != book.RequestID("r3-new") {
+		t.Fatalf("r3 terminal=%v", r3)
 	}
 	if len(rt.starts) != 2 || len(rt.starts[1].Messages) != 1 || rt.starts[1].Messages[0].SourceID != "r3-new" || rt.starts[1].Messages[0].Text == "three-new" {
 		t.Fatalf("starts=%+v", rt.starts)
 	}
 }
 
-func TestAgentControl28ManifestSchemasAndErrorsValidateWithoutReservedCodes(t *testing.T) {
+func TestAgentControl28ManifestSchemasAndErrorsIncludeBusyButNoReservedCodes(t *testing.T) {
 	manifest := Manifest("agent", map[string]bool{})
 	if err := introspect.ValidateManifest(manifest); err != nil {
 		t.Fatal(err)
@@ -672,9 +766,14 @@ func TestAgentControl28ManifestSchemasAndErrorsValidateWithoutReservedCodes(t *t
 			t.Fatalf("%s missing schema", typ)
 		}
 		for _, code := range spec.ErrorCodes {
-			if code == "forbidden" || code == "busy" {
-				t.Fatalf("%s contains reserved/dead code %s", typ, code)
+			if code == "forbidden" {
+				t.Fatalf("%s contains reserved code %s", typ, code)
 			}
+		}
+	}
+	for _, typ := range []string{TypeHold, TypeInterrupt} {
+		if !slices.Contains(manifest.Words[typ].ErrorCodes, "busy") {
+			t.Fatalf("%s does not advertise busy: %v", typ, manifest.Words[typ].ErrorCodes)
 		}
 	}
 }
