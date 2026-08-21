@@ -263,7 +263,7 @@ ok "steward = $STEWARD"
 echo
 
 # ---------------------------------------------------------------- 3. password
-bold "3/5 root 密码（账号 root@atoll.local）"
+bold "3/5 root 密码（账号 root，全名 root@atoll.local）"
 PASSWORD=""
 if [ "$YES" = 1 ]; then
   PASSWORD="${ATOLL_ROOT_PASSWORD:-}"
@@ -325,8 +325,8 @@ if ! curl -fs "http://$ADDR/healthz" >/dev/null 2>&1; then bad "30s 内没起来
 
 echo
 bold "atoll 已在跑"
-echo "  打开        : http://$ADDR  （用 root@atoll.local 登录）"
-echo "  登录 API    : POST http://$ADDR/api/identity/login  {\"email\":\"root@atoll.local\",\"password\":<密码>}"
+echo "  打开        : http://$ADDR    （账号填 root 即可）"
+echo "  登录 API    : POST http://$ADDR/api/identity/login  {\"email\":\"root\",\"password\":<密码>}"
 [ -n "$PASSWORD" ] && echo "  密码        : 见 $HOME_DIR/server/root-password"
 echo "  token       : $HOME_DIR/server/atoll-token"
 echo "  日志        : $LOG"

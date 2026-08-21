@@ -259,6 +259,28 @@ func (p *Portal) serveUI(w http.ResponseWriter, r *http.Request) {
 	p.ui.ServeHTTP(w, r)
 }
 
+// qualifyLoginName reads a bare name as one of the accounts the node carved for
+// itself. A principal is named by an email, and `root` is nobody's email — but
+// it is the only thing the person installing a node ever calls that account, and
+// making them type a domain the node invented for them is a toll charged for
+// nothing.
+//
+// Only the accounts boot writes can be named this way, and that is why only
+// logging in qualifies: registration insists on a real address (see register),
+// so a bare name can never be a stored one. Qualify both sides instead and the
+// two spellings drift — an account registered as "alice" would be looked up as
+// "alice@atoll.local" and could never be reached at all.
+//
+// A name that already carries a domain is left exactly as it is; a node is not
+// the only place a principal can come from.
+func qualifyLoginName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.Contains(s, "@") {
+		return s
+	}
+	return s + "@" + channelspec.LocalEmailDomain
+}
+
 func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		ID          string `json:"id"`
@@ -272,6 +294,15 @@ func (p *Portal) register(w http.ResponseWriter, r *http.Request) {
 	in.Email = strings.TrimSpace(in.Email)
 	if in.Email == "" || in.Password == "" {
 		writeError(w, 400, string(codeInvalidArgs), "email and password required")
+		return
+	}
+	// Registering asks for a real address, and a bare name is refused rather
+	// than completed: the node's own domain is not this account's to claim, and
+	// an account stored under a bare name could never be logged into — logging
+	// in reads a bare name as that domain (see qualifyLoginName), and would look
+	// for an address the store does not have.
+	if !strings.Contains(in.Email, "@") {
+		writeError(w, 400, string(codeInvalidArgs), "email must be a full address, e.g. you@example.com")
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
@@ -387,7 +418,7 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &in) {
 		return
 	}
-	in.Email = strings.TrimSpace(in.Email)
+	in.Email = qualifyLoginName(in.Email)
 	if in.Email == "" || in.Password == "" {
 		writeError(w, 400, string(codeInvalidArgs), "email and password required")
 		return

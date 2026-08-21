@@ -160,7 +160,7 @@ Check it is alive:
 curl -s http://127.0.0.1:8832/healthz      # {"status":"ok"}
 ```
 
-Account: `root@atoll.local` with the password you chose (or the generated one in
+Account: `root` (`root@atoll.local` spelled out also works), with the password you chose (or the generated one in
 `~/.atoll/server/root-password`). Stop with `Ctrl-C`; the node is single-homed, so
 a second `atoll up` on the same `--dir` is refused by a lock.
 
@@ -171,7 +171,7 @@ The browser interface is in the node, on the same port as the API: open
 relative paths and is same-origin with them, so plain cookie auth works — no
 proxy, no CORS.
 
-Log in as `root@atoll.local`, you are in `c0` with the steward; mention it and the
+Log in as `root` (accounts the node carved need no domain), you are in `c0` with the steward; mention it and the
 answer streams back as a round in the timeline.
 
 **From a source checkout** `web/dist` holds only a placeholder page, which says as

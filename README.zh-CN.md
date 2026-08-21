@@ -145,7 +145,7 @@ bin/atoll up --dir ~/.atoll --addr 127.0.0.1:8832   # 显式 flag 仍然优先�
 curl -s http://127.0.0.1:8832/healthz      # {"status":"ok"}
 ```
 
-账号：`root@atoll.local`，密码是你设的那个（或 `~/.atoll/server/root-password` 里生成的那个）。
+账号 `root`（写全 `root@atoll.local` 也行），密码是你设的那个（或 `~/.atoll/server/root-password` 里生成的那个）。
 `Ctrl-C` 停止；节点是单 home 的，对同一个 `--dir` 再跑一次 `atoll up` 会被锁拒绝。
 
 ### 3. 打开 web UI
@@ -153,7 +153,7 @@ curl -s http://127.0.0.1:8832/healthz      # {"status":"ok"}
 浏览器界面就在节点里，和 API 同一个端口：打开 `http://127.0.0.1:8832`。UI 用相对路径访问
 `/api`、`/ws`、`/obs`、`/files`，和它们同源，所以普通 cookie 登录就能用，没有代理、没有跨域。
 
-用 `root@atoll.local` 登录，你就在 `c0` 里、steward 坐在对面；@ 它，回答以一个回合（round）
+用 `root` 登录（节点自己的账号可以不写域），你就在 `c0` 里、steward 坐在对面；@ 它，回答以一个回合（round）
 流回时间线。
 
 **从源码构建时** `web/dist` 里只有一张占位页，打开会告诉你 UI 没打包。要编进去：

@@ -435,3 +435,43 @@ func TestTheUIAnswersOnlyForPathsTheNodeDidNotClaim(t *testing.T) {
 		})
 	}
 }
+
+// `root` is what the person who installed the node calls that account, and the
+// node invented the domain, so logging in completes it. Only logging in:
+// registration refuses a bare name outright (see the register handler), which is
+// what keeps the two spellings from ever naming different accounts.
+func TestLoggingInReadsABareNameAsAnAccountTheNodeCarved(t *testing.T) {
+	for _, tc := range []struct{ typed, means string }{
+		{typed: "root", means: "root@atoll.local"},
+		{typed: "  root  ", means: "root@atoll.local"},
+		{typed: "guest", means: "guest@atoll.local"},
+		// 已经指名了域的，原样——节点不是 principal 的唯一来源
+		{typed: "alice@example.com", means: "alice@example.com"},
+		{typed: "root@atoll.local", means: "root@atoll.local"},
+		// 空的仍然是空的：缺不缺账号由入口自己判，恒不由这里补出一个来
+		{typed: "", means: ""},
+		{typed: "   ", means: ""},
+	} {
+		if got := qualifyLoginName(tc.typed); got != tc.means {
+			t.Fatalf("qualifyLoginName(%q)=%q want %q", tc.typed, got, tc.means)
+		}
+	}
+}
+
+// A bare name must never become a stored account: logging in would look for it
+// under the node's domain and never find it. So the entrance refuses instead of
+// completing — the refusal happens before anything is written.
+func TestRegisteringRefusesANameWithoutADomain(t *testing.T) {
+	p := New(Config{ContractVersion: "test", Sessions: gateway.NewSessionStore()})
+	for _, typed := range []string{"root2", "alice", "  bob  "} {
+		rec := httptest.NewRecorder()
+		body := strings.NewReader(`{"email":"` + strings.TrimSpace(typed) + `","password":"longenough"}`)
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/identity/register", body))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("register %q: status=%d want 400 body=%s", typed, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "full address") {
+			t.Fatalf("register %q: 拒绝信息要说清该怎么改：%s", typed, rec.Body.String())
+		}
+	}
+}
