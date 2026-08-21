@@ -1,0 +1,89 @@
+name: Release
+
+# 发行 = 在 atoll 打一个 tag。别的都跟着它走。
+#
+# 一次发行只有一个对外版本号，就是这个 tag。它配的前端是 atoll-web 的哪个 tag，
+# 由仓根的 WEB_VERSION 指定 —— 那是"这版 atoll 配哪版 UI"的唯一出处，人不用
+# 记两个号，二进制自己也说得清（atoll version）。
+#
+# 发布动作：
+#   1. 确认 WEB_VERSION 里写的 atoll-web tag 已经存在
+#   2. git tag v0.01 && git push origin v0.01
+#
+# 出四个平台的包。纯 Go（modernc sqlite，无 CGO），所以一台 ubuntu runner
+# 就能全出，不需要 mac runner。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v0.01）；不打 tag 的试跑用'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build + package + publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: resolve version
+        id: v
+        run: |
+          version="${{ github.event.inputs.version }}"
+          [ -n "$version" ] || version="${GITHUB_REF_NAME}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "web=$(cat WEB_VERSION)" >> "$GITHUB_OUTPUT"
+          echo "atoll $version + atoll-web $(cat WEB_VERSION)"
+
+      # 走 Makefile 而不是在这里另写一遍：本地 `make web && make package` 出的包
+      # 必须和这里出的是同一个东西，否则发行链路只有 CI 跑过。
+      - name: build web UI
+        run: make web
+
+      - name: package
+        run: make package VERSION=${{ steps.v.outputs.version }}
+
+      - name: smoke test the linux build
+        run: |
+          tar -xzf dist/atoll_${{ steps.v.outputs.version }}_linux_amd64.tar.gz -C /tmp
+          bin=/tmp/atoll_${{ steps.v.outputs.version }}_linux_amd64/atoll
+          "$bin" version
+          # 装完就要能打开——一个自己不吐 UI 的包不算装好了
+          "$bin" up --dir /tmp/smoke --addr 127.0.0.1:8899 --root-password smoketest123 &
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:8899/healthz >/dev/null && break; sleep 0.5; done
+          curl -fs http://127.0.0.1:8899/healthz
+          curl -fsS http://127.0.0.1:8899/ | grep -qi '<!doctype html' \
+            || { echo "根路径没有吐出页面——UI 没打进去"; exit 1; }
+          kill %1 || true
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.v.outputs.version }}" \
+            --title "atoll ${{ steps.v.outputs.version }}" \
+            --notes "$(printf '装：\n\n```\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | bash\n```\n\n前端：atoll-web %s\n' "$GITHUB_REPOSITORY" "${{ steps.v.outputs.web }}")" \
+            dist/*.tar.gz dist/checksums.txt

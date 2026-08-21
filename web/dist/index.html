@@ -1,0 +1,40 @@
+<!doctype html>
+<!--
+  Placeholder. A source checkout carries no built UI: the real dist/ is produced
+  at release time from the atoll-web tag named in WEB_VERSION, and overwrites
+  everything in this directory.
+
+  Do not add files here by hand — they would ship inside the binary.
+-->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>atoll — web UI 未打包</title>
+<style>
+  body { font: 15px/1.7 ui-sans-serif, system-ui, sans-serif; max-width: 34rem;
+         margin: 4rem auto; padding: 0 1.5rem; color: #1a1a1a; background: #fff; }
+  code { background: #f2f2f2; padding: .15em .4em; border-radius: 3px; }
+  pre  { background: #f2f2f2; padding: .8rem 1rem; border-radius: 5px; overflow-x: auto; }
+  h1   { font-size: 1.3rem; }
+  .m   { color: #666; font-size: .9em; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e8e8e8; background: #171717; }
+    code, pre { background: #262626; }
+    .m { color: #999; }
+  }
+</style>
+</head>
+<body>
+<h1>这个 atoll 二进制里没有打包 web UI</h1>
+<p>节点本身在正常运行 —— API 就在这个地址上。你看到这一页，是因为它是从源码编译的，而
+构建前端是发布环节的事，不是编译节点的前提。</p>
+<p>要界面，两条路：</p>
+<pre>#（一）装一个正式发行版，UI 在二进制里
+curl -fsSL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh | bash
+
+#（二）本地把 UI 编进去（按 WEB_VERSION 取 atoll-web）
+make web &amp;&amp; make build</pre>
+<p class="m">只改前端时不必每次重编：<code>npm run dev</code> 起 vite，它会把 /api、/ws、/obs、/files 代理到这个节点。</p>
+</body>
+</html>

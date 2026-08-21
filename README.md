@@ -69,9 +69,34 @@ permissions; Atoll gives agents **actors**, **channels** and **membership**.
 
 ## Quickstart
 
-Three steps: build, run the installer once, start the web UI against the node.
-You end up with a node at `http://127.0.0.1:8832`, a `root` account, and a coding
-agent seated in the root channel `c0` as its **steward**.
+You end up with a node at `http://127.0.0.1:8832`, a `root` account, a coding agent
+seated in the root channel `c0` as its **steward**, and a web UI you just open.
+
+### Install a release (the short way)
+
+No Go, no build, no separate front end. This picks the build for your OS and
+architecture (the UI is inside it), verifies its sha256, and drops you into the
+very same wizard a source install runs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh | bash
+```
+
+Then open `http://127.0.0.1:8832`.
+
+```bash
+ATOLL_VERSION=v0.01 ...               # pin a release instead of taking the latest
+ATOLL_INSTALL_DIR=/usr/local/bin ...   # where the binary goes (default ~/.local/bin)
+```
+
+Archives and `checksums.txt` are on [Releases](https://github.com/wanpengxie/atoll/releases);
+mac ships as Apple Silicon and Intel builds, Linux as amd64 and arm64, and the
+script picks by `uname`.
+
+The codex / claude CLI a steward runs on is still yours to install and log in —
+that is your account, not something an installer should claim for you.
+
+What follows is the **from source** route.
 
 **Prerequisites**
 
@@ -79,7 +104,7 @@ agent seated in the root channel `c0` as its **steward**.
 |---|---|
 | the node | Go 1.25+ ([go.mod](go.mod)), `make`, `curl` |
 | a steward agent | [`codex`](https://github.com/openai/codex) and/or [`claude`](https://github.com/anthropics/claude-code) CLI installed **and logged in** (the installer detects both and lets you pick; you can add one later) |
-| the web UI | Node.js 22+ and the sibling repo [`atoll-web`](https://github.com/wanpengxie/atoll-web) |
+| the web UI | Node.js 22+ (`make web` builds the [`atoll-web`](https://github.com/wanpengxie/atoll-web) tag named in [WEB_VERSION](WEB_VERSION) into the binary); the node runs without it, the UI is then a placeholder page |
 
 ### 1. Build
 
@@ -139,17 +164,30 @@ Account: `root@atoll.local` with the password you chose (or the generated one in
 `~/.atoll/server/root-password`). Stop with `Ctrl-C`; the node is single-homed, so
 a second `atoll up` on the same `--dir` is refused by a lock.
 
-### 3. Start the web UI
+### 3. Open the web UI
 
-The browser client is a separate repository and is **not** served by the node. It
-is a Vite app that proxies `/api`, `/ws`, `/obs` and `/files` to the node, so the
-browser always sees one origin and plain cookie auth works.
+The browser interface is in the node, on the same port as the API: open
+`http://127.0.0.1:8832`. It reaches `/api`, `/ws`, `/obs` and `/files` over
+relative paths and is same-origin with them, so plain cookie auth works — no
+proxy, no CORS.
+
+Log in as `root@atoll.local`, you are in `c0` with the steward; mention it and the
+answer streams back as a round in the timeline.
+
+**From a source checkout** `web/dist` holds only a placeholder page, which says as
+much when you open it. To build the real one in:
 
 ```bash
-# in a sibling directory, with the node from step 2 running on :8832
+make web       # builds the atoll-web tag named in WEB_VERSION into web/dist
+make build     # bin/atoll now carries that UI
+```
+
+**While working on the front end** there is no need to rebuild each time — run
+vite, which proxies `/api`, `/ws`, `/obs` and `/files` to the node:
+
+```bash
 git clone git@github.com:wanpengxie/atoll-web.git
-cd atoll-web
-npm install
+cd atoll-web && npm install
 npm run dev                   # -> http://localhost:5173
 ```
 
@@ -160,15 +198,14 @@ the proxy, it never enters the browser bundle):
 ATOLL_SERVER_URL=http://127.0.0.1:9000 npm run dev
 ```
 
-Open the printed URL, log in as `root@atoll.local`, you are in `c0` with the
-steward; mention it and the answer streams back as a round in the timeline.
 `atoll-web` also ships a stand-alone mock of the node (`npm run mock`) if you want
 to try the UI without a node.
 
 ```
- browser ──► atoll-web (vite :5173) ──proxy──► atoll up (:8832)
-                                               ├── server   (ledgers: c0, channels, registry)
-                                               └── local device (runs codex/claude/tools)
+ browser ──► atoll up (:8832)
+             ├── web UI       (static pages shipped in the binary, same origin)
+             ├── server       (ledgers: c0, channels, registry)
+             └── local device (runs codex/claude/tools)
 ```
 
 ### Running the roles as separate processes

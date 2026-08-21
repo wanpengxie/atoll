@@ -17,3 +17,11 @@ bin/
 /.cache/
 *.err.log
 output/*
+
+# web/dist is the embed target: the placeholder page must be tracked (without it
+# //go:embed all:dist does not compile), while a real build's output must not be
+# — the release stamps that in and it is nobody's source. The blanket `dist/`
+# rule above would take the directory whole, so it is re-opened here.
+!/web/dist/
+/web/dist/*
+!/web/dist/index.html

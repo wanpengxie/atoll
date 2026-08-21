@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/gateway"
@@ -391,5 +392,46 @@ func TestObsHTTPContextCancellationReachesBlockingRegistry(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 || rec.Header().Get("Content-Type") != "" {
 		t.Fatalf("canceled handler wrote response: headers=%v body=%s", rec.Header(), rec.Body.String())
+	}
+}
+
+// The UI shares the entrance with the API because it addresses the node over
+// relative paths. Sharing an origin is not sharing a namespace: /api stays the
+// machine's, and answers as the machine even when nothing is there.
+func TestTheUIAnswersOnlyForPathsTheNodeDidNotClaim(t *testing.T) {
+	ui := fstest.MapFS{
+		"index.html":    {Data: []byte("<!doctype html>page")},
+		"assets/app.js": {Data: []byte("console.log(1)")},
+	}
+	p := New(Config{ContractVersion: "test", Sessions: gateway.NewSessionStore(), Web: ui})
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		status int
+		body   string
+	}{
+		{name: "root is the page", method: http.MethodGet, path: "/", status: http.StatusOK, body: "<!doctype html>page"},
+		{name: "a built asset is itself", method: http.MethodGet, path: "/assets/app.js", status: http.StatusOK, body: "console.log(1)"},
+		{name: "a UI route the browser resolves gets the page", method: http.MethodGet, path: "/channel/c0", status: http.StatusOK, body: "<!doctype html>page"},
+		{name: "a missing file is a missing file", method: http.MethodGet, path: "/assets/gone.js", status: http.StatusNotFound},
+		{name: "an unknown API path stays the machine's", method: http.MethodGet, path: "/api/nothing", status: http.StatusNotFound},
+		{name: "only reads reach the UI", method: http.MethodPost, path: "/channel/c0", status: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.body != "" && rec.Body.String() != tc.body {
+				t.Fatalf("body=%q want=%q", rec.Body.String(), tc.body)
+			}
+			if tc.status == http.StatusNotFound {
+				if got := rec.Header().Get("Content-Type"); got != "application/json" {
+					t.Fatalf("a refusal must stay machine-readable: content-type=%q body=%s", got, rec.Body.String())
+				}
+			}
+		})
 	}
 }

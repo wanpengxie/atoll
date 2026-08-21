@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wanpengxie/atoll/cmd/internal/buildinfo"
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
 	"github.com/wanpengxie/atoll/cmd/internal/engineboot"
 	"github.com/wanpengxie/atoll/cmd/internal/homelock"
@@ -28,8 +29,16 @@ import (
 const teardownGrace = 30 * time.Second
 
 func main() {
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "version", "--version", "-v":
+			fmt.Println(buildinfo.Line("atoll"))
+			return
+		}
+	}
 	if len(os.Args) < 2 || os.Args[1] != "up" {
 		fmt.Fprintln(os.Stderr, "usage: atoll up [--dir DIR] [--addr ADDR] [--root-password PASSWORD] [--steward CLASS] [--open-registration]")
+		fmt.Fprintln(os.Stderr, "       atoll version")
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("up", flag.ExitOnError)

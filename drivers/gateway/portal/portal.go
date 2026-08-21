@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -42,6 +44,10 @@ type Config struct {
 	DataPlane       dataplane.Redeemer
 	ContractVersion string
 	Obs             ObsPlane
+	// Web is the browser UI, served from this same origin because the UI
+	// addresses the node over relative paths. Nil serves no UI; the entrance
+	// then answers unknown paths the way it always has.
+	Web fs.FS
 }
 
 type ObsPlane interface {
@@ -51,10 +57,14 @@ type Portal struct {
 	cfg Config
 	ws  *web.Connector
 	mux *http.ServeMux
+	ui  http.Handler
 }
 
 func New(cfg Config) *Portal {
 	p := &Portal{cfg: cfg, ws: web.New(cfg.Gateway, cfg.ContractVersion), mux: http.NewServeMux()}
+	if cfg.Web != nil {
+		p.ui = http.FileServerFS(cfg.Web)
+	}
 	p.mux.HandleFunc("POST /api/identity/register", p.register)
 	p.mux.HandleFunc("POST /api/identity/login", p.login)
 	p.mux.HandleFunc("POST /api/identity/logout", p.logout)
@@ -216,9 +226,37 @@ func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/ws", "/compute", "/healthz":
 		writeError(w, http.StatusMethodNotAllowed, string(codeNotFound), "method not allowed")
-	default:
-		writeError(w, http.StatusNotFound, string(codeNotFound), "route not found")
+		return
 	}
+	// /api is the machine's namespace: an unknown path under it stays a JSON
+	// error, so a caller expecting JSON never has to parse a page to find out
+	// it asked for something that does not exist.
+	if p.ui == nil || r.Method != http.MethodGet && r.Method != http.MethodHead ||
+		strings.HasPrefix(r.URL.Path, "/api/") {
+		writeError(w, http.StatusNotFound, string(codeNotFound), "route not found")
+		return
+	}
+	p.serveUI(w, r)
+}
+
+// serveUI answers everything the node itself did not claim. A path naming a
+// file that is not there is a missing file and says so; a path naming no file
+// at all is one of the UI's own routes, which only the browser can resolve, so
+// it gets the page and resolves it there.
+func (p *Portal) serveUI(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+	if name == "" || name == "." {
+		name = "index.html"
+	}
+	if _, err := fs.Stat(p.cfg.Web, name); err != nil {
+		if path.Ext(name) != "" {
+			writeError(w, http.StatusNotFound, string(codeNotFound), "route not found")
+			return
+		}
+		r = r.Clone(r.Context())
+		r.URL.Path = "/"
+	}
+	p.ui.ServeHTTP(w, r)
 }
 
 func (p *Portal) register(w http.ResponseWriter, r *http.Request) {

@@ -24,6 +24,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/web"
 )
 
 const shutdownTimeout = 30 * time.Second
@@ -186,7 +187,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		Daemons:  daemonObsAdapter{host: e.daemonHost},
 		Now:      func() int64 { return time.Now().UnixMilli() },
 	})
-	p := portal.New(portal.Config{Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion})
+	p := portal.New(portal.Config{Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion, Web: web.Assets()})
 	e.handler = p
 	e.gateway.Start()
 	if err := e.host.StartConvergence(); err != nil {

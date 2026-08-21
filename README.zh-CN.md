@@ -58,8 +58,31 @@
 
 ## 快速开始
 
-三步：编译、跑一次安装器、对着节点起 web UI。结果是一个在 `http://127.0.0.1:8832` 的节点、
-一个 `root` 账号、一个坐在根频道 `c0` 里当 **steward** 的 coding agent。
+结果是一个在 `http://127.0.0.1:8832` 的节点、一个 `root` 账号、一个坐在根频道 `c0` 里当
+**steward** 的 coding agent，以及一个打开就能用的 web UI。
+
+### 装一个发行版（最省事）
+
+不用 Go、不用编译、不用单独起前端。这条命令按你的系统和架构取对应的二进制（UI 已经在里面），
+校验 sha256，然后进入和源码安装**完全同一个**交互向导：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh | bash
+```
+
+装完打开 `http://127.0.0.1:8832`。
+
+```bash
+ATOLL_VERSION=v0.01 ...        # 固定某个版本，不取最新
+ATOLL_INSTALL_DIR=/usr/local/bin ...   # 换二进制装到哪（默认 ~/.local/bin）
+```
+
+包和 `checksums.txt` 都在 [Releases](https://github.com/wanpengxie/atoll/releases)；
+mac 分 Apple Silicon / Intel 两个，Linux 分 amd64 / arm64，脚本按 `uname` 自己选。
+
+steward 用的 codex / claude CLI 仍然要你自己装好并登录 —— 那是你的账号，装机脚本不替你登。
+
+下面是**从源码**的路径。
 
 **前置条件**
 
@@ -67,7 +90,7 @@
 |---|---|
 | 节点 | Go 1.25+（见 [go.mod](go.mod)）、`make`、`curl` |
 | steward agent | [`codex`](https://github.com/openai/codex) 和/或 [`claude`](https://github.com/anthropics/claude-code) CLI 已安装**且已登录**（安装器会检测两者并让你选；也可以之后再加） |
-| web UI | Node.js 22+ 和兄弟仓库 [`atoll-web`](https://github.com/wanpengxie/atoll-web) |
+| web UI | Node.js 22+（`make web` 会按 [WEB_VERSION](WEB_VERSION) 取 [`atoll-web`](https://github.com/wanpengxie/atoll-web) 编进二进制）；不编也能跑节点，只是 UI 是张占位页 |
 
 ### 1. 编译
 
@@ -125,16 +148,26 @@ curl -s http://127.0.0.1:8832/healthz      # {"status":"ok"}
 账号：`root@atoll.local`，密码是你设的那个（或 `~/.atoll/server/root-password` 里生成的那个）。
 `Ctrl-C` 停止；节点是单 home 的，对同一个 `--dir` 再跑一次 `atoll up` 会被锁拒绝。
 
-### 3. 启动 web UI
+### 3. 打开 web UI
 
-浏览器客户端是一个独立仓库，**不由节点托管**。它是一个 Vite 应用，把 `/api`、`/ws`、`/obs`
-和 `/files` 代理到节点，所以浏览器始终只看到一个源，普通的 cookie 登录就能用。
+浏览器界面就在节点里，和 API 同一个端口：打开 `http://127.0.0.1:8832`。UI 用相对路径访问
+`/api`、`/ws`、`/obs`、`/files`，和它们同源，所以普通 cookie 登录就能用，没有代理、没有跨域。
+
+用 `root@atoll.local` 登录，你就在 `c0` 里、steward 坐在对面；@ 它，回答以一个回合（round）
+流回时间线。
+
+**从源码构建时** `web/dist` 里只有一张占位页，打开会告诉你 UI 没打包。要编进去：
 
 ```bash
-# 在兄弟目录里，第 2 步的节点已在 :8832 跑着
+make web       # 按 WEB_VERSION 取 atoll-web 的那个 tag，构建，铺进 web/dist
+make build     # bin/atoll 现在带着这版 UI
+```
+
+**只改前端时**不必每次重编 —— 起 vite，它把 `/api`、`/ws`、`/obs`、`/files` 代理到节点：
+
+```bash
 git clone git@github.com:wanpengxie/atoll-web.git
-cd atoll-web
-npm install
+cd atoll-web && npm install
 npm run dev                   # -> http://localhost:5173
 ```
 
@@ -144,14 +177,13 @@ npm run dev                   # -> http://localhost:5173
 ATOLL_SERVER_URL=http://127.0.0.1:9000 npm run dev
 ```
 
-打开打印出来的地址，用 `root@atoll.local` 登录，你就在 `c0` 里、steward 坐在对面；@ 它，
-回答以一个回合（round）流回时间线。`atoll-web` 还自带一个节点的独立 mock（`npm run mock`），
-想不起节点先玩玩 UI 可以用。
+`atoll-web` 还自带一个节点的独立 mock（`npm run mock`），想不起节点先玩玩 UI 可以用。
 
 ```
- browser ──► atoll-web (vite :5173) ──proxy──► atoll up (:8832)
-                                               ├── server   （账本：c0、各频道、注册表）
-                                               └── local device（跑 codex/claude/工具）
+ browser ──► atoll up (:8832)
+             ├── web UI      （随二进制发的静态页，同源）
+             ├── server      （账本：c0、各频道、注册表）
+             └── local device（跑 codex/claude/工具）
 ```
 
 ### 把角色拆成独立进程

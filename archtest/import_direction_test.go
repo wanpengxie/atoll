@@ -129,8 +129,12 @@ var layerAllowlist = map[string][]string{
 	"platform": {"protocol", "runtime", "lib"},
 	"registry": {"protocol", "lib", "platform"},
 	"drivers":  {"protocol", "runtime", "lib", "platform", "registry"},
-	"cmd":      {"protocol", "runtime", "lib", "platform", "registry", "drivers"},
-	"e2e":      {}, // 纯测试目录，无生产文件；占位使其入表
+	"cmd":      {"protocol", "runtime", "lib", "platform", "registry", "drivers", "web"},
+	// web = 浏览器界面的静态资产（//go:embed），恒零内部依赖：它是被装配进
+	// 节点的素材，不是层模型里的一层。只有 cmd 够得着它——装配是 cmd 的事，
+	// 而 drivers 里的入口只收一个 fs.FS，不知道资产从哪来。
+	"web": {},
+	"e2e": {}, // 纯测试目录，无生产文件；占位使其入表
 	// scripts = demo/工具脚本层，恒零内部依赖：demo 就是"第一个第三方壳"，
 	// 只许说契约语言（HTTP/ws + 生成 schema）——它 import 不到内部包这件事
 	// 本身就是"契约面足以封壳"的结构证明。
