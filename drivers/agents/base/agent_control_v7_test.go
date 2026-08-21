@@ -694,3 +694,111 @@ func TestAgentControl29ContextIncludesOnlyLiveFrozenState(t *testing.T) {
 		t.Fatalf("context=%v", value)
 	}
 }
+
+func TestAgentControl35SteerTargetAdmission(t *testing.T) {
+	t.Run("target must be buffered", func(t *testing.T) {
+		l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		l.state.Requests["active"] = &book.Request{ID: "active", Sender: "caller", Location: book.Workspace}
+		l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"active"}`))
+		if got := sys.terminal("insert"); len(got) != 1 || got[0].code != errorCASMismatch {
+			t.Fatalf("terminal=%v", got)
+		}
+	})
+	t.Run("target must belong to sender", func(t *testing.T) {
+		l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		row := &book.Request{ID: "target", Sender: "owner", Location: book.Buffered}
+		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
+		l.handleIntake(v7Request("insert", TypeSteer, "other", `{"target":"target"}`))
+		if got := sys.terminal("insert"); len(got) != 1 || got[0].code != "target_not_owned" {
+			t.Fatalf("terminal=%v", got)
+		}
+	})
+	t.Run("target and text are mutually exclusive", func(t *testing.T) {
+		l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"target","text":"also"}`))
+		if got := sys.terminal("insert"); len(got) != 1 || got[0].code != "invalid_args" {
+			t.Fatalf("terminal=%v", got)
+		}
+	})
+	t.Run("target form bypasses request table capacity", func(t *testing.T) {
+		l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		row := &book.Request{ID: "target", Sender: "caller", Location: book.Buffered}
+		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
+		l.def.cfg.RequestMaxCount = 1
+		l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"target"}`))
+		if got := sys.terminal("insert"); len(got) != 1 || got[0].fail {
+			t.Fatalf("terminal=%v", got)
+		}
+	})
+}
+
+func TestAgentControl36SteerTargetWithoutActiveTurnIsNoOp(t *testing.T) {
+	l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+	row := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{SourceID: "target", Text: "queued text"}, Bytes: 11, Location: book.Buffered, Scope: l.vault.Mint("target", "target")}
+	l.state.Requests[row.ID], l.state.Buffer, l.state.BufferBytes = row, []book.RequestID{row.ID}, row.Bytes
+	l.freeze("hold", time.Minute)
+	l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"target"}`))
+	if got := sys.terminal("insert"); len(got) != 1 || got[0].fail {
+		t.Fatalf("terminal=%v", got)
+	}
+	if len(l.state.Buffer) != 1 || l.state.Buffer[0] != "target" || l.state.Requests["target"] != row || len(rt.controls) != 0 {
+		t.Fatalf("buffer=%v row=%+v controls=%v", l.state.Buffer, l.state.Requests["target"], rt.controls)
+	}
+	l.clearFreeze()
+	l.startNext()
+	if len(rt.starts) != 1 || rt.starts[0].Messages[0].SourceID != "target" {
+		t.Fatalf("starts=%+v", rt.starts)
+	}
+}
+
+func TestAgentControl37SteerTargetOwnershipAndOriginalIndexReturn(t *testing.T) {
+	seed := func(t *testing.T) (*agentLoop, *v7Sys, *captureRuntime) {
+		t.Helper()
+		l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		v7Activate(t, l, "owner")
+		for _, item := range []struct{ id, text string }{{"before", "before"}, {"target", "insert me"}, {"after", "after"}} {
+			l.handleIntake(v7Request(item.id, TypeAsk, "caller", `{"text":"`+item.text+`"}`))
+		}
+		l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"target"}`))
+		if got := sys.terminal("insert"); len(got) != 1 || got[0].fail {
+			t.Fatalf("insert terminal=%v", got)
+		}
+		if len(rt.controls) != 1 || rt.controls[0].Content == nil || rt.controls[0].Content.Text != "insert me" {
+			t.Fatalf("controls=%+v", rt.controls)
+		}
+		return l, sys, rt
+	}
+
+	t.Run("accepted transfers owner and preempts old owner", func(t *testing.T) {
+		l, sys, _ := seed(t)
+		a := l.state.Running
+		l.onControlDone(runtimeEvent{kind: evControlDone, op: a.Op, turnID: a.Target, verdict: runtimeproto.ControlAccepted})
+		if l.state.Turn.Owner != "target" || l.state.Requests["target"].Location != book.Workspace {
+			t.Fatalf("turn=%+v target=%+v", l.state.Turn, l.state.Requests["target"])
+		}
+		old := sys.terminal("owner")
+		if len(old) != 1 || old[0].fail || old[0].value.(map[string]any)["preempted_by"] != book.RequestID("target") {
+			t.Fatalf("owner terminal=%v", old)
+		}
+	})
+
+	for _, verdict := range []runtimeproto.ControlVerdict{runtimeproto.ControlRejected, runtimeproto.ControlTimeout} {
+		t.Run(string(verdict)+" returns original index", func(t *testing.T) {
+			l, sys, _ := seed(t)
+			a := l.state.Running
+			l.onControlDone(runtimeEvent{kind: evControlDone, op: a.Op, turnID: a.Target, verdict: verdict})
+			want := []book.RequestID{"before", "target", "after"}
+			if len(l.state.Buffer) != len(want) {
+				t.Fatalf("buffer=%v", l.state.Buffer)
+			}
+			for i := range want {
+				if l.state.Buffer[i] != want[i] {
+					t.Fatalf("buffer=%v want=%v", l.state.Buffer, want)
+				}
+			}
+			if row := l.state.Requests["target"]; row == nil || row.Location != book.Buffered || len(sys.terminal("target")) != 0 {
+				t.Fatalf("target=%+v terminal=%v", row, sys.terminal("target"))
+			}
+		})
+	}
+}

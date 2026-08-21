@@ -442,6 +442,17 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		l.handleInterrupt(msg)
 		return
 	}
+	if msg.Type == TypeSteer {
+		target, targetForm, err := parseSteerTarget(msg.Payload)
+		if err != nil {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "invalid agent.steer payload: " + err.Error()})
+			return
+		}
+		if targetForm {
+			l.handleSteerTarget(msg, target)
+			return
+		}
+	}
 	if msg.Type != TypeReplace && len(l.state.Requests) >= l.def.cfg.RequestMaxCount {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorBaseCapacity, detail: "agent live request table capacity exceeded"})
 		return
@@ -537,6 +548,46 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	default:
 		l.acceptContent(id, false)
 	}
+}
+
+func parseSteerTarget(raw json.RawMessage) (book.RequestID, bool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "", false, nil // Preserve the existing text-form validation path.
+	}
+	targetRaw, hasTarget := fields["target"]
+	if !hasTarget {
+		return "", false, nil
+	}
+	if len(fields) != 1 {
+		return "", true, errors.New("target form must contain only target")
+	}
+	var target string
+	if json.Unmarshal(targetRaw, &target) != nil || strings.TrimSpace(target) == "" {
+		return "", true, errors.New("target must be a non-empty string")
+	}
+	return book.RequestID(target), true, nil
+}
+
+func (l *agentLoop) handleSteerTarget(msg actorbase.Msg, targetID book.RequestID) {
+	row := l.state.Requests[targetID]
+	if row == nil || row.Location != book.Buffered || l.state.IndexInBuffer(targetID) < 0 {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorCASMismatch, detail: "steer target is not buffered"})
+		return
+	}
+	if row.Sender != string(msg.Sender.ID) {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "target_not_owned", detail: "steer target belongs to a different sender"})
+		return
+	}
+	turn := l.state.Turn
+	if turn == nil || turn.Phase != book.TurnActive {
+		l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
+		return
+	}
+	idx := l.state.IndexInBuffer(targetID)
+	l.state.RemoveFromBuffer(targetID)
+	l.scheduleSteerTarget(targetID, idx)
+	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
 }
 
 func parseHoldPayload(raw json.RawMessage) (string, time.Duration, error) {
@@ -992,6 +1043,14 @@ func resumedInputText(row *book.Request) string {
 }
 
 func (l *agentLoop) scheduleAction(kind book.ActionKind, id book.RequestID, disposition book.ActionDisposition, holder, ownerAtAdmit book.RequestID) {
+	l.scheduleActionAt(kind, id, disposition, holder, ownerAtAdmit, false, -1)
+}
+
+func (l *agentLoop) scheduleSteerTarget(id book.RequestID, idx int) {
+	l.scheduleActionAt(book.ActionSteer, id, book.DispFailOwner, "", "", true, idx)
+}
+
+func (l *agentLoop) scheduleActionAt(kind book.ActionKind, id book.RequestID, disposition book.ActionDisposition, holder, ownerAtAdmit book.RequestID, steerTarget bool, bufferIndex int) {
 	row := l.state.Requests[id]
 	if row == nil && kind == book.ActionSteer {
 		return
@@ -1001,12 +1060,14 @@ func (l *agentLoop) scheduleAction(kind book.ActionKind, id book.RequestID, disp
 		l.faultNow("counter_overflow", "Base action serial overflow")
 		return
 	}
-	a := &book.Action{Serial: l.nextAction, Kind: kind, Request: id, Disposition: disposition, HolderID: holder, OwnerAtAdmit: ownerAtAdmit}
+	a := &book.Action{Serial: l.nextAction, Kind: kind, Request: id, Disposition: disposition, HolderID: holder, OwnerAtAdmit: ownerAtAdmit, SteerTarget: steerTarget, BufferIndex: bufferIndex}
 	if row != nil {
 		row.Location = book.ControlPending
 	}
 	if old := l.state.Pending; old != nil {
-		if l.state.Requests[old.Request] != nil {
+		if old.Kind == book.ActionSteer && old.SteerTarget {
+			l.returnSteerTarget(old)
+		} else if l.state.Requests[old.Request] != nil {
 			l.finish(old.Request, terminalCandidate{value: map[string]any{"superseded_by": id}})
 		}
 	}
@@ -1057,7 +1118,10 @@ func (l *agentLoop) runSteer(a *book.Action) {
 		return
 	}
 	if turn == nil || turn.Phase != book.TurnActive || (row.ExplicitCAS && row.ExpectedTurn != turn.ID) {
-		if row.ExplicitCAS {
+		if a.SteerTarget {
+			l.returnSteerTarget(a)
+			l.completeAction()
+		} else if row.ExplicitCAS {
 			l.finish(row.ID, terminalCandidate{fail: true, code: errorCASMismatch,
 				detail: fmt.Sprintf("steer target is no longer active: turn %q ended before this steer could be applied, so the work it aimed at is already finished. Read that turn's result before deciding whether anything still needs saying", row.ExpectedTurn)})
 		} else {
@@ -1330,6 +1394,10 @@ func (l *agentLoop) settleSteer(a *book.Action, e runtimeEvent) {
 		l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": turn.ID})
 		return
 	}
+	if a.SteerTarget {
+		l.returnSteerTarget(a)
+		return
+	}
 	if e.verdict == runtimeproto.ControlTimeout {
 		l.finish(row.ID, terminalCandidate{fail: true, code: errorControlTimeout, detail: e.detail})
 		return
@@ -1339,6 +1407,16 @@ func (l *agentLoop) settleSteer(a *book.Action, e runtimeEvent) {
 		return
 	}
 	l.enqueue(row.ID)
+}
+
+func (l *agentLoop) returnSteerTarget(a *book.Action) {
+	row := l.state.Requests[a.Request]
+	if row == nil || row.Location == book.Buffered {
+		return
+	}
+	row.Location = book.Buffered
+	l.state.InsertAt(a.BufferIndex, row.ID)
+	l.state.BufferBytes += row.Bytes
 }
 
 func (l *agentLoop) finishControlAction(a *book.Action) {

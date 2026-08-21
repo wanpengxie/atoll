@@ -80,6 +80,8 @@ type Action struct {
 	Disposition  ActionDisposition
 	HolderID     RequestID
 	OwnerAtAdmit RequestID
+	SteerTarget  bool
+	BufferIndex  int
 }
 
 type State struct {
