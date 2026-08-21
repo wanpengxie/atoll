@@ -22,16 +22,22 @@ import (
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-type captureRuntime struct{ starts []runtimeproto.StartCommand }
+type captureRuntime struct {
+	starts   []runtimeproto.StartCommand
+	controls []runtimeproto.ControlCommand
+}
 
 func (r *captureRuntime) Start(v runtimeproto.StartCommand) error {
 	r.starts = append(r.starts, v)
 	return nil
 }
-func (*captureRuntime) Control(runtimeproto.ControlCommand) error { return nil }
-func (*captureRuntime) Terminate() error                          { return nil }
-func (*captureRuntime) EnsureReady(runtimeproto.OpID) error       { return nil }
-func (*captureRuntime) Close()                                    {}
+func (r *captureRuntime) Control(v runtimeproto.ControlCommand) error {
+	r.controls = append(r.controls, v)
+	return nil
+}
+func (*captureRuntime) Terminate() error                    { return nil }
+func (*captureRuntime) EnsureReady(runtimeproto.OpID) error { return nil }
+func (*captureRuntime) Close()                              {}
 
 func TestCommandRequestsFormSingleItemBatches(t *testing.T) {
 	rt := &captureRuntime{}

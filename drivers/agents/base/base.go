@@ -1,6 +1,7 @@
 package base
 
 import (
+	"encoding/json"
 	"errors"
 	"sort"
 	"time"
@@ -44,15 +45,12 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 	if cfg.Runtime.Documentation.SkillDoc == "" {
 		cfg.Runtime.Documentation.SkillDoc = doc
 	}
-	d := definition{cfg: cfg, controls: map[string]struct{}{TypeAsk: {}, TypeCompact: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeStop: {}}}
+	d := definition{cfg: cfg, controls: map[string]struct{}{TypeAsk: {}, TypeCompact: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeHold: {}, TypeUnhold: {}, TypeReplace: {}, TypeInterrupt: {}}}
 	if cfg.Runtime.Capabilities[runtimeproto.CapabilityFork] {
 		d.controls[TypeFork] = struct{}{}
 	}
 	if cfg.Runtime.Capabilities[runtimeproto.CapabilitySteer] {
 		d.controls[TypeSteer] = struct{}{}
-	}
-	if cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
-		d.controls[TypeInterrupt] = struct{}{}
 	}
 	if d.cfg.BufferMaxCount <= 0 {
 		d.cfg.BufferMaxCount = defaultBufferMaxCount
@@ -77,9 +75,13 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 
 func Manifest(class string, capabilities map[string]bool) introspect.Manifest {
 	words := map[string]introspect.WordSpec{}
-	for _, name := range []string{TypeAsk, TypeFork, TypeSteer, TypeQueue, TypeInterrupt, TypeStop, TypeCompact, TypeSelect, TypeContext} {
+	for _, name := range []string{TypeAsk, TypeFork, TypeSteer, TypeQueue, TypeInterrupt, TypeHold, TypeUnhold, TypeReplace, TypeCompact, TypeSelect, TypeContext} {
 		words[name] = introspect.WordSpec{Description: "standard agent request"}
 	}
+	words[TypeHold] = introspect.WordSpec{Description: "freeze the agent wait queue, optionally interrupting an owned target for editing", InputSchema: json.RawMessage(`{"type":"object","properties":{"target":{"type":"string"},"duration_ms":{"type":"integer","minimum":1,"maximum":1800000}},"additionalProperties":false}`), ErrorCodes: []string{errorCASMismatch, "target_not_owned", "invalid_args"}}
+	words[TypeUnhold] = introspect.WordSpec{Description: "idempotently release the agent wait queue", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`)}
+	words[TypeReplace] = introspect.WordSpec{Description: "replace an owned buffered request in place", InputSchema: json.RawMessage(`{"type":"object","required":["target","old_text","new_text"],"properties":{"target":{"type":"string","minLength":1},"old_text":{"type":"string"},"new_text":{"type":"string"},"attachments":{"type":"array"}},"additionalProperties":false}`), ErrorCodes: []string{errorCASMismatch, "invalid_args", errorBaseCapacity, "target_not_owned"}}
+	words[TypeInterrupt] = introspect.WordSpec{Description: "freeze the wait queue and interrupt the current turn when supported", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`), ErrorCodes: []string{"invalid_args"}}
 	return introspect.Manifest{Class: class, Interfaces: []string{"actor", "agent"}, Capabilities: cloneCapabilities(capabilities), Words: words}
 }
 
@@ -92,15 +94,18 @@ func cloneCapabilities(in map[string]bool) map[string]bool {
 }
 
 const (
-	TypeAsk       = "agent.ask"
-	TypeFork      = "agent.fork"
-	TypeCompact   = "agent.compact"
-	TypeSelect    = "agent.select"
-	TypeContext   = "agent.context"
-	TypeSteer     = "agent.steer"
-	TypeInterrupt = "agent.interrupt"
-	TypeQueue     = "agent.queue"
-	TypeStop      = "agent.stop"
+	TypeAsk         = "agent.ask"
+	TypeFork        = "agent.fork"
+	TypeCompact     = "agent.compact"
+	TypeSelect      = "agent.select"
+	TypeContext     = "agent.context"
+	TypeSteer       = "agent.steer"
+	TypeInterrupt   = "agent.interrupt"
+	TypeHold        = "agent.hold"
+	TypeUnhold      = "agent.unhold"
+	TypeReplace     = "agent.replace"
+	TypeQueue       = "agent.queue"
+	typeHoldExpired = "agent.hold_expired"
 )
 
 func (d definition) supports(typ string) bool { _, ok := d.controls[typ]; return ok }

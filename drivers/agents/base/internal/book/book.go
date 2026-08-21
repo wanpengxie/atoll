@@ -31,6 +31,7 @@ type Request struct {
 	Location      Location
 	TurnKind      runtimeproto.TurnKind
 	Options       runtimeproto.TurnOptions
+	Resumed       bool
 }
 
 type TurnPhase uint8
@@ -56,10 +57,16 @@ type ActionKind uint8
 const (
 	ActionSteer ActionKind = iota
 	ActionInterrupt
-	ActionStop
 	ActionTerminate
 	ActionRestart
 	ActionCleanup
+)
+
+type ActionDisposition uint8
+
+const (
+	DispFailOwner ActionDisposition = iota
+	DispRebufferOwner
 )
 
 type Action struct {
@@ -70,6 +77,9 @@ type Action struct {
 	Target       runtimeproto.TurnID
 	ControlDone  bool
 	TerminalSeen bool
+	Disposition  ActionDisposition
+	HolderID     RequestID
+	OwnerAtAdmit RequestID
 }
 
 type State struct {
@@ -98,6 +108,24 @@ func (s *State) RemoveFromBuffer(id RequestID) bool {
 		return true
 	}
 	return false
+}
+
+func (s *State) InsertAt(idx int, id RequestID) {
+	if idx < 0 || idx > len(s.Buffer) {
+		idx = len(s.Buffer)
+	}
+	s.Buffer = append(s.Buffer, "")
+	copy(s.Buffer[idx+1:], s.Buffer[idx:])
+	s.Buffer[idx] = id
+}
+
+func (s *State) IndexInBuffer(id RequestID) int {
+	for idx, candidate := range s.Buffer {
+		if candidate == id {
+			return idx
+		}
+	}
+	return -1
 }
 
 func (s *State) RemoveRequest(id RequestID) *Request {

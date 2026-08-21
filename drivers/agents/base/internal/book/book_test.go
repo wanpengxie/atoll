@@ -15,3 +15,15 @@ func TestRemoveRequestLeavesNoTombstoneAndCleansProjection(t *testing.T) {
 		t.Fatalf("state retained tombstone/projection: %+v", s)
 	}
 }
+
+func TestInsertAtAndIndexInBufferPreserveOrder(t *testing.T) {
+	s := New()
+	s.Buffer = []RequestID{"r1", "r3"}
+	s.InsertAt(1, "r2")
+	if got := s.IndexInBuffer("r2"); got != 1 {
+		t.Fatalf("index=%d buffer=%v", got, s.Buffer)
+	}
+	if got := s.IndexInBuffer("missing"); got != -1 {
+		t.Fatalf("missing index=%d", got)
+	}
+}

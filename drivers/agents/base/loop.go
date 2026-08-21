@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 type intakeFact struct{ msg actorbase.Msg }
@@ -256,6 +257,10 @@ type agentLoop struct {
 	options                                   runtimeproto.TurnOptions
 	lastUsage                                 runtimeproto.TurnUsage
 	hasUsage                                  bool
+	frozenUntil                               time.Time
+	heldBy                                    book.RequestID
+	holdTimer                                 schedule.TimerID
+	nowFn                                     func() time.Time
 }
 
 func (d definition) run(sys actorbase.Sys) error {
@@ -276,7 +281,7 @@ func (d definition) run(sys actorbase.Sys) error {
 		return fmt.Errorf("agent/base: runtime construct: %w", err)
 	}
 	exec.bindRuntime(rt)
-	l := &agentLoop{def: d, sys: sys, rt: rt, port: port, vault: vault, exec: exec, state: book.New(), inbox: inbox, local: local, cancel: cancel, background: loadCatchup(local, sys), receipts: map[string]receiptRow{}, receiptTimers: map[string]*time.Timer{}, logger: slog.Default(), options: options}
+	l := &agentLoop{def: d, sys: sys, rt: rt, port: port, vault: vault, exec: exec, state: book.New(), inbox: inbox, local: local, cancel: cancel, background: loadCatchup(local, sys), receipts: map[string]receiptRow{}, receiptTimers: map[string]*time.Timer{}, logger: slog.Default(), options: options, nowFn: time.Now}
 	if options.Model != "" || options.Effort != "" {
 		l.lastUsage = runtimeproto.TurnUsage{Model: options.Model, Effort: options.Effort}
 		l.hasUsage = true
@@ -376,15 +381,43 @@ func (l *agentLoop) opID() runtimeproto.OpID {
 	return runtimeproto.OpID(l.nextOp)
 }
 
+const defaultHoldDuration = 30 * time.Minute
+
+type replacePayload struct {
+	target      book.RequestID
+	oldText     string
+	newText     string
+	attachments []runtimeproto.Attachment
+	bytes       int
+}
+
+func (l *agentLoop) now() time.Time {
+	if l.nowFn != nil {
+		return l.nowFn()
+	}
+	return time.Now()
+}
+
+func (l *agentLoop) frozen(now time.Time) bool { return now.Before(l.frozenUntil) }
+
 func (l *agentLoop) handleIntake(msg actorbase.Msg) {
+	if msg.Kind == message.KindEvent {
+		if msg.Type == typeHoldExpired {
+			l.handleHoldExpired(msg.Payload)
+		}
+		return
+	}
 	if msg.Kind != message.KindRequest || msg.Sender.ID == l.sys.Self() {
 		return
 	}
 	l.exec.install(msg)
 	if msg.Type == TypeContext {
-		value := any(map[string]any{})
+		value := map[string]any{}
 		if l.hasUsage {
 			value = usageValue(l.lastUsage)
+		}
+		if l.frozen(l.now()) {
+			value["frozen"] = map[string]any{"held_by": l.heldBy, "until": l.frozenUntil.UnixMilli()}
 		}
 		l.exec.terminal(string(msg.ID), terminalCandidate{value: value})
 		return
@@ -398,7 +431,18 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		l.handleFork(msg)
 		return
 	}
-	if len(l.state.Requests) >= l.def.cfg.RequestMaxCount {
+	switch msg.Type {
+	case TypeHold:
+		l.handleHold(msg)
+		return
+	case TypeUnhold:
+		l.handleUnhold(msg)
+		return
+	case TypeInterrupt:
+		l.handleInterrupt(msg)
+		return
+	}
+	if msg.Type != TypeReplace && len(l.state.Requests) >= l.def.cfg.RequestMaxCount {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorBaseCapacity, detail: "agent live request table capacity exceeded"})
 		return
 	}
@@ -406,6 +450,17 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	corr := message.CorrelationID(msg.CorrelationID, msg.ID)
 	caller := actorbase.EffectiveCaller(msg)
 	input := runtimeproto.Input{SourceID: string(msg.ID), Type: msg.Type, Sender: string(msg.Sender.ID), Caller: caller, Payload: append(json.RawMessage(nil), msg.Payload...), Text: messageText(msg.Payload)}
+	var replacement replacePayload
+	if msg.Type == TypeReplace {
+		var code, detail string
+		replacement, code, detail = l.validateReplace(msg)
+		if code != "" {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: code, detail: detail})
+			return
+		}
+		input.Text = replacement.newText
+		input.Attachments = replacement.attachments
+	}
 	if msg.Type == TypeAsk {
 		var ask struct {
 			Text        string            `json:"text"`
@@ -430,7 +485,11 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		input.Text = ask.Text
 		input.Attachments = attachments
 	}
-	row := &book.Request{ID: id, Input: input, Bytes: len(msg.Payload), Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(corr)}
+	rowBytes := len(msg.Payload)
+	if msg.Type == TypeReplace {
+		rowBytes = replacement.bytes
+	}
+	row := &book.Request{ID: id, Input: input, Bytes: rowBytes, Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(corr)}
 	row.Scope = l.vault.Mint(row.ParentID, row.CorrelationID)
 	if msg.Type == TypeSteer {
 		var payload struct {
@@ -464,17 +523,202 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	switch msg.Type {
 	case TypeQueue:
 		row.Input = steerInput(row)
-		l.enqueue(id, true)
+		l.enqueue(id)
 	case TypeCompact, TypeSelect:
-		l.enqueue(id, l.state.Turn != nil)
+		l.enqueue(id)
 	case TypeSteer:
 		l.acceptContent(id, true)
-	case TypeInterrupt:
-		l.scheduleAction(book.ActionInterrupt, id)
-	case TypeStop:
-		l.scheduleAction(book.ActionStop, id)
+	case TypeReplace:
+		target := l.state.Requests[replacement.target]
+		idx := l.state.IndexInBuffer(replacement.target)
+		resumed := target.Resumed
+		l.finish(replacement.target, terminalCandidate{value: map[string]any{"replaced_by": id}})
+		l.admitBufferedAt(id, idx, resumed)
 	default:
 		l.acceptContent(id, false)
+	}
+}
+
+func parseHoldPayload(raw json.RawMessage) (string, time.Duration, error) {
+	var payload struct {
+		Target     json.RawMessage `json:"target"`
+		DurationMS json.RawMessage `json:"duration_ms"`
+	}
+	if err := decodeStrict(raw, &payload); err != nil {
+		return "", 0, err
+	}
+	target := ""
+	if len(payload.Target) != 0 {
+		if bytes.Equal(bytes.TrimSpace(payload.Target), []byte("null")) || json.Unmarshal(payload.Target, &target) != nil {
+			return "", 0, errors.New("target must be a string")
+		}
+	}
+	duration := defaultHoldDuration
+	if len(payload.DurationMS) != 0 {
+		if bytes.Equal(bytes.TrimSpace(payload.DurationMS), []byte("null")) {
+			return "", 0, errors.New("duration_ms must be an integer")
+		}
+		var milliseconds int64
+		if json.Unmarshal(payload.DurationMS, &milliseconds) != nil || milliseconds < 1 || milliseconds > defaultHoldDuration.Milliseconds() {
+			return "", 0, errors.New("duration_ms must be an integer between 1 and 1800000")
+		}
+		duration = time.Duration(milliseconds) * time.Millisecond
+	}
+	return target, duration, nil
+}
+
+func (l *agentLoop) handleHold(msg actorbase.Msg) {
+	targetText, duration, err := parseHoldPayload(msg.Payload)
+	if err != nil {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "invalid agent.hold payload: " + err.Error()})
+		return
+	}
+	targetID := book.RequestID(targetText)
+	if targetID != "" {
+		row := l.state.Requests[targetID]
+		turnOwner := l.state.Turn != nil && l.state.Turn.Owner == targetID
+		if row == nil || (row.Location != book.Buffered && !((row.Location == book.Starting || row.Location == book.Workspace) && turnOwner)) {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorCASMismatch, detail: "hold target is not buffered or the current turn owner"})
+			return
+		}
+		if row.Sender != string(msg.Sender.ID) {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "target_not_owned", detail: "hold target belongs to a different sender"})
+			return
+		}
+		if isCommandRequest(row) {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "compact and select requests cannot be edited"})
+			return
+		}
+	}
+	id := book.RequestID(msg.ID)
+	l.freeze(id, duration)
+	if targetID != "" && l.state.Turn != nil && l.state.Turn.Owner == targetID && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
+		l.scheduleAction(book.ActionInterrupt, id, book.DispRebufferOwner, id, targetID)
+	}
+	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
+}
+
+func (l *agentLoop) handleUnhold(msg actorbase.Msg) {
+	l.clearFreeze()
+	l.startNext()
+	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
+}
+
+func (l *agentLoop) handleInterrupt(msg actorbase.Msg) {
+	var payload struct{}
+	if err := decodeStrict(msg.Payload, &payload); err != nil {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "agent.interrupt payload must be an empty object"})
+		return
+	}
+	id := book.RequestID(msg.ID)
+	l.freeze(id, defaultHoldDuration)
+	if l.state.Turn != nil && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
+		l.scheduleAction(book.ActionInterrupt, id, book.DispFailOwner, id, "")
+	}
+	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
+}
+
+func (l *agentLoop) validateReplace(msg actorbase.Msg) (replacePayload, string, string) {
+	var payload struct {
+		Target      *string         `json:"target"`
+		OldText     *string         `json:"old_text"`
+		NewText     *string         `json:"new_text"`
+		Attachments json.RawMessage `json:"attachments"`
+	}
+	if err := decodeStrict(msg.Payload, &payload); err != nil || payload.Target == nil || strings.TrimSpace(*payload.Target) == "" || payload.OldText == nil || payload.NewText == nil {
+		detail := "target, old_text, and new_text are required strings"
+		if err != nil {
+			detail = err.Error()
+		}
+		return replacePayload{}, "invalid_args", "invalid agent.replace payload: " + detail
+	}
+	targetID := book.RequestID(*payload.Target)
+	target := l.state.Requests[targetID]
+	if target == nil {
+		return replacePayload{}, errorCASMismatch, "replace target does not exist"
+	}
+	if target.Sender != string(msg.Sender.ID) {
+		return replacePayload{}, "target_not_owned", "replace target belongs to a different sender"
+	}
+	if target.Location != book.Buffered || l.state.IndexInBuffer(targetID) < 0 || target.Input.Text != *payload.OldText {
+		return replacePayload{}, errorCASMismatch, "replace target is not buffered at the expected text"
+	}
+	attachments := []runtimeproto.Attachment(nil)
+	newBytes := len(*payload.NewText)
+	if len(payload.Attachments) != 0 {
+		if bytes.Equal(bytes.TrimSpace(payload.Attachments), []byte("null")) {
+			return replacePayload{}, "invalid_args", "invalid agent.replace payload: attachments must be an array"
+		}
+		var rawAttachments []json.RawMessage
+		if json.Unmarshal(payload.Attachments, &rawAttachments) != nil {
+			return replacePayload{}, "invalid_args", "invalid agent.replace payload: attachments must be an array"
+		}
+		attachments = make([]runtimeproto.Attachment, 0, len(rawAttachments))
+		for _, raw := range rawAttachments {
+			newBytes += len(raw)
+			var attachment runtimeproto.Attachment
+			if json.Unmarshal(raw, &attachment) != nil || strings.TrimSpace(attachment.Address) == "" {
+				continue
+			}
+			attachments = append(attachments, attachment)
+		}
+	}
+	if l.state.BufferBytes-target.Bytes+newBytes > l.def.cfg.BufferMaxBytes {
+		return replacePayload{}, errorBaseCapacity, "replacement exceeds agent request buffer capacity"
+	}
+	return replacePayload{target: targetID, oldText: *payload.OldText, newText: *payload.NewText, attachments: attachments, bytes: newBytes}, "", ""
+}
+
+func (l *agentLoop) freeze(holdID book.RequestID, duration time.Duration) {
+	l.detachFreezeAction()
+	l.clearHoldTimer()
+	l.frozenUntil = l.now().Add(duration)
+	l.heldBy = holdID
+	if l.sys != nil {
+		l.holdTimer, _ = l.sys.After(duration, typeHoldExpired, map[string]any{"hold_id": string(holdID)}, schedule.TimerHomeMemory)
+	}
+}
+
+func (l *agentLoop) clearFreeze() {
+	l.detachFreezeAction()
+	l.frozenUntil = time.Time{}
+	l.heldBy = ""
+	l.clearHoldTimer()
+}
+
+func (l *agentLoop) detachFreezeAction() {
+	if action := l.state.Pending; action != nil && action.HolderID == l.heldBy && action.Disposition == book.DispRebufferOwner {
+		l.state.Pending = nil
+	}
+}
+
+func (l *agentLoop) clearHoldTimer() {
+	if l.holdTimer == "" {
+		return
+	}
+	timer := l.holdTimer
+	l.holdTimer = ""
+	if l.sys != nil {
+		_ = l.sys.CancelTimer(timer)
+	}
+}
+
+func (l *agentLoop) handleHoldExpired(raw json.RawMessage) {
+	var payload struct {
+		HoldID string `json:"hold_id"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	if book.RequestID(payload.HoldID) != l.heldBy {
+		return
+	}
+	now := l.now()
+	if !l.frozen(now) {
+		l.clearFreeze()
+		l.startNext()
+		return
+	}
+	if l.sys != nil {
+		l.holdTimer, _ = l.sys.After(l.frozenUntil.Sub(now), typeHoldExpired, map[string]any{"hold_id": string(l.heldBy)}, schedule.TimerHomeMemory)
 	}
 }
 
@@ -602,6 +846,10 @@ func (l *agentLoop) acceptContent(id book.RequestID, explicitSteer bool) {
 	if row == nil {
 		return
 	}
+	if !explicitSteer {
+		l.enqueue(id)
+		return
+	}
 	t := l.state.Turn
 	if t == nil || t.Phase != book.TurnActive || !l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilitySteer] {
 		if explicitSteer && row.ExplicitCAS {
@@ -609,7 +857,7 @@ func (l *agentLoop) acceptContent(id book.RequestID, explicitSteer bool) {
 				detail: "no steerable turn: no turn is active, so there is nothing to steer into. Send agent.ask to start work, or resend without expected_turn_id to queue behind whatever runs next"})
 			return
 		}
-		l.enqueue(id, t != nil)
+		l.enqueue(id)
 		return
 	}
 	if row.ExplicitCAS && row.ExpectedTurn != t.ID {
@@ -617,29 +865,44 @@ func (l *agentLoop) acceptContent(id book.RequestID, explicitSteer bool) {
 			detail: fmt.Sprintf("turn target mismatch: expected_turn_id %q, but the active turn is %q. Re-read turn_id from the most recent processing reply and resend; the turn you named has already ended", row.ExpectedTurn, t.ID)})
 		return
 	}
-	l.scheduleAction(book.ActionSteer, id)
+	l.scheduleAction(book.ActionSteer, id, book.DispFailOwner, "", "")
 }
 
-func (l *agentLoop) enqueue(id book.RequestID, progress bool) {
+func (l *agentLoop) enqueue(id book.RequestID) {
+	l.admitBufferedAt(id, -1, false)
+}
+
+func (l *agentLoop) admitBufferedAt(id book.RequestID, idx int, resumed bool) {
 	row := l.state.Requests[id]
 	if row == nil {
 		return
 	}
+	l.clearFreeze()
 	if len(l.state.Buffer) >= l.def.cfg.BufferMaxCount || l.state.BufferBytes+row.Bytes > l.def.cfg.BufferMaxBytes {
 		l.finish(id, terminalCandidate{fail: true, code: errorBaseCapacity, detail: "agent request buffer capacity exceeded"})
+		l.startNext()
 		return
 	}
+	row.Resumed = resumed
 	row.Location = book.Buffered
-	l.state.Buffer = append(l.state.Buffer, id)
+	if idx < 0 {
+		l.state.Buffer = append(l.state.Buffer, id)
+	} else {
+		l.state.InsertAt(idx, id)
+	}
 	l.state.BufferBytes += row.Bytes
-	if progress {
+	l.startNext()
+	row = l.state.Requests[id]
+	if row == nil {
+		return
+	}
+	if row.Location == book.Buffered {
 		l.exec.progress(string(id), message.StatusQueued, map[string]any{})
 	}
-	l.startNext()
 }
 
 func (l *agentLoop) startNext() {
-	if l.fault != nil || l.state.Turn != nil || l.state.Running != nil || l.state.Pending != nil || len(l.state.Buffer) == 0 {
+	if l.frozen(l.now()) || l.fault != nil || l.state.Turn != nil || l.state.Running != nil || l.state.Pending != nil || len(l.state.Buffer) == 0 {
 		return
 	}
 	first := l.state.Requests[l.state.Buffer[0]]
@@ -659,13 +922,13 @@ func (l *agentLoop) startNext() {
 		if row.Input.Caller != first.Input.Caller {
 			break
 		}
-		if len(batch) > 0 && isCommandRequest(row) {
+		if len(batch) > 0 && (isCommandRequest(row) || row.Resumed) {
 			break
 		}
 		l.state.Buffer = l.state.Buffer[1:]
 		l.state.BufferBytes -= row.Bytes
 		batch = append(batch, id)
-		if isCommandRequest(row) {
+		if isCommandRequest(row) || row.Resumed {
 			break
 		}
 	}
@@ -679,7 +942,11 @@ func (l *agentLoop) startNext() {
 			if isCommandRequest(row) {
 				continue
 			}
-			messages = append(messages, runtimeproto.CloneInput(row.Input))
+			input := runtimeproto.CloneInput(row.Input)
+			if row.Resumed {
+				input.Text = resumedInputText(row)
+			}
+			messages = append(messages, input)
 		}
 	}
 	for _, id := range batch[:len(batch)-1] {
@@ -698,6 +965,7 @@ func (l *agentLoop) startNext() {
 	op := l.opID()
 	owner.Location = book.Starting
 	l.state.Turn = &book.Turn{Serial: l.nextTurn, Phase: book.TurnStarting, StartOp: op, Owner: tail, Scope: owner.Scope, AnchorParent: owner.ParentID, AnchorCorrelation: owner.CorrelationID}
+	l.exec.progress(string(owner.ID), message.StatusProcessing, map[string]any{})
 	cmd := runtimeproto.StartCommand{Op: op, Messages: messages, Background: l.takeBackground(), Scope: owner.Scope, Kind: owner.TurnKind, Options: owner.Options}
 	if err := l.exec.runtimeStart(cmd); err != nil {
 		l.faultNow("command_admission", err.Error())
@@ -710,9 +978,22 @@ func isCommandRequest(row *book.Request) bool {
 	return row != nil && (row.TurnKind == runtimeproto.TurnCompact || row.TurnKind == runtimeproto.TurnSelect)
 }
 
-func (l *agentLoop) scheduleAction(kind book.ActionKind, id book.RequestID) {
+func resumedInputText(row *book.Request) string {
+	if row != nil && row.Input.Type == TypeReplace {
+		var payload struct {
+			OldText string `json:"old_text"`
+			NewText string `json:"new_text"`
+		}
+		if json.Unmarshal(row.Input.Payload, &payload) == nil {
+			return fmt.Sprintf("用户明确将 %q 修改为 %q，请遵循更新之后的指令或信息，其余保持不变。", payload.OldText, payload.NewText)
+		}
+	}
+	return "请继续刚才被打断的工作。"
+}
+
+func (l *agentLoop) scheduleAction(kind book.ActionKind, id book.RequestID, disposition book.ActionDisposition, holder, ownerAtAdmit book.RequestID) {
 	row := l.state.Requests[id]
-	if row == nil {
+	if row == nil && kind == book.ActionSteer {
 		return
 	}
 	l.nextAction++
@@ -720,10 +1001,14 @@ func (l *agentLoop) scheduleAction(kind book.ActionKind, id book.RequestID) {
 		l.faultNow("counter_overflow", "Base action serial overflow")
 		return
 	}
-	a := &book.Action{Serial: l.nextAction, Kind: kind, Request: id}
-	row.Location = book.ControlPending
+	a := &book.Action{Serial: l.nextAction, Kind: kind, Request: id, Disposition: disposition, HolderID: holder, OwnerAtAdmit: ownerAtAdmit}
+	if row != nil {
+		row.Location = book.ControlPending
+	}
 	if old := l.state.Pending; old != nil {
-		l.finish(old.Request, terminalCandidate{value: map[string]any{"superseded_by": id}})
+		if l.state.Requests[old.Request] != nil {
+			l.finish(old.Request, terminalCandidate{value: map[string]any{"superseded_by": id}})
+		}
 	}
 	l.state.Pending = a
 	l.maybeRunAction()
@@ -760,8 +1045,6 @@ func (l *agentLoop) maybeRunAction() {
 		l.runSteer(a)
 	case book.ActionInterrupt:
 		l.runInterrupt(a)
-	case book.ActionStop:
-		l.runStop(a)
 	case book.ActionCleanup:
 		l.runCleanup(a)
 	}
@@ -779,7 +1062,7 @@ func (l *agentLoop) runSteer(a *book.Action) {
 				detail: fmt.Sprintf("steer target is no longer active: turn %q ended before this steer could be applied, so the work it aimed at is already finished. Read that turn's result before deciding whether anything still needs saying", row.ExpectedTurn)})
 		} else {
 			l.state.Running = nil
-			l.enqueue(row.ID, true)
+			l.enqueue(row.ID)
 			l.maybeRunAction()
 		}
 		return
@@ -796,9 +1079,6 @@ func (l *agentLoop) runSteer(a *book.Action) {
 func (l *agentLoop) runInterrupt(a *book.Action) {
 	turn := l.state.Turn
 	if turn == nil || turn.Phase != book.TurnActive {
-		if a.Request != "" {
-			l.finish(a.Request, terminalCandidate{value: map[string]any{"interrupted": false}})
-		}
 		l.completeAction()
 		return
 	}
@@ -808,28 +1088,6 @@ func (l *agentLoop) runInterrupt(a *book.Action) {
 		return
 	}
 	l.armReceipt(receiptKey("control", uint64(a.Op)))
-}
-
-func (l *agentLoop) runStop(a *book.Action) {
-	l.revokeWork(true)
-	turn := l.state.Turn
-	if turn != nil && turn.Phase == book.TurnActive && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
-		a.Kind, a.Op, a.Target = book.ActionCleanup, l.opID(), turn.ID
-		if err := l.exec.runtimeControl(runtimeproto.ControlCommand{Op: a.Op, Kind: runtimeproto.ControlInterrupt, Target: turn.ID}); err != nil {
-			l.faultNow("command_admission", err.Error())
-			return
-		}
-		l.armReceipt(receiptKey("control", uint64(a.Op)))
-		l.cancelWork(true, "stop")
-		l.finish(a.Request, terminalCandidate{value: map[string]any{"stopped": true}})
-		a.Request = ""
-		return
-	}
-	l.cancelWork(true, "stop")
-	l.finish(a.Request, terminalCandidate{value: map[string]any{"stopped": true}})
-	a.Request = ""
-	a.Kind = book.ActionCleanup
-	l.runCleanup(a)
 }
 
 func (l *agentLoop) runCleanup(a *book.Action) {
@@ -852,36 +1110,6 @@ func (l *agentLoop) runCleanup(a *book.Action) {
 		return
 	}
 	l.armReceipt(receiptKey("control", uint64(a.Op)))
-}
-
-func (l *agentLoop) cancelWork(clearBuffer bool, detail string) {
-	if turn := l.state.Turn; turn != nil && turn.Owner != "" {
-		l.finish(turn.Owner, terminalCandidate{fail: true, code: errorCancelled, detail: detail})
-		turn.Owner = ""
-	}
-	if clearBuffer {
-		ids := append([]book.RequestID(nil), l.state.Buffer...)
-		for _, id := range ids {
-			l.finish(id, terminalCandidate{fail: true, code: errorCancelled, detail: detail})
-		}
-		l.state.Buffer = nil
-		l.state.BufferBytes = 0
-	}
-}
-
-func (l *agentLoop) revokeWork(includeBuffer bool) {
-	if turn := l.state.Turn; turn != nil && turn.Owner != "" {
-		if row := l.state.Requests[turn.Owner]; row != nil {
-			l.exec.revoke(row.Scope)
-		}
-	}
-	if includeBuffer {
-		for _, id := range l.state.Buffer {
-			if row := l.state.Requests[id]; row != nil {
-				l.exec.revoke(row.Scope)
-			}
-		}
-	}
 }
 
 func (l *agentLoop) handleRuntimeEvent(e runtimeEvent) {
@@ -963,6 +1191,10 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 	if row := l.state.Requests[t.Owner]; row != nil {
 		ownerKind = row.TurnKind
 	}
+	matchingAction := l.state.Running
+	if matchingAction == nil || matchingAction.Target != e.turnID {
+		matchingAction = nil
+	}
 	if t.Owner != "" {
 		switch e.status {
 		case runtimeproto.TurnStatusOK:
@@ -975,7 +1207,20 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 			}
 			l.finish(t.Owner, terminalCandidate{value: value})
 		case runtimeproto.TurnStatusInterrupted:
-			l.finish(t.Owner, terminalCandidate{fail: true, code: errorInterrupted, detail: e.detail})
+			if matchingAction != nil && matchingAction.Disposition == book.DispRebufferOwner && matchingAction.OwnerAtAdmit == t.Owner {
+				owner := t.Owner
+				if row := l.state.Requests[owner]; row != nil {
+					row.Location = book.Buffered
+					row.Resumed = true
+					row.Scope = l.vault.Mint(row.ParentID, row.CorrelationID)
+					l.state.InsertAt(0, owner)
+					l.state.BufferBytes += row.Bytes
+					l.exec.progress(string(owner), message.StatusQueued, map[string]any{"resumed": true, "held_by": matchingAction.HolderID})
+				}
+				t.Owner = ""
+			} else {
+				l.finish(t.Owner, terminalCandidate{fail: true, code: errorInterrupted, detail: e.detail})
+			}
 		default:
 			l.finish(t.Owner, terminalCandidate{fail: true, code: errorProviderFailed, detail: e.detail})
 		}
@@ -1042,9 +1287,6 @@ func (l *agentLoop) onControlDone(e runtimeEvent) {
 		l.completeAction()
 	case book.ActionInterrupt:
 		if e.verdict != runtimeproto.ControlAccepted {
-			if a.Request != "" {
-				l.finish(a.Request, terminalCandidate{fail: true, code: controlErrorCode(e.verdict), detail: e.detail})
-			}
 			l.completeAction()
 			return
 		}
@@ -1096,13 +1338,10 @@ func (l *agentLoop) settleSteer(a *book.Action, e runtimeEvent) {
 		l.finish(row.ID, terminalCandidate{fail: true, code: errorCASMismatch, detail: e.detail})
 		return
 	}
-	l.enqueue(row.ID, true)
+	l.enqueue(row.ID)
 }
 
 func (l *agentLoop) finishControlAction(a *book.Action) {
-	if a.Kind == book.ActionInterrupt && a.Request != "" {
-		l.finish(a.Request, terminalCandidate{value: map[string]any{"interrupted": true}})
-	}
 	l.completeAction()
 }
 

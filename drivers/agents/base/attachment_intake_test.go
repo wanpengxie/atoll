@@ -24,6 +24,9 @@ func (s *askIntakeSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error)
 	s.failures <- code
 	return "failure", nil
 }
+func (*askIntakeSys) Progress(actorbase.Msg, string, any) (message.ID, error) {
+	return "progress", nil
+}
 
 func runAskIntake(t *testing.T, payload string) (*captureRuntime, <-chan string) {
 	t.Helper()
