@@ -953,8 +953,28 @@ func (l *agentLoop) admitBufferedAt(id book.RequestID, idx int, resumed bool) {
 		return
 	}
 	if row.Location == book.Buffered {
-		l.exec.progress(string(id), message.StatusQueued, map[string]any{})
+		l.exec.progress(string(id), message.StatusQueued, map[string]any{"controls": l.queuedControls()})
 	}
+}
+
+// progress 契约：凡带 status 的进度帧必带 controls——受理方在这条消息自己的账上
+// 宣告"此刻可以对它用哪些控制词"。全量快照、后帧覆盖前帧、终态帧恒不带。
+// 前端据此画按钮，不查任何表；能力差异（steer/interrupt）只在这里收敛。
+func (l *agentLoop) queuedControls() []map[string]any {
+	controls := []map[string]any{{"word": TypeReplace}}
+	if l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilitySteer] {
+		controls = append(controls, map[string]any{"word": TypeSteer})
+	}
+	return controls
+}
+
+func (l *agentLoop) processingControls() []map[string]any {
+	if !l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
+		return []map[string]any{}
+	}
+	// 运行中编辑 = 先打断，故 processing 位置的 replace 依赖 interrupt 能力——
+	// 这条规则只活在受理方，前端恒不重演。
+	return []map[string]any{{"word": TypeInterrupt}, {"word": TypeReplace}}
 }
 
 func (l *agentLoop) startNext() {
@@ -1021,7 +1041,7 @@ func (l *agentLoop) startNext() {
 	op := l.opID()
 	owner.Location = book.Starting
 	l.state.Turn = &book.Turn{Serial: l.nextTurn, Phase: book.TurnStarting, StartOp: op, Owner: tail, Scope: owner.Scope, AnchorParent: owner.ParentID, AnchorCorrelation: owner.CorrelationID}
-	l.exec.progress(string(owner.ID), message.StatusProcessing, map[string]any{})
+	l.exec.progress(string(owner.ID), message.StatusProcessing, map[string]any{"controls": l.processingControls()})
 	cmd := runtimeproto.StartCommand{Op: op, Messages: messages, Background: l.takeBackground(), Scope: owner.Scope, Kind: owner.TurnKind, Options: owner.Options}
 	if err := l.exec.runtimeStart(cmd); err != nil {
 		l.faultNow("command_admission", err.Error())
@@ -1244,7 +1264,7 @@ func (l *agentLoop) onTurnStarted(e runtimeEvent) {
 	t.Phase, t.ID = book.TurnActive, e.turnID
 	if row := l.state.Requests[t.Owner]; row != nil {
 		row.Location = book.Workspace
-		l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": e.turnID})
+		l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": e.turnID, "controls": l.processingControls()})
 	}
 	l.emitTurnStarted()
 	if l.state.Running != nil && l.state.Running.Kind == book.ActionCleanup && l.state.Running.Op == 0 {
@@ -1310,7 +1330,7 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 					row.Scope = l.vault.Mint(row.ParentID, row.CorrelationID)
 					l.state.InsertAt(0, owner)
 					l.state.BufferBytes += row.Bytes
-					l.exec.progress(string(owner), message.StatusQueued, map[string]any{"resumed": true, "held_by": matchingAction.HolderID})
+					l.exec.progress(string(owner), message.StatusQueued, map[string]any{"resumed": true, "held_by": matchingAction.HolderID, "controls": l.queuedControls()})
 				}
 				t.Owner = ""
 			} else {
@@ -1422,7 +1442,7 @@ func (l *agentLoop) settleSteer(a *book.Action, e runtimeEvent) {
 		turn.Owner, turn.Scope = row.ID, row.Scope
 		turn.AnchorParent, turn.AnchorCorrelation = row.ParentID, row.CorrelationID
 		row.Location = book.Workspace
-		l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": turn.ID})
+		l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": turn.ID, "controls": l.processingControls()})
 		return
 	}
 	if a.SteerTarget {
