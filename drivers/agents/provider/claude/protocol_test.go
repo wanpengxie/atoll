@@ -531,3 +531,33 @@ func activeHarness(t *testing.T) (*harness, driverproto.WorkerTurnTarget, string
 	target := waitAs[driverproto.TurnStarted](h).Target
 	return h, target, u
 }
+
+// TestHostServedToolNarrationIsNotRepublished: a mcp__atoll__* tool_use /
+// tool_result pair is the stream's re-telling of a host callback the host
+// already projects authoritatively; republishing it would double every host
+// tool on the ledger. Claude-local tools (Bash, …) have no host projection and
+// must keep publishing.
+func TestHostServedToolNarrationIsNotRepublished(t *testing.T) {
+	h, _, _ := activeHarness(t)
+	h.proc.emit(t, map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"content": []any{
+		map[string]any{"type": "tool_use", "id": "host-1", "name": "mcp__atoll__system_call", "input": map[string]any{"word": "system.member.list"}},
+		map[string]any{"type": "tool_use", "id": "local-1", "name": "Bash", "input": map[string]any{"command": "ls"}},
+	}}})
+	h.proc.emit(t, map[string]any{"type": "user", "parent_tool_use_id": nil, "message": map[string]any{"content": []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "host-1", "content": "ok"},
+		map[string]any{"type": "tool_result", "tool_use_id": "local-1", "content": "ok"},
+	}}})
+	h.wait(func(e driverproto.DriverEvent) bool {
+		tool, ok := e.(driverproto.Tool)
+		return ok && tool.CallID == "local-1" && tool.Phase == driverproto.ToolEnded
+	})
+	tools := eventsAs[driverproto.Tool](h.sink.snapshot())
+	if len(tools) != 2 {
+		t.Fatalf("want exactly the local pair, got %#v", tools)
+	}
+	for _, tool := range tools {
+		if tool.CallID != "local-1" {
+			t.Fatalf("host-served narration republished: %#v", tool)
+		}
+	}
+}

@@ -54,6 +54,12 @@ type worker struct {
 	options    driverproto.TurnOptions
 	pending    driverproto.TurnOptions
 	usage      driverproto.TurnUsage
+	// sessionModel/sessionEffort are the ACTUAL defaults codex reported in the
+	// thread/start|resume response (model + reasoningEffort). When the decl
+	// configures nothing, turns run on these — usage accounting reports them
+	// instead of "", so the ledger always names what the turn actually ran on.
+	sessionModel  string
+	sessionEffort string
 	leases     sync.WaitGroup
 	reaped     chan struct{}
 	retireOnce sync.Once
@@ -210,12 +216,18 @@ func (w *worker) afterSession(c *connection, resumed bool, raw json.RawMessage, 
 		w.publish(driverproto.OpenRejected{Class: driverproto.FailureProvider, Detail: "session response missing thread id", Disposition: driverproto.RetireWorker})
 		return
 	}
+	var configured struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoningEffort"`
+	}
+	_ = json.Unmarshal(raw, &configured)
 	w.mu.Lock()
 	if w.phase != phaseOpening || w.conn != c {
 		w.mu.Unlock()
 		return
 	}
 	w.thread, w.phase = id, phaseReady
+	w.sessionModel, w.sessionEffort = configured.Model, configured.ReasoningEffort
 	w.mu.Unlock()
 	if !w.publish(driverproto.SeedUpdated{Value: encodeResumeSeed(id, w.surface.Digest())}) {
 		return
@@ -290,6 +302,14 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 func (w *worker) currentUsageLocked() driverproto.TurnUsage {
 	usage := w.usage
 	usage.Model, usage.Effort = w.options.Model, w.options.Effort
+	// An option we set on turn/start IS the actual value; when unset, the turn
+	// ran on the session defaults codex reported at thread/start|resume.
+	if usage.Model == "" {
+		usage.Model = w.sessionModel
+	}
+	if usage.Effort == "" {
+		usage.Effort = w.sessionEffort
+	}
 	return usage
 }
 

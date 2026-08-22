@@ -137,7 +137,9 @@ func newCodexHarness(t *testing.T, options driverproto.TurnOptions, inspectOpen 
 	if inspectOpen != nil {
 		inspectOpen(open)
 	}
-	h.respond(open, map[string]any{"thread": map[string]any{"id": "thread-1"}})
+	// The real thread/start|resume response reports the session's actual
+	// model/effort defaults alongside the thread (see appserver wire).
+	h.respond(open, map[string]any{"thread": map[string]any{"id": "thread-1"}, "model": "gpt-session-default", "reasoningEffort": "session-effort"})
 	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.WorkerReady); return ok })
 	t.Cleanup(func() {
 		h.worker.Retire()
@@ -313,5 +315,56 @@ func TestTokenUsageNotificationFillsTurnEndedUsage(t *testing.T) {
 	ended := h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok }).(driverproto.TurnEnded)
 	if ended.Usage.ContextTokens != 321 || ended.Usage.ContextWindow != 999 || ended.Usage.Model != "gpt-test" || ended.Usage.Effort != "medium" {
 		t.Fatalf("usage=%+v", ended.Usage)
+	}
+}
+
+// TestUnconfiguredUsageReportsSessionDefaults: with no decl-configured options,
+// a turn runs on the session defaults codex reported in the thread/start
+// response — usage accounting must name those actual values, never "".
+func TestUnconfiguredUsageReportsSessionDefaults(t *testing.T) {
+	h := newCodexHarness(t, driverproto.TurnOptions{}, nil)
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 3, Messages: []driverproto.DriverMessage{{Text: "hi"}}})
+	request := h.input()
+	h.respond(request, map[string]any{})
+	h.notify("turn/started", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-defaults", "status": "inProgress"}})
+	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnStarted); return ok })
+	h.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-defaults", "status": "completed"}})
+	ended := h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok }).(driverproto.TurnEnded)
+	if ended.Usage.Model != "gpt-session-default" || ended.Usage.Effort != "session-effort" {
+		t.Fatalf("usage must fall back to session defaults, got %+v", ended.Usage)
+	}
+}
+
+// TestDynamicToolCallNarrationIsNotRepublished: dynamicToolCall items are the
+// stream's re-telling of a host callback the host already projects; publishing
+// them again would double every tool event on the ledger.
+func TestDynamicToolCallNarrationIsNotRepublished(t *testing.T) {
+	h := newCodexHarness(t, driverproto.TurnOptions{}, nil)
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 4, Messages: []driverproto.DriverMessage{{Text: "hi"}}})
+	request := h.input()
+	h.respond(request, map[string]any{})
+	h.notify("turn/started", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-tools", "status": "inProgress"}})
+	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnStarted); return ok })
+	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-tools", "item": map[string]any{"id": "call-1", "type": "dynamicToolCall", "tool": "system_call", "status": "inProgress"}})
+	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-tools", "item": map[string]any{"id": "call-1", "type": "dynamicToolCall", "tool": "system_call", "status": "completed"}})
+	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-tools", "item": map[string]any{"id": "call-2", "type": "commandExecution", "command": "ls", "status": "inProgress"}})
+	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-tools", "item": map[string]any{"id": "call-2", "type": "commandExecution", "command": "ls", "status": "completed"}})
+	h.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-tools", "status": "completed"}})
+	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok })
+	h.sink.mu.Lock()
+	var tools []driverproto.Tool
+	for _, event := range h.sink.events {
+		if tool, ok := event.(driverproto.Tool); ok {
+			tools = append(tools, tool)
+		}
+	}
+	h.sink.mu.Unlock()
+	if len(tools) != 2 {
+		t.Fatalf("want only codex-local pair, got %#v", tools)
+	}
+	for _, tool := range tools {
+		if tool.CallID != "call-2" {
+			t.Fatalf("dynamicToolCall narration republished: %#v", tool)
+		}
 	}
 }

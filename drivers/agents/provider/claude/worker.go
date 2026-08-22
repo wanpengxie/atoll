@@ -141,10 +141,16 @@ type worker struct {
 	options           driverproto.TurnOptions
 	lastModel         string
 	usage             driverproto.TurnUsage
+	// hostToolCalls tracks tool_use ids the stream narrated for HOST-served
+	// tools (mcp__atoll__* → served via the sdk MCP channel → projected
+	// authoritatively by the host callback). Their tool_use/tool_result
+	// narration must not publish Tool events or every host tool doubles on
+	// the ledger; ids are recorded at tool_use and retired at tool_result.
+	hostToolCalls map[string]struct{}
 }
 
 func newWorker(cfg Config, host driverproto.WorkerHost) *worker {
-	return &worker{cfg: cfg, host: host, gate: emit.New(host.Events()), phase: phaseConstructed, reaped: make(chan struct{}), debugSeen: map[string]bool{}}
+	return &worker{cfg: cfg, host: host, gate: emit.New(host.Events()), phase: phaseConstructed, reaped: make(chan struct{}), debugSeen: map[string]bool{}, hostToolCalls: map[string]struct{}{}}
 }
 
 func (w *worker) begin(allowed ...workerPhase) bool {

@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/toolsurface"
 )
 
 type parentFrame struct {
@@ -309,6 +310,15 @@ func (w *worker) onAssistant(c *connection, raw json.RawMessage) {
 	for _, block := range frame.Message.Content {
 		switch block.Type {
 		case "tool_use":
+			if strings.HasPrefix(block.Name, toolsurface.ClaudeExposedPrefix) {
+				// Host-served tool: the host callback projects this call
+				// authoritatively; the stream narration is liveness only.
+				w.mu.Lock()
+				w.hostToolCalls[block.ID] = struct{}{}
+				w.mu.Unlock()
+				w.publish(driverproto.Activity{Target: target})
+				continue
+			}
 			w.publish(driverproto.Tool{Target: target, CallID: block.ID, Phase: driverproto.ToolStarted, Name: block.Name, Status: driverproto.ToolStatusUnknown, Detail: boundedSummary(block.Input)})
 		case "text", "thinking":
 			w.publish(driverproto.Activity{Target: target})
@@ -336,6 +346,15 @@ func (w *worker) onUser(c *connection, raw json.RawMessage) {
 			continue
 		}
 		hadTool = true
+		w.mu.Lock()
+		_, hostServed := w.hostToolCalls[block.ToolUseID]
+		if hostServed {
+			delete(w.hostToolCalls, block.ToolUseID)
+		}
+		w.mu.Unlock()
+		if hostServed {
+			continue
+		}
 		status := driverproto.ToolStatusCompleted
 		if block.IsError {
 			status = driverproto.ToolStatusFailed

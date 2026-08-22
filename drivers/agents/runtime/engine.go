@@ -609,6 +609,19 @@ func (e *engine) nativeTool(x driverproto.Tool) {
 		e.logContradiction("late Tool", x)
 		return
 	}
+	// A host callback (dynamic tool / resource served by us) is already
+	// projected authoritatively by handleCallback/handleCallbackCompletion —
+	// the provider's own item stream re-narrates the same call under the same
+	// call id, which would double every tool event on the ledger. Skip the
+	// narration; keep the execution-side record.
+	if e.turn != nil {
+		for _, row := range e.turn.callbacks {
+			if row.request.callID == x.CallID {
+				e.resetWatchdog()
+				return
+			}
+		}
+	}
 	phase := "started"
 	if x.Phase == driverproto.ToolEnded {
 		phase = "ended"
