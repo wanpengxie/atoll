@@ -29,11 +29,16 @@ func Build(provider driverproto.Provider, policy Policy) (runtimeproto.Factory, 
 		}
 	}
 	spec := runtimeproto.Spec{
+		Name:             ps.Name,
 		Documentation:    ps.Documentation,
 		Capabilities:     cloneCapabilities(ps.Capabilities),
 		Bounds:           runtimeproto.Bounds{ReceiptDeadline: receipt, EventCapacity: policy.EventCapacity},
 		Selections:       make([]runtimeproto.TurnOptions, len(ps.Selections)),
 		DefaultSelection: ps.DefaultSelection,
+		SelectionTitles:  make([]runtimeproto.SelectionTitle, len(ps.SelectionTitles)),
+	}
+	for i, title := range ps.SelectionTitles {
+		spec.SelectionTitles[i] = runtimeproto.SelectionTitle{Model: title.Model, Effort: title.Effort}
 	}
 	for i, option := range ps.Selections {
 		spec.Selections[i] = runtimeproto.TurnOptions{Model: option.Model, Effort: option.Effort}

@@ -166,11 +166,26 @@ type Bounds struct {
 }
 
 type Spec struct {
+	// Name is the provider's class name (claude/codex/script). Base projects it
+	// as the instance manifest's Class — actor.describe must answer the real
+	// class, not the generic "agent".
+	Name             string
 	Documentation    driverproto.Documentation
 	Capabilities     map[string]bool
 	Bounds           Bounds
 	Selections       []TurnOptions
 	DefaultSelection int
+	// SelectionTitles parallel Selections (same index); display metadata only,
+	// never part of options identity or persistence.
+	SelectionTitles []SelectionTitle
+}
+
+// SelectionTitle is one selection's optional human names (empty = show the raw
+// value). Declared here — not borrowed from driverproto — so Base consumes it
+// without crossing the base→driverproto layering wall.
+type SelectionTitle struct {
+	Model  string
+	Effort string
 }
 
 type ToolSpec struct {

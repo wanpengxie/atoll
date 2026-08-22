@@ -207,6 +207,25 @@ func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error
 	if decl.Kind != d.Kind {
 		return platform.ActorDecl{}, fmt.Errorf("registry: build %q: constructed kind %q ≠ declared kind %q", class, decl.Kind, d.Kind)
 	}
-	decl.Factory.Proc.Manifest = d.Manifest
+	// The constructor may project an INSTANCE manifest — per-instance words such
+	// as agent.select's selections schema, which only the instance config knows.
+	// Respect it; the class-level manifest is the fallback for constructors that
+	// declare none. Unconditionally overwriting here silently erased every
+	// instance projection (actor.describe is a per-instance answer, not a class
+	// directory row).
+	if decl.Factory.Proc.Manifest.Class == "" {
+		decl.Factory.Proc.Manifest = d.Manifest
+	} else {
+		// An instance projection must still be a valid manifest, and its Class
+		// is normalized to the registered class: the words are the instance's
+		// truth, the identity is the directory's. (A generic body such as
+		// peeractor legitimately carries its own Class — rejecting the mismatch
+		// would refuse every template-named proxy; overwriting only the Class
+		// keeps describe consistent with the directory row.)
+		if err := introspect.ValidateManifest(decl.Factory.Proc.Manifest); err != nil {
+			return platform.ActorDecl{}, fmt.Errorf("registry: build %q: instance manifest invalid: %w", class, err)
+		}
+		decl.Factory.Proc.Manifest.Class = class
+	}
 	return decl, nil
 }

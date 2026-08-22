@@ -31,3 +31,26 @@ func TestConfigPublishesConfiguredSelections(t *testing.T) {
 		t.Fatalf("spec=%+v", spec)
 	}
 }
+
+func TestConfigSelectionLabelsRideBesideOptionsNotInside(t *testing.T) {
+	cfg, err := ParseConfig(json.RawMessage(`{"selections":[{"model":"gpt-test","effort":"low","model_label":"Test","effort_label":"低"}]}`), "/workspace", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := NewProvider(cfg).Spec()
+	if len(spec.SelectionTitles) != 1 || spec.SelectionTitles[0] != (driverproto.SelectionTitle{Model: "Test", Effort: "低"}) {
+		t.Fatalf("titles=%+v", spec.SelectionTitles)
+	}
+	if spec.Selections[0] != (driverproto.TurnOptions{Model: "gpt-test", Effort: "low"}) {
+		t.Fatalf("selections=%+v", spec.Selections)
+	}
+}
+
+func TestConfigRejectsDuplicateOrBlankSelections(t *testing.T) {
+	if err := ValidateConfig(json.RawMessage(`{"selections":[{"model":"m","effort":"e"},{"model":"m","effort":"e"}]}`)); err == nil {
+		t.Fatal("duplicate selection accepted")
+	}
+	if err := ValidateConfig(json.RawMessage(`{"selections":[{"model":"","effort":"e"}]}`)); err == nil {
+		t.Fatal("blank model accepted")
+	}
+}

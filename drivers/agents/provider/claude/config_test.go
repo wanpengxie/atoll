@@ -36,6 +36,33 @@ func TestConfigPublishesConfiguredSelections(t *testing.T) {
 	}
 }
 
+func TestConfigSelectionLabelsRideBesideOptionsNotInside(t *testing.T) {
+	cfg, err := ParseConfig(json.RawMessage(`{"selections":[{"model":"claude-test","effort":"low","model_label":"Test","effort_label":"低"},{"model":"claude-test","effort":"high"}]}`), "/workspace", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := NewProvider(cfg).Spec()
+	if len(spec.SelectionTitles) != 2 || spec.SelectionTitles[0] != (driverproto.SelectionTitle{Model: "Test", Effort: "低"}) || spec.SelectionTitles[1] != (driverproto.SelectionTitle{}) {
+		t.Fatalf("titles=%+v", spec.SelectionTitles)
+	}
+	// Options identity must stay label-free (labels never enter persistence
+	// or equality).
+	if spec.Selections[0] != (driverproto.TurnOptions{Model: "claude-test", Effort: "low"}) {
+		t.Fatalf("selections=%+v", spec.Selections)
+	}
+}
+
+func TestConfigRejectsDuplicateOrBlankSelections(t *testing.T) {
+	// A duplicate (model, effort) pair becomes two identical oneOf branches,
+	// making the fully valid submit match both and fail oneOf validation.
+	if err := ValidateConfig(json.RawMessage(`{"selections":[{"model":"m","effort":"e"},{"model":"m","effort":"e"}]}`)); err == nil {
+		t.Fatal("duplicate selection accepted")
+	}
+	if err := ValidateConfig(json.RawMessage(`{"selections":[{"model":"m","effort":""}]}`)); err == nil {
+		t.Fatal("blank effort accepted")
+	}
+}
+
 func TestSpawnArgsGolden(t *testing.T) {
 	tests := []struct {
 		name    string

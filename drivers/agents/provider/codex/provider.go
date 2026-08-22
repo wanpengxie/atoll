@@ -11,7 +11,7 @@ const AgentSkillDoc = "# codex agent\n\nWorkspace-backed assistant using the loc
 
 func NewProvider(cfg Config) driverproto.Provider { return provider{cfg: cfg} }
 func (p provider) Spec() driverproto.ProviderSpec {
-	return driverproto.ProviderSpec{Name: Class, Capabilities: map[string]bool{driverproto.CapabilitySteer: true, driverproto.CapabilityInterrupt: true, driverproto.CapabilityResume: true, driverproto.CapabilityFork: true}, Documentation: driverproto.Documentation{Description: "Codex workspace agent backed by a dedicated local app-server.", SkillDoc: AgentSkillDoc}, Selections: append([]driverproto.TurnOptions(nil), p.cfg.Selections...), DefaultSelection: p.cfg.Default}
+	return driverproto.ProviderSpec{Name: Class, Capabilities: map[string]bool{driverproto.CapabilitySteer: true, driverproto.CapabilityInterrupt: true, driverproto.CapabilityResume: true, driverproto.CapabilityFork: true}, Documentation: driverproto.Documentation{Description: "Codex workspace agent backed by a dedicated local app-server.", SkillDoc: AgentSkillDoc}, Selections: append([]driverproto.TurnOptions(nil), p.cfg.Selections...), DefaultSelection: p.cfg.Default, SelectionTitles: append([]driverproto.SelectionTitle(nil), p.cfg.SelectionTitles...)}
 }
 func (p provider) NewWorker(host driverproto.WorkerHost) (driverproto.Worker, error) {
 	return newWorker(p.cfg, host), nil

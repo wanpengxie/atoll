@@ -2,7 +2,11 @@
 // shared agent runtime and provider adapters.
 package driverproto
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 type Documentation struct {
 	Description string
@@ -29,6 +33,36 @@ type ProviderSpec struct {
 	Documentation    Documentation
 	Selections       []TurnOptions
 	DefaultSelection int
+	// SelectionTitles are display metadata parallel to Selections (same index).
+	// They ride NEXT TO TurnOptions, never inside it: options participate in
+	// persistence and equality, titles never do — they only feed the
+	// agent.select manifest schema (oneOf branch titles).
+	SelectionTitles []SelectionTitle
+}
+
+// SelectionTitle is one selection's optional human names. Empty fields mean
+// "show the raw value".
+type SelectionTitle struct {
+	Model  string
+	Effort string
+}
+
+// ValidateSelections rejects a selections list the agent.select manifest
+// schema cannot faithfully represent: blank fields, or a duplicate
+// (model, effort) pair — a duplicate becomes two identical oneOf branches,
+// and a fully valid submit then matches both and fails oneOf validation.
+func ValidateSelections(selections []TurnOptions) error {
+	seen := map[TurnOptions]struct{}{}
+	for i, option := range selections {
+		if strings.TrimSpace(option.Model) == "" || strings.TrimSpace(option.Effort) == "" {
+			return fmt.Errorf("selections[%d]: model and effort must be non-empty", i)
+		}
+		if _, dup := seen[option]; dup {
+			return fmt.Errorf("selections[%d]: duplicate (model, effort) pair %s/%s", i, option.Model, option.Effort)
+		}
+		seen[option] = struct{}{}
+	}
+	return nil
 }
 
 const (
