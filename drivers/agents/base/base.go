@@ -89,6 +89,7 @@ func instanceManifest(spec runtimeproto.Spec) introspect.Manifest {
 		word := m.Words[TypeSelect]
 		word.Description = "switch this agent's model/effort; the schema's oneOf lists the exact legal (model, effort) pairs"
 		word.InputSchema = schema
+		word.ErrorCodes = []string{"invalid_args", "superseded", "type_unsupported"}
 		m.Words[TypeSelect] = word
 	}
 	return m

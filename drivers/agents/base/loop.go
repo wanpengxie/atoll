@@ -281,7 +281,14 @@ type agentLoop struct {
 	restoreInterruptBy                        book.RequestID
 	holdTimer                                 schedule.TimerID
 	steerBatches                              map[uint64]steerBatch
-	nowFn                                     func() time.Time
+	// selectSlot is agent.select's bypass lane (design §8): an exclusive
+	// 0-or-1 slot BESIDE the buffer — never in the wait queue, never counted
+	// against capacity, never touched by hold/interrupt freezes or steer/replace.
+	// A newer select supersedes the held one; the slot runs immediately when no
+	// turn is active, otherwise right after the current turn, before anything
+	// queued.
+	selectSlot book.RequestID
+	nowFn      func() time.Time
 }
 
 func (d definition) run(sys actorbase.Sys) error {
@@ -560,8 +567,10 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	case TypeQueue:
 		row.Input = steerInput(row)
 		l.enqueue(id)
-	case TypeCompact, TypeSelect:
+	case TypeCompact:
 		l.enqueue(id)
+	case TypeSelect:
+		l.admitSelectSlot(id)
 	case TypeSteer:
 		l.acceptContent(id, true)
 	case TypeReplace:
@@ -698,6 +707,11 @@ func (l *agentLoop) ownedBuffered(sender string) ([]book.RequestID, []int) {
 		if row == nil || row.Location != book.Buffered || row.Sender != sender {
 			continue
 		}
+		// Command rows (compact) are instructions, not content — sweeping one
+		// into a turn would turn a directive into a meaningless empty injection.
+		if isCommandRequest(row) {
+			continue
+		}
 		ids = append(ids, id)
 		indices = append(indices, idx)
 	}
@@ -823,6 +837,9 @@ func (l *agentLoop) validateReplace(msg actorbase.Msg) (replacePayload, string, 
 	}
 	if target.Location != book.Buffered || l.state.IndexInBuffer(targetID) < 0 || target.Input.Text != *payload.OldText {
 		return replacePayload{}, errorCASMismatch, "replace target is not buffered at the expected text"
+	}
+	if isCommandRequest(target) {
+		return replacePayload{}, "invalid_args", "replace target is an instruction, not an editable message"
 	}
 	attachments := []runtimeproto.Attachment(nil)
 	newBytes := len(*payload.NewText)
@@ -1118,7 +1135,42 @@ func (l *agentLoop) processingControls() []map[string]any {
 	return []map[string]any{{"word": TypeInterrupt}, {"word": TypeReplace}}
 }
 
+// admitSelectSlot places one agent.select into the bypass slot. Supersession is
+// the slot's whole concurrency story: the previous occupant (if any) fails with
+// "superseded" — it never took effect, so a success terminal would lie.
+func (l *agentLoop) admitSelectSlot(id book.RequestID) {
+	if l.selectSlot != "" && l.selectSlot != id {
+		l.finish(l.selectSlot, terminalCandidate{fail: true, code: "superseded", detail: "superseded by a newer agent.select"})
+	}
+	l.selectSlot = id
+	// Slot registration receipt. Controls are empty: the slot is outside the
+	// buffer, so replace/steer can never address it — cancel rides the request
+	// closure like any request.
+	l.exec.progress(string(id), message.StatusQueued, map[string]any{"controls": []map[string]any{}})
+	l.maybeRunSelectSlot()
+}
+
+// maybeRunSelectSlot runs the bypass slot when no turn is active. Deliberately
+// NO freeze check: switching a model must neither wake a stopped agent's queue
+// nor be blocked by it — the select turn runs alone, and the queue's own gate
+// (startNext's frozen guard) keeps everything else asleep afterwards.
+func (l *agentLoop) maybeRunSelectSlot() {
+	if l.selectSlot == "" || l.fault != nil || l.state.Turn != nil || l.state.Running != nil || l.state.Pending != nil {
+		return
+	}
+	id := l.selectSlot
+	l.selectSlot = ""
+	if l.state.Requests[id] == nil {
+		return // closed (cancelled) while waiting in the slot
+	}
+	l.beginTurn(id, nil)
+}
+
 func (l *agentLoop) startNext() {
+	// The bypass slot goes before anything queued: "after the current turn,
+	// before the next instruction" holds on every resume path because they all
+	// funnel through here.
+	l.maybeRunSelectSlot()
 	if l.frozen(l.now()) || l.fault != nil || l.state.Turn != nil || l.state.Running != nil || l.state.Pending != nil || len(l.state.Buffer) == 0 {
 		return
 	}
@@ -1169,9 +1221,19 @@ func (l *agentLoop) startNext() {
 	for _, id := range batch[:len(batch)-1] {
 		l.finish(id, terminalCandidate{value: map[string]any{"merged_into": tail}})
 	}
+	if l.state.Requests[tail] == nil {
+		l.startNext()
+		return
+	}
+	l.beginTurn(tail, messages)
+}
+
+// beginTurn opens one turn owned by tail. Shared by the queue path (startNext,
+// with the batch's messages) and the select bypass slot (nil messages — a
+// select turn carries no content, it only registers options).
+func (l *agentLoop) beginTurn(tail book.RequestID, messages []runtimeproto.Input) {
 	owner := l.state.Requests[tail]
 	if owner == nil {
-		l.startNext()
 		return
 	}
 	l.nextTurn++
@@ -1766,6 +1828,9 @@ func (l *agentLoop) handleClosure(id book.RequestID) {
 		if l.state.Running != nil && l.state.Running.Request == id {
 			l.state.Running.Request = ""
 		}
+	}
+	if l.selectSlot == id {
+		l.selectSlot = ""
 	}
 	delete(l.state.Requests, id)
 	l.exec.release(string(id))
