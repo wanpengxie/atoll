@@ -742,6 +742,7 @@ func TestAgentControl27MergedOwnerReplaceKeepsChainAndRunsCorrectionAlone(t *tes
 	a := l.state.Running
 	l.onControlDone(runtimeEvent{kind: evControlDone, op: a.Op, turnID: a.Target, verdict: runtimeproto.ControlAccepted})
 	l.handleIntake(v7Request("r3-new", TypeReplace, "caller", `{"target":"r3","old_text":"three","new_text":"three-new"}`))
+	l.handleIntake(v7Request("unhold", TypeUnhold, "caller", `{}`))
 	r2 := sys.terminal("r2")
 	r3 := sys.terminal("r3")
 	if len(r2) != 1 || r2[0].fail || r2[0].value.(map[string]any)["merged_into"] != book.RequestID("r3") {
@@ -760,7 +761,7 @@ func TestAgentControl28ManifestSchemasAndErrorsIncludeBusyButNoReservedCodes(t *
 	if err := introspect.ValidateManifest(manifest); err != nil {
 		t.Fatal(err)
 	}
-	for _, typ := range []string{TypeHold, TypeUnhold, TypeReplace, TypeInterrupt} {
+	for _, typ := range []string{TypeHold, TypeUnhold, TypeReplace, TypeInterrupt, TypeSteer} {
 		spec := manifest.Words[typ]
 		if len(spec.InputSchema) == 0 {
 			t.Fatalf("%s missing schema", typ)
@@ -775,6 +776,12 @@ func TestAgentControl28ManifestSchemasAndErrorsIncludeBusyButNoReservedCodes(t *
 		if !slices.Contains(manifest.Words[typ].ErrorCodes, "busy") {
 			t.Fatalf("%s does not advertise busy: %v", typ, manifest.Words[typ].ErrorCodes)
 		}
+	}
+	var steerSchema struct {
+		OneOf []json.RawMessage `json:"oneOf"`
+	}
+	if err := json.Unmarshal(manifest.Words[TypeSteer].InputSchema, &steerSchema); err != nil || len(steerSchema.OneOf) != 3 {
+		t.Fatalf("agent.steer schema=%s err=%v", manifest.Words[TypeSteer].InputSchema, err)
 	}
 }
 
@@ -831,22 +838,44 @@ func TestAgentControl35SteerTargetAdmission(t *testing.T) {
 	})
 }
 
-func TestAgentControl36SteerTargetWithoutActiveTurnIsNoOp(t *testing.T) {
-	l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
-	row := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{SourceID: "target", Text: "queued text"}, Bytes: 11, Location: book.Buffered, Scope: l.vault.Mint("target", "target")}
-	l.state.Requests[row.ID], l.state.Buffer, l.state.BufferBytes = row, []book.RequestID{row.ID}, row.Bytes
-	l.freeze("hold", time.Minute)
-	l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"target"}`))
-	if got := sys.terminal("insert"); len(got) != 1 || got[0].fail {
-		t.Fatalf("terminal=%v", got)
+func TestAgentControl36SteerTargetWithoutActiveTurnPromotesAndStarts(t *testing.T) {
+	tests := []struct {
+		name   string
+		ids    []book.RequestID
+		target book.RequestID
+		freeze bool
+		want   []string
+	}{
+		{name: "interrupt stopped", ids: []book.RequestID{"b", "c"}, target: "c", freeze: true, want: []string{"c", "b"}},
+		{name: "idle", ids: []book.RequestID{"b"}, target: "b", want: []string{"b"}},
 	}
-	if len(l.state.Buffer) != 1 || l.state.Buffer[0] != "target" || l.state.Requests["target"] != row || len(rt.controls) != 0 {
-		t.Fatalf("buffer=%v row=%+v controls=%v", l.state.Buffer, l.state.Requests["target"], rt.controls)
-	}
-	l.clearFreeze()
-	l.startNext()
-	if len(rt.starts) != 1 || rt.starts[0].Messages[0].SourceID != "target" {
-		t.Fatalf("starts=%+v", rt.starts)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+			for _, id := range test.ids {
+				row := &book.Request{ID: id, Sender: "caller", Input: runtimeproto.Input{SourceID: string(id), Text: string(id)}, Bytes: len(id), Location: book.Buffered, Scope: l.vault.Mint(string(id), string(id))}
+				l.state.Requests[id] = row
+				l.state.Buffer = append(l.state.Buffer, id)
+				l.state.BufferBytes += row.Bytes
+			}
+			if test.freeze {
+				l.freezeInterrupt("stop")
+			}
+			l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"`+string(test.target)+`"}`))
+			if got := sys.terminal("insert"); len(got) != 1 || got[0].fail {
+				t.Fatalf("terminal=%v", got)
+			}
+			if l.frozen(l.now()) || len(rt.controls) != 0 || len(rt.starts) != 1 || l.state.BufferBytes != 0 {
+				t.Fatalf("frozen=%v starts=%+v controls=%v bytes=%d", l.frozen(l.now()), rt.starts, rt.controls, l.state.BufferBytes)
+			}
+			got := make([]string, 0, len(rt.starts[0].Messages))
+			for _, input := range rt.starts[0].Messages {
+				got = append(got, input.SourceID)
+			}
+			if !slices.Equal(got, test.want) || l.state.Turn.Owner != test.ids[0] {
+				t.Fatalf("messages=%v want=%v turn=%+v", got, test.want, l.state.Turn)
+			}
+		})
 	}
 }
 
@@ -897,6 +926,132 @@ func TestAgentControl37SteerTargetOwnershipAndOriginalIndexReturn(t *testing.T) 
 			}
 			if row := l.state.Requests["target"]; row == nil || row.Location != book.Buffered || len(sys.terminal("target")) != 0 {
 				t.Fatalf("target=%+v terminal=%v", row, sys.terminal("target"))
+			}
+		})
+	}
+}
+
+func TestAgentControl38SteerAllActiveTurnSettlesBatchAndPreservesOthers(t *testing.T) {
+	seed := func(t *testing.T) (*agentLoop, *v7Sys, *captureRuntime) {
+		t.Helper()
+		l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		v7Activate(t, l, "owner")
+		l.handleIntake(v7Request("own-1", TypeAsk, "caller", `{"text":"one"}`))
+		l.handleIntake(v7Request("other", TypeAsk, "other", `{"text":"leave me"}`))
+		l.handleIntake(v7Request("own-2", TypeAsk, "caller", `{"text":"two"}`))
+		l.handleIntake(v7Request("insert-all", TypeSteer, "caller", `{"all":true}`))
+		if got := sys.terminal("insert-all"); len(got) != 1 || got[0].fail {
+			t.Fatalf("terminal=%v", got)
+		}
+		if !slices.Equal(l.state.Buffer, []book.RequestID{"other"}) || len(rt.controls) != 1 || rt.controls[0].Content == nil || rt.controls[0].Content.Text != "one\n\ntwo" {
+			t.Fatalf("buffer=%v controls=%+v", l.state.Buffer, rt.controls)
+		}
+		return l, sys, rt
+	}
+
+	t.Run("accepted", func(t *testing.T) {
+		l, sys, _ := seed(t)
+		a := l.state.Running
+		l.onControlDone(runtimeEvent{kind: evControlDone, op: a.Op, turnID: a.Target, verdict: runtimeproto.ControlAccepted})
+		merged := sys.terminal("own-1")
+		preempted := sys.terminal("owner")
+		if len(merged) != 1 || merged[0].value.(map[string]any)["merged_into"] != book.RequestID("own-2") ||
+			len(preempted) != 1 || preempted[0].value.(map[string]any)["preempted_by"] != book.RequestID("own-2") ||
+			l.state.Turn.Owner != "own-2" || l.state.Requests["own-2"].Location != book.Workspace || l.state.Requests["other"].Location != book.Buffered {
+			t.Fatalf("merged=%v preempted=%v turn=%+v buffer=%v", merged, preempted, l.state.Turn, l.state.Buffer)
+		}
+	})
+
+	for _, verdict := range []runtimeproto.ControlVerdict{runtimeproto.ControlRejected, runtimeproto.ControlTimeout} {
+		t.Run(string(verdict)+" returns every item", func(t *testing.T) {
+			l, _, _ := seed(t)
+			a := l.state.Running
+			l.onControlDone(runtimeEvent{kind: evControlDone, op: a.Op, turnID: a.Target, verdict: verdict})
+			want := []book.RequestID{"own-1", "other", "own-2"}
+			if !slices.Equal(l.state.Buffer, want) {
+				t.Fatalf("buffer=%v want=%v", l.state.Buffer, want)
+			}
+			for _, id := range []book.RequestID{"own-1", "own-2"} {
+				if row := l.state.Requests[id]; row == nil || row.Location != book.Buffered {
+					t.Fatalf("%s=%+v", id, row)
+				}
+			}
+		})
+	}
+}
+
+func TestAgentControl39SteerAllWithoutTurnStartsOwnBatchOrNoOps(t *testing.T) {
+	t.Run("stopped", func(t *testing.T) {
+		l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		l.state.Pending = &book.Action{Kind: book.ActionCleanup}
+		l.handleIntake(v7Request("other", TypeAsk, "other", `{"text":"other"}`))
+		l.handleIntake(v7Request("own-1", TypeAsk, "caller", `{"text":"one"}`))
+		l.handleIntake(v7Request("own-2", TypeAsk, "caller", `{"text":"two"}`))
+		l.state.Pending = nil
+		l.freezeInterrupt("stop")
+		l.handleIntake(v7Request("insert-all", TypeSteer, "caller", `{"all":true}`))
+		if got := sys.terminal("insert-all"); len(got) != 1 || got[0].fail || l.frozen(l.now()) {
+			t.Fatalf("terminal=%v frozen=%v", got, l.frozen(l.now()))
+		}
+		if len(rt.starts) != 1 || len(rt.starts[0].Messages) != 2 || rt.starts[0].Messages[0].SourceID != "own-1" || rt.starts[0].Messages[1].SourceID != "own-2" || l.state.Turn.Owner != "own-2" || !slices.Equal(l.state.Buffer, []book.RequestID{"other"}) {
+			t.Fatalf("starts=%+v turn=%+v buffer=%v", rt.starts, l.state.Turn, l.state.Buffer)
+		}
+	})
+
+	t.Run("empty own buffer", func(t *testing.T) {
+		l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		l.freezeInterrupt("stop")
+		l.handleIntake(v7Request("insert-all", TypeSteer, "caller", `{"all":true}`))
+		if got := sys.terminal("insert-all"); len(got) != 1 || got[0].fail || !l.frozen(l.now()) || len(rt.starts) != 0 || len(rt.controls) != 0 {
+			t.Fatalf("terminal=%v frozen=%v starts=%v controls=%v", got, l.frozen(l.now()), rt.starts, rt.controls)
+		}
+	})
+}
+
+func TestAgentControl40HoldRestoresInterruptFreeze(t *testing.T) {
+	t.Run("unhold after replace", func(t *testing.T) {
+		l, sys, rt := newV7Loop(t, nil)
+		l.state.Pending = &book.Action{Kind: book.ActionCleanup}
+		l.handleIntake(v7Request("target", TypeAsk, "caller", `{"text":"old"}`))
+		l.state.Pending = nil
+		l.handleIntake(v7Request("stop", TypeInterrupt, "caller", `{}`))
+		l.handleIntake(v7Request("hold-1", TypeHold, "caller", `{"target":"target"}`))
+		l.handleIntake(v7Request("hold-2", TypeHold, "caller", `{"target":"target"}`))
+		l.handleIntake(v7Request("replacement", TypeReplace, "caller", `{"target":"target","old_text":"old","new_text":"new"}`))
+		if !l.restoreInterrupt || l.freezeSource != freezeSourceHold || len(rt.starts) != 0 {
+			t.Fatalf("before unhold restore=%v source=%v starts=%v", l.restoreInterrupt, l.freezeSource, rt.starts)
+		}
+		l.handleIntake(v7Request("unhold", TypeUnhold, "caller", `{}`))
+		if got := sys.terminal("unhold"); len(got) != 1 || got[0].fail || !l.frozen(l.now()) || l.freezeSource != freezeSourceInterrupt || l.heldBy != "stop" || l.restoreInterrupt || len(rt.starts) != 0 {
+			t.Fatalf("terminal=%v frozen=%v source=%v heldBy=%q restore=%v starts=%v", got, l.frozen(l.now()), l.freezeSource, l.heldBy, l.restoreInterrupt, rt.starts)
+		}
+		l.handleIntake(v7Request("resume", TypeAsk, "caller", `{"text":"continue"}`))
+		if l.frozen(l.now()) || l.freezeSource != freezeSourceNone || len(rt.starts) != 1 || len(rt.starts[0].Messages) != 2 {
+			t.Fatalf("frozen=%v source=%v starts=%+v", l.frozen(l.now()), l.freezeSource, rt.starts)
+		}
+	})
+
+	t.Run("expiry", func(t *testing.T) {
+		l, _, rt := newV7Loop(t, nil)
+		now := time.Unix(100, 0)
+		l.nowFn = func() time.Time { return now }
+		l.handleIntake(v7Request("stop", TypeInterrupt, "caller", `{}`))
+		l.handleIntake(v7Request("hold", TypeHold, "caller", `{"duration_ms":1000}`))
+		now = now.Add(2 * time.Second)
+		l.handleHoldExpired(json.RawMessage(`{"hold_id":"hold"}`))
+		if !l.frozen(now) || l.freezeSource != freezeSourceInterrupt || l.heldBy != "stop" || l.restoreInterrupt || len(rt.starts) != 0 {
+			t.Fatalf("frozen=%v source=%v heldBy=%q restore=%v starts=%v", l.frozen(now), l.freezeSource, l.heldBy, l.restoreInterrupt, rt.starts)
+		}
+	})
+}
+
+func TestAgentControl41SteerAllPayloadValidation(t *testing.T) {
+	for _, payload := range []string{`{"all":false}`, `{"all":true,"target":"target"}`} {
+		t.Run(payload, func(t *testing.T) {
+			l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+			l.handleIntake(v7Request("insert", TypeSteer, "caller", payload))
+			if got := sys.terminal("insert"); len(got) != 1 || got[0].code != "invalid_args" {
+				t.Fatalf("terminal=%v", got)
 			}
 		})
 	}
