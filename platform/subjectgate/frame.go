@@ -430,9 +430,32 @@ type FeedPayload struct {
 // Boot names the server world this connection attached to (the c0 genesis
 // identity): it changes on reinstall, never on restart, and lets clients
 // invalidate caches from a previous world instead of replaying ghosts.
+//
+// Memberships is the attach-time answer to "which channels am I a member of,
+// as which actor" — read from the gateway's资格账 after its first synchronous
+// reconcile, not computed for the receipt. The gateway maintains that ledger
+// for the whole session anyway (it routes the feed by it); the receipt merely
+// reports it, so a client knows its own membership the moment it connects
+// instead of reverse-inferring it from feed side effects. Later membership
+// changes reach the client the way they always did: a new channel's frames
+// arrive on the feed, a revoked channel stops serving.
+//
+// MembershipsComplete separates "confirmed full list" from "this round's
+// resolve failed": false means nothing was confirmed (whole-snapshot or
+// per-channel resolver failure) and the list must not be read as "you are in
+// nothing" — a client keeps its prior knowledge and lets the feed catch up.
 type AttachReceipt struct {
-	ContractVersion string `json:"contract_version"`
-	Boot            string `json:"boot,omitempty"`
+	ContractVersion     string            `json:"contract_version"`
+	Boot                string            `json:"boot,omitempty"`
+	Memberships         []MembershipEntry `json:"memberships"`
+	MembershipsComplete bool              `json:"memberships_complete"`
+}
+
+// MembershipEntry names one channel the attached principal holds membership
+// in, and the actor identity that membership binds them to there.
+type MembershipEntry struct {
+	ChannelID string `json:"channel_id"`
+	ActorID   string `json:"actor_id"`
 }
 
 // SubmitReceipt acks a write: it says the write was accepted, and names WHAT was

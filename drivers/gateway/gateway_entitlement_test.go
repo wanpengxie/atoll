@@ -282,6 +282,42 @@ func TestStartFeedSyncEligibility(t *testing.T) {
 	g.Close()
 }
 
+// TestMembershipSnapshotReportsEligibility: MembershipSnapshot is the attach
+// receipt's read of the资格账 — after the synchronous first reconcile it reports
+// the confirmed membership routes; complete=false whenever the round confirmed
+// less than the full set (per-channel failure or whole-snapshot failure), so a
+// client never reads absence as "confirmed not a member".
+func TestMembershipSnapshotReportsEligibility(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "pat"
+	h, id := openHome(t, channel.ID("c"), principal)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(principal, nil)
+	defer g.Close()
+
+	if routes, complete := s.MembershipSnapshot(); complete || len(routes) != 0 {
+		t.Fatalf("before the first reconcile nothing is confirmed: routes=%d complete=%v", len(routes), complete)
+	}
+	if !s.PrimeFeed() {
+		t.Fatal("PrimeFeed refused")
+	}
+	routes, complete := s.MembershipSnapshot()
+	if !complete || len(routes) != 1 || routes[0].Channel != "c" || routes[0].SubjectID != id {
+		t.Fatalf("after PrimeFeed the snapshot must report the confirmed membership: routes=%v complete=%v", routes, complete)
+	}
+
+	// A per-channel failure taints completeness (absence ≠ confirmed non-member).
+	// Second reconcile still before LaunchFeed — subs are pump-owned once it runs.
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, []channel.ID{"flaky"}, nil)
+	s.reconcile()
+	if _, complete := s.MembershipSnapshot(); complete {
+		t.Fatal("a per-channel resolver failure must mark the snapshot incomplete")
+	}
+	s.LaunchFeed()
+}
+
 func TestNewRequiresResolver(t *testing.T) {
 	if _, err := New(Config{Resolver: newResolver()}); err == nil {
 		// Resolver is the only required space-side seam; routing is evaluated by

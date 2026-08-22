@@ -64,11 +64,15 @@ type controlResult struct {
 // whole-snapshot failure (no routes/failed are trustworthy at all) — any channel_id not
 // already a known live route maps to unavailable rather than forbidden, because a
 // forbidden verdict asserts confirmed absence and we cannot currently confirm anything.
+// resolved = at least one reconcile has published this state. Attach seeds an
+// empty UNRESOLVED ledger; MembershipSnapshot must never present that seed as
+// "confirmed member of nothing" (empty + complete), so completeness requires it.
 type eligState struct {
 	routes    map[channel.ID]Route
 	paused    map[channel.ID]struct{}
 	failed    map[channel.ID]struct{}
 	globalErr bool
+	resolved  bool
 }
 
 // Session is one attached connection's handle into the gateway (spec §3.2 终形):
@@ -143,13 +147,31 @@ func (g *Gateway) Attach(principal string, since map[channel.ID]int64) (*Session
 // are pump-owned thereafter (this reconcile completes before the pump goroutine starts,
 // so there is no concurrent access).
 func (s *Session) StartFeed() {
-	if !s.beginFeed() {
-		s.Close()
+	if !s.PrimeFeed() {
 		return
 	}
+	s.LaunchFeed()
+}
+
+// PrimeFeed is the synchronous half of StartFeed: pump registration + the first
+// eligibility reconcile, WITHOUT spawning the pump. Split out so a connector can
+// read the资格账 (MembershipSnapshot) and put the answer into the attach receipt
+// BEFORE any backfill can enter the lane — the pump is the only thing that pushes
+// feed frames, and it does not exist until LaunchFeed. Returns false (and closes
+// the session) if registration is refused.
+func (s *Session) PrimeFeed() bool {
+	if !s.beginFeed() {
+		s.Close()
+		return false
+	}
 	s.reconcile()
-	// Defensively re-check the same latch before spawning. Production resolvers must
-	// honor ctx; even a faulty late return cannot launch a post-Close goroutine.
+	return true
+}
+
+// LaunchFeed spawns the async pump after PrimeFeed. Defensively re-checks the
+// closed latch before spawning: production resolvers must honor ctx; even a
+// faulty late return cannot launch a post-Close goroutine.
+func (s *Session) LaunchFeed() {
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
@@ -158,6 +180,23 @@ func (s *Session) StartFeed() {
 		return
 	}
 	go s.runFeed()
+}
+
+// MembershipSnapshot reports the资格账 as of the last published reconcile: the
+// confirmed membership routes, plus whether that round confirmed the FULL set
+// (complete=false on a whole-snapshot resolver failure or any per-channel
+// failure — then absence from routes means "unconfirmed", not "not a member").
+// Read-only off the atomic elig pointer; safe from any goroutine.
+func (s *Session) MembershipSnapshot() (routes []Route, complete bool) {
+	st := s.elig.Load()
+	if st == nil {
+		return nil, false
+	}
+	routes = make([]Route, 0, len(st.routes))
+	for _, r := range st.routes {
+		routes = append(routes, r)
+	}
+	return routes, st.resolved && !st.globalErr && len(st.failed) == 0
 }
 
 // beginFeed is the SESSION half of泵登记 (统一会话闸, 五轮 P1-3): closed, 泵登记, and
@@ -653,7 +692,7 @@ func (s *Session) publishElig(globalErr bool, failedThisRound map[channel.ID]str
 		}
 		routes[ch] = sub.route
 	}
-	s.elig.Store(&eligState{routes: routes, paused: paused, failed: failedThisRound, globalErr: globalErr})
+	s.elig.Store(&eligState{routes: routes, paused: paused, failed: failedThisRound, globalErr: globalErr, resolved: true})
 }
 
 // pumpChannel drains up to feedBatch rows after ch's cursor into the lane as feed

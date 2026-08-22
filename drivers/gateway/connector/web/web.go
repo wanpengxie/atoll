@@ -8,6 +8,8 @@ package web
 import (
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -116,11 +118,28 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		_ = ws.SetReadDeadline(time.Now())
 	}()
 
-	// Attach receipt carries version discovery and is sent before feed backfill.
-	// Sent before the feed backfill so it is not interleaved behind it.
-	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{ContractVersion: c.contractVersion, Boot: c.boot})
+	// Attach receipt carries version discovery + the membership answer, and is
+	// sent before feed backfill. Ordering: PrimeFeed converges the资格账
+	// synchronously (no pump yet → nothing can enter the lane), the receipt reads
+	// that ledger and goes onto the lane first, THEN LaunchFeed spawns the pump
+	// that pushes backfill behind it.
+	if !sess.PrimeFeed() {
+		return
+	}
+	routes, complete := sess.MembershipSnapshot()
+	entries := make([]subjectgate.MembershipEntry, 0, len(routes))
+	for _, route := range routes {
+		entries = append(entries, subjectgate.MembershipEntry{ChannelID: string(route.Channel), ActorID: string(route.SubjectID)})
+	}
+	slices.SortFunc(entries, func(a, b subjectgate.MembershipEntry) int { return strings.Compare(a.ChannelID, b.ChannelID) })
+	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{
+		ContractVersion:     c.contractVersion,
+		Boot:                c.boot,
+		Memberships:         entries,
+		MembershipsComplete: complete,
+	})
 	sess.Send(receipt)
-	sess.StartFeed()
+	sess.LaunchFeed()
 
 	// Reader loop: the SINGLE ws reader. detach is整删 (no client-visible unbind);
 	// every business frame names its own channel_id and returns a receipt-or-error.
