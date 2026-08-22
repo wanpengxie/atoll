@@ -43,6 +43,10 @@ type Config struct {
 	DaemonHost      *daemonhost.Host
 	DataPlane       dataplane.Redeemer
 	ContractVersion string
+	// Boot is the server world identity (c0 genesis): changes on reinstall,
+	// never on restart. Carried on the attach receipt for client-side cache
+	// invalidation.
+	Boot string
 	Obs             ObsPlane
 	// Web is the browser UI, served from this same origin because the UI
 	// addresses the node over relative paths. Nil serves no UI; the entrance
@@ -61,7 +65,7 @@ type Portal struct {
 }
 
 func New(cfg Config) *Portal {
-	p := &Portal{cfg: cfg, ws: web.New(cfg.Gateway, cfg.ContractVersion), mux: http.NewServeMux()}
+	p := &Portal{cfg: cfg, ws: web.New(cfg.Gateway, cfg.ContractVersion, cfg.Boot), mux: http.NewServeMux()}
 	if cfg.Web != nil {
 		p.ui = http.FileServerFS(cfg.Web)
 	}

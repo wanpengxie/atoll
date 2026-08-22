@@ -427,8 +427,12 @@ type FeedPayload struct {
 
 // AttachReceipt is the report-in ack. ContractVersion is the websocket side of
 // version discovery; the transport envelope version remains FrameVersion.
+// Boot names the server world this connection attached to (the c0 genesis
+// identity): it changes on reinstall, never on restart, and lets clients
+// invalidate caches from a previous world instead of replaying ghosts.
 type AttachReceipt struct {
 	ContractVersion string `json:"contract_version"`
+	Boot            string `json:"boot,omitempty"`
 }
 
 // SubmitReceipt acks a write: it says the write was accepted, and names WHAT was

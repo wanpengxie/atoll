@@ -33,17 +33,19 @@ const (
 type Connector struct {
 	gw              *gateway.Gateway
 	contractVersion string
+	boot            string
 	upgrader        websocket.Upgrader
 }
 
-// New builds a web connector over gw. The contract version is supplied by the
-// assembly root.
-func New(gw *gateway.Gateway, contractVersion string) *Connector {
+// New builds a web connector over gw. The contract version and the server
+// world identity (boot) are supplied by the assembly root; boot may be empty
+// for hosts without an install identity.
+func New(gw *gateway.Gateway, contractVersion, boot string) *Connector {
 	if contractVersion == "" {
 		panic("web connector: contract version is required")
 	}
 	return &Connector{
-		gw: gw, contractVersion: contractVersion,
+		gw: gw, contractVersion: contractVersion, boot: boot,
 		upgrader: websocket.Upgrader{
 			// Same-origin ws (cross-site hijacking defense): /ws authenticates by
 			// cookie, so an absent Origin (non-browser client) is allowed but a
@@ -116,7 +118,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 
 	// Attach receipt carries version discovery and is sent before feed backfill.
 	// Sent before the feed backfill so it is not interleaved behind it.
-	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{ContractVersion: c.contractVersion})
+	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{ContractVersion: c.contractVersion, Boot: c.boot})
 	sess.Send(receipt)
 	sess.StartFeed()
 

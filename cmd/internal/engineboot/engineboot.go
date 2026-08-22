@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -73,7 +74,9 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if installed.Installed && installed.RootPassword != "" {
 		logger.Info("atoll installed", "root_password", installed.RootPassword)
 	}
-	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.NewSessionStore()}
+	// Sessions live beside the install data: restart keeps every login,
+	// reinstall (directory wipe) is what revokes them.
+	e := &Engine{cfg: cfg, logger: logger, ready: make(chan struct{}), sessions: gateway.OpenSessionStore(filepath.Join(filepath.Dir(cfg.ChannelDBDir), "sessions.json"))}
 	var host *channelhost.ChannelHost
 	var gatewayEdge *gateway.Gateway
 	e.registry, err = lagoon.OpenWith(installed.RegistryDBPath, func(change lagoon.Change) {
@@ -187,7 +190,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		Daemons:  daemonObsAdapter{host: e.daemonHost},
 		Now:      func() int64 { return time.Now().UnixMilli() },
 	})
-	p := portal.New(portal.Config{Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion, Web: web.Assets()})
+	p := portal.New(portal.Config{Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion, Boot: fmt.Sprintf("%s@%d", installed.C0Genesis.ChannelID, installed.C0Genesis.CreatedAt), Web: web.Assets()})
 	e.handler = p
 	e.gateway.Start()
 	if err := e.host.StartConvergence(); err != nil {
