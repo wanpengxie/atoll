@@ -173,8 +173,8 @@ check-data-plane-scope:
 # 后台只会让排查从"看日志"变成"猜"。
 #
 # 每次都清空：开发实例恒是一次性的，账本形一改旧库就没意义，留着只会让人
-# 对着上一次的残留调试。于是每次都是首次安装，密码就定死 root:root。
-# 这条路恒不用于任何真实数据。
+# 对着上一次的残留调试。于是每次都是首次安装，密码由启动那条命令自己给
+# （示例里用 root）。这条路恒不用于任何真实数据。
 #
 # web UI 跟 API 同端口（编进二进制）：跑过 make all/make web 才是真界面，
 # 否则是张占位页；只改前端时用 atoll-web 的 npm run dev 连这个 API。
@@ -184,9 +184,8 @@ DEV_ADDR ?= :8832
 
 dev: build-go
 	@rm -rf "$(DEV_HOME)"
-	@echo "[dev] 已清空 $(DEV_HOME)，二进制在 bin/。自己起，日志就在你眼前："
+	@echo "[dev] 已清空 $(DEV_HOME)，二进制在 bin/。启动："
 	@echo "      ATOLL_ROOT_PASSWORD=root bin/atoll up --dir $(DEV_HOME) --addr $(DEV_ADDR)"
-	@echo "      账号 root 密码 root（每次 make dev 都是全新安装）"
 
 # ----------------------------------------------------------------------------
 # clean — 删 build 产物（不动用户数据）
