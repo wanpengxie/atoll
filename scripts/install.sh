@@ -25,7 +25,38 @@
 #   3. password    — root password (typed twice, or generated)
 #   4. home / addr / confirm
 #   5. install     — writes <home>/atoll.env + <home>/server/root-password, runs `atoll up`
+# 这是 bash 脚本，但用户十有八九会 `curl … | zsh`（macOS 默认壳）或 `| sh`。
+# zsh 的 `read -p` 是"从 coprocess 读"而不是"打提示"，走到第一处提问就报
+# `no coprocess` 退出，向导整个消失。装机脚本不能指望用户记得管给哪个壳：
+# 不在 bash 里就自己搬进 bash 重跑。管道模式下脚本正从 stdin 流入、没有
+# 文件可以 re-exec——把剩余部分落到临时文件再交给 bash（unlink 由 bash 侧
+# 做，打开中的文件删掉是安全的）。这段守卫必须是 POSIX/zsh/dash 都能跑的
+# 语法，其余部分才允许 bash 专有写法。
+if [ -z "${BASH_VERSION:-}" ]; then
+  command -v bash >/dev/null 2>&1 || { echo "atoll installer 需要 bash，请先安装 bash" >&2; exit 1; }
+  if [ -f "$0" ]; then
+    exec bash "$0" "$@"
+  fi
+  _atoll_self=$(mktemp) || exit 1
+  cat > "$_atoll_self" 2>/dev/null || true
+  # slurp 只有在壳逐字节读 stdin（bash/zsh 都是）时才拿得到完整的剩余脚本。
+  # dash 这类壳按块预读，走到这里时后文已被吞掉一截——用守卫后紧跟的哨兵行
+  # 校验临时文件是不是恰好从断点接上；缺损就从发布地址重取完整脚本。
+  if [ "$(head -n1 "$_atoll_self" 2>/dev/null)" = "# ATOLL_RESUME_MARK" ]; then
+    ATOLL_REEXEC_TMP="$_atoll_self" exec bash "$_atoll_self" "$@"
+  fi
+  _atoll_url="${ATOLL_INSTALL_URL:-https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh}"
+  echo "  ! 当前 shell 预读了管道里的脚本，就地接管不完整；从 $_atoll_url 重新取一份交给 bash" >&2
+  if curl -fsSL --max-time 60 "$_atoll_url" -o "$_atoll_self" 2>/dev/null; then
+    ATOLL_REEXEC_TMP="$_atoll_self" exec bash "$_atoll_self" "$@"
+  fi
+  rm -f "$_atoll_self"
+  echo "atoll installer: 取不到脚本；请改用  curl -f#SL $_atoll_url | bash" >&2
+  exit 1
+fi
+# ATOLL_RESUME_MARK
 set -euo pipefail
+[ -n "${ATOLL_REEXEC_TMP:-}" ] && rm -f "$ATOLL_REEXEC_TMP"
 
 REPO_SLUG="${ATOLL_REPO:-wanpengxie/atoll}"
 
@@ -98,10 +129,14 @@ download_release() {
 
   ver="${ATOLL_VERSION:-}"
   if [ -z "$ver" ]; then
-    echo "  … 查询最新发行版（api.github.com）"
-    ver=$(curl -fsSL --max-time 30 "https://api.github.com/repos/$REPO_SLUG/releases/latest" \
-          | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-    [ -n "$ver" ] || { bad "查不到最新发行版；用 ATOLL_VERSION=<tag> 指定一个"; exit 1; }
+    # 版本号从 github.com 的 releases/latest 重定向里拿，跟下载包同一个域——
+    # 能下到包就能查到版本。恒不走 api.github.com：它无凭据限流 60 次/小时/IP，
+    # 且在部分网络环境（如国内）经常直接不通，而包下载是通的。
+    echo "  … 查询最新发行版（github.com）"
+    ver=$(curl -fsSLI --max-time 30 -o /dev/null -w '%{url_effective}' \
+          "https://github.com/$REPO_SLUG/releases/latest" 2>/dev/null || true)
+    ver="${ver##*/}"
+    case "$ver" in ""|latest) bad "查不到最新发行版；用 ATOLL_VERSION=<tag> 指定一个"; exit 1 ;; esac
   fi
   name="atoll_${ver}_${os}_${arch}"
   base="https://github.com/$REPO_SLUG/releases/download/$ver"
