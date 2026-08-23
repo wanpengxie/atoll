@@ -369,24 +369,26 @@ func TestDynamicToolCallNarrationIsNotRepublished(t *testing.T) {
 	}
 }
 
-// TestCompletedIntermediateItemsBecomeProgressNotes: completed reasoning/plan
-// items are filled into the provider-independent note vocabulary; started
-// items and userMessage stay pure liveness, and the final agentMessage is the
-// answer itself, never a note.
-func TestCompletedIntermediateItemsBecomeProgressNotes(t *testing.T) {
+// TestIntermediateItemsBecomeProgressNotesByPhase: codex's own wire carries the
+// distinction — a reasoning item is a thinking interval with no text to give
+// (OpenAI never sends the plaintext), commentary agentMessages are the visible
+// running narration, and only final_answer is the answer itself.
+func TestIntermediateItemsBecomeProgressNotesByPhase(t *testing.T) {
 	h := newCodexHarness(t, driverproto.TurnOptions{}, nil)
 	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 5, Messages: []driverproto.DriverMessage{{Text: "hi"}}})
 	request := h.input()
 	h.respond(request, map[string]any{})
 	h.notify("turn/started", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-stage", "status": "inProgress"}})
 	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnStarted); return ok })
-	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "r1", "type": "reasoning"}})
-	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "r1", "type": "reasoning", "text": "查了一下端口占用"}})
+	// reasoning：wire 上恒无文本（实测 summary/content 全空），started 即思考区间
+	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "r1", "type": "reasoning", "summary": []any{}, "content": []any{}}})
+	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "r1", "type": "reasoning", "summary": []any{}, "content": []any{}}})
+	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "c1", "type": "agentMessage", "phase": "commentary", "text": "我先看一下端口占用"}})
 	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "p1", "type": "plan", "text": "1. 先看日志"}})
-	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "m1", "type": "agentMessage", "text": "final answer"}})
+	h.notify("item/completed", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "m1", "type": "agentMessage", "phase": "final_answer", "text": "final answer"}})
 	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "u1", "type": "userMessage"}})
 	h.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-stage", "status": "completed"}})
-	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok })
+	ended := h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok })
 	h.sink.mu.Lock()
 	var notes []driverproto.ProgressNote
 	for _, event := range h.sink.events {
@@ -395,7 +397,14 @@ func TestCompletedIntermediateItemsBecomeProgressNotes(t *testing.T) {
 		}
 	}
 	h.sink.mu.Unlock()
-	if len(notes) != 2 || notes[0].Kind != driverproto.NoteThinking || notes[0].Text != "查了一下端口占用" || notes[1].Kind != driverproto.NotePlan || notes[1].Text != "1. 先看日志" {
-		t.Fatalf("want reasoning+plan notes, got %#v", notes)
+	if len(notes) != 3 ||
+		notes[0].Kind != driverproto.NoteThinking || notes[0].Text != "" ||
+		notes[1].Kind != driverproto.NoteText || notes[1].Text != "我先看一下端口占用" ||
+		notes[2].Kind != driverproto.NotePlan || notes[2].Text != "1. 先看日志" {
+		t.Fatalf("want thinking(empty)+commentary+plan notes, got %#v", notes)
+	}
+	// commentary 恒不进终稿：回合在旁白之后中断时，用户不能收到一句旁白当回答。
+	if final := ended.(driverproto.TurnEnded).FinalText; final != "final answer" {
+		t.Fatalf("commentary leaked into the answer: %q", final)
 	}
 }

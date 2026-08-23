@@ -39,6 +39,7 @@ type itemWire struct {
 	SavedPath         string            `json:"savedPath"`
 	Result            json.RawMessage   `json:"result"`
 	Prompt            string            `json:"prompt"`
+	Phase             string            `json:"phase"`
 	SenderThreadID    string            `json:"senderThreadId"`
 	ReceiverThreadIDs []string          `json:"receiverThreadIds"`
 }
@@ -136,6 +137,17 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 			return
 		}
 		if n.Item.Type == "agentMessage" {
+			// agentMessage 分两相：commentary 是干活途中的旁白（明文中间产物），
+			// final_answer 才是终稿。不分相会把旁白写进终稿——回合若在旁白之后
+			// 中断，用户收到的"回答"就是一句旁白。
+			if n.Item.Phase == "commentary" {
+				if method == "item/completed" && strings.TrimSpace(n.Item.Text) != "" {
+					w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteText, Text: boundedNoteText(n.Item.Text)})
+					return
+				}
+				w.publish(driverproto.Activity{Target: target})
+				return
+			}
 			if method == "item/completed" && strings.TrimSpace(n.Item.Text) != "" {
 				w.mu.Lock()
 				w.final[target.Native] = n.Item.Text
@@ -144,15 +156,21 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 			w.publish(driverproto.Activity{Target: target})
 			return
 		}
-		if n.Item.Type == "reasoning" || n.Item.Type == "plan" {
-			// 完成了的中间产物按统一词表填充成 ProgressNote；未完成（started）
-			// 只是活性。delta 碎片恒不在此列（见 default 分支）。
+		if n.Item.Type == "reasoning" {
+			// 实测：reasoning 在 wire 上恒是 summary:[] content:[]（xhigh 也
+			// 一样，不退订 delta 也一样）——OpenAI 不下发思考明文。但
+			// started→completed 是真实的思考区间，发一条无文本的 thinking
+			// note，让前端有据可依地显示"思考中"，而不是自己编。
+			if method == "item/started" {
+				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking})
+				return
+			}
+			w.publish(driverproto.Activity{Target: target})
+			return
+		}
+		if n.Item.Type == "plan" {
 			if method == "item/completed" && strings.TrimSpace(n.Item.Text) != "" {
-				kind := driverproto.NoteThinking
-				if n.Item.Type == "plan" {
-					kind = driverproto.NotePlan
-				}
-				w.publish(driverproto.ProgressNote{Target: target, Kind: kind, Text: boundedNoteText(n.Item.Text)})
+				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NotePlan, Text: boundedNoteText(n.Item.Text)})
 				return
 			}
 			w.publish(driverproto.Activity{Target: target})

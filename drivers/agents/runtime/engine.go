@@ -99,6 +99,7 @@ type turnState struct {
 	control           *controlState
 	callbacks         map[string]*callbackRow
 	noteCount         int
+	lastNote          string
 }
 
 type timerKind uint8
@@ -613,14 +614,17 @@ func (e *engine) note(x driverproto.ProgressNote) {
 		return
 	}
 	e.resetWatchdog()
-	if e.turn == nil || e.turn.terminal || e.turn.id == "" || x.Text == "" {
+	if e.turn == nil || e.turn.terminal || e.turn.id == "" || x.Kind == "" {
 		return
 	}
-	// note 是已完成中间产物的摘要，逐条上报不合并；64 条/turn 是防疯转的
-	// 兜底限额，正常回合远到不了。
-	if e.turn.noteCount >= 64 {
+	// 无文本的 note 是合法的（codex 的思考区间就没有文本可给），但连续同样
+	// 的读数没有信息量——与上一条完全相同则丢。note 本身逐条上报不合并；
+	// 64 条/turn 是防疯转的兜底限额，正常回合远到不了。
+	key := x.Kind + "\x00" + x.Text
+	if key == e.turn.lastNote || e.turn.noteCount >= 64 {
 		return
 	}
+	e.turn.lastNote = key
 	e.turn.noteCount++
 	e.publish(publishProgress{turn: e.turn.id, event: runtimeproto.ProgressEvent{Kind: x.Kind, Text: x.Text}})
 }

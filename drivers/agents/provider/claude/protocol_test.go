@@ -563,15 +563,15 @@ func TestHostServedToolNarrationIsNotRepublished(t *testing.T) {
 }
 
 // TestAssistantBlocksBecomeProgressNotes: arriving thinking/text blocks are
-// completed intermediate artifacts — filled into the provider-independent note
-// vocabulary with their (redacted, bounded) content.
+// intermediate artifacts, published as they come. The answer of record is the
+// result frame; the progress trail is just the trail.
 func TestAssistantBlocksBecomeProgressNotes(t *testing.T) {
 	h, _, _ := activeHarness(t)
 	h.proc.emit(t, map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"content": []any{
 		map[string]any{"type": "thinking", "thinking": "hmm"},
 	}}})
 	h.proc.emit(t, map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"content": []any{
-		map[string]any{"type": "text", "text": "draft answer"},
+		map[string]any{"type": "text", "text": "让我先查一下"},
 	}}})
 	h.wait(func(e driverproto.DriverEvent) bool {
 		n, ok := e.(driverproto.ProgressNote)
@@ -583,7 +583,7 @@ func TestAssistantBlocksBecomeProgressNotes(t *testing.T) {
 			notes = append(notes, n)
 		}
 	}
-	if len(notes) != 2 || notes[0].Kind != driverproto.NoteThinking || notes[0].Text != "hmm" || notes[1].Kind != driverproto.NoteText || notes[1].Text != "draft answer" {
+	if len(notes) != 2 || notes[0].Kind != driverproto.NoteThinking || notes[0].Text != "hmm" || notes[1].Kind != driverproto.NoteText || notes[1].Text != "让我先查一下" {
 		t.Fatalf("want thinking+text notes, got %#v", notes)
 	}
 }

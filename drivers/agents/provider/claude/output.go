@@ -321,16 +321,17 @@ func (w *worker) onAssistant(c *connection, raw json.RawMessage) {
 			}
 			w.publish(driverproto.Tool{Target: target, CallID: block.ID, Phase: driverproto.ToolStarted, Name: block.Name, Status: driverproto.ToolStatusUnknown, Detail: boundedSummary(block.Input)})
 		case "text":
-			// 到达的 text/thinking 块是完成了的中间产物（stream-json 按块整发，
-			// 不是 delta）——按统一词表填充成 ProgressNote；空块只算活性。
-			if strings.TrimSpace(block.Text) != "" {
-				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteText, Text: boundedSummary(strings.TrimSpace(block.Text))})
+			// 到达即发。claude 的最后一个 text 块与终稿同文，于是过程记录里
+			// 会有一条与回答相同的末条——这是有意接受的：过程是过程，
+			// 回答是回答，各自完整，恒不为了去重而猜"这块是不是最后一块"。
+			if s := strings.TrimSpace(block.Text); s != "" {
+				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteText, Text: boundedSummary(s)})
 			} else {
 				w.publish(driverproto.Activity{Target: target})
 			}
 		case "thinking":
-			if strings.TrimSpace(block.Thinking) != "" {
-				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking, Text: boundedSummary(strings.TrimSpace(block.Thinking))})
+			if s := strings.TrimSpace(block.Thinking); s != "" {
+				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking, Text: boundedSummary(s)})
 			} else {
 				w.publish(driverproto.Activity{Target: target})
 			}

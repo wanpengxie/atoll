@@ -203,10 +203,13 @@ func (w *stageWorker) Open(context.Context, driverproto.OpenRequest) {
 func (w *stageWorker) Start(_ context.Context, r driverproto.StartRequest) {
 	target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "turn"}
 	w.host.Events().Publish(driverproto.TurnStarted{Target: target})
-	// note 逐条上报不合并；空文本只是活性；纯心跳恒不产生 progress。
+	// note 逐条上报不合并；无文本的 note 合法（思考区间没有文本可给），但
+	// 与上一条完全相同的读数没有信息量、恒丢；纯心跳恒不产生 progress。
+	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking})
+	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking})
 	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking, Text: "a"})
-	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NotePlan, Text: ""})
 	w.host.Events().Publish(driverproto.Activity{Target: target})
+	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: "", Text: "无 kind 恒不发"})
 	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NotePlan, Text: "b"})
 	w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "done"})
 }
@@ -216,9 +219,9 @@ func (w *stageWorker) Control(_ context.Context, r driverproto.ControlRequest) {
 func (w *stageWorker) Retire()                  { w.once.Do(func() { close(w.reaped) }) }
 func (w *stageWorker) Reaped() <-chan struct{}  { return w.reaped }
 
-// TestProgressNotesFlowThroughInOrder: completed intermediate artifacts pass
-// through one-by-one (no coalescing), empty texts and bare liveness never
-// become progress.
+// TestProgressNotesFlowThroughInOrder: intermediate artifacts pass through
+// one-by-one (no coalescing); a repeat of the previous reading and a kindless
+// note are dropped, bare liveness never becomes progress.
 func TestProgressNotesFlowThroughInOrder(t *testing.T) {
 	factory, _, err := Build(&stageProvider{}, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, Watchdog: time.Second})
 	if err != nil {
@@ -256,8 +259,8 @@ func TestProgressNotesFlowThroughInOrder(t *testing.T) {
 			break
 		}
 	}
-	if len(notes) != 2 || notes[0] != "thinking:a" || notes[1] != "plan:b" {
-		t.Fatalf("want [thinking:a plan:b], got %#v", notes)
+	if len(notes) != 3 || notes[0] != "thinking:" || notes[1] != "thinking:a" || notes[2] != "plan:b" {
+		t.Fatalf("want [thinking: thinking:a plan:b], got %#v", notes)
 	}
 }
 
