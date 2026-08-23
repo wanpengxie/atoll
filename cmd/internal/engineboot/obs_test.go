@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	classregistry "github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -98,7 +99,8 @@ func openObsGoldenRegistry(t *testing.T) *lagoon.Registry {
 	const stamp = int64(1_700_000_000_000)
 	installed, err := boot.Ensure(context.Background(), boot.Config{
 		ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "obs-golden-password",
-		Now: func() time.Time { return time.UnixMilli(stamp) },
+		ResolveClassConfig: classregistry.ResolveDefaultConfig,
+		Now:                func() time.Time { return time.UnixMilli(stamp) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -186,10 +188,13 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The steward decl carries boot.StewardConfig (prompt + model/effort
-			// selections); the golden names the slot and the content is sourced
-			// from boot, not restated here.
-			want := strings.Replace(test.golden, `"default_class":"codex","config":{}`, `"default_class":"codex","config":`+string(boot.StewardConfig("codex")), 1)
+			// The steward decl carries the provider default plus its boot-owned
+			// prompt; the golden names the slot and does not restate the config.
+			stewardConfig, err := boot.StewardConfig("codex", classregistry.ResolveDefaultConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := strings.Replace(test.golden, `"default_class":"codex","config":{}`, `"default_class":"codex","config":`+string(stewardConfig), 1)
 			if string(raw) != want {
 				t.Fatalf("golden mismatch\n got: %s\nwant: %s", raw, want)
 			}

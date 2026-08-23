@@ -41,18 +41,58 @@ type Config struct {
 	Situation driverproto.Situation
 }
 
+type selectionConfig struct {
+	Model  string `json:"model"`
+	Effort string `json:"effort"`
+	// Labels are display metadata for the agent.select manifest schema
+	// (oneOf branch titles); they never enter TurnOptions or persistence.
+	ModelLabel  string `json:"model_label,omitempty"`
+	EffortLabel string `json:"effort_label,omitempty"`
+}
+
 type specConfig struct {
-	Model      string `json:"model,omitempty"`
-	Prompt     string `json:"prompt,omitempty"`
-	Selections []struct {
-		Model  string `json:"model"`
-		Effort string `json:"effort"`
-		// Labels are display metadata for the agent.select manifest schema
-		// (oneOf branch titles); they never enter TurnOptions or persistence.
-		ModelLabel  string `json:"model_label,omitempty"`
-		EffortLabel string `json:"effort_label,omitempty"`
-	} `json:"selections,omitempty"`
-	Default int `json:"default,omitempty"`
+	Model      string            `json:"model,omitempty"`
+	Prompt     string            `json:"prompt,omitempty"`
+	Selections []selectionConfig `json:"selections,omitempty"`
+	Default    int               `json:"default"`
+}
+
+var defaultModels = []struct{ value, label string }{
+	{"haiku", "Haiku"},
+	{"sonnet", "Sonnet"},
+	{"opus", "Opus"},
+	{"fable", "Fable"},
+}
+
+var defaultEfforts = []struct{ value, label string }{
+	{"low", "轻量"},
+	{"medium", "中等"},
+	{"high", "高"},
+	{"xhigh", "超高"},
+	{"max", "极限"},
+}
+
+// DefaultConfig is Claude's class-owned baseline. Declarations may override
+// any top-level field, but boot and ordinary actor creation never duplicate
+// this provider knowledge. Haiku/low is the provider's explicit startup
+// default; Model also covers the deliberate no-selections/fixed-model mode.
+// Index zero deliberately preserves the pre-migration boot behaviour and is
+// safe when an instance replaces selections without spelling another index.
+func DefaultConfig() json.RawMessage {
+	spec := specConfig{Model: "haiku"}
+	for _, model := range defaultModels {
+		for _, effort := range defaultEfforts {
+			spec.Selections = append(spec.Selections, selectionConfig{
+				Model: model.value, ModelLabel: model.label,
+				Effort: effort.value, EffortLabel: effort.label,
+			})
+		}
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		panic("claude: marshal default config: " + err.Error())
+	}
+	return raw
 }
 
 func (c specConfig) selections() []driverproto.TurnOptions {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform/boot"
@@ -16,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/registry"
 	_ "modernc.org/sqlite"
 )
 
@@ -65,7 +67,7 @@ func cutMessage(word lagoon.Word, payload any) actorbase.Msg {
 
 func TestCreateCommitSurvivesCutBeforeEdgeAndRetireCleansResidual(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "channels")
-	installed, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: dir, RootPassword: "cut-password"})
+	installed, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: dir, RootPassword: "cut-password", ResolveClassConfig: registry.ResolveDefaultConfig})
 	if err != nil {
 		t.Fatal(err)
 	}

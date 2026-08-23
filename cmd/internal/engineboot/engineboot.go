@@ -25,6 +25,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/web"
 )
 
@@ -67,7 +68,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if cfg.ChannelDBDir == "" {
 		return nil, errors.New("engineboot: channel db dir required")
 	}
-	installed, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: cfg.ChannelDBDir, RootPassword: cfg.RootPassword, StewardClass: cfg.StewardClass})
+	installed, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: cfg.ChannelDBDir, RootPassword: cfg.RootPassword, StewardClass: cfg.StewardClass, ResolveClassConfig: registry.ResolveDefaultConfig})
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +95,10 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		return nil, err
 	}
 	resolver := &assemblyResolver{registry: e.registry, logger: logger}
+	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{genesis: installed.C0Genesis}, resolver)
+	if err := resolver.registrar.MaterializeDeclarationConfigs(context.Background()); err != nil {
+		return nil, e.fail(fmt.Errorf("materialize registry declaration configs: %w", err))
+	}
 	// The init host opens only the already-installed c0. No gateway, device host,
 	// other channel, or convergence loop exists before registrar reconciliation.
 	e.host, err = channelhost.New(cfg.ChannelDBDir, e.registry, channelhost.HomeDeps{CompositionResolver: resolver, IntroductionResolver: resolver, RegistryBindings: e.registry, Logger: logger})

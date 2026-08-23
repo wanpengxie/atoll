@@ -33,6 +33,19 @@ func (f registrarFactsFunc) ActorFacts(ctx context.Context, ch channel.ID, id ac
 type registrarClassStub struct{}
 
 func (registrarClassStub) ValidateConfig(string, json.RawMessage) error { return nil }
+func (registrarClassStub) ResolveConfig(_ string, config json.RawMessage) (json.RawMessage, error) {
+	effective := map[string]json.RawMessage{"enabled": json.RawMessage(`true`)}
+	if len(config) > 0 {
+		var override map[string]json.RawMessage
+		if err := json.Unmarshal(config, &override); err != nil {
+			return nil, err
+		}
+		for key, value := range override {
+			effective[key] = value
+		}
+	}
+	return json.Marshal(effective)
+}
 func (registrarClassStub) LookupClassKind(string) (actor.Kind, bool) {
 	return actor.KindTool, true
 }
@@ -42,6 +55,20 @@ func (registrarClassStub) LookupClassPlacement(string) (channelspec.PlacementKin
 func (registrarClassStub) Classes() []string { return []string{"echo"} }
 func (registrarClassStub) ClassConfigSchema(string) (json.RawMessage, bool) {
 	return json.RawMessage(`{"type":"object"}`), true
+}
+func (registrarClassStub) ClassDefaultConfig(string) (json.RawMessage, bool) {
+	return json.RawMessage(`{"enabled":true}`), true
+}
+
+func TestClassCatalogPublishesProviderDefaultConfig(t *testing.T) {
+	r := &Registrar{classes: registrarClassStub{}}
+	rows, err := r.readClasses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Class != "echo" || string(rows[0].DefaultConfig) != `{"enabled":true}` {
+		t.Fatalf("classes=%+v", rows)
+	}
 }
 
 func (s registrarFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
@@ -142,6 +169,9 @@ func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
 	if err != nil || created.Description != "Create and inspect orders." {
 		t.Fatalf("created=%+v err=%v", created, err)
 	}
+	if string(created.Config) != `{"enabled":true}` {
+		t.Fatalf("created declaration hid its effective default config: %s", created.Config)
+	}
 	empty := ""
 	edited, err := r.editDecl(context.Background(), "alice", "source", DeclEdit{ID: "orders", Description: &empty})
 	if err != nil || edited.Description != "" {
@@ -153,6 +183,56 @@ func TestDeclDescriptionPersistsAndCanBeClearedByEdit(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "description") {
 		t.Fatalf("empty description did not omit field: %s", raw)
+	}
+}
+
+func TestMaterializeDeclarationConfigsUpgradesLegacyRowsAtomically(t *testing.T) {
+	dbPath := t.TempDir() + "/registry.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, singleton INTEGER NOT NULL DEFAULT 0, created_at INTEGER, updated_at INTEGER)`,
+		`CREATE TABLE channels (id TEXT PRIMARY KEY, status TEXT)`,
+		`CREATE TABLE decl_overlays (decl_id TEXT, channel_id TEXT, config_json TEXT, updated_at INTEGER, PRIMARY KEY (decl_id, channel_id))`,
+		`INSERT INTO decls VALUES ('legacy','legacy',NULL,'root','echo','{}','present','private',0,1,7)`,
+		`INSERT INTO channels VALUES ('c0','present')`,
+		`INSERT INTO decl_overlays VALUES ('legacy','c0','{"mode":"channel"}',9)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := regstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	r := NewRegistrar(&Registry{store: storage}, nil, registrarClassStub{})
+	if err := r.MaterializeDeclarationConfigs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	decl, found, err := storage.GetDecl(context.Background(), "legacy")
+	if err != nil || !found {
+		t.Fatalf("decl found=%v err=%v", found, err)
+	}
+	if string(decl.Config) != `{"enabled":true}` || decl.UpdatedAt != 7 {
+		t.Fatalf("decl config=%s updated_at=%d", decl.Config, decl.UpdatedAt)
+	}
+	overlay, found, err := storage.GetOverlay(context.Background(), "legacy", channelspec.C0ChannelID)
+	if err != nil || !found {
+		t.Fatalf("overlay found=%v err=%v", found, err)
+	}
+	if string(overlay.Config) != `{"enabled":true,"mode":"channel"}` || overlay.UpdatedAt != 9 {
+		t.Fatalf("overlay config=%s updated_at=%d", overlay.Config, overlay.UpdatedAt)
+	}
+	// Re-running startup reconciliation is idempotent.
+	if err := r.MaterializeDeclarationConfigs(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

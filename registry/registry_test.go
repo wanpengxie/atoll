@@ -48,6 +48,55 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
+func TestClassDefaultConfigIsMergedForValidationAndBuild(t *testing.T) {
+	const class = "registry-default-config-test"
+	var built json.RawMessage
+	Register(class, ClassDecl{
+		Kind: actor.KindAgent, Placement: channelspec.PlacementServer,
+		DefaultConfig: func() json.RawMessage {
+			return json.RawMessage(`{"model":"base","nested":{"from":"default"},"selections":[{"model":"base"}]}`)
+		},
+		ValidateConfig: func(raw json.RawMessage) error {
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &got); err != nil || len(got["model"]) == 0 || len(got["nested"]) == 0 || len(got["selections"]) == 0 {
+				return errors.New("effective defaults missing")
+			}
+			return nil
+		},
+		New: func(spec InstanceSpec, _ Deps) (platform.ActorDecl, error) {
+			built = append(json.RawMessage(nil), spec.Config...)
+			return platform.ActorDecl{ID: spec.ID, Kind: actor.KindAgent}, nil
+		},
+	})
+
+	effective, err := ResolveConfig(class, json.RawMessage(`{"model":"instance","selections":[{"model":"instance"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(effective, &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["model"]) != `"instance"` || string(got["nested"]) != `{"from":"default"}` || string(got["selections"]) != `[{"model":"instance"}]` {
+		t.Fatalf("effective config=%s", effective)
+	}
+	if _, err := Build(class, InstanceSpec{ID: "agent:default:1", Config: json.RawMessage(`{}`)}, Deps{}); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(built) || string(built) == `{}` {
+		t.Fatalf("Build did not receive class defaults: %s", built)
+	}
+	first, ok := ClassDefaultConfig(class)
+	if !ok {
+		t.Fatal("class default config not published")
+	}
+	first[0] = '['
+	second, _ := ClassDefaultConfig(class)
+	if second[0] != '{' {
+		t.Fatal("published class default aliases registry storage")
+	}
+}
+
 func TestRegisterRejectsZeroPlacement(t *testing.T) {
 	defer func() {
 		if recover() == nil {

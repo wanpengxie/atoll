@@ -36,6 +36,21 @@ func TestConfigPublishesConfiguredSelections(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigOwnsClaudeCatalogAndStartupChoice(t *testing.T) {
+	cfg, err := ParseConfig(DefaultConfig(), "/workspace", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := NewProvider(cfg).Spec()
+	if cfg.Model != "haiku" || len(spec.Selections) != 20 || spec.DefaultSelection != 0 {
+		t.Fatalf("cfg model=%q selections=%d default=%d", cfg.Model, len(spec.Selections), spec.DefaultSelection)
+	}
+	want := driverproto.TurnOptions{Model: "haiku", Effort: "low"}
+	if spec.Selections[spec.DefaultSelection] != want {
+		t.Fatalf("default selection=%+v want=%+v", spec.Selections[spec.DefaultSelection], want)
+	}
+}
+
 func TestConfigSelectionLabelsRideBesideOptionsNotInside(t *testing.T) {
 	cfg, err := ParseConfig(json.RawMessage(`{"selections":[{"model":"claude-test","effort":"low","model_label":"Test","effort_label":"低"},{"model":"claude-test","effort":"high"}]}`), "/workspace", nil)
 	if err != nil {

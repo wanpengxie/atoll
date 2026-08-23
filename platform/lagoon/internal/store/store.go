@@ -305,9 +305,32 @@ func (s *Store) ListDecls(ctx context.Context) ([]regspec.DeclRow, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanDeclRows(rows)
+}
+
+func scanDeclRows(rows *sql.Rows) ([]regspec.DeclRow, error) {
 	var out []regspec.DeclRow
 	for rows.Next() {
 		row, err := scanDecl(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListPresentOverlays(ctx context.Context) ([]regspec.OverlayRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+overlayColumns+`
+		FROM decl_overlays JOIN decls ON decls.id=decl_overlays.decl_id JOIN channels ON channels.id=decl_overlays.channel_id
+		WHERE decls.status='present' AND channels.status='present' ORDER BY decl_overlays.decl_id,decl_overlays.channel_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []regspec.OverlayRow
+	for rows.Next() {
+		row, err := scanOverlay(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -489,6 +512,16 @@ func (t *Tx) InsertBinding(ctx context.Context, row regspec.BindingRow) error {
 func (t *Tx) InsertDecl(ctx context.Context, row regspec.DeclRow) error {
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,singleton,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, row.ID, row.Name, nullableText(row.Description), row.Owner, row.DefaultClass, nullableJSON(row.Config), row.Status, row.Visibility, row.Singleton, row.CreatedAt, row.UpdatedAt)
 	return classify(err)
+}
+
+func (t *Tx) UpdateDeclConfig(ctx context.Context, id string, config json.RawMessage) error {
+	_, err := t.tx.ExecContext(ctx, `UPDATE decls SET config_json=? WHERE id=?`, nullableJSON(config), id)
+	return err
+}
+
+func (t *Tx) UpdateOverlayConfig(ctx context.Context, declID string, channelID channel.ID, config json.RawMessage) error {
+	_, err := t.tx.ExecContext(ctx, `UPDATE decl_overlays SET config_json=? WHERE decl_id=? AND channel_id=?`, nullableJSON(config), declID, channelID)
+	return err
 }
 
 func (t *Tx) InsertPrincipal(ctx context.Context, row regspec.PrincipalRow) error {

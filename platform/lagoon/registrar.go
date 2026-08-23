@@ -33,13 +33,86 @@ func NewRegistrar(registry *Registry, facts SourceActorFactsResolver, classes Cl
 	return &Registrar{registry: registry, facts: facts, classes: classes, now: time.Now}
 }
 
+// MaterializeDeclarationConfigs upgrades the registry from declaration inputs
+// to installed declaration facts. Provider defaults are resolved before any
+// actor is constructed, then the complete documents are written atomically.
+// This is deliberately fail-closed: an installed declaration that its provider
+// cannot validate prevents startup instead of becoming a runtime surprise.
+func (r *Registrar) MaterializeDeclarationConfigs(ctx context.Context) error {
+	if r == nil || r.registry == nil || r.registry.store == nil {
+		return errors.New("lagoon: registrar registry required")
+	}
+	if r.classes == nil {
+		return errors.New("lagoon: class catalog required to materialize declaration configs")
+	}
+	decls, err := r.registry.store.ListDecls(ctx)
+	if err != nil {
+		return err
+	}
+	type declUpdate struct {
+		id     string
+		config json.RawMessage
+	}
+	updates := make([]declUpdate, 0, len(decls))
+	classByDecl := make(map[string]string, len(decls))
+	for _, decl := range decls {
+		classByDecl[decl.ID] = decl.DefaultClass
+		config, err := r.classes.ResolveConfig(decl.DefaultClass, decl.Config)
+		if err != nil {
+			return fmt.Errorf("lagoon: materialize declaration %q class %q: %w", decl.ID, decl.DefaultClass, err)
+		}
+		if !jsonEqual(config, decl.Config) {
+			updates = append(updates, declUpdate{id: decl.ID, config: cloneJSON(config)})
+		}
+	}
+	overlays, err := r.registry.store.ListPresentOverlays(ctx)
+	if err != nil {
+		return err
+	}
+	type overlayUpdate struct {
+		declID    string
+		channelID channel.ID
+		config    json.RawMessage
+	}
+	overlayUpdates := make([]overlayUpdate, 0, len(overlays))
+	for _, overlay := range overlays {
+		class, ok := classByDecl[overlay.DeclID]
+		if !ok {
+			return fmt.Errorf("lagoon: overlay for unknown declaration %q", overlay.DeclID)
+		}
+		config, err := r.classes.ResolveConfig(class, overlay.Config)
+		if err != nil {
+			return fmt.Errorf("lagoon: materialize declaration %q overlay for channel %q: %w", overlay.DeclID, overlay.ChannelID, err)
+		}
+		if !jsonEqual(config, overlay.Config) {
+			overlayUpdates = append(overlayUpdates, overlayUpdate{declID: overlay.DeclID, channelID: overlay.ChannelID, config: cloneJSON(config)})
+		}
+	}
+	if len(updates) == 0 && len(overlayUpdates) == 0 {
+		return nil
+	}
+	return r.registry.store.InTx(ctx, func(tx *store.Tx) error {
+		for _, update := range updates {
+			if err := tx.UpdateDeclConfig(ctx, update.id, update.config); err != nil {
+				return err
+			}
+		}
+		for _, update := range overlayUpdates {
+			if err := tx.UpdateOverlayConfig(ctx, update.declID, update.channelID, update.config); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // ReconcileSystem carves the registry's fixed system rows on first start and
 // leaves them alone afterwards. An existing c0 row is never rewritten: its
 // profile (description, serving, endpoints) belongs to its owner and survives
 // restarts. If the stored genesis cannot be read the start fails and the
-// operator wipes the installation — there is no automatic upgrade or
-// recalibration. It deliberately never touches credentials or user/device
-// identities.
+// operator wipes the installation — declaration-config materialization does
+// not rewrite channel genesis or other owner-controlled state. It deliberately
+// never touches credentials or user/device identities.
 func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 	if r == nil || r.registry == nil {
 		return errors.New("lagoon: registrar registry required")
@@ -297,6 +370,22 @@ func (r *Registrar) configRejection(class string, err error) error {
 		return invalid(fmt.Sprintf("class %q is not one this node can run; list the runnable classes, each with the config shape it accepts, using system.class.list", class))
 	}
 	return invalid(fmt.Sprintf("%s; read the accepted config shape for class %q with system.class.list", err.Error(), class))
+}
+
+// materializeConfig turns a caller's chosen config source into the complete
+// declaration-time snapshot that will actually construct the actor. Provider
+// defaults are therefore visible in the registry ledger and class management
+// UI; registry.Build keeps the same resolution only as a legacy-data safety
+// net, never as the primary place where configuration becomes knowable.
+func (r *Registrar) materializeConfig(class string, config json.RawMessage) (json.RawMessage, error) {
+	if r.classes == nil {
+		return nil, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
+	}
+	effective, err := r.classes.ResolveConfig(class, config)
+	if err != nil {
+		return nil, r.configRejection(class, err)
+	}
+	return effective, nil
 }
 
 func kindOrUnknown(kind actor.Kind, known bool) string {
@@ -676,8 +765,12 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if r.classes == nil {
 			return regspec.ChannelRow{}, false, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 		}
-		if err := r.classes.ValidateConfig(decl.DefaultClass, config); err != nil {
-			return regspec.ChannelRow{}, false, r.configRejection(decl.DefaultClass, err)
+		config, err = r.materializeConfig(decl.DefaultClass, config)
+		if err != nil {
+			return regspec.ChannelRow{}, false, err
+		}
+		if len(item.Config) > 0 {
+			overlays[len(overlays)-1].Config = cloneJSON(config)
 		}
 		kind, ok := r.classes.LookupClassKind(decl.DefaultClass)
 		if !ok {
@@ -1075,12 +1168,11 @@ func (r *Registrar) registerDecl(ctx context.Context, owner string, p DeclRegist
 	if p.Visibility != "private" && p.Visibility != "public" {
 		return regspec.DeclRow{}, invalid(fmt.Sprintf("visibility %q is not valid: the only values are public (anyone may build from this declaration) and private (only you may, and this is the default)", p.Visibility))
 	}
-	if r.classes == nil {
-		return regspec.DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
+	effectiveConfig, err := r.materializeConfig(p.Class, p.Config)
+	if err != nil {
+		return regspec.DeclRow{}, err
 	}
-	if err := r.classes.ValidateConfig(p.Class, p.Config); err != nil {
-		return regspec.DeclRow{}, r.configRejection(p.Class, err)
-	}
+	p.Config = effectiveConfig
 	now := r.now().UnixMilli()
 	existing, found, err := r.registry.store.GetDecl(ctx, p.ID)
 	if err == nil && found {
@@ -1155,6 +1247,7 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.
 	if p.Description != nil {
 		row.Description = *p.Description
 	}
+	classChanged := false
 	if p.Class != nil {
 		next := strings.TrimSpace(*p.Class)
 		if r.systemClass(next) {
@@ -1168,10 +1261,18 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.
 		if !oldOK || !newOK || oldKind != newKind {
 			return regspec.DeclRow{}, invalid(fmt.Sprintf("cannot change class from %q to %q: that would change the declaration from a %s into a %s, and a declaration's kind is fixed once minted. Create a new declaration instead", row.DefaultClass, next, kindOrUnknown(oldKind, oldOK), kindOrUnknown(newKind, newOK)))
 		}
+		classChanged = next != row.DefaultClass
 		row.DefaultClass = next
 	}
+	configSource := row.Config
+	if classChanged && p.Config == nil {
+		// A class change chooses the new provider's default config; carrying the
+		// old provider's materialized document across would be an implicit and
+		// usually invalid "other config" selection.
+		configSource = nil
+	}
 	if p.Config != nil {
-		row.Config = cloneJSON(p.Config)
+		configSource = p.Config
 	}
 	if p.Visibility != nil {
 		row.Visibility = *p.Visibility
@@ -1182,11 +1283,9 @@ func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.
 	if row.Name == "" || (row.Visibility != "private" && row.Visibility != "public") {
 		return regspec.DeclRow{}, invalid(fmt.Sprintf("the declaration would be left invalid: name is %q and visibility is %q, but a declaration needs a non-empty name and a visibility of public or private", row.Name, row.Visibility))
 	}
-	if r.classes == nil {
-		return regspec.DeclRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
-	}
-	if err := r.classes.ValidateConfig(row.DefaultClass, row.Config); err != nil {
-		return regspec.DeclRow{}, r.configRejection(row.DefaultClass, err)
+	row.Config, err = r.materializeConfig(row.DefaultClass, configSource)
+	if err != nil {
+		return regspec.DeclRow{}, err
 	}
 	if row.Name == before.Name && row.Description == before.Description && row.DefaultClass == before.DefaultClass && row.Visibility == before.Visibility && row.Singleton == before.Singleton && jsonEqual(row.Config, before.Config) {
 		return before, nil
@@ -1255,11 +1354,9 @@ func (r *Registrar) setOverlay(ctx context.Context, _ string, source channel.ID,
 	if r.systemClass(decl.DefaultClass) || systemDecl(decl.ID) {
 		return regspec.OverlayRow{}, reserved("system declaration is reserved")
 	}
-	if r.classes == nil {
-		return regspec.OverlayRow{}, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
-	}
-	if err := r.classes.ValidateConfig(decl.DefaultClass, p.Config); err != nil {
-		return regspec.OverlayRow{}, r.configRejection(decl.DefaultClass, err)
+	p.Config, err = r.materializeConfig(decl.DefaultClass, p.Config)
+	if err != nil {
+		return regspec.OverlayRow{}, err
 	}
 	return r.writeOverlay(ctx, p)
 }
@@ -1660,10 +1757,11 @@ func (r *Registrar) readDevices(ctx context.Context) ([]regspec.DeviceRow, error
 // contain. The schema is the class's own published contract, not a copy — a
 // copy here would drift from the parser that actually rejects config.
 type ClassRow struct {
-	Class        string          `json:"class"`
-	Kind         string          `json:"kind"`
-	Placement    string          `json:"placement"`
-	ConfigSchema json.RawMessage `json:"config_schema,omitempty"`
+	Class         string          `json:"class"`
+	Kind          string          `json:"kind"`
+	Placement     string          `json:"placement"`
+	ConfigSchema  json.RawMessage `json:"config_schema,omitempty"`
+	DefaultConfig json.RawMessage `json:"default_config,omitempty"`
 }
 
 func (r *Registrar) readClasses() ([]ClassRow, error) {
@@ -1682,6 +1780,9 @@ func (r *Registrar) readClasses() ([]ClassRow, error) {
 		}
 		if schema, ok := r.classes.ClassConfigSchema(class); ok {
 			row.ConfigSchema = schema
+		}
+		if config, ok := r.classes.ClassDefaultConfig(class); ok {
+			row.DefaultConfig = config
 		}
 		out = append(out, row)
 	}

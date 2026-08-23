@@ -316,7 +316,9 @@ type SystemGenesisResolver interface {
 
 type ClassCatalog interface {
 	ValidateConfig(class string, config json.RawMessage) error
+	ResolveConfig(class string, config json.RawMessage) (json.RawMessage, error)
 	ClassConfigSchema(class string) (json.RawMessage, bool)
+	ClassDefaultConfig(class string) (json.RawMessage, bool)
 	Classes() []string
 	LookupClassKind(class string) (actor.Kind, bool)
 	LookupClassPlacement(class string) (channelspec.PlacementKind, bool)

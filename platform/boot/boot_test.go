@@ -18,18 +18,25 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"golang.org/x/crypto/bcrypt"
 
+	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 	_ "modernc.org/sqlite"
 )
+
+func withClassDefaults(cfg boot.Config) boot.Config {
+	cfg.ResolveClassConfig = registry.ResolveDefaultConfig
+	return cfg
+}
 
 func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	stamp := time.UnixMilli(1700000000000)
-	result, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass", Now: func() time.Time { return stamp }})
+	result, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "root-pass", Now: func() time.Time { return stamp }}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +183,7 @@ func assertBootRoster(t *testing.T, path string, decls, principals []string, tot
 }
 
 func TestEnsureGeneratesRootPasswordWhenNotSupplied(t *testing.T) {
-	result, err := boot.Ensure(context.Background(), boot.Config{ChannelDir: t.TempDir()})
+	result, err := boot.Ensure(context.Background(), withClassDefaults(boot.Config{ChannelDir: t.TempDir()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +207,7 @@ func TestEnsureGeneratesRootPasswordWhenNotSupplied(t *testing.T) {
 func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	first, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "first"})
+	first, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "first"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +220,7 @@ func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	second, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "second"})
+	second, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "second"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +244,7 @@ func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
 func TestEnsureRebuildsRegistryWithoutMarker(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	first, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "discarded"})
+	first, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "discarded"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +259,7 @@ func TestEnsureRebuildsRegistryWithoutMarker(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	result, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
+	result, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "root-pass"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +295,7 @@ func TestEnsureRebuildsBothDatabaseFamiliesWithoutInstallTable(t *testing.T) {
 		}
 	}
 
-	result, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "root-pass"})
+	result, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "root-pass"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +329,7 @@ func TestEnsurePreservesUnreadableDatabase(t *testing.T) {
 	if err := os.WriteFile(path, want, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := boot.Ensure(ctx, boot.Config{ChannelDir: root, RootPassword: "must-not-be-used"}); err == nil {
+	if _, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "must-not-be-used"})); err == nil {
 		t.Fatal("Ensure succeeded for an unreadable registry database")
 	}
 	got, err := os.ReadFile(path)
@@ -336,7 +343,7 @@ func TestEnsurePreservesUnreadableDatabase(t *testing.T) {
 
 func TestRegistryAndC0WritersDoNotShareSQLiteLockDomain(t *testing.T) {
 	ctx := context.Background()
-	installed, err := boot.Ensure(ctx, boot.Config{ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "root-pass"})
+	installed, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "root-pass"}))
 	if err != nil {
 		t.Fatal(err)
 	}

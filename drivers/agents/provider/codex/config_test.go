@@ -32,6 +32,21 @@ func TestConfigPublishesConfiguredSelections(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigOwnsCodexCatalogAndStartupChoice(t *testing.T) {
+	cfg, err := ParseConfig(DefaultConfig(), "/workspace", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := NewProvider(cfg).Spec()
+	if len(spec.Selections) != 15 || spec.DefaultSelection != 0 {
+		t.Fatalf("selections=%d default=%d", len(spec.Selections), spec.DefaultSelection)
+	}
+	want := driverproto.TurnOptions{Model: "gpt-5.6-sol", Effort: "low"}
+	if spec.Selections[spec.DefaultSelection] != want {
+		t.Fatalf("default selection=%+v want=%+v", spec.Selections[spec.DefaultSelection], want)
+	}
+}
+
 func TestConfigSelectionLabelsRideBesideOptionsNotInside(t *testing.T) {
 	cfg, err := ParseConfig(json.RawMessage(`{"selections":[{"model":"gpt-test","effort":"low","model_label":"Test","effort_label":"低"}]}`), "/workspace", nil)
 	if err != nil {

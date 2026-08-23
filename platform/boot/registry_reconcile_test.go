@@ -18,7 +18,7 @@ import (
 // what this pins.
 func TestReconcileSystemLeavesExistingC0RowUntouched(t *testing.T) {
 	ctx := context.Background()
-	installed, err := boot.Ensure(ctx, boot.Config{ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "root-pass"})
+	installed, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "root-pass"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestReconcileSystemRefusesUnreadableOrForeignC0Genesis(t *testing.T) {
 		{"not json", `not json`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installed, err := boot.Ensure(ctx, boot.Config{ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "root-pass"})
+			installed, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: filepath.Join(t.TempDir(), "channels"), RootPassword: "root-pass"}))
 			if err != nil {
 				t.Fatal(err)
 			}

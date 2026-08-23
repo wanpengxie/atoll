@@ -67,6 +67,12 @@ type ClassDecl struct {
 	Placement channelspec.PlacementKind
 	Manifest  introspect.Manifest
 	New       Constructor
+	// DefaultConfig is the class-owned baseline for every instance. It belongs
+	// beside the constructor and schema: providers know their own operational
+	// defaults; boot, declarations, and callers must not copy those defaults.
+	// The registry snapshots and validates it at registration, then shallowly
+	// overlays the per-instance JSON object before validation and construction.
+	DefaultConfig func() json.RawMessage
 	// ValidateConfig is the acceptance gate. ConfigSchema is the same contract
 	// stated forward: the gate can only say no after the fact, and a caller
 	// writing a declaration has nothing else to go on — the shape lives in Go
@@ -74,6 +80,7 @@ type ClassDecl struct {
 	// config has nothing to describe.
 	ValidateConfig func(json.RawMessage) error
 	ConfigSchema   json.RawMessage
+	defaultConfig  json.RawMessage
 }
 
 // ErrUnknownClass distinguishes "no such class" from "config invalid": the
@@ -91,18 +98,83 @@ func ValidateConfig(class string, config json.RawMessage) error {
 	if !found {
 		return fmt.Errorf("%w: %q", ErrUnknownClass, class)
 	}
-	if len(config) != 0 {
-		var object map[string]json.RawMessage
-		if err := json.Unmarshal(config, &object); err != nil || object == nil {
-			return fmt.Errorf("registry: config for %q must be a JSON object", class)
+	_, err := resolveConfig(class, d, config)
+	return err
+}
+
+// ResolveConfig returns the effective class config: the class-owned default
+// with the instance object overlaid at the top level. Arrays and nested values
+// are intentionally atomic — an instance that supplies selections replaces
+// the default selection catalog instead of accidentally splicing two policy
+// documents together.
+func ResolveConfig(class string, config json.RawMessage) (json.RawMessage, error) {
+	mu.RLock()
+	d, found := reg[class]
+	mu.RUnlock()
+	if !found {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownClass, class)
+	}
+	return resolveConfig(class, d, config)
+}
+
+// ResolveDefaultConfig is the composition-root door used by boot: unlike the
+// general resolver it refuses classes that have no declared baseline, because
+// silently carving a special actor from only an override would recreate the
+// very boot-owned configuration this API removes.
+func ResolveDefaultConfig(class string, config json.RawMessage) (json.RawMessage, error) {
+	mu.RLock()
+	d, found := reg[class]
+	mu.RUnlock()
+	if !found {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownClass, class)
+	}
+	if len(d.defaultConfig) == 0 {
+		return nil, fmt.Errorf("registry: class %q has no default config", class)
+	}
+	return resolveConfig(class, d, config)
+}
+
+func resolveConfig(class string, d ClassDecl, override json.RawMessage) (json.RawMessage, error) {
+	base, err := configObject(class, "default", d.defaultConfig)
+	if err != nil {
+		return nil, err
+	}
+	provided, err := configObject(class, "instance", override)
+	if err != nil {
+		return nil, err
+	}
+	if len(base) == 0 && len(provided) == 0 && len(d.defaultConfig) == 0 && len(override) == 0 {
+		if d.ValidateConfig != nil {
+			if err := d.ValidateConfig(nil); err != nil {
+				return nil, fmt.Errorf("registry: invalid config for %q: %w", class, err)
+			}
 		}
+		return nil, nil
+	}
+	for key, value := range provided {
+		base[key] = append(json.RawMessage(nil), value...)
+	}
+	effective, err := json.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("registry: encode effective config for %q: %w", class, err)
 	}
 	if d.ValidateConfig != nil {
-		if err := d.ValidateConfig(config); err != nil {
-			return fmt.Errorf("registry: invalid config for %q: %w", class, err)
+		if err := d.ValidateConfig(effective); err != nil {
+			return nil, fmt.Errorf("registry: invalid config for %q: %w", class, err)
 		}
 	}
-	return nil
+	return effective, nil
+}
+
+func configObject(class, source string, raw json.RawMessage) (map[string]json.RawMessage, error) {
+	out := map[string]json.RawMessage{}
+	if len(raw) == 0 {
+		return out, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
+		return nil, fmt.Errorf("registry: %s config for %q must be a JSON object", source, class)
+	}
+	return out, nil
 }
 
 var (
@@ -122,6 +194,12 @@ func Register(class string, d ClassDecl) {
 	}
 	if err := introspect.ValidateManifest(d.Manifest); err != nil {
 		panic("registry: invalid manifest for " + class + ": " + err.Error())
+	}
+	if d.DefaultConfig != nil {
+		d.defaultConfig = append(json.RawMessage(nil), d.DefaultConfig()...)
+		if _, err := resolveConfig(class, d, nil); err != nil {
+			panic("registry: invalid default config for " + class + ": " + err.Error())
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -169,6 +247,20 @@ func ClassConfigSchema(class string) (json.RawMessage, bool) {
 	return append(json.RawMessage(nil), d.ConfigSchema...), true
 }
 
+// ClassDefaultConfig returns the immutable provider/class baseline advertised
+// to declaration authors and consumed by special constructors such as boot's
+// root steward carving. Runtime instances use ResolveConfig/Build and therefore
+// receive the same baseline without callers materialising it themselves.
+func ClassDefaultConfig(class string) (json.RawMessage, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	d, ok := reg[class]
+	if !ok || len(d.defaultConfig) == 0 {
+		return nil, false
+	}
+	return append(json.RawMessage(nil), d.defaultConfig...), true
+}
+
 // classes returns the registered class keys, sorted (stable iteration order).
 // Build uses it for diagnostics; RegisteredClasses exposes a snapshot for
 // whole-registry invariants without exposing mutable declarations.
@@ -197,6 +289,11 @@ func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error
 	if !found {
 		return platform.ActorDecl{}, fmt.Errorf("%w: %q (registered: %v)", ErrUnknownClass, class, classes())
 	}
+	effective, err := resolveConfig(class, d, spec.Config)
+	if err != nil {
+		return platform.ActorDecl{}, err
+	}
+	spec.Config = effective
 	decl, err := d.New(spec, ctx)
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("registry: build %q: %w", class, err)

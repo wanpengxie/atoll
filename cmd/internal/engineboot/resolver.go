@@ -173,6 +173,16 @@ func (r *assemblyResolver) ValidateConfig(class string, config json.RawMessage) 
 	return classregistry.ValidateConfig(class, config)
 }
 
+func (r *assemblyResolver) ResolveConfig(class string, config json.RawMessage) (json.RawMessage, error) {
+	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.ClassRegistrar {
+		if err := r.ValidateConfig(class, config); err != nil {
+			return nil, err
+		}
+		return append(json.RawMessage(nil), config...), nil
+	}
+	return classregistry.ResolveConfig(class, config)
+}
+
 func (r *assemblyResolver) LookupClassKind(class string) (actor.Kind, bool) {
 	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass {
 		return actor.KindPeer, true
@@ -191,6 +201,10 @@ func (r *assemblyResolver) Classes() []string { return classregistry.RegisteredC
 
 func (r *assemblyResolver) ClassConfigSchema(class string) (json.RawMessage, bool) {
 	return classregistry.ClassConfigSchema(class)
+}
+
+func (r *assemblyResolver) ClassDefaultConfig(class string) (json.RawMessage, bool) {
+	return classregistry.ClassDefaultConfig(class)
 }
 
 func (r *assemblyResolver) LookupClassPlacement(class string) (channelspec.PlacementKind, bool) {
