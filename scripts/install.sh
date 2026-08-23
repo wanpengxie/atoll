@@ -25,6 +25,10 @@
 #   3. password    — root password (typed twice, or generated)
 #   4. home / addr / confirm
 #   5. install     — writes <home>/atoll.env + <home>/server/root-password, runs `atoll up`
+#
+# 铁律：第 4 步"开始安装？"之前恒不落任何持久动作——不搬 home、不装二进制、
+# 不建目录、不写文件。确认前只收集与只读检查；答 n 时机器与你来之前一样。
+
 # 这是 bash 脚本，但用户十有八九会 `curl … | zsh`（macOS 默认壳）或 `| sh`。
 # zsh 的 `read -p` 是"从 coprocess 读"而不是"打提示"，走到第一处提问就报
 # `no coprocess` 退出，向导整个消失。装机脚本不能指望用户记得管给哪个壳：
@@ -47,7 +51,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
   fi
   _atoll_url="${ATOLL_INSTALL_URL:-https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh}"
   echo "  ! 当前 shell 预读了管道里的脚本，就地接管不完整；从 $_atoll_url 重新取一份交给 bash" >&2
-  if curl -fsSL --max-time 60 "$_atoll_url" -o "$_atoll_self" 2>/dev/null; then
+  if curl -fsSL --connect-timeout 15 --max-time 60 "$_atoll_url" -o "$_atoll_self" 2>/dev/null; then
     ATOLL_REEXEC_TMP="$_atoll_self" exec bash "$_atoll_self" "$@"
   fi
   rm -f "$_atoll_self"
@@ -56,21 +60,40 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 # ATOLL_RESUME_MARK
 set -euo pipefail
-[ -n "${ATOLL_REEXEC_TMP:-}" ] && rm -f "$ATOLL_REEXEC_TMP"
+
+# 全部逻辑收进 main、文件最后一行才调用：curl|bash 下载中途被掐断时，bash
+# 手里只有半个 main 的定义——语法错误，一行副作用都不会执行。恒不把有副作
+# 用的语句放在 main 之外。
+main() {
+
+# 守卫留下的临时脚本副本。只删临时目录里的东西：这是环境变量，恒不拿它
+# 当"删任意路径"的授权。
+if [ -n "${ATOLL_REEXEC_TMP:-}" ]; then
+  case "$ATOLL_REEXEC_TMP" in
+    "${TMPDIR:-/tmp}"/*) rm -f "$ATOLL_REEXEC_TMP" ;;
+  esac
+fi
 
 REPO_SLUG="${ATOLL_REPO:-wanpengxie/atoll}"
 
-# `curl ... | bash` hands bash the SCRIPT on stdin — bash reads the next line
-# to execute from fd 0. Redirecting fd 0 to the terminal (exec </dev/tty) makes
-# bash read "the rest of the script" FROM THE TERMINAL: the install hangs dead
-# waiting for keystrokes. So stdin is never touched; the wizard talks to the
-# terminal on its own fd (3). With no terminal at all (CI), there is nobody to
-# ask: take the defaults and say so.
+# 管道模式（curl|bash / 守卫 re-exec）下 $0 不是脚本文件，dirname 只会指到
+# 无关目录——这时"旁边的二进制/源码树"判据全部失效，恒走 release 下载或
+# 显式 ATOLL_BIN，绝不把 cwd 里恰好叫 atoll 的文件当发行件。
+STREAMED=0
+if [ -n "${ATOLL_REEXEC_TMP:-}" ] || [ ! -f "$0" ]; then STREAMED=1; fi
+
 YES=0
 TTY_FD=0
-for a in "$@"; do case "$a" in --yes|-y) YES=1 ;; -h|--help) sed -n '2,28p' "$0"; exit 0 ;; esac; done
+for a in "$@"; do case "$a" in
+  --yes|-y) YES=1 ;;
+  -h|--help)
+    if [ "$STREAMED" = 0 ]; then sed -n '2,30p' "$0"; else echo "用法见 https://github.com/$REPO_SLUG"; fi
+    exit 0 ;;
+esac; done
+# curl|bash 时 fd0 是脚本流，恒不动它；向导用自己的 fd(3) 跟终端说话。
+# exec 的重定向自左向右生效，/dev/tty 打不开的原生报错要用命令组整体捂住。
 if [ ! -t 0 ]; then
-  if exec 3</dev/tty 2>/dev/null; then
+  if { exec 3</dev/tty; } 2>/dev/null; then
     TTY_FD=3
   else
     YES=1
@@ -78,8 +101,8 @@ if [ ! -t 0 ]; then
   fi
 fi
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo /nonexistent)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)"
 DEFAULT_HOME="${ATOLL_HOME:-$HOME/.atoll}"
 DEFAULT_ADDR="${ATOLL_ADDR:-127.0.0.1:8832}"
 
@@ -87,19 +110,36 @@ bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✔\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31m✘\033[0m %s\n' "$*"; }
+# 终端输入结束（Ctrl-D / 断开）不是"取默认值"：确认类问题把 EOF 当默认 y
+# 会变成"挂断电话等于同意安装"。恒明确报错退出。
+eof_abort() { echo; bad "终端输入已结束，未执行安装"; exit 1; }
 ask()  { # ask VAR "prompt" "default"
   local __var=$1 __prompt=$2 __def=${3:-}
   if [ "$YES" = 1 ]; then printf -v "$__var" '%s' "$__def"; return; fi
   local __in
-  read -r -u "$TTY_FD" -p "$__prompt${__def:+ [$__def]}: " __in
+  read -r -u "$TTY_FD" -p "$__prompt${__def:+ [$__def]}: " __in || eof_abort
   printf -v "$__var" '%s' "${__in:-$__def}"
 }
 confirm() { # confirm "prompt" default(y|n)
   local def=${2:-y} in
   if [ "$YES" = 1 ]; then [ "$def" = y ]; return; fi
-  read -r -u "$TTY_FD" -p "$1 [$([ "$def" = y ] && echo Y/n || echo y/N)]: " in
+  read -r -u "$TTY_FD" -p "$1 [$([ "$def" = y ] && echo Y/n || echo y/N)]: " in || eof_abort
   in=${in:-$def}; [[ "$in" =~ ^[Yy] ]]
 }
+
+# 生命周期收口：脚本无论怎么退（成功、报错、信号），下载临时目录不留、
+# 起了一半的节点不留。DL_TMP/UP_PID 是全局的——trap 引用函数局部变量是
+# 上一版的病（返回后 unbound，正常退出反而报错）。
+DL_TMP=""
+UP_PID=""
+cleanup() {
+  if [ -n "$UP_PID" ] && kill -0 "$UP_PID" 2>/dev/null; then
+    kill "$UP_PID" 2>/dev/null || true
+    wait "$UP_PID" 2>/dev/null || true
+  fi
+  if [ -n "$DL_TMP" ]; then rm -rf "$DL_TMP" || true; fi
+}
+trap cleanup EXIT
 
 echo
 bold "atoll installer"
@@ -115,9 +155,11 @@ sha256_of() {
 # download_release fetches the build for this machine. mac ships as two builds
 # because Intel and Apple Silicon are not interchangeable; nobody is asked which
 # one — uname already knows.
+# 只下载到临时目录并校验；装入 ~/.local/bin 发生在最终确认之后（install_binary）。
+PENDING_BIN_SRC=""
 download_release() {
   command -v curl >/dev/null || { bad "需要 curl"; exit 1; }
-  local os arch ver name base tmp want got dest
+  local os arch ver name base want got rc
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m)
   case "$arch" in
@@ -133,61 +175,73 @@ download_release() {
     # 能下到包就能查到版本。恒不走 api.github.com：它无凭据限流 60 次/小时/IP，
     # 且在部分网络环境（如国内）经常直接不通，而包下载是通的。
     echo "  … 查询最新发行版（github.com）"
-    ver=$(curl -fsSLI --max-time 30 -o /dev/null -w '%{url_effective}' \
-          "https://github.com/$REPO_SLUG/releases/latest" 2>/dev/null || true)
+    ver=$(curl -fsSLI --connect-timeout 15 --max-time 30 -o /dev/null -w '%{url_effective}' \
+          "https://github.com/$REPO_SLUG/releases/latest" 2>/dev/null </dev/null || true)
     ver="${ver##*/}"
     case "$ver" in ""|latest) bad "查不到最新发行版；用 ATOLL_VERSION=<tag> 指定一个"; exit 1 ;; esac
   fi
   name="atoll_${ver}_${os}_${arch}"
   base="https://github.com/$REPO_SLUG/releases/download/$ver"
-  tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
+  DL_TMP=$(mktemp -d)
 
   # 下载进度：终端上交给 curl 的进度条；没有终端（CI、docker exec、重定向）
   # 时 --progress-bar 会完全静默，就自己每 5 秒报一次已下载量——慢可以，
   # 哑不行，用户必须能看出它活着。
-  local size_note total
-  total=$(curl -fsIL --max-time 15 "$base/$name.tar.gz" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}')
+  # 报大小的 HEAD 是纯装饰：探测失败恒不挡下载（total=0 就不报而已）。
+  local size_note total watcher
+  total=$(curl -fsIL --connect-timeout 15 --max-time 20 "$base/$name.tar.gz" 2>/dev/null </dev/null \
+          | tr -d '\r' | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}') || total=0
   size_note=""; [ "${total:-0}" -gt 0 ] && size_note="（$((total/1024/1024)) MB）"
   echo "  ↓ $name.tar.gz $size_note"
   if [ -t 2 ]; then
-    curl -fL --progress-bar -o "$tmp/$name.tar.gz" "$base/$name.tar.gz" \
+    curl -fL --connect-timeout 15 --progress-bar -o "$DL_TMP/$name.tar.gz" "$base/$name.tar.gz" </dev/null \
       || { bad "下载失败：$base/$name.tar.gz"; exit 1; }
   else
-    ( while [ ! -f "$tmp/.done" ]; do
+    ( while [ ! -f "$DL_TMP/.done" ]; do
         sleep 5
-        [ -f "$tmp/.done" ] && break
-        got=$(wc -c < "$tmp/$name.tar.gz" 2>/dev/null || echo 0)
+        [ -f "$DL_TMP/.done" ] && break
+        got=$(wc -c < "$DL_TMP/$name.tar.gz" 2>/dev/null || echo 0)
         if [ "${total:-0}" -gt 0 ]; then echo "    … $((got/1024)) KB / $((total/1024)) KB"; else echo "    … 已下载 $((got/1024)) KB"; fi
       done ) &
     watcher=$!
-    curl -fsSL -o "$tmp/$name.tar.gz" "$base/$name.tar.gz"
-    rc=$?
-    : > "$tmp/.done"; wait "$watcher" 2>/dev/null || true
+    if curl -fsSL --connect-timeout 15 -o "$DL_TMP/$name.tar.gz" "$base/$name.tar.gz" </dev/null; then rc=0; else rc=$?; fi
+    : > "$DL_TMP/.done"; wait "$watcher" 2>/dev/null || true
     [ "$rc" = 0 ] || { bad "下载失败：$base/$name.tar.gz"; exit 1; }
   fi
 
-  # 包和清单来自同一个 release，所以这道校验防的是传输截断和坏包，
-  # 不是有意投毒——那要靠签名，这个版本还没有。
-  if curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" 2>/dev/null; then
-    want=$(awk -v f="$name.tar.gz" '$2==f || $2=="*"f {print $1; exit}' "$tmp/checksums.txt")
-    got=$(sha256_of "$tmp/$name.tar.gz")
-    if [ -n "$want" ] && [ -n "$got" ] && [ "$want" != "$got" ]; then
-      bad "sha256 不符——包在路上坏了，装机中止"
-      echo "    期望 $want"
-      echo "    实际 $got"
-      exit 1
-    fi
-    [ -n "$want" ] && ok "sha256 校验通过"
-  else
-    warn "拿不到 checksums.txt，跳过校验"
+  # 校验 fail-closed：README 承诺了 sha256 校验，那它就恒不许被静默跳过。
+  # 包和清单来自同一个 release，这道校验防的是传输截断和坏包，不是有意
+  # 投毒——那要靠签名，这个版本还没有。
+  curl -fsSL --connect-timeout 15 --max-time 60 -o "$DL_TMP/checksums.txt" "$base/checksums.txt" </dev/null \
+    || { bad "拿不到 checksums.txt，无法校验，装机中止（网络恢复后重试）"; exit 1; }
+  want=$(awk -v f="$name.tar.gz" '$2==f || $2=="*"f {print $1; exit}' "$DL_TMP/checksums.txt")
+  [ -n "$want" ] || { bad "checksums.txt 里没有 $name.tar.gz 的条目，装机中止"; exit 1; }
+  got=$(sha256_of "$DL_TMP/$name.tar.gz")
+  [ -n "$got" ] || { bad "机器上没有 sha256sum/shasum，无法校验，装机中止"; exit 1; }
+  if [ "$want" != "$got" ]; then
+    bad "sha256 不符——包在路上坏了，装机中止"
+    echo "    期望 $want"
+    echo "    实际 $got"
+    exit 1
   fi
+  ok "sha256 校验通过"
 
-  tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
-  dest="${ATOLL_INSTALL_DIR:-$HOME/.local/bin}"
+  tar -xzf "$DL_TMP/$name.tar.gz" -C "$DL_TMP" </dev/null
+  PENDING_BIN_SRC="$DL_TMP/$name/atoll"
+  [ -x "$PENDING_BIN_SRC" ] || { bad "包里没有可执行的 atoll"; exit 1; }
+  ATOLL_BIN="$PENDING_BIN_SRC"
+  ok "已取到 $ver（确认安装后装入 ${ATOLL_INSTALL_DIR:-$HOME/.local/bin}）"
+}
+
+# 确认之后才把下载的二进制装进用户目录；写法是临时文件 + mv，恒不原地
+# 覆写——写一半断掉不能留下半个二进制。
+install_binary() {
+  [ -n "$PENDING_BIN_SRC" ] || return 0
+  local dest="${ATOLL_INSTALL_DIR:-$HOME/.local/bin}"
   mkdir -p "$dest"
-  cp "$tmp/$name/atoll" "$dest/atoll"
-  chmod 0755 "$dest/atoll"
+  cp "$PENDING_BIN_SRC" "$dest/.atoll.new"
+  chmod 0755 "$dest/.atoll.new"
+  mv -f "$dest/.atoll.new" "$dest/atoll"
   ATOLL_BIN="$dest/atoll"
   ok "已装到 $ATOLL_BIN"
   case ":$PATH:" in
@@ -202,38 +256,44 @@ bold "0/5 取 atoll 二进制"
 if [ -n "${ATOLL_BIN:-}" ]; then
   [ -x "$ATOLL_BIN" ] || { bad "ATOLL_BIN=$ATOLL_BIN 不是可执行文件"; exit 1; }
   ok "用你指定的二进制"
-elif [ -x "$SCRIPT_DIR/atoll" ]; then
+elif [ "$STREAMED" = 0 ] && [ -x "$SCRIPT_DIR/atoll" ]; then
   ATOLL_BIN="$SCRIPT_DIR/atoll"
   ok "发行包里的二进制"
-elif [ -f "$REPO_ROOT/go.mod" ] && command -v go >/dev/null; then
+elif [ "$STREAMED" = 0 ] && [ -f "$REPO_ROOT/go.mod" ] && command -v go >/dev/null; then
   ATOLL_BIN="$REPO_ROOT/bin/atoll"
   if [ ! -x "$ATOLL_BIN" ]; then
     warn "源码树里还没编过"
-    confirm "  现在 make build 编一个？" y && (cd "$REPO_ROOT" && make build)
+    confirm "  现在 make build 编一个？" y && (cd "$REPO_ROOT" && make build </dev/null)
   fi
   [ -x "$ATOLL_BIN" ] || { bad "没有可用的 atoll 二进制（设 ATOLL_BIN 或先 make build）"; exit 1; }
   ok "源码树编出来的二进制"
 else
   download_release
 fi
-echo "    $ATOLL_BIN"
-echo "    $("$ATOLL_BIN" version 2>/dev/null || echo '版本未知（旧二进制）')"
+echo "    $("$ATOLL_BIN" version </dev/null 2>/dev/null || echo '版本未知（旧二进制）')"
 echo
 
 # ---------------------------------------------------------------- 1. preflight
 bold "1/5 预检"
 
 ask HOME_DIR "  安装目录（node home）" "$DEFAULT_HOME"
-HOME_DIR="${HOME_DIR/#\~/$HOME}"
+# 只展开孤立的 ~ 和 ~/ 前缀。~alice 这种形拼不出正确的家目录（bash 参数
+# 展开会造出 /home/你alice），明确拒绝好过安静装错地方。
+case "$HOME_DIR" in
+  "~")     HOME_DIR="$HOME" ;;
+  "~/"*)   HOME_DIR="$HOME/${HOME_DIR#\~/}" ;;
+  "~"*)    bad "不支持 ~user 形式的路径，请写绝对路径"; exit 1 ;;
+esac
 PREV_MARKER=""
 if [ -f "$HOME_DIR/server/registry.db" ] && command -v sqlite3 >/dev/null; then
-  PREV_MARKER=$(sqlite3 "$HOME_DIR/server/registry.db" "select installed_at from atoll_install where id=1" 2>/dev/null || true)
+  PREV_MARKER=$(sqlite3 "$HOME_DIR/server/registry.db" "select installed_at from atoll_install where id=1" </dev/null 2>/dev/null || true)
 elif [ -f "$HOME_DIR/server/registry.db" ]; then
   PREV_MARKER="unknown"
 fi
 fmt_epoch() { # GNU date takes -d @<epoch>, BSD/macOS takes -r <epoch>
   date -d "@$1" '+%F %T' 2>/dev/null || date -r "$1" '+%F %T' 2>/dev/null || printf '%s' "$1"
 }
+RESET_HOME=0
 if [ -n "$PREV_MARKER" ]; then
   when="$PREV_MARKER"; [ "$PREV_MARKER" != unknown ] && when=$(fmt_epoch $((PREV_MARKER/1000)))
   warn "检测到已安装的 atoll：$HOME_DIR（装于 $when）"
@@ -242,7 +302,7 @@ if [ -n "$PREV_MARKER" ]; then
   echo "      [r] 把它挪到 ${HOME_DIR}.bak-<时间> 后全新安装"
   ask PREV_ACTION "  怎么处理" "o"
   case "$PREV_ACTION" in
-    r|R) BAK="${HOME_DIR}.bak-$(date +%Y%m%d-%H%M%S)"; mv "$HOME_DIR" "$BAK"; ok "已挪到 $BAK";;
+    r|R) RESET_HOME=1; ok "确认安装后将挪到 ${HOME_DIR}.bak-<时间>";;
     *)   ok "将直接打开既有实例（跳过密码/steward 设置）"; OPEN_EXISTING=1;;
   esac
 fi
@@ -252,13 +312,18 @@ if [ -f "$HOME_DIR/atoll.env" ]; then
   EXISTING_ADDR=$(sed -n 's/^ATOLL_ADDR=//p' "$HOME_DIR/atoll.env" | tail -1)
   EXISTING_STEWARD=$(sed -n 's/^ATOLL_STEWARD=//p' "$HOME_DIR/atoll.env" | tail -1)
 fi
-mkdir -p "$HOME_DIR"
-[ -w "$HOME_DIR" ] || { bad "$HOME_DIR 不可写"; exit 1; }
+# 确认前只做只读检查：目录已存在就查它本身，不存在就查最近的既有父目录。
+# mkdir 恒在第 5 步。
+_probe="$HOME_DIR"
+while [ ! -e "$_probe" ]; do _probe=$(dirname "$_probe"); done
+[ -w "$_probe" ] || { bad "$_probe 不可写，装不进 $HOME_DIR"; exit 1; }
 ok "home 可写: $HOME_DIR"
 
 # agent CLIs — deliberately blunt: binary present? version? credential present?
 # Per-agent state lives in AGENT_OK_<name>/AGENT_NOTE_<name>, not an associative
 # array: macOS still ships bash 3.2, which has no `declare -A`.
+# 所有外部探测命令恒关 stdin（</dev/null）：curl|bash 下 fd0 是脚本流，
+# 子命令读一口 stdin 吃掉的就是脚本接下来的行。探测失败恒不挡安装。
 AGENT_OK_codex=0;  AGENT_NOTE_codex=""
 AGENT_OK_claude=0; AGENT_NOTE_claude=""
 agent_set()  { eval "AGENT_OK_$1=\$2; AGENT_NOTE_$1=\$3"; }
@@ -266,8 +331,8 @@ agent_ok()   { local __v="AGENT_OK_$1";   printf '%s' "${!__v}"; }
 agent_note() { local __v="AGENT_NOTE_$1"; printf '%s' "${!__v}"; }
 detect_codex() {
   if ! command -v codex >/dev/null; then agent_set codex 0 "未安装（npm i -g @openai/codex）"; return; fi
-  local v; v=$(codex --version 2>/dev/null | head -1)
-  if [ -s "$HOME/.codex/auth.json" ] || codex login status >/dev/null 2>&1; then
+  local v; v=$(codex --version </dev/null 2>/dev/null | head -1) || true
+  if [ -s "$HOME/.codex/auth.json" ] || codex login status </dev/null >/dev/null 2>&1; then
     agent_set codex 1 "$v · 已登录"
   else
     agent_set codex 0 "$v · 未登录（codex login）"
@@ -275,8 +340,8 @@ detect_codex() {
 }
 detect_claude() {
   if ! command -v claude >/dev/null; then agent_set claude 0 "未安装（npm i -g @anthropic-ai/claude-code）"; return; fi
-  local v; v=$(claude --version 2>/dev/null | head -1)
-  if [ -s "$HOME/.claude/.credentials.json" ] || claude auth status 2>/dev/null | grep -q '"loggedIn": *true'; then
+  local v; v=$(claude --version </dev/null 2>/dev/null | head -1) || true
+  if [ -s "$HOME/.claude/.credentials.json" ] || claude auth status </dev/null 2>/dev/null | grep -q '"loggedIn": *true'; then
     agent_set claude 1 "$v · 已登录"
   else
     agent_set claude 0 "$v · 未登录（claude auth login）"
@@ -288,20 +353,24 @@ for a in codex claude; do
 done
 
 ask ADDR "  监听地址" "${EXISTING_ADDR:-$DEFAULT_ADDR}"
-PORT="${ADDR##*:}"
 port_busy() { # ss on linux, lsof on macOS; no tool = no opinion
   if command -v ss >/dev/null; then
-    ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$1\$"
+    ss -ltn 2>/dev/null </dev/null | awk '{print $4}' | grep -q ":$1\$"
   elif command -v lsof >/dev/null; then
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1 </dev/null
   else
     return 1
   fi
 }
-if port_busy "$PORT"; then
-  warn "端口 $PORT 已被占用；换一个或先停掉占用者"
+# 占用的端口上起不来节点，"警告一声照样装"只是把失败推迟到第 5 步。
+# 循环到给出一个空闲端口为止；无人值守模式没得问，直接明确失败。
+PORT="${ADDR##*:}"
+while port_busy "$PORT"; do
+  warn "端口 $PORT 已被占用；换一个或先停掉占用者再填同一个"
+  [ "$YES" = 1 ] && { bad "默认端口被占用且无人值守，装机中止（设 ATOLL_ADDR 换端口）"; exit 1; }
   ask ADDR "  监听地址" "$ADDR"
-fi
+  PORT="${ADDR##*:}"
+done
 ok "监听地址: $ADDR"
 echo
 
@@ -328,9 +397,11 @@ if [ "$YES" = 1 ]; then
   PASSWORD="${ATOLL_ROOT_PASSWORD:-}"
 else
   while :; do
-    read -r -s -u "$TTY_FD" -p "  输入密码（回车=随机生成）: " p1; echo
+    read -r -s -u "$TTY_FD" -p "  输入密码（回车=随机生成）: " p1 || eof_abort
+    echo
     if [ -z "$p1" ]; then break; fi
-    read -r -s -u "$TTY_FD" -p "  再输一遍: " p2; echo
+    read -r -s -u "$TTY_FD" -p "  再输一遍: " p2 || eof_abort
+    echo
     [ "$p1" = "$p2" ] && { PASSWORD="$p1"; break; }
     warn "两次不一致，再来"
   done
@@ -347,42 +418,58 @@ fi
 # ---------------------------------------------------------------- 4. reminders
 bold "4/5 确认"
 echo "  home        : $HOME_DIR"
+[ "$RESET_HOME" = 1 ] && echo "                （既有实例将先挪到 ${HOME_DIR}.bak-<时间>）"
 echo "  addr        : $ADDR"
 [ -n "$STEWARD" ] && echo "  steward     : $STEWARD"
 echo "  web UI      : http://$ADDR （在二进制里，跟 API 同一个端口）"
 echo "  token       : $HOME_DIR/server/atoll-token（本地自动化用 Bearer）"
 [ -n "$PASSWORD" ] && echo "  密码文件    : $HOME_DIR/server/root-password（0600）"
-confirm "  开始安装并启动？" y || { echo "已取消"; exit 0; }
+confirm "  开始安装并启动？" y || { echo "已取消（机器上没有落任何东西）"; exit 0; }
 echo
 
 # ---------------------------------------------------------------- 5. install
 bold "5/5 安装 + 启动"
+install_binary
+if [ "$RESET_HOME" = 1 ] && [ -e "$HOME_DIR" ]; then
+  BAK="${HOME_DIR}.bak-$(date +%Y%m%d-%H%M%S)"
+  mv "$HOME_DIR" "$BAK"
+  ok "既有实例已挪到 $BAK"
+fi
 mkdir -p "$HOME_DIR/server"
+# 配置文件写临时名再 mv：既有实例的 atoll.env 恒不被写一半的文件顶掉。
 {
   echo "# written by scripts/install.sh $(date '+%F %T'); a bare 'atoll up --dir $HOME_DIR' reads this"
   echo "ATOLL_ADDR=$ADDR"
   [ -n "$STEWARD" ] && echo "ATOLL_STEWARD=$STEWARD"
-} > "$HOME_DIR/atoll.env"
+} > "$HOME_DIR/.atoll.env.new"
+mv -f "$HOME_DIR/.atoll.env.new" "$HOME_DIR/atoll.env"
 if [ -n "$PASSWORD" ]; then
-  (umask 077; printf '%s\n' "$PASSWORD" > "$HOME_DIR/server/root-password")
+  (umask 077; printf '%s\n' "$PASSWORD" > "$HOME_DIR/server/.root-password.new")
+  mv -f "$HOME_DIR/server/.root-password.new" "$HOME_DIR/server/root-password"
 fi
 ok "已写 $HOME_DIR/atoll.env"
 
 UP_ARGS=(up --dir "$HOME_DIR" --addr "$ADDR")
 [ -n "$STEWARD" ] && [ "${OPEN_EXISTING:-0}" != 1 ] && UP_ARGS+=(--steward "$STEWARD")
-[ -n "$PASSWORD" ] && UP_ARGS+=(--root-password "$PASSWORD")
 LOG="$HOME_DIR/atoll-up.log"
-"$ATOLL_BIN" "${UP_ARGS[@]}" >"$LOG" 2>&1 &
+# 密码走环境变量（atoll up 的 flag 为空时读 ATOLL_ROOT_PASSWORD），恒不进
+# argv——命令行参数在进程表里对同机观察者可见。子进程关掉 stdin 和向导的
+# fd3，别让节点攥着终端。
+ATOLL_ROOT_PASSWORD="$PASSWORD" "$ATOLL_BIN" "${UP_ARGS[@]}" </dev/null >"$LOG" 2>&1 3<&- &
 UP_PID=$!
-trap 'kill "$UP_PID" 2>/dev/null; wait "$UP_PID" 2>/dev/null; exit 0' INT TERM
+trap 'kill "$UP_PID" 2>/dev/null || true; wait "$UP_PID" 2>/dev/null || true; exit 0' INT TERM
 echo "  … 等待节点起来（http://$ADDR/healthz）"
 for i in $(seq 1 60); do
-  if curl -fs "http://$ADDR/healthz" >/dev/null 2>&1; then break; fi
+  if curl -fs --max-time 2 "http://$ADDR/healthz" >/dev/null 2>&1 </dev/null; then break; fi
   if ! kill -0 "$UP_PID" 2>/dev/null; then bad "atoll up 退出了，看日志：$LOG"; tail -20 "$LOG"; exit 1; fi
   [ $((i % 10)) = 0 ] && echo "    … 还在等（$((i / 2))s）"
   sleep 0.5
 done
-if ! curl -fs "http://$ADDR/healthz" >/dev/null 2>&1; then bad "30s 内没起来，看日志：$LOG"; exit 1; fi
+if ! curl -fs --max-time 2 "http://$ADDR/healthz" >/dev/null 2>&1 </dev/null; then
+  bad "30s 内没起来；已停掉半启动的节点，看日志：$LOG"
+  tail -20 "$LOG"
+  exit 1
+fi
 
 echo
 bold "atoll 已在跑"
@@ -394,4 +481,14 @@ echo "  日志        : $LOG"
 [ -n "$STEWARD" ] && echo "  c0 里的 steward 是 $STEWARD——登录后在 c0 直接对它说话"
 echo "  以后启动    : $ATOLL_BIN up --dir $HOME_DIR   （读 atoll.env，同一实例）"
 echo "  Ctrl-C 停止。"
-wait "$UP_PID"
+wait "$UP_PID" || {
+  rc=$?
+  UP_PID=""
+  bad "节点退出（$rc）；日志：$LOG"
+  tail -5 "$LOG"
+  exit 1
+}
+UP_PID=""
+
+}
+main "$@"
