@@ -17,6 +17,9 @@
 #
 #   ATOLL_VERSION=v0.01   pin a release instead of taking the latest
 #   ATOLL_BIN=/path/atoll  use a binary you already have
+#   ATOLL_GH_MIRROR=...    download through a GitHub mirror when the CDN is slow,
+#                          e.g. ATOLL_GH_MIRROR=https://ghproxy.net/https://github.com
+#                          (curl also honors https_proxy=... as usual)
 #
 # What it does, in order:
 #   0. acquire     — find or fetch the binary (see above)
@@ -95,18 +98,43 @@ download_release() {
 
   ver="${ATOLL_VERSION:-}"
   if [ -z "$ver" ]; then
-    ver=$(curl -fsSL "https://api.github.com/repos/$REPO_SLUG/releases/latest" \
+    echo "  … 查询最新发行版（api.github.com）"
+    ver=$(curl -fsSL --max-time 30 "https://api.github.com/repos/$REPO_SLUG/releases/latest" \
           | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     [ -n "$ver" ] || { bad "查不到最新发行版；用 ATOLL_VERSION=<tag> 指定一个"; exit 1; }
   fi
   name="atoll_${ver}_${os}_${arch}"
   base="https://github.com/$REPO_SLUG/releases/download/$ver"
+  if [ -n "${ATOLL_GH_MIRROR:-}" ]; then
+    base="${ATOLL_GH_MIRROR%/}/$REPO_SLUG/releases/download/$ver"
+    ok "经镜像下载：$base"
+  fi
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
 
-  echo "  ↓ $name.tar.gz"
-  curl -fL --progress-bar -o "$tmp/$name.tar.gz" "$base/$name.tar.gz" \
-    || { bad "下载失败：$base/$name.tar.gz"; exit 1; }
+  # 下载进度：终端上交给 curl 的进度条；没有终端（CI、docker exec、重定向）
+  # 时 --progress-bar 会完全静默，就自己每 5 秒报一次已下载量——慢可以，
+  # 哑不行，用户必须能看出它活着。
+  local size_note total
+  total=$(curl -fsIL --max-time 15 "$base/$name.tar.gz" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}')
+  size_note=""; [ "${total:-0}" -gt 0 ] && size_note="（$((total/1024/1024)) MB）"
+  echo "  ↓ $name.tar.gz $size_note"
+  if [ -t 2 ]; then
+    curl -fL --progress-bar --speed-limit 1024 --speed-time 60 -o "$tmp/$name.tar.gz" "$base/$name.tar.gz" \
+      || { bad "下载失败或过慢：$base/$name.tar.gz"; echo "    网络到 GitHub CDN 慢时可设镜像：ATOLL_GH_MIRROR=https://ghproxy.net/https://github.com 或 https_proxy=..."; exit 1; }
+  else
+    ( while [ ! -f "$tmp/.done" ]; do
+        sleep 5
+        [ -f "$tmp/.done" ] && break
+        got=$(wc -c < "$tmp/$name.tar.gz" 2>/dev/null || echo 0)
+        if [ "${total:-0}" -gt 0 ]; then echo "    … $((got/1024)) KB / $((total/1024)) KB"; else echo "    … 已下载 $((got/1024)) KB"; fi
+      done ) &
+    watcher=$!
+    curl -fsSL --speed-limit 1024 --speed-time 60 -o "$tmp/$name.tar.gz" "$base/$name.tar.gz"
+    rc=$?
+    : > "$tmp/.done"; wait "$watcher" 2>/dev/null || true
+    [ "$rc" = 0 ] || { bad "下载失败或过慢：$base/$name.tar.gz"; echo "    网络到 GitHub CDN 慢时可设镜像：ATOLL_GH_MIRROR=https://ghproxy.net/https://github.com 或 https_proxy=..."; exit 1; }
+  fi
 
   # 包和清单来自同一个 release，所以这道校验防的是传输截断和坏包，
   # 不是有意投毒——那要靠签名，这个版本还没有。
@@ -316,9 +344,11 @@ LOG="$HOME_DIR/atoll-up.log"
 "$ATOLL_BIN" "${UP_ARGS[@]}" >"$LOG" 2>&1 &
 UP_PID=$!
 trap 'kill "$UP_PID" 2>/dev/null; wait "$UP_PID" 2>/dev/null; exit 0' INT TERM
+echo "  … 等待节点起来（http://$ADDR/healthz）"
 for i in $(seq 1 60); do
   if curl -fs "http://$ADDR/healthz" >/dev/null 2>&1; then break; fi
   if ! kill -0 "$UP_PID" 2>/dev/null; then bad "atoll up 退出了，看日志：$LOG"; tail -20 "$LOG"; exit 1; fi
+  [ $((i % 10)) = 0 ] && echo "    … 还在等（$((i / 2))s）"
   sleep 0.5
 done
 if ! curl -fs "http://$ADDR/healthz" >/dev/null 2>&1; then bad "30s 内没起来，看日志：$LOG"; exit 1; fi
