@@ -17,9 +17,6 @@
 #
 #   ATOLL_VERSION=v0.01   pin a release instead of taking the latest
 #   ATOLL_BIN=/path/atoll  use a binary you already have
-#   ATOLL_GH_MIRROR=...    download through a GitHub mirror when the CDN is slow,
-#                          e.g. ATOLL_GH_MIRROR=https://ghproxy.net/https://github.com
-#                          (curl also honors https_proxy=... as usual)
 #
 # What it does, in order:
 #   0. acquire     — find or fetch the binary (see above)
@@ -32,15 +29,18 @@ set -euo pipefail
 
 REPO_SLUG="${ATOLL_REPO:-wanpengxie/atoll}"
 
-# `curl ... | bash` hands the script a pipe for stdin, and every prompt below
-# would read EOF from it — the wizard would silently answer itself. The terminal
-# is still there, so take it back. With no terminal at all (CI), there is nobody
-# to ask: take the defaults and say so.
+# `curl ... | bash` hands bash the SCRIPT on stdin — bash reads the next line
+# to execute from fd 0. Redirecting fd 0 to the terminal (exec </dev/tty) makes
+# bash read "the rest of the script" FROM THE TERMINAL: the install hangs dead
+# waiting for keystrokes. So stdin is never touched; the wizard talks to the
+# terminal on its own fd (3). With no terminal at all (CI), there is nobody to
+# ask: take the defaults and say so.
 YES=0
+TTY_FD=0
 for a in "$@"; do case "$a" in --yes|-y) YES=1 ;; -h|--help) sed -n '2,28p' "$0"; exit 0 ;; esac; done
 if [ ! -t 0 ]; then
-  if (exec </dev/tty) 2>/dev/null; then
-    exec </dev/tty
+  if exec 3</dev/tty 2>/dev/null; then
+    TTY_FD=3
   else
     YES=1
     echo "  ! 没有可交互的终端，全部取默认值（等同 --yes）" >&2
@@ -60,13 +60,13 @@ ask()  { # ask VAR "prompt" "default"
   local __var=$1 __prompt=$2 __def=${3:-}
   if [ "$YES" = 1 ]; then printf -v "$__var" '%s' "$__def"; return; fi
   local __in
-  read -r -p "$__prompt${__def:+ [$__def]}: " __in
+  read -r -u "$TTY_FD" -p "$__prompt${__def:+ [$__def]}: " __in
   printf -v "$__var" '%s' "${__in:-$__def}"
 }
 confirm() { # confirm "prompt" default(y|n)
   local def=${2:-y} in
   if [ "$YES" = 1 ]; then [ "$def" = y ]; return; fi
-  read -r -p "$1 [$([ "$def" = y ] && echo Y/n || echo y/N)]: " in
+  read -r -u "$TTY_FD" -p "$1 [$([ "$def" = y ] && echo Y/n || echo y/N)]: " in
   in=${in:-$def}; [[ "$in" =~ ^[Yy] ]]
 }
 
@@ -105,10 +105,6 @@ download_release() {
   fi
   name="atoll_${ver}_${os}_${arch}"
   base="https://github.com/$REPO_SLUG/releases/download/$ver"
-  if [ -n "${ATOLL_GH_MIRROR:-}" ]; then
-    base="${ATOLL_GH_MIRROR%/}/$REPO_SLUG/releases/download/$ver"
-    ok "经镜像下载：$base"
-  fi
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
 
@@ -120,8 +116,8 @@ download_release() {
   size_note=""; [ "${total:-0}" -gt 0 ] && size_note="（$((total/1024/1024)) MB）"
   echo "  ↓ $name.tar.gz $size_note"
   if [ -t 2 ]; then
-    curl -fL --progress-bar --speed-limit 1024 --speed-time 60 -o "$tmp/$name.tar.gz" "$base/$name.tar.gz" \
-      || { bad "下载失败或过慢：$base/$name.tar.gz"; echo "    网络到 GitHub CDN 慢时可设镜像：ATOLL_GH_MIRROR=https://ghproxy.net/https://github.com 或 https_proxy=..."; exit 1; }
+    curl -fL --progress-bar -o "$tmp/$name.tar.gz" "$base/$name.tar.gz" \
+      || { bad "下载失败：$base/$name.tar.gz"; exit 1; }
   else
     ( while [ ! -f "$tmp/.done" ]; do
         sleep 5
@@ -130,10 +126,10 @@ download_release() {
         if [ "${total:-0}" -gt 0 ]; then echo "    … $((got/1024)) KB / $((total/1024)) KB"; else echo "    … 已下载 $((got/1024)) KB"; fi
       done ) &
     watcher=$!
-    curl -fsSL --speed-limit 1024 --speed-time 60 -o "$tmp/$name.tar.gz" "$base/$name.tar.gz"
+    curl -fsSL -o "$tmp/$name.tar.gz" "$base/$name.tar.gz"
     rc=$?
     : > "$tmp/.done"; wait "$watcher" 2>/dev/null || true
-    [ "$rc" = 0 ] || { bad "下载失败或过慢：$base/$name.tar.gz"; echo "    网络到 GitHub CDN 慢时可设镜像：ATOLL_GH_MIRROR=https://ghproxy.net/https://github.com 或 https_proxy=..."; exit 1; }
+    [ "$rc" = 0 ] || { bad "下载失败：$base/$name.tar.gz"; exit 1; }
   fi
 
   # 包和清单来自同一个 release，所以这道校验防的是传输截断和坏包，
@@ -297,9 +293,9 @@ if [ "$YES" = 1 ]; then
   PASSWORD="${ATOLL_ROOT_PASSWORD:-}"
 else
   while :; do
-    read -r -s -p "  输入密码（回车=随机生成）: " p1; echo
+    read -r -s -u "$TTY_FD" -p "  输入密码（回车=随机生成）: " p1; echo
     if [ -z "$p1" ]; then break; fi
-    read -r -s -p "  再输一遍: " p2; echo
+    read -r -s -u "$TTY_FD" -p "  再输一遍: " p2; echo
     [ "$p1" = "$p2" ] && { PASSWORD="$p1"; break; }
     warn "两次不一致，再来"
   done

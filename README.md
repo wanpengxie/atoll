@@ -79,7 +79,7 @@ architecture (the UI is inside it), verifies its sha256, and drops you into the
 very same wizard a source install runs:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh | bash
+curl -f#SL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh | bash
 ```
 
 Then open `http://127.0.0.1:8832`.
@@ -88,6 +88,10 @@ Then open `http://127.0.0.1:8832`.
 ATOLL_VERSION=v0.01 ...               # pin a release instead of taking the latest
 ATOLL_INSTALL_DIR=/usr/local/bin ...   # where the binary goes (default ~/.local/bin)
 ```
+
+If the command sits silent for more than a few seconds, that is the network to
+GitHub, not the installer: every stage prints progress once the script is
+running, so a silent terminal means the script itself is still downloading.
 
 Archives and `checksums.txt` are on [Releases](https://github.com/wanpengxie/atoll/releases);
 mac ships as Apple Silicon and Intel builds, Linux as amd64 and arm64, and the
