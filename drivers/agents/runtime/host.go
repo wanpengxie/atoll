@@ -39,7 +39,7 @@ func (s *generationSink) Publish(event driverproto.DriverEvent) bool {
 	g := s.generation
 	s.mu.Unlock()
 	if a, ok := event.(driverproto.Activity); ok {
-		if s.queue.pushActivity(g, a.Target, a.Stage) {
+		if s.queue.pushActivity(g, a.Target) {
 			return true
 		}
 		return s.dropObservation("activity")
@@ -78,7 +78,7 @@ func (s *generationSink) dropObservation(kind string) bool {
 
 func isObservation(event driverproto.DriverEvent) bool {
 	switch event.(type) {
-	case driverproto.Tool, driverproto.Diagnostic:
+	case driverproto.Tool, driverproto.Diagnostic, driverproto.ProgressNote:
 		return true
 	default:
 		return false
@@ -86,10 +86,14 @@ func isObservation(event driverproto.DriverEvent) bool {
 }
 
 func observationName(event driverproto.DriverEvent) string {
-	if _, ok := event.(driverproto.Tool); ok {
+	switch event.(type) {
+	case driverproto.Tool:
 		return "tool"
+	case driverproto.ProgressNote:
+		return "note"
+	default:
+		return "diagnostic"
 	}
-	return "diagnostic"
 }
 
 func (s *generationSink) seal() {

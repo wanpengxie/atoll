@@ -66,8 +66,8 @@ func (c *liveCollector) TurnRejected(op runtimeproto.OpID, code, detail string) 
 func (c *liveCollector) Tool(id runtimeproto.TurnID, e runtimeproto.ToolEvent) {
 	c.push(liveEvent{kind: "tool", turn: id, text: e.Name, detail: e.Phase + " " + e.Detail})
 }
-func (c *liveCollector) Progress(id runtimeproto.TurnID, stage string) {
-	c.push(liveEvent{kind: "progress", turn: id, text: stage})
+func (c *liveCollector) Progress(id runtimeproto.TurnID, v runtimeproto.ProgressEvent) {
+	c.push(liveEvent{kind: "progress", turn: id, text: v.Kind, detail: v.Text})
 }
 func (c *liveCollector) TurnEnded(id runtimeproto.TurnID, status runtimeproto.TurnStatus, text, detail string, usage runtimeproto.TurnUsage) {
 	c.push(liveEvent{kind: "ended", turn: id, status: status, text: text, detail: detail, usage: usage})

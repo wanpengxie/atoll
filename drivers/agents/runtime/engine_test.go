@@ -140,8 +140,8 @@ func (c *eventCollector) TurnRejected(op runtimeproto.OpID, code, detail string)
 	c.ch <- collectedEvent{kind: "rejected", op: op, text: code + detail}
 }
 func (c *eventCollector) Tool(runtimeproto.TurnID, runtimeproto.ToolEvent) {}
-func (c *eventCollector) Progress(id runtimeproto.TurnID, stage string) {
-	c.ch <- collectedEvent{kind: "progress", turn: id, text: stage}
+func (c *eventCollector) Progress(id runtimeproto.TurnID, v runtimeproto.ProgressEvent) {
+	c.ch <- collectedEvent{kind: "progress", turn: id, text: v.Kind + ":" + v.Text}
 }
 func (c *eventCollector) TurnEnded(id runtimeproto.TurnID, _ runtimeproto.TurnStatus, text, _ string, usage runtimeproto.TurnUsage) {
 	c.ch <- collectedEvent{kind: "ended", turn: id, text: text, usage: usage}
@@ -203,10 +203,11 @@ func (w *stageWorker) Open(context.Context, driverproto.OpenRequest) {
 func (w *stageWorker) Start(_ context.Context, r driverproto.StartRequest) {
 	target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "turn"}
 	w.host.Events().Publish(driverproto.TurnStarted{Target: target})
-	// 同 stage 重复与 2s 内的 stage 切换都要被节流闸吃掉：恰出一条 progress。
-	w.host.Events().Publish(driverproto.Activity{Target: target, Stage: driverproto.StageThinking})
-	w.host.Events().Publish(driverproto.Activity{Target: target, Stage: driverproto.StageThinking})
-	w.host.Events().Publish(driverproto.Activity{Target: target, Stage: driverproto.StageWriting})
+	// note 逐条上报不合并；空文本只是活性；纯心跳恒不产生 progress。
+	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking, Text: "a"})
+	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NotePlan, Text: ""})
+	w.host.Events().Publish(driverproto.Activity{Target: target})
+	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NotePlan, Text: "b"})
 	w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "done"})
 }
 func (w *stageWorker) Control(_ context.Context, r driverproto.ControlRequest) {
@@ -215,10 +216,10 @@ func (w *stageWorker) Control(_ context.Context, r driverproto.ControlRequest) {
 func (w *stageWorker) Retire()                  { w.once.Do(func() { close(w.reaped) }) }
 func (w *stageWorker) Reaped() <-chan struct{}  { return w.reaped }
 
-// TestStagedActivityThrottlesIntoProgress: staged liveness becomes at most a
-// trickle of progress facts — repeats and sub-2s stage flips are dropped, the
-// first reading gets through.
-func TestStagedActivityThrottlesIntoProgress(t *testing.T) {
+// TestProgressNotesFlowThroughInOrder: completed intermediate artifacts pass
+// through one-by-one (no coalescing), empty texts and bare liveness never
+// become progress.
+func TestProgressNotesFlowThroughInOrder(t *testing.T) {
 	factory, _, err := Build(&stageProvider{}, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, Watchdog: time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +236,7 @@ func TestStagedActivityThrottlesIntoProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := awaitKind(t, events, "started")
-	progress := 0
+	var notes []string
 	deadline := time.After(time.Second)
 	for {
 		var got collectedEvent
@@ -245,20 +246,18 @@ func TestStagedActivityThrottlesIntoProgress(t *testing.T) {
 			t.Fatal("no ended event")
 		}
 		if got.kind == "progress" {
-			progress++
-			// inbox 合并让值收敛到最新读数，具体是哪个 stage 取决于消费时序；
-			// 铁的是恰一条（2s 闸下同 turn 不可能第二条）且值合法。
-			if got.turn != started.turn || (got.text != driverproto.StageThinking && got.text != driverproto.StageWriting) {
-				t.Fatalf("unexpected progress %+v", got)
+			if got.turn != started.turn {
+				t.Fatalf("progress on wrong turn %+v", got)
 			}
+			notes = append(notes, got.text)
 			continue
 		}
 		if got.kind == "ended" {
 			break
 		}
 	}
-	if progress != 1 {
-		t.Fatalf("throttle leaked: want 1 progress, got %d", progress)
+	if len(notes) != 2 || notes[0] != "thinking:a" || notes[1] != "plan:b" {
+		t.Fatalf("want [thinking:a plan:b], got %#v", notes)
 	}
 }
 

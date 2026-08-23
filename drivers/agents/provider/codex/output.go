@@ -141,12 +141,21 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				w.final[target.Native] = n.Item.Text
 				w.mu.Unlock()
 			}
-			// 正文条目开写 = 回合进入写作阶段；这是阶段台阶，不是正文碎片。
-			w.publish(driverproto.Activity{Target: target, Stage: driverproto.StageWriting})
+			w.publish(driverproto.Activity{Target: target})
 			return
 		}
 		if n.Item.Type == "reasoning" || n.Item.Type == "plan" {
-			w.publish(driverproto.Activity{Target: target, Stage: driverproto.StageThinking})
+			// 完成了的中间产物按统一词表填充成 ProgressNote；未完成（started）
+			// 只是活性。delta 碎片恒不在此列（见 default 分支）。
+			if method == "item/completed" && strings.TrimSpace(n.Item.Text) != "" {
+				kind := driverproto.NoteThinking
+				if n.Item.Type == "plan" {
+					kind = driverproto.NotePlan
+				}
+				w.publish(driverproto.ProgressNote{Target: target, Kind: kind, Text: boundedNoteText(n.Item.Text)})
+				return
+			}
+			w.publish(driverproto.Activity{Target: target})
 			return
 		}
 		if n.Item.Type == "userMessage" || n.Item.Type == "contextCompaction" {
@@ -191,22 +200,21 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 		}
 	default:
 		if isDeltaMethod(method) && target.Valid() {
-			w.publish(driverproto.Activity{Target: target, Stage: deltaStage(method)})
+			w.publish(driverproto.Activity{Target: target})
 		}
 	}
 }
 
-// deltaStage 把 delta 方法名折成阶段读数：reasoning 流 = 思考，
-// message 流 = 写正文；认不出的 delta 保持纯心跳。
-func deltaStage(method string) string {
-	m := strings.ToLower(method)
-	if strings.Contains(m, "reasoning") {
-		return driverproto.StageThinking
+// boundedNoteText 是 ProgressNote 的统一整形：脱敏 + 截断，与工具摘要同一
+// 长度预算。note 是摘要不是正文，超长恒截。
+func boundedNoteText(s string) string {
+	s = redactNative(strings.TrimSpace(s))
+	r := []rune(s)
+	if len(r) <= toolSummaryMaxChars {
+		return s
 	}
-	if strings.Contains(m, "message") {
-		return driverproto.StageWriting
-	}
-	return ""
+	mark := "…[truncated]"
+	return string(r[:toolSummaryMaxChars-utf8.RuneCountInString(mark)]) + mark
 }
 
 func boundedToolSummary(item itemWire) string {

@@ -562,28 +562,28 @@ func TestHostServedToolNarrationIsNotRepublished(t *testing.T) {
 	}
 }
 
-// TestActivityCarriesStageReadings: thinking blocks surface as the thinking
-// stage, text blocks as writing — the coarse ladder the runtime throttles into
-// ledger-visible progress for tool-less turns.
-func TestActivityCarriesStageReadings(t *testing.T) {
+// TestAssistantBlocksBecomeProgressNotes: arriving thinking/text blocks are
+// completed intermediate artifacts — filled into the provider-independent note
+// vocabulary with their (redacted, bounded) content.
+func TestAssistantBlocksBecomeProgressNotes(t *testing.T) {
 	h, _, _ := activeHarness(t)
 	h.proc.emit(t, map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"content": []any{
 		map[string]any{"type": "thinking", "thinking": "hmm"},
 	}}})
 	h.proc.emit(t, map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"content": []any{
-		map[string]any{"type": "text", "text": "answer"},
+		map[string]any{"type": "text", "text": "draft answer"},
 	}}})
 	h.wait(func(e driverproto.DriverEvent) bool {
-		a, ok := e.(driverproto.Activity)
-		return ok && a.Stage == driverproto.StageWriting
+		n, ok := e.(driverproto.ProgressNote)
+		return ok && n.Kind == driverproto.NoteText
 	})
-	stages := []string{}
+	notes := []driverproto.ProgressNote{}
 	for _, event := range h.sink.snapshot() {
-		if a, ok := event.(driverproto.Activity); ok && a.Stage != "" {
-			stages = append(stages, a.Stage)
+		if n, ok := event.(driverproto.ProgressNote); ok {
+			notes = append(notes, n)
 		}
 	}
-	if len(stages) != 2 || stages[0] != driverproto.StageThinking || stages[1] != driverproto.StageWriting {
-		t.Fatalf("want [thinking writing], got %#v", stages)
+	if len(notes) != 2 || notes[0].Kind != driverproto.NoteThinking || notes[0].Text != "hmm" || notes[1].Kind != driverproto.NoteText || notes[1].Text != "draft answer" {
+		t.Fatalf("want thinking+text notes, got %#v", notes)
 	}
 }

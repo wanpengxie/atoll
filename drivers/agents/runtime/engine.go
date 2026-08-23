@@ -98,9 +98,7 @@ type turnState struct {
 	resumeRetried     bool
 	control           *controlState
 	callbacks         map[string]*callbackRow
-	lastStage         string
-	lastProgressAt    time.Time
-	progressCount     int
+	noteCount         int
 }
 
 type timerKind uint8
@@ -510,6 +508,8 @@ func (e *engine) handleDriverFact(f driverFact) {
 		e.turnStarted(x)
 	case driverproto.Activity:
 		e.activity(x)
+	case driverproto.ProgressNote:
+		e.note(x)
 	case driverproto.Tool:
 		e.nativeTool(x)
 	case driverproto.TurnEnded:
@@ -605,20 +605,24 @@ func (e *engine) activity(x driverproto.Activity) {
 		return
 	}
 	e.resetWatchdog()
-	// 带阶段的活性升格为进度读数，三重闸拒绝刷屏：阶段变化才发、两次之间
-	// 至少隔 2s、每 turn 至多 8 条。丢掉的不补——下一次心跳还会带着同阶段。
-	if x.Stage == "" || e.turn == nil || e.turn.terminal || e.turn.id == "" {
+}
+
+func (e *engine) note(x driverproto.ProgressNote) {
+	if !e.currentTarget(x.Target) {
+		e.logContradiction("late ProgressNote", x)
 		return
 	}
-	t := e.turn
-	if x.Stage == t.lastStage || t.progressCount >= 8 {
+	e.resetWatchdog()
+	if e.turn == nil || e.turn.terminal || e.turn.id == "" || x.Text == "" {
 		return
 	}
-	if now := time.Now(); t.lastProgressAt.IsZero() || now.Sub(t.lastProgressAt) >= 2*time.Second {
-		t.lastStage, t.lastProgressAt = x.Stage, now
-		t.progressCount++
-		e.publish(publishProgress{turn: t.id, stage: x.Stage})
+	// note 是已完成中间产物的摘要，逐条上报不合并；64 条/turn 是防疯转的
+	// 兜底限额，正常回合远到不了。
+	if e.turn.noteCount >= 64 {
+		return
 	}
+	e.turn.noteCount++
+	e.publish(publishProgress{turn: e.turn.id, event: runtimeproto.ProgressEvent{Kind: x.Kind, Text: x.Text}})
 }
 
 func (e *engine) nativeTool(x driverproto.Tool) {

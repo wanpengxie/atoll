@@ -131,6 +131,13 @@ type ReadyResult struct {
 	Detail string
 }
 
+// ProgressEvent 是回合内一件已完成中间产物的截断摘要（provider 无关词表，
+// 见 driverproto 的 Note* 常量）。展示与阶段推断全在前端，后端只负责发送。
+type ProgressEvent struct {
+	Kind string
+	Text string
+}
+
 type ToolEvent struct {
 	CallID string
 	Phase  string
@@ -150,9 +157,9 @@ type Events interface {
 	TurnStarted(OpID, TurnID)
 	TurnRejected(OpID, string, string)
 	Tool(TurnID, ToolEvent)
-	// Progress 是回合内的粗粒度阶段读数（thinking/writing）。它与 Tool 同为
-	// 可丢弃的过程观测：拥塞时丢，恒不因它拉闸。
-	Progress(TurnID, string)
+	// Progress 是回合内一件已完成中间产物的摘要。与 Tool 同为可丢弃的过程
+	// 观测：拥塞时丢，恒不因它拉闸。
+	Progress(TurnID, ProgressEvent)
 	TurnEnded(TurnID, TurnStatus, string, string, TurnUsage)
 	ControlDone(OpID, TurnID, ControlVerdict, string)
 	ReadyDone(OpID, ReadyResult)

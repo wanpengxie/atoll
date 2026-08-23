@@ -89,18 +89,23 @@ type ControlOutcome struct {
 }
 
 type TurnStarted struct{ Target WorkerTurnTarget }
+type Activity struct{ Target WorkerTurnTarget }
 
-// Activity 是回合内的活性证据。Stage 是可选的粗粒度阶段读数
-// （StageThinking/StageWriting），空值 = 纯心跳。它恒不携带正文片段——
-// 过程碎片不进任何投影，阶段台阶才进。
-type Activity struct {
+// ProgressNote 是回合内一件"已完成的中间产物"的截断摘要。Kind 是 provider
+// 无关的统一词表（下方常量），各 provider 把自家 wire 的条目映射填充进来；
+// 阶段感（思考中/正在写……）由前端从 note 流自行推断，后端不做阶段机制。
+// 判据是完成性：delta（逐 token 碎片）恒不在此列。它与 Tool 同为可丢弃的
+// 过程观测，拥塞时丢，恒不因它拉闸。
+type ProgressNote struct {
 	Target WorkerTurnTarget
-	Stage  string
+	Kind   string
+	Text   string
 }
 
 const (
-	StageThinking = "thinking"
-	StageWriting  = "writing"
+	NoteThinking = "thinking" // 思考/推理小结（codex reasoning、claude thinking）
+	NotePlan     = "plan"     // 计划条目
+	NoteText     = "text"     // 中间正文块
 )
 type Tool struct {
 	Target WorkerTurnTarget
@@ -136,6 +141,7 @@ type Diagnostic struct {
 
 func (TurnStarted) driverEvent()        {}
 func (Activity) driverEvent()           {}
+func (ProgressNote) driverEvent()       {}
 func (Tool) driverEvent()               {}
 func (TurnEnded) driverEvent()          {}
 func (SeedUpdated) driverEvent()        {}

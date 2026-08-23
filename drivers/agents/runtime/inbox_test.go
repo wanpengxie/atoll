@@ -46,7 +46,7 @@ func TestObservationPressureDropsObservationButPreservesLifecycleFact(t *testing
 func TestInboxCoalescedActivityKeepsAdmissionOrder(t *testing.T) {
 	q := newInbox(Policy{IngressCapacity: 2, CommandCapacity: 1, CallbackCapacity: 1}.normalized())
 	target := driverproto.WorkerTurnTarget{Attempt: 1, Native: "native"}
-	if !q.pushActivity(1, target, "") || !q.push(classTimer, timerFact{kind: timerWatchdog}) || !q.pushActivity(1, target, "") {
+	if !q.pushActivity(1, target) || !q.push(classTimer, timerFact{kind: timerWatchdog}) || !q.pushActivity(1, target) {
 		t.Fatal("admission failed")
 	}
 	first, ok := q.pop()

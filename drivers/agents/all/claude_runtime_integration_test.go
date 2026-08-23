@@ -53,7 +53,7 @@ func (c *claudeRuntimeCollector) TurnEnded(_ runtimeproto.TurnID, status runtime
 func (*claudeRuntimeCollector) ControlDone(runtimeproto.OpID, runtimeproto.TurnID, runtimeproto.ControlVerdict, string) {
 }
 func (*claudeRuntimeCollector) ReadyDone(runtimeproto.OpID, runtimeproto.ReadyResult) {}
-func (*claudeRuntimeCollector) Progress(runtimeproto.TurnID, string)                  {}
+func (*claudeRuntimeCollector) Progress(runtimeproto.TurnID, runtimeproto.ProgressEvent) {}
 func (c *claudeRuntimeCollector) ProviderLost(_ runtimeproto.TurnID, _ runtimeproto.LostCause, detail string) {
 	c.push(claudeRuntimeEvent{kind: "lost", text: detail})
 }

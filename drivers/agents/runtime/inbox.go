@@ -112,7 +112,7 @@ func (q *inbox) push(class ingressClass, value any) bool {
 	return true
 }
 
-func (q *inbox) pushActivity(generation uint64, target driverproto.WorkerTurnTarget, stage string) bool {
+func (q *inbox) pushActivity(generation uint64, target driverproto.WorkerTurnTarget) bool {
 	key := activityKey(generation, target)
 	q.mu.Lock()
 	if q.sealed {
@@ -120,10 +120,9 @@ func (q *inbox) pushActivity(generation uint64, target driverproto.WorkerTurnTar
 		return false
 	}
 	if old := q.activity[key]; old != nil {
-		// Activity carries at most a stage reading. Retaining the first seq
-		// while replacing the value with the newest reading is order-preserving
-		// coalescence — the engine wants "where is it now", not the history.
-		old.value = driverFact{generation: generation, event: driverproto.Activity{Target: target, Stage: stage}}
+		// Activity has no content. Retaining the first seq while replacing the
+		// value is therefore order-preserving coalescence.
+		old.value = driverFact{generation: generation, event: driverproto.Activity{Target: target}}
 		q.mu.Unlock()
 		return true
 	}
@@ -133,7 +132,7 @@ func (q *inbox) pushActivity(generation uint64, target driverproto.WorkerTurnTar
 	}
 	q.observations++
 	q.next++
-	e := &ingressEntry{seq: q.next, class: classObservation, value: driverFact{generation: generation, event: driverproto.Activity{Target: target, Stage: stage}}, activityKey: key}
+	e := &ingressEntry{seq: q.next, class: classObservation, value: driverFact{generation: generation, event: driverproto.Activity{Target: target}}, activityKey: key}
 	q.items = append(q.items, e)
 	q.activity[key] = e
 	q.mu.Unlock()

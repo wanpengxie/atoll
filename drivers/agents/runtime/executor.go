@@ -27,7 +27,7 @@ type publishTool struct {
 }
 type publishProgress struct {
 	turn  runtimeproto.TurnID
-	stage string
+	event runtimeproto.ProgressEvent
 }
 type publishTurnEnded struct {
 	turn         runtimeproto.TurnID
@@ -73,7 +73,7 @@ func (e *engine) publish(f publishFact) {
 	case publishTool:
 		e.events.Tool(x.turn, x.event)
 	case publishProgress:
-		e.events.Progress(x.turn, x.stage)
+		e.events.Progress(x.turn, x.event)
 	case publishTurnEnded:
 		e.events.TurnEnded(x.turn, x.status, x.text, x.detail, x.usage)
 	case publishControlDone:
