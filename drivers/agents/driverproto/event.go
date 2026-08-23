@@ -1,5 +1,7 @@
 package driverproto
 
+import "encoding/json"
+
 type DriverEvent interface{ driverEvent() }
 
 type WorkerDisposition uint8
@@ -107,6 +109,7 @@ const (
 	NotePlan     = "plan"     // 计划条目
 	NoteText     = "text"     // 中间正文块
 )
+
 type Tool struct {
 	Target WorkerTurnTarget
 	CallID string
@@ -114,6 +117,8 @@ type Tool struct {
 	Name   string
 	Status ToolStatus
 	Detail string
+	Input  json.RawMessage
+	Output json.RawMessage
 }
 type TurnUsage struct {
 	ContextTokens int64

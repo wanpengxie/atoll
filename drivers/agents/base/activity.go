@@ -47,7 +47,7 @@ func (l *agentLoop) emitTool(v toolEvent) {
 		return
 	}
 	if v.Phase == "started" {
-		l.emit(registry.ActivityToolStarted, registry.ActivityToolStartedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: registry.ActivityStartedStatus})
+		l.emit(registry.ActivityToolStarted, registry.ActivityToolStartedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: registry.ActivityStartedStatus, Input: v.Input})
 		return
 	}
 	status := v.Status
@@ -58,5 +58,5 @@ func (l *agentLoop) emitTool(v toolEvent) {
 		l.logger.Error("agent invalid tool status", "status", fmt.Sprint(status))
 		return
 	}
-	l.emit(registry.ActivityToolEnded, registry.ActivityToolEndedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: status, Detail: v.Detail})
+	l.emit(registry.ActivityToolEnded, registry.ActivityToolEndedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: status, Detail: v.Detail, Output: v.Output})
 }

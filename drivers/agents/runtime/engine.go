@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -657,7 +658,7 @@ func (e *engine) nativeTool(x driverproto.Tool) {
 	} else if x.Status == driverproto.ToolStatusFailed {
 		status = "failed"
 	}
-	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: x.CallID, Phase: phase, Name: x.Name, Status: status, Detail: x.Detail}})
+	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: x.CallID, Phase: phase, Name: x.Name, Status: status, Detail: x.Detail, Input: x.Input, Output: x.Output}})
 	e.resetWatchdog()
 }
 
@@ -1049,7 +1050,7 @@ func (e *engine) handleCallback(r *callbackRequest) {
 	}
 	e.turn.callbacks[key] = &callbackRow{request: r, running: true}
 	e.resetWatchdog()
-	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: r.callID, Phase: "started", Name: callbackName(r)}})
+	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: r.callID, Phase: "started", Name: callbackName(r), Input: callbackInput(r)}})
 	e.invokeBridge(r, key, e.turn.start, e.turn.acceptedSteer, e.turn.hasAcceptedSteer)
 }
 
@@ -1070,7 +1071,7 @@ func (e *engine) handleCallbackCompletion(c callbackCompletion) {
 	if row.request.kind == callbackResource && c.result.resource.Error != "" {
 		status, detail = "failed", c.result.resource.Error
 	}
-	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: row.request.callID, Phase: "ended", Name: callbackName(row.request), Status: status, Detail: detail}})
+	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: row.request.callID, Phase: "ended", Name: callbackName(row.request), Status: status, Detail: detail, Output: callbackOutput(row.request, c.result)}})
 	select {
 	case row.request.response <- c.result:
 	default:
@@ -1088,6 +1089,36 @@ func callbackName(r *callbackRequest) string {
 		return r.tool.Name
 	}
 	return "resource." + r.resource.Operation
+}
+
+func callbackInput(r *callbackRequest) json.RawMessage {
+	if r.kind == callbackTool {
+		return append(json.RawMessage(nil), r.tool.Params...)
+	}
+	raw, _ := json.Marshal(map[string]any{"operation": r.resource.Operation, "resource_id": r.resource.ResourceID, "payload": r.resource.Payload})
+	return raw
+}
+
+func callbackOutput(r *callbackRequest, result callbackResult) json.RawMessage {
+	if r.kind == callbackResource {
+		if len(result.resource.Payload) != 0 {
+			return append(json.RawMessage(nil), result.resource.Payload...)
+		}
+		if result.resource.Error != "" {
+			raw, _ := json.Marshal(result.resource.Error)
+			return raw
+		}
+		return nil
+	}
+	text := strings.TrimSpace(result.tool.Text)
+	if text == "" {
+		return nil
+	}
+	if json.Valid([]byte(text)) {
+		return append(json.RawMessage(nil), text...)
+	}
+	raw, _ := json.Marshal(result.tool.Text)
+	return raw
 }
 func runningCallbacks(t *turnState) int {
 	n := 0

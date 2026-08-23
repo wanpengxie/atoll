@@ -1,5 +1,7 @@
 package registry
 
+import "encoding/json"
+
 // ActivityType is a composition-level durable phase-event type. The registry below is
 // the single vocabulary source for producers.
 type ActivityType string
@@ -49,16 +51,18 @@ type TurnUsagePayload struct {
 }
 
 type ActivityToolStartedPayload struct {
-	TurnIndex  int    `json:"turn_index"`
-	ToolCallID string `json:"tool_call_id"`
-	Tool       string `json:"tool"`
-	Status     string `json:"status"`
+	TurnIndex  int             `json:"turn_index"`
+	ToolCallID string          `json:"tool_call_id"`
+	Tool       string          `json:"tool"`
+	Status     string          `json:"status"`
+	Input      json.RawMessage `json:"input,omitempty"`
 }
 
 type ActivityToolEndedPayload struct {
-	TurnIndex  int    `json:"turn_index"`
-	ToolCallID string `json:"tool_call_id"`
-	Tool       string `json:"tool"`
-	Status     string `json:"status"`
-	Detail     string `json:"detail,omitempty"`
+	TurnIndex  int             `json:"turn_index"`
+	ToolCallID string          `json:"tool_call_id"`
+	Tool       string          `json:"tool"`
+	Status     string          `json:"status"`
+	Detail     string          `json:"detail,omitempty"`
+	Output     json.RawMessage `json:"output,omitempty"`
 }

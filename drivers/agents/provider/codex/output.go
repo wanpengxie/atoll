@@ -203,7 +203,7 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				status = driverproto.ToolStatusFailed
 			}
 		}
-		w.publish(driverproto.Tool{Target: target, CallID: n.Item.ID, Phase: phase, Name: name, Status: status, Detail: boundedToolSummary(n.Item)})
+		w.publish(driverproto.Tool{Target: target, CallID: n.Item.ID, Phase: phase, Name: name, Status: status, Detail: boundedToolSummary(n.Item), Input: toolInput(n.Item, phase), Output: toolOutput(n.Item, phase)})
 	case "error":
 		var notice struct {
 			ThreadID  string `json:"threadId"`
@@ -265,6 +265,48 @@ func toolSummary(item itemWire) string {
 	default:
 		return firstNonEmpty(item.Command, item.AggregatedOutput, item.Status)
 	}
+}
+
+func toolInput(item itemWire, phase driverproto.ToolPhase) json.RawMessage {
+	if phase != driverproto.ToolStarted {
+		return nil
+	}
+	if len(item.Arguments) != 0 && !bytes.Equal(bytes.TrimSpace(item.Arguments), []byte("null")) {
+		return append(json.RawMessage(nil), item.Arguments...)
+	}
+	var value any
+	switch item.Type {
+	case "commandExecution":
+		value = map[string]any{"command": item.Command}
+	case "webSearch":
+		value = map[string]any{"query": item.Query}
+	case "imageView":
+		value = map[string]any{"path": item.Path}
+	case "collabAgentToolCall":
+		value = map[string]any{"prompt": item.Prompt, "receiver_thread_ids": item.ReceiverThreadIDs}
+	default:
+		return nil
+	}
+	raw, _ := json.Marshal(value)
+	return raw
+}
+
+func toolOutput(item itemWire, phase driverproto.ToolPhase) json.RawMessage {
+	if phase != driverproto.ToolEnded {
+		return nil
+	}
+	if len(item.Result) != 0 && !bytes.Equal(bytes.TrimSpace(item.Result), []byte("null")) {
+		return append(json.RawMessage(nil), item.Result...)
+	}
+	if item.AggregatedOutput != "" {
+		raw, _ := json.Marshal(item.AggregatedOutput)
+		return raw
+	}
+	if len(item.Changes) != 0 {
+		raw, _ := json.Marshal(item.Changes)
+		return raw
+	}
+	return nil
 }
 func joinToolSummary(parts ...string) string {
 	out := parts[:0]

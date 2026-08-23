@@ -144,6 +144,8 @@ type ToolEvent struct {
 	Name   string
 	Status string
 	Detail string
+	Input  json.RawMessage
+	Output json.RawMessage
 }
 
 type TurnUsage struct {

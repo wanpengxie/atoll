@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -130,16 +131,23 @@ type collectedEvent struct {
 	text  string
 	usage runtimeproto.TurnUsage
 }
-type eventCollector struct{ ch chan collectedEvent }
+type eventCollector struct {
+	ch    chan collectedEvent
+	tools chan runtimeproto.ToolEvent
+}
 
-func newCollector() *eventCollector { return &eventCollector{ch: make(chan collectedEvent, 32)} }
+func newCollector() *eventCollector {
+	return &eventCollector{ch: make(chan collectedEvent, 32), tools: make(chan runtimeproto.ToolEvent, 32)}
+}
 func (c *eventCollector) TurnStarted(op runtimeproto.OpID, id runtimeproto.TurnID) {
 	c.ch <- collectedEvent{kind: "started", op: op, turn: id}
 }
 func (c *eventCollector) TurnRejected(op runtimeproto.OpID, code, detail string) {
 	c.ch <- collectedEvent{kind: "rejected", op: op, text: code + detail}
 }
-func (c *eventCollector) Tool(runtimeproto.TurnID, runtimeproto.ToolEvent) {}
+func (c *eventCollector) Tool(_ runtimeproto.TurnID, event runtimeproto.ToolEvent) {
+	c.tools <- event
+}
 func (c *eventCollector) Progress(id runtimeproto.TurnID, v runtimeproto.ProgressEvent) {
 	c.ch <- collectedEvent{kind: "progress", turn: id, text: v.Kind + ":" + v.Text}
 }
@@ -216,8 +224,8 @@ func (w *stageWorker) Start(_ context.Context, r driverproto.StartRequest) {
 func (w *stageWorker) Control(_ context.Context, r driverproto.ControlRequest) {
 	w.host.Events().Publish(driverproto.ControlOutcome{Action: r.Action, Target: r.Target, Verdict: driverproto.ControlAccepted})
 }
-func (w *stageWorker) Retire()                  { w.once.Do(func() { close(w.reaped) }) }
-func (w *stageWorker) Reaped() <-chan struct{}  { return w.reaped }
+func (w *stageWorker) Retire()                 { w.once.Do(func() { close(w.reaped) }) }
+func (w *stageWorker) Reaped() <-chan struct{} { return w.reaped }
 
 // TestProgressNotesFlowThroughInOrder: intermediate artifacts pass through
 // one-by-one (no coalescing); a repeat of the previous reading and a kindless
@@ -747,6 +755,39 @@ func TestCallbackAndTerminalArrivalOrders(t *testing.T) {
 				t.Fatalf("completed callback did not leave reusable worker: turn=%+v generation=%+v", e.turn, e.generation)
 			}
 		})
+	}
+}
+
+func TestToolProcessPayloadSurvivesRuntimeProjection(t *testing.T) {
+	e, _, events := newStateEngine(t)
+	_, target := setFixtureTurn(e, false, false)
+	e.nativeTool(driverproto.Tool{
+		Target: target, CallID: "native-1", Phase: driverproto.ToolStarted, Name: "search",
+		Input: json.RawMessage(`{"query":"ledger"}`),
+	})
+	started := <-events.tools
+	if string(started.Input) != `{"query":"ledger"}` || len(started.Output) != 0 {
+		t.Fatalf("started payload=%+v input=%s", started, started.Input)
+	}
+
+	e.nativeTool(driverproto.Tool{
+		Target: target, CallID: "native-1", Phase: driverproto.ToolEnded, Name: "search", Status: driverproto.ToolStatusCompleted,
+		Output: json.RawMessage(`{"hits":3}`),
+	})
+	ended := <-events.tools
+	if string(ended.Output) != `{"hits":3}` || len(ended.Input) != 0 {
+		t.Fatalf("ended payload=%+v output=%s", ended, ended.Output)
+	}
+
+	toolRequest := &callbackRequest{kind: callbackTool, tool: driverproto.ToolInvocation{Params: json.RawMessage(`{"path":"README.md"}`)}}
+	if got := string(callbackInput(toolRequest)); got != `{"path":"README.md"}` {
+		t.Fatalf("callback input=%s", got)
+	}
+	if got := string(callbackOutput(toolRequest, callbackResult{tool: driverproto.ToolResult{Text: `{"text":"ok"}`}})); got != `{"text":"ok"}` {
+		t.Fatalf("callback output=%s", got)
+	}
+	if got := string(callbackOutput(toolRequest, callbackResult{tool: driverproto.ToolResult{Text: "plain text"}})); got != `"plain text"` {
+		t.Fatalf("plain callback output=%s", got)
 	}
 }
 

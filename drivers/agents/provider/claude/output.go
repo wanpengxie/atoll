@@ -319,7 +319,7 @@ func (w *worker) onAssistant(c *connection, raw json.RawMessage) {
 				w.publish(driverproto.Activity{Target: target})
 				continue
 			}
-			w.publish(driverproto.Tool{Target: target, CallID: block.ID, Phase: driverproto.ToolStarted, Name: block.Name, Status: driverproto.ToolStatusUnknown, Detail: boundedSummary(block.Input)})
+			w.publish(driverproto.Tool{Target: target, CallID: block.ID, Phase: driverproto.ToolStarted, Name: block.Name, Status: driverproto.ToolStatusUnknown, Detail: boundedSummary(block.Input), Input: append(json.RawMessage(nil), block.Input...)})
 		case "text":
 			// 到达即发。claude 的最后一个 text 块与终稿同文，于是过程记录里
 			// 会有一条与回答相同的末条——这是有意接受的：过程是过程，
@@ -372,7 +372,7 @@ func (w *worker) onUser(c *connection, raw json.RawMessage) {
 		if block.IsError {
 			status = driverproto.ToolStatusFailed
 		}
-		w.publish(driverproto.Tool{Target: target, CallID: block.ToolUseID, Phase: driverproto.ToolEnded, Status: status, Detail: boundedSummary(block.Content)})
+		w.publish(driverproto.Tool{Target: target, CallID: block.ToolUseID, Phase: driverproto.ToolEnded, Status: status, Detail: boundedSummary(block.Content), Output: append(json.RawMessage(nil), block.Content...)})
 	}
 	if !hadTool {
 		w.publish(driverproto.Activity{Target: target})
