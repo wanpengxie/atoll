@@ -41,7 +41,8 @@ if [ -z "${BASH_VERSION:-}" ]; then
   if [ -f "$0" ]; then
     exec bash "$0" "$@"
   fi
-  _atoll_self=$(mktemp) || exit 1
+  # mktemp 恒带显式模板：无参调用在新旧 BSD/GNU/busybox 之间行为不一。
+  _atoll_self=$(mktemp "${TMPDIR:-/tmp}/atoll-install.XXXXXX") || exit 1
   cat > "$_atoll_self" 2>/dev/null || true
   # slurp 只有在壳逐字节读 stdin（bash/zsh 都是）时才拿得到完整的剩余脚本。
   # dash 这类壳按块预读，走到这里时后文已被吞掉一截——用守卫后紧跟的哨兵行
@@ -51,7 +52,11 @@ if [ -z "${BASH_VERSION:-}" ]; then
   fi
   _atoll_url="${ATOLL_INSTALL_URL:-https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh}"
   echo "  ! 当前 shell 预读了管道里的脚本，就地接管不完整；从 $_atoll_url 重新取一份交给 bash" >&2
-  if curl -fsSL --connect-timeout 15 --max-time 60 "$_atoll_url" -o "$_atoll_self" 2>/dev/null; then
+  # 兜底下载 curl/wget 二选一：alpine/容器环境常常没有 curl、恒有 busybox wget。
+  if command -v curl >/dev/null 2>&1 && curl -fsSL --connect-timeout 15 --max-time 60 "$_atoll_url" -o "$_atoll_self" 2>/dev/null; then
+    ATOLL_REEXEC_TMP="$_atoll_self" exec bash "$_atoll_self" "$@"
+  fi
+  if command -v wget >/dev/null 2>&1 && wget -q -T 60 -O "$_atoll_self" "$_atoll_url" 2>/dev/null; then
     ATOLL_REEXEC_TMP="$_atoll_self" exec bash "$_atoll_self" "$@"
   fi
   rm -f "$_atoll_self"
@@ -73,6 +78,10 @@ if [ -n "${ATOLL_REEXEC_TMP:-}" ]; then
     "${TMPDIR:-/tmp}"/*) rm -f "$ATOLL_REEXEC_TMP" ;;
   esac
 fi
+
+# set -u 下 $HOME 缺失会在深处报一句没人看得懂的 unbound variable；
+# 在门口把话说清楚。
+[ -n "${HOME:-}" ] || { echo "atoll installer 需要 HOME 环境变量（当前未设置）" >&2; exit 1; }
 
 REPO_SLUG="${ATOLL_REPO:-wanpengxie/atoll}"
 
@@ -182,7 +191,7 @@ download_release() {
   fi
   name="atoll_${ver}_${os}_${arch}"
   base="https://github.com/$REPO_SLUG/releases/download/$ver"
-  DL_TMP=$(mktemp -d)
+  DL_TMP=$(mktemp -d "${TMPDIR:-/tmp}/atoll-dl.XXXXXX")
 
   # 下载进度：终端上交给 curl 的进度条；没有终端（CI、docker exec、重定向）
   # 时 --progress-bar 会完全静默，就自己每 5 秒报一次已下载量——慢可以，
@@ -230,7 +239,9 @@ download_release() {
   PENDING_BIN_SRC="$DL_TMP/$name/atoll"
   [ -x "$PENDING_BIN_SRC" ] || { bad "包里没有可执行的 atoll"; exit 1; }
   ATOLL_BIN="$PENDING_BIN_SRC"
-  ok "已取到 $ver（确认安装后装入 ${ATOLL_INSTALL_DIR:-$HOME/.local/bin}）"
+  # 变量紧贴全角字符时恒用 ${var} 花括号形：macOS bash 3.2 的旧解析器会把
+  # 全角字符的首字节咬进变量名（set -u 下直接 unbound variable 崩掉）。
+  ok "已取到 ${ver}（确认安装后装入 ${ATOLL_INSTALL_DIR:-$HOME/.local/bin}）"
 }
 
 # 确认之后才把下载的二进制装进用户目录；写法是临时文件 + mv，恒不原地
@@ -296,7 +307,7 @@ fmt_epoch() { # GNU date takes -d @<epoch>, BSD/macOS takes -r <epoch>
 RESET_HOME=0
 if [ -n "$PREV_MARKER" ]; then
   when="$PREV_MARKER"; [ "$PREV_MARKER" != unknown ] && when=$(fmt_epoch $((PREV_MARKER/1000)))
-  warn "检测到已安装的 atoll：$HOME_DIR（装于 $when）"
+  warn "检测到已安装的 atoll：${HOME_DIR}（装于 ${when}）"
   echo "    1.0 之前没有升级/兼容路径：库形变了就重装。两种处理："
   echo "      [o] 直接打开这个实例（不重装，密码/agent 保持原样）"
   echo "      [r] 把它挪到 ${HOME_DIR}.bak-<时间> 后全新安装"
@@ -353,19 +364,18 @@ for a in codex claude; do
 done
 
 ask ADDR "  监听地址" "${EXISTING_ADDR:-$DEFAULT_ADDR}"
-port_busy() { # ss on linux, lsof on macOS; no tool = no opinion
-  if command -v ss >/dev/null; then
-    ss -ltn 2>/dev/null </dev/null | awk '{print $4}' | grep -q ":$1\$"
-  elif command -v lsof >/dev/null; then
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1 </dev/null
-  else
-    return 1
-  fi
+port_busy() { # port_busy PORT [HOST]
+  # 恒不解析 ss/lsof：各家方言不同（busybox 的 lsof 不认参数、恒返回成功，
+  # 拿它判端口就是恒报被占）。bash 内建 /dev/tcp 直连探测零外部依赖，
+  # 3.2 起就有：连得上 = 有人在听。
+  local host="${2:-127.0.0.1}"
+  case "$host" in 0.0.0.0|::|"") host=127.0.0.1 ;; esac
+  (exec 3<>"/dev/tcp/$host/$1") 2>/dev/null
 }
 # 占用的端口上起不来节点，"警告一声照样装"只是把失败推迟到第 5 步。
 # 循环到给出一个空闲端口为止；无人值守模式没得问，直接明确失败。
 PORT="${ADDR##*:}"
-while port_busy "$PORT"; do
+while port_busy "$PORT" "${ADDR%:*}"; do
   warn "端口 $PORT 已被占用；换一个或先停掉占用者再填同一个"
   [ "$YES" = 1 ] && { bad "默认端口被占用且无人值守，装机中止（设 ATOLL_ADDR 换端口）"; exit 1; }
   ask ADDR "  监听地址" "$ADDR"
@@ -478,13 +488,13 @@ echo "  登录 API    : POST http://$ADDR/api/identity/login  {\"email\":\"root\
 [ -n "$PASSWORD" ] && echo "  密码        : 见 $HOME_DIR/server/root-password"
 echo "  token       : $HOME_DIR/server/atoll-token"
 echo "  日志        : $LOG"
-[ -n "$STEWARD" ] && echo "  c0 里的 steward 是 $STEWARD——登录后在 c0 直接对它说话"
+[ -n "$STEWARD" ] && echo "  c0 里的 steward 是 ${STEWARD}——登录后在 c0 直接对它说话"
 echo "  以后启动    : $ATOLL_BIN up --dir $HOME_DIR   （读 atoll.env，同一实例）"
 echo "  Ctrl-C 停止。"
 wait "$UP_PID" || {
   rc=$?
   UP_PID=""
-  bad "节点退出（$rc）；日志：$LOG"
+  bad "节点退出（${rc}）；日志：$LOG"
   tail -5 "$LOG"
   exit 1
 }
