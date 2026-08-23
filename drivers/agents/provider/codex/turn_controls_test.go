@@ -368,3 +368,31 @@ func TestDynamicToolCallNarrationIsNotRepublished(t *testing.T) {
 		}
 	}
 }
+
+// TestActivityCarriesStageReadings: reasoning/plan items surface as thinking,
+// agentMessage as writing — the coarse stage ladder the runtime throttles into
+// ledger-visible progress. Un-staged notices (userMessage) stay pure liveness.
+func TestActivityCarriesStageReadings(t *testing.T) {
+	h := newCodexHarness(t, driverproto.TurnOptions{}, nil)
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 5, Messages: []driverproto.DriverMessage{{Text: "hi"}}})
+	request := h.input()
+	h.respond(request, map[string]any{})
+	h.notify("turn/started", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-stage", "status": "inProgress"}})
+	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnStarted); return ok })
+	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "r1", "type": "reasoning"}})
+	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "m1", "type": "agentMessage"}})
+	h.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "turn-stage", "item": map[string]any{"id": "u1", "type": "userMessage"}})
+	h.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-stage", "status": "completed"}})
+	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok })
+	h.sink.mu.Lock()
+	var stages []string
+	for _, event := range h.sink.events {
+		if a, ok := event.(driverproto.Activity); ok {
+			stages = append(stages, a.Stage)
+		}
+	}
+	h.sink.mu.Unlock()
+	if len(stages) != 3 || stages[0] != driverproto.StageThinking || stages[1] != driverproto.StageWriting || stages[2] != "" {
+		t.Fatalf("want [thinking writing \"\"], got %#v", stages)
+	}
+}

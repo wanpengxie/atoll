@@ -186,14 +186,10 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The steward decl carries boot.StewardPrompt in its config; the
-			// golden names the slot and the prompt text is sourced from boot,
-			// not restated here.
-			stewardCfg, err := json.Marshal(map[string]string{"prompt": boot.StewardPrompt})
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := strings.Replace(test.golden, `"default_class":"codex","config":{}`, `"default_class":"codex","config":`+string(stewardCfg), 1)
+			// The steward decl carries boot.StewardConfig (prompt + model/effort
+			// selections); the golden names the slot and the content is sourced
+			// from boot, not restated here.
+			want := strings.Replace(test.golden, `"default_class":"codex","config":{}`, `"default_class":"codex","config":`+string(boot.StewardConfig("codex")), 1)
 			if string(raw) != want {
 				t.Fatalf("golden mismatch\n got: %s\nwant: %s", raw, want)
 			}

@@ -140,6 +140,9 @@ func (c *eventCollector) TurnRejected(op runtimeproto.OpID, code, detail string)
 	c.ch <- collectedEvent{kind: "rejected", op: op, text: code + detail}
 }
 func (c *eventCollector) Tool(runtimeproto.TurnID, runtimeproto.ToolEvent) {}
+func (c *eventCollector) Progress(id runtimeproto.TurnID, stage string) {
+	c.ch <- collectedEvent{kind: "progress", turn: id, text: stage}
+}
 func (c *eventCollector) TurnEnded(id runtimeproto.TurnID, _ runtimeproto.TurnStatus, text, _ string, usage runtimeproto.TurnUsage) {
 	c.ch <- collectedEvent{kind: "ended", turn: id, text: text, usage: usage}
 }
@@ -176,6 +179,86 @@ func awaitKind(t *testing.T, c *eventCollector, kind string) collectedEvent {
 		case <-deadline:
 			t.Fatalf("no %s event", kind)
 		}
+	}
+}
+
+type stageProvider struct{}
+
+func (p *stageProvider) Spec() driverproto.ProviderSpec {
+	return driverproto.ProviderSpec{Name: "stage", Capabilities: map[string]bool{}, Documentation: driverproto.Documentation{Description: "stage"}}
+}
+func (p *stageProvider) NewWorker(h driverproto.WorkerHost) (driverproto.Worker, error) {
+	return &stageWorker{host: h, reaped: make(chan struct{})}, nil
+}
+
+type stageWorker struct {
+	host   driverproto.WorkerHost
+	reaped chan struct{}
+	once   sync.Once
+}
+
+func (w *stageWorker) Open(context.Context, driverproto.OpenRequest) {
+	w.host.Events().Publish(driverproto.WorkerReady{})
+}
+func (w *stageWorker) Start(_ context.Context, r driverproto.StartRequest) {
+	target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "turn"}
+	w.host.Events().Publish(driverproto.TurnStarted{Target: target})
+	// 同 stage 重复与 2s 内的 stage 切换都要被节流闸吃掉：恰出一条 progress。
+	w.host.Events().Publish(driverproto.Activity{Target: target, Stage: driverproto.StageThinking})
+	w.host.Events().Publish(driverproto.Activity{Target: target, Stage: driverproto.StageThinking})
+	w.host.Events().Publish(driverproto.Activity{Target: target, Stage: driverproto.StageWriting})
+	w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "done"})
+}
+func (w *stageWorker) Control(_ context.Context, r driverproto.ControlRequest) {
+	w.host.Events().Publish(driverproto.ControlOutcome{Action: r.Action, Target: r.Target, Verdict: driverproto.ControlAccepted})
+}
+func (w *stageWorker) Retire()                  { w.once.Do(func() { close(w.reaped) }) }
+func (w *stageWorker) Reaped() <-chan struct{}  { return w.reaped }
+
+// TestStagedActivityThrottlesIntoProgress: staged liveness becomes at most a
+// trickle of progress facts — repeats and sub-2s stage flips are dropped, the
+// first reading gets through.
+func TestStagedActivityThrottlesIntoProgress(t *testing.T) {
+	factory, _, err := Build(&stageProvider{}, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, Watchdog: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := newCollector()
+	rt, err := factory(runtimeproto.Deps{Parent: ctx}, nil, runtimeproto.TurnOptions{}, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	if err := rt.Start(runtimeproto.StartCommand{Op: 1, Messages: []runtimeproto.Input{{Text: "hello"}}}); err != nil {
+		t.Fatal(err)
+	}
+	started := awaitKind(t, events, "started")
+	progress := 0
+	deadline := time.After(time.Second)
+	for {
+		var got collectedEvent
+		select {
+		case got = <-events.ch:
+		case <-deadline:
+			t.Fatal("no ended event")
+		}
+		if got.kind == "progress" {
+			progress++
+			// inbox 合并让值收敛到最新读数，具体是哪个 stage 取决于消费时序；
+			// 铁的是恰一条（2s 闸下同 turn 不可能第二条）且值合法。
+			if got.turn != started.turn || (got.text != driverproto.StageThinking && got.text != driverproto.StageWriting) {
+				t.Fatalf("unexpected progress %+v", got)
+			}
+			continue
+		}
+		if got.kind == "ended" {
+			break
+		}
+	}
+	if progress != 1 {
+		t.Fatalf("throttle leaked: want 1 progress, got %d", progress)
 	}
 }
 

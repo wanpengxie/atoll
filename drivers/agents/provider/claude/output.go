@@ -320,8 +320,10 @@ func (w *worker) onAssistant(c *connection, raw json.RawMessage) {
 				continue
 			}
 			w.publish(driverproto.Tool{Target: target, CallID: block.ID, Phase: driverproto.ToolStarted, Name: block.Name, Status: driverproto.ToolStatusUnknown, Detail: boundedSummary(block.Input)})
-		case "text", "thinking":
-			w.publish(driverproto.Activity{Target: target})
+		case "text":
+			w.publish(driverproto.Activity{Target: target, Stage: driverproto.StageWriting})
+		case "thinking":
+			w.publish(driverproto.Activity{Target: target, Stage: driverproto.StageThinking})
 		}
 	}
 	if nonNull(frame.Message.Error) {

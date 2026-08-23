@@ -89,7 +89,19 @@ type ControlOutcome struct {
 }
 
 type TurnStarted struct{ Target WorkerTurnTarget }
-type Activity struct{ Target WorkerTurnTarget }
+
+// Activity 是回合内的活性证据。Stage 是可选的粗粒度阶段读数
+// （StageThinking/StageWriting），空值 = 纯心跳。它恒不携带正文片段——
+// 过程碎片不进任何投影，阶段台阶才进。
+type Activity struct {
+	Target WorkerTurnTarget
+	Stage  string
+}
+
+const (
+	StageThinking = "thinking"
+	StageWriting  = "writing"
+)
 type Tool struct {
 	Target WorkerTurnTarget
 	CallID string

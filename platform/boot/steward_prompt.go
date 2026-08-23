@@ -55,11 +55,12 @@ var stewardModels = map[string][]struct{ model, label string }{
 	},
 }
 
-// stewardConfig is the steward declaration's config_json: the agent-class
+// StewardConfig is the steward declaration's config_json: the agent-class
 // config carrying the prompt plus the runtime model/effort selections (the
 // full model × effort product for the class). The startup model stays at the
 // class defaults — usage accounting reports the actual session values.
-func stewardConfig(class string) json.RawMessage {
+// Exported so tests assert against this single source instead of restating it.
+func StewardConfig(class string) json.RawMessage {
 	config := map[string]any{"prompt": StewardPrompt}
 	if models := stewardModels[class]; len(models) > 0 {
 		selections := make([]map[string]string, 0, len(models)*len(stewardEfforts))

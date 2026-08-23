@@ -150,6 +150,9 @@ type Events interface {
 	TurnStarted(OpID, TurnID)
 	TurnRejected(OpID, string, string)
 	Tool(TurnID, ToolEvent)
+	// Progress 是回合内的粗粒度阶段读数（thinking/writing）。它与 Tool 同为
+	// 可丢弃的过程观测：拥塞时丢，恒不因它拉闸。
+	Progress(TurnID, string)
 	TurnEnded(TurnID, TurnStatus, string, string, TurnUsage)
 	ControlDone(OpID, TurnID, ControlVerdict, string)
 	ReadyDone(OpID, ReadyResult)

@@ -274,7 +274,7 @@ func install(ctx context.Context, c0Path, registryPath, password, stewardClass s
 		{Kind: actor.KindSystem, SourceDeclID: lagoon.RegistrarDeclID, Seed: lagoon.RegistrarSeed, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.ClassRegistrar, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
 		{Kind: actor.KindPeer, SourceDeclID: lagoon.SvcActorDeclID, Seed: lagoon.SvcActorSeed, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.SvcActorClass, Config: json.RawMessage(`{}`)}, Placement: storespec.NewServerPlacement()},
 		{Kind: actor.KindHuman, Principal: channelspec.RootPrincipalID, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: "human"}, Placement: storespec.NewServerPlacement()},
-		{Kind: actor.KindAgent, Principal: channelspec.StewardPrincipalID, SourceDeclID: lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, stewardSeed), Seed: stewardSeed, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: stewardClass, Config: stewardConfig(stewardClass)}, Placement: daemonPlacement},
+		{Kind: actor.KindAgent, Principal: channelspec.StewardPrincipalID, SourceDeclID: lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, stewardSeed), Seed: stewardSeed, CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: stewardClass, Config: StewardConfig(stewardClass)}, Placement: daemonPlacement},
 		{Kind: actor.KindPeer, SourceDeclID: string(channelspec.LobbyChannelID), Seed: string(channelspec.LobbyChannelID), CreatedAt: stamp, Definition: storespec.ActorDefinition{Class: lagoon.PeerActorClass, Config: targetConfig(channelspec.LobbyChannelID)}, Placement: storespec.NewServerPlacement()},
 	}); err != nil {
 		return fmt.Errorf("boot: write c0: %w", err)
@@ -357,7 +357,7 @@ func install(ctx context.Context, c0Path, registryPath, password, stewardClass s
 		{lagoon.RegistrarDeclID, lagoon.RegistrarSeed, "Channel registry seat.", lagoon.ClassRegistrar, "private", json.RawMessage(`{}`)},
 		{lagoon.SvcActorDeclID, lagoon.SvcActorSeed, "Channel service face.", lagoon.SvcActorClass, "private", json.RawMessage(`{}`)},
 		{string(channelspec.LobbyChannelID), string(channelspec.LobbyChannelID), "Handle for the registration lobby.", lagoon.PeerActorClass, "public", targetConfig(channelspec.LobbyChannelID)},
-		{lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, stewardSeed), stewardSeed, "The node owner's own agent.", stewardClass, "private", stewardConfig(stewardClass)},
+		{lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, stewardSeed), stewardSeed, "The node owner's own agent.", stewardClass, "private", StewardConfig(stewardClass)},
 	}
 	for _, decl := range decls {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO decls(id,name,description,owner,default_class,config_json,status,visibility,created_at,updated_at) VALUES(?,?,?,?,?,?,'present',?,?,?)`, decl.id, decl.name, decl.description, channelspec.RootPrincipalID, decl.class, string(decl.config), decl.visibility, stamp, stamp); err != nil {

@@ -151,6 +151,7 @@ const (
 	evProviderLost
 	evSeed
 	evRuntimeFault
+	evProgress
 )
 
 type toolEvent = runtimeproto.ToolEvent
@@ -166,6 +167,7 @@ type runtimeEvent struct {
 	cause              runtimeproto.LostCause
 	seed               []byte
 	usage              runtimeproto.TurnUsage
+	stage              string
 }
 
 type runtimePort struct {
@@ -182,7 +184,7 @@ func (p *runtimePort) send(v runtimeEvent) {
 		return
 	}
 	p.mu.Unlock()
-	if v.kind == evTool {
+	if v.kind == evTool || v.kind == evProgress {
 		if p.queue.push(v) {
 			return
 		}
@@ -215,6 +217,9 @@ func (p *runtimePort) TurnRejected(op runtimeproto.OpID, code, detail string) {
 }
 func (p *runtimePort) Tool(id runtimeproto.TurnID, v runtimeproto.ToolEvent) {
 	p.send(runtimeEvent{kind: evTool, turnID: id, tool: v})
+}
+func (p *runtimePort) Progress(id runtimeproto.TurnID, stage string) {
+	p.send(runtimeEvent{kind: evProgress, turnID: id, stage: stage})
 }
 func (p *runtimePort) TurnEnded(id runtimeproto.TurnID, status runtimeproto.TurnStatus, text, detail string, usage runtimeproto.TurnUsage) {
 	p.send(runtimeEvent{kind: evTurnEnded, turnID: id, status: status, text: text, detail: detail, usage: usage})
@@ -1495,6 +1500,14 @@ func (l *agentLoop) handleRuntimeEvent(e runtimeEvent) {
 			l.emitTool(e.tool)
 		} else {
 			l.logLate("Tool", e.turnID)
+		}
+	case evProgress:
+		// 阶段读数落成 owner 请求的 provisional 进度（与 turn started 的
+		// processing 回执同一机制）；没有 owner（自发回合）就无人可告，丢弃。
+		if t := l.state.Turn; t != nil && t.ID == e.turnID && t.Owner != "" {
+			if row := l.state.Requests[t.Owner]; row != nil {
+				l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": e.turnID, "stage": e.stage})
+			}
 		}
 	case evTurnEnded:
 		l.onTurnEnded(e)

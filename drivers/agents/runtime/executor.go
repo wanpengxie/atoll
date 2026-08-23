@@ -25,6 +25,10 @@ type publishTool struct {
 	turn  runtimeproto.TurnID
 	event runtimeproto.ToolEvent
 }
+type publishProgress struct {
+	turn  runtimeproto.TurnID
+	stage string
+}
 type publishTurnEnded struct {
 	turn         runtimeproto.TurnID
 	status       runtimeproto.TurnStatus
@@ -52,6 +56,7 @@ type publishFault struct{ code, detail string }
 func (publishTurnStarted) publishFact()  {}
 func (publishTurnRejected) publishFact() {}
 func (publishTool) publishFact()         {}
+func (publishProgress) publishFact()     {}
 func (publishTurnEnded) publishFact()    {}
 func (publishControlDone) publishFact()  {}
 func (publishReadyDone) publishFact()    {}
@@ -67,6 +72,8 @@ func (e *engine) publish(f publishFact) {
 		e.events.TurnRejected(x.op, x.code, x.detail)
 	case publishTool:
 		e.events.Tool(x.turn, x.event)
+	case publishProgress:
+		e.events.Progress(x.turn, x.stage)
 	case publishTurnEnded:
 		e.events.TurnEnded(x.turn, x.status, x.text, x.detail, x.usage)
 	case publishControlDone:

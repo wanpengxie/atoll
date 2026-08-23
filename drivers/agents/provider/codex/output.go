@@ -141,9 +141,15 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				w.final[target.Native] = n.Item.Text
 				w.mu.Unlock()
 			}
+			// 正文条目开写 = 回合进入写作阶段；这是阶段台阶，不是正文碎片。
+			w.publish(driverproto.Activity{Target: target, Stage: driverproto.StageWriting})
 			return
 		}
-		if n.Item.Type == "userMessage" || n.Item.Type == "reasoning" || n.Item.Type == "plan" || n.Item.Type == "contextCompaction" {
+		if n.Item.Type == "reasoning" || n.Item.Type == "plan" {
+			w.publish(driverproto.Activity{Target: target, Stage: driverproto.StageThinking})
+			return
+		}
+		if n.Item.Type == "userMessage" || n.Item.Type == "contextCompaction" {
 			w.publish(driverproto.Activity{Target: target})
 			return
 		}
@@ -185,9 +191,22 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 		}
 	default:
 		if isDeltaMethod(method) && target.Valid() {
-			w.publish(driverproto.Activity{Target: target})
+			w.publish(driverproto.Activity{Target: target, Stage: deltaStage(method)})
 		}
 	}
+}
+
+// deltaStage 把 delta 方法名折成阶段读数：reasoning 流 = 思考，
+// message 流 = 写正文；认不出的 delta 保持纯心跳。
+func deltaStage(method string) string {
+	m := strings.ToLower(method)
+	if strings.Contains(m, "reasoning") {
+		return driverproto.StageThinking
+	}
+	if strings.Contains(m, "message") {
+		return driverproto.StageWriting
+	}
+	return ""
 }
 
 func boundedToolSummary(item itemWire) string {
