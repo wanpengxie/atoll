@@ -31,8 +31,7 @@ func spawnProcess(ctx context.Context, cfg Config) (*childProcess, error) {
 	cmd := exec.Command(cfg.Binary, "app-server", "--stdio")
 	cmd.Dir = cfg.WorkspaceDir
 	if cfg.Home != "" {
-		// Node-owned CODEX_HOME: auth borrowed from the user, nothing else
-		// (see PrepareHome). Unset → codex's default ~/.codex.
+		// 只有调用方显式指定时才覆盖；平时不设，codex 用自己的 ~/.codex。
 		cmd.Env = append(os.Environ(), "CODEX_HOME="+cfg.Home)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

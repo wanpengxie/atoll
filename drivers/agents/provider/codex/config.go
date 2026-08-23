@@ -28,8 +28,10 @@ type Config struct {
 	// model as thread/start developerInstructions (appended to codex's own
 	// system prompt), so it is part of the thread from its first request.
 	Prompt string
-	// Home is the CODEX_HOME the app-server child runs under. Empty means
-	// the codex default (~/.codex). See ResolveHome.
+	// Home is the CODEX_HOME the app-server child runs under. Empty — the
+	// normal case — leaves codex on its own default (~/.codex), which is the
+	// user's live login. A node恒不复制凭据到自己的目录下：那份拷贝会在用户
+	// 重新登录后变成陈的，而 agent 起不来的样子和"没配置"一模一样。
 	Home string
 	// Situation is who this agent is and where it sits. It reaches the model
 	// as the system prompt's identity block and the tool guide's reach
@@ -100,7 +102,7 @@ func ParseConfig(raw json.RawMessage, workspace string, logger *slog.Logger) (Co
 	for i, option := range spec.Selections {
 		titles[i] = driverproto.SelectionTitle{Model: option.ModelLabel, Effort: option.EffortLabel}
 	}
-	return Config{WorkspaceDir: workspace, Binary: "codex", Logger: logger, processFactory: spawnProcess, Selections: selections, SelectionTitles: titles, Default: spec.Default, Prompt: spec.Prompt, Home: ResolveHome()}, nil
+	return Config{WorkspaceDir: workspace, Binary: "codex", Logger: logger, processFactory: spawnProcess, Selections: selections, SelectionTitles: titles, Default: spec.Default, Prompt: spec.Prompt}, nil
 }
 
 // ConfigSchema publishes what specConfig above accepts. Decoding is strict, so
