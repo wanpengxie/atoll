@@ -168,13 +168,21 @@ check-data-plane-scope:
 	./scripts/check-data-plane-scope.sh
 
 # ----------------------------------------------------------------------------
-# dev — 起 server 于 /tmp/atoll-dev。首启自动安装（root 密码见日志），
-# 重复运行恒重开同一个 home。web UI 跟 API 同端口（编进二进制；没跑过 make web
-# 就是张占位页，改前端时用 atoll-web 的 npm run dev 连这个 API）。
+# dev — 起 server 于 /tmp/atoll-dev。每次都先清空那个目录：开发实例恒是
+# 一次性的，账本形一改旧库就没意义，留着只会让人对着上一次的残留调试。
+# 于是每次都是首次安装，密码就定死 root:root——开发机上找日志抄随机密码
+# 纯属自找麻烦。这条路恒不用于任何真实数据。
+#
+# web UI 跟 API 同端口（编进二进制）：跑过 make all/make web 才是真界面，
+# 否则是张占位页；只改前端时用 atoll-web 的 npm run dev 连这个 API。
 # ----------------------------------------------------------------------------
+DEV_HOME ?= /tmp/atoll-dev
+DEV_ADDR ?= :8832
+
 dev: build-go
-	@echo "[dev] server on :8832 (home: /tmp/atoll-dev/server)"
-	@bin/atoll-server --home /tmp/atoll-dev/server --addr :8832 &
+	@rm -rf "$(DEV_HOME)"
+	@echo "[dev] server on $(DEV_ADDR) (home: $(DEV_HOME)/server, 账号 root 密码 root)"
+	@ATOLL_ROOT_PASSWORD=root bin/atoll-server --home "$(DEV_HOME)/server" --addr "$(DEV_ADDR)" &
 
 # ----------------------------------------------------------------------------
 # clean — 删 build 产物（不动用户数据）
