@@ -71,7 +71,7 @@ func TestView_ActorFacts_KernelIsNotAMember(t *testing.T) {
 // (a home restart) succeeds and restores the durable membership image.
 func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h1, err := home.Open(completeHomeTestConfig(home.Config{ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true, BootstrapOwnerPrincipal: "restart-owner"}))
+	h1, err := home.Open(completeHomeTestConfig(home.Config{ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true, BootstrapHumanPrincipals: []string{"restart-owner"}}))
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}

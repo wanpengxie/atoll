@@ -271,6 +271,13 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	genesis.ParentChannelID = string(spec.ParentID)
 	genesis.InitiatorPrincipal = spec.InitiatorPrincipal
 	bootstrapDeclarations := make([]home.DeclareRequest, 0, len(spec.Declarations))
+	bootstrapHumans := make([]string, 0, len(spec.Humans))
+	for _, human := range spec.Humans {
+		if human.Principal == "" {
+			return errors.New("channelhost: invalid genesis human")
+		}
+		bootstrapHumans = append(bootstrapHumans, human.Principal)
+	}
 	for _, declaration := range spec.Declarations {
 		if err := declaration.Rendered.Validate(); err != nil {
 			return fmt.Errorf("channelhost: invalid genesis declaration %q: %w", declaration.DeclID, err)
@@ -282,7 +289,8 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 		config := json.RawMessage(append([]byte(nil), declaration.Rendered.Config...))
 		bootstrapDeclarations = append(bootstrapDeclarations, home.DeclareRequest{
 			SourceDeclID: declaration.DeclID, Seed: declaration.Seed, Kind: declaration.Kind,
-			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
+			Principal: declaration.Principal,
+			Class:     declaration.Rendered.Class, Config: &config, Placement: placement,
 			Singleton: declaration.Rendered.Singleton,
 			CreatedAt: spec.CreatedAt,
 		})
@@ -294,7 +302,7 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 	port := svcactor.NewPort()
 	homeInstance, err := h.openHome(
 		spec.ChannelID, name, main, true, &genesis,
-		spec.OwnerPrincipal, bootstrapDeclarations, bootstrapService, port,
+		bootstrapHumans, bootstrapDeclarations, bootstrapService, port,
 	)
 	if err != nil {
 		return err
@@ -372,7 +380,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	// checks only that the pointer is present. There is no second account to
 	// cross-check it against.
 	port := svcactor.NewPort()
-	homeInstance, err := h.openHome(spec.ChannelID, spec.ChannelName, main, false, &genesis, "", nil, home.BootstrapService{}, port)
+	homeInstance, err := h.openHome(spec.ChannelID, spec.ChannelName, main, false, &genesis, nil, nil, home.BootstrapService{}, port)
 	if err != nil {
 		port.Close()
 		if errors.Is(err, home.ErrOwnerInvariant) {
@@ -415,7 +423,7 @@ func (h *ChannelHost) openHome(
 	path string,
 	bootstrap bool,
 	genesis *storespec.ChannelGenesis,
-	bootstrapOwner string,
+	bootstrapHumans []string,
 	bootstrapDeclarations []home.DeclareRequest,
 	bootstrapService home.BootstrapService,
 	port *svcactor.Port,
@@ -423,7 +431,7 @@ func (h *ChannelHost) openHome(
 	config := home.Config{
 		ChannelID: id, ChannelName: name, DBPath: path, Bootstrap: bootstrap, MustExistDB: !bootstrap,
 		CompositionResolver: h.deps.CompositionResolver, IntroductionResolver: h.deps.IntroductionResolver,
-		Logger: h.logger, BootstrapOwnerPrincipal: bootstrapOwner,
+		Logger: h.logger, BootstrapHumanPrincipals: bootstrapHumans,
 		BootstrapDeclarations: bootstrapDeclarations,
 		BootstrapService:      bootstrapService,
 		DaemonRoutes:          h.deps.DaemonRoutes,

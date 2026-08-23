@@ -81,6 +81,55 @@ func TestProvisionGenesisIncludesRecipeUserDeclarations(t *testing.T) {
 	}
 }
 
+func TestProvisionGenesisUsesExplicitSeatsInsteadOfSynthesizingOwnerHuman(t *testing.T) {
+	ctx := context.Background()
+	host, err := New(t.TempDir(), testBindings{}, HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}, RegistryBindings: testBindings{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := (channelspec.RenderedSnapshot{
+		Class: "test-agent", Config: json.RawMessage(`{}`), Placement: channelspec.Placement{Kind: channelspec.PlacementServer},
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := genesisSpec("explicit-seats")
+	spec.OwnerPrincipal = "steward"
+	spec.Humans = []lagoon.GenesisHuman{{Principal: "root", SourceActorID: "human:root:1"}}
+	spec.Declarations = []lagoon.GenesisDeclaration{{
+		DeclID: "decl-steward", Seed: "steward", Kind: actor.KindAgent,
+		Principal: "steward", SourceActorID: "agent:steward:2", Rendered: snapshot,
+	}}
+	if err := host.provisionGenesis(ctx, spec, "c0.explicit-seats"); err != nil {
+		t.Fatal(err)
+	}
+	main, _, _ := host.paths(spec.ChannelID)
+	db, err := sql.Open("sqlite", main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT actor_kind, principal FROM actor_registry WHERE deregistered_at IS NULL ORDER BY actor_kind`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var kind, principal string
+		if err := rows.Scan(&kind, &principal); err != nil {
+			t.Fatal(err)
+		}
+		got[kind] = principal
+	}
+	if got[string(actor.KindAgent)] != "steward" || got[string(actor.KindHuman)] != "root" {
+		t.Fatalf("explicit seats=%v", got)
+	}
+	if count := len(got); count != 2 {
+		t.Fatalf("member kinds=%v, owner must not synthesize another human", got)
+	}
+}
+
 func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

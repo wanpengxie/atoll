@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -17,6 +18,12 @@ import (
 )
 
 const admissionProbeKey = resource.ResourceID("admission-probe")
+
+type nonHumanPrincipalResolver struct{ inertIntroductionResolver }
+
+func (nonHumanPrincipalResolver) PrincipalKind(context.Context, string) (actor.Kind, bool, error) {
+	return actor.KindAgent, true, nil
+}
 
 // openAdmissionHome is a bare channel with no genesis owner, so the owner
 // terminal guard has nobody to protect and Remove is free to aim at any
@@ -37,6 +44,30 @@ func openAdmissionHome(t *testing.T, name string) *Home {
 	}
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	return h
+}
+
+func TestHumanAdmissionRejectsAgentPrincipal(t *testing.T) {
+	h, err := Open(Config{
+		ChannelID:            "admission-kind",
+		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver:  emptyCompositionResolver{},
+		IntroductionResolver: nonHumanPrincipalResolver{},
+		RegistryBindings:     emptyBindingReader{},
+		ReconcileInterval:    time.Hour,
+		Bootstrap:            true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.closeInternal("test") })
+	_, err = h.opEntry.admit(context.Background(), "steward")
+	var opErr *channelspec.OperationError
+	if !errors.As(err, &opErr) || opErr.Code != channelspec.ErrCodeBadPayload {
+		t.Fatalf("admitting agent principal error=%v, want bad_payload", err)
+	}
+	if roster, rosterErr := h.View().HumanRoster(context.Background()); rosterErr != nil || len(roster) != 0 {
+		t.Fatalf("human roster=%v err=%v", roster, rosterErr)
+	}
 }
 
 func admissionHumanRoster(t *testing.T, h *Home, principal string) []actor.ActorID {

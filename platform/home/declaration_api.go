@@ -15,6 +15,7 @@ type DeclareRequest struct {
 	SourceDeclID string
 	Seed         string
 	Kind         actor.Kind
+	Principal    string
 	Class        string
 	Config       *json.RawMessage
 	Placement    storespec.Placement
@@ -26,6 +27,9 @@ func validateDeclareRequest(in DeclareRequest) error {
 	if in.SourceDeclID == "" || in.Seed == "" || in.Class == "" || in.CreatedAt <= 0 ||
 		in.Placement.Validate() != nil {
 		return errors.New("platform: invalid declaration request")
+	}
+	if in.Principal != "" && in.Kind != actor.KindAgent {
+		return errors.New("platform: only an agent declaration may carry a principal")
 	}
 	return nil
 }

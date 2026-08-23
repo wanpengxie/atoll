@@ -23,14 +23,14 @@ func TestFrozenRecipePersistsRenderedDeclarationsOverlayAndServiceCard(t *testin
 		"id": "recipe-echo", "name": "recipe-echo", "class": "echo", "visibility": "public", "config": map[string]any{"max_seconds": 1},
 	}), nil)
 	invalidProfile := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
-		"name": "bad-service", "recipe": map[string]any{"profile": map[string]any{"svc_agent": "missing"}},
+		"name": "bad-service", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}, "recipe": map[string]any{"profile": map[string]any{"svc_agent": "missing"}},
 	}))
 	if invalidProfile.Status != message.StatusFailed || invalidProfile.ErrorCode != string(lagoon.CodeInvalidArgs) {
 		t.Fatalf("invalid service profile=%+v", invalidProfile)
 	}
 
 	child := createdChannelID(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
-		"name": "frozen-recipe", "recipe": map[string]any{
+		"name": "frozen-recipe", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}, "recipe": map[string]any{
 			"declarations": []any{map[string]any{"decl_id": "recipe-echo", "config": map[string]any{"max_seconds": 2}}},
 			"profile":      map[string]any{"svc_agent": nil, "endpoints": map[string]any{"echo.say": map[string]any{"receiver": "recipe-echo"}}},
 		},

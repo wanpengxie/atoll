@@ -51,6 +51,7 @@ type Directory interface {
 // incarnation; run(sys) is the process body.
 type SystemActor struct {
 	authority Directory
+	facts     storespec.ActorFactsAuthority
 	decl      func(context.Context, []string) (map[string]channelspec.DeclarationFacts, error)
 	clock     func() time.Time
 	presence  PresenceStat
@@ -67,6 +68,7 @@ type SystemActor struct {
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
 	Authority   Directory
+	ActorFacts  storespec.ActorFactsAuthority
 	Declaration func(context.Context, []string) (map[string]channelspec.DeclarationFacts, error)
 	Clock       func() time.Time
 	Presence    PresenceStat
@@ -101,6 +103,7 @@ func New(deps Deps) *SystemActor {
 	}
 	return &SystemActor{
 		authority: deps.Authority,
+		facts:     deps.ActorFacts,
 		decl:      deps.Declaration,
 		clock:     clock,
 		presence:  deps.Presence,

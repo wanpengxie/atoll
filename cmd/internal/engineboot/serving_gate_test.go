@@ -22,8 +22,8 @@ func TestProfileSetAuthorizesTargetOrC0AndRejectsC0Target(t *testing.T) {
 	core, _ := eng.host.Acquire(channelspec.C0ChannelID)
 	registrar := onlyDecl(t, core, lagoon.RegistrarDeclID)
 	var target, other lagoon.ChannelCreateReply
-	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "profile-target"}), &target)
-	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "profile-other"}), &other)
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "profile-target", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &target)
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "profile-other", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &other)
 	targetBundle := waitBundle(t, eng, target.ChannelID)
 	otherBundle := waitBundle(t, eng, other.ChannelID)
 	payload := map[string]any{"channel_id": target.ChannelID, "description": "from target", "serving": 1}

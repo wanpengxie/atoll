@@ -181,10 +181,9 @@ type IdentityRoster interface {
 // id, never a record — and it is the ONLY principal-axis read outside the store,
 // so a login can be turned into a member without anyone holding the registry.
 //
-// A principal is a human-only fact (the registry refuses a non-human one), so
-// the answer needs no kind to disambiguate. An empty principal is not a query
-// and never resolves: every non-human carries "" and must not be reachable by
-// asking for nothing.
+// Principals may attribute agents as well as humans. This inverse is narrower:
+// it resolves the human login seat for authentication and therefore ignores
+// agent records carrying the same principal. An empty principal is not a query.
 type PrincipalIdentity interface {
 	ResolvePrincipal(principal string) (actor.ActorID, bool, error)
 }

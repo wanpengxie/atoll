@@ -51,6 +51,28 @@ func (e *opEntry) admit(ctx context.Context, principal string) (actorctl.AdmitRe
 			Code: channelspec.ErrCodeBadPayload, Detail: "principal required",
 		}
 	}
+	catalog, ok := e.home.resolver.(PrincipalCatalog)
+	if !ok {
+		return actorctl.AdmitResult{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeAuthorityUnavailable, Detail: "principal registry unavailable", Retryable: true,
+		}
+	}
+	kind, found, err := catalog.PrincipalKind(ctx, principal)
+	if err != nil {
+		return actorctl.AdmitResult{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true,
+		}
+	}
+	if !found {
+		return actorctl.AdmitResult{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeBadPayload, Detail: "principal " + principal + " is not registered",
+		}
+	}
+	if kind != actor.KindHuman {
+		return actorctl.AdmitResult{}, &channelspec.OperationError{
+			Code: channelspec.ErrCodeBadPayload, Detail: "principal " + principal + " is " + string(kind) + "; system.member.admit accepts human principals only",
+		}
+	}
 	result, err := e.home.actors.Admit(ctx, actorctl.AdmitRequest{Principal: principal})
 	if err == nil && result.ActorID != "" {
 		e.home.ensureSubjectSlot(result.ActorID)

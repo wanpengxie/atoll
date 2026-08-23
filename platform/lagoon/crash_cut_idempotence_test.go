@@ -81,7 +81,7 @@ func TestCreateCommitSurvivesCutBeforeEdgeAndRetireCleansResidual(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	createSys := &cutSys{msgs: []actorbase.Msg{cutMessage(lagoon.WordChannelCreate, map[string]any{"name": "cut-child"})}}
+	createSys := &cutSys{msgs: []actorbase.Msg{cutMessage(lagoon.WordChannelCreate, map[string]any{"name": "cut-child", "initial_seats": []any{}})}}
 	_ = proc(createSys)
 	if createSys.code != "" {
 		t.Fatalf("create failed code=%s", createSys.code)

@@ -18,6 +18,10 @@ import (
 
 type routingResolver struct{}
 
+func (routingResolver) PrincipalKind(context.Context, string) (actor.Kind, bool, error) {
+	return actor.KindHuman, true, nil
+}
+
 func (routingResolver) BuildClass(_ channel.ID, _ actor.ActorID, class string, _ json.RawMessage) (platform.ActorFactory, bool) {
 	if class != "routing-live" {
 		return platform.ActorFactory{}, false

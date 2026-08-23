@@ -13,9 +13,9 @@ import (
 func SystemWordSpecs() map[string]WordSpec {
 	return map[string]WordSpec{
 		message.TypeSystemChannelCreate: systemWordWithExamples(
-			"Create a channel from an inline recipe. The new channel is a child of the channel you send this from.",
-			"name (string), recipe (object). A channel whose recipe names no svc_agent accepts nothing through its service door afterwards.",
-			objectSchema(channelNameSchema+","+recipeSchema, "name", "recipe"),
+			"Create a child channel from this channel. You must explicitly choose which active actors from the current channel are copied into its genesis; names such as root or steward are not actor ids.",
+			"name (string), recipe (object), initial_actor_ids (array of full actor ids from system.member.list; [] explicitly creates no copied seats). A channel whose recipe names no svc_agent accepts nothing through its service door afterwards.",
+			objectSchema(channelNameSchema+","+recipeSchema+","+initialActorIDsSchema, "name", "recipe", "initial_actor_ids"),
 			recipeExampleMinimal, recipeExampleServing),
 		message.TypeSystemChannelGet:    systemWord("Get one channel's registered facts.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
 		message.TypeSystemChannelList:   systemWord("List registered channels, optionally below one parent.", "parent_id (optional string).", objectSchema(`"parent_id":{"type":"string"}`)),
@@ -50,7 +50,7 @@ func SystemWordSpecs() map[string]WordSpec {
 		message.TypeSystemDeviceDelete:          systemWord("Retire a device.", "device_id (string).", objectSchema(`"device_id":{"type":"string"}`, "device_id")),
 		message.TypeSystemClassList:             systemWord("List the actor classes this node can run, each with the config shape its declarations must follow. Read this before writing an actor template: class decides what config means, and config is decoded strictly, so a field the schema does not list is rejected. A class with no config_schema takes no config at all.", "No parameters.", objectSchema("")),
 		message.TypeSystemMemberCreate:          systemWord("Create a member of the channel this request reaches, from an actor declaration. Sent to your own system door it acts on your channel; sent to a peer it acts on that peer's channel.", "decl_id (string): an actor template visible to you. desired_host (string, optional): which of this channel's attached devices runs it — list them with system.device.list, and name one when the channel has more than one, because otherwise the channel picks and its pick carries no intent. Only classes that run on a device accept it.", objectSchema(`"decl_id":{"type":"string"},"desired_host":{"type":"string"}`, "decl_id")),
-		message.TypeSystemMemberAdmit:           systemWord("Admit a principal as a human member of the channel this request reaches. Sent to your own system door it acts on your channel; sent to a peer it acts on that peer's channel.", "principal (string): a principal id, not an actor id.", objectSchema(`"principal":{"type":"string"}`, "principal")),
+		message.TypeSystemMemberAdmit:           systemWord("Admit a registered human principal as a human member of the channel this request reaches. Agent principals are rejected; agents and tools enter through their declarations.", "principal (string): a human principal id, not an actor id.", objectSchema(`"principal":{"type":"string"}`, "principal")),
 		message.TypeSystemMemberList:            systemWord("List the current members and presence facts of the channel this request reaches. Sent to your own system door it lists your channel; sent to a peer it lists that peer's channel.", "No parameters.", objectSchema("")),
 		message.TypeSystemMemberGet:             systemWord("Get one member's membership and presence facts.", "member (string actor id or unambiguous segment).", objectSchema(`"member":{"type":"string"}`, "member")),
 		message.TypeSystemMemberDelete:          systemWord("Remove a member from the channel this request reaches.", "Exactly one of: member (string actor id or unambiguous segment), or decl_id (string): the actor template the member was seated from, which removes that template's single seat and fails as ambiguous if it has more than one.", objectSchema(`"member":{"type":"string"},"decl_id":{"type":"string"}`)),
@@ -86,6 +86,8 @@ func systemWordWithExamples(description, params string, schema json.RawMessage, 
 // was a non-ASCII name.
 const channelNameSchema = `"name":{"type":"string","pattern":"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$","description":"1-63 chars, lowercase a-z, 0-9 and '-', not starting or ending with '-'"}`
 
+const initialActorIDsSchema = `"initial_actor_ids":{"type":"array","description":"explicit active members copied from the source channel; use complete ids returned by system.member.list, and send [] for none","maxItems":64,"uniqueItems":true,"items":{"type":"string"}}`
+
 // recipeSchema is the inline channel recipe: the declarations a new channel is
 // born with, plus the service profile that decides whether anyone outside can
 // reach it. It is spelled out here because it exists nowhere a caller can read
@@ -99,9 +101,9 @@ const recipeSchema = `"recipe":{"type":"object","additionalProperties":false,"de
 	`"svc_agent":{"type":"string","description":"which agent answers agent.ask from outside. Must be a decl_id listed in declarations above and that declaration must be an agent, or the literal \"default\" to use the first active agent. Omit it and the channel answers nothing from outside."},` +
 	`"endpoints":{"type":"object","description":"extra words the service door accepts, mapped to the declaration that answers them","additionalProperties":{"type":"object","required":["receiver"],"properties":{"description":{"type":"string"},"receiver":{"type":"string"},"schema":{"type":"object"},"examples":{"type":"array"}}}}}}}}`
 
-const recipeExampleMinimal = `{"name":"research","recipe":{"declarations":[],"profile":{"description":"a channel with no members and no service door"}}}`
+const recipeExampleMinimal = `{"name":"research","recipe":{"declarations":[],"profile":{"description":"a channel with no members and no service door"}},"initial_actor_ids":[]}`
 
-const recipeExampleServing = `{"name":"research","recipe":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"analysis workspace","serving":1,"svc_agent":"my-analyst"}}}`
+const recipeExampleServing = `{"name":"research","recipe":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"analysis workspace","serving":1,"svc_agent":"my-analyst"}},"initial_actor_ids":["human:root:1787128257816","agent:steward:1787487131255"]}`
 
 const templateBodyExample = `{"id":"team-channel","name":"Team channel","visibility":"public","body":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"a team workspace","serving":1,"svc_agent":"my-analyst"}}}`
 

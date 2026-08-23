@@ -118,6 +118,14 @@ func (r *assemblyResolver) ResolveDeclarationCatalog(ctx context.Context, _ chan
 	}
 	return out, nil
 }
+
+func (r *assemblyResolver) PrincipalKind(ctx context.Context, id string) (actor.Kind, bool, error) {
+	principal, found, err := r.registry.GetPrincipal(ctx, id)
+	if err != nil || !found || principal.Status != regspec.PrincipalPresent {
+		return "", false, err
+	}
+	return principal.Kind, true, nil
+}
 func (r *assemblyResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
 	switch class {
 	case lagoon.PeerActorClass, lagoon.SvcActorClass:

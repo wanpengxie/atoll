@@ -20,10 +20,10 @@ func TestChannelRetireRejectsLiveChildrenAndPreservesParent(t *testing.T) {
 	core, _ := eng.host.Acquire(channelspec.C0ChannelID)
 	registrar := onlyDecl(t, core, lagoon.RegistrarDeclID)
 	var parent lagoon.ChannelCreateReply
-	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "live-parent"}), &parent)
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "live-parent", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &parent)
 	parentBundle := waitBundle(t, eng, parent.ChannelID)
 	var child lagoon.ChannelCreateReply
-	terminalValue(t, callMember(t, parent.ChannelID, parentBundle, channelspec.RootPrincipalID, "system", string(lagoon.WordChannelCreate), map[string]any{"name": "live-child"}), &child)
+	terminalValue(t, callMember(t, parent.ChannelID, parentBundle, channelspec.RootPrincipalID, "system", string(lagoon.WordChannelCreate), map[string]any{"name": "live-child", "initial_actor_ids": []any{currentMemberID(t, parentBundle, channelspec.RootPrincipalID)}}), &child)
 	retired := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelDelete), map[string]any{"channel_id": parent.ChannelID}))
 	if retired.Status != message.StatusFailed || retired.ErrorCode != string(lagoon.CodeConflictExists) {
 		t.Fatalf("retire parent terminal=%+v", retired)
@@ -45,7 +45,7 @@ func TestChannelNameReplayReturnsExistingButRetiredNameRemainsReserved(t *testin
 	create := func() lagoon.ChannelCreateReply {
 		t.Helper()
 		var out lagoon.ChannelCreateReply
-		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "reserved-name"}), &out)
+		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "reserved-name", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &out)
 		return out
 	}
 	first, replay := create(), create()
@@ -53,7 +53,7 @@ func TestChannelNameReplayReturnsExistingButRetiredNameRemainsReserved(t *testin
 		t.Fatalf("same-name replay first=%+v replay=%+v", first, replay)
 	}
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelDelete), map[string]any{"channel_id": first.ChannelID}), nil)
-	conflict := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "reserved-name"}))
+	conflict := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "reserved-name", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}))
 	if conflict.Status != message.StatusFailed || conflict.ErrorCode != string(lagoon.CodeConflictExists) {
 		t.Fatalf("retired-name create=%+v", conflict)
 	}

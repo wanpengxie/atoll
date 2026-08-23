@@ -123,7 +123,8 @@ func (v View) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.Act
 // one that can hold a member the Controller has not published yet and can still
 // hold one it has already ended.
 //
-// There is no kind to pass: a principal is a human-only fact.
+// There is no kind to pass because this method is specifically the human-login
+// inverse; agent attribution principals are intentionally ignored.
 func (v View) ResolvePrincipal(_ context.Context, principal string) (actor.ActorID, bool, error) {
 	return v.authority.ResolvePrincipal(principal)
 }

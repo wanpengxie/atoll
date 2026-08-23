@@ -109,6 +109,10 @@ func (r *Registry) ListPrincipals(ctx context.Context) ([]regspec.PrincipalRow, 
 	return r.store.ListPrincipals(ctx)
 }
 
+func (r *Registry) GetPrincipal(ctx context.Context, id string) (regspec.PrincipalRow, bool, error) {
+	return r.store.GetPrincipal(ctx, id)
+}
+
 func (r *Registry) ListDevices(ctx context.Context) ([]regspec.DeviceRow, error) {
 	return r.store.ListDevices(ctx)
 }

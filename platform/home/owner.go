@@ -11,13 +11,13 @@ import (
 
 // Owner is a property of the CHANNEL, and its one and only home is the genesis
 // pointer written at creation. "Is this actor the owner" is therefore always a
-// derived judgement — a human whose login principal equals genesis.OwnerPrincipal
+// derived judgement — any active actor whose attributable principal equals genesis.OwnerPrincipal
 // — never a stored bit on the record.
 func (h *Home) isOwner(facts storespec.ActorFacts) bool {
 	if h == nil || h.ownerPrincipal == "" {
 		return false
 	}
-	return facts.Kind == actor.KindHuman && facts.Principal == h.ownerPrincipal
+	return facts.Principal != "" && facts.Principal == h.ownerPrincipal
 }
 
 // guardOwnerTerminal is the command-front owner protection for the management

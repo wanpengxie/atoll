@@ -33,6 +33,10 @@ import (
 
 type gatewayTestCompositionResolver struct{}
 
+func (gatewayTestCompositionResolver) PrincipalKind(context.Context, string) (actor.Kind, bool, error) {
+	return actor.KindHuman, true, nil
+}
+
 const gatewayTestAgentClass = "gateway-test-unresolved"
 
 func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
@@ -398,7 +402,10 @@ func (h *testChannel) submitOperate(ctx context.Context, typ string, payload any
 func openTestChannel(t *testing.T, chID channel.ID, owner, member string, memberKind actor.Kind, wired *Gateway) (*testChannel, actor.ActorID) {
 	t.Helper()
 	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}, IntroductionResolver: gatewayTestCompositionResolver{}, RegistryBindings: gatewayTestBindings{}}
-	genesis := lagoon.GenesisSpec{ChannelID: chID, Type: "group", OwnerPrincipal: owner, CreatedAt: time.Now().UnixMilli()}
+	genesis := lagoon.GenesisSpec{
+		ChannelID: chID, Type: "group", OwnerPrincipal: owner, CreatedAt: time.Now().UnixMilli(),
+		Humans: []lagoon.GenesisHuman{{Principal: owner}},
+	}
 	source := ""
 	if memberKind == actor.KindAgent {
 		source = "gateway-test-" + member

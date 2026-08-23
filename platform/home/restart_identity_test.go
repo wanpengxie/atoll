@@ -128,7 +128,7 @@ func TestBootRestoresEveryDurableIdentityKindWholeAndImmediatelyGated(t *testing
 			ChannelID: string(channelID), Type: "channel",
 			OwnerPrincipal: ownerPrincipal, CreatedAt: createdAt,
 		},
-		BootstrapOwnerPrincipal: ownerPrincipal,
+		BootstrapHumanPrincipals: []string{ownerPrincipal},
 		BootstrapDeclarations: []DeclareRequest{
 			{
 				SourceDeclID: "decl-restore-agent", Seed: "decl-restore-agent", Kind: actor.KindAgent,

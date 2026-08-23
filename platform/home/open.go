@@ -308,7 +308,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		ActorID: actor.SystemActorID, Kind: actor.KindSystem, Logger: logger,
 	}, func(actorrt.Incarnation) actorrt.Actor {
 		return actorbase.New(systemCaps, h.hooks(), sysactor.Def(sysactor.Deps{
-			Authority: h.actors, Clock: clock,
+			Authority: h.actors, ActorFacts: h.actors, Clock: clock,
 			Declaration: func(ctx context.Context, declIDs []string) (map[string]channelspec.DeclarationFacts, error) {
 				return resolveDeclarationCatalog(ctx, h.resolver, h.channelID, declIDs)
 			},
@@ -395,9 +395,9 @@ func validateGenesis(ctx context.Context, genesis storespec.GenesisStore, cfg Co
 }
 
 // seedBootstrap commits the bootstrap records before Controller.Start so the
-// Controller publishes one complete durable image. The owner's human record is
-// an ordinary human admission: no marker is seeded at the door, because owner
-// lives on the genesis pointer alone.
+// Controller publishes one complete durable image. Membership is supplied by
+// the explicit genesis seat plan; the channel owner pointer never synthesizes
+// a human member.
 func seedBootstrap(
 	ctx context.Context,
 	actors storespec.ActorRegistryStore,
@@ -405,13 +405,16 @@ func seedBootstrap(
 	cfg Config,
 	nowMs func() int64,
 ) error {
-	if cfg.BootstrapOwnerPrincipal != "" {
+	for _, principal := range cfg.BootstrapHumanPrincipals {
+		if principal == "" {
+			return errors.New("platform: bootstrap human principal required")
+		}
 		if _, err := actors.Insert(ctx, storespec.ActorDraft{
-			Kind: actor.KindHuman, Principal: cfg.BootstrapOwnerPrincipal,
+			Kind: actor.KindHuman, Principal: principal,
 			Definition: storespec.ActorDefinition{Class: "human"},
 			Placement:  storespec.NewServerPlacement(), CreatedAt: nowMs(),
 		}); err != nil {
-			return fmt.Errorf("platform: seed owner: %w", err)
+			return fmt.Errorf("platform: seed human %q: %w", principal, err)
 		}
 	}
 	instances := make(map[string]actor.ActorID, len(cfg.BootstrapDeclarations))
@@ -475,6 +478,7 @@ func admitBootstrapDeclaration(
 	record, err := actors.Insert(ctx, storespec.ActorDraft{
 		Kind:         in.Kind,
 		Seed:         in.Seed,
+		Principal:    in.Principal,
 		SourceDeclID: in.SourceDeclID,
 		Singleton:    in.Singleton,
 		CreatedAt:    in.CreatedAt,

@@ -43,9 +43,9 @@ type Config struct {
 	Bootstrap       bool
 	// Bootstrap values are committed before Controller.Start so the
 	// Controller publishes one complete durable image.
-	BootstrapOwnerPrincipal string
-	BootstrapDeclarations   []DeclareRequest
-	BootstrapService        BootstrapService
+	BootstrapHumanPrincipals []string
+	BootstrapDeclarations    []DeclareRequest
+	BootstrapService         BootstrapService
 
 	Logger               *slog.Logger
 	ReconcileInterval    time.Duration

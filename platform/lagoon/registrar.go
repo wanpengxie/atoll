@@ -404,7 +404,7 @@ func nameRule(what, got string) string {
 }
 
 const (
-	shapeRecipe = `{"name": "<1-63 chars, lowercase a-z 0-9 and '-'>", "recipe": {"declarations": [{"decl_id": "<an actor template id>", "desired_host": "<optional device id; attaches that device to the new channel and runs this seat there>"}], "profile": {"description": "...", "serving": 0 or 1, "svc_agent": "<a decl_id listed in declarations>"}}}`
+	shapeRecipe = `an internal source-resolved create plan: {"name": "<1-63 chars, lowercase a-z 0-9 and '-'>", "recipe": {...}, "initial_seats": [{"source_actor_id": "<current-channel actor id>", "kind": "human|agent|tool", "principal": "...", "decl_id": "..."}]}`
 
 	shapeChannelTemplate = `{"id": "...", "name": "...", "visibility": "public" or "private", "body": {"declarations": [{"decl_id": "..."}], "profile": {...}}}`
 
@@ -429,7 +429,7 @@ func (r *Registrar) execute(sys actorbase.Sys, trigger actorbase.Msg, principal 
 	ctx := trigger.Ctx()
 	switch word {
 	case WordChannelCreate:
-		var p ChannelCreate
+		var p ResolvedChannelCreate
 		if err := decodeArgs(raw, &p, shapeRecipe); err != nil {
 			return nil, err
 		}
@@ -649,13 +649,13 @@ type ChannelCreateReply struct {
 	ChannelID channel.ID `json:"channel_id"`
 }
 
-func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owner string, source channel.ID, p ChannelCreate) (ChannelCreateReply, error) {
+func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owner string, source channel.ID, p ResolvedChannelCreate) (ChannelCreateReply, error) {
 	ctx := trigger.Ctx()
 	var row regspec.ChannelRow
 	var created bool
 	err := r.registry.store.InTx(ctx, func(tx *store.Tx) error {
 		var err error
-		row, created, err = r.provisionChannel(ctx, tx, owner, source, p.Name, p.Recipe)
+		row, created, err = r.provisionChannel(ctx, tx, owner, source, p.Name, p.Recipe, p.InitialSeats)
 		return err
 	})
 	if err != nil {
@@ -671,7 +671,7 @@ func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owne
 	return ChannelCreateReply{ChannelID: row.ID}, nil
 }
 
-func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name string, body regspec.TemplateBody) (regspec.ChannelRow, bool, error) {
+func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name string, body regspec.TemplateBody, initialSeats []InitialSeatIntent) (regspec.ChannelRow, bool, error) {
 	if name == "" {
 		return regspec.ChannelRow{}, false, invalid("name required: a channel needs a name, 1-63 chars of lowercase a-z, 0-9 or '-'")
 	}
@@ -730,7 +730,59 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if *profile.Serving != 0 && *profile.Serving != 1 {
 		return regspec.ChannelRow{}, false, invalid("serving must be 0 or 1")
 	}
-	declarations := make([]GenesisDeclaration, 0, len(body.Declarations)+2)
+	humans := make([]GenesisHuman, 0, len(initialSeats))
+	trustedByDecl := make(map[string]InitialSeatIntent, len(initialSeats))
+	seenSources := make(map[actor.ActorID]struct{}, len(initialSeats))
+	declarationItems := append([]regspec.TemplateDeclaration(nil), body.Declarations...)
+	for index, seat := range initialSeats {
+		if seat.SourceActorID != "" {
+			if _, duplicate := seenSources[seat.SourceActorID]; duplicate {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("initial_seats[%d] repeats source_actor_id %q", index, seat.SourceActorID))
+			}
+			seenSources[seat.SourceActorID] = struct{}{}
+		}
+		switch seat.Kind {
+		case actor.KindHuman:
+			if seat.Principal == "" || seat.DeclID != "" {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("initial_seats[%d] is not a valid human identity", index))
+			}
+			principal, found, err := tx.GetPrincipal(ctx, seat.Principal)
+			if err != nil {
+				return regspec.ChannelRow{}, false, err
+			}
+			if !found || principal.Status != regspec.PrincipalPresent {
+				return regspec.ChannelRow{}, false, notFound("principal", seat.Principal, "system.principal.list")
+			}
+			if principal.Kind != actor.KindHuman {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("principal %q is %s, so it cannot create a human seat", seat.Principal, principal.Kind))
+			}
+			humans = append(humans, GenesisHuman{Principal: seat.Principal, SourceActorID: seat.SourceActorID})
+		case actor.KindAgent, actor.KindTool:
+			if seat.DeclID == "" {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("initial_seats[%d] has no source declaration", index))
+			}
+			if seat.Kind == actor.KindTool && seat.Principal != "" {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("tool seat %q cannot carry a principal", seat.SourceActorID))
+			}
+			if seat.Principal != "" {
+				principal, found, err := tx.GetPrincipal(ctx, seat.Principal)
+				if err != nil {
+					return regspec.ChannelRow{}, false, err
+				}
+				if !found || principal.Status != regspec.PrincipalPresent {
+					return regspec.ChannelRow{}, false, notFound("principal", seat.Principal, "system.principal.list")
+				}
+			}
+			if _, duplicate := trustedByDecl[seat.DeclID]; duplicate {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("initial seats repeat declaration %q", seat.DeclID))
+			}
+			trustedByDecl[seat.DeclID] = seat
+			declarationItems = append(declarationItems, regspec.TemplateDeclaration{DeclID: seat.DeclID})
+		default:
+			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("initial_seats[%d] has non-importable kind %q", index, seat.Kind))
+		}
+	}
+	declarations := make([]GenesisDeclaration, 0, len(declarationItems)+2)
 	// Devices a recipe entry named. They get bound to the new channel below: a
 	// seat placed on a machine the channel cannot reach is a member that is
 	// declared, placed, and never arrives.
@@ -743,7 +795,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	declarations = append(declarations, GenesisDeclaration{DeclID: SvcActorDeclID, Seed: SvcActorSeed, Kind: actor.KindPeer, Rendered: svc})
 	declarationKinds[SvcActorDeclID] = actor.KindPeer
-	for _, item := range body.Declarations {
+	for _, item := range declarationItems {
 		if item.DeclID == "" || declarationKinds[item.DeclID] != "" {
 			return regspec.ChannelRow{}, false, invalid("recipe declaration id is empty or duplicated")
 		}
@@ -754,7 +806,8 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if !ok || decl.Status != regspec.DeclPresent {
 			return regspec.ChannelRow{}, false, notFound("declaration", item.DeclID, "system.actor.template.list")
 		}
-		if decl.Visibility != "public" && decl.Owner != owner {
+		trustedSeat, trusted := trustedByDecl[item.DeclID]
+		if !trusted && decl.Visibility != "public" && decl.Owner != owner {
 			return regspec.ChannelRow{}, false, denied(fmt.Sprintf("declaration %q is private and owned by %q, not you; use a public declaration, one you own, or create your own with system.actor.template.create and visibility \"public\"", item.DeclID, decl.Owner))
 		}
 		config := decl.Config
@@ -775,6 +828,12 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		kind, ok := r.classes.LookupClassKind(decl.DefaultClass)
 		if !ok {
 			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("declaration %q names class %q, which this node cannot run; list the runnable classes with system.class.list", item.DeclID, decl.DefaultClass))
+		}
+		if trusted && kind != trustedSeat.Kind {
+			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("source actor %q is %s but declaration %q resolves to %s", trustedSeat.SourceActorID, trustedSeat.Kind, item.DeclID, kind))
+		}
+		if trusted && kind != actor.KindAgent && kind != actor.KindTool {
+			return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("declaration %q resolves to non-importable kind %s", item.DeclID, kind))
 		}
 		placement, ok := r.classes.LookupClassPlacement(decl.DefaultClass)
 		if !ok {
@@ -803,7 +862,12 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if err != nil {
 			return regspec.ChannelRow{}, false, err
 		}
-		declarations = append(declarations, GenesisDeclaration{DeclID: item.DeclID, Seed: decl.Name, Kind: kind, Rendered: rendered})
+		genesisDeclaration := GenesisDeclaration{DeclID: item.DeclID, Seed: decl.Name, Kind: kind, Rendered: rendered}
+		if trusted {
+			genesisDeclaration.Principal = trustedSeat.Principal
+			genesisDeclaration.SourceActorID = trustedSeat.SourceActorID
+		}
+		declarations = append(declarations, genesisDeclaration)
 		declarationKinds[item.DeclID] = kind
 	}
 	if parent != channelspec.C0ChannelID {
@@ -827,7 +891,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if err := validateServiceProfile(profile, declarationKinds); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
-	spec := GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: owner, CreatedAt: now, ParentID: parent, InitiatorPrincipal: owner, Declarations: declarations, Profile: profile}
+	spec := GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: owner, CreatedAt: now, ParentID: parent, InitiatorPrincipal: owner, Humans: humans, Declarations: declarations, Profile: profile}
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		return regspec.ChannelRow{}, false, err
@@ -1036,7 +1100,7 @@ func (r *Registrar) registerPrincipal(sys actorbase.Sys, trigger actorbase.Msg, 
 		}
 		var created bool
 		var err error
-		home, created, err = r.provisionChannel(ctx, tx, id, channelspec.C0ChannelID, id, regspec.TemplateBody{})
+		home, created, err = r.provisionChannel(ctx, tx, id, channelspec.C0ChannelID, id, regspec.TemplateBody{}, []InitialSeatIntent{{Kind: actor.KindHuman, Principal: id}})
 		if err != nil {
 			return err
 		}

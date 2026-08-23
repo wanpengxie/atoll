@@ -51,7 +51,7 @@ func TestLocalDeviceReservationsAndRetiredBindingsUseEffectiveStatus(t *testing.
 	var device regspec.DeviceRow
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordDeviceCreate), map[string]any{"name": "retiring-device"}), &device)
 	var created lagoon.ChannelCreateReply
-	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "device-binding-home"}), &created)
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "device-binding-home", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &created)
 	bundle := waitBundle(t, eng, created.ChannelID)
 	terminalValue(t, callMember(t, created.ChannelID, bundle, channelspec.RootPrincipalID, "system", string(lagoon.WordDeviceAttach), map[string]any{"channel_id": created.ChannelID, "device_id": device.ID}), nil)
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordDeviceDelete), map[string]any{"device_id": device.ID}), nil)

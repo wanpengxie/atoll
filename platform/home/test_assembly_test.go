@@ -17,6 +17,10 @@ import (
 
 type inertIntroductionResolver struct{}
 
+func (inertIntroductionResolver) PrincipalKind(context.Context, string) (actor.Kind, bool, error) {
+	return actor.KindHuman, true, nil
+}
+
 func (inertIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channelspec.DeclarationFacts, error) {
 	return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 }

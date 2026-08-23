@@ -43,3 +43,12 @@ func createdChannelID(t *testing.T, raw []byte) channel.ID {
 	}
 	return child
 }
+
+func currentMemberID(t *testing.T, bundle channelhost.Bundle, principal string) actor.ActorID {
+	t.Helper()
+	id, found, err := bundle.View().ResolvePrincipal(context.Background(), principal)
+	if err != nil || !found {
+		t.Fatalf("resolve current member for principal %q: found=%v err=%v", principal, found, err)
+	}
+	return id
+}

@@ -151,6 +151,7 @@ type GenesisSpec struct {
 	CreatedAt          int64                  `json:"created_at"`
 	ParentID           channel.ID             `json:"parent_id,omitempty"`
 	InitiatorPrincipal string                 `json:"initiator_principal,omitempty"`
+	Humans             []GenesisHuman         `json:"genesis_humans,omitempty"`
 	Declarations       []GenesisDeclaration   `json:"genesis_declarations"`
 	Profile            regspec.ChannelProfile `json:"profile"`
 }
@@ -160,15 +161,47 @@ type GenesisSpec struct {
 // reconciliation, and renaming a declaration must not restart the actor it
 // already seated.
 type GenesisDeclaration struct {
-	DeclID   string                       `json:"decl_id"`
-	Seed     string                       `json:"seed"`
-	Kind     actor.Kind                   `json:"kind"`
-	Rendered channelspec.RenderedSnapshot `json:"rendered_snapshot"`
+	DeclID        string                       `json:"decl_id"`
+	Seed          string                       `json:"seed"`
+	Kind          actor.Kind                   `json:"kind"`
+	Principal     string                       `json:"principal,omitempty"`
+	SourceActorID actor.ActorID                `json:"source_actor_id,omitempty"`
+	Rendered      channelspec.RenderedSnapshot `json:"rendered_snapshot"`
 }
 
-type ChannelCreate struct {
-	Name   string               `json:"name"`
-	Recipe regspec.TemplateBody `json:"recipe"`
+// GenesisHuman is one explicit human seat in a channel's immutable creation
+// plan. Ownership never implies this row: a channel may be owned by an agent
+// principal, and only the resolved initial-seat plan creates members.
+type GenesisHuman struct {
+	Principal     string        `json:"principal"`
+	SourceActorID actor.ActorID `json:"source_actor_id,omitempty"`
+}
+
+// ChannelCreateIntent is the public create shape. Actor ids are meaningful
+// only inside the source channel, so the source sysactor resolves them before
+// this request is allowed to cross into c0.
+type ChannelCreateIntent struct {
+	Name            string               `json:"name"`
+	Recipe          regspec.TemplateBody `json:"recipe"`
+	InitialActorIDs []actor.ActorID      `json:"initial_actor_ids"`
+}
+
+// InitialSeatIntent is a platform-authored snapshot of one active source
+// member. Callers cannot assert these fields: the source sysactor derives them
+// from its Controller-owned ActorFacts authority.
+type InitialSeatIntent struct {
+	SourceActorID actor.ActorID `json:"source_actor_id"`
+	Kind          actor.Kind    `json:"kind"`
+	Principal     string        `json:"principal,omitempty"`
+	DeclID        string        `json:"decl_id,omitempty"`
+}
+
+// ResolvedChannelCreate is the internal create shape accepted by Registrar.
+// It is carried only after the source-channel gate has resolved every id.
+type ResolvedChannelCreate struct {
+	Name         string               `json:"name"`
+	Recipe       regspec.TemplateBody `json:"recipe"`
+	InitialSeats []InitialSeatIntent  `json:"initial_seats"`
 }
 type ChannelRetire struct {
 	ChannelID channel.ID `json:"channel_id"`

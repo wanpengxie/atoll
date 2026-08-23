@@ -48,7 +48,7 @@ func lifecycleOpenConfig(t *testing.T, name string) Config {
 			ChannelID: string(id), Type: "channel",
 			OwnerPrincipal: "lifecycle-owner", CreatedAt: time.Now().UnixMilli(),
 		},
-		BootstrapOwnerPrincipal: "lifecycle-owner",
+		BootstrapHumanPrincipals: []string{"lifecycle-owner"},
 	}
 }
 
@@ -57,7 +57,7 @@ func lifecycleOpenConfig(t *testing.T, name string) Config {
 func lifecycleReopenConfig(cfg Config) Config {
 	cfg.Bootstrap = false
 	cfg.Genesis = nil
-	cfg.BootstrapOwnerPrincipal = ""
+	cfg.BootstrapHumanPrincipals = nil
 	cfg.BootstrapDeclarations = nil
 	cfg.MustExistDB = true
 	cfg.Logger = nil
@@ -239,7 +239,7 @@ func TestOpenMissingRequiredDatabaseRollsBackWithoutResidue(t *testing.T) {
 	cfg := lifecycleOpenConfig(t, "missing-db")
 	cfg.Bootstrap = false
 	cfg.Genesis = nil
-	cfg.BootstrapOwnerPrincipal = ""
+	cfg.BootstrapHumanPrincipals = nil
 	cfg.MustExistDB = true
 
 	h, err := Open(cfg)

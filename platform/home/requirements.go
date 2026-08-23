@@ -25,6 +25,14 @@ type IntroductionResolver interface {
 	AdmitIntroduction(context.Context, channel.ID, channelspec.DeclarationFacts) error
 }
 
+// PrincipalCatalog is the registry-backed identity check used only by human
+// admission. A principal string is not proof of a human identity: agent
+// principals exist too, and admitting one through the human door would corrupt
+// the channel's actor kind.
+type PrincipalCatalog interface {
+	PrincipalKind(context.Context, string) (actor.Kind, bool, error)
+}
+
 // DeclarationCatalogResolver is the optional bulk read used by directory and
 // observation projections. Production implements it with one registry scan;
 // focused test resolvers may implement only IntroductionResolver and use the

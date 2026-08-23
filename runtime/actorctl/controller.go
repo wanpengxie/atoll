@@ -243,14 +243,9 @@ func (c *Controller) ActorFacts(
 	}, true, nil
 }
 
-// ResolvePrincipal turns a login principal into the member behind it. It is the
-// inverse of ActorFacts' principal field, answered off the same in-memory value
-// ledger and under the same lock, so it can never disagree with what the rest of
-// the Controller is serving.
-//
-// An empty principal resolves to nothing. Every non-human member carries "" (the
-// registry forbids them a login principal), so matching one would hand an
-// arbitrary agent back as the answer to "who is logged in as nobody".
+// ResolvePrincipal turns a login principal into its human member. Agent records
+// may carry an attribution principal too, so this inverse deliberately filters
+// by kind rather than returning whichever matching record map iteration sees.
 func (c *Controller) ResolvePrincipal(principal string) (actor.ActorID, bool, error) {
 	if principal == "" {
 		return "", false, nil
@@ -261,7 +256,7 @@ func (c *Controller) ResolvePrincipal(principal string) (actor.ActorID, bool, er
 		return "", false, err
 	}
 	for id, value := range c.actors {
-		if value.Record.Principal == principal {
+		if value.Record.Kind == actor.KindHuman && value.Record.Principal == principal {
 			return id, true, nil
 		}
 	}

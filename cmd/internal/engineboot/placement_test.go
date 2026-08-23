@@ -39,7 +39,7 @@ func TestPeerPlacementIsServerWithoutCoreDeviceBindingAndCodexIsDaemon(t *testin
 	}), nil)
 	var created lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
-		"name": "placement", "recipe": map[string]any{"declarations": []any{map[string]any{"decl_id": "codex-placement"}}},
+		"name": "placement", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}, "recipe": map[string]any{"declarations": []any{map[string]any{"decl_id": "codex-placement"}}},
 	}), &created)
 	_ = waitBundle(t, eng, created.ChannelID)
 

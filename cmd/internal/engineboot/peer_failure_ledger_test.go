@@ -220,7 +220,7 @@ func TestA9AllElevenFailureRowsTraverseFramesAndRealCallerLedger(t *testing.T) {
 		"id": "inactive-receiver", "name": "inactive-receiver", "class": peerFailureReceiverClass, "visibility": "public", "config": map[string]any{},
 	}), nil)
 	child := createdChannelID(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
-		"name": "peer-failure-ledger", "recipe": map[string]any{
+		"name": "peer-failure-ledger", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}, "recipe": map[string]any{
 			"declarations": []any{map[string]any{"decl_id": "failure-receiver"}, map[string]any{"decl_id": "inactive-receiver"}},
 			"profile": map[string]any{"svc_agent": nil, "endpoints": map[string]any{
 				"remote.unsupported": map[string]any{"receiver": "failure-receiver"},

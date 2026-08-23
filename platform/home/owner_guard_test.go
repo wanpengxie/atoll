@@ -30,7 +30,7 @@ func TestOwnerTerminalGuardRefusesAtTheDoor(t *testing.T) {
 			ChannelID: "owner-guard", Type: "channel",
 			OwnerPrincipal: ownerPrincipal, CreatedAt: time.Now().UnixMilli(),
 		},
-		BootstrapOwnerPrincipal: ownerPrincipal,
+		BootstrapHumanPrincipals: []string{ownerPrincipal},
 		BootstrapDeclarations: []DeclareRequest{{
 			SourceDeclID: "decl-probe", Seed: "decl-probe", Class: "routing-live",
 			Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent,
@@ -81,5 +81,57 @@ func TestOwnerTerminalGuardRefusesAtTheDoor(t *testing.T) {
 	}
 	if len(result.Removed) != 1 || result.Removed[0] != agentID {
 		t.Fatalf("removed=%v, want [%s]", result.Removed, agentID)
+	}
+}
+
+func TestOwnerTerminalGuardRecognizesAgentPrincipal(t *testing.T) {
+	const ownerPrincipal = "steward"
+	h, err := Open(Config{
+		ChannelID:            "agent-owner-guard",
+		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver:  routingResolver{},
+		IntroductionResolver: inertIntroductionResolver{},
+		ReconcileInterval:    time.Hour,
+		Bootstrap:            true,
+		Genesis: &storespec.ChannelGenesis{
+			ChannelID: "agent-owner-guard", Type: "channel",
+			OwnerPrincipal: ownerPrincipal, CreatedAt: time.Now().UnixMilli(),
+		},
+		BootstrapDeclarations: []DeclareRequest{
+			{
+				SourceDeclID: "decl-steward", Seed: "steward", Class: "routing-live",
+				Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent,
+				Principal: ownerPrincipal, CreatedAt: time.Now().UnixMilli(),
+			},
+			{
+				SourceDeclID: "decl-worker", Seed: "worker", Class: "routing-live",
+				Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent,
+				CreatedAt: time.Now().UnixMilli(),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.closeInternal("test") })
+	ctx := context.Background()
+	identities, err := h.controller.ActiveIdentities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ownerID actor.ActorID
+	for _, identity := range identities {
+		facts, active, factsErr := h.controller.ActorFacts(ctx, identity.ID)
+		if factsErr == nil && active && facts.Principal == ownerPrincipal {
+			ownerID = identity.ID
+		}
+	}
+	if ownerID == "" {
+		t.Fatal("agent owner seat missing")
+	}
+	_, err = h.opEntry.remove(ctx, removeRequest{Target: ownerID, InitiatorActorID: ownerID})
+	var opErr *channelspec.OperationError
+	if !errors.As(err, &opErr) || opErr.Code != channelspec.ErrCodeProtectedActor {
+		t.Fatalf("removing agent owner: err=%v, want %s", err, channelspec.ErrCodeProtectedActor)
 	}
 }

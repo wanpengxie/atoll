@@ -443,6 +443,14 @@ func (s *Store) GetPrincipal(ctx context.Context, id string) (regspec.PrincipalR
 	return row, err == nil, err
 }
 
+func (t *Tx) GetPrincipal(ctx context.Context, id string) (regspec.PrincipalRow, bool, error) {
+	row, err := scanPrincipal(t.tx.QueryRowContext(ctx, `SELECT `+principalColumns+` FROM principals WHERE principals.id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.PrincipalRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
 func (s *Store) GetPrincipalByEmail(ctx context.Context, email string) (regspec.PrincipalRow, bool, error) {
 	row, err := scanPrincipal(s.db.QueryRowContext(ctx, `SELECT `+principalColumns+` FROM principals WHERE principals.email=?`, email))
 	if errors.Is(err, sql.ErrNoRows) {
