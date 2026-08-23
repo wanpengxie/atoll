@@ -38,7 +38,10 @@
 # 语法，其余部分才允许 bash 专有写法。
 if [ -z "${BASH_VERSION:-}" ]; then
   command -v bash >/dev/null 2>&1 || { echo "atoll installer 需要 bash，请先安装 bash" >&2; exit 1; }
-  if [ -f "$0" ]; then
+  # "$0 是个存在的文件"不等于"$0 是本脚本"：curl … | /bin/zsh 时 $0 就是
+  # zsh 二进制本身，exec bash 去解析它必死。只有 $0 的头部带着本脚本的
+  # 哨兵标记才算文件模式，其余一律按流模式处理。
+  if [ -f "$0" ] && head -c 16384 "$0" 2>/dev/null | grep -q ATOLL_RESUME_MARK; then
     exec bash "$0" "$@"
   fi
   # mktemp 恒带显式模板：无参调用在新旧 BSD/GNU/busybox 之间行为不一。
@@ -56,7 +59,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
   if command -v curl >/dev/null 2>&1 && curl -fsSL --connect-timeout 15 --max-time 60 "$_atoll_url" -o "$_atoll_self" 2>/dev/null; then
     ATOLL_REEXEC_TMP="$_atoll_self" exec bash "$_atoll_self" "$@"
   fi
-  if command -v wget >/dev/null 2>&1 && wget -q -T 60 -O "$_atoll_self" "$_atoll_url" 2>/dev/null; then
+  if command -v wget >/dev/null 2>&1 && wget -q -O "$_atoll_self" "$_atoll_url" 2>/dev/null; then
     ATOLL_REEXEC_TMP="$_atoll_self" exec bash "$_atoll_self" "$@"
   fi
   rm -f "$_atoll_self"
@@ -110,8 +113,9 @@ if [ ! -t 0 ]; then
   fi
 fi
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo /nonexistent)"
-SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)"
+# CDPATH= 前缀：用户设了 CDPATH 时 cd 会额外打印目录名，污染命令替换。
+REPO_ROOT="$(CDPATH= cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo /nonexistent)"
+SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)"
 DEFAULT_HOME="${ATOLL_HOME:-$HOME/.atoll}"
 DEFAULT_ADDR="${ATOLL_ADDR:-127.0.0.1:8832}"
 
@@ -469,11 +473,15 @@ ATOLL_ROOT_PASSWORD="$PASSWORD" "$ATOLL_BIN" "${UP_ARGS[@]}" </dev/null >"$LOG" 
 UP_PID=$!
 trap 'kill "$UP_PID" 2>/dev/null || true; wait "$UP_PID" 2>/dev/null || true; exit 0' INT TERM
 echo "  … 等待节点起来（http://$ADDR/healthz）"
-for i in $(seq 1 60); do
+# 整数计数 + 整数 sleep：seq 和小数 sleep 都是 busybox 可裁剪的特性，
+# 这里失败发生在节点已启动之后，误判会把好好的节点杀掉——不赌。
+i=0
+while [ "$i" -lt 30 ]; do
+  i=$((i+1))
   if curl -fs --max-time 2 "http://$ADDR/healthz" >/dev/null 2>&1 </dev/null; then break; fi
   if ! kill -0 "$UP_PID" 2>/dev/null; then bad "atoll up 退出了，看日志：$LOG"; tail -20 "$LOG"; exit 1; fi
-  [ $((i % 10)) = 0 ] && echo "    … 还在等（$((i / 2))s）"
-  sleep 0.5
+  [ $((i % 5)) = 0 ] && echo "    … 还在等（${i}s）"
+  sleep 1
 done
 if ! curl -fs --max-time 2 "http://$ADDR/healthz" >/dev/null 2>&1 </dev/null; then
   bad "30s 内没起来；已停掉半启动的节点，看日志：$LOG"
