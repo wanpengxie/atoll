@@ -18,10 +18,13 @@ bin/
 *.err.log
 output/*
 
-# web/dist is the embed target: the placeholder page must be tracked (without it
-# //go:embed all:dist does not compile), while a real build's output must not be
-# — the release stamps that in and it is nobody's source. The blanket `dist/`
-# rule above would take the directory whole, so it is re-opened here.
+# web/dist is where a UI build lands, and it is nobody's source: everything in
+# it is ignored. The one tracked file is .gitkeep — an anchor so `//go:embed
+# all:dist` still compiles in a fresh checkout. It carries no content and no
+# build writes it, so `make web` never shows up as a diff and nobody can
+# "restore" a built UI away. The page shown when no UI was built lives in
+# web/placeholder/, out of the build's reach. The blanket `dist/` rule above
+# would take the directory whole, so it is re-opened here.
 !/web/dist/
 /web/dist/*
-!/web/dist/index.html
+!/web/dist/.gitkeep

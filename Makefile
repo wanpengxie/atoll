@@ -63,9 +63,9 @@ build-release:
 # web — 按 WEB_VERSION 取 atoll-web 的那个 tag，构建，铺进 web/dist。
 # 之后编出来的 atoll 里就带着这版 UI。
 #
-# web/dist 只有 index.html 进库（占位页，没有它 //go:embed 编不过）；这条命令
-# 会覆盖它，所以跑完 git 会显示它改了——那是构建产物，别 commit，
-# 用 `git checkout web/dist/index.html` 复原。
+# web/dist 整个是构建产物、全部不进库（只有 .gitkeep 这个空锚点进库，让
+# //go:embed 在干净 checkout 里也编得过）。没构建过 UI 时节点显示的那一页在
+# web/placeholder/，构建碰不到它——所以跑完 make web，git 恒是干净的。
 # ----------------------------------------------------------------------------
 WEB_REPO   ?= https://github.com/wanpengxie/atoll-web.git
 WEB_SRC    ?= $(CURDIR)/.cache/atoll-web
@@ -76,7 +76,7 @@ web:
 	@mkdir -p "$(dir $(WEB_SRC))"
 	git clone --depth 1 --branch "$(WEB_VERSION)" "$(WEB_REPO)" "$(WEB_SRC)"
 	cd "$(WEB_SRC)" && npm ci && npm run build
-	@rm -rf web/dist && mkdir -p web/dist
+	@rm -rf web/dist && mkdir -p web/dist && touch web/dist/.gitkeep
 	cp -R "$(WEB_SRC)/dist/." web/dist/
 	@test -f web/dist/index.html || { echo "atoll-web $(WEB_VERSION) 没产出 index.html"; exit 1; }
 	@echo "[web] web/dist = atoll-web $(WEB_VERSION)"
@@ -96,7 +96,7 @@ web-dev:
 	@test -f "$(WEB_WORKTREE)/package.json" || { echo "找不到 atoll-web 工作树：$(WEB_WORKTREE)（用 WEB_WORKTREE=<路径> 指一个）"; exit 1; }
 	@echo "[web-dev] 源 = $(WEB_WORKTREE) @ $$(cd "$(WEB_WORKTREE)" && git rev-parse --abbrev-ref HEAD)$$(cd "$(WEB_WORKTREE)" && git diff --quiet || echo '+本地改动')"
 	cd "$(WEB_WORKTREE)" && npm run build
-	@rm -rf web/dist && mkdir -p web/dist
+	@rm -rf web/dist && mkdir -p web/dist && touch web/dist/.gitkeep
 	cp -R "$(WEB_WORKTREE)/dist/." web/dist/
 	@test -f web/dist/index.html || { echo "atoll-web 没产出 index.html"; exit 1; }
 	@echo "[web-dev] web/dist = $(WEB_WORKTREE) 的当前状态"
