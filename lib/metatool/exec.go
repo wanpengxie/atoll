@@ -60,47 +60,32 @@ type awaitOutcome struct {
 	err error
 }
 
-// awaitWithProgress is the A-side observation point for provisional rows. It
-// drains the same ordered queue that the A ledger receives and returns those
-// observations alongside the terminal/ack so the agent model sees them in the
-// identical order. A timed-out wait stops consuming; a later await resumes the
-// same queue.
-func awaitWithProgress(ctx context.Context, jobs actorbase.JobTable, id message.ID, window time.Duration) (*message.Envelope, bool, []any, error) {
+// awaitFinal drains the child's provisional stream while waiting, but never
+// copies it into the caller's tool result. The child RequestTurn owns those
+// progress rows. The parent only observes the outbound request as tool input
+// and the terminal/failed response (or ACK) as tool output.
+func awaitFinal(ctx context.Context, jobs actorbase.JobTable, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
 	progress := jobs.ProgressEvents(id)
 	done := make(chan awaitOutcome, 1)
 	go func() {
 		env, ok, err := jobs.Await(ctx, id, window)
 		done <- awaitOutcome{env: env, ok: ok, err: err}
 	}()
-	observed := []any{}
 	for {
 		select {
-		case env, open := <-progress:
+		case _, open := <-progress:
 			if open {
-				observed = append(observed, payloadValue(env.Payload))
 				continue
 			}
 			progress = nil
 		case outcome := <-done:
 			if outcome.ok && progress != nil {
-				for env := range progress {
-					observed = append(observed, payloadValue(env.Payload))
+				for range progress {
 				}
 			}
-			return outcome.env, outcome.ok, observed, outcome.err
+			return outcome.env, outcome.ok, outcome.err
 		}
 	}
-}
-
-func attachProgress(result ResultValue, observed []any) ResultValue {
-	if len(observed) == 0 {
-		return result
-	}
-	if result.Value == nil {
-		result.Value = map[string]any{}
-	}
-	result.Value["progress_events"] = observed
-	return result
 }
 
 // now returns wall time, defaulting to time.Now if the Clock is unset (a test
@@ -181,21 +166,21 @@ func (x *Exec) ExecuteRequest(ctx context.Context, rc RuntimeContext, spec Reque
 	if window <= 0 {
 		return x.ackResult(spec.ToolName, ack)
 	}
-	finalEnv, ok, observed, awaitErr := awaitWithProgress(ctx, x.Jobs, id, window)
+	finalEnv, ok, awaitErr := awaitFinal(ctx, x.Jobs, id, window)
 	if awaitErr != nil {
 		// The wait was released (ctx / account close) but — unlike the old
 		// Shell path — nothing here drops the ledger entry: an in-flight
 		// request stays in-flight (author#2 owns its terminal), awaitable
 		// again later. A closed account (ErrCallClosed) already deleted itself.
-		return attachProgress(NewError(spec.ToolName, InternalError,
+		return NewError(spec.ToolName, InternalError,
 			"channel request "+spec.EnvelopeType+" wait failed: "+awaitErr.Error(),
-			"Inspect adapter logs; the wait was released but the call keeps running", nil), observed)
+			"Inspect adapter logs; the wait was released but the call keeps running", nil)
 	}
 	if ok {
 		rv, _ := ResultFromResponse(spec.ToolName, *finalEnv)
-		return attachProgress(rv, observed)
+		return rv
 	}
-	return attachProgress(x.ackResult(spec.ToolName, ack), observed)
+	return x.ackResult(spec.ToolName, ack)
 }
 
 // callSyncFinal is the shared head of the two CallSync* faces: drive a

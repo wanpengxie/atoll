@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -60,6 +59,7 @@ func TestCommandRequestsFormSingleItemBatches(t *testing.T) {
 	add("c1", runtimeproto.TurnChat)
 	add("c2", runtimeproto.TurnChat)
 	add("compact", runtimeproto.TurnCompact)
+	add("new", runtimeproto.TurnNew)
 	add("c3", runtimeproto.TurnChat)
 
 	for len(l.state.Buffer) > 0 {
@@ -72,14 +72,14 @@ func TestCommandRequestsFormSingleItemBatches(t *testing.T) {
 		l.clearTurn()
 		l.state.RemoveRequest(owner)
 	}
-	if len(rt.starts) != 3 {
-		t.Fatalf("batches=%d want 3", len(rt.starts))
+	if len(rt.starts) != 4 {
+		t.Fatalf("batches=%d want 4", len(rt.starts))
 	}
-	if got := []int{len(rt.starts[0].Messages), len(rt.starts[1].Messages), len(rt.starts[2].Messages)}; got[0] != 2 || got[1] != 0 || got[2] != 1 {
-		t.Fatalf("batch sizes=%v want [2 0 1]", got)
+	if got := []int{len(rt.starts[0].Messages), len(rt.starts[1].Messages), len(rt.starts[2].Messages), len(rt.starts[3].Messages)}; got[0] != 2 || got[1] != 0 || got[2] != 0 || got[3] != 1 {
+		t.Fatalf("batch sizes=%v want [2 0 0 1]", got)
 	}
-	if rt.starts[0].Kind != runtimeproto.TurnChat || rt.starts[1].Kind != runtimeproto.TurnCompact || rt.starts[2].Kind != runtimeproto.TurnChat {
-		t.Fatalf("batch kinds=%v/%v/%v", rt.starts[0].Kind, rt.starts[1].Kind, rt.starts[2].Kind)
+	if rt.starts[0].Kind != runtimeproto.TurnChat || rt.starts[1].Kind != runtimeproto.TurnCompact || rt.starts[2].Kind != runtimeproto.TurnNew || rt.starts[3].Kind != runtimeproto.TurnChat {
+		t.Fatalf("batch kinds=%v/%v/%v/%v", rt.starts[0].Kind, rt.starts[1].Kind, rt.starts[2].Kind, rt.starts[3].Kind)
 	}
 }
 
@@ -212,7 +212,6 @@ type turnControlSys struct {
 	actorbase.Sys
 	mu      sync.Mutex
 	replies []any
-	events  []behavior.EventSpec
 }
 
 type forkPending struct{ terminal actorbase.Msg }
@@ -276,20 +275,14 @@ func (s *turnControlSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	return "reply", nil
 }
 func (s *turnControlSys) Fail(actorbase.Msg, string, string) (message.ID, error) { return "fail", nil }
-func (s *turnControlSys) Emit(event behavior.EventSpec) (message.ID, error) {
-	s.mu.Lock()
-	s.events = append(s.events, event)
-	s.mu.Unlock()
-	return "event", nil
-}
-func (*turnControlSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return nil }
-func (*turnControlSys) Self() actor.ActorID                                { return "agent:test" }
+func (*turnControlSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error       { return nil }
+func (*turnControlSys) Self() actor.ActorID                                      { return "agent:test" }
 
 func baseRequest(id, typ string) actorbase.Msg {
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "caller"}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{"body":{}}`)})
 }
 
-func TestTurnEndedCarriesUsageIntoActivityAndReply(t *testing.T) {
+func TestTurnEndedCarriesUsageOnlyInTerminalReply(t *testing.T) {
 	sys := &turnControlSys{}
 	vault := effectcap.NewVault()
 	exec := newExecutor(sys, vault)
@@ -315,17 +308,11 @@ func TestTurnEndedCarriesUsageIntoActivityAndReply(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	sys.mu.Lock()
-	reply, event := sys.replies[0], sys.events[0]
+	reply := sys.replies[0]
 	sys.mu.Unlock()
 	value := reply.(map[string]any)
 	if !jsonEqual(t, value["usage"], usageValue(usage)) {
 		t.Fatalf("reply usage=%v", value["usage"])
-	}
-	var activity struct {
-		Usage map[string]any `json:"usage"`
-	}
-	if json.Unmarshal(event.Payload, &activity) != nil || !jsonEqual(t, activity.Usage, usageValue(usage)) {
-		t.Fatalf("activity=%s", event.Payload)
 	}
 }
 

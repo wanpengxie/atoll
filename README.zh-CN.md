@@ -288,8 +288,8 @@ curl -s -H "$AUTH" http://127.0.0.1:8832/obs/channel/c0/actors
 submit 帧里写裸参数；账本把它包成请求唯一的那种形 `{"body": <参数>}`，你在 feed 上看到的就是包好的。
 回执带 `payload.message_id`；答复随后以
 `feed` 帧到达，`kind:"response"`、`parent_id` 等于那个 id、终态 `status` 为 `completed` 或
-`failed`。agent 的回合（`agent.turn.*`、`agent.tool.*`）作为事件出现在同一条 feed 上，然后才是
-它的最终响应。
+`failed`。请求未关闭时，agent 以指向同一 request 的 provisional response 报告 turn、stage、
+tool 过程（`payload.status:"processing"`，细节位于 `payload.process`），最后再发送唯一终态响应。
 
 **管理是一套词表，不是一个管理面板。** 全部是对 `system`（门）的请求；space 级的词在 `c0`
 里说，频道级的词在那个频道里说：

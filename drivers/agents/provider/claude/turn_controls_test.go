@@ -59,6 +59,37 @@ func TestCompactFailureMapsToTurnFailed(t *testing.T) {
 	}
 }
 
+func TestNewTurnUsesClearAndPersistsReplacementSession(t *testing.T) {
+	h := readyHarness(t, "old-session")
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 33, Kind: driverproto.TurnNew})
+	frame := h.input()
+	u := frameUUID(frame)
+	content := frame["message"].(map[string]any)["content"].([]any)
+	if content[0].(map[string]any)["text"] != "/clear" {
+		t.Fatalf("new frame=%v", frame)
+	}
+	h.proc.emit(t, map[string]any{"type": "command_lifecycle", "command_uuid": u, "state": "queued", "session_id": "old-session"})
+	h.proc.emit(t, map[string]any{"type": "command_lifecycle", "command_uuid": u, "state": "started", "session_id": "old-session"})
+	started := waitAs[driverproto.TurnStarted](h)
+	h.proc.emit(t, map[string]any{"type": "conversation_reset", "new_conversation_id": "reset-not-the-session", "session_id": "old-session"})
+	h.proc.emit(t, map[string]any{"type": "system", "subtype": "init", "session_id": "new-session", "claude_code_version": "test"})
+	seed := waitAs[driverproto.SeedUpdated](h)
+	if string(seed.Value) != "new-session" {
+		t.Fatalf("seed=%q", seed.Value)
+	}
+	h.proc.emit(t, map[string]any{"type": "result", "subtype": "success", "num_turns": 0, "session_id": "new-session"})
+	ended := waitAs[driverproto.TurnEnded](h)
+	if ended.Target != started.Target || ended.Status != driverproto.TurnOK || ended.FinalText != "" || ended.Usage.ContextTokens != 0 {
+		t.Fatalf("started=%+v ended=%+v", started, ended)
+	}
+
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 34, Messages: []driverproto.DriverMessage{{Text: "next"}}})
+	next := h.input()
+	if next["session_id"] != "new-session" {
+		t.Fatalf("next frame session=%v", next)
+	}
+}
+
 func TestSelectSendsSetModelThenEffortLine(t *testing.T) {
 	h := readyHarness(t, "")
 	h.worker.mu.Lock()

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -300,6 +301,35 @@ func TestCompactStartMapsCompactionTurnToTurnEvents(t *testing.T) {
 	ended := h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok }).(driverproto.TurnEnded)
 	if started.Target != ended.Target || ended.Status != driverproto.TurnOK || ended.Usage.ContextTokens != 4540 || ended.Usage.ContextWindow != 999 {
 		t.Fatalf("started=%+v ended=%+v", started, ended)
+	}
+}
+
+func TestNewStartCreatesClearSourcedThreadAndPersistsIt(t *testing.T) {
+	h := newCodexHarness(t, driverproto.TurnOptions{Model: "gpt-test", Effort: "high"}, nil)
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 40, Kind: driverproto.TurnNew})
+	request := h.input()
+	params := rpcParams(request)
+	if request["method"] != "thread/start" || params["sessionStartSource"] != "clear" {
+		t.Fatalf("new=%v", request)
+	}
+	if _, ok := params["threadId"]; ok {
+		t.Fatalf("new must not resume old thread: %v", request)
+	}
+	h.respond(request, map[string]any{"thread": map[string]any{"id": "thread-2"}, "model": "gpt-test", "reasoningEffort": "high"})
+	started := h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnStarted); return ok }).(driverproto.TurnStarted)
+	seed := h.waitEvent(func(event driverproto.DriverEvent) bool {
+		value, ok := event.(driverproto.SeedUpdated)
+		return ok && strings.Contains(string(value.Value), "thread-2")
+	}).(driverproto.SeedUpdated)
+	ended := h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.TurnEnded); return ok }).(driverproto.TurnEnded)
+	if !strings.Contains(string(seed.Value), "thread-2") || started.Target != ended.Target || ended.Status != driverproto.TurnOK || ended.Usage.ContextTokens != 0 {
+		t.Fatalf("seed=%q started=%+v ended=%+v", seed.Value, started, ended)
+	}
+
+	h.worker.Start(context.Background(), driverproto.StartRequest{Attempt: 41, Messages: []driverproto.DriverMessage{{Text: "next"}}})
+	next := h.input()
+	if next["method"] != "turn/start" || rpcParams(next)["threadId"] != "thread-2" {
+		t.Fatalf("next=%v", next)
 	}
 }
 

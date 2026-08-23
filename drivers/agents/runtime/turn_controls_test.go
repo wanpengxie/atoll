@@ -113,17 +113,17 @@ func TestSelectTurnUpdatesOptionsUsedByNextGenerationOpen(t *testing.T) {
 	}
 }
 
-func TestCompactAndSelectAllowEmptyMessages(t *testing.T) {
+func TestCommandTurnsAllowEmptyMessages(t *testing.T) {
 	provider := &turnControlProvider{}
 	rt, events := newTurnControlRuntime(t, provider, runtimeproto.TurnOptions{})
-	for op, kind := range []runtimeproto.TurnKind{runtimeproto.TurnCompact, runtimeproto.TurnSelect} {
+	for op, kind := range []runtimeproto.TurnKind{runtimeproto.TurnCompact, runtimeproto.TurnSelect, runtimeproto.TurnNew} {
 		if err := rt.Start(runtimeproto.StartCommand{Op: runtimeproto.OpID(op + 1), Kind: kind, Options: runtimeproto.TurnOptions{Model: "m", Effort: "low"}}); err != nil {
 			t.Fatal(err)
 		}
 		awaitKind(t, events, "ended")
 	}
-	if got := len(provider.starts); got != 2 {
-		t.Fatalf("starts=%d want 2", got)
+	if got := len(provider.starts); got != 3 {
+		t.Fatalf("starts=%d want 3", got)
 	}
 }
 

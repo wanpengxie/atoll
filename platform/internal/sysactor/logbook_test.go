@@ -55,7 +55,7 @@ func TestLogbookRecentIncludesCallerAndProtocolTrafficInsideTheGate(t *testing.T
 	}
 }
 func TestLogbookRecentNeverReturnsEvents(t *testing.T) {
-	rows := []storespec.StoredRow{logRow(1, message.KindEvent, "other", "agent.turn.started"), logRow(2, message.KindRequest, "other", "user.text")}
+	rows := []storespec.StoredRow{logRow(1, message.KindEvent, "system", "system.member.created"), logRow(2, message.KindRequest, "other", "user.text")}
 	sys := &fakeSys{}
 	New(Deps{Logbook: fakeLogbook{rows}}).handle(sys, requestMsg("q", message.TypeSystemLogRecent, []byte(`{"limit":5}`)))
 	got := sys.replies[0].v.(LogbookRecentResponse).Messages

@@ -41,29 +41,29 @@ const (
 )
 
 type worker struct {
-	cfg        Config
-	host       driverproto.WorkerHost
-	gate       *emit.Gate
-	mu         sync.Mutex
-	phase      workerPhase
-	conn       *connection
-	thread     string
-	attempt    driverproto.AttemptToken
-	target     driverproto.WorkerTurnTarget
-	final      map[driverproto.WorkerTurnRef]string
-	options    driverproto.TurnOptions
-	pending    driverproto.TurnOptions
-	usage      driverproto.TurnUsage
+	cfg     Config
+	host    driverproto.WorkerHost
+	gate    *emit.Gate
+	mu      sync.Mutex
+	phase   workerPhase
+	conn    *connection
+	thread  string
+	attempt driverproto.AttemptToken
+	target  driverproto.WorkerTurnTarget
+	final   map[driverproto.WorkerTurnRef]string
+	options driverproto.TurnOptions
+	pending driverproto.TurnOptions
+	usage   driverproto.TurnUsage
 	// sessionModel/sessionEffort are the ACTUAL defaults codex reported in the
 	// thread/start|resume response (model + reasoningEffort). When the decl
 	// configures nothing, turns run on these — usage accounting reports them
 	// instead of "", so the ledger always names what the turn actually ran on.
 	sessionModel  string
 	sessionEffort string
-	leases     sync.WaitGroup
-	reaped     chan struct{}
-	retireOnce sync.Once
-	surface    toolsurface.Surface
+	leases        sync.WaitGroup
+	reaped        chan struct{}
+	retireOnce    sync.Once
+	surface       toolsurface.Surface
 }
 
 func newWorker(cfg Config, host driverproto.WorkerHost) *worker {
@@ -165,21 +165,8 @@ func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage
 	w.mu.Lock()
 	model := w.options.Model
 	w.mu.Unlock()
-	startParams := map[string]any{"approvalPolicy": "never", "sandbox": "danger-full-access", "cwd": w.cfg.WorkspaceDir}
-	if model != "" {
-		startParams["model"] = model
-	}
-	// The decl-authored prompt is appended to codex's own system prompt as a
-	// developer instruction; atoll's tool catalog rides along as dynamic
-	// tools so the model can call actors in its channel (served back to us
-	// via item/tool/call → WorkerHost.Tools().Invoke).
+	startParams := w.threadStartParams(model, "")
 	prompt := w.surface.AppendGuide(w.cfg.Prompt)
-	if prompt != "" {
-		startParams["developerInstructions"] = prompt
-	}
-	if tools := w.dynamicTools(); len(tools) > 0 {
-		startParams["dynamicTools"] = tools
-	}
 	method, params := "thread/start", any(startParams)
 	resumeThread, resumeOK := decodeResumeSeed(seed, w.surface.Digest())
 	if resumeOK {
@@ -197,6 +184,26 @@ func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage
 	if err := c.rpc.callAsync(method, params, func(raw json.RawMessage, err error) { w.afterSession(c, resumeOK, raw, err) }); err != nil {
 		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 	}
+}
+
+func (w *worker) threadStartParams(model, source string) map[string]any {
+	params := map[string]any{"approvalPolicy": "never", "sandbox": "danger-full-access", "cwd": w.cfg.WorkspaceDir}
+	if model != "" {
+		params["model"] = model
+	}
+	// The decl-authored prompt is appended to codex's own system prompt as a
+	// developer instruction; atoll's tool catalog rides along as dynamic tools
+	// on every fresh thread, including agent.new.
+	if prompt := w.surface.AppendGuide(w.cfg.Prompt); prompt != "" {
+		params["developerInstructions"] = prompt
+	}
+	if tools := w.dynamicTools(); len(tools) > 0 {
+		params["dynamicTools"] = tools
+	}
+	if source != "" {
+		params["sessionStartSource"] = source
+	}
+	return params
 }
 
 func (w *worker) afterSession(c *connection, resumed bool, raw json.RawMessage, err error) {
@@ -277,6 +284,17 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 		w.publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, Usage: usage})
 		return
 	}
+	if req.Kind == driverproto.TurnNew {
+		target := driverproto.WorkerTurnTarget{Attempt: req.Attempt, Native: driverproto.WorkerTurnRef(fmt.Sprintf("new-%d", req.Attempt))}
+		w.target = target
+		usage := w.currentUsageLocked()
+		params := w.threadStartParams(usage.Model, "clear")
+		w.mu.Unlock()
+		if err := c.rpc.callAsync("thread/start", params, func(raw json.RawMessage, err error) { w.afterNewResponse(req.Attempt, target, raw, err) }); err != nil {
+			w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
+		}
+		return
+	}
 	pending := w.pending
 	if req.Kind == driverproto.TurnChat {
 		w.pending = driverproto.TurnOptions{}
@@ -297,6 +315,61 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	if err := c.rpc.callAsync(method, params, func(_ json.RawMessage, err error) { w.afterStartResponse(req.Attempt, err) }); err != nil {
 		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 	}
+}
+
+func (w *worker) afterNewResponse(attempt driverproto.AttemptToken, target driverproto.WorkerTurnTarget, raw json.RawMessage, err error) {
+	if err != nil {
+		w.mu.Lock()
+		current := w.attempt == attempt && w.phase == phaseStarting
+		if current {
+			w.attempt, w.target, w.phase = 0, driverproto.WorkerTurnTarget{}, phaseReady
+		}
+		w.mu.Unlock()
+		if current {
+			w.publish(driverproto.SubmissionRejected{Attempt: attempt, Class: driverproto.FailureProvider, Detail: err.Error(), Disposition: driverproto.KeepWorker})
+		}
+		return
+	}
+	thread := threadIDFrom(raw)
+	if thread == "" {
+		w.afterNewResponse(attempt, target, nil, &rpcError{Code: -32603, Message: "new thread response missing thread id"})
+		return
+	}
+	var configured struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoningEffort"`
+	}
+	_ = json.Unmarshal(raw, &configured)
+	w.mu.Lock()
+	if w.attempt != attempt || w.phase != phaseStarting || w.target != target {
+		w.mu.Unlock()
+		return
+	}
+	w.thread = thread
+	if configured.Model != "" {
+		w.sessionModel = configured.Model
+	}
+	if configured.ReasoningEffort != "" {
+		w.sessionEffort = configured.ReasoningEffort
+	}
+	usage := w.currentUsageLocked()
+	usage.ContextTokens = 0
+	w.usage = usage
+	// thread/start has no effort parameter. Re-apply the actor's current
+	// model/effort pair to the first chat turn on the new thread.
+	w.pending = w.options
+	w.phase = phaseActive
+	w.mu.Unlock()
+	w.publish(driverproto.TurnStarted{Target: target})
+	if !w.publish(driverproto.SeedUpdated{Value: encodeResumeSeed(thread, w.surface.Digest())}) {
+		return
+	}
+	w.mu.Lock()
+	if w.attempt == attempt && w.target == target {
+		w.attempt, w.target, w.phase = 0, driverproto.WorkerTurnTarget{}, phaseReady
+	}
+	w.mu.Unlock()
+	w.publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, Usage: usage})
 }
 
 func (w *worker) currentUsageLocked() driverproto.TurnUsage {

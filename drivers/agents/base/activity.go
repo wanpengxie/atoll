@@ -1,62 +1,101 @@
 package base
 
 import (
-	"fmt"
-
-	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/registry"
 )
 
-func (l *agentLoop) emit(typ registry.ActivityType, payload any) {
+const (
+	processKindTurn  = "turn"
+	processKindStage = "stage"
+	processKindTool  = "tool"
+	processStarted   = "started"
+	processEnded     = "ended"
+	toolCompleted    = "completed"
+	toolFailed       = "failed"
+)
+
+// progressProcess is the only Agent Base → ledger projection for runtime
+// process observations. Provider/runtime events stay internal; on the wire a
+// process belongs to the request this Agent is serving, so it is a provisional
+// response from the serving Actor rather than a free-standing event.
+func (l *agentLoop) progressProcess(process map[string]any) {
 	t := l.state.Turn
-	if t == nil || t.AnchorParent == "" {
+	if t == nil || t.Owner == "" {
 		return
 	}
-	// A turn event reports on the request that started the turn. The anchor is
-	// that request's id and correlation, held here rather than the envelope
-	// because a turn outlives a restart and the envelope does not.
-	cause := message.Anchored(message.ID(t.AnchorParent), message.ID(t.AnchorCorrelation))
-	spec, err := behavior.EventSpecJSON(cause, string(typ), payload)
-	if err != nil {
+	row := l.state.Requests[t.Owner]
+	if row == nil {
 		return
 	}
-	l.exec.emit(emptyAudiencePublic(spec))
-}
-func (l *agentLoop) emitTurnStarted() {
-	if t := l.state.Turn; t != nil {
-		l.emit(registry.ActivityTurnStarted, registry.ActivityTurnStartedPayload{TurnIndex: int(t.Serial), Status: registry.ActivityStartedStatus})
+	value := map[string]any{
+		"turn_id":  t.ID,
+		"controls": l.processingControls(),
 	}
-}
-func (l *agentLoop) emitTurnEnded(status string, usage *runtimeproto.TurnUsage) {
-	if t := l.state.Turn; t != nil {
-		var payload *registry.TurnUsagePayload
-		if usage != nil {
-			payload = usagePayload(*usage)
-		}
-		l.emit(registry.ActivityTurnEnded, registry.ActivityTurnEndedPayload{TurnIndex: int(t.Serial), Status: status, Usage: payload})
+	if process != nil {
+		value["process"] = process
 	}
+	l.exec.progress(string(row.ID), message.StatusProcessing, value)
 }
 
-func usagePayload(usage runtimeproto.TurnUsage) *registry.TurnUsagePayload {
-	return &registry.TurnUsagePayload{ContextTokens: usage.ContextTokens, ContextWindow: usage.ContextWindow, Model: usage.Model, Effort: usage.Effort}
+func (l *agentLoop) progressTurnStarted() {
+	t := l.state.Turn
+	if t == nil {
+		return
+	}
+	l.progressProcess(map[string]any{
+		"kind":       processKindTurn,
+		"phase":      processStarted,
+		"turn_index": t.Serial,
+	})
 }
-func (l *agentLoop) emitTool(v toolEvent) {
-	if v.CallID == "" || v.Name == "" || l.state.Turn == nil {
+
+func (l *agentLoop) progressStage(kind, text string) {
+	if kind == "" {
 		return
 	}
-	if v.Phase == "started" {
-		l.emit(registry.ActivityToolStarted, registry.ActivityToolStartedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: registry.ActivityStartedStatus, Input: v.Input})
+	l.progressProcess(map[string]any{
+		"kind":  processKindStage,
+		"stage": kind,
+		"text":  text,
+	})
+}
+
+func (l *agentLoop) progressTool(v toolEvent) {
+	t := l.state.Turn
+	if v.CallID == "" || v.Name == "" || t == nil {
 		return
 	}
-	status := v.Status
-	if status == "" {
-		status = registry.ActivityToolEndedStatusCompleted
+	process := map[string]any{
+		"kind":         processKindTool,
+		"phase":        v.Phase,
+		"turn_index":   t.Serial,
+		"tool_call_id": v.CallID,
+		"tool":         v.Name,
 	}
-	if !registry.IsActivityToolEndedStatus(status) {
-		l.logger.Error("agent invalid tool status", "status", fmt.Sprint(status))
+	switch v.Phase {
+	case processStarted:
+		if len(v.Input) != 0 {
+			process["input"] = v.Input
+		}
+	case processEnded:
+		outcome := v.Status
+		if outcome == "" {
+			outcome = toolCompleted
+		}
+		if outcome != toolCompleted && outcome != toolFailed {
+			l.logger.Error("agent invalid tool outcome", "outcome", outcome)
+			return
+		}
+		process["outcome"] = outcome
+		if v.Detail != "" {
+			process["detail"] = v.Detail
+		}
+		if len(v.Output) != 0 {
+			process["output"] = v.Output
+		}
+	default:
+		l.logger.Error("agent invalid tool phase", "phase", v.Phase)
 		return
 	}
-	l.emit(registry.ActivityToolEnded, registry.ActivityToolEndedPayload{TurnIndex: int(l.state.Turn.Serial), ToolCallID: v.CallID, Tool: v.Name, Status: status, Detail: v.Detail, Output: v.Output})
+	l.progressProcess(process)
 }

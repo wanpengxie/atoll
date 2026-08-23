@@ -3,6 +3,7 @@ package home
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -79,7 +80,7 @@ func (progressPathResolver) AdmitIntroduction(context.Context, channel.ID, chann
 	return nil
 }
 
-func TestRealJobTableProgressReachesMetatoolInCallerLedgerOrder(t *testing.T) {
+func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 	resolver := progressPathResolver{}
 	h, err := Open(completeHomeTestConfig(Config{
 		ChannelID: "progress-model-channel", DBPath: t.TempDir() + "/channel.sqlite", Bootstrap: true,
@@ -147,7 +148,7 @@ func TestRealJobTableProgressReachesMetatoolInCallerLedgerOrder(t *testing.T) {
 		var modelCall message.ID
 		var ledgerSteps []int
 		var ledgerStatuses []string
-		var observed []any
+		var parentFinal map[string]any
 		for _, row := range rows {
 			env := row.Envelope
 			if env.Kind == message.KindRequest && env.Sender.ID == model && env.Type == "progress.work" {
@@ -165,29 +166,25 @@ func TestRealJobTableProgressReachesMetatoolInCallerLedgerOrder(t *testing.T) {
 				}
 			}
 			if env.Kind == message.KindResponse && env.ParentID == request.ID {
-				var payload struct {
-					Progress []any `json:"progress_events"`
-				}
-				if json.Unmarshal(env.Payload, &payload) == nil {
-					observed = payload.Progress
+				var payload map[string]any
+				if json.Unmarshal(env.Payload, &payload) == nil && message.IsFinalStatus(fmt.Sprint(payload["status"])) {
+					parentFinal = payload
 				}
 			}
 		}
-		if len(observed) == 2 {
+		if parentFinal != nil {
 			if len(ledgerStatuses) != 3 || ledgerStatuses[0] != message.StatusReceived || ledgerStatuses[1] != message.StatusProcessing || ledgerStatuses[2] != message.StatusCompleted {
 				t.Fatalf("caller ledger statuses=%v", ledgerStatuses)
 			}
 			if len(ledgerSteps) != 2 || ledgerSteps[0] != 1 || ledgerSteps[1] != 2 {
 				t.Fatalf("caller ledger steps=%v", ledgerSteps)
 			}
-			first := observed[0].(map[string]any)
-			second := observed[1].(map[string]any)
-			if first["step"] != float64(1) || second["step"] != float64(2) {
-				t.Fatalf("metatool observed=%#v", observed)
+			if _, leaked := parentFinal["progress_events"]; leaked {
+				t.Fatalf("child progress leaked into parent tool result: %#v", parentFinal)
 			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("real JobTable progress did not reach metatool before the final result")
+	t.Fatal("parent tool result did not close after isolated child progress")
 }

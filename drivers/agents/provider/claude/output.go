@@ -15,6 +15,7 @@ type parentFrame struct {
 	ParentToolUseID json.RawMessage `json:"parent_tool_use_id"`
 }
 type systemFrame struct {
+	SessionID         string   `json:"session_id"`
 	Capabilities      []string `json:"capabilities"`
 	ClaudeCodeVersion string   `json:"claude_code_version"`
 	Tools             []string `json:"tools"`
@@ -175,6 +176,14 @@ func (w *worker) onFrame(c *connection, typ, subtype string, raw json.RawMessage
 			return
 		}
 		w.debug("noise_frame", typ+"/"+subtype)
+	case "conversation_reset":
+		// `/clear` announces the reset before the following system/init frame.
+		// The init frame owns the actual session id; this frame is only liveness.
+		if target, ok := w.activeTarget(c); ok {
+			w.publish(driverproto.Activity{Target: target})
+		} else {
+			w.unsolicited(typ)
+		}
 	case "assistant":
 		w.onAssistant(c, raw)
 	case "user":
@@ -255,7 +264,19 @@ func (w *worker) onInit(c *connection, raw json.RawMessage) {
 	}
 	first := !w.initSeen
 	w.initSeen = true
+	newSession := strings.TrimSpace(frame.SessionID)
+	isNewInit := w.phase == phaseActive && w.turn != nil && w.turn.kind == driverproto.TurnNew && newSession != "" && newSession != w.session
+	if isNewInit {
+		w.session = newSession
+		w.resume = true
+		w.turn.newSession = newSession
+	}
 	w.mu.Unlock()
+	if isNewInit {
+		w.publish(driverproto.SeedUpdated{Value: []byte(newSession)})
+		w.debug("claude_code_version", frame.ClaudeCodeVersion)
+		return
+	}
 	if !first {
 		w.debug("claude_code_version", frame.ClaudeCodeVersion)
 		return
@@ -462,6 +483,8 @@ func (w *worker) finishResult(c *connection, target driverproto.WorkerTurnTarget
 	case driverproto.TurnSelect:
 		// Claude reports zero result usage for control turns. Preserve the
 		// latest context usage while applying the selected model and effort.
+	case driverproto.TurnNew:
+		usage.ContextTokens = 0
 	}
 	if turn.kind == driverproto.TurnSelect {
 		if frame.Subtype == "success" {
@@ -480,6 +503,12 @@ func (w *worker) finishResult(c *connection, target driverproto.WorkerTurnTarget
 		final = ""
 		if turn.compactResult == "failed" {
 			status, detail = driverproto.TurnFailed, turn.compactError
+		}
+	}
+	if turn.kind == driverproto.TurnNew {
+		final = ""
+		if turn.newSession == "" {
+			status, detail = driverproto.TurnFailed, "Claude clear completed without a new session id"
 		}
 	}
 	if turn.kind == driverproto.TurnSelect {

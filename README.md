@@ -326,8 +326,9 @@ A submit frame carries the bare arguments; the ledger wraps them into the one
 request shape `{"body": <args>}`, which is what you see on the feed. The receipt carries
 `payload.message_id`; the answer arrives later as a `feed` frame with
 `kind:"response"`, `parent_id` equal to that id and a terminal `status` of
-`completed` or `failed`. An agent's rounds (`agent.turn.*`, `agent.tool.*`) show
-up on the same feed as events before its final response.
+`completed` or `failed`. While the request is open, the agent reports turn,
+stage, and tool process as provisional responses to that same request
+(`payload.status:"processing"`, with details under `payload.process`).
 
 **Administration is a vocabulary, not an admin panel.** All of it is requests to
 `system` (the gate); space-level words are spoken in `c0`, channel-level words in

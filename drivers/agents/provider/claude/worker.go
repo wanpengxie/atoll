@@ -109,6 +109,7 @@ type turnState struct {
 	kind          driverproto.TurnKind
 	options       driverproto.TurnOptions
 	settling      bool
+	newSession    string
 	compactResult string
 	compactError  string
 	compactPost   int64
@@ -375,6 +376,9 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	content := buildContent(req.Messages, req.Background, w.cfg.Situation)
 	if req.Kind == driverproto.TurnCompact {
 		content = []map[string]any{{"type": "text", "text": "/compact"}}
+	}
+	if req.Kind == driverproto.TurnNew {
+		content = []map[string]any{{"type": "text", "text": "/clear"}}
 	}
 	if req.Kind == driverproto.TurnChat && len(content) == 0 {
 		w.publish(driverproto.SubmissionRejected{Attempt: req.Attempt, Class: driverproto.FailureInvalidInput, Detail: "empty input", Disposition: driverproto.KeepWorker})

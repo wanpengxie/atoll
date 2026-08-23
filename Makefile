@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: deps install build build-go build-release web web-dev all package test test-full test-strict lint check-activity-types check-data-plane-scope dev clean e2e-loop
+.PHONY: deps install build build-go build-release web web-dev all package test test-full test-strict lint check-data-plane-scope dev clean e2e-loop
 
 # server/daemon ship namespaced (atoll-server / atoll-daemon); the entry
 # command itself is plain `atoll` — its own name IS the namespace.
@@ -156,13 +156,9 @@ e2e-loop: build-go
 	ATOLL_E2E_BIN=$(PWD)/bin go test -count=1 ./e2e/ -v -timeout 600s
 
 # lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
-lint: check-activity-types
+lint:
 	go vet ./...
 	go test ./archtest/
-
-check-activity-types:
-	./scripts/check-activity-types.sh
-	./scripts/check-activity-types.sh --self-test
 
 check-data-plane-scope:
 	./scripts/check-data-plane-scope.sh

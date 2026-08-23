@@ -48,6 +48,10 @@ const (
 	TurnChat TurnKind = iota
 	TurnCompact
 	TurnSelect
+	// TurnNew replaces the provider-native conversation behind the current
+	// actor. The actor identity, declaration, workspace and selected options
+	// stay put; only the resumable provider session becomes a fresh one.
+	TurnNew
 )
 
 type TurnOptions struct {

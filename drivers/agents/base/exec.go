@@ -102,11 +102,6 @@ func (x *executor) progress(id, status string, value any) {
 		slog.Warn("agent progress write failed", "request", id, "error", err)
 	}
 }
-func (x *executor) emit(spec behavior.EventSpec) {
-	if _, err := x.sys.Emit(spec); err != nil {
-		slog.Warn("agent activity write failed", "error", err)
-	}
-}
 
 func (x *executor) runtimeStart(v runtimeproto.StartCommand) error     { return x.runtime.Start(v) }
 func (x *executor) runtimeControl(v runtimeproto.ControlCommand) error { return x.runtime.Control(v) }
@@ -115,9 +110,3 @@ func (x *executor) runtimeEnsureReady(op runtimeproto.OpID) error      { return 
 func (x *executor) revoke(scope effectcap.Scope)                       { x.vault.Revoke(scope) }
 func (x *executor) persistSeed(value []byte)                           { persistSeed(x.sys, value) }
 func (x *executor) persistSelection(value runtimeproto.TurnOptions)    { persistSelection(x.sys, value) }
-
-func emptyAudiencePublic(spec behavior.EventSpec) behavior.EventSpec {
-	spec.Audience = message.Audience{}
-	spec.Visibility = message.VisibilityPublic
-	return spec
-}

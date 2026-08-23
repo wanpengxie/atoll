@@ -236,7 +236,7 @@ func TestExecuteCallActor_SyncResolvesInline(t *testing.T) {
 	}
 }
 
-func TestExecuteCallActorSurfacesOrderedProgressBeforeInlineFinal(t *testing.T) {
+func TestExecuteCallActorDoesNotBubbleChildProgressIntoParentToolResult(t *testing.T) {
 	jobs := &fakeJobs{progress: map[message.ID][]*message.Envelope{
 		"req-1": {progressResp("req-1", 1), progressResp("req-1", 2)},
 	}}
@@ -245,9 +245,11 @@ func TestExecuteCallActorSurfacesOrderedProgressBeforeInlineFinal(t *testing.T) 
 	}
 	rv := metatool.ExecuteCallActor(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","wait":true}`), newExec(jobs, nil), defaultRC())
 	assertNotError(t, rv)
-	events, ok := rv.Value["progress_events"].([]any)
-	if !ok || len(events) != 2 || events[0].(map[string]any)["step"] != float64(1) || events[1].(map[string]any)["step"] != float64(2) {
-		t.Fatalf("ordered progress=%#v", rv.Value["progress_events"])
+	if _, leaked := rv.Value["progress_events"]; leaked {
+		t.Fatalf("child progress leaked into parent tool result: %#v", rv.Value)
+	}
+	if rv.Value["value"] != "done" {
+		t.Fatalf("terminal result lost while draining child progress: %#v", rv.Value)
 	}
 }
 
@@ -345,16 +347,18 @@ func TestExecuteAwaitResult_ResolvesFinal(t *testing.T) {
 	}
 }
 
-func TestExecuteAwaitResultConsumesProgressFromTheCallerLedger(t *testing.T) {
+func TestExecuteAwaitResultDoesNotBubbleChildProgress(t *testing.T) {
 	jobs := &fakeJobs{progress: map[message.ID][]*message.Envelope{"req-1": {progressResp("req-1", 3)}}}
 	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
 		return finalResp(id, map[string]any{"status": "completed"}), true, nil
 	}
 	rv := metatool.ExecuteAwaitResult(context.Background(), json.RawMessage(`{"request_id":"req-1"}`), newExec(jobs, nil), defaultRC())
 	assertNotError(t, rv)
-	events, ok := rv.Value["progress_events"].([]any)
-	if !ok || len(events) != 1 || events[0].(map[string]any)["step"] != float64(3) {
-		t.Fatalf("await progress=%#v", rv.Value["progress_events"])
+	if _, leaked := rv.Value["progress_events"]; leaked {
+		t.Fatalf("child progress leaked from await_result: %#v", rv.Value)
+	}
+	if rv.Value["status"] != "completed" {
+		t.Fatalf("terminal result lost while draining child progress: %#v", rv.Value)
 	}
 }
 

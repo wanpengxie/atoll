@@ -223,6 +223,36 @@ func TestAgentControl03FirstPositionProgressMatchesResult(t *testing.T) {
 	})
 }
 
+func TestAgentToolLifecycleIsOwnerProgress(t *testing.T) {
+	l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilityInterrupt: true})
+	v7Activate(t, l, "owner")
+
+	l.handleRuntimeEvent(runtimeEvent{kind: evTool, turnID: "turn-owner", tool: runtimeproto.ToolEvent{
+		CallID: "call-1", Phase: processStarted, Name: "call_actor", Input: json.RawMessage(`{"actor_id":"agent:peer:1","type":"agent.ask"}`),
+	}})
+	l.handleRuntimeEvent(runtimeEvent{kind: evTool, turnID: "turn-owner", tool: runtimeproto.ToolEvent{
+		CallID: "call-1", Phase: processEnded, Name: "call_actor", Status: toolCompleted, Output: json.RawMessage(`{"status":"completed","text":"done"}`),
+	}})
+
+	got := sys.progresses("owner")
+	if len(got) != 4 {
+		t.Fatalf("progress=%#v want admission + turn-start + tool-start + tool-end", got)
+	}
+	started := got[2].value.(map[string]any)
+	startedProcess := started["process"].(map[string]any)
+	if got[2].status != message.StatusProcessing || started["turn_id"] != runtimeproto.TurnID("turn-owner") || startedProcess["kind"] != processKindTool || startedProcess["phase"] != processStarted || startedProcess["tool_call_id"] != "call-1" {
+		t.Fatalf("started=%#v", got[2])
+	}
+	if controls, ok := started["controls"].([]map[string]any); !ok || len(controls) == 0 {
+		t.Fatalf("started controls=%#v", started["controls"])
+	}
+	ended := got[3].value.(map[string]any)
+	endedProcess := ended["process"].(map[string]any)
+	if got[3].status != message.StatusProcessing || endedProcess["phase"] != processEnded || endedProcess["outcome"] != toolCompleted {
+		t.Fatalf("ended=%#v", got[3])
+	}
+}
+
 func TestAgentControl04ResumedRequestFormsSingleItemBatch(t *testing.T) {
 	l, _, rt := newV7Loop(t, nil)
 	for idx, id := range []book.RequestID{"r1", "r2", "r3"} {

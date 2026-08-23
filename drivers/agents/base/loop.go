@@ -490,6 +490,13 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 			return
 		}
 	}
+	if msg.Type == TypeNew {
+		var payload struct{}
+		if err := decodeStrict(msg.Payload, &payload); err != nil {
+			l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "agent.new payload must be an empty object"})
+			return
+		}
+	}
 	if msg.Type != TypeReplace && len(l.state.Requests) >= l.def.cfg.RequestMaxCount {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorBaseCapacity, detail: "agent live request table capacity exceeded"})
 		return
@@ -557,6 +564,10 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		row.TurnKind = runtimeproto.TurnCompact
 		row.Input.Text = ""
 	}
+	if msg.Type == TypeNew {
+		row.TurnKind = runtimeproto.TurnNew
+		row.Input.Text = ""
+	}
 	if msg.Type == TypeSelect {
 		options, code, detail := l.validateSelection(msg.Payload)
 		if code != "" {
@@ -572,7 +583,7 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	case TypeQueue:
 		row.Input = steerInput(row)
 		l.enqueue(id)
-	case TypeCompact:
+	case TypeCompact, TypeNew:
 		l.enqueue(id)
 	case TypeSelect:
 		l.admitSelectSlot(id)
@@ -1259,7 +1270,7 @@ func (l *agentLoop) beginTurn(tail book.RequestID, messages []runtimeproto.Input
 }
 
 func isCommandRequest(row *book.Request) bool {
-	return row != nil && (row.TurnKind == runtimeproto.TurnCompact || row.TurnKind == runtimeproto.TurnSelect)
+	return row != nil && (row.TurnKind == runtimeproto.TurnCompact || row.TurnKind == runtimeproto.TurnSelect || row.TurnKind == runtimeproto.TurnNew)
 }
 
 func resumedInputText(row *book.Request) string {
@@ -1497,7 +1508,7 @@ func (l *agentLoop) handleRuntimeEvent(e runtimeEvent) {
 		l.onTurnRejected(e)
 	case evTool:
 		if t := l.state.Turn; t != nil && t.ID == e.turnID {
-			l.emitTool(e.tool)
+			l.progressTool(e.tool)
 		} else {
 			l.logLate("Tool", e.turnID)
 		}
@@ -1507,7 +1518,7 @@ func (l *agentLoop) handleRuntimeEvent(e runtimeEvent) {
 		// （自发回合）就无人可告，丢弃。
 		if t := l.state.Turn; t != nil && t.ID == e.turnID && t.Owner != "" {
 			if row := l.state.Requests[t.Owner]; row != nil {
-				l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": e.turnID, "kind": e.progress.Kind, "text": e.progress.Text})
+				l.progressStage(e.progress.Kind, e.progress.Text)
 			}
 		}
 	case evTurnEnded:
@@ -1535,9 +1546,8 @@ func (l *agentLoop) onTurnStarted(e runtimeEvent) {
 	t.Phase, t.ID = book.TurnActive, e.turnID
 	if row := l.state.Requests[t.Owner]; row != nil {
 		row.Location = book.Workspace
-		l.exec.progress(string(row.ID), message.StatusProcessing, map[string]any{"turn_id": e.turnID, "controls": l.processingControls()})
 	}
-	l.emitTurnStarted()
+	l.progressTurnStarted()
 	if l.state.Running != nil && l.state.Running.Kind == book.ActionCleanup && l.state.Running.Op == 0 {
 		l.runCleanup(l.state.Running)
 		return
@@ -1588,7 +1598,7 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 			if e.text != "" {
 				value["text"] = e.text
 			}
-			if ownerKind == runtimeproto.TurnCompact {
+			if ownerKind == runtimeproto.TurnCompact || ownerKind == runtimeproto.TurnNew {
 				value["status"] = "completed"
 			}
 			l.finish(t.Owner, terminalCandidate{value: value})
@@ -1616,7 +1626,6 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 		l.options = runtimeproto.TurnOptions{Model: e.usage.Model, Effort: e.usage.Effort}
 		l.exec.persistSelection(l.options)
 	}
-	l.emitTurnEnded(string(e.status), &e.usage)
 	l.clearTurn()
 	if a := l.state.Running; a != nil && a.Target == e.turnID {
 		l.clearReceipt(receiptKey("terminal", a.Serial))
@@ -1646,7 +1655,6 @@ func (l *agentLoop) onProviderLost(e runtimeEvent) {
 	if t.Owner != "" {
 		l.finish(t.Owner, terminalCandidate{fail: true, code: code, detail: e.detail})
 	}
-	l.emitTurnEnded(string(runtimeproto.TurnStatusFailed), nil)
 	l.clearTurn()
 	if a := l.state.Running; a != nil && a.Target == e.turnID {
 		l.clearReceipt(receiptKey("terminal", a.Serial))

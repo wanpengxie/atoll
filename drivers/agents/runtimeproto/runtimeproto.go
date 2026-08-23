@@ -31,6 +31,7 @@ const (
 	TurnChat    = driverproto.TurnChat
 	TurnCompact = driverproto.TurnCompact
 	TurnSelect  = driverproto.TurnSelect
+	TurnNew     = driverproto.TurnNew
 )
 
 type TurnOptions struct {

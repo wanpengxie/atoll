@@ -36,6 +36,19 @@ type logbookResponse struct {
 	} `json:"messages"`
 }
 
+func isProvisionalContext(kind string, payload json.RawMessage) bool {
+	if kind != string(message.KindResponse) {
+		return false
+	}
+	var status struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(payload, &status) != nil || status.Status == "" {
+		return false
+	}
+	return !message.IsFinalStatus(status.Status)
+}
+
 func loadCatchup(ctx context.Context, sys actorbase.Sys) []runtimeproto.ContextItem {
 	// Catch-up is best-effort — a failure must never block boot — but it must
 	// never fail silently either: without a line here, an agent that quietly
@@ -60,7 +73,11 @@ func loadCatchup(ctx context.Context, sys actorbase.Sys) []runtimeproto.ContextI
 	}
 	items := make([]runtimeproto.ContextItem, 0, len(response.Messages))
 	for _, row := range response.Messages {
-		if row.Message.Kind == string(message.KindEvent) && (strings.HasPrefix(row.Message.Type, "agent.turn.") || strings.HasPrefix(row.Message.Type, "agent.tool.")) && row.Message.Sender.ID != string(sys.Self()) {
+		// Provisional responses are the request owner's live state/process
+		// projection. They drive UI and controls, but feeding them back into an
+		// Agent's catch-up prompt duplicates tool output and lets transient process
+		// noise crowd out the durable request/terminal conversation.
+		if isProvisionalContext(row.Message.Kind, row.Message.Payload) {
 			continue
 		}
 		rendered := fmt.Sprintf("[%s %s %s] %s", row.Message.Sender.ID, row.Message.Kind, row.Message.Type, strings.TrimSpace(string(row.Message.Payload)))

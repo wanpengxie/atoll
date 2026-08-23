@@ -45,7 +45,7 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 	if cfg.Runtime.Documentation.SkillDoc == "" {
 		cfg.Runtime.Documentation.SkillDoc = doc
 	}
-	d := definition{cfg: cfg, controls: map[string]struct{}{TypeAsk: {}, TypeCompact: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeHold: {}, TypeUnhold: {}, TypeReplace: {}, TypeInterrupt: {}}}
+	d := definition{cfg: cfg, controls: map[string]struct{}{TypeAsk: {}, TypeCompact: {}, TypeNew: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeHold: {}, TypeUnhold: {}, TypeReplace: {}, TypeInterrupt: {}}}
 	if cfg.Runtime.Capabilities[runtimeproto.CapabilityFork] {
 		d.controls[TypeFork] = struct{}{}
 	}
@@ -138,7 +138,7 @@ func selectInputSchema(selections []runtimeproto.TurnOptions, titles []runtimepr
 
 func Manifest(class string, capabilities map[string]bool) introspect.Manifest {
 	words := map[string]introspect.WordSpec{}
-	for _, name := range []string{TypeAsk, TypeFork, TypeSteer, TypeQueue, TypeInterrupt, TypeHold, TypeUnhold, TypeReplace, TypeCompact, TypeSelect, TypeContext} {
+	for _, name := range []string{TypeAsk, TypeFork, TypeSteer, TypeQueue, TypeInterrupt, TypeHold, TypeUnhold, TypeReplace, TypeCompact, TypeNew, TypeSelect, TypeContext} {
 		words[name] = introspect.WordSpec{Description: "standard agent request"}
 	}
 	words[TypeHold] = introspect.WordSpec{Description: "freeze the agent wait queue, optionally interrupting an owned target for editing", InputSchema: json.RawMessage(`{"type":"object","properties":{"target":{"type":"string"},"duration_ms":{"type":"integer","minimum":1,"maximum":1800000}},"additionalProperties":false}`), ErrorCodes: []string{errorCASMismatch, "target_not_owned", "invalid_args", "busy"}}
@@ -146,6 +146,7 @@ func Manifest(class string, capabilities map[string]bool) introspect.Manifest {
 	words[TypeReplace] = introspect.WordSpec{Description: "replace an owned buffered request in place", InputSchema: json.RawMessage(`{"type":"object","required":["target","old_text","new_text"],"properties":{"target":{"type":"string","minLength":1},"old_text":{"type":"string"},"new_text":{"type":"string"},"attachments":{"type":"array"}},"additionalProperties":false}`), ErrorCodes: []string{errorCASMismatch, "invalid_args", errorBaseCapacity, "target_not_owned"}}
 	words[TypeInterrupt] = introspect.WordSpec{Description: "freeze the wait queue and interrupt the current turn when supported", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`), ErrorCodes: []string{"invalid_args", "busy"}}
 	words[TypeSteer] = introspect.WordSpec{Description: "steer text into the active turn or insert owned buffered requests", InputSchema: json.RawMessage(`{"oneOf":[{"type":"object","required":["text"],"properties":{"text":{"type":"string"},"expected_turn_id":{"type":"string"}},"additionalProperties":false},{"type":"object","required":["target"],"properties":{"target":{"type":"string","minLength":1}},"additionalProperties":false},{"type":"object","required":["all"],"properties":{"all":{"const":true}},"additionalProperties":false}]}`), ErrorCodes: []string{errorCASMismatch, "target_not_owned", "invalid_args"}}
+	words[TypeNew] = introspect.WordSpec{Description: "replace the provider conversation while preserving the actor, workspace and selected options", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`), ErrorCodes: []string{"invalid_args"}}
 	return introspect.Manifest{Class: class, Interfaces: []string{"actor", "agent"}, Capabilities: cloneCapabilities(capabilities), Words: words}
 }
 
@@ -161,6 +162,7 @@ const (
 	TypeAsk         = "agent.ask"
 	TypeFork        = "agent.fork"
 	TypeCompact     = "agent.compact"
+	TypeNew         = "agent.new"
 	TypeSelect      = "agent.select"
 	TypeContext     = "agent.context"
 	TypeSteer       = "agent.steer"
