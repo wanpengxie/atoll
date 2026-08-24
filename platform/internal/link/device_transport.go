@@ -260,6 +260,13 @@ const (
 	// DeviceStreamExchange carries one file-byte redemption. It is an exact-
 	// lane child and therefore always carries channel plus lane generation.
 	DeviceStreamExchange DeviceStreamKind = "exchange"
+	// DeviceStreamPTY carries one interactive terminal session. Like exchange
+	// it is an exact-lane child, but unlike exchange it is LONG-LIVED and
+	// FULL-DUPLEX: there is no "end of bytes" until the shell exits, so it
+	// carries no terminal segment and never uses the chunk framing that
+	// exchange judges its boundary by. The two never share a code path — see
+	// pty.go. Terminal-line design: .dalek/pm/terminal-line-design.md §4.5.
+	DeviceStreamPTY DeviceStreamKind = "pty"
 )
 
 type DeviceStreamHeader struct {
@@ -280,7 +287,7 @@ func (h DeviceStreamHeader) Validate() error {
 		if h.ProtoVersion != 0 || h.Channel == "" || h.LaneGen == "" || h.ChannelName == "" {
 			return fmt.Errorf("link: malformed %s stream header", h.Kind)
 		}
-	case DeviceStreamStorage, DeviceStreamActor, DeviceStreamExchange:
+	case DeviceStreamStorage, DeviceStreamActor, DeviceStreamExchange, DeviceStreamPTY:
 		if h.ProtoVersion != 0 || h.Channel == "" || h.ChannelName != "" || h.LaneGen == "" {
 			return fmt.Errorf("link: malformed %s stream header", h.Kind)
 		}
@@ -831,6 +838,12 @@ func (c *ClientCarrier) OpenExchange(ctx context.Context, chID channel.ID, gener
 
 func (c *ServerCarrier) OpenExchange(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
 	return c.open(ctx, DeviceStreamHeader{Kind: DeviceStreamExchange, Channel: chID, LaneGen: generation})
+}
+
+// OpenPTY opens the host leg of one terminal session. Server-side only: the
+// session is always minted by the door, never by the device.
+func (c *ServerCarrier) OpenPTY(ctx context.Context, chID channel.ID, generation LaneGeneration) (net.Conn, error) {
+	return c.open(ctx, DeviceStreamHeader{Kind: DeviceStreamPTY, Channel: chID, LaneGen: generation})
 }
 
 func (c *ServerCarrier) AcceptStream() (net.Conn, DeviceStreamHeader, error) {

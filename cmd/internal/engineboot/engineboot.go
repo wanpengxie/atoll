@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
+	"github.com/wanpengxie/atoll/platform/terminal"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
@@ -47,6 +48,7 @@ type Engine struct {
 	registry       *lagoon.Registry
 	host           *channelhost.ChannelHost
 	daemonHost     *daemonhost.Host
+	terminals      *terminal.Manager
 	dataIssuer     dataplane.Issuer
 	dataRedeemer   dataplane.Redeemer
 	dataBinder     dataplane.Binder
@@ -195,7 +197,8 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		Daemons:  daemonObsAdapter{host: e.daemonHost},
 		Now:      func() int64 { return time.Now().UnixMilli() },
 	})
-	p := portal.New(portal.Config{Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion, Boot: fmt.Sprintf("%s@%d", installed.C0Genesis.ChannelID, installed.C0Genesis.CreatedAt), Web: web.Assets()})
+	e.terminals = terminal.NewManager(ptyOpener{host: e.daemonHost}, portal.NewRecorder(e.acquireChannel))
+	p := portal.New(portal.Config{Terminals: e.terminals, Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion, Boot: fmt.Sprintf("%s@%d", installed.C0Genesis.ChannelID, installed.C0Genesis.CreatedAt), Web: web.Assets()})
 	e.handler = p
 	e.gateway.Start()
 	if err := e.host.StartConvergence(); err != nil {
@@ -217,6 +220,26 @@ func (e *Engine) acquireLobby(ctx context.Context) (channelhost.Bundle, error) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// acquireChannel gets a live bundle for one channel. Unlike acquireLobby it
+// does NOT wait: a terminal command row is best effort, and blocking here
+// would put the ledger's availability in the path of a person's keystrokes.
+func (e *Engine) acquireChannel(_ context.Context, chID channel.ID) (channelhost.Bundle, error) {
+	bundle, ok := e.host.Acquire(chID)
+	if !ok {
+		return nil, errors.New("engineboot: channel unavailable")
+	}
+	return bundle, nil
+}
+
+// ptyOpener adapts the daemon host to the terminal manager's Opener. The
+// device is picked by the host (one attached device carries no choice); a
+// channel with several must name one, which the door does not do yet.
+type ptyOpener struct{ host *daemonhost.Host }
+
+func (o ptyOpener) OpenPTY(ctx context.Context, chID channel.ID, cols, rows uint16, integration bool) (io.ReadWriteCloser, error) {
+	return o.host.OpenPTY(ctx, "", chID, cols, rows, integration)
 }
 
 func (e *Engine) LocalDeviceKey(ctx context.Context) (string, error) {
@@ -299,6 +322,11 @@ func (e *Engine) Close(ctx context.Context) error {
 		}
 		if e.host != nil {
 			e.closeErr = errors.Join(e.closeErr, e.host.Close(ctx))
+		}
+		if e.terminals != nil {
+			// Before the daemon host goes: every shell dies with the node,
+			//恒不留孤儿 (terminal-line-design.md §4.4).
+			e.terminals.CloseAll()
 		}
 		if e.dataBinder != nil {
 			e.dataBinder.UnbindHostStreamOpener()

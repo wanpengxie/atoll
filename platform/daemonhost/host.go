@@ -791,7 +791,7 @@ func (h *Host) acceptStream(
 		_ = carrier.wire.Close()
 		return
 	}
-	if header.Kind != link.DeviceStreamActor && header.Kind != link.DeviceStreamStorage && header.Kind != link.DeviceStreamExchange {
+	if header.Kind != link.DeviceStreamActor && header.Kind != link.DeviceStreamStorage && header.Kind != link.DeviceStreamExchange && header.Kind != link.DeviceStreamPTY {
 		_ = conn.Close()
 		return
 	}
@@ -813,6 +813,10 @@ func (h *Host) acceptStream(
 	}
 	if header.Kind == link.DeviceStreamExchange {
 		lane.acceptExchange(conn)
+		return
+	}
+	if header.Kind == link.DeviceStreamPTY {
+		lane.acceptPTY(conn)
 		return
 	}
 	lane.acceptActor(conn)

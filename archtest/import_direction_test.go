@@ -375,6 +375,11 @@ func TestDriversUsePlatformExportFaceOnly(t *testing.T) {
 		// 2026-08-05 devicehost 入 drivers 层（此前同一 import 住 cmd/daemon，
 		// 墙不覆盖 cmd）：消费者轴是"设备"，与 subjectgate 之于"人"对称。
 		"platform/compute": true,
+		// terminal = 终端线的出口脸（2026-08-25 登记）。portal 经它开会话、
+		// 转字节、收命令记录；与 dataplane 之于文件字节对称——同一条"门判权、
+		// 平台搬运"的分工，只是承载的是一条长连双向流而非一次传输。
+		// 家档 = .dalek/pm/terminal-line-design.md。
+		"platform/terminal": true,
 	}
 	var bad []string
 	for _, f := range productionFiles(t) {

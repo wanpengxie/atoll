@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/dataplane"
+	"github.com/wanpengxie/atoll/platform/terminal"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -42,6 +43,9 @@ type Config struct {
 	Gateway         *gateway.Gateway
 	DaemonHost      *daemonhost.Host
 	DataPlane       dataplane.Redeemer
+	// Terminals owns live terminal sessions. Nil disables the terminal line
+	// entirely — /pty then answers unavailable, and nothing else changes.
+	Terminals       *terminal.Manager
 	ContractVersion string
 	// Boot is the server world identity (c0 genesis): changes on reinstall,
 	// never on restart. Carried on the attach receipt for client-side cache
@@ -175,6 +179,10 @@ func (p *Portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.URL.EscapedPath() == ptyPath {
+		p.pty(w, r)
+		return
+	}
 	if r.URL.EscapedPath() == "/files" {
 		if r.Method == http.MethodGet || r.Method == http.MethodPut {
 			p.files(w, r)
@@ -228,7 +236,7 @@ func (p *Portal) observe(w http.ResponseWriter, r *http.Request) {
 
 func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/ws", "/compute", "/healthz":
+	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/ws", "/compute", "/healthz", ptyPath:
 		writeError(w, http.StatusMethodNotAllowed, string(codeNotFound), "method not allowed")
 		return
 	}
