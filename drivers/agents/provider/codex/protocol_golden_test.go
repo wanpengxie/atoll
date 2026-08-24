@@ -24,7 +24,7 @@ func TestRequiredMethodsAndFieldsGolden(t *testing.T) {
 		"initialize":                            {"capabilities.optOutNotificationMethods", "clientInfo.name", "clientInfo.title", "clientInfo.version", "result.userAgent"},
 		"initialized":                           {},
 		"thread/start":                          {"approvalPolicy", "cwd", "developerInstructions", "dynamicTools", "model", "result.thread.id", "sandbox"},
-		"thread/resume":                         {"developerInstructions", "excludeTurns", "model", "result.thread.id", "threadId"},
+		"thread/resume":                         {"approvalPolicy", "cwd", "developerInstructions", "excludeTurns", "model", "result.thread.id", "sandbox", "threadId"},
 		"item/tool/call":                        {"arguments", "callId", "result.contentItems", "result.success", "threadId", "tool", "turnId"},
 		"thread/compact/start":                  {"threadId"},
 		"thread/tokenUsage/updated":             {"threadId", "tokenUsage.last.totalTokens", "tokenUsage.modelContextWindow", "turnId"},
@@ -116,7 +116,7 @@ func protocolTokensForMethod(t *testing.T, method string, declarations map[strin
 	t.Helper()
 	contexts := map[string][]string{
 		"initialize": {"Open", "afterInitialize"}, "initialized": {"afterInitialize"},
-		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom", "threadStartParams", "dynamicTools"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom"},
+		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom", "threadStartParams", "threadPolicyParams", "dynamicTools"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom", "threadPolicyParams"},
 		"item/tool/call":       {"prepareServerRequest", "dynamicToolCallParams", "dynamicToolResult"},
 		"thread/compact/start": {"Start"}, "thread/tokenUsage/updated": {"notification", "tokenUsageNotice"},
 		"turn/start": {"Start"}, "turn/steer": {"Control"}, "turn/interrupt": {"Control"},

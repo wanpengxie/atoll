@@ -43,6 +43,12 @@ type messageFrame struct {
 	} `json:"message"`
 }
 type resultUsage struct {
+	InputTokens         int64             `json:"input_tokens"`
+	CacheCreationTokens int64             `json:"cache_creation_input_tokens"`
+	CacheReadTokens     int64             `json:"cache_read_input_tokens"`
+	Iterations          []resultIteration `json:"iterations"`
+}
+type resultIteration struct {
 	InputTokens         int64 `json:"input_tokens"`
 	CacheCreationTokens int64 `json:"cache_creation_input_tokens"`
 	CacheReadTokens     int64 `json:"cache_read_input_tokens"`
@@ -475,7 +481,14 @@ func (w *worker) finishResult(c *connection, target driverproto.WorkerTurnTarget
 	usage := w.currentUsageLocked()
 	switch turn.kind {
 	case driverproto.TurnChat:
-		usage.ContextTokens = frame.Usage.InputTokens + frame.Usage.CacheCreationTokens + frame.Usage.CacheReadTokens
+		// The top-level result usage is billed work accumulated across every
+		// model iteration in this agent turn. It can legitimately exceed the
+		// model context window after a tool-heavy turn. The final iteration's
+		// input is the current prompt context (the same accounting used by
+		// get_context_usage.totalTokens), so only that value is context state.
+		if contextTokens, ok := latestIterationContextTokens(frame.Usage); ok {
+			usage.ContextTokens = contextTokens
+		}
 	case driverproto.TurnCompact:
 		if turn.compactMeta {
 			usage.ContextTokens = turn.compactPost
@@ -515,6 +528,14 @@ func (w *worker) finishResult(c *connection, target driverproto.WorkerTurnTarget
 		final = ""
 	}
 	w.publish(driverproto.TurnEnded{Target: target, Status: status, FinalText: final, ErrorDetail: detail, Usage: usage})
+}
+
+func latestIterationContextTokens(usage resultUsage) (int64, bool) {
+	if len(usage.Iterations) == 0 {
+		return 0, false
+	}
+	last := usage.Iterations[len(usage.Iterations)-1]
+	return last.InputTokens + last.CacheCreationTokens + last.CacheReadTokens, true
 }
 
 func resultDetail(frame resultFrame) string {

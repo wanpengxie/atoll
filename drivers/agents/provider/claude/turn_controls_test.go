@@ -111,12 +111,12 @@ func TestSelectSendsSetModelThenEffortLine(t *testing.T) {
 	lines := goldenLines(t, "probeH.out.jsonl")
 	emitGolden(t, h.proc, lines, 17, 21, map[string]string{goldenS: u}, nil)
 	ended := waitAs[driverproto.TurnEnded](h)
-	if ended.Status != driverproto.TurnOK || ended.Usage.ContextTokens != 25885 || ended.Usage.ContextWindow != 200000 || ended.Usage.Model != options.Model || ended.Usage.Effort != options.Effort {
+	if ended.Status != driverproto.TurnOK || ended.Usage.ContextTokens != 100 || ended.Usage.ContextWindow != 200000 || ended.Usage.Model != options.Model || ended.Usage.Effort != options.Effort {
 		t.Fatalf("ended=%+v", ended)
 	}
 }
 
-func TestTurnEndedUsageComesFromResultUsageWithoutWaiting(t *testing.T) {
+func TestTurnEndedUsageComesFromLatestResultIterationWithoutWaiting(t *testing.T) {
 	h := readyHarness(t, "")
 	h.proc.autoContext.Store(false)
 	lines := goldenLines(t, "probeI.out.jsonl")
@@ -158,10 +158,10 @@ func TestOpenFetchesContextWindowOnce(t *testing.T) {
 	h.proc.emitRaw(t, rewriteGolden(t, lines[13], nil, map[string]string{"ctx-1": requestID(request)}))
 	waitAs[driverproto.WorkerReady](h)
 	h.worker.mu.Lock()
-	window := h.worker.usage.ContextWindow
+	tokens, window := h.worker.usage.ContextTokens, h.worker.usage.ContextWindow
 	h.worker.mu.Unlock()
-	if window != 200000 {
-		t.Fatalf("context window=%d", window)
+	if tokens != 25787 || window != 200000 {
+		t.Fatalf("context usage=%d/%d", tokens, window)
 	}
 	h.noInputFor(100 * time.Millisecond)
 }
@@ -204,9 +204,25 @@ func TestSelectRefreshesContextWindowAsync(t *testing.T) {
 	u := h.start(38, "after select")
 	h.proc.emit(t, map[string]any{"type": "command_lifecycle", "command_uuid": u, "state": "started"})
 	waitAs[driverproto.TurnStarted](h)
-	h.proc.emit(t, map[string]any{"type": "result", "subtype": "success", "result": "done", "user_message_uuid": u, "usage": map[string]any{"input_tokens": 1, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3}})
+	h.proc.emit(t, map[string]any{"type": "result", "subtype": "success", "result": "done", "user_message_uuid": u, "usage": map[string]any{"input_tokens": 1, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3, "iterations": []map[string]any{{"input_tokens": 1, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3}}}})
 	next := waitAs[driverproto.TurnEnded](h)
 	if next.Usage.ContextTokens != 6 || next.Usage.ContextWindow != 967000 || next.Usage.Model != options.Model {
 		t.Fatalf("next usage=%+v", next.Usage)
+	}
+}
+
+func TestLatestIterationContextTokensDoesNotUseAccumulatedBillingUsage(t *testing.T) {
+	usage := resultUsage{
+		InputTokens:         800000,
+		CacheCreationTokens: 1200000,
+		CacheReadTokens:     1800000,
+		Iterations: []resultIteration{
+			{InputTokens: 10, CacheCreationTokens: 300000, CacheReadTokens: 400000},
+			{InputTokens: 10, CacheCreationTokens: 5000, CacheReadTokens: 745000},
+		},
+	}
+	tokens, ok := latestIterationContextTokens(usage)
+	if !ok || tokens != 750010 {
+		t.Fatalf("latest context=%d ok=%v", tokens, ok)
 	}
 }

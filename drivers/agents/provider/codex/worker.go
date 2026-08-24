@@ -172,7 +172,11 @@ func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage
 	if resumeOK {
 		// thread/resume has no dynamicTools field: codex persists a thread's
 		// dynamic tools with the thread and restores them on resume.
-		resumeParams := map[string]any{"threadId": resumeThread, "excludeTurns": true}
+		// Execution policy is supplied again so an old thread cannot retain a
+		// sandbox policy that predates Atoll's current yolo configuration.
+		resumeParams := w.threadPolicyParams()
+		resumeParams["threadId"] = resumeThread
+		resumeParams["excludeTurns"] = true
 		if model != "" {
 			resumeParams["model"] = model
 		}
@@ -187,7 +191,7 @@ func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage
 }
 
 func (w *worker) threadStartParams(model, source string) map[string]any {
-	params := map[string]any{"approvalPolicy": "never", "sandbox": "danger-full-access", "cwd": w.cfg.WorkspaceDir}
+	params := w.threadPolicyParams()
 	if model != "" {
 		params["model"] = model
 	}
@@ -204,6 +208,10 @@ func (w *worker) threadStartParams(model, source string) map[string]any {
 		params["sessionStartSource"] = source
 	}
 	return params
+}
+
+func (w *worker) threadPolicyParams() map[string]any {
+	return map[string]any{"approvalPolicy": "never", "sandbox": "danger-full-access", "cwd": w.cfg.WorkspaceDir}
 }
 
 func (w *worker) afterSession(c *connection, resumed bool, raw json.RawMessage, err error) {

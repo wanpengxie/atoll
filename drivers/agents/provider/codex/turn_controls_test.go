@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/internal/toolsurface"
 	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
@@ -119,6 +120,10 @@ type codexHarness struct {
 }
 
 func newCodexHarness(t *testing.T, options driverproto.TurnOptions, inspectOpen func(map[string]any)) *codexHarness {
+	return newCodexHarnessWithResume(t, options, nil, inspectOpen)
+}
+
+func newCodexHarnessWithResume(t *testing.T, options driverproto.TurnOptions, resumeSeed []byte, inspectOpen func(map[string]any)) *codexHarness {
 	t.Helper()
 	h := &codexHarness{t: t, sink: newCodexEventSink()}
 	cfg := Config{WorkspaceDir: t.TempDir(), Binary: "codex", Logger: slog.New(slog.DiscardHandler)}
@@ -127,7 +132,8 @@ func newCodexHarness(t *testing.T, options driverproto.TurnOptions, inspectOpen 
 		return h.proc.process, nil
 	}
 	h.worker = newWorker(cfg, codexWorkerHost{sink: h.sink})
-	h.worker.Open(context.Background(), driverproto.OpenRequest{Options: options})
+	openRequest := driverproto.OpenRequest{Options: options, ResumeSeed: resumeSeed}
+	h.worker.Open(context.Background(), openRequest)
 	initialize := h.input()
 	h.respond(initialize, map[string]any{"userAgent": "test"})
 	initialized := h.input()
@@ -203,6 +209,24 @@ func TestOpenPassesSelectedModelToThreadStart(t *testing.T) {
 	newCodexHarness(t, driverproto.TurnOptions{Model: "gpt-test", Effort: "high"}, func(open map[string]any) {
 		if open["method"] != "thread/start" || rpcParams(open)["model"] != "gpt-test" {
 			t.Fatalf("open=%v", open)
+		}
+	})
+}
+
+func TestResumeReappliesYoloThreadPolicy(t *testing.T) {
+	surface, err := toolsurface.Assemble(codexTestToolPort{}.Catalog(), toolsurface.Codex, driverproto.Situation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := encodeResumeSeed("thread-old", surface.Digest())
+	newCodexHarnessWithResume(t, driverproto.TurnOptions{Model: "gpt-test"}, seed, func(open map[string]any) {
+		params := rpcParams(open)
+		workspace, _ := params["cwd"].(string)
+		if open["method"] != "thread/resume" || params["threadId"] != "thread-old" || params["excludeTurns"] != true {
+			t.Fatalf("resume=%v", open)
+		}
+		if params["approvalPolicy"] != "never" || params["sandbox"] != "danger-full-access" || workspace == "" {
+			t.Fatalf("resume policy=%v", params)
 		}
 	})
 }

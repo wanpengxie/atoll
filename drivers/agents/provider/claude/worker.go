@@ -295,7 +295,7 @@ func (w *worker) fetchInitialContextWindow(c *connection) {
 		once.Do(func() {
 			if timeout {
 				w.debug("context_usage_timeout", "initial context window unavailable after 5s")
-			} else if !w.cacheContextWindow(c, reply) {
+			} else if !w.cacheContextUsage(c, reply) {
 				w.debug("context_usage_failed", "initial context window unavailable")
 			}
 			w.finishOpen(c)
@@ -329,7 +329,7 @@ func (w *worker) finishOpen(c *connection) {
 
 func (w *worker) refreshContextWindow(c *connection) {
 	_, err := c.wire.sendControl("get_context_usage", nil, func(reply controlReply) {
-		if !w.cacheContextWindow(c, reply) && reply.Error != "wire closed" {
+		if !w.cacheContextUsage(c, reply) && reply.Error != "wire closed" {
 			w.debug("context_usage_failed", "selected model context window unavailable")
 		}
 	})
@@ -338,7 +338,7 @@ func (w *worker) refreshContextWindow(c *connection) {
 	}
 }
 
-func (w *worker) cacheContextWindow(c *connection, reply controlReply) bool {
+func (w *worker) cacheContextUsage(c *connection, reply controlReply) bool {
 	if !reply.Success {
 		return false
 	}
@@ -351,6 +351,10 @@ func (w *worker) cacheContextWindow(c *connection, reply controlReply) bool {
 	if w.conn != c || w.phase == phaseRetiring || w.phase == phaseReaped {
 		return false
 	}
+	// get_context_usage reports a coherent snapshot. Keep both halves from
+	// that snapshot; mixing maxTokens with a turn's cumulative billed usage
+	// produces impossible displays such as 3.8M / 1M.
+	w.usage.ContextTokens = frame.TotalTokens
 	w.usage.ContextWindow = frame.MaxTokens
 	return true
 }
