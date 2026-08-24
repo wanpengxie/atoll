@@ -185,3 +185,26 @@ func TestScannerReportsOffsetsSoOutputCanBeAttributed(t *testing.T) {
 		t.Errorf("end = %+v, want {true, 0}", *end)
 	}
 }
+
+func TestStripControlLeavesTextAndRemovesMarks(t *testing.T) {
+	// A recorded tail must not carry an OSC 133 mark: a later reader could
+	// not tell it from a live one.
+	raw := "before" + string(osc("133;C")) + "\x1b[31mred\x1b[0m" + string(osc("1337;AtollCmd='x'")) + "after"
+	got := StripControl(raw)
+	if got != "beforeredafter" {
+		t.Fatalf("StripControl = %q, want %q", got, "beforeredafter")
+	}
+}
+
+func TestScannerCapturesCwd(t *testing.T) {
+	var s Scanner
+	_, cmds := feedAll(&s,
+		osc("1337;AtollCmd='go build'"),
+		osc("1337;AtollCwd='/home/me/proj'"),
+		osc("133;C"),
+		osc("133;D;0"),
+	)
+	if len(cmds) != 1 || cmds[0].Cwd != "/home/me/proj" {
+		t.Fatalf("cwd not captured: %+v", cmds)
+	}
+}

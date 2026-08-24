@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -28,7 +29,7 @@ const GracePeriod = 60 * time.Second
 
 // Opener opens the device leg of a session. Implemented by daemonhost.Host.
 type Opener interface {
-	OpenPTY(ctx context.Context, chID channel.ID, cols, rows uint16, integration bool) (io.ReadWriteCloser, error)
+	OpenPTY(ctx context.Context, chID channel.ID, device string, cols, rows uint16, integration bool) (io.ReadWriteCloser, error)
 }
 
 // Recorder writes one command row to the channel ledger, authored by the
@@ -40,6 +41,9 @@ type Recorder func(ctx context.Context, chID channel.ID, caller actor.ActorID, r
 type Record struct {
 	SessionID string `json:"session_id"`
 	Cmd       string `json:"cmd,omitempty"`
+	// Cwd is where the command ran. The same command means different things
+	// in different trees, so the record is incomplete without it.
+	Cwd       string `json:"cwd,omitempty"`
 	ExitCode  int    `json:"exit_code"`
 	HasExit   bool   `json:"-"`
 	DurationMs int64 `json:"duration_ms,omitempty"`
@@ -70,6 +74,33 @@ type Session struct {
 	openCmd  time.Time
 	tail     []byte
 	inCmd    bool
+	// ended is closed when the session is over for good, and endReason says
+	// why. A viewer that cannot tell "the shell exited" from "the connection
+	// dropped" will reconnect into a brand-new shell, which is never what the
+	// person meant.
+	ended     chan struct{}
+	endOnce   sync.Once
+	endReason string
+}
+
+// Ended reports the session's terminal state. Reason is empty while live.
+func (s *Session) Ended() <-chan struct{} { return s.ended }
+
+func (s *Session) EndReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endReason
+}
+
+func (s *Session) finish(reason string) {
+	s.endOnce.Do(func() {
+		s.mu.Lock()
+		if s.endReason == "" {
+			s.endReason = reason
+		}
+		s.mu.Unlock()
+		close(s.ended)
+	})
 }
 
 // Manager owns every live session on this node.
@@ -82,21 +113,58 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	closed   bool
+
+	// records is the bounded hand-off from the device pumps to the ledger.
+	// See relay.go: recording恒不得阻塞设备输出泵.
+	// records is never closed: device pumps outlive CloseAll by however long
+	// their reads take to unblock, and a closed channel would panic under
+	// them. Shutdown is signalled by stop instead.
+	records  chan recordJob
+	stop     chan struct{}
+	stopOnce sync.Once
+	dropped  atomic.Uint64
+	recorder sync.WaitGroup
 }
 
+type recordJob struct {
+	ch     channel.ID
+	caller actor.ActorID
+	rec    Record
+}
+
+// recordQueueDepth is how many rows may wait. Deep enough that a brief ledger
+// stall costs nothing; shallow enough that a long one is visibly lossy rather
+// than silently unbounded.
+const recordQueueDepth = 512
+
 func NewManager(opener Opener, record Recorder) *Manager {
-	return &Manager{
+	m := &Manager{
 		opener:   opener,
 		record:   record,
 		now:      time.Now,
 		grace:    GracePeriod,
 		sessions: make(map[string]*Session),
+		records:  make(chan recordJob, recordQueueDepth),
+		stop:     make(chan struct{}),
 	}
+	if record != nil {
+		m.recorder.Add(1)
+		go func() {
+			defer m.recorder.Done()
+			m.recordLoop()
+		}()
+	}
+	return m
 }
+
+// DroppedRecords counts rows the ledger could not keep up with. A non-zero and
+// rising value means the record is incomplete — worth surfacing, never worth
+// fixing by blocking the terminal.
+func (m *Manager) DroppedRecords() uint64 { return m.dropped.Load() }
 
 // Open mints a session and starts its device leg. The session is live from
 // this moment whether or not anyone is watching.
-func (m *Manager) Open(ctx context.Context, id string, chID channel.ID, caller actor.ActorID, cols, rows uint16) (*Session, error) {
+func (m *Manager) Open(ctx context.Context, id string, chID channel.ID, caller actor.ActorID, device string, cols, rows uint16) (*Session, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -108,11 +176,11 @@ func (m *Manager) Open(ctx context.Context, id string, chID channel.ID, caller a
 	}
 	m.mu.Unlock()
 
-	dev, err := m.opener.OpenPTY(ctx, chID, cols, rows, true)
+	dev, err := m.opener.OpenPTY(ctx, chID, device, cols, rows, true)
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{ID: id, Channel: chID, Caller: caller, dev: dev}
+	s := &Session{ID: id, Channel: chID, Caller: caller, dev: dev, ended: make(chan struct{})}
 
 	m.mu.Lock()
 	if m.closed {
@@ -228,6 +296,9 @@ func (m *Manager) Close(id string) {
 		return
 	}
 	s.closed = true
+	if s.endReason == "" {
+		s.endReason = "session closed"
+	}
 	if s.graceAt != nil {
 		s.graceAt.Stop()
 		s.graceAt = nil
@@ -242,6 +313,7 @@ func (m *Manager) Close(id string) {
 	if dev != nil {
 		_ = dev.Close()
 	}
+	s.finish("session closed")
 }
 
 // CloseAll ends every session. Called when the node shuts down; lane
@@ -256,6 +328,10 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 	for _, id := range ids {
 		m.Close(id)
+	}
+	if m.record != nil {
+		m.stopOnce.Do(func() { close(m.stop) })
+		m.recorder.Wait()
 	}
 }
 

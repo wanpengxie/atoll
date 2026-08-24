@@ -32,6 +32,9 @@ autoload -Uz add-zsh-hook
 __atoll_preexec() {
   printf '\e]133;C\e\\'
   printf '\e]1337;AtollCmd=%s\e\\' "${(q)1}"
+  # Where it ran matters as much as what ran: the same command means
+  # different things in different trees.
+  printf '\e]1337;AtollCwd=%s\e\\' "${(q)PWD}"
 }
 
 # OSC 133;D;<code> — the command finished, with its status.

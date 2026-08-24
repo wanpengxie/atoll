@@ -6,7 +6,14 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+// recordTimeout bounds one ledger write. It is generous — a row is worth
+// waiting for — but finite, because an unbounded wait is how a queue turns
+// into a leak.
+const recordTimeout = 10 * time.Second
 
 func writeFrame(w io.Writer, p []byte) error {
 	return link.WritePTYFrame(w, link.PTYFrameData, p)
@@ -47,8 +54,13 @@ func (m *Manager) pumpDevice(s *Session) {
 			m.onOutput(s, payload)
 		case link.PTYFrameExit:
 			// The shell exited on its own — a real terminal state, unlike a
-			// dropped connection. Nothing to record beyond ending the session:
-			// the last command's row was already closed by its own D mark.
+			// dropped connection. Say so: a viewer that cannot tell the two
+			// apart reconnects and silently gets a SECOND shell.
+			reason := "shell exited"
+			if code := string(payload); code != "" && code != "0" {
+				reason = "shell exited (" + code + ")"
+			}
+			s.finish(reason)
 			return
 		}
 	}
@@ -78,11 +90,15 @@ func (m *Manager) onOutput(s *Session, payload []byte) {
 			s.tail = s.tail[:0]
 		case EventEnd:
 			rec := Record{
-				SessionID:  s.ID,
-				Cmd:        ev.Text,
-				ExitCode:   ev.ExitCode,
-				HasExit:    ev.HasExit,
-				OutputTail: string(s.tail),
+				SessionID: s.ID,
+				Cmd:       ev.Text,
+				Cwd:       ev.Cwd,
+				ExitCode:  ev.ExitCode,
+				HasExit:   ev.HasExit,
+				// The live stream kept every byte; this copy is cleaned so a
+				// reader gets text, not colour codes — and so a recorded OSC
+				// mark can never be mistaken for a live one.
+				OutputTail: StripControl(string(s.tail)),
 			}
 			if s.inCmd && !s.openCmd.IsZero() {
 				rec.DurationMs = time.Since(s.openCmd).Milliseconds()
@@ -108,11 +124,56 @@ func (m *Manager) onOutput(s *Session, payload []byte) {
 	chID, caller := s.Channel, s.Caller
 	s.mu.Unlock()
 
-	if m.record == nil {
+	if m.record == nil || len(emit) == 0 {
 		return
 	}
+	// The ledger write恒不得在设备输出泵的路径上. Recording synchronously here
+	// would mean a slow subject cell stops this loop from reading, the pty's
+	// buffer fills, and the terminal freezes — the exact opposite of what
+	// pty_record.go's comment promises. Hand the rows to a bounded queue and
+	// go back to reading.
 	for _, rec := range emit {
-		m.record(context.Background(), chID, caller, rec)
+		m.enqueue(chID, caller, rec)
+	}
+}
+
+// enqueue hands one row to the recorder goroutine. The queue is bounded and
+// LOSSY BY DESIGN: a ledger that cannot keep up costs us rows, never the
+// person's keystrokes. A dropped row is a gap in the record; a blocked pump is
+// a dead terminal, and only one of those is acceptable.
+func (m *Manager) enqueue(chID channel.ID, caller actor.ActorID, rec Record) {
+	select {
+	case m.records <- recordJob{ch: chID, caller: caller, rec: rec}:
+	default:
+		m.dropped.Add(1)
+	}
+}
+
+// recordLoop drains the queue. Each write gets its own deadline so one stuck
+// delivery cannot wedge every row behind it.
+func (m *Manager) recordLoop() {
+	write := func(job recordJob) {
+		ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
+		defer cancel()
+		m.record(ctx, job.ch, job.caller, job.rec)
+	}
+	for {
+		select {
+		case job := <-m.records:
+			write(job)
+		case <-m.stop:
+			// Drain what is already queued, then go. Rows still in flight
+			// from a pump that has not noticed shutdown yet are lost, which
+			// is the same trade the queue makes everywhere else.
+			for {
+				select {
+				case job := <-m.records:
+					write(job)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 

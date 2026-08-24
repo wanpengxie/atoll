@@ -34,6 +34,7 @@ type Scanner struct {
 	// cmd is the command text captured by the most recent AtollCmd mark, held
 	// until the matching D mark closes the command.
 	cmd     string
+	cwd     string
 	started bool
 	// at is the offset just past the byte currently being consumed, so a
 	// recognised sequence can report where it ended within the fed chunk.
@@ -59,6 +60,7 @@ type Event struct {
 	Kind     EventKind
 	Offset   int
 	Text     string
+	Cwd      string
 	ExitCode int
 	HasExit  bool
 }
@@ -145,7 +147,7 @@ func (s *Scanner) interpret(body string, done *[]Event) {
 			// shell marks boundaries but does not report text; we still open
 			// the bracket so the exit code has something to close.
 			s.started = true
-			*done = append(*done, Event{Kind: EventStart, Offset: s.at, Text: s.cmd})
+			*done = append(*done, Event{Kind: EventStart, Offset: s.at, Text: s.cmd, Cwd: s.cwd})
 		case strings.HasPrefix(rest, "D"):
 			if !s.started {
 				// A D with no open bracket is the very first prompt after
@@ -153,7 +155,7 @@ func (s *Scanner) interpret(body string, done *[]Event) {
 				s.cmd = ""
 				return
 			}
-			c := Event{Kind: EventEnd, Offset: s.at, Text: s.cmd}
+			c := Event{Kind: EventEnd, Offset: s.at, Text: s.cmd, Cwd: s.cwd}
 			if i := strings.Index(rest, ";"); i >= 0 {
 				if code, err := strconv.Atoi(strings.TrimSpace(rest[i+1:])); err == nil {
 					c.ExitCode = code
@@ -168,6 +170,8 @@ func (s *Scanner) interpret(body string, done *[]Event) {
 		}
 	case strings.HasPrefix(body, "1337;AtollCmd="):
 		s.cmd = unquoteShell(body[len("1337;AtollCmd="):])
+	case strings.HasPrefix(body, "1337;AtollCwd="):
+		s.cwd = unquoteShell(body[len("1337;AtollCwd="):])
 	}
 }
 
@@ -190,6 +194,53 @@ func unquoteShell(in string) string {
 			continue
 		}
 		b.WriteByte(in[i])
+	}
+	return b.String()
+}
+
+
+// StripControl removes escape sequences from a captured output tail. The tail
+// is a record for people and agents to READ — colour codes and cursor moves
+// are noise there, and an OSC 133 mark surviving into it would be worse than
+// noise: a later reader could mistake a recorded mark for a live one.
+//
+// The live stream keeps every byte; only this copy is cleaned.
+func StripControl(in string) string {
+	var b strings.Builder
+	b.Grow(len(in))
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if c != esc {
+			if c == bel {
+				continue
+			}
+			b.WriteByte(c)
+			continue
+		}
+		if i+1 >= len(in) {
+			break
+		}
+		switch in[i+1] {
+		case ']': // OSC — runs until BEL or ST
+			i += 2
+			for i < len(in) {
+				if in[i] == bel {
+					break
+				}
+				if in[i] == esc && i+1 < len(in) && in[i+1] == '\\' {
+					i++
+					break
+				}
+				i++
+			}
+		case '[': // CSI — runs until a final byte in @..~
+			i += 2
+			for i < len(in) && (in[i] < 0x40 || in[i] > 0x7e) {
+				i++
+			}
+		default:
+			i++
+		}
 	}
 	return b.String()
 }

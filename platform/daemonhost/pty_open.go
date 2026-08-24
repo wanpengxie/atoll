@@ -3,7 +3,9 @@ package daemonhost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -35,7 +37,10 @@ func (h *Host) OpenPTY(ctx context.Context, daemonID string, chID channel.ID, co
 		case 1:
 			daemonID = attached[0]
 		default:
-			return nil, errors.New("daemonhost: channel has several devices — name one")
+			// Honest physics (data-plane axiom 5): say which machines exist
+			// so the caller can name one, rather than just refusing.
+			return nil, fmt.Errorf("daemonhost: channel has %d devices (%s) — name one with ?device=",
+				len(attached), strings.Join(attached, ", "))
 		}
 	}
 	lane := h.currentLane(daemonID, chID)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,7 +88,7 @@ func (d *fakeDevice) isClosed() bool {
 
 type fakeOpener struct{ dev *fakeDevice }
 
-func (o *fakeOpener) OpenPTY(context.Context, channel.ID, uint16, uint16, bool) (io.ReadWriteCloser, error) {
+func (o *fakeOpener) OpenPTY(context.Context, channel.ID, string, uint16, uint16, bool) (io.ReadWriteCloser, error) {
 	return o.dev, nil
 }
 
@@ -113,7 +114,7 @@ func newTestManager(t *testing.T, grace time.Duration) (*Manager, *fakeDevice, f
 func TestDetachKeepsTheShellAlive(t *testing.T) {
 	// 保住进程，恒不保住输出 (§4.4). Losing the viewer must NOT kill the pty.
 	m, dev, _ := newTestManager(t, time.Hour)
-	s, err := m.Open(context.Background(), "s1", "c0", "human:root", 80, 24)
+	s, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +133,7 @@ func TestDetachKeepsTheShellAlive(t *testing.T) {
 func TestGraceExpiryKillsTheSession(t *testing.T) {
 	// 宽限期超时未回 → 杀掉，恒不留孤儿 (§4.4).
 	m, dev, _ := newTestManager(t, 40*time.Millisecond)
-	s, _ := m.Open(context.Background(), "s1", "c0", "human:root", 80, 24)
+	s, _ := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
 	if _, _, err := m.Attach("s1", "human:root"); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +153,7 @@ func TestGraceExpiryKillsTheSession(t *testing.T) {
 
 func TestReattachWithinGraceCancelsTheClock(t *testing.T) {
 	m, dev, _ := newTestManager(t, 300*time.Millisecond)
-	s, _ := m.Open(context.Background(), "s1", "c0", "human:root", 80, 24)
+	s, _ := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
 	if _, _, err := m.Attach("s1", "human:root"); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +171,7 @@ func TestReattachWithinGraceCancelsTheClock(t *testing.T) {
 func TestOpenWithoutAViewerIsAlreadyOnTheClock(t *testing.T) {
 	// An Open whose browser never arrives must not leak a shell.
 	m, dev, _ := newTestManager(t, 40*time.Millisecond)
-	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", 80, 24); err != nil {
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.After(2 * time.Second)
@@ -189,7 +190,7 @@ func TestOpenWithoutAViewerIsAlreadyOnTheClock(t *testing.T) {
 func TestAnotherCallerCannotAttach(t *testing.T) {
 	// The口子 is per-caller: a session belongs to the human who opened it.
 	m, _, _ := newTestManager(t, time.Hour)
-	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", 80, 24); err != nil {
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := m.Attach("s1", "human:mallory"); err != ErrNotOwner {
@@ -201,7 +202,7 @@ func TestCommandsLandOnTheLedgerAndBytesDoNot(t *testing.T) {
 	// The whole point of the line (§4): the viewer sees every byte, the
 	// ledger sees one row per command and no bytes of its own.
 	m, dev, records := newTestManager(t, time.Hour)
-	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", 80, 24); err != nil {
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	_, viewer, err := m.Attach("s1", "human:root")
@@ -262,4 +263,78 @@ func indexOf(h, n string) int {
 		}
 	}
 	return -1
+}
+
+func TestASlowLedgerDoesNotFreezeTheTerminal(t *testing.T) {
+	// The device pump must keep reading even when the ledger is wedged.
+	// Recording synchronously on that path is how a terminal freezes, and a
+	// comment promising otherwise is not a mechanism — this is.
+	dev := newFakeDevice()
+	release := make(chan struct{})
+	var recorded sync.WaitGroup
+	recorded.Add(1)
+	var once sync.Once
+	m := NewManager(&fakeOpener{dev: dev}, func(context.Context, channel.ID, actor.ActorID, Record) {
+		once.Do(func() { recorded.Done() })
+		<-release // wedge the ledger for the whole test
+	})
+	t.Cleanup(func() { close(release); m.CloseAll() })
+
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	_, viewer, err := m.Attach("s1", "human:root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen int64
+	go func() {
+		for b := range viewer {
+			atomic.AddInt64(&seen, int64(len(b)))
+		}
+	}()
+
+	// One command, so the (wedged) recorder is entered.
+	first := append(append(append([]byte(nil), osc("1337;AtollCmd='slow'")...), osc("133;C")...), osc("133;D;0")...)
+	dev.push(link.PTYFrameData, first)
+	recorded.Wait() // the recorder is now blocked
+
+	// While it is blocked, the terminal must still carry output.
+	dev.push(link.PTYFrameData, []byte("STILL-ALIVE"))
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt64(&seen) < int64(len(first)+len("STILL-ALIVE")) {
+		select {
+		case <-deadline:
+			t.Fatal("device output stopped while the ledger was wedged — the terminal would appear frozen")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestRecordQueueDropsRatherThanBlocking(t *testing.T) {
+	// A ledger that cannot keep up costs rows, never keystrokes.
+	dev := newFakeDevice()
+	release := make(chan struct{})
+	m := NewManager(&fakeOpener{dev: dev}, func(context.Context, channel.ID, actor.ActorID, Record) {
+		<-release
+	})
+	t.Cleanup(func() { close(release); m.CloseAll() })
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Attach("s1", "human:root"); err != nil {
+		t.Fatal(err)
+	}
+	one := append(append(append([]byte(nil), osc("1337;AtollCmd='x'")...), osc("133;C")...), osc("133;D;0")...)
+	for i := 0; i < recordQueueDepth+64; i++ {
+		dev.push(link.PTYFrameData, one)
+	}
+	deadline := time.After(3 * time.Second)
+	for m.DroppedRecords() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("queue never reported a drop — it is either unbounded or it blocked")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }

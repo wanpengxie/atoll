@@ -126,7 +126,7 @@ func (p *Portal) pty(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		sessionID = newSessionID()
-		sess, err = p.cfg.Terminals.Open(r.Context(), sessionID, chID, caller, cols, rows)
+		sess, err = p.cfg.Terminals.Open(r.Context(), sessionID, chID, caller, r.URL.Query().Get("device"), cols, rows)
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), err.Error())
 			return
@@ -176,6 +176,29 @@ func (p *Portal) servePTY(ws *websocket.Conn, sess *terminal.Session, stream <-c
 	done := make(chan struct{})
 	var once sync.Once
 	finish := func() { once.Do(func() { close(done) }) }
+
+	// A session that ends for good must SAY so, with a close frame carrying a
+	// reason. Without it the browser cannot tell "the shell exited" from "the
+	// network dropped" and will reconnect forever — landing the person in a
+	// second shell they never asked for.
+	go func() {
+		select {
+		case <-sess.Ended():
+			reason := sess.EndReason()
+			if reason == "" {
+				reason = "session ended"
+			}
+			writeMu.Lock()
+			_ = ws.SetWriteDeadline(time.Now().Add(ptyWriteWait))
+			_ = ws.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason),
+				time.Now().Add(ptyWriteWait))
+			writeMu.Unlock()
+			finish()
+			_ = ws.Close()
+		case <-done:
+		}
+	}()
 
 	go func() {
 		defer finish()
