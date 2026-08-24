@@ -1,4 +1,4 @@
-package daemonhost
+package compute
 
 import (
 	"context"
@@ -16,15 +16,41 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/link"
 )
 
-// acceptPTY serves one terminal session on this lane.
+// servePTY runs one terminal session on THIS machine.
 //
-// It is an exact-lane child exactly as an exchange is: it is tracked with the
-// lane's other exchanges so that lane retirement, channel teardown or a
-// carrier generation change closes it and joins it. That is what makes
-// "daemon 重启 / carrier 换代 → 恒即死" true by construction rather than by a
+// It lives on the device side, beside serveHostExchange, because that is where
+// the shell actually is: platform/daemonhost is the SERVER's view of a device
+// and is not even linked into the daemon binary. (Recorded because the first
+// implementation put it there and the symptom was a terminal that connected,
+// said "ready", then died with no bytes — the server had opened a stream kind
+// the device did not know.)
+//
+// Like an exchange it is an exact-lane child: lane retirement, channel
+// teardown or a carrier generation change closes it and joins it, which is
+// what makes "daemon 重启 / carrier 换代 → 恒即死" structural rather than a
 // policy someone has to remember. See terminal-line-design.md §4.4/§6-4.
-func (l *serverLane) acceptPTY(conn net.Conn) {
-	cleanup, ok := l.trackExchange(conn)
+func (m *compartmentManager) acceptPTY(carrier *link.ClientCarrier, conn net.Conn, header link.DeviceStreamHeader) {
+	if err := header.Validate(); err != nil {
+		_ = conn.Close()
+		return
+	}
+	m.mu.Lock()
+	cell := m.cells[string(header.Channel)]
+	currentCarrier := m.carrier == carrier
+	m.mu.Unlock()
+	if !currentCarrier || cell == nil {
+		_ = conn.Close()
+		return
+	}
+	cell.mu.Lock()
+	lane := cell.lane
+	current := lane != nil && lane.stream.Gen == header.LaneGen
+	cell.mu.Unlock()
+	if !current {
+		_ = conn.Close()
+		return
+	}
+	cleanup, ok := lane.trackExchange(conn)
 	if !ok {
 		_ = conn.Close()
 		return
@@ -36,12 +62,12 @@ func (l *serverLane) acceptPTY(conn net.Conn) {
 	if err := link.ReadPTYControl(conn, &open); err != nil {
 		return
 	}
-	root, err := l.workspace(l.carrier.host.ctx)
-	if err != nil {
-		_ = link.WritePTYControl(conn, link.PTYReady{OK: false, Code: "unavailable", Detail: err.Error()})
+	root := lane.boundWorkspace()
+	if root == "" {
+		_ = link.WritePTYControl(conn, link.PTYReady{OK: false, Code: "unavailable", Detail: "workspace unavailable"})
 		return
 	}
-	runPTY(l.carrier.host.ctx, conn, open, root)
+	runPTY(m.ctx, conn, open, root)
 }
 
 // shellOf resolves the program to run. The door may name one; otherwise the

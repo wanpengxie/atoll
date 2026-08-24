@@ -111,7 +111,7 @@ func (p *Portal) pty(w http.ResponseWriter, r *http.Request) {
 		// Reattach within the grace window: the shell kept running, and the
 		// viewer picks up the live stream from NOW. Output produced while
 		// away is gone by design (§4.3-2) — nothing was buffered.
-		sess, stream, err = p.cfg.Terminals.Attach(sessionID, caller)
+		sess, stream, err = p.cfg.Terminals.Attach(sessionID, chID, caller)
 		if err != nil {
 			status := http.StatusNotFound
 			code := codeNotFound
@@ -131,7 +131,7 @@ func (p *Portal) pty(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), err.Error())
 			return
 		}
-		sess, stream, err = p.cfg.Terminals.Attach(sessionID, caller)
+		sess, stream, err = p.cfg.Terminals.Attach(sessionID, chID, caller)
 		if err != nil {
 			p.cfg.Terminals.Close(sessionID)
 			writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), err.Error())

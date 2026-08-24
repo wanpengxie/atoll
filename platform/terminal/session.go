@@ -198,8 +198,13 @@ func (m *Manager) Open(ctx context.Context, id string, chID channel.ID, caller a
 	return s, nil
 }
 
-// Attach binds a viewer. Returns the downstream channel the caller must drain.
-func (m *Manager) Attach(id string, caller actor.ActorID) (*Session, <-chan []byte, error) {
+// Attach binds a viewer to an existing session. chID is the channel the
+// caller's membership was just checked against; a session恒只在自己的频道里
+// 被接回。Without that bind, a caller who belongs to both A and B could hand
+// in A's session id while claiming B — no privilege is gained (the session is
+// still their own), but the door would have judged one channel and served
+// another, and每条命令记录会落进 A 而调用方自称在 B。恒不留这种错位。
+func (m *Manager) Attach(id string, chID channel.ID, caller actor.ActorID) (*Session, <-chan []byte, error) {
 	m.mu.Lock()
 	s := m.sessions[id]
 	m.mu.Unlock()
@@ -209,13 +214,23 @@ func (m *Manager) Attach(id string, caller actor.ActorID) (*Session, <-chan []by
 	if s.Caller != caller {
 		return nil, nil, ErrNotOwner
 	}
+	if s.Channel != chID {
+		return nil, nil, ErrNotOwner
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, nil, ErrNoSession
 	}
 	if s.viewer != nil {
-		return nil, nil, ErrBusy
+		// Take over rather than refuse. A tab switch or a refresh routinely
+		// races: the old socket has not finished closing when the new one
+		// arrives. Refusing would push the person into opening a SECOND
+		// shell, which is the thing this whole grace mechanism exists to
+		// avoid. Ownership was already checked above, so the only party who
+		// can supersede a viewer is the one who owns the session.
+		close(s.viewer)
+		s.viewer = nil
 	}
 	if s.graceAt != nil {
 		s.graceAt.Stop()

@@ -406,6 +406,10 @@ func (m *compartmentManager) acceptLanes(carrier *link.ClientCarrier) {
 			m.acceptExchange(carrier, conn, header)
 			return
 		}
+		if header.Kind == link.DeviceStreamPTY {
+			m.acceptPTY(carrier, conn, header)
+			return
+		}
 		laneStream, err := link.AdoptLane(carrier, header, conn)
 		if err != nil {
 			return
