@@ -118,7 +118,7 @@ func TestDetachKeepsTheShellAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.Attach("s1", "human:root"); err != nil {
+	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
 		t.Fatal(err)
 	}
 	m.Detach(s)
@@ -134,7 +134,7 @@ func TestGraceExpiryKillsTheSession(t *testing.T) {
 	// 宽限期超时未回 → 杀掉，恒不留孤儿 (§4.4).
 	m, dev, _ := newTestManager(t, 40*time.Millisecond)
 	s, _ := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
-	if _, _, err := m.Attach("s1", "human:root"); err != nil {
+	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
 		t.Fatal(err)
 	}
 	m.Detach(s)
@@ -154,12 +154,12 @@ func TestGraceExpiryKillsTheSession(t *testing.T) {
 func TestReattachWithinGraceCancelsTheClock(t *testing.T) {
 	m, dev, _ := newTestManager(t, 300*time.Millisecond)
 	s, _ := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
-	if _, _, err := m.Attach("s1", "human:root"); err != nil {
+	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
 		t.Fatal(err)
 	}
 	m.Detach(s)
 	time.Sleep(60 * time.Millisecond)
-	if _, _, err := m.Attach("s1", "human:root"); err != nil {
+	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
 		t.Fatalf("reattach within grace failed: %v", err)
 	}
 	time.Sleep(400 * time.Millisecond)
@@ -187,13 +187,42 @@ func TestOpenWithoutAViewerIsAlreadyOnTheClock(t *testing.T) {
 	}
 }
 
+func TestReattachSupersedesTheOldViewer(t *testing.T) {
+	// A tab switch races: the old socket may not have finished closing. The
+	// owner must be able to take over rather than be told "busy" and pushed
+	// into opening a second shell.
+	m, _, _ := newTestManager(t, time.Hour)
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	_, first, err := m.Attach("s1", "c0", "human:root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := m.Attach("s1", "c0", "human:root")
+	if err != nil {
+		t.Fatalf("owner could not take over its own session: %v", err)
+	}
+	select {
+	case _, open := <-first:
+		if open {
+			t.Fatal("superseded viewer still receiving")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("superseded viewer was not closed")
+	}
+	if second == nil {
+		t.Fatal("takeover returned no stream")
+	}
+}
+
 func TestAnotherCallerCannotAttach(t *testing.T) {
 	// The口子 is per-caller: a session belongs to the human who opened it.
 	m, _, _ := newTestManager(t, time.Hour)
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.Attach("s1", "human:mallory"); err != ErrNotOwner {
+	if _, _, err := m.Attach("s1", "c0", "human:mallory"); err != ErrNotOwner {
 		t.Fatalf("err = %v, want ErrNotOwner", err)
 	}
 }
@@ -205,7 +234,7 @@ func TestCommandsLandOnTheLedgerAndBytesDoNot(t *testing.T) {
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	_, viewer, err := m.Attach("s1", "human:root")
+	_, viewer, err := m.Attach("s1", "c0", "human:root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +312,7 @@ func TestASlowLedgerDoesNotFreezeTheTerminal(t *testing.T) {
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	_, viewer, err := m.Attach("s1", "human:root")
+	_, viewer, err := m.Attach("s1", "c0", "human:root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +351,7 @@ func TestRecordQueueDropsRatherThanBlocking(t *testing.T) {
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.Attach("s1", "human:root"); err != nil {
+	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
 		t.Fatal(err)
 	}
 	one := append(append(append([]byte(nil), osc("1337;AtollCmd='x'")...), osc("133;C")...), osc("133;D;0")...)
@@ -336,5 +365,21 @@ func TestRecordQueueDropsRatherThanBlocking(t *testing.T) {
 			t.Fatal("queue never reported a drop — it is either unbounded or it blocked")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+func TestSessionIsBoundToItsChannel(t *testing.T) {
+	// 门判的是「你在这个频道里是成员吗」。若接回时不校验频道，同时属于 A 和 B
+	// 的调用方可以拿 A 的 session id 声称自己在 B——不构成越权（会话仍是他自己
+	// 的），但门判了一个频道却服务了另一个，且命令记录会落进 A 而调用方自称在 B。
+	m, _, _ := newTestManager(t, time.Hour)
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Attach("s1", "c0.other", "human:root"); err != ErrNotOwner {
+		t.Fatalf("跨频道接回未被拒：err = %v", err)
+	}
+	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
+		t.Fatalf("本频道接回被误拒：%v", err)
 	}
 }

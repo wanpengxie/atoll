@@ -87,7 +87,7 @@ func TestQualifiedChannelAddressMatchesDiskAndRetirementLeavesBytes(t *testing.T
 	registrar := findRegistrar(t, ws)
 	// parent is never a field: a channel is created from inside its parent, and
 	// the registrar in c0 makes c0 the parent.
-	createdChannel := registrarRequest(t, ws, c0ChannelID, registrar, "system.channel.create", map[string]any{"name": "archive"})
+	createdChannel := createChannelWithRoot(t, ws, c0ChannelID, registrar, "archive")
 	channelID := stringField(t, createdChannel, "channel_id")
 	channelRow := registrarRequest(t, ws, c0ChannelID, registrar, "system.channel.get", map[string]any{"channel_id": channelID})
 	qualified := stringField(t, channelRow, "qualified_name")
@@ -157,13 +157,19 @@ func TestParentAndChildChannelsStayFlatOnDifferentDaemons(t *testing.T) {
 	h := newHarness(t)
 	_, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
 	registrar := findRegistrar(t, ws)
-	parent := registrarRequest(t, ws, c0ChannelID, registrar, "system.channel.create", map[string]any{"name": "project"})
+	parent := createChannelWithRoot(t, ws, c0ChannelID, registrar, "project")
 	parentID := stringField(t, parent, "channel_id")
 	// The child is created from inside the parent: root (owner, hence member of
 	// project) speaks system.channel.create to project's own door, and project
 	// becomes the parent because that is where the request was made.
 	projectDoor := awaitDoor(t, ws, parentID)
-	childReply := ws.request(parentID, "system.channel.create", projectDoor, map[string]any{"name": "backend"})
+	childReply := ws.request(parentID, "system.channel.create", projectDoor, map[string]any{
+		"name": "backend",
+		// 从 project 内部建 backend，同样要显式说明谁被带进去——这里带的是
+		// project 里的 root（与 c0 里的 root 是同一个人、不同的 actor id）。
+		// 这条经频道自己的门走，故用门的形 initial_actor_ids。
+		"initial_actor_ids": []any{rootActorID(t, ws, parentID)},
+	})
 	child, _ := childReply["value"].(map[string]any)
 	if child == nil {
 		t.Fatalf("system.channel.create through project door omitted value: %v", childReply)

@@ -36,6 +36,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: atoll up [--dir DIR] [--addr ADDR] [--root-password PASSWORD] [--steward CLASS] [--open-registration]")
 	fmt.Fprintln(os.Stderr, "       atoll start [同 up 的参数]   # 后台启动，日志写 <dir>/atoll-up.log")
 	fmt.Fprintln(os.Stderr, "       atoll stop [--dir DIR]      # 停掉后台节点")
+	fmt.Fprintln(os.Stderr, "       atoll restart [同 up 的参数] # 停掉再起，等旧进程真的退干净")
 	fmt.Fprintln(os.Stderr, "       atoll status [--dir DIR]    # 看后台节点在不在跑")
 	fmt.Fprintln(os.Stderr, "       atoll version")
 	os.Exit(2)
@@ -52,6 +53,9 @@ func main() {
 			return
 		case "stop":
 			cmdStop(os.Args[2:])
+			return
+		case "restart":
+			cmdRestart(os.Args[2:])
 			return
 		case "status":
 			cmdStatus(os.Args[2:])
@@ -367,6 +371,156 @@ func cmdStop(args []string) {
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	fmt.Fprintf(os.Stderr, "30s 没退，已强杀（pid %d）\n", pid)
 	_ = os.Remove(pidPath(*dir))
+}
+
+// restartWorkerFlag marks the detached half of a restart. It is not in usage:
+// nobody types it, restart re-execs itself with it.
+const restartWorkerFlag = "--restart-worker"
+
+// cmdRestart stops a running node and starts it again.
+//
+// The hard part is not stop-then-start; it is that **the process doing the
+// restart must not be a descendant of what it is restarting**. The reason to
+// have this command at all is to run it from the node's own web terminal —
+// and that terminal is a pty owned by the node's daemon. Kill the node from
+// inside it and the pty dies with the node, taking the restarter with it
+// before it can start anything: the node is now stopped with nobody left to
+// start it. (Observed 2026-08-25: `atoll stop` typed in that terminal left
+// the node down and unrecoverable from the web.)
+//
+// So restart re-execs itself detached — new session, no controlling terminal,
+// stdio to the log — and that copy does the actual work. Setsid also escapes
+// the pty's process group, so the daemon's group-wide SIGHUP/SIGKILL on
+// session teardown恒不会跟着打到它。
+//
+// The parent then reports progress for as long as it happens to live. If the
+// caller's terminal dies mid-way (the normal case when restarting from the
+// web terminal) the detached worker finishes anyway, and the browser simply
+// reconnects into a fresh shell.
+func cmdRestart(args []string) {
+	if len(args) > 0 && args[0] == restartWorkerFlag {
+		restartInPlace(args[1:])
+		return
+	}
+	fs := flag.NewFlagSet("restart", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "node home root")
+	_ = fs.Parse(restartDirArgs(args))
+
+	self, err := os.Executable()
+	if err != nil {
+		log.Fatalf("restart: %v", err)
+	}
+	if err := os.MkdirAll(*dir, 0o755); err != nil {
+		log.Fatalf("restart: %v", err)
+	}
+	logPath := filepath.Join(*dir, "atoll-up.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Fatalf("restart: %v", err)
+	}
+	worker := exec.Command(self, append([]string{"restart", restartWorkerFlag}, args...)...)
+	worker.Stdout, worker.Stderr = logFile, logFile
+	worker.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := worker.Start(); err != nil {
+		log.Fatalf("restart: %v", err)
+	}
+	workerPid := worker.Process.Pid
+	_ = worker.Process.Release()
+	_ = logFile.Close()
+
+	fmt.Printf("重启已交给后台进程（pid %d），它恒不随本终端一起死。\n", workerPid)
+	fmt.Printf("  日志: %s\n", logPath)
+	// 如果本命令是从节点自己的网页终端里跑的，下面这段会随终端一起消失——
+	// 那是预期的，重启照样完成，浏览器重连后是一个新 shell。
+	old, _, had := readPidFile(*dir)
+	for i := 0; i < 60; i++ {
+		time.Sleep(time.Second)
+		cur, _, ok := readPidFile(*dir)
+		if ok && pidAlive(cur) && (!had || cur != old) {
+			fmt.Printf("新节点已起来（pid %d）\n", cur)
+			return
+		}
+		if !pidAlive(workerPid) {
+			// 工作进程没了而 pid 文件没翻新：让人去看日志，恒不假装成功。
+			cur, _, ok = readPidFile(*dir)
+			if ok && pidAlive(cur) && (!had || cur != old) {
+				fmt.Printf("新节点已起来（pid %d）\n", cur)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "重启进程已退出但节点没起来，看日志：%s\n", logPath)
+			os.Exit(1)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "60s 内没等到新节点；后台进程仍在（pid %d），看日志：%s\n", workerPid, logPath)
+	os.Exit(1)
+}
+
+// restartInPlace is the detached half: it is already out of the doomed
+// process tree, so it can safely stop the node and start it again.
+//
+// It also tolerates "not running": restart恒不得因为节点碰巧已经停了就拒绝
+// 启动——那是人最不希望被卡住的时刻。
+func restartInPlace(args []string) {
+	fs := flag.NewFlagSet("restart-worker", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "node home root")
+	_ = fs.Parse(restartDirArgs(args))
+
+	pid, _, running := readPidFile(*dir)
+	if running && pidAlive(pid) {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		gone := false
+		for i := 0; i < 30; i++ {
+			if !pidAlive(pid) {
+				gone = true
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if !gone {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			// Even SIGKILL is not instant: the kernel still has to tear the
+			// process down and release its listening socket. Starting into
+			// that window is exactly the failure this command exists to avoid.
+			for i := 0; i < 10; i++ {
+				if !pidAlive(pid) {
+					gone = true
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			if !gone {
+				log.Fatalf("restart: pid %d 杀不掉，恒不接着起——那样只会撞端口且两边都没了", pid)
+			}
+			fmt.Fprintf(os.Stderr, "30s 没退，已强杀（pid %d）\n", pid)
+		} else {
+			fmt.Printf("已停止（pid %d）\n", pid)
+		}
+	} else {
+		fmt.Println("atoll 没有在跑，直接启动")
+	}
+	_ = os.Remove(pidPath(*dir))
+	cmdStart(args)
+}
+
+// restartDirArgs keeps only --dir so restart can find the pid file without
+// having to know every flag start accepts; everything else rides through to
+// cmdStart unchanged.
+func restartDirArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--dir" || a == "-dir" {
+			if i+1 < len(args) {
+				out = append(out, a, args[i+1])
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "--dir=") || strings.HasPrefix(a, "-dir=") {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func cmdStatus(args []string) {
