@@ -565,13 +565,18 @@ func findRegistrar(t *testing.T, ws *wsClient) string {
 func awaitDoor(t *testing.T, ws *wsClient, channelID string) string {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
+	var last error
 	for time.Now().Before(deadline) {
-		if _, _, err := ws.tryRequest(channelID, "system.member.list", systemActor, map[string]any{}); err == nil {
+		_, _, err := ws.tryRequest(channelID, "system.member.list", systemActor, map[string]any{})
+		if err == nil {
 			return systemActor
 		}
+		last = err
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("channel %s never served its system door", channelID)
+	// 把最后一次的真实原因带出来：只报"没等到"恒不足以定位——CI 上红了两天，
+	// 而日志里除了这句什么都没有。
+	t.Fatalf("channel %s never served its system door; last error: %v", channelID, last)
 	return ""
 }
 
@@ -605,6 +610,51 @@ func stringField(t *testing.T, row map[string]any, field string) string {
 		t.Fatalf("%s missing from %v", field, row)
 	}
 	return value
+}
+
+// rootActorID returns root's complete three-segment actor id in a channel.
+//
+// system.channel.create requires initial_actor_ids and恒不接受两段地址: the
+// seat carried into the new channel has to name an actual current member, and
+// an incarnation is part of that name. Tests therefore have to look it up
+// rather than spell it.
+func rootActorID(t *testing.T, ws *wsClient, channelID string) string {
+	t.Helper()
+	catalog := ws.request(channelID, "system.member.list", systemActor, map[string]any{})
+	rows, _ := catalog["actors"].([]any)
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		id, _ := row["id"].(string)
+		if strings.HasPrefix(id, "human:root:") {
+			return id
+		}
+	}
+	t.Fatalf("root has no actor in channel %s: %v", channelID, catalog)
+	return ""
+}
+
+// createChannelWithRoot creates a child channel and carries root into it.
+//
+// Two shapes exist and they are not interchangeable. The DOOR takes
+// initial_actor_ids (plain current-channel actor ids) and resolves them; the
+// REGISTRAR takes an already-resolved plan, initial_seats, because by the time
+// a request reaches it the source channel is no longer available to look
+// anything up in. Tests speak to both, so this helper covers the registrar
+// path and callers that go through a channel door pass initial_actor_ids.
+//
+// Carrying root is not incidental: every one of these tests then speaks to the
+// new channel's door as root, and a channel恒不认得非成员 (forbidden: no
+// eligibility for channel).
+func createChannelWithRoot(t *testing.T, ws *wsClient, parentID, registrar, name string) map[string]any {
+	t.Helper()
+	return registrarRequest(t, ws, parentID, registrar, "system.channel.create", map[string]any{
+		"name": name,
+		"initial_seats": []any{map[string]any{
+			"source_actor_id": rootActorID(t, ws, parentID),
+			"kind":            "human",
+			"principal":       "root",
+		}},
+	})
 }
 
 // waitActorPresence polls system.member.list until actorID's presence matches want,

@@ -9,7 +9,7 @@ func TestDoorCarriesChannelRequestThroughSvcactor(t *testing.T) {
 	h := newHarness(t)
 	api, setupWS := rootClient(t, h, map[string]int64{c0ChannelID: 0})
 	registrar := findRegistrar(t, setupWS)
-	sourceRow := registrarRequest(t, setupWS, c0ChannelID, registrar, "system.channel.create", map[string]any{"name": "e2e-membrane-source"})
+	sourceRow := createChannelWithRoot(t, setupWS, c0ChannelID, registrar, "e2e-membrane-source")
 	sourceID := stringField(t, sourceRow, "channel_id")
 	door := awaitDoor(t, setupWS, sourceID)
 
