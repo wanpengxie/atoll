@@ -36,6 +36,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: atoll up [--dir DIR] [--addr ADDR] [--root-password PASSWORD] [--steward CLASS] [--open-registration]")
 	fmt.Fprintln(os.Stderr, "       atoll start [同 up 的参数]   # 后台启动，日志写 <dir>/atoll-up.log")
 	fmt.Fprintln(os.Stderr, "       atoll stop [--dir DIR]      # 停掉后台节点")
+	fmt.Fprintln(os.Stderr, "       atoll restart [同 up 的参数] # 停掉再起，等旧进程真的退干净")
 	fmt.Fprintln(os.Stderr, "       atoll status [--dir DIR]    # 看后台节点在不在跑")
 	fmt.Fprintln(os.Stderr, "       atoll version")
 	os.Exit(2)
@@ -52,6 +53,9 @@ func main() {
 			return
 		case "stop":
 			cmdStop(os.Args[2:])
+			return
+		case "restart":
+			cmdRestart(os.Args[2:])
 			return
 		case "status":
 			cmdStatus(os.Args[2:])
@@ -367,6 +371,83 @@ func cmdStop(args []string) {
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	fmt.Fprintf(os.Stderr, "30s 没退，已强杀（pid %d）\n", pid)
 	_ = os.Remove(pidPath(*dir))
+}
+
+// cmdRestart stops a running node and starts it again with the given args.
+//
+// It is not "stop then start" typed twice: the two have to be separated by a
+// wait for the old process to actually be gone. A node holds a listening
+// socket, and starting the new one while the old one still has it fails with
+// "address already in use" — the restart then leaves nothing running at all,
+// which is worse than either half. So this waits for the pid to die, and says
+// so if it will not.
+//
+// It also tolerates "not running": restart恒不得因为节点碰巧已经停了就拒绝
+// 启动——那是人最不希望被卡住的时刻。
+func cmdRestart(args []string) {
+	fs := flag.NewFlagSet("restart", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "node home root")
+	// The remaining flags belong to the start half; parse only what we need to
+	// find the pid file, and hand the original args through untouched.
+	_ = fs.Parse(restartDirArgs(args))
+
+	pid, _, running := readPidFile(*dir)
+	if running && pidAlive(pid) {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		gone := false
+		for i := 0; i < 30; i++ {
+			if !pidAlive(pid) {
+				gone = true
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if !gone {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			// Even SIGKILL is not instant: the kernel still has to tear the
+			// process down and release its socket. Starting into that window
+			// is exactly the failure this command exists to avoid.
+			for i := 0; i < 10; i++ {
+				if !pidAlive(pid) {
+					gone = true
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			if !gone {
+				fmt.Fprintf(os.Stderr, "restart: pid %d 杀不掉，恒不接着起——那样只会撞端口且两边都没了\n", pid)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "30s 没退，已强杀（pid %d）\n", pid)
+		} else {
+			fmt.Printf("已停止（pid %d）\n", pid)
+		}
+	} else {
+		fmt.Println("atoll 没有在跑，直接启动")
+	}
+	_ = os.Remove(pidPath(*dir))
+	cmdStart(args)
+}
+
+// restartDirArgs keeps only --dir so restart can find the pid file without
+// having to know every flag start accepts; everything else rides through to
+// cmdStart unchanged.
+func restartDirArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--dir" || a == "-dir" {
+			if i+1 < len(args) {
+				out = append(out, a, args[i+1])
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "--dir=") || strings.HasPrefix(a, "-dir=") {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func cmdStatus(args []string) {
