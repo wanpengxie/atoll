@@ -426,7 +426,16 @@ func TestSpineWriteFailureClosesAfterReleasingSendLock(t *testing.T) {
 
 func waitForLink(t *testing.T, reason string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	waitForLinkWithin(t, 3*time.Second, reason, condition)
+}
+
+// waitForLinkWithin is waitForLink with an explicit budget, for the few waits
+// that depend on the scheduler having run N goroutines rather than on one
+// event having happened. Those need slack proportional to how busy the machine
+// is, and a CI runner is much busier than a laptop.
+func waitForLinkWithin(t *testing.T, budget time.Duration, reason string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
 	for !condition() {
 		if time.Now().After(deadline) {
 			t.Fatal(reason)
@@ -474,16 +483,31 @@ func TestStreamOpenIsBoundedAndRefusesInsteadOfQueueing(t *testing.T) {
 	header := DeviceStreamHeader{Kind: DeviceStreamActor, Channel: "a", LaneGen: "g1"}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	for i := 0; i < maxStreamOpenAttempts*2; i++ {
-		go func() { _, _ = carrier.open(ctx, header) }()
-	}
-	waitForLink(t, "opens never reached the ceiling", func() bool {
+	// 填到坐满，恒不靠一次齐发去撞一个瞬态。
+	//
+	// 夹具的第一个 open 是**成功**的（AcceptBacklog=1），它占座、返回、把座位
+	// 还回去；其余的才停在库里。所以一次齐发 2N 个之后的稳态是 N-1 个停着 +
+	// 一个空座，而 N 只在"成功那个尚未返回、且已有 N-1 个停下"的瞬间成立。
+	// 快机器上 1ms 轮询能撞到它，-race + 低并行度下撞不到——峰值稳定停在
+	// N-1，测试就间歇性红（本地 GOMAXPROCS=1 -race 可稳定复现，v0.02 同样）。
+	//
+	// 改为持续补发直到坐满：被拒的那些立刻返回、恒不占座，所以补发恒会收敛，
+	// 而"上限恒不被突破"这条不变量在每一轮照查。
+	launched := 0
+	waitForLinkWithin(t, 30*time.Second, "opens never reached the ceiling", func() bool {
 		inFlight := carrier.openInFlight.Load()
 		if inFlight > maxStreamOpenAttempts {
 			t.Fatalf("%d opens were in flight at once, above the ceiling of %d",
 				inFlight, maxStreamOpenAttempts)
 		}
-		return inFlight == maxStreamOpenAttempts
+		if inFlight >= maxStreamOpenAttempts {
+			return true
+		}
+		if launched < maxStreamOpenAttempts*8 {
+			go func() { _, _ = carrier.open(ctx, header) }()
+			launched++
+		}
+		return false
 	})
 
 	// At the ceiling the next open must come back on its own. If it queued
