@@ -387,9 +387,11 @@ type UnobservePayload struct {
 	ChannelID string `json:"channel_id"`
 }
 
-// HistoryBeforePayload reads one bounded visible page strictly before BeforeSeq.
-// BeforeSeq == 0 anchors the query at the channel's current head. History is a
-// read control on the attached human connection; it never enters the ledger.
+// HistoryBeforePayload reads one semantic visible page strictly before
+// BeforeSeq. BeforeSeq == 0 anchors the query at the channel's current head;
+// Limit is a soft raw-row target because Platform View may scan farther back
+// to close the root-turn boundary. History is a read control on the attached
+// human connection; it never enters the ledger.
 type HistoryBeforePayload struct {
 	ChannelID string `json:"channel_id"`
 	BeforeSeq int64  `json:"before_seq,omitempty"`
@@ -480,8 +482,11 @@ type HistoryRow struct {
 	Envelope json.RawMessage `json:"envelope"`
 }
 
-// HistoryReceipt is an on-demand page. Rows are always ascending for direct
-// insertion into the same fold used by live feed frames.
+// HistoryReceipt is the page-complete barrier for an on-demand history read.
+// The gateway emits the page's ascending envelopes through ordinary feed
+// frames immediately before this correlated receipt, avoiding an aggregate
+// frame that could exceed the wire limit. Rows remains as an empty compatibility
+// field so clients written for the earlier aggregate carrier remain harmless.
 type HistoryReceipt struct {
 	ChannelID string       `json:"channel_id"`
 	HeadSeq   int64        `json:"head_seq"`

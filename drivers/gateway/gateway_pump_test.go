@@ -64,8 +64,12 @@ func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
 	head := all[len(all)-1]
 
 	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head})
+	feed, stop := observeFeed(s)
 	s.StartFeed()
-	defer s.Close()
+	defer func() {
+		s.Close()
+		stop()
+	}()
 	request, err := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-1", subjectgate.HistoryBeforePayload{
 		ChannelID: "c", BeforeSeq: 0, Limit: 3,
 	})
@@ -81,9 +85,10 @@ func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := all[len(all)-3:]
-	got := make([]int64, 0, len(page.Rows))
-	for _, row := range page.Rows {
-		got = append(got, row.Seq)
+	waitFor(t, func() bool { return len(feed.sequences("c")) == len(want) }, "history feed rows")
+	got := feed.sequences("c")
+	if len(page.Rows) != 0 {
+		t.Fatalf("history receipt must be a page-complete barrier, not an aggregate carrier: %+v", page.Rows)
 	}
 	if !slices.Equal(got, want) || !page.HasOlder {
 		t.Fatalf("unexpected history page: got=%v want=%v page=%+v", got, want, page)

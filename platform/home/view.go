@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -100,6 +101,157 @@ func (v View) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int
 
 func (v View) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
 	return v.visible.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+}
+
+// ReadVisibleTurnWindowBeforeSeq reads backwards until a root-turn-safe
+// boundary is available, then projects away historical intermediate progress.
+// Live feed remains the full visible ledger; this method is history-only.
+func (v View) ReadVisibleTurnWindowBeforeSeq(ctx context.Context, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
+	return readVisibleTurnWindow(ctx, v.visible, query)
+}
+
+const historyScanBatch = 256
+
+func readVisibleTurnWindow(ctx context.Context, visible storespec.VisibleMessageQuery, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
+	target := query.TargetRows
+	if target <= 0 {
+		target = 200
+	}
+	minimumRoots := query.MinimumCompleteRoots
+	if minimumRoots <= 0 {
+		minimumRoots = 3
+	}
+	before := query.BeforeSeq
+	var accumulated []storespec.StoredRow
+	var head int64
+	for {
+		page, snapshotHead, hasOlder, err := visible.ReadVisibleBeforeSeq(ctx, before, historyScanBatch)
+		if err != nil {
+			return channelspec.HistoryWindow{}, err
+		}
+		if head == 0 {
+			head = snapshotHead
+		}
+		if len(page) > 0 {
+			accumulated = append(page, accumulated...)
+			before = page[0].Seq
+		}
+		boundary, ready := historyBoundary(accumulated, target, minimumRoots, !hasOlder)
+		if ready {
+			return projectHistoryWindow(accumulated, boundary, head, hasOlder || boundary > 0), nil
+		}
+		if !hasOlder || len(page) == 0 {
+			return projectHistoryWindow(accumulated, 0, head, false), nil
+		}
+	}
+}
+
+func historyBoundary(rows []storespec.StoredRow, target, minimumRoots int, atBeginning bool) (int, bool) {
+	if len(rows) == 0 {
+		return 0, atBeginning
+	}
+	if len(rows) < target && !atBeginning {
+		return 0, false
+	}
+	rootIndexes := make([]int, 0)
+	completeRootIndexes := make([]int, 0)
+	terminalParents := make(map[message.ID]bool)
+	for _, row := range rows {
+		if row.IsTerminal {
+			terminalParents[row.Envelope.ParentID] = true
+		}
+	}
+	for index, row := range rows {
+		envelope := row.Envelope
+		if envelope.Kind != message.KindRequest || envelope.ParentID != "" {
+			continue
+		}
+		rootIndexes = append(rootIndexes, index)
+		if terminalParents[envelope.ID] {
+			completeRootIndexes = append(completeRootIndexes, index)
+		}
+	}
+	if len(rootIndexes) == 0 {
+		hasTurnRows := false
+		for _, row := range rows {
+			if row.Envelope.Kind == message.KindRequest || row.Envelope.Kind == message.KindResponse {
+				hasTurnRows = true
+				break
+			}
+		}
+		if !hasTurnRows && len(rows) >= target {
+			return len(rows) - target, true
+		}
+		if !atBeginning {
+			return 0, false
+		}
+		return 0, true
+	}
+	cutoff := len(rows) - target
+	if cutoff < 0 {
+		cutoff = 0
+	}
+	boundary := -1
+	for _, index := range rootIndexes {
+		if index > cutoff {
+			break
+		}
+		boundary = index
+	}
+	if boundary < 0 {
+		if !atBeginning {
+			return 0, false
+		}
+		boundary = 0
+	}
+	if len(completeRootIndexes) < minimumRoots {
+		if !atBeginning {
+			return 0, false
+		}
+		return 0, true
+	}
+	minimumBoundary := completeRootIndexes[len(completeRootIndexes)-minimumRoots]
+	if minimumBoundary < boundary {
+		boundary = minimumBoundary
+	}
+	return boundary, true
+}
+
+func projectHistoryWindow(raw []storespec.StoredRow, boundary int, head int64, hasOlder bool) channelspec.HistoryWindow {
+	if boundary < 0 || boundary > len(raw) {
+		boundary = 0
+	}
+	rows := raw[boundary:]
+	terminalParents := make(map[message.ID]bool)
+	latestProvisional := make(map[message.ID]int64)
+	for _, row := range rows {
+		if row.Envelope.Kind != message.KindResponse || row.Envelope.ParentID == "" {
+			continue
+		}
+		if row.IsTerminal {
+			terminalParents[row.Envelope.ParentID] = true
+		} else if row.Seq > latestProvisional[row.Envelope.ParentID] {
+			latestProvisional[row.Envelope.ParentID] = row.Seq
+		}
+	}
+	projected := make([]channelspec.VisibleMessageRow, 0, len(rows))
+	for _, row := range rows {
+		include := row.Envelope.Kind != message.KindResponse || row.IsTerminal
+		if row.Envelope.Kind == message.KindResponse && !row.IsTerminal && !terminalParents[row.Envelope.ParentID] {
+			include = latestProvisional[row.Envelope.ParentID] == row.Seq
+		}
+		if include {
+			projected = append(projected, channelspec.VisibleMessageRow{Seq: row.Seq, Envelope: row.Envelope})
+		}
+	}
+	window := channelspec.HistoryWindow{Rows: projected, HeadSeq: head, HasOlder: hasOlder}
+	if len(rows) > 0 {
+		window.OldestSeq = rows[0].Seq
+	}
+	if len(projected) > 0 {
+		window.NewestSeq = projected[len(projected)-1].Seq
+	}
+	return window
 }
 
 // IsActive is the narrow membership question used by boundary readers before

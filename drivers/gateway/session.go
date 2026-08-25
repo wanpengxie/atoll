@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -22,6 +23,7 @@ const feedBatch = 100
 const (
 	defaultHistoryLimit = 200
 	maxHistoryLimit     = 200
+	minimumHistoryRoots = 3
 )
 
 // subscription is one channel the session's read pump is currently following (spec
@@ -233,32 +235,31 @@ func (s *Session) PrepareInitialHistory(limit int) []subjectgate.HistoryEntry {
 			cancel()
 			continue
 		}
-		stored, head, hasOlder, err := sub.route.Bundle.View().ReadVisibleBeforeSeq(rctx, 0, limit)
+		window, err := sub.route.Bundle.View().ReadVisibleTurnWindowBeforeSeq(rctx, channelspec.HistoryWindowQuery{
+			BeforeSeq: 0, TargetRows: limit, MinimumCompleteRoots: minimumHistoryRoots,
+		})
 		cancel()
 		if err != nil {
 			continue
 		}
-		rows := make([]subjectgate.HistoryRow, 0, len(stored))
-		for _, row := range stored {
+		rows := make([]subjectgate.HistoryRow, 0, len(window.Rows))
+		for _, row := range window.Rows {
 			if historyRow, ok := transportableHistoryRow(ch, row.Seq, row.Envelope); ok {
 				rows = append(rows, historyRow)
 			}
 		}
-		oldest := int64(0)
-		if len(stored) > 0 {
-			oldest = stored[0].Seq
-		}
-		floor := head
+		oldest := window.OldestSeq
+		floor := window.HeadSeq
 		if oldest > 0 {
 			floor = oldest - 1
 		}
 		truncated := s.lane.cursor.at(ch) < floor
 		entries = append(entries, subjectgate.HistoryEntry{
-			ChannelID: string(ch), HeadSeq: head, OldestSeq: oldest,
-			HasOlder: hasOlder, Truncated: truncated,
+			ChannelID: string(ch), HeadSeq: window.HeadSeq, OldestSeq: oldest,
+			HasOlder: window.HasOlder, Truncated: truncated,
 		})
 		if truncated {
-			s.initialTails[ch] = initialTail{head: head, rows: rows}
+			s.initialTails[ch] = initialTail{head: window.HeadSeq, rows: rows}
 		}
 	}
 	return entries
@@ -705,23 +706,24 @@ func (s *Session) handleControl(command controlCommand) {
 				break
 			}
 		}
-		stored, head, hasOlder, err := sub.route.Bundle.View().ReadVisibleBeforeSeq(rctx, command.before, command.limit)
+		window, err := sub.route.Bundle.View().ReadVisibleTurnWindowBeforeSeq(rctx, channelspec.HistoryWindowQuery{
+			BeforeSeq: command.before, TargetRows: command.limit, MinimumCompleteRoots: minimumHistoryRoots,
+		})
 		cancel()
 		if err != nil {
 			result.code, result.detail = subjectgate.CodeUnavailable, "history unavailable — retry"
 			break
 		}
-		rows := make([]subjectgate.HistoryRow, 0, len(stored))
-		for _, row := range stored {
+		rows := make([]subjectgate.HistoryRow, 0, len(window.Rows))
+		for _, row := range window.Rows {
 			if historyRow, ok := transportableHistoryRow(command.channel, row.Seq, row.Envelope); ok {
 				rows = append(rows, historyRow)
 			}
 		}
 		page := &subjectgate.HistoryReceipt{
-			ChannelID: string(command.channel), HeadSeq: head, HasOlder: hasOlder, Rows: rows,
-		}
-		if len(stored) > 0 {
-			page.OldestSeq, page.NewestSeq = stored[0].Seq, stored[len(stored)-1].Seq
+			ChannelID: string(command.channel), HeadSeq: window.HeadSeq,
+			OldestSeq: window.OldestSeq, NewestSeq: window.NewestSeq,
+			HasOlder: window.HasOlder, Rows: rows,
 		}
 		result.history = page
 	default:
@@ -772,32 +774,6 @@ func transportableHistoryRow(ch channel.ID, seq int64, value any) (subjectgate.H
 		return subjectgate.HistoryRow{}, false
 	}
 	return row, true
-}
-
-// historyFrame enforces the physical 512KB frame cap without turning a page
-// containing several large messages into a dropped receipt. Oldest rows are
-// trimmed first, keeping the returned page contiguous at the requested anchor;
-// the client can recover the trimmed prefix with the returned oldest cursor.
-func historyFrame(ref string, page subjectgate.HistoryReceipt) (subjectgate.Frame, error) {
-	for {
-		frame, err := subjectgate.NewFrame(subjectgate.FrameReceipt, ref, page)
-		if err != nil {
-			return subjectgate.Frame{}, err
-		}
-		if _, err = frame.Marshal(); err == nil {
-			return frame, nil
-		} else if !errors.Is(err, subjectgate.ErrFrameTooBig) || len(page.Rows) == 0 {
-			return subjectgate.Frame{}, err
-		}
-		page.Rows = page.Rows[1:]
-		page.HasOlder = true
-		if len(page.Rows) == 0 {
-			page.OldestSeq, page.NewestSeq = 0, 0
-		} else {
-			page.OldestSeq = page.Rows[0].Seq
-			page.NewestSeq = page.Rows[len(page.Rows)-1].Seq
-		}
-	}
 }
 
 func (s *Session) resolveObservation(ch channel.ID) (ObserverRoute, string, string) {
@@ -997,9 +973,25 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 				if result.history == nil {
 					return errFrame(subjectgate.CodeUnavailable, "history unavailable — retry")
 				}
-				frame, err := historyFrame(f.Ref, *result.history)
+				// Historical envelopes use the existing bounded feed carrier one by
+				// one. Aggregating a semantic page into one receipt can exceed the
+				// physical frame limit; trimming that aggregate would cut a root turn.
+				// All sends enter the same lane before the receipt, so the receipt is
+				// both correlation ack and page-complete barrier.
+				page := *result.history
+				for _, row := range page.Rows {
+					feed, err := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
+						ChannelID: page.ChannelID, Seq: row.Seq, Envelope: row.Envelope,
+					})
+					if err != nil {
+						return errFrame(subjectgate.CodeUnavailable, "history row exceeds transport limit")
+					}
+					s.Send(feed)
+				}
+				page.Rows = []subjectgate.HistoryRow{}
+				frame, err := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, page)
 				if err != nil {
-					return errFrame(subjectgate.CodeUnavailable, "history page exceeds transport limit")
+					return errFrame(subjectgate.CodeUnavailable, "history receipt unavailable")
 				}
 				return frame
 			}

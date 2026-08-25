@@ -66,6 +66,9 @@ func (obsViewStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec
 func (obsViewStub) ReadVisibleBeforeSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, bool, error) {
 	return nil, 0, false, nil
 }
+func (obsViewStub) ReadVisibleTurnWindowBeforeSeq(context.Context, channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
+	return channelspec.HistoryWindow{}, nil
+}
 func (obsViewStub) IsActive(context.Context, actor.ActorID) (bool, error) { return true, nil }
 func (obsViewStub) ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return channelspec.ActorFacts{}, false, nil
