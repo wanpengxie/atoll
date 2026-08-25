@@ -18,9 +18,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type blockingHistoryBundle struct {
+	channelhost.Bundle
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b blockingHistoryBundle) View() channelhost.View {
+	return blockingHistoryView{View: b.Bundle.View(), started: b.started, release: b.release}
+}
+
+type blockingHistoryView struct {
+	channelhost.View
+	started chan struct{}
+	release chan struct{}
+}
+
+func (v blockingHistoryView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+	select {
+	case v.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-v.release:
+		return v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+	case <-ctx.Done():
+		return nil, 0, false, ctx.Err()
+	}
+}
 
 func TestAttachBacklogStartsFromBoundedTail(t *testing.T) {
 	clk := newClock()
@@ -96,6 +127,66 @@ func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
 	if cursor := s.lane.cursor.at("c"); cursor != head {
 		t.Fatalf("history read moved live cursor: got=%d want=%d", cursor, head)
 	}
+}
+
+func TestHistoryReadNeverBlocksRealtimeFeed(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "history-does-not-block-live"
+	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, 3)
+	all := sourceSeqs(t, h)
+	head := all[len(all)-1]
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	res.set(principal, []Route{{
+		Channel: "c", SubjectID: id,
+		Bundle: blockingHistoryBundle{Bundle: h, started: started, release: release},
+	}}, nil, nil)
+
+	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head})
+	feed, stop := observeFeed(s)
+	s.StartFeed()
+	request, err := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "slow-history", subjectgate.HistoryBeforePayload{
+		ChannelID: "c", BeforeSeq: 0, Limit: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := make(chan subjectgate.Frame, 1)
+	go func() { response <- s.Upstream(request) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("history read did not start")
+	}
+
+	// A commit arriving while history is deliberately blocked must cross the
+	// realtime feed boundary before that history read is released.
+	admitRows(t, h, 1)
+	newAll := sourceSeqs(t, h)
+	newHead := newAll[len(newAll)-1]
+	waitFor(t, func() bool { return feed.lastSeq("c") >= newHead }, "live feed stalled behind history read")
+	select {
+	case <-response:
+		t.Fatal("history unexpectedly completed before release")
+	default:
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case frame := <-response:
+		if frame.Type != subjectgate.FrameReceipt {
+			t.Fatalf("history failed after release: %+v", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("history did not complete after release")
+	}
+	s.Close()
+	stop()
 }
 
 // TestStaticBacklogFullDelivery (DoD-7⑤): a channel with a static backlog >2×feedBatch

@@ -119,7 +119,7 @@ func readVisibleTurnWindow(ctx context.Context, visible storespec.VisibleMessage
 	}
 	minimumRoots := query.MinimumCompleteRoots
 	if minimumRoots <= 0 {
-		minimumRoots = 3
+		minimumRoots = 20
 	}
 	before := query.BeforeSeq
 	var accumulated []storespec.StoredRow

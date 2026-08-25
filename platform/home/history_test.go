@@ -157,6 +157,27 @@ func TestHistoryWindowKeepsLatestProgressOnlyForOpenRequest(t *testing.T) {
 	}
 }
 
+func TestHistoryWindowDefaultsToTwentyCompleteRootTurns(t *testing.T) {
+	seq := int64(1)
+	var rows []storespec.StoredRow
+	for index := 1; index <= 25; index++ {
+		rows = appendCompletedRoot(rows, &seq, fmt.Sprintf("turn-%d", index), 0, false)
+	}
+	window, err := readVisibleTurnWindow(context.Background(), &historyQueryStub{rows: rows}, channelspec.HistoryWindowQuery{TargetRows: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := make([]message.ID, 0)
+	for _, row := range window.Rows {
+		if row.Envelope.Kind == message.KindRequest && row.Envelope.ParentID == "" {
+			roots = append(roots, row.Envelope.ID)
+		}
+	}
+	if len(roots) != 20 || roots[0] != "turn-6-root" || roots[len(roots)-1] != "turn-25-root" {
+		t.Fatalf("default semantic page roots = %v", roots)
+	}
+}
+
 func TestHistoryWindowPaginationUsesExclusiveRootBoundary(t *testing.T) {
 	seq := int64(1)
 	var rows []storespec.StoredRow

@@ -23,7 +23,7 @@ const feedBatch = 100
 const (
 	defaultHistoryLimit = 200
 	maxHistoryLimit     = 200
-	minimumHistoryRoots = 3
+	minimumHistoryRoots = 20
 )
 
 // subscription is one channel the session's read pump is currently following (spec
@@ -127,6 +127,7 @@ type Session struct {
 	initialTails map[channel.ID]initialTail
 
 	onceClose sync.Once
+	historyWG sync.WaitGroup
 }
 
 // Attach opens a session for one authenticated connection (连接模型勘误期: the portal
@@ -370,6 +371,10 @@ func (s *Session) teardownSubs() {
 		delete(s.subs, ch)
 	}
 	s.Close()
+	// Runtime history reads are detached from the live pump so they can never
+	// stall feed delivery. Session cancellation releases them; joining here keeps
+	// their lifetime inside the pump registration owned by Gateway.Close.
+	s.historyWG.Wait()
 	// Pump registration retires LAST. Gateway.Close's join covers all teardown.
 	s.gw.unregisterPump()
 }
@@ -692,43 +697,64 @@ func (s *Session) handleControl(command controlCommand) {
 				break
 			}
 		}
-		rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
-		if sub.reader.Mode == ReaderMember {
-			active, err := sub.route.Bundle.View().IsActive(rctx, sub.reader.ActorID)
-			if err != nil {
-				cancel()
-				result.code, result.detail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
-				break
-			}
-			if !active {
-				cancel()
-				result.code, result.detail = subjectgate.CodeForbidden, "no eligibility for channel"
-				break
-			}
-		}
-		window, err := sub.route.Bundle.View().ReadVisibleTurnWindowBeforeSeq(rctx, channelspec.HistoryWindowQuery{
-			BeforeSeq: command.before, TargetRows: command.limit, MinimumCompleteRoots: minimumHistoryRoots,
-		})
-		cancel()
-		if err != nil {
-			result.code, result.detail = subjectgate.CodeUnavailable, "history unavailable — retry"
-			break
-		}
-		rows := make([]subjectgate.HistoryRow, 0, len(window.Rows))
-		for _, row := range window.Rows {
-			if historyRow, ok := transportableHistoryRow(command.channel, row.Seq, row.Envelope); ok {
-				rows = append(rows, historyRow)
-			}
-		}
-		page := &subjectgate.HistoryReceipt{
-			ChannelID: string(command.channel), HeadSeq: window.HeadSeq,
-			OldestSeq: window.OldestSeq, NewestSeq: window.NewestSeq,
-			HasOlder: window.HasOlder, Rows: rows,
-		}
-		result.history = page
+		// The pump owns subscription/eligibility state, so it snapshots the
+		// authorized route here. The potentially slow historical read runs outside
+		// the pump; live commit notifications and feed batches remain runnable.
+		s.historyWG.Add(1)
+		go s.readHistory(command, sub.route, sub.reader)
+		return
 	default:
 		result.code, result.detail = subjectgate.CodeBadPayload, "unknown session control command"
 	}
+	s.replyControl(command, result)
+}
+
+func (s *Session) readHistory(command controlCommand, route Route, reader Reader) {
+	defer s.historyWG.Done()
+	result := controlResult{}
+	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
+	defer cancel()
+	if reader.Mode == ReaderMember {
+		active, err := route.Bundle.View().IsActive(rctx, reader.ActorID)
+		if err != nil {
+			result.code, result.detail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
+			s.replyControl(command, result)
+			return
+		}
+		if !active {
+			result.code, result.detail = subjectgate.CodeForbidden, "no eligibility for channel"
+			s.replyControl(command, result)
+			return
+		}
+	}
+	// The attach path already established a root-turn-safe first screen. Every
+	// later history_before is scheduler read-ahead: a strict bounded keyset page
+	// with no semantic scan, so the client can quietly maintain a deep reservoir
+	// without repeatedly expanding a 200-row request to whole turns.
+	page, head, hasOlder, err := route.Bundle.View().ReadVisibleBeforeSeq(rctx, command.before, command.limit)
+	if err != nil {
+		result.code, result.detail = subjectgate.CodeUnavailable, "history unavailable — retry"
+		s.replyControl(command, result)
+		return
+	}
+	rows := make([]subjectgate.HistoryRow, 0, len(page))
+	for _, row := range page {
+		if historyRow, ok := transportableHistoryRow(command.channel, row.Seq, row.Envelope); ok {
+			rows = append(rows, historyRow)
+		}
+	}
+	result.history = &subjectgate.HistoryReceipt{
+		ChannelID: string(command.channel), HeadSeq: head,
+		HasOlder: hasOlder, Rows: rows,
+	}
+	if len(page) > 0 {
+		result.history.OldestSeq = page[0].Seq
+		result.history.NewestSeq = page[len(page)-1].Seq
+	}
+	s.replyControl(command, result)
+}
+
+func (s *Session) replyControl(command controlCommand, result controlResult) {
 	select {
 	case command.reply <- result:
 	case <-s.ctx.Done():
