@@ -21,11 +21,16 @@ var (
 
 // GracePeriod is how long a session outlives its viewer.
 //
-// Fixed, not configurable (design §4.4, 零预留). Its whole job is to survive a
-// wifi blip or a closed tab without turning the session into a durable object:
-// the process is kept, the output produced meanwhile is dropped, and nothing
-// is buffered. See §4.3 — the stream is for experience and需要不精准.
-const GracePeriod = 60 * time.Second
+// Fixed, not configurable (design §4.4, 零预留). The unit is a work sitting,
+// not a network blip: closing the laptop for a meeting and coming back must
+// land you in the same shell, at the same cwd, with the same environment.
+// 60s covered a wifi blip and nothing else — every lid close silently handed
+// out a fresh shell, and 恒不能让人以为自己还站在原地.
+//
+// This is still not a durable object: the process is kept, the output produced
+// meanwhile is dropped, and nothing is buffered. See §4.3 — the stream is for
+// experience and需要不精准.
+const GracePeriod = 6 * time.Hour
 
 // Opener opens the device leg of a session. Implemented by daemonhost.Host.
 type Opener interface {
