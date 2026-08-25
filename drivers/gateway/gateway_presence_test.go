@@ -449,10 +449,10 @@ func TestCloseCleanupNarrow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreign, ok := h.SubjectSlotFor(fid)
-	if !ok {
-		t.Fatal("ghost subject slot unavailable")
-	}
+	// Admit commits membership before the background slot projection necessarily
+	// observes it.  This test is about Close's epoch CAS, not projection timing,
+	// so create the admitted human's slot through the harness' explicit seam.
+	foreign := h.EnsureSubjectSlot(fid)
 	foreign.PublishCurrent(999, subjectgate.LevelOnline)
 	g.coverage[covKey{principal: "ghost", channel: "c"}] = &covEntry{slot: foreign}
 
@@ -461,10 +461,7 @@ func TestCloseCleanupNarrow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	residual, ok := h.SubjectSlotFor(rid)
-	if !ok {
-		t.Fatal("residual subject slot unavailable")
-	}
+	residual := h.EnsureSubjectSlot(rid)
 	residual.PublishCurrent(100, subjectgate.LevelOnline)
 	residual.PublishCurrent(100, subjectgate.LevelOffline)
 

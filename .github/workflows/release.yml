@@ -10,6 +10,11 @@ name: Release
 #   1. 确认 WEB_VERSION 里写的 atoll-web tag 已经存在
 #   2. git tag v0.01 && git push origin v0.01
 #
+# tag 只负责触发，不代表质量结论。发布前必须同时通过：
+#   - 本 tag commit 上与日常 CI 完全相同的 Go lint/race/build；
+#   - WEB_VERSION 指向的精确前端 tag 上的 unit/browser/build。
+# 前端产物只构建一次：web-ci 测过什么，package 就嵌入什么。
+#
 # 出四个平台的包。纯 Go（modernc sqlite，无 CGO），所以一台 ubuntu runner
 # 就能全出，不需要 mac runner。
 
@@ -30,8 +35,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  core-ci:
+    name: backend gate
+    uses: ./.github/workflows/ci.yml
+
+  web-ci:
+    name: paired web gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: resolve paired web version
+        id: web
+        run: |
+          version="$(tr -d '[:space:]' < WEB_VERSION)"
+          [ -n "$version" ] || { echo "WEB_VERSION 为空"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: checkout paired web tag
+        uses: actions/checkout@v4
+        with:
+          repository: wanpengxie/atoll-web
+          ref: ${{ steps.web.outputs.version }}
+          path: .cache/atoll-web
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: .cache/atoll-web/package-lock.json
+
+      - name: install web dependencies
+        working-directory: .cache/atoll-web
+        run: npm ci
+
+      - name: install browser
+        working-directory: .cache/atoll-web
+        run: npx playwright install --with-deps chromium
+
+      - name: test and build paired web
+        working-directory: .cache/atoll-web
+        run: npm run test:ci
+
+      - name: retain tested web bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-web-dist
+          path: .cache/atoll-web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+    outputs:
+      version: ${{ steps.web.outputs.version }}
+
   release:
-    name: build + package + publish
+    name: package + smoke + publish
+    needs: [core-ci, web-ci]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -44,24 +106,20 @@ jobs:
           go-version: '1.25'
           cache: false
 
-      - name: setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
       - name: resolve version
         id: v
         run: |
           version="${{ github.event.inputs.version }}"
           [ -n "$version" ] || version="${GITHUB_REF_NAME}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "web=$(cat WEB_VERSION)" >> "$GITHUB_OUTPUT"
-          echo "atoll $version + atoll-web $(cat WEB_VERSION)"
+          echo "atoll $version + atoll-web ${{ needs.web-ci.outputs.version }}"
 
-      # 走 Makefile 而不是在这里另写一遍：本地 `make web && make package` 出的包
-      # 必须和这里出的是同一个东西，否则发行链路只有 CI 跑过。
-      - name: build web UI
-        run: make web
+      # 恒使用 web-ci 已测试的同一份字节，避免测试后重新 clone/build 的时间窗。
+      - name: restore tested web bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: paired-web-dist
+          path: web/dist
 
       - name: package
         run: make package VERSION=${{ steps.v.outputs.version }}
@@ -80,10 +138,12 @@ jobs:
           kill %1 || true
 
       - name: publish
+        # workflow_dispatch 是不打 tag 的全链路试跑，恒不得暗中创建 release/tag。
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.v.outputs.version }}" \
             --title "atoll ${{ steps.v.outputs.version }}" \
-            --notes "$(printf '装：\n\n```\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | bash\n```\n\n前端：atoll-web %s\n' "$GITHUB_REPOSITORY" "${{ steps.v.outputs.web }}")" \
+            --notes "$(printf '装：\n\n```\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | bash\n```\n\n前端：atoll-web %s\n' "$GITHUB_REPOSITORY" "${{ needs.web-ci.outputs.version }}")" \
             dist/*.tar.gz dist/checksums.txt
