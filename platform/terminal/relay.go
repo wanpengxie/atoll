@@ -23,6 +23,10 @@ func resizeFrame(w io.Writer, cols, rows uint16) error {
 	return link.WritePTYFrame(w, link.PTYFrameResize, link.EncodeResize(cols, rows))
 }
 
+func redrawFrame(w io.Writer) error {
+	return link.WritePTYFrame(w, link.PTYFrameRedraw, nil)
+}
+
 // pumpDevice is the one place where the two halves of this line meet.
 //
 // Every byte the device produces goes to the viewer verbatim (or is dropped if
@@ -115,6 +119,11 @@ func (m *Manager) onOutput(s *Session, payload []byte) {
 		s.tail = appendTail(s.tail, passed[prev:])
 	}
 
+	// 屏幕环恒无条件地喂：它恒不取决于此刻有没有人在看——没人看的时候攒的
+	// 正是"回来要看到的那一屏"。这是这条线上唯一一处"没有 viewer 也要留下
+	// 东西"的地方，也正是它让 attach 恒不再是黑屏。
+	s.replay = appendRing(s.replay, passed, MaxReplay)
+
 	viewer := s.viewer
 	// Non-blocking: a viewer that cannot keep up loses bytes rather than
 	// stalling the device. §4.3 says the stream恒不需精准.
@@ -197,6 +206,15 @@ func (m *Manager) recordLoop() {
 			}
 		}
 	}
+}
+
+// appendRing keeps at most max bytes, discarding from the front.
+func appendRing(buf, add []byte, max int) []byte {
+	buf = append(buf, add...)
+	if len(buf) > max {
+		buf = buf[len(buf)-max:]
+	}
+	return buf
 }
 
 // appendTail keeps at most MaxOutputTail bytes, discarding from the front.

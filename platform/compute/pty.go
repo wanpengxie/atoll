@@ -185,6 +185,15 @@ func runPTY(ctx context.Context, conn net.Conn, open link.PTYOpen, root string) 
 					continue
 				}
 				_ = pty.Setsize(f, &pty.Winsize{Cols: size.Cols, Rows: size.Rows})
+			case link.PTYFrameRedraw:
+				// 回放只还原得了"字节画出来的屏幕"。全屏程序（vim/htop/less）的屏幕
+				// 是它自己画的，恒不会因为收到旧字节而重画——但它们全都在 SIGWINCH
+				// 上重画。信号发给整个前台进程组，和 killShell 同一个道理。
+				if cmd.Process != nil {
+					if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
+						_ = syscall.Kill(-pgid, syscall.SIGWINCH)
+					}
+				}
 			default:
 				// Unknown frame kinds are ignored, never fatal: a door newer
 				// than this device must be able to add one without killing

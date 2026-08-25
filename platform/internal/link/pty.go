@@ -29,7 +29,12 @@ const (
 
 	PTYFrameData   uint8 = 1 // either direction: raw bytes to/from the pty
 	PTYFrameResize uint8 = 2 // door → device: window size changed
-	PTYFrameExit   uint8 = 3 // device → door: the shell exited, payload = code
+	PTYFrameExit   uint8 = 3
+	// PTYFrameRedraw asks the device to poke the foreground process group with
+	// SIGWINCH. Replaying raw bytes restores a shell's screen, but a full-screen
+	// program (vim/htop/less) draws its own screen and恒不会因为收到旧字节而重画。
+	// 它们全都在 SIGWINCH 上重画——所以"普通会话靠回放，全屏程序靠重画"。
+	PTYFrameRedraw uint8 = 4 // device → door: the shell exited, payload = code
 )
 
 // PTYOpen is the host-leg header, written by the server after it has verified

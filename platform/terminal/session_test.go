@@ -1,9 +1,11 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -199,23 +201,23 @@ func TestReattachSupersedesTheOldViewer(t *testing.T) {
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	_, first, err := m.Attach("s1", "c0", "human:root")
+	_, firstAtt, err := m.Attach("s1", "c0", "human:root")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, second, err := m.Attach("s1", "c0", "human:root")
+	_, secondAtt, err := m.Attach("s1", "c0", "human:root")
 	if err != nil {
 		t.Fatalf("owner could not take over its own session: %v", err)
 	}
 	select {
-	case _, open := <-first:
+	case _, open := <-firstAtt.Bytes:
 		if open {
 			t.Fatal("superseded viewer still receiving")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("superseded viewer was not closed")
 	}
-	if second == nil {
+	if secondAtt == nil {
 		t.Fatal("takeover returned no stream")
 	}
 }
@@ -238,7 +240,7 @@ func TestCommandsLandOnTheLedgerAndBytesDoNot(t *testing.T) {
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	_, viewer, err := m.Attach("s1", "c0", "human:root")
+	_, viewerAtt, err := m.Attach("s1", "c0", "human:root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +249,7 @@ func TestCommandsLandOnTheLedgerAndBytesDoNot(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for b := range viewer {
+		for b := range viewerAtt.Bytes {
 			seen = append(seen, b...)
 		}
 	}()
@@ -327,13 +329,13 @@ func TestASlowLedgerDoesNotFreezeTheTerminal(t *testing.T) {
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	_, viewer, err := m.Attach("s1", "c0", "human:root")
+	_, viewerAtt, err := m.Attach("s1", "c0", "human:root")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var seen int64
 	go func() {
-		for b := range viewer {
+		for b := range viewerAtt.Bytes {
 			atomic.AddInt64(&seen, int64(len(b)))
 		}
 	}()
@@ -405,7 +407,8 @@ func TestSessionOpensWithARowAndCommandsHangFromIt(t *testing.T) {
 	// 账本恒不该只记被授权之后的行为而漏掉授权本身。命令再挂到它下面，
 	// 于是一次会话读起来是一件事，恒不是一堆互不相干的根。
 	m, dev, records := newTestManager(t, time.Hour)
-	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
+	s, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
@@ -428,6 +431,15 @@ func TestSessionOpensWithARowAndCommandsHangFromIt(t *testing.T) {
 	if opened.Parent != "" {
 		t.Errorf("开启行不该有父，它就是根：%q", opened.Parent)
 	}
+
+	// 行落账 ≠ 会话已经知道自己的根：openRow 是记录回调里回填的，比 records()
+	// 看到那一行更晚。机器一忙这个窗口就会拉开，命令行的 parent 会是空——那
+	// 恒是真实存在的产品行为，但这条测试要验的是"接上了"，所以必须等到接上。
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.openRow != ""
+	})
 
 	payload := append(append(append([]byte(nil),
 		osc("1337;AtollCmd='make test'")...), osc("133;C")...), osc("133;D;0")...)
@@ -462,4 +474,178 @@ func TestSessionOpensWithARowAndCommandsHangFromIt(t *testing.T) {
 	if last.Event != "closed" || last.Parent != "row-1" {
 		t.Errorf("关闭行不对：%+v", last)
 	}
+}
+
+// —— 屏幕回放 ——
+//
+// 这一组存在的理由，如实记账：原来的形把终端的真相放在浏览器的 DOM 里，于是
+// 切频道、切主视图、刷新页面都会把它弄丢，回来是黑屏。真相恒该在会话这一侧。
+
+func TestAttachReplaysTheScreen(t *testing.T) {
+	m, dev, _ := newTestManager(t, time.Hour)
+	s, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 没有 viewer 的时候产生的输出，正是"回来要看到的那一屏"。
+	_, att, err := m.Attach("s1", "c0", "human:root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(att.Replay) != 0 {
+		t.Fatalf("全新会话恒不该有回放，拿到 %q", att.Replay)
+	}
+	dev.push(link.PTYFrameData, []byte("before you left\n"))
+	waitFor(t, func() bool { return len(readAll(att.Bytes)) >= 0 })
+	drain(att.Bytes)
+	m.Detach(s)
+	dev.push(link.PTYFrameData, []byte("while you were away\n"))
+
+	var back *Attachment
+	waitFor(t, func() bool {
+		_, a, err := m.Attach("s1", "c0", "human:root")
+		if err != nil {
+			return false
+		}
+		back = a
+		return strings.Contains(string(a.Replay), "while you were away")
+	})
+	if !strings.Contains(string(back.Replay), "before you left") {
+		t.Fatalf("回放丢了离开之前那一屏: %q", back.Replay)
+	}
+	if !bytes.HasPrefix(back.Replay, []byte{0x1b, 'c'}) {
+		t.Fatal("回放恒该以 RIS 开头——新 viewer 必须从一个确定的状态开始")
+	}
+}
+
+func TestReplayIsBounded(t *testing.T) {
+	m, dev, _ := newTestManager(t, time.Hour)
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	chunk := bytes.Repeat([]byte("x"), 64<<10)
+	for i := 0; i < 8; i++ { // 512KB，两倍于上限
+		dev.push(link.PTYFrameData, chunk)
+	}
+	waitFor(t, func() bool {
+		_, att, err := m.Attach("s1", "c0", "human:root")
+		return err == nil && len(att.Replay) > MaxReplay/2
+	})
+	_, att, err := m.Attach("s1", "c0", "human:root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// RIS 两字节之外，恒不超过上限。
+	if len(att.Replay) > MaxReplay+2 {
+		t.Fatalf("回放环恒该有界 %d，实际 %d", MaxReplay, len(att.Replay))
+	}
+}
+
+// 快照与订阅必须在同一把锁内产生。分两次拿的话，两次之间到达的字节既不在快照里
+// 也不在订阅里——凭空丢一段，而且恒难复现。这条在设备持续输出时反复 attach，
+// 用字节的连号来验"无丢无重"。
+func TestReplayAndLiveStreamDoNotLoseBytesAtTheSeam(t *testing.T) {
+	m, dev, _ := newTestManager(t, time.Hour)
+	s, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const total = 400
+	writing := make(chan struct{})
+	go func() {
+		defer close(writing)
+		for i := 0; i < total; i++ {
+			dev.push(link.PTYFrameData, []byte(fmt.Sprintf("<%d>", i)))
+		}
+	}()
+
+	seen := ""
+	_, att, err := m.Attach("s1", "c0", "human:root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen += string(att.Replay)
+	deadline := time.After(10 * time.Second)
+	for {
+		done := false
+		select {
+		case b, ok := <-att.Bytes:
+			if !ok {
+				done = true
+				break
+			}
+			seen += string(b)
+		case <-time.After(120 * time.Millisecond):
+			done = true
+		case <-deadline:
+			t.Fatal("timeout")
+		}
+		if !done {
+			continue
+		}
+		if strings.Contains(seen, fmt.Sprintf("<%d>", total-1)) {
+			break
+		}
+		// 中途重新 attach：接缝正是在这里发生的。
+		m.Detach(s)
+		_, att, err = m.Attach("s1", "c0", "human:root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen += string(att.Replay)
+	}
+	<-writing
+	// 每个标记恒该出现，且恒该按序。回放会与之前看过的内容重叠——那是允许的
+	// （RIS 之后重画同一屏），这里验的是**恒不缺号**。
+	last := -1
+	for i := 0; i < total; i++ {
+		idx := strings.LastIndex(seen, fmt.Sprintf("<%d>", i))
+		if idx < 0 {
+			t.Fatalf("接缝处丢了第 %d 个标记", i)
+		}
+		if idx < last {
+			t.Fatalf("第 %d 个标记乱序", i)
+		}
+		last = idx
+	}
+}
+
+func drain(ch <-chan []byte) {
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		case <-time.After(80 * time.Millisecond):
+			return
+		}
+	}
+}
+
+func readAll(ch <-chan []byte) []byte {
+	var out []byte
+	for {
+		select {
+		case b, ok := <-ch:
+			if !ok {
+				return out
+			}
+			out = append(out, b...)
+		case <-time.After(50 * time.Millisecond):
+			return out
+		}
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("条件在 5s 内没有成立")
 }

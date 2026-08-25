@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -31,6 +32,16 @@ var (
 // meanwhile is dropped, and nothing is buffered. See §4.3 — the stream is for
 // experience and需要不精准.
 const GracePeriod = 6 * time.Hour
+
+// MaxReplay 是会话回放环的上限。恒定，恒不设开关。
+//
+// 会话恒持有一块"屏幕"：attach 时先把它吐给新的 viewer，人才看得到走之前那一屏。
+// 这恒不是给流加可靠性机制（§4.3 前半仍然成立：恒不做 exactly-once、恒不补发、
+// 恒不加交付语义）——tmux 也恒不把自己的屏幕叫做可靠性机制。屏幕是终端的状态。
+//
+// 256KB：一屏 200×50 带 SGR 约 40KB，这里放得下几屏，够"回来看到走之前那一屏
+// 加一点上下文"；同时恒有界，一个被遗弃的会话最多占这么多。
+const MaxReplay = 256 << 10
 
 // Opener opens the device leg of a session. Implemented by daemonhost.Host.
 type Opener interface {
@@ -93,6 +104,9 @@ type Session struct {
 	openCmd  time.Time
 	tail     []byte
 	inCmd    bool
+	// replay 是给屏幕的环（MaxReplay）；tail 是给账本的每命令尾部（MaxOutputTail）。
+	// 两者量纲不同、用途不同，恒不合并。
+	replay   []byte
 	// ended is closed when the session is over for good, and endReason says
 	// why. A viewer that cannot tell "the shell exited" from "the connection
 	// dropped" will reconnect into a brand-new shell, which is never what the
@@ -239,7 +253,18 @@ func (m *Manager) Open(ctx context.Context, id string, chID channel.ID, caller a
 // in A's session id while claiming B — no privilege is gained (the session is
 // still their own), but the door would have judged one channel and served
 // another, and每条命令记录会落进 A 而调用方自称在 B。恒不留这种错位。
-func (m *Manager) Attach(id string, chID channel.ID, caller actor.ActorID) (*Session, <-chan []byte, error) {
+// Attachment 是一次 attach 的全部所得：先回放的那块屏幕，再往下的直播。
+//
+// 两者恒须在**同一把锁内**产生。分两次拿（先 Attach 再读 replay）会让两次加锁
+// 之间到达的字节既不在快照里、也不在订阅里——凭空丢一段，而且恒难复现。
+type Attachment struct {
+	// Replay 是 attach 时刻的屏幕。恒可为空（全新会话）。
+	Replay []byte
+	// Bytes 是从 attach 时刻起的直播。
+	Bytes <-chan []byte
+}
+
+func (m *Manager) Attach(id string, chID channel.ID, caller actor.ActorID) (*Session, *Attachment, error) {
 	m.mu.Lock()
 	s := m.sessions[id]
 	m.mu.Unlock()
@@ -275,7 +300,27 @@ func (m *Manager) Attach(id string, chID channel.ID, caller actor.ActorID) (*Ses
 	// dropped, never queued (§4.3-2: 断线期间的输出恒丢).
 	ch := make(chan []byte, 256)
 	s.viewer = ch
-	return s, ch, nil
+	return s, &Attachment{Replay: replayFrom(s.replay), Bytes: ch}, nil
+}
+
+// replaySnapshot 恒只在 s.mu 下调用。
+//
+// 环回绕后首字节可能落在一个转义序列的肚子里，于是从环首推进到第一个 '\n' 之后
+// 再发——换行恒不出现在 CSI 序列内部。误差上限是糊一行，与 §4.3「恒不需精准」相称。
+// 前面再补一个 RIS 做完整复位，让新 viewer 从一个确定的状态开始。
+func replayFrom(buf []byte) []byte {
+	if len(buf) == 0 {
+		return nil
+	}
+	body := buf
+	if len(buf) >= MaxReplay {
+		if cut := bytes.IndexByte(buf, '\n'); cut >= 0 && cut+1 < len(buf) {
+			body = buf[cut+1:]
+		}
+	}
+	out := make([]byte, 0, len(body)+2)
+	out = append(out, 0x1b, 'c') // RIS
+	return append(out, body...)
 }
 
 // Detach unbinds the viewer and starts the grace clock. The shell keeps
@@ -329,6 +374,20 @@ func (s *Session) Resize(cols, rows uint16) error {
 		return ErrNoSession
 	}
 	return resizeFrame(dev, cols, rows)
+}
+
+// Redraw asks the far shell's foreground process group to repaint (SIGWINCH).
+// 回放还原得了字节画出来的屏幕，还原不了全屏程序自己画的那一块——所以 attach
+// 恒在回放之后再补这一下。
+func (s *Session) Redraw() error {
+	s.mu.Lock()
+	dev := s.dev
+	closed := s.closed
+	s.mu.Unlock()
+	if closed || dev == nil {
+		return ErrNoSession
+	}
+	return redrawFrame(dev)
 }
 
 // Close ends a session for good: the shell dies, the viewer is dropped.
