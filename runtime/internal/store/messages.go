@@ -325,6 +325,68 @@ func (m *messages) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limi
 	return out, scanned, nil
 }
 
+// ReadVisibleBeforeSeq selects a visible page backwards from the exclusive
+// keyset cursor. SQLite applies ORDER BY/LIMIT at the tail; the small bounded
+// result is reversed before returning so every caller still folds normal
+// ascending ledger order. A zero cursor addresses the current snapshot tail.
+func (m *messages) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+	if limit <= 0 {
+		limit = 256
+	}
+	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("store: visible history begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var head int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM messages`).Scan(&head); err != nil {
+		return nil, 0, false, fmt.Errorf("store: visible history head: %w", err)
+	}
+	anchor := beforeSeq
+	if anchor <= 0 || anchor > head+1 {
+		anchor = head + 1
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+                  sender_kind, sender_id,
+                  kind, type, payload,
+                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
+                  visibility, audience,
+                  expires_at,
+                  is_terminal, seq
+             FROM messages m
+             WHERE m.seq < ? AND m.visibility <> 'system'
+             ORDER BY m.seq DESC LIMIT ?`
+	rows, err := tx.QueryContext(ctx, q, anchor, limit+1)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("store: visible history: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]storespec.StoredRow, 0, limit+1)
+	for rows.Next() {
+		row, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("store: visible history scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, false, err
+	}
+	hasOlder := len(out) > limit
+	if hasOlder {
+		out = out[:limit]
+	}
+	for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
+		out[left], out[right] = out[right], out[left]
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, 0, false, err
+	}
+	return out, head, hasOlder, nil
+}
+
 // OpenRequestsForActor returns ALL open request rows whose first audience
 // member is actorID and that have no terminal response yet — regardless of
 // expires_at. It is unbounded by construction: closing a dead actor's

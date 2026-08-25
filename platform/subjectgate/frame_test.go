@@ -74,6 +74,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		{"resource", FrameResource, ResourcePayload{ChannelID: "c1", Op: ResRead, ResourceID: "res:1"}},
 		{"observe", FrameObserve, ObservePayload{ChannelID: "c1"}},
 		{"unobserve", FrameUnobserve, UnobservePayload{ChannelID: "c1"}},
+		{"history_before", FrameHistoryBefore, HistoryBeforePayload{ChannelID: "c1", BeforeSeq: 7, Limit: 50}},
 		{"feed", FrameFeed, FeedPayload{ChannelID: "c1", Seq: 5, Envelope: json.RawMessage(`{}`)}},
 		{"receipt", FrameReceipt, SubmitReceipt{MessageID: "m1"}},
 		{"error", FrameError, ErrorPayload{Frame: "submit", Code: CodeBadPayload, Detail: "bad"}},
@@ -129,6 +130,7 @@ func TestUpstreamUnknownFieldsRejected(t *testing.T) {
 		`{"v":2,"frame_type":"resource","ref":"r1","payload":{"channel_id":"c1","op":"read","resource_id":"r1","unexpected":true}}`,
 		`{"v":2,"frame_type":"observe","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
 		`{"v":2,"frame_type":"unobserve","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":2,"frame_type":"history_before","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
 	} {
 		f, err := ParseUpstreamFrame([]byte(b))
 		if err == nil {

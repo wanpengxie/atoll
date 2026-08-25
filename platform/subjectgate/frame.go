@@ -30,14 +30,15 @@ const (
 	// Upstream control.
 	FrameAttach FrameType = "attach"
 	// Upstream business (the person's actions, driven onto the cell's own caps).
-	FrameSubmit      FrameType = "submit"
-	FrameResolve     FrameType = "resolve"
-	FrameCancel      FrameType = "cancel"
-	FrameAfter       FrameType = "after"
-	FrameCancelTimer FrameType = "cancel_timer"
-	FrameResource    FrameType = "resource"
-	FrameObserve     FrameType = "observe"
-	FrameUnobserve   FrameType = "unobserve"
+	FrameSubmit        FrameType = "submit"
+	FrameResolve       FrameType = "resolve"
+	FrameCancel        FrameType = "cancel"
+	FrameAfter         FrameType = "after"
+	FrameCancelTimer   FrameType = "cancel_timer"
+	FrameResource      FrameType = "resource"
+	FrameObserve       FrameType = "observe"
+	FrameUnobserve     FrameType = "unobserve"
+	FrameHistoryBefore FrameType = "history_before"
 	// Downstream.
 	FrameFeed         FrameType = "feed"
 	FrameReceipt      FrameType = "receipt"
@@ -242,6 +243,8 @@ func ParseUpstreamFrame(b []byte) (Frame, error) {
 		err = validatePayloadStrict[ObservePayload](f.Payload)
 	case FrameUnobserve:
 		err = validatePayloadStrict[UnobservePayload](f.Payload)
+	case FrameHistoryBefore:
+		err = validatePayloadStrict[HistoryBeforePayload](f.Payload)
 	default:
 		return f, fmt.Errorf("%w: %q", ErrUnknownFrameType, f.Type)
 	}
@@ -384,6 +387,15 @@ type UnobservePayload struct {
 	ChannelID string `json:"channel_id"`
 }
 
+// HistoryBeforePayload reads one bounded visible page strictly before BeforeSeq.
+// BeforeSeq == 0 anchors the query at the channel's current head. History is a
+// read control on the attached human connection; it never enters the ledger.
+type HistoryBeforePayload struct {
+	ChannelID string `json:"channel_id"`
+	BeforeSeq int64  `json:"before_seq,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
 // ResourceOp is the closed resource-verb enum (build spec §S2 resource row).
 type ResourceOp string
 
@@ -449,6 +461,34 @@ type AttachReceipt struct {
 	Boot                string            `json:"boot,omitempty"`
 	Memberships         []MembershipEntry `json:"memberships"`
 	MembershipsComplete bool              `json:"memberships_complete"`
+	History             []HistoryEntry    `json:"history,omitempty"`
+}
+
+// HistoryEntry describes the bounded initial tail selected for one membership.
+// Truncated says the submitted device cursor was older than this tail, so the
+// server deliberately starts at OldestSeq instead of replaying an unbounded gap.
+type HistoryEntry struct {
+	ChannelID string `json:"channel_id"`
+	HeadSeq   int64  `json:"head_seq"`
+	OldestSeq int64  `json:"oldest_seq,omitempty"`
+	HasOlder  bool   `json:"has_older"`
+	Truncated bool   `json:"truncated"`
+}
+
+type HistoryRow struct {
+	Seq      int64           `json:"seq"`
+	Envelope json.RawMessage `json:"envelope"`
+}
+
+// HistoryReceipt is an on-demand page. Rows are always ascending for direct
+// insertion into the same fold used by live feed frames.
+type HistoryReceipt struct {
+	ChannelID string       `json:"channel_id"`
+	HeadSeq   int64        `json:"head_seq"`
+	OldestSeq int64        `json:"oldest_seq,omitempty"`
+	NewestSeq int64        `json:"newest_seq,omitempty"`
+	HasOlder  bool         `json:"has_older"`
+	Rows      []HistoryRow `json:"rows"`
 }
 
 // MembershipEntry names one channel the attached principal holds membership

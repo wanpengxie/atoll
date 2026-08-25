@@ -63,6 +63,9 @@ func (obsViewStub) OwnerPrincipal(context.Context) (string, bool, error) { retur
 func (obsViewStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, error) {
 	return nil, 0, nil
 }
+func (obsViewStub) ReadVisibleBeforeSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, bool, error) {
+	return nil, 0, false, nil
+}
 func (obsViewStub) IsActive(context.Context, actor.ActorID) (bool, error) { return true, nil }
 func (obsViewStub) ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return channelspec.ActorFacts{}, false, nil

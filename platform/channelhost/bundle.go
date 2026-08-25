@@ -29,6 +29,7 @@ type View interface {
 	ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, error)
+	ReadVisibleBeforeSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, bool, error)
 	IsActive(context.Context, actor.ActorID) (bool, error)
 	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 	IsBound(context.Context, string) (bool, error)
@@ -67,6 +68,9 @@ func (a viewAdapter) OwnerPrincipal(ctx context.Context) (string, bool, error) {
 }
 func (a viewAdapter) ReadVisibleAfterSeq(ctx context.Context, seq int64, limit int) ([]storespec.StoredRow, int64, error) {
 	return a.home.View().ReadVisibleAfterSeq(ctx, seq, limit)
+}
+func (a viewAdapter) ReadVisibleBeforeSeq(ctx context.Context, seq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+	return a.home.View().ReadVisibleBeforeSeq(ctx, seq, limit)
 }
 func (a viewAdapter) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
 	return a.home.View().IsActive(ctx, id)

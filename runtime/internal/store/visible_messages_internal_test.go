@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -99,6 +100,69 @@ func TestReadVisibleAfterSeqSnapshotCursorDoesNotSkipLaterInsert(t *testing.T) {
 	rows, next, err := messages.ReadVisibleAfterSeq(ctx, scanned, 100)
 	if err != nil || len(rows) != 1 || rows[0].Seq != int64(second.Seq) || next != int64(second.Seq) {
 		t.Fatalf("boundary read rows=%v next=%d err=%v", rowSeqs(rows), next, err)
+	}
+}
+
+func TestReadVisibleBeforeSeqBoundsTailAndPagesBackwards(t *testing.T) {
+	ctx := context.Background()
+	messages, register := openVisibleMessages(t)
+	register("alice", "principal-a")
+
+	publicSeqs := make([]int64, 0, 5)
+	for i := 0; i < 5; i++ {
+		row, err := messages.Append(ctx, visibleEnvelope("public-"+string(rune('a'+i)), "alice", message.VisibilityPublic), false, storespec.AppendMetadata{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		publicSeqs = append(publicSeqs, int64(row.Seq))
+		if i == 2 {
+			if _, err := messages.Append(ctx, visibleEnvelope("system-gap", "alice", message.VisibilitySystem), false, storespec.AppendMetadata{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	rows, head, hasOlder, err := messages.ReadVisibleBeforeSeq(ctx, 0, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rowSeqs(rows), publicSeqs[2:]; !slices.Equal(got, want) {
+		t.Fatalf("tail rows=%v want=%v", got, want)
+	}
+	if head < publicSeqs[len(publicSeqs)-1] || !hasOlder {
+		t.Fatalf("tail head=%d hasOlder=%v", head, hasOlder)
+	}
+
+	rows, sameHead, hasOlder, err := messages.ReadVisibleBeforeSeq(ctx, rows[0].Seq, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rowSeqs(rows), publicSeqs[:2]; !slices.Equal(got, want) {
+		t.Fatalf("older rows=%v want=%v", got, want)
+	}
+	if sameHead != head || hasOlder {
+		t.Fatalf("older head=%d want=%d hasOlder=%v", sameHead, head, hasOlder)
+	}
+}
+
+func TestReadVisibleBeforeSeqSnapshotHeadHandsOffToForwardRead(t *testing.T) {
+	ctx := context.Background()
+	messages, register := openVisibleMessages(t)
+	register("alice", "principal-a")
+	if _, err := messages.Append(ctx, visibleEnvelope("tail", "alice", message.VisibilityPublic), false, storespec.AppendMetadata{}); err != nil {
+		t.Fatal(err)
+	}
+	rows, head, _, err := messages.ReadVisibleBeforeSeq(ctx, 0, 50)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("tail rows=%v head=%d err=%v", rowSeqs(rows), head, err)
+	}
+	later, err := messages.Append(ctx, visibleEnvelope("after-snapshot", "alice", message.VisibilityPublic), false, storespec.AppendMetadata{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, next, err := messages.ReadVisibleAfterSeq(ctx, head, 50)
+	if err != nil || len(rows) != 1 || rows[0].Seq != int64(later.Seq) || next != int64(later.Seq) {
+		t.Fatalf("handoff rows=%v next=%d err=%v", rowSeqs(rows), next, err)
 	}
 }
 

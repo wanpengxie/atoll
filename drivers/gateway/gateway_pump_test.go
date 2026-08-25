@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sync"
 	"testing"
@@ -20,6 +21,77 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+func TestAttachBacklogStartsFromBoundedTail(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "bounded-tail"
+	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, defaultHistoryLimit+35)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	wantAll := sourceSeqs(t, h)
+	want := wantAll[len(wantAll)-defaultHistoryLimit:]
+
+	s, _ := g.Attach(principal, map[channel.ID]int64{"c": 0})
+	feed, stop := observeFeed(s)
+	if !s.PrimeFeed() {
+		t.Fatal("PrimeFeed refused")
+	}
+	grants := s.PrepareInitialHistory(defaultHistoryLimit)
+	if len(grants) != 1 || !grants[0].Truncated || !grants[0].HasOlder || grants[0].OldestSeq != want[0] {
+		t.Fatalf("unexpected attach history grant: %+v", grants)
+	}
+	s.FlushInitialHistory()
+	s.LaunchFeed()
+	waitFor(t, func() bool { return len(feed.sequences("c")) == len(want) }, "bounded attach tail")
+	s.Close()
+	stop()
+	if got := feed.sequences("c"); !slices.Equal(got, want) {
+		t.Fatalf("attach replay was not the bounded tail: got=%v want=%v", got, want)
+	}
+}
+
+func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "history-page"
+	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, 12)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	all := sourceSeqs(t, h)
+	head := all[len(all)-1]
+
+	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head})
+	s.StartFeed()
+	defer s.Close()
+	request, err := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-1", subjectgate.HistoryBeforePayload{
+		ChannelID: "c", BeforeSeq: 0, Limit: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := s.Upstream(request)
+	if response.Type != subjectgate.FrameReceipt {
+		t.Fatalf("history request failed: %+v", response)
+	}
+	var page subjectgate.HistoryReceipt
+	if err := json.Unmarshal(response.Payload, &page); err != nil {
+		t.Fatal(err)
+	}
+	want := all[len(all)-3:]
+	got := make([]int64, 0, len(page.Rows))
+	for _, row := range page.Rows {
+		got = append(got, row.Seq)
+	}
+	if !slices.Equal(got, want) || !page.HasOlder {
+		t.Fatalf("unexpected history page: got=%v want=%v page=%+v", got, want, page)
+	}
+	if cursor := s.lane.cursor.at("c"); cursor != head {
+		t.Fatalf("history read moved live cursor: got=%d want=%d", cursor, head)
+	}
+}
 
 // TestStaticBacklogFullDelivery (DoD-7⑤): a channel with a static backlog >2×feedBatch
 // and zero new writes is fully delivered — the pump's 积压续跑 keeps a channel runnable

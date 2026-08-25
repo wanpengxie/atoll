@@ -98,6 +98,10 @@ func (v View) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int
 	return v.visible.ReadVisibleAfterSeq(ctx, afterSeq, limit)
 }
 
+func (v View) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+	return v.visible.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+}
+
 // IsActive is the narrow membership question used by boundary readers before
 // they enter the unscoped visible-log read port.
 func (v View) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {

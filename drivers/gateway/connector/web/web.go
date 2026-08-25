@@ -126,6 +126,8 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 	if !sess.PrimeFeed() {
 		return
 	}
+	history := sess.PrepareInitialHistory(0)
+	slices.SortFunc(history, func(a, b subjectgate.HistoryEntry) int { return strings.Compare(a.ChannelID, b.ChannelID) })
 	routes, complete := sess.MembershipSnapshot()
 	entries := make([]subjectgate.MembershipEntry, 0, len(routes))
 	for _, route := range routes {
@@ -137,8 +139,10 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		Boot:                c.boot,
 		Memberships:         entries,
 		MembershipsComplete: complete,
+		History:             history,
 	})
 	sess.Send(receipt)
+	sess.FlushInitialHistory()
 	sess.LaunchFeed()
 
 	// Reader loop: the SINGLE ws reader. detach is整删 (no client-visible unbind);

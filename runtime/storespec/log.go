@@ -148,6 +148,11 @@ type MessageQuery interface {
 // retained for the delivery pump and audit internals.
 type VisibleMessageQuery interface {
 	ReadVisibleAfterSeq(context.Context, int64, int) ([]StoredRow, int64, error)
+	// ReadVisibleBeforeSeq returns one bounded page selected backwards from an
+	// exclusive seq cursor. beforeSeq == 0 means the current tail. Rows cross
+	// the store boundary in ascending ledger order; head is the transaction's
+	// snapshot head and hasOlder reports another visible row before this page.
+	ReadVisibleBeforeSeq(context.Context, int64, int) (rows []StoredRow, head int64, hasOlder bool, err error)
 }
 
 // RequestLookup recovers an original request envelope by id.

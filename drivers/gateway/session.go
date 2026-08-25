@@ -19,6 +19,11 @@ func defaultEpoch() int64 { return time.Now().UnixNano() }
 // feedBatch is the read pump's per-poll, per-channel row budget (照 ws.go wsTail 100).
 const feedBatch = 100
 
+const (
+	defaultHistoryLimit = 200
+	maxHistoryLimit     = 200
+)
+
 // subscription is one channel the session's read pump is currently following (spec
 // §3.2 收敛对象甲, current = 订阅集). PUMP-OWNED — created/mutated/read only by the
 // runFeed goroutine, so no lock. lastOK anchors the T_stale lease; paused = lease
@@ -38,17 +43,26 @@ type controlKind uint8
 const (
 	controlObserve controlKind = iota + 1
 	controlUnobserve
+	controlHistoryBefore
 )
 
 type controlCommand struct {
 	kind    controlKind
 	channel channel.ID
+	before  int64
+	limit   int
 	reply   chan controlResult
 }
 
 type controlResult struct {
-	code   string
-	detail string
+	code    string
+	detail  string
+	history *subjectgate.HistoryReceipt
+}
+
+type initialTail struct {
+	head int64
+	rows []subjectgate.HistoryRow
 }
 
 // eligState is the session's资格账 snapshot (spec §3.2 v0.8, 六轮 P1-2 修形): the pump
@@ -105,9 +119,10 @@ type Session struct {
 
 	// subs is the订阅集 (PUMP-OWNED, no lock). elig is the資格账 the pump publishes
 	// for Upstream (atomic single-writer).
-	subs     map[channel.ID]*subscription
-	elig     atomic.Pointer[eligState]
-	controls chan controlCommand
+	subs         map[channel.ID]*subscription
+	elig         atomic.Pointer[eligState]
+	controls     chan controlCommand
+	initialTails map[channel.ID]initialTail
 
 	onceClose sync.Once
 }
@@ -118,12 +133,13 @@ type Session struct {
 // EMPTY (报到 ack — attach is no longer a binding grant). Refused after Close.
 func (g *Gateway) Attach(principal string, since map[channel.ID]int64) (*Session, error) {
 	s := &Session{
-		gw:        g,
-		principal: principal,
-		lane:      newLane(newCursor(since)),
-		wake:      make(chan struct{}, 1),
-		subs:      map[channel.ID]*subscription{},
-		controls:  make(chan controlCommand, 32),
+		gw:           g,
+		principal:    principal,
+		lane:         newLane(newCursor(since)),
+		wake:         make(chan struct{}, 1),
+		subs:         map[channel.ID]*subscription{},
+		controls:     make(chan controlCommand, 32),
+		initialTails: map[channel.ID]initialTail{},
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.elig.Store(&eligState{routes: map[channel.ID]Route{}, paused: map[channel.ID]struct{}{}, failed: map[channel.ID]struct{}{}})
@@ -197,6 +213,73 @@ func (s *Session) MembershipSnapshot() (routes []Route, complete bool) {
 		routes = append(routes, r)
 	}
 	return routes, st.resolved && !st.globalErr && len(st.failed) == 0
+}
+
+// PrepareInitialHistory replaces an unbounded catch-up with a bounded tail for
+// membership channels whose submitted device cursor lies before that tail. It
+// runs after PrimeFeed and before LaunchFeed, while subs and the lane cursor are
+// still single-goroutine owned. A failed read leaves the old replay behavior in
+// place; availability failures must not manufacture a gap.
+func (s *Session) PrepareInitialHistory(limit int) []subjectgate.HistoryEntry {
+	limit = normalizeHistoryLimit(limit)
+	entries := make([]subjectgate.HistoryEntry, 0, len(s.subs))
+	for ch, sub := range s.subs {
+		if sub.temporary || sub.paused {
+			continue
+		}
+		rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
+		active, aerr := sub.route.Bundle.View().IsActive(rctx, sub.reader.ActorID)
+		if aerr != nil || !active {
+			cancel()
+			continue
+		}
+		stored, head, hasOlder, err := sub.route.Bundle.View().ReadVisibleBeforeSeq(rctx, 0, limit)
+		cancel()
+		if err != nil {
+			continue
+		}
+		rows := make([]subjectgate.HistoryRow, 0, len(stored))
+		for _, row := range stored {
+			if historyRow, ok := transportableHistoryRow(ch, row.Seq, row.Envelope); ok {
+				rows = append(rows, historyRow)
+			}
+		}
+		oldest := int64(0)
+		if len(stored) > 0 {
+			oldest = stored[0].Seq
+		}
+		floor := head
+		if oldest > 0 {
+			floor = oldest - 1
+		}
+		truncated := s.lane.cursor.at(ch) < floor
+		entries = append(entries, subjectgate.HistoryEntry{
+			ChannelID: string(ch), HeadSeq: head, OldestSeq: oldest,
+			HasOlder: hasOlder, Truncated: truncated,
+		})
+		if truncated {
+			s.initialTails[ch] = initialTail{head: head, rows: rows}
+		}
+	}
+	return entries
+}
+
+// FlushInitialHistory puts the prepared tail behind the attach receipt and
+// advances the live cursor to the captured head. LaunchFeed then continues
+// strictly after that snapshot, so writes racing the attach are not lost.
+func (s *Session) FlushInitialHistory() {
+	for ch, tail := range s.initialTails {
+		for _, row := range tail.rows {
+			fr, err := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
+				ChannelID: string(ch), Seq: row.Seq, Envelope: row.Envelope,
+			})
+			if err == nil {
+				s.Send(fr)
+			}
+		}
+		s.lane.cursor.advance(ch, tail.head)
+		delete(s.initialTails, ch)
+	}
 }
 
 // beginFeed is the SESSION half of泵登记 (统一会话闸, 五轮 P1-3): closed, 泵登记, and
@@ -590,12 +673,130 @@ func (s *Session) handleControl(command controlCommand) {
 			sub.cancel()
 			delete(s.subs, command.channel)
 		}
+	case controlHistoryBefore:
+		sub := s.subs[command.channel]
+		if sub == nil {
+			result.code, result.detail = s.readEligibilityError(command.channel)
+			break
+		}
+		if sub.paused {
+			result.code, result.detail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
+			break
+		}
+		if sub.temporary {
+			s.refreshObservation(command.channel, sub, s.gw.clock.Now())
+			sub = s.subs[command.channel]
+			if sub == nil || !sub.temporary {
+				result.code, result.detail = subjectgate.CodeUnavailable, "observation unavailable — retry"
+				break
+			}
+		}
+		rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
+		if sub.reader.Mode == ReaderMember {
+			active, err := sub.route.Bundle.View().IsActive(rctx, sub.reader.ActorID)
+			if err != nil {
+				cancel()
+				result.code, result.detail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
+				break
+			}
+			if !active {
+				cancel()
+				result.code, result.detail = subjectgate.CodeForbidden, "no eligibility for channel"
+				break
+			}
+		}
+		stored, head, hasOlder, err := sub.route.Bundle.View().ReadVisibleBeforeSeq(rctx, command.before, command.limit)
+		cancel()
+		if err != nil {
+			result.code, result.detail = subjectgate.CodeUnavailable, "history unavailable — retry"
+			break
+		}
+		rows := make([]subjectgate.HistoryRow, 0, len(stored))
+		for _, row := range stored {
+			if historyRow, ok := transportableHistoryRow(command.channel, row.Seq, row.Envelope); ok {
+				rows = append(rows, historyRow)
+			}
+		}
+		page := &subjectgate.HistoryReceipt{
+			ChannelID: string(command.channel), HeadSeq: head, HasOlder: hasOlder, Rows: rows,
+		}
+		if len(stored) > 0 {
+			page.OldestSeq, page.NewestSeq = stored[0].Seq, stored[len(stored)-1].Seq
+		}
+		result.history = page
 	default:
 		result.code, result.detail = subjectgate.CodeBadPayload, "unknown session control command"
 	}
 	select {
 	case command.reply <- result:
 	case <-s.ctx.Done():
+	}
+}
+
+func (s *Session) readEligibilityError(ch channel.ID) (string, string) {
+	st := s.elig.Load()
+	if st != nil {
+		if _, ok := st.paused[ch]; ok {
+			return subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
+		}
+		if _, ok := st.failed[ch]; ok || st.globalErr {
+			return subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
+		}
+	}
+	return subjectgate.CodeForbidden, "no eligibility for channel"
+}
+
+func normalizeHistoryLimit(limit int) int {
+	if limit <= 0 {
+		return defaultHistoryLimit
+	}
+	if limit > maxHistoryLimit {
+		return maxHistoryLimit
+	}
+	return limit
+}
+
+func transportableHistoryRow(ch channel.ID, seq int64, value any) (subjectgate.HistoryRow, bool) {
+	envelope, err := json.Marshal(value)
+	if err != nil {
+		return subjectgate.HistoryRow{}, false
+	}
+	row := subjectgate.HistoryRow{Seq: seq, Envelope: envelope}
+	frame, err := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
+		ChannelID: string(ch), Seq: seq, Envelope: envelope,
+	})
+	if err != nil {
+		return subjectgate.HistoryRow{}, false
+	}
+	if _, err := frame.Marshal(); err != nil {
+		return subjectgate.HistoryRow{}, false
+	}
+	return row, true
+}
+
+// historyFrame enforces the physical 512KB frame cap without turning a page
+// containing several large messages into a dropped receipt. Oldest rows are
+// trimmed first, keeping the returned page contiguous at the requested anchor;
+// the client can recover the trimmed prefix with the returned oldest cursor.
+func historyFrame(ref string, page subjectgate.HistoryReceipt) (subjectgate.Frame, error) {
+	for {
+		frame, err := subjectgate.NewFrame(subjectgate.FrameReceipt, ref, page)
+		if err != nil {
+			return subjectgate.Frame{}, err
+		}
+		if _, err = frame.Marshal(); err == nil {
+			return frame, nil
+		} else if !errors.Is(err, subjectgate.ErrFrameTooBig) || len(page.Rows) == 0 {
+			return subjectgate.Frame{}, err
+		}
+		page.Rows = page.Rows[1:]
+		page.HasOlder = true
+		if len(page.Rows) == 0 {
+			page.OldestSeq, page.NewestSeq = 0, 0
+		} else {
+			page.OldestSeq = page.Rows[0].Seq
+			page.NewestSeq = page.Rows[len(page.Rows)-1].Seq
+		}
 	}
 }
 
@@ -762,17 +963,26 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 	switch f.Type {
 	case subjectgate.FrameAttach:
 		return errFrame(subjectgate.CodeBadPayload, "attach is the opening frame, not a mid-stream verb")
-	case subjectgate.FrameObserve, subjectgate.FrameUnobserve:
+	case subjectgate.FrameObserve, subjectgate.FrameUnobserve, subjectgate.FrameHistoryBefore:
 		chID, derr := channelIDOf(f)
 		if derr != nil || subjectgate.RequireChannelID(chID) != nil {
 			return errFrame(subjectgate.CodeBadPayload, "missing required channel_id")
 		}
 		kind := controlObserve
+		command := controlCommand{channel: channel.ID(chID)}
 		if f.Type == subjectgate.FrameUnobserve {
 			kind = controlUnobserve
+		} else if f.Type == subjectgate.FrameHistoryBefore {
+			kind = controlHistoryBefore
+			var payload subjectgate.HistoryBeforePayload
+			if err := f.DecodePayload(&payload); err != nil || payload.BeforeSeq < 0 || payload.Limit < 0 || payload.Limit > maxHistoryLimit {
+				return errFrame(subjectgate.CodeBadPayload, "history before_seq must be non-negative and limit must be between 0 and 200")
+			}
+			command.before = payload.BeforeSeq
+			command.limit = normalizeHistoryLimit(payload.Limit)
 		}
 		reply := make(chan controlResult, 1)
-		command := controlCommand{kind: kind, channel: channel.ID(chID), reply: reply}
+		command.kind, command.reply = kind, reply
 		select {
 		case s.controls <- command:
 		case <-s.ctx.Done():
@@ -782,6 +992,16 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 		case result := <-reply:
 			if result.code != "" {
 				return errFrame(result.code, result.detail)
+			}
+			if f.Type == subjectgate.FrameHistoryBefore {
+				if result.history == nil {
+					return errFrame(subjectgate.CodeUnavailable, "history unavailable — retry")
+				}
+				frame, err := historyFrame(f.Ref, *result.history)
+				if err != nil {
+					return errFrame(subjectgate.CodeUnavailable, "history page exceeds transport limit")
+				}
+				return frame
 			}
 			if f.Type == subjectgate.FrameObserve {
 				frame, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.ObserveReceipt{ChannelID: chID})
