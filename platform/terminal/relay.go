@@ -99,6 +99,9 @@ func (m *Manager) onOutput(s *Session, payload []byte) {
 				// reader gets text, not colour codes — and so a recorded OSC
 				// mark can never be mistaken for a live one.
 				OutputTail: StripControl(string(s.tail)),
+				// 挂到会话的开启行：一次会话读起来是一件事，恒不是一堆
+				// 互不相干的根。
+				Parent: s.openRow,
 			}
 			if s.inCmd && !s.openCmd.IsZero() {
 				rec.DurationMs = time.Since(s.openCmd).Milliseconds()
@@ -149,13 +152,32 @@ func (m *Manager) enqueue(chID channel.ID, caller actor.ActorID, rec Record) {
 	}
 }
 
+// enqueueOpen queues the session's opening row and remembers the id it lands
+// under, so later rows can hang from it. The id is only known after the write,
+// hence a callback rather than a return value.
+func (m *Manager) enqueueOpen(s *Session, rec Record) {
+	job := recordJob{ch: s.Channel, caller: s.Caller, rec: rec, onWritten: func(id string) {
+		s.mu.Lock()
+		s.openRow = id
+		s.mu.Unlock()
+	}}
+	select {
+	case m.records <- job:
+	default:
+		m.dropped.Add(1)
+	}
+}
+
 // recordLoop drains the queue. Each write gets its own deadline so one stuck
 // delivery cannot wedge every row behind it.
 func (m *Manager) recordLoop() {
 	write := func(job recordJob) {
 		ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
 		defer cancel()
-		m.record(ctx, job.ch, job.caller, job.rec)
+		id := m.record(ctx, job.ch, job.caller, job.rec)
+		if job.onWritten != nil {
+			job.onWritten(id)
+		}
 	}
 	for {
 		select {

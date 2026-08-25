@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -97,10 +98,13 @@ func newTestManager(t *testing.T, grace time.Duration) (*Manager, *fakeDevice, f
 	dev := newFakeDevice()
 	var mu sync.Mutex
 	var recs []Record
-	m := NewManager(&fakeOpener{dev: dev}, func(_ context.Context, _ channel.ID, _ actor.ActorID, r Record) {
+	seq := 0
+	m := NewManager(&fakeOpener{dev: dev}, func(_ context.Context, _ channel.ID, _ actor.ActorID, r Record) string {
 		mu.Lock()
+		defer mu.Unlock()
 		recs = append(recs, r)
-		mu.Unlock()
+		seq++
+		return fmt.Sprintf("row-%d", seq)
 	})
 	m.grace = grace
 	t.Cleanup(m.CloseAll)
@@ -254,8 +258,18 @@ func TestCommandsLandOnTheLedgerAndBytesDoNot(t *testing.T) {
 	payload = append(payload, osc("133;D;1")...)
 	dev.push(link.PTYFrameData, payload)
 
+	// 等的是**命令行**：会话开启行会先到，恒不可拿它当命令来数。
+	commandRows := func() []Record {
+		var out []Record
+		for _, r := range records() {
+			if r.Event == "" {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
 	deadline := time.After(2 * time.Second)
-	for len(records()) == 0 {
+	for len(commandRows()) == 0 {
 		select {
 		case <-deadline:
 			t.Fatal("command never reached the ledger")
@@ -265,11 +279,11 @@ func TestCommandsLandOnTheLedgerAndBytesDoNot(t *testing.T) {
 	m.Close("s1")
 	wg.Wait()
 
-	recs := records()
-	if len(recs) != 1 {
-		t.Fatalf("want exactly one row, got %d: %+v", len(recs), recs)
+	cmds := commandRows()
+	if len(cmds) != 1 {
+		t.Fatalf("want exactly one command row, got %d: %+v", len(cmds), records())
 	}
-	got := recs[0]
+	got := cmds[0]
 	if got.Cmd != "make test" || got.ExitCode != 1 || !got.HasExit {
 		t.Errorf("row = %+v, want {make test, exit 1}", got)
 	}
@@ -303,9 +317,10 @@ func TestASlowLedgerDoesNotFreezeTheTerminal(t *testing.T) {
 	var recorded sync.WaitGroup
 	recorded.Add(1)
 	var once sync.Once
-	m := NewManager(&fakeOpener{dev: dev}, func(context.Context, channel.ID, actor.ActorID, Record) {
+	m := NewManager(&fakeOpener{dev: dev}, func(context.Context, channel.ID, actor.ActorID, Record) string {
 		once.Do(func() { recorded.Done() })
 		<-release // wedge the ledger for the whole test
+		return ""
 	})
 	t.Cleanup(func() { close(release); m.CloseAll() })
 
@@ -344,8 +359,9 @@ func TestRecordQueueDropsRatherThanBlocking(t *testing.T) {
 	// A ledger that cannot keep up costs rows, never keystrokes.
 	dev := newFakeDevice()
 	release := make(chan struct{})
-	m := NewManager(&fakeOpener{dev: dev}, func(context.Context, channel.ID, actor.ActorID, Record) {
+	m := NewManager(&fakeOpener{dev: dev}, func(context.Context, channel.ID, actor.ActorID, Record) string {
 		<-release
+		return ""
 	})
 	t.Cleanup(func() { close(release); m.CloseAll() })
 	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
@@ -381,5 +397,69 @@ func TestSessionIsBoundToItsChannel(t *testing.T) {
 	}
 	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
 		t.Fatalf("本频道接回被误拒：%v", err)
+	}
+}
+
+func TestSessionOpensWithARowAndCommandsHangFromIt(t *testing.T) {
+	// 开会话是这条线上唯一一次真判权动作，故它本身必须在账本上——
+	// 账本恒不该只记被授权之后的行为而漏掉授权本身。命令再挂到它下面，
+	// 于是一次会话读起来是一件事，恒不是一堆互不相干的根。
+	m, dev, records := newTestManager(t, time.Hour)
+	if _, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Attach("s1", "c0", "human:root"); err != nil {
+		t.Fatal(err)
+	}
+	// 开启行走的是同一条有界队列（恒不同步写——账本一卡开会话就卡死），
+	// 故要等它落定。
+	wait := time.After(2 * time.Second)
+	for len(records()) == 0 {
+		select {
+		case <-wait:
+			t.Fatal("会话开启没有落账")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	opened := records()[0]
+	if opened.Event != "opened" {
+		t.Fatalf("第一条不是会话开启行：%+v", opened)
+	}
+	if opened.Parent != "" {
+		t.Errorf("开启行不该有父，它就是根：%q", opened.Parent)
+	}
+
+	payload := append(append(append([]byte(nil),
+		osc("1337;AtollCmd='make test'")...), osc("133;C")...), osc("133;D;0")...)
+	dev.push(link.PTYFrameData, payload)
+
+	deadline := time.After(2 * time.Second)
+	for len(records()) < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("命令没落账")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cmd := records()[1]
+	if cmd.Cmd != "make test" {
+		t.Fatalf("第二条不是命令行：%+v", cmd)
+	}
+	if cmd.Parent != "row-1" {
+		t.Errorf("命令没挂到会话开启行上：parent=%q，想要 row-1", cmd.Parent)
+	}
+
+	// 关闭同样落账，且同挂一棵树。
+	m.Close("s1")
+	for len(records()) < 3 {
+		select {
+		case <-deadline:
+			t.Fatal("会话关闭没落账")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	last := records()[2]
+	if last.Event != "closed" || last.Parent != "row-1" {
+		t.Errorf("关闭行不对：%+v", last)
 	}
 }

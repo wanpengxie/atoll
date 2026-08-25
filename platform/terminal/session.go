@@ -32,21 +32,35 @@ type Opener interface {
 	OpenPTY(ctx context.Context, chID channel.ID, device string, cols, rows uint16, integration bool) (io.ReadWriteCloser, error)
 }
 
-// Recorder writes one command row to the channel ledger, authored by the
-// caller. This is the entire point of the line (design §4.2): the sender is
-// stamped by the runtime, never filled in here.
-type Recorder func(ctx context.Context, chID channel.ID, caller actor.ActorID, rec Record)
+// Recorder writes one row to the channel ledger, authored by the caller, and
+// answers with the id of what it wrote (empty when the write did not land).
+//
+// This is the entire point of the line (design §4.2): the sender is stamped by
+// the runtime, never filled in here. The id comes back because the session's
+// own opening row is the root every later row hangs from — without it each
+// command would be its own tree and a session would not be a thing on the
+// ledger at all.
+type Recorder func(ctx context.Context, chID channel.ID, caller actor.ActorID, rec Record) string
 
 // Record is what lands on the ledger for one command.
 type Record struct {
 	SessionID string `json:"session_id"`
-	Cmd       string `json:"cmd,omitempty"`
+	// Event marks a session lifecycle row: "opened" / "closed". Empty means a
+	// command row. 会话开启恒是这条线上唯一一次真判权动作（design §7），
+	// 故它本身必须在账本上——账本恒不该只记被授权之后的行为，而漏掉授权本身。
+	Event  string `json:"event,omitempty"`
+	Device string `json:"device,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Cmd    string `json:"cmd,omitempty"`
 	// Cwd is where the command ran. The same command means different things
 	// in different trees, so the record is incomplete without it.
 	Cwd       string `json:"cwd,omitempty"`
 	ExitCode  int    `json:"exit_code"`
 	HasExit   bool   `json:"-"`
 	DurationMs int64 `json:"duration_ms,omitempty"`
+	// Parent is the session's opening row. Commands hang from it so a session
+	// reads as one errand rather than a scatter of unrelated roots.
+	Parent string `json:"-"`
 	// OutputTail is the bounded tail of what the command printed. Bounded by
 	// MaxOutputTail, which is device.MaxStreamBytes — the same answer this
 	// system already gave for "how much device output goes on the ledger"
@@ -81,6 +95,8 @@ type Session struct {
 	ended     chan struct{}
 	endOnce   sync.Once
 	endReason string
+	// openRow is the ledger id of this session's "opened" event.
+	openRow string
 }
 
 // Ended reports the session's terminal state. Reason is empty while live.
@@ -130,6 +146,8 @@ type recordJob struct {
 	ch     channel.ID
 	caller actor.ActorID
 	rec    Record
+	// onWritten receives the id the row landed under (empty if it did not).
+	onWritten func(string)
 }
 
 // recordQueueDepth is how many rows may wait. Deep enough that a brief ledger
@@ -191,6 +209,18 @@ func (m *Manager) Open(ctx context.Context, id string, chID channel.ID, caller a
 	m.sessions[id] = s
 	m.mu.Unlock()
 
+	// 开启行走同一条有界队列，恒不在这里同步写。
+	//
+	// 我先写成了同步——理由是"它是树根，后面每条命令都要引它"。那是错的：
+	// 账本一卡，开会话就卡死，正是本包那条"账本恒不得阻塞人的手"被自己破掉
+	// （TestASlowLedgerDoesNotFreezeTheTerminal 当场抓到）。**没有哪条记录
+	// 值得用一个卡住的终端去换。**
+	//
+	// 代价是根 id 要过一会儿才回来：在它落定之前发生的命令挂不上树，成为各自
+	// 的根。那是诚实降级——记录不完整恒好过终端不能用，而且窗口只有开头一瞬。
+	if m.record != nil {
+		m.enqueueOpen(s, Record{SessionID: id, Event: "opened", Device: device})
+	}
 	go m.pumpDevice(s)
 	// A session with no viewer yet is already on the clock: an Open whose
 	// browser never arrives must not leak a shell.
@@ -329,6 +359,16 @@ func (m *Manager) Close(id string) {
 		_ = dev.Close()
 	}
 	s.finish("session closed")
+	if m.record != nil {
+		// 结束行走同一条有界队列：关闭恒不得因为账本忙而卡住。
+		s.mu.Lock()
+		root := s.openRow
+		s.mu.Unlock()
+		m.enqueue(s.Channel, s.Caller, Record{
+			SessionID: s.ID, Event: "closed",
+			Reason: s.EndReason(), Parent: root,
+		})
+	}
 }
 
 // CloseAll ends every session. Called when the node shuts down; lane
