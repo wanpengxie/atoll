@@ -87,7 +87,7 @@ func (s *registrarSysStub) Reply(_ actorbase.Msg, value any) (message.ID, error)
 	return "reply", nil
 }
 
-func (s *registrarSysStub) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
+func (s *registrarSysStub) Fail(_ actorbase.Msg, code, detail string, _ ...map[string]any) (message.ID, error) {
 	s.code, s.detail = code, detail
 	return "failed", nil
 }

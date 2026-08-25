@@ -46,7 +46,7 @@ func (s *cutSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	s.reply = value.(lagoon.Reply)
 	return "reply", nil
 }
-func (s *cutSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
+func (s *cutSys) Fail(_ actorbase.Msg, code, _ string, _ ...map[string]any) (message.ID, error) {
 	s.code = code
 	return "fail", nil
 }

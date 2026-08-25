@@ -15,6 +15,7 @@
 package all
 
 import (
+	_ "github.com/wanpengxie/atoll/drivers/tools/coderunner"
 	_ "github.com/wanpengxie/atoll/drivers/tools/device"
 	_ "github.com/wanpengxie/atoll/drivers/tools/echo"
 	_ "github.com/wanpengxie/atoll/drivers/tools/kimi"

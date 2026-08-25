@@ -254,7 +254,7 @@ func (s *forkSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	close(s.done)
 	return "reply", nil
 }
-func (s *forkSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
+func (s *forkSys) Fail(_ actorbase.Msg, code, _ string, _ ...map[string]any) (message.ID, error) {
 	s.mu.Lock()
 	s.fail = code
 	s.mu.Unlock()
@@ -274,9 +274,11 @@ func (s *turnControlSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	s.mu.Unlock()
 	return "reply", nil
 }
-func (s *turnControlSys) Fail(actorbase.Msg, string, string) (message.ID, error) { return "fail", nil }
-func (*turnControlSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error       { return nil }
-func (*turnControlSys) Self() actor.ActorID                                      { return "agent:test" }
+func (s *turnControlSys) Fail(actorbase.Msg, string, string, ...map[string]any) (message.ID, error) {
+	return "fail", nil
+}
+func (*turnControlSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return nil }
+func (*turnControlSys) Self() actor.ActorID                                { return "agent:test" }
 
 func baseRequest(id, typ string) actorbase.Msg {
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "caller"}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{"body":{}}`)})

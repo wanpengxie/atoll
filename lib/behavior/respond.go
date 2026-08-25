@@ -142,7 +142,8 @@ func Progress(
 }
 
 // Fail commits a status=failed final carrying the conventional failure
-// payload {error_code, detail} — the ONE home of that shape. The terminal
+// payload {error_code, detail, ...application fields} — the ONE home of that
+// shape. Reserved response/core keys cannot be replaced. The terminal
 // reason is pinned to receiver_internal_error (the serve-side catch-all);
 // specificity rides in errorCode, which is the actor's own closed set.
 func Fail(
@@ -151,8 +152,24 @@ func Fail(
 	clock func() time.Time,
 	request *message.Envelope,
 	errorCode, detail string,
+	fields ...map[string]any,
 ) (message.ID, error) {
-	payload, _ := json.Marshal(message.Failure{ErrorCode: errorCode, Detail: detail})
+	payloadMap := map[string]any{"error_code": errorCode}
+	if detail != "" {
+		payloadMap["detail"] = detail
+	}
+	for _, extra := range fields {
+		for key, value := range extra {
+			if key == "error_code" || key == "detail" || key == "status" || key == "reason" {
+				continue
+			}
+			payloadMap[key] = value
+		}
+	}
+	payload, err := json.Marshal(payloadMap)
+	if err != nil {
+		return "", fmt.Errorf("behavior: failure payload marshal: %w", err)
+	}
 	return Respond(ctx, pen, clock, request, ResponseSpec{
 		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalReceiverInternalError),

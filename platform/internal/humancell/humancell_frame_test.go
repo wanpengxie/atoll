@@ -89,7 +89,7 @@ func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
 	return f.terminalID, f.writeTermE
 }
 
-func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, error) {
+func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string, _ ...map[string]any) (message.ID, error) {
 	f.failMsg, f.failCode, f.failDetail, f.failed = msg, code, detail, true
 	return f.terminalID, f.writeTermE
 }

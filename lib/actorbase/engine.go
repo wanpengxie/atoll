@@ -466,11 +466,11 @@ func (e *engine) Reply(msg Msg, v any) (message.ID, error) {
 	return id, nil
 }
 
-func (e *engine) Fail(msg Msg, code, detail string) (message.ID, error) {
+func (e *engine) Fail(msg Msg, code, detail string, fields ...map[string]any) (message.ID, error) {
 	if err := e.terminalGate(msg); err != nil {
 		return "", err
 	}
-	id, err := e.writeFailure(msg, code, detail)
+	id, err := e.writeFailure(msg, code, detail, fields...)
 	if err != nil {
 		return "", err
 	}
@@ -493,9 +493,9 @@ func (e *engine) Fail(msg Msg, code, detail string) (message.ID, error) {
 // cosmetic difference — it is the bit that distinguishes a deliberate close
 // from a deadline that merely passed, it is what callLedger.cancel already
 // stamps for the in-process twin of this act, and it is asserted end-to-end at
-// the WS frame layer. behavior.Fail is deliberately NOT changed to carry it:
-// that primitive is the {error_code, detail} receiver-failure shape's one
-// home, and the overload reject lane still uses it as such.
+// the WS frame layer. behavior.Fail does not manufacture this bit: it owns the
+// receiver-failure shape, while this arm owns the caller self-close shape.
+// Optional application fields ride through both without replacing core keys.
 //
 // KNOWN limit: on a self-addressed request the same identity is both caller and
 // receiver, both arms are authorised, and this derivation always picks
@@ -504,21 +504,37 @@ func (e *engine) Fail(msg Msg, code, detail string) (message.ID, error) {
 // the shape is reachable; what no current product flow needs is the ability to
 // EXPRESS a receiver failure on it. An explicit reason入口 can be added
 // additively the day one does.
-func (e *engine) writeFailure(msg Msg, code, detail string) (message.ID, error) {
+func (e *engine) writeFailure(msg Msg, code, detail string, fields ...map[string]any) (message.ID, error) {
 	self := e.Self()
 	if self == "" || self != msg.Sender.ID {
-		return behavior.Fail(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), code, detail)
+		return behavior.Fail(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), code, detail, fields...)
 	}
-	payload, _ := json.Marshal(map[string]any{
+	payloadMap := map[string]any{
 		"error_code": code,
 		"detail":     detail,
 		"cancelled":  true,
-	})
+	}
+	mergeFailureFields(payloadMap, fields)
+	payload, err := json.Marshal(payloadMap)
+	if err != nil {
+		return "", fmt.Errorf("actorbase: failure payload marshal: %w", err)
+	}
 	return behavior.Respond(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), behavior.ResponseSpec{
 		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalUnansweredTimeout),
 		Payload: payload,
 	})
+}
+
+func mergeFailureFields(payload map[string]any, fields []map[string]any) {
+	for _, extra := range fields {
+		for key, value := range extra {
+			if key == "error_code" || key == "detail" || key == "status" || key == "reason" {
+				continue
+			}
+			payload[key] = value
+		}
+	}
 }
 
 func (e *engine) Progress(msg Msg, status string, v any) (message.ID, error) {

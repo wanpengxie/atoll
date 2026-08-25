@@ -52,7 +52,8 @@ type Sys interface {
 	// exists.
 	Reply(msg Msg, v any) (message.ID, error)
 	// Fail commits a final failed response, carrying the conventional
-	// {error_code,detail} payload. This is the PRECISE error tier (spec
+	// {error_code,detail,...fields} payload. fields is optional application
+	// detail; its keys may not replace error_code or detail. This is the PRECISE error tier (spec
 	// B-P2) — the counterpart to a bare `return err`, which Serve's sugar
 	// maps to the generic internal_error tier instead.
 	//
@@ -62,7 +63,7 @@ type Sys interface {
 	// account (unanswered_timeout) — and the latter additionally stamps
 	// cancelled:true into the payload, the structured bit consumers use to
 	// tell a deliberate close from a deadline that simply passed.
-	Fail(msg Msg, code, detail string) (message.ID, error)
+	Fail(msg Msg, code, detail string, fields ...map[string]any) (message.ID, error)
 	// Progress commits a non-final provisional response for the request Msg
 	// in hand — the request stays Admitted, awaiting its eventual terminal.
 	// A log-origin Msg is a TERMINAL-ONLY handle and is refused here.

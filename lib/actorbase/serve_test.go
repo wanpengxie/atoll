@@ -71,7 +71,7 @@ func (f *fakeSys) Reply(msg Msg, v any) (message.ID, error) {
 	return "reply-id", nil
 }
 
-func (f *fakeSys) Fail(msg Msg, code, detail string) (message.ID, error) {
+func (f *fakeSys) Fail(msg Msg, code, detail string, _ ...map[string]any) (message.ID, error) {
 	f.fails = append(f.fails, failCall{msg: msg, code: code, detail: detail})
 	return "fail-id", nil
 }

@@ -84,6 +84,30 @@ func TestRespond_FinalSuccess(t *testing.T) {
 	}
 }
 
+func TestFailCarriesApplicationFieldsWithoutReplacingCoreFields(t *testing.T) {
+	w := &recordingWriter{}
+	_, err := Fail(context.Background(), w, fixedClock(1), newRequest("r1", nil), "dependency_missing", "not present", map[string]any{
+		"missing":    []string{"mcp:github"},
+		"error_code": "forged",
+		"status":     "completed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Status    string   `json:"status"`
+		ErrorCode string   `json:"error_code"`
+		Detail    string   `json:"detail"`
+		Missing   []string `json:"missing"`
+	}
+	if err := json.Unmarshal(w.last().Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Status != message.StatusFailed || payload.ErrorCode != "dependency_missing" || payload.Detail != "not present" || len(payload.Missing) != 1 {
+		t.Fatalf("unexpected structured failure: %+v", payload)
+	}
+}
+
 // An empty status defaults to "completed".
 func TestRespond_EmptyStatusDefaultsCompleted(t *testing.T) {
 	w := &recordingWriter{}

@@ -76,6 +76,8 @@ var actorErrorClasses = map[string]failureClass{
 	"invalid_desired_host": {PayloadInvalid, hintFixPayload, false},
 	"limit_exceeded":       {PayloadInvalid, hintFixPayload, false},
 	"empty_input":          {PayloadInvalid, hintFixPayload, false},
+	"invalid_input":        {PayloadInvalid, hintFixPayload, false},
+	"output_limit":         {PayloadInvalid, hintFixPayload, false},
 
 	// The subject named does not exist.
 	"not_found":      {NotFound, hintNotFound, false},
@@ -100,10 +102,11 @@ var actorErrorClasses = map[string]failureClass{
 	"conflict_exists": {Conflict, hintConflict, false},
 
 	// Present in the registry, absent right now.
-	"receiver_inactive": {ActorUnreachable, hintUnreachable, true},
-	"member_inactive":   {ActorUnreachable, hintUnreachable, true},
-	"device_offline":    {ActorUnreachable, hintUnreachable, true},
-	"mcp_unreachable":   {ActorUnreachable, hintUnreachable, true},
+	"receiver_inactive":  {ActorUnreachable, hintUnreachable, true},
+	"member_inactive":    {ActorUnreachable, hintUnreachable, true},
+	"device_offline":     {ActorUnreachable, hintUnreachable, true},
+	"mcp_unreachable":    {ActorUnreachable, hintUnreachable, true},
+	"dependency_missing": {ActorUnreachable, hintUnreachable, true},
 
 	// Genuinely transient dependencies.
 	"channel_unavailable":   {Unavailable, hintUnavailable, true},
@@ -111,10 +114,12 @@ var actorErrorClasses = map[string]failureClass{
 	"provider_failed":       {Unavailable, hintUnavailable, true},
 
 	"mcp_timeout": {Timeout, hintTimeout, false},
+	"timeout":     {Timeout, hintTimeout, false},
 
 	// Cancellation is a decision somebody already made, not a fault: repeating
 	// the call would simply undo it.
 	"mcp_cancelled": {Unsupported, hintCancelled, false},
+	"cancelled":     {Unsupported, hintCancelled, false},
 
 	// Outcome genuinely unknown — the one class where a blind retry can do
 	// real damage, so it is called out separately from a plain failure.
@@ -125,6 +130,7 @@ var actorErrorClasses = map[string]failureClass{
 	"mcp_result_invalid": {InternalError, hintInternal, false},
 	"resource_error":     {InternalError, hintInternal, false},
 	"schedule_failed":    {InternalError, hintInternal, false},
+	"runtime_failed":     {InternalError, hintInternal, false},
 }
 
 // newClassifiedError reports a classified failure with `retryable` stated as a

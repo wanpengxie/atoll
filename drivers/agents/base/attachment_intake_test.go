@@ -20,7 +20,7 @@ type askIntakeSys struct {
 }
 
 func (*askIntakeSys) Self() actor.ActorID { return "agent:test:1" }
-func (s *askIntakeSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
+func (s *askIntakeSys) Fail(_ actorbase.Msg, code, _ string, _ ...map[string]any) (message.ID, error) {
 	s.failures <- code
 	return "failure", nil
 }

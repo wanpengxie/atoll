@@ -110,7 +110,7 @@ func (s *svcSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	s.reply = value
 	return "reply", nil
 }
-func (s *svcSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
+func (s *svcSys) Fail(_ actorbase.Msg, code, _ string, _ ...map[string]any) (message.ID, error) {
 	s.fail = code
 	return "fail", nil
 }

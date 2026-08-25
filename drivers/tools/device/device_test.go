@@ -83,7 +83,7 @@ func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
 	return msg.ID, nil
 }
 
-func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, error) {
+func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string, _ ...map[string]any) (message.ID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fails = append(f.fails, failRec{id: msg.ID, code: code, detail: detail})

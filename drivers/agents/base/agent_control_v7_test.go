@@ -92,7 +92,7 @@ func (s *v7Sys) Reply(msg actorbase.Msg, value any) (message.ID, error) {
 	s.mu.Unlock()
 	return "reply", nil
 }
-func (s *v7Sys) Fail(msg actorbase.Msg, code, _ string) (message.ID, error) {
+func (s *v7Sys) Fail(msg actorbase.Msg, code, _ string, _ ...map[string]any) (message.ID, error) {
 	s.mu.Lock()
 	s.terminals[string(msg.ID)] = append(s.terminals[string(msg.ID)], v7Terminal{fail: true, code: code})
 	s.mu.Unlock()

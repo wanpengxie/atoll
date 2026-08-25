@@ -48,7 +48,7 @@ func (f *failSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
 	f.replies = append(f.replies, replyRec{msg: msg, v: v})
 	return msg.ID, nil
 }
-func (f *failSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, error) {
+func (f *failSys) Fail(msg actorbase.Msg, code, detail string, _ ...map[string]any) (message.ID, error) {
 	f.fails = append(f.fails, failRec{code: code, detail: detail})
 	return msg.ID, nil
 }

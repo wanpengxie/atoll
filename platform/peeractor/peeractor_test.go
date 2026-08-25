@@ -32,7 +32,7 @@ func (s *peerSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
 	s.reply, _ = json.Marshal(value)
 	return "reply", nil
 }
-func (s *peerSys) Fail(_ actorbase.Msg, code, _ string) (message.ID, error) {
+func (s *peerSys) Fail(_ actorbase.Msg, code, _ string, _ ...map[string]any) (message.ID, error) {
 	s.fail = code
 	return "fail", nil
 }

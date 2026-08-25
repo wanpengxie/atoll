@@ -139,7 +139,7 @@ func (s *terminalRecorder) Reply(_ actorbase.Msg, value any) (message.ID, error)
 	return "reply", nil
 }
 
-func (s *terminalRecorder) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
+func (s *terminalRecorder) Fail(_ actorbase.Msg, code, detail string, _ ...map[string]any) (message.ID, error) {
 	s.failCode, s.failText = code, detail
 	return "fail", nil
 }
@@ -415,7 +415,7 @@ func (s *describeRecorder) Reply(_ actorbase.Msg, value any) (message.ID, error)
 	s.reply = value
 	return "reply", nil
 }
-func (s *describeRecorder) Fail(_ actorbase.Msg, code, detail string) (message.ID, error) {
+func (s *describeRecorder) Fail(_ actorbase.Msg, code, detail string, _ ...map[string]any) (message.ID, error) {
 	s.fail = code + ": " + detail
 	return "fail", nil
 }
