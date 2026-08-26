@@ -11,10 +11,12 @@ import (
 
 // FrameVersion is the wire envelope version every frame carries in `v`. A frame
 // with a different version is refused at Unmarshal (fail-closed): a version
-// mismatch is never silently reinterpreted. v3 adds the bounded history page
-// protocol to the channel-blind connection model. It is a breaking wire change;
+// mismatch is never silently reinterpreted. v4 makes history an explicitly
+// correlated, concurrent batch protocol. Attach carries metadata only; every
+// history row and terminal echoes the client generation and batch ref. It is a
+// breaking wire change;
 // the only deployment form is atoll and atoll-web switching in the same batch.
-const FrameVersion = 3
+const FrameVersion = 4
 
 // MaxFrameBytes caps one serialized frame at 512KB (build spec §S2 envelope
 // note). A larger frame is refused (connector maps to a CloseMessageTooBig).
@@ -330,6 +332,7 @@ type AttachPayload struct {
 	Since           map[string]int64 `json:"since,omitempty"`
 	Focus           string           `json:"focus"`
 	HistoryProtocol int              `json:"history_protocol"`
+	Generation      uint64           `json:"generation"`
 }
 
 // RequireChannelID validates a business frame payload's required channel_id
@@ -398,9 +401,14 @@ type UnobservePayload struct {
 // to close the root-turn boundary. History is a read control on the attached
 // human connection; it never enters the ledger.
 type HistoryBeforePayload struct {
-	ChannelID string `json:"channel_id"`
-	BeforeSeq int64  `json:"before_seq,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	ChannelID  string `json:"channel_id"`
+	BeforeSeq  int64  `json:"before_seq,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	ByteLimit  int    `json:"byte_limit,omitempty"`
+	Generation uint64 `json:"generation"`
+	// Purpose only selects the transport priority lane. It never changes the
+	// historical projection or authorization rules.
+	Purpose string `json:"purpose"` // initial-tail | user-demand | hydrate
 }
 
 // ResourceOp is the closed resource-verb enum (build spec §S2 resource row).
@@ -439,9 +447,11 @@ type ResourcePayload struct {
 // --- Downstream payloads --------------------------------------------------
 
 type FeedPayload struct {
-	ChannelID string          `json:"channel_id"`
-	Seq       int64           `json:"seq"`
-	Envelope  json.RawMessage `json:"envelope"`
+	ChannelID  string          `json:"channel_id"`
+	Seq        int64           `json:"seq"`
+	Envelope   json.RawMessage `json:"envelope"`
+	Source     string          `json:"source"` // live | history
+	Generation uint64          `json:"generation"`
 }
 
 // AttachReceipt is the report-in ack. ContractVersion is the websocket side of
@@ -464,24 +474,22 @@ type FeedPayload struct {
 // per-channel resolver failure) and the list must not be read as "you are in
 // nothing" — a client keeps its prior knowledge and lets the feed catch up.
 type AttachReceipt struct {
-	ContractVersion     string            `json:"contract_version"`
-	Boot                string            `json:"boot,omitempty"`
-	Memberships         []MembershipEntry `json:"memberships"`
-	MembershipsComplete bool              `json:"memberships_complete"`
-	History             []HistoryEntry    `json:"history,omitempty"`
+	ContractVersion     string             `json:"contract_version"`
+	Boot                string             `json:"boot,omitempty"`
+	Memberships         []MembershipEntry  `json:"memberships"`
+	MembershipsComplete bool               `json:"memberships_complete"`
+	HistoryMeta         []HistoryMetaEntry `json:"history_meta,omitempty"`
 }
 
-// HistoryEntry describes the bounded initial tail selected for one membership.
-// Truncated says the submitted device cursor was older than this tail, so the
-// server deliberately starts at OldestSeq instead of replaying an unbounded gap.
-type HistoryEntry struct {
-	ChannelID   string `json:"channel_id"`
-	HeadSeq     int64  `json:"head_seq"`
-	OldestSeq   int64  `json:"oldest_seq,omitempty"`
-	HasOlder    bool   `json:"has_older"`
-	Truncated   bool   `json:"truncated"`
-	ErrorCode   string `json:"error_code,omitempty"`
-	ErrorDetail string `json:"error_detail,omitempty"`
+// HistoryMetaEntry is deliberately body-free. The client uses it to schedule
+// bounded initial-tail batches without waiting for any message deserialization.
+type HistoryMetaEntry struct {
+	ChannelID    string `json:"channel_id"`
+	HeadSeq      int64  `json:"head_seq"`
+	HasRows      bool   `json:"has_rows"`
+	LastActivity int64  `json:"last_activity,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorDetail  string `json:"error_detail,omitempty"`
 }
 
 type HistoryRow struct {
@@ -492,20 +500,30 @@ type HistoryRow struct {
 // HistoryAcceptedReceipt acknowledges that a history read has entered the
 // bounded backfill lane. Completion is carried by one correlated page_end.
 type HistoryAcceptedReceipt struct {
-	Accepted bool `json:"accepted"`
+	Accepted   bool   `json:"accepted"`
+	ChannelID  string `json:"channel_id"`
+	Purpose    string `json:"purpose"`
+	Generation uint64 `json:"generation"`
 }
 
 // PageEndPayload is the mandatory terminal for an attach tail or one accepted
 // history_before page. Ref remains on the frame envelope, never in this payload.
 type PageEndPayload struct {
-	Source      string `json:"source"` // attach | page
-	ChannelID   string `json:"channel_id"`
-	HeadSeq     int64  `json:"head_seq"`
-	OldestSeq   int64  `json:"oldest_seq,omitempty"`
-	NewestSeq   int64  `json:"newest_seq,omitempty"`
-	HasOlder    bool   `json:"has_older"`
-	ErrorCode   string `json:"error_code,omitempty"`
-	ErrorDetail string `json:"error_detail,omitempty"`
+	Source        string `json:"source"` // history
+	ChannelID     string `json:"channel_id"`
+	Purpose       string `json:"purpose"`
+	Generation    uint64 `json:"generation"`
+	HeadSeq       int64  `json:"head_seq"`
+	OldestSeq     int64  `json:"oldest_seq,omitempty"`
+	NewestSeq     int64  `json:"newest_seq,omitempty"`
+	ScanLowSeq    int64  `json:"scan_low_seq,omitempty"`
+	ScanHighSeq   int64  `json:"scan_high_seq,omitempty"`
+	NextBeforeSeq int64  `json:"next_before_seq,omitempty"`
+	Rows          int    `json:"rows"`
+	Bytes         int    `json:"bytes"`
+	HasOlder      bool   `json:"has_older"`
+	ErrorCode     string `json:"error_code,omitempty"`
+	ErrorDetail   string `json:"error_detail,omitempty"`
 }
 
 // MembershipEntry names one channel the attached principal holds membership

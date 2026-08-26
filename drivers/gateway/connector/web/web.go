@@ -106,7 +106,11 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		return
 	}
 
-	sess, aerr := c.gw.Attach(principal, parseSince(ap))
+	if ap.Generation == 0 {
+		writeErr(ws, f.Ref, "attach", subjectgate.CodeBadPayload, "generation must be positive")
+		return
+	}
+	sess, aerr := c.gw.Attach(principal, parseSince(ap), ap.Generation)
 	if aerr != nil {
 		writeErr(ws, f.Ref, "attach", subjectgate.CodeUnavailable, "gateway unavailable")
 		return
@@ -122,15 +126,14 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		_ = ws.SetReadDeadline(time.Now())
 	}()
 
-	// Attach receipt carries version discovery + the membership answer, and is
-	// sent before feed backfill. Ordering: PrimeFeed converges the资格账
-	// synchronously (no pump yet → nothing can enter the lane), the receipt reads
-	// that ledger and goes onto the lane first, THEN LaunchFeed spawns the pump
-	// that pushes backfill behind it.
+	// Attach receipt carries only membership and lightweight history metadata.
+	// PrimeFeed installs commit subscriptions first; PrepareHistoryMetadata then
+	// captures each head and advances the live cursor to it. LaunchFeed therefore
+	// starts strictly after the snapshot while every later commit remains visible.
 	if !sess.PrimeFeed() {
 		return
 	}
-	history := sess.PrepareInitialHistory(channel.ID(ap.Focus))
+	historyMeta := sess.PrepareHistoryMetadata(channel.ID(ap.Focus))
 	routes, complete := sess.MembershipSnapshot()
 	entries := make([]subjectgate.MembershipEntry, 0, len(routes))
 	for _, route := range routes {
@@ -142,10 +145,9 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		Boot:                c.boot,
 		Memberships:         entries,
 		MembershipsComplete: complete,
-		History:             history,
+		HistoryMeta:         historyMeta,
 	})
 	sess.Send(receipt)
-	sess.FlushInitialHistory(f.Ref)
 	sess.LaunchFeed()
 
 	// Reader loop: the SINGLE ws reader. detach is整删 (no client-visible unbind);

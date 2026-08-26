@@ -13,12 +13,15 @@ func TestDoorCarriesChannelRequestThroughSvcactor(t *testing.T) {
 	sourceID := stringField(t, sourceRow, "channel_id")
 	door := awaitDoor(t, setupWS, sourceID)
 
+	// The UI history projection intentionally removes system.* housekeeping.
+	// Observe this protocol chain live instead of trying to reconstruct an audit
+	// trace through the human-facing historical projection after the fact.
+	auditWS := dialWS(t, h.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0, sourceID: 0})
 	sourceRequestID, result := setupWS.requestWithID(sourceID, "system.channel.list", door, map[string]any{})
 	if _, ok := result["value"]; !ok {
 		t.Fatalf("door system channel-list reply omitted registrar value: %v", result)
 	}
 
-	auditWS := dialWS(t, h.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0, sourceID: 0})
 	var sourceRequest, sourceReply, c0Request, c0Reply map[string]any
 	deadline := time.Now().Add(30 * time.Second)
 	for (sourceRequest == nil || sourceReply == nil || c0Request == nil || c0Reply == nil) && time.Now().Before(deadline) {
