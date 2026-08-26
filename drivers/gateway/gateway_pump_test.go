@@ -13,12 +13,14 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -40,20 +42,102 @@ type blockingHistoryView struct {
 	release chan struct{}
 }
 
-func (v blockingHistoryView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+type attachSeamBundle struct {
+	channelhost.Bundle
+	beforeRead bool
+	reached    chan struct{}
+	release    chan struct{}
+}
+
+func (b attachSeamBundle) View() channelhost.View {
+	return attachSeamView{View: b.Bundle.View(), beforeRead: b.beforeRead, reached: b.reached, release: b.release}
+}
+
+type attachSeamView struct {
+	channelhost.View
+	beforeRead bool
+	reached    chan struct{}
+	release    chan struct{}
+}
+
+func (v attachSeamView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+	if beforeSeq != 0 || limit != 1 {
+		return v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+	}
+	wait := func() error {
+		select {
+		case v.reached <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-v.release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if v.beforeRead {
+		if err := wait(); err != nil {
+			return nil, 0, false, err
+		}
+	}
+	rows, head, older, err := v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+	if err == nil && !v.beforeRead {
+		if waitErr := wait(); waitErr != nil {
+			return nil, 0, false, waitErr
+		}
+	}
+	return rows, head, older, err
+}
+
+type failingHistoryBundle struct {
+	channelhost.Bundle
+	windowErr error
+	pageErr   error
+}
+
+func (b failingHistoryBundle) View() channelhost.View {
+	return failingHistoryView{View: b.Bundle.View(), windowErr: b.windowErr, pageErr: b.pageErr}
+}
+
+type failingHistoryView struct {
+	channelhost.View
+	windowErr error
+	pageErr   error
+}
+
+func (v failingHistoryView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+	if beforeSeq == 0 && limit == 1 && v.windowErr != nil {
+		return nil, 0, false, v.windowErr
+	}
+	return v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+}
+
+func (v failingHistoryView) ReadVisibleTurnWindowBeforeSeq(ctx context.Context, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
+	if query.MinimumCompleteRoots == 1 && v.pageErr != nil {
+		return channelspec.HistoryWindow{}, v.pageErr
+	}
+	if v.windowErr != nil {
+		return channelspec.HistoryWindow{}, v.windowErr
+	}
+	return v.View.ReadVisibleTurnWindowBeforeSeq(ctx, query)
+}
+
+func (v blockingHistoryView) ReadVisibleTurnWindowBeforeSeq(ctx context.Context, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
 	select {
 	case v.started <- struct{}{}:
 	default:
 	}
 	select {
 	case <-v.release:
-		return v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+		return v.View.ReadVisibleTurnWindowBeforeSeq(ctx, query)
 	case <-ctx.Done():
-		return nil, 0, false, ctx.Err()
+		return channelspec.HistoryWindow{}, ctx.Err()
 	}
 }
 
-func TestAttachBacklogStartsFromBoundedTail(t *testing.T) {
+func TestAttachCarriesMetadataAndAnchorsLiveAtSnapshotHead(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
@@ -62,25 +146,136 @@ func TestAttachBacklogStartsFromBoundedTail(t *testing.T) {
 	admitRows(t, h, defaultHistoryLimit+35)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 	wantAll := sourceSeqs(t, h)
-	want := wantAll[len(wantAll)-defaultHistoryLimit:]
+	head := wantAll[len(wantAll)-1]
 
 	s, _ := g.Attach(principal, map[channel.ID]int64{"c": 0})
-	feed, stop := observeFeed(s)
 	if !s.PrimeFeed() {
 		t.Fatal("PrimeFeed refused")
 	}
-	grants := s.PrepareInitialHistory(defaultHistoryLimit)
-	if len(grants) != 1 || !grants[0].Truncated || !grants[0].HasOlder || grants[0].OldestSeq != want[0] {
-		t.Fatalf("unexpected attach history grant: %+v", grants)
+	meta := s.PrepareHistoryMetadata("c")
+	if len(meta) != 1 || meta[0].HeadSeq != head || !meta[0].HasRows || meta[0].LastActivity == 0 {
+		t.Fatalf("unexpected attach history metadata: %+v", meta)
 	}
-	s.FlushInitialHistory()
+	if got := s.lane.cursor.at("c"); got != head {
+		t.Fatalf("live cursor not anchored at metadata head: got=%d want=%d", got, head)
+	}
+	if len(s.BackfillDown()) != 0 {
+		t.Fatal("attach metadata must not enqueue message bodies")
+	}
 	s.LaunchFeed()
-	waitFor(t, func() bool { return len(feed.sequences("c")) == len(want) }, "bounded attach tail")
 	s.Close()
-	stop()
-	if got := feed.sequences("c"); !slices.Equal(got, want) {
-		t.Fatalf("attach replay was not the bounded tail: got=%v want=%v", got, want)
+}
+
+func TestAttachMetadataAndLiveSubscriptionHaveNoCommitSeam(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		beforeRead bool
+		wantLive   bool
+	}{
+		{name: "commit before snapshot belongs to history", beforeRead: true},
+		{name: "commit after snapshot remains live", beforeRead: false, wantLive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := newClock()
+			res := newResolver()
+			g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+			principal := "attach-seam-" + tc.name
+			h, id := openHome(t, channel.ID("c"), principal)
+			admitRows(t, h, 1)
+			oldHead := sourceSeqs(t, h)[0]
+			reached := make(chan struct{}, 1)
+			release := make(chan struct{})
+			bundle := attachSeamBundle{Bundle: h, beforeRead: tc.beforeRead, reached: reached, release: release}
+			res.set(principal, []Route{{Channel: "c", SubjectID: id, Bundle: bundle}}, nil, nil)
+
+			s, _ := g.Attach(principal, nil)
+			if !s.PrimeFeed() {
+				t.Fatal("PrimeFeed refused")
+			}
+			metaDone := make(chan []subjectgate.HistoryMetaEntry, 1)
+			go func() { metaDone <- s.PrepareHistoryMetadata("c") }()
+			select {
+			case <-reached:
+			case <-time.After(2 * time.Second):
+				t.Fatal("metadata read did not reach seam")
+			}
+			admitRows(t, h, 1)
+			newHead := sourceSeqs(t, h)[1]
+			close(release)
+			meta := <-metaDone
+			wantMetaHead := oldHead
+			if tc.beforeRead {
+				wantMetaHead = newHead
+			}
+			if len(meta) != 1 || meta[0].HeadSeq != wantMetaHead {
+				t.Fatalf("metadata seam head: got=%+v want=%d", meta, wantMetaHead)
+			}
+
+			feed, stop := observeFeed(s)
+			s.LaunchFeed()
+			if tc.wantLive {
+				waitFor(t, func() bool { return feed.lastSeq("c") == newHead }, "post-snapshot commit was lost")
+			} else {
+				time.Sleep(30 * time.Millisecond)
+				if got := feed.delivered("c"); got != 0 {
+					t.Fatalf("snapshot-owned commit was duplicated on live feed: %d", got)
+				}
+			}
+			s.Close()
+			stop()
+		})
 	}
+}
+
+func TestAttachHistoryFailureIsExplicitAndLogged(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	logs := &logCapture{}
+	g := newTestGateway(t, Config{Resolver: res, Logger: logs.logger()}, settings{clock: clk})
+	const principal = "attach-history-error"
+	h, id := openHome(t, channel.ID("c"), principal)
+	broken := failingHistoryBundle{Bundle: h, windowErr: errors.New("read failed")}
+	res.set(principal, []Route{{Channel: "c", SubjectID: id, Bundle: broken}}, nil, nil)
+
+	s, _ := g.Attach(principal, nil)
+	if !s.PrimeFeed() {
+		t.Fatal("PrimeFeed refused")
+	}
+	grants := s.PrepareHistoryMetadata("c")
+	if len(grants) != 1 || grants[0].ChannelID != "c" || grants[0].ErrorCode != subjectgate.CodeUnavailable {
+		t.Fatalf("attach history failure was silent: %+v", grants)
+	}
+	if !logs.has("gateway.history.attach_failed") {
+		t.Fatal("attach history failure was not logged")
+	}
+	s.Close()
+}
+
+func TestAttachMetadataDoesNotFillBackfillLane(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "attach-reader-free"
+	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, defaultHistoryLimit+10)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(principal, nil)
+	if !s.PrimeFeed() {
+		t.Fatal("PrimeFeed refused")
+	}
+	meta := s.PrepareHistoryMetadata("c")
+	if len(meta) != 1 || meta[0].HeadSeq == 0 {
+		t.Fatalf("missing metadata: %+v", meta)
+	}
+	if got := s.lane.cursor.at("c"); got == 0 {
+		t.Fatal("live cursor was not advanced to metadata snapshot")
+	}
+	if len(s.BackfillDown()) != 0 {
+		t.Fatal("metadata-only attach unexpectedly enqueued backfill")
+	}
+	s.LaunchFeed()
+	s.Close()
+	s.historyWG.Wait()
 }
 
 func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
@@ -94,7 +289,7 @@ func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
 	all := sourceSeqs(t, h)
 	head := all[len(all)-1]
 
-	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head})
+	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head}, 1)
 	feed, stop := observeFeed(s)
 	s.StartFeed()
 	defer func() {
@@ -102,7 +297,7 @@ func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
 		stop()
 	}()
 	request, err := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-1", subjectgate.HistoryBeforePayload{
-		ChannelID: "c", BeforeSeq: 0, Limit: 3,
+		ChannelID: "c", BeforeSeq: 0, Limit: 3, Generation: 1, Purpose: "user-demand",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -111,22 +306,102 @@ func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
 	if response.Type != subjectgate.FrameReceipt {
 		t.Fatalf("history request failed: %+v", response)
 	}
-	var page subjectgate.HistoryReceipt
-	if err := json.Unmarshal(response.Payload, &page); err != nil {
+	var accepted subjectgate.HistoryAcceptedReceipt
+	if err := json.Unmarshal(response.Payload, &accepted); err != nil || !accepted.Accepted {
 		t.Fatal(err)
 	}
 	want := all[len(all)-3:]
-	waitFor(t, func() bool { return len(feed.sequences("c")) == len(want) }, "history feed rows")
+	waitFor(t, func() bool {
+		_, ended := feed.pageEnd("history-1")
+		return len(feed.sequences("c")) == len(want) && ended
+	}, "history feed rows")
 	got := feed.sequences("c")
-	if len(page.Rows) != 0 {
-		t.Fatalf("history receipt must be a page-complete barrier, not an aggregate carrier: %+v", page.Rows)
-	}
+	page, _ := feed.pageEnd("history-1")
 	if !slices.Equal(got, want) || !page.HasOlder {
 		t.Fatalf("unexpected history page: got=%v want=%v page=%+v", got, want, page)
 	}
 	if cursor := s.lane.cursor.at("c"); cursor != head {
 		t.Fatalf("history read moved live cursor: got=%d want=%d", cursor, head)
 	}
+}
+
+func TestAcceptedHistoryFailureAlwaysEndsWithCorrelatedPageEnd(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "history-page-error"
+	h, id := openHome(t, channel.ID("c"), principal)
+	broken := failingHistoryBundle{Bundle: h, pageErr: errors.New("read failed")}
+	res.set(principal, []Route{{Channel: "c", SubjectID: id, Bundle: broken}}, nil, nil)
+	s, _ := g.Attach(principal, nil, 1)
+	feed, stop := observeFeed(s)
+	s.StartFeed()
+	defer func() {
+		s.Close()
+		stop()
+	}()
+
+	request, _ := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-error", subjectgate.HistoryBeforePayload{
+		ChannelID: "c", BeforeSeq: 10, Limit: 10, Generation: 1, Purpose: "hydrate",
+	})
+	response := s.Upstream(request)
+	var accepted subjectgate.HistoryAcceptedReceipt
+	if response.Type != subjectgate.FrameReceipt || response.DecodePayload(&accepted) != nil || !accepted.Accepted {
+		t.Fatalf("history was not accepted: %+v", response)
+	}
+	waitFor(t, func() bool {
+		end, ok := feed.pageEnd("history-error")
+		return ok && end.ErrorCode == subjectgate.CodeUnavailable
+	}, "accepted history failure did not terminate")
+}
+
+func TestDispatchQueuesHistoryAcceptanceBeforeStartingBackfill(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "history-publication-barrier"
+	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, 3)
+	all := sourceSeqs(t, h)
+	head := all[len(all)-1]
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	res.set(principal, []Route{{
+		Channel: "c", SubjectID: id,
+		Bundle: blockingHistoryBundle{Bundle: h, started: started, release: release},
+	}}, nil, nil)
+	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head}, 1)
+	s.StartFeed()
+	defer s.Close()
+
+	request, _ := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-barrier", subjectgate.HistoryBeforePayload{
+		ChannelID: "c", BeforeSeq: 0, Limit: 3, Generation: 1, Purpose: "hydrate",
+	})
+	dispatched := make(chan struct{})
+	go func() {
+		s.Dispatch(request)
+		close(dispatched)
+	}()
+	select {
+	case raw := <-s.LiveDown():
+		frame, err := subjectgate.ParseEnvelope(raw)
+		if err != nil || frame.Type != subjectgate.FrameReceipt || frame.Ref != "history-barrier" {
+			t.Fatalf("first published frame was not acceptance: frame=%+v err=%v", frame, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("history acceptance was not published")
+	}
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch did not return after publishing acceptance")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("history read was not released after acceptance publication")
+	}
+	close(release)
 }
 
 func TestHistoryReadNeverBlocksRealtimeFeed(t *testing.T) {
@@ -147,11 +422,11 @@ func TestHistoryReadNeverBlocksRealtimeFeed(t *testing.T) {
 		Bundle: blockingHistoryBundle{Bundle: h, started: started, release: release},
 	}}, nil, nil)
 
-	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head})
+	s, _ := g.Attach(principal, map[channel.ID]int64{"c": head}, 1)
 	feed, stop := observeFeed(s)
 	s.StartFeed()
 	request, err := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "slow-history", subjectgate.HistoryBeforePayload{
-		ChannelID: "c", BeforeSeq: 0, Limit: 20,
+		ChannelID: "c", BeforeSeq: 0, Limit: 20, Generation: 1, Purpose: "user-demand",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -171,20 +446,17 @@ func TestHistoryReadNeverBlocksRealtimeFeed(t *testing.T) {
 	newHead := newAll[len(newAll)-1]
 	waitFor(t, func() bool { return feed.lastSeq("c") >= newHead }, "live feed stalled behind history read")
 	select {
-	case <-response:
-		t.Fatal("history unexpectedly completed before release")
-	default:
+	case frame := <-response:
+		var accepted subjectgate.HistoryAcceptedReceipt
+		if frame.Type != subjectgate.FrameReceipt || frame.DecodePayload(&accepted) != nil || !accepted.Accepted {
+			t.Fatalf("history was not accepted immediately: %+v", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("history acceptance blocked on the historical read")
 	}
 
 	releaseOnce.Do(func() { close(release) })
-	select {
-	case frame := <-response:
-		if frame.Type != subjectgate.FrameReceipt {
-			t.Fatalf("history failed after release: %+v", frame)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("history did not complete after release")
-	}
+	waitFor(t, func() bool { _, ok := feed.pageEnd("slow-history"); return ok }, "history did not complete after release")
 	s.Close()
 	stop()
 }

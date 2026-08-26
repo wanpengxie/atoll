@@ -349,7 +349,7 @@ func dialWS(t *testing.T, base, cookie string, since map[string]int64) *wsClient
 	}
 	go client.readLoop()
 	t.Cleanup(client.close)
-	if err := conn.WriteJSON(wireFrame("attach", "attach", map[string]any{"since": since})); err != nil {
+	if err := conn.WriteJSON(wireFrame("attach", "attach", map[string]any{"since": since, "focus": "", "history_protocol": 4, "generation": 1})); err != nil {
 		t.Fatal(err)
 	}
 	ack := client.awaitAck("attach", 10*time.Second)
@@ -360,11 +360,29 @@ func dialWS(t *testing.T, base, cookie string, since map[string]int64) *wsClient
 	if payload["contract_version"] == "" {
 		t.Fatalf("attach receipt omitted contract version: %v", ack)
 	}
+	// v4 attach is metadata-only. This audit client already has the exact set of
+	// channels it wants in `since`, so request those tails directly. Do not make
+	// test observability depend on the receipt's metadata representation or on a
+	// directory snapshot racing a just-created membership.
+	index := 0
+	for channelID := range since {
+		ref := fmt.Sprintf("initial-history-%d", index)
+		index++
+			if err := conn.WriteJSON(wireFrame("history_before", ref, map[string]any{
+				"channel_id": channelID, "before_seq": 0, "limit": 200,
+				"byte_limit": 4 << 20, "generation": 1, "purpose": "initial-tail",
+			})); err != nil {
+				t.Fatal(err)
+			}
+			if historyAck := client.awaitAck(ref, 10*time.Second); historyAck["frame_type"] != "receipt" {
+				t.Fatalf("history rejected: %v", historyAck)
+			}
+	}
 	return client
 }
 
 func wireFrame(frameType, ref string, payload any) map[string]any {
-	frame := map[string]any{"v": 2, "frame_type": frameType}
+	frame := map[string]any{"v": 4, "frame_type": frameType}
 	if ref != "" {
 		frame["ref"] = ref
 	}

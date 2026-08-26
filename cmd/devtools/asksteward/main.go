@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 )
 
 func main() {
@@ -81,7 +82,7 @@ func main() {
 		}
 	}()
 	send := func(ref string, frameType string, payload any) map[string]any {
-		frame := map[string]any{"v": 2, "frame_type": frameType, "ref": ref, "payload": payload}
+		frame := map[string]any{"v": subjectgate.FrameVersion, "frame_type": frameType, "ref": ref, "payload": payload}
 		if err := conn.WriteJSON(frame); err != nil {
 			log.Fatalf("write %s: %v", ref, err)
 		}
@@ -97,7 +98,9 @@ func main() {
 			}
 		}
 	}
-	if ack := send("attach", "attach", map[string]any{"since": map[string]int64{}}); ack["frame_type"] != "receipt" {
+	if ack := send("attach", "attach", map[string]any{
+		"since": map[string]int64{}, "focus": *channelID, "history_protocol": subjectgate.FrameVersion,
+	}); ack["frame_type"] != "receipt" {
 		log.Fatalf("attach rejected: %v", ack)
 	}
 	submit := func(ref, typ, audience string, payload any) string {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,9 +23,11 @@ func defaultEpoch() int64 { return time.Now().UnixNano() }
 const feedBatch = 100
 
 const (
-	defaultHistoryLimit = 200
-	maxHistoryLimit     = 200
-	minimumHistoryRoots = 20
+	defaultHistoryLimit       = 200
+	maxHistoryLimit           = 200
+	initialHistoryParallelism = 4
+	maxHistoryInflight        = 4
+	maxHistoryBytes           = 4 << 20
 )
 
 // subscription is one channel the session's read pump is currently following (spec
@@ -49,22 +53,25 @@ const (
 )
 
 type controlCommand struct {
-	kind    controlKind
-	channel channel.ID
-	before  int64
-	limit   int
-	reply   chan controlResult
+	kind       controlKind
+	channel    channel.ID
+	before     int64
+	limit      int
+	byteLimit  int
+	generation uint64
+	purpose    string
+	ref        string
+	// start is a connector-owned publication barrier. A history read may not
+	// enqueue backfill until its accepted receipt is already on the live lane.
+	// Direct in-process callers leave it nil and retain the synchronous API.
+	start <-chan struct{}
+	reply chan controlResult
 }
 
 type controlResult struct {
-	code    string
-	detail  string
-	history *subjectgate.HistoryReceipt
-}
-
-type initialTail struct {
-	head int64
-	rows []subjectgate.HistoryRow
+	code     string
+	detail   string
+	accepted bool
 }
 
 // eligState is the session's资格账 snapshot (spec §3.2 v0.8, 六轮 P1-2 修形): the pump
@@ -97,9 +104,10 @@ type eligState struct {
 // The connector drives it: drains Down() to the wire, feeds each parsed upstream
 // frame to Upstream, and calls Close on disconnect.
 type Session struct {
-	gw        *Gateway
-	principal string
-	lane      *lane
+	gw         *Gateway
+	principal  string
+	generation uint64
+	lane       *lane
 
 	// ctx is the session-lifetime context (spec §3.2统一会话闸): Close cancels it, and
 	// the resolver / routing / Slot.Deliver all derive from it — so a已获准 blocking
@@ -121,10 +129,12 @@ type Session struct {
 
 	// subs is the订阅集 (PUMP-OWNED, no lock). elig is the資格账 the pump publishes
 	// for Upstream (atomic single-writer).
-	subs         map[channel.ID]*subscription
-	elig         atomic.Pointer[eligState]
-	controls     chan controlCommand
-	initialTails map[channel.ID]initialTail
+	subs            map[channel.ID]*subscription
+	elig            atomic.Pointer[eligState]
+	controls        chan controlCommand
+	historyMu       sync.Mutex
+	historyInflight map[channel.ID]string
+	historyCount    int
 
 	onceClose sync.Once
 	historyWG sync.WaitGroup
@@ -134,15 +144,20 @@ type Session struct {
 // membrane resolved cookie→principal — no channel ACL at connection level). It seats
 // the device (首入 → 踢在场圈) and hands back the session; the attach receipt is now
 // EMPTY (报到 ack — attach is no longer a binding grant). Refused after Close.
-func (g *Gateway) Attach(principal string, since map[channel.ID]int64) (*Session, error) {
+func (g *Gateway) Attach(principal string, since map[channel.ID]int64, generation ...uint64) (*Session, error) {
+	var connectionGeneration uint64
+	if len(generation) > 0 {
+		connectionGeneration = generation[0]
+	}
 	s := &Session{
-		gw:           g,
-		principal:    principal,
-		lane:         newLane(newCursor(since)),
-		wake:         make(chan struct{}, 1),
-		subs:         map[channel.ID]*subscription{},
-		controls:     make(chan controlCommand, 32),
-		initialTails: map[channel.ID]initialTail{},
+		gw:              g,
+		principal:       principal,
+		generation:      connectionGeneration,
+		lane:            newLane(newCursor(since)),
+		wake:            make(chan struct{}, 1),
+		subs:            map[channel.ID]*subscription{},
+		controls:        make(chan controlCommand, 32),
+		historyInflight: map[channel.ID]string{},
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.elig.Store(&eligState{routes: map[channel.ID]Route{}, paused: map[channel.ID]struct{}{}, failed: map[channel.ID]struct{}{}})
@@ -218,70 +233,109 @@ func (s *Session) MembershipSnapshot() (routes []Route, complete bool) {
 	return routes, st.resolved && !st.globalErr && len(st.failed) == 0
 }
 
-// PrepareInitialHistory replaces an unbounded catch-up with a bounded tail for
-// membership channels whose submitted device cursor lies before that tail. It
-// runs after PrimeFeed and before LaunchFeed, while subs and the lane cursor are
-// still single-goroutine owned. A failed read leaves the old replay behavior in
-// place; availability failures must not manufacture a gap.
-func (s *Session) PrepareInitialHistory(limit int) []subjectgate.HistoryEntry {
-	limit = normalizeHistoryLimit(limit)
-	entries := make([]subjectgate.HistoryEntry, 0, len(s.subs))
+// PrepareHistoryMetadata snapshots only the current head of each member
+// channel. Subscriptions are already installed by PrimeFeed, so advancing the
+// live cursor to the captured head produces an atomic seam: commits at or below
+// the head are history; commits after it remain observable by the live pump.
+// No message body enters the attach receipt.
+func (s *Session) PrepareHistoryMetadata(focus channel.ID) []subjectgate.HistoryMetaEntry {
+	type job struct {
+		ch  channel.ID
+		sub *subscription
+	}
+	type result struct {
+		ch    channel.ID
+		entry subjectgate.HistoryMetaEntry
+	}
+	jobs := make([]job, 0, len(s.subs))
 	for ch, sub := range s.subs {
-		if sub.temporary || sub.paused {
+		if sub.temporary {
 			continue
 		}
-		rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
-		active, aerr := sub.route.Bundle.View().IsActive(rctx, sub.reader.ActorID)
-		if aerr != nil || !active {
-			cancel()
-			continue
-		}
-		window, err := sub.route.Bundle.View().ReadVisibleTurnWindowBeforeSeq(rctx, channelspec.HistoryWindowQuery{
-			BeforeSeq: 0, TargetRows: limit, MinimumCompleteRoots: minimumHistoryRoots,
-		})
-		cancel()
-		if err != nil {
-			continue
-		}
-		rows := make([]subjectgate.HistoryRow, 0, len(window.Rows))
-		for _, row := range window.Rows {
-			if historyRow, ok := transportableHistoryRow(ch, row.Seq, row.Envelope); ok {
-				rows = append(rows, historyRow)
+		jobs = append(jobs, job{ch: ch, sub: sub})
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
+	defer cancel()
+	work := make(chan job)
+	results := make(chan result, len(jobs))
+	workers := min(initialHistoryParallelism, len(jobs))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range work {
+				entry := subjectgate.HistoryMetaEntry{ChannelID: string(item.ch)}
+				if item.sub.paused {
+					entry.ErrorCode, entry.ErrorDetail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
+					results <- result{ch: item.ch, entry: entry}
+					continue
+				}
+				active, err := item.sub.route.Bundle.View().IsActive(ctx, item.sub.reader.ActorID)
+				if err != nil || !active {
+					entry.ErrorCode, entry.ErrorDetail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
+					results <- result{ch: item.ch, entry: entry}
+					continue
+				}
+				rows, head, _, err := item.sub.route.Bundle.View().ReadVisibleBeforeSeq(ctx, 0, 1)
+				if err != nil {
+					entry.ErrorCode, entry.ErrorDetail = subjectgate.CodeUnavailable, "history unavailable — retry"
+					results <- result{ch: item.ch, entry: entry}
+					continue
+				}
+				entry.HeadSeq = head
+				entry.HasRows = len(rows) > 0
+				if len(rows) > 0 {
+					entry.LastActivity = rows[len(rows)-1].Envelope.TS
+				}
+				results <- result{ch: item.ch, entry: entry}
 			}
+		}()
+	}
+	go func() {
+		for _, item := range jobs {
+			work <- item
 		}
-		oldest := window.OldestSeq
-		floor := window.HeadSeq
-		if oldest > 0 {
-			floor = oldest - 1
+		close(work)
+		wg.Wait()
+		close(results)
+	}()
+	collected := make([]result, 0, len(jobs))
+	for item := range results {
+		collected = append(collected, item)
+	}
+	// Deterministic ordering is client policy input only: focus first, then the
+	// most recently active channels. A slow channel never blocks the others;
+	// metadata reads above run in four bounded workers.
+	slices.SortFunc(collected, func(a, b result) int {
+		if (a.ch == focus) != (b.ch == focus) {
+			if a.ch == focus {
+				return -1
+			}
+			return 1
 		}
-		truncated := s.lane.cursor.at(ch) < floor
-		entries = append(entries, subjectgate.HistoryEntry{
-			ChannelID: string(ch), HeadSeq: window.HeadSeq, OldestSeq: oldest,
-			HasOlder: window.HasOlder, Truncated: truncated,
-		})
-		if truncated {
-			s.initialTails[ch] = initialTail{head: window.HeadSeq, rows: rows}
+		if a.entry.LastActivity != b.entry.LastActivity {
+			if a.entry.LastActivity > b.entry.LastActivity {
+				return -1
+			}
+			return 1
 		}
+		return strings.Compare(string(a.ch), string(b.ch))
+	})
+	entries := make([]subjectgate.HistoryMetaEntry, 0, len(collected))
+	for _, item := range collected {
+		entries = append(entries, item.entry)
+		if item.entry.ErrorCode != "" {
+			s.gw.logger.Warn("gateway.history.attach_failed",
+				"channel", string(item.ch),
+				"code", item.entry.ErrorCode,
+				"detail", item.entry.ErrorDetail,
+			)
+			continue
+		}
+		s.lane.cursor.advance(item.ch, item.entry.HeadSeq)
 	}
 	return entries
-}
-
-// FlushInitialHistory puts the prepared tail behind the attach receipt and
-// advances the live cursor to the captured head. LaunchFeed then continues
-// strictly after that snapshot, so writes racing the attach are not lost.
-func (s *Session) FlushInitialHistory() {
-	for ch, tail := range s.initialTails {
-		for _, row := range tail.rows {
-			fr, err := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
-				ChannelID: string(ch), Seq: row.Seq, Envelope: row.Envelope,
-			})
-			if err == nil {
-				s.Send(fr)
-			}
-		}
-		s.lane.cursor.advance(ch, tail.head)
-		delete(s.initialTails, ch)
-	}
 }
 
 // beginFeed is the SESSION half of泵登记 (统一会话闸, 五轮 P1-3): closed, 泵登记, and
@@ -317,9 +371,38 @@ func (s *Session) Send(f subjectgate.Frame) {
 	}
 }
 
-// Down is the connector's drain: the writer goroutine reads serialized downstream
-// frames from here and writes them to the wire.
-func (s *Session) Down() <-chan []byte { return s.lane.out }
+// SendBackfill serializes one historical frame onto the bounded low-priority lane.
+func (s *Session) SendBackfill(f subjectgate.Frame) {
+	b, err := f.Marshal()
+	if err != nil {
+		return
+	}
+	if !s.lane.pushBackfill(b) {
+		s.Close()
+	}
+}
+
+// SendHistory serializes one on-demand history page frame. It is below live
+// traffic but above attach replay: a person's upward read must not queue behind
+// unrelated channels being hydrated in the background.
+func (s *Session) SendHistory(f subjectgate.Frame) {
+	b, err := f.Marshal()
+	if err != nil {
+		return
+	}
+	if !s.lane.pushHistory(b) {
+		s.Close()
+	}
+}
+
+// LiveDown, HistoryDown and BackfillDown are the writer inputs. The connector performs
+// strict-priority selection at every frame boundary.
+func (s *Session) LiveDown() <-chan []byte     { return s.lane.live }
+func (s *Session) HistoryDown() <-chan []byte  { return s.lane.history }
+func (s *Session) BackfillDown() <-chan []byte { return s.lane.backfill }
+
+// Down remains the live face for non-history gateway harnesses.
+func (s *Session) Down() <-chan []byte { return s.lane.live }
 
 // Done closes when the session is torn down (the connector unblocks its reader off
 // this).
@@ -697,61 +780,176 @@ func (s *Session) handleControl(command controlCommand) {
 				break
 			}
 		}
+		if command.generation != s.generation {
+			result.code, result.detail = subjectgate.CodeUnavailable, "stale connection generation"
+			break
+		}
+		// Admission is connection-wide and channel-scoped. The actual read remains
+		// asynchronous, but no connection can retain more than four View reads and
+		// no channel can race two beforeSeq cursors.
+		s.historyMu.Lock()
+		if s.historyCount >= maxHistoryInflight {
+			result.code, result.detail = subjectgate.CodeUnavailable, "history batch capacity reached — retry"
+		} else if _, exists := s.historyInflight[command.channel]; exists {
+			result.code, result.detail = subjectgate.CodeUnavailable, "history batch already in flight for channel"
+		} else {
+			s.historyInflight[command.channel] = command.ref
+			s.historyCount++
+		}
+		s.historyMu.Unlock()
+		if result.code != "" {
+			break
+		}
 		// The pump owns subscription/eligibility state, so it snapshots the
 		// authorized route here. The potentially slow historical read runs outside
 		// the pump; live commit notifications and feed batches remain runnable.
+		route, reader := sub.route, sub.reader
 		s.historyWG.Add(1)
-		go s.readHistory(command, sub.route, sub.reader)
-		return
+		go func(route Route, reader Reader) {
+			defer s.historyWG.Done()
+			defer s.releaseHistory(command.channel, command.ref)
+			if command.start != nil {
+				select {
+				case <-command.start:
+				case <-s.ctx.Done():
+					return
+				}
+			}
+			s.readHistory(command, route, reader)
+		}(route, reader)
+		result.accepted = true
 	default:
 		result.code, result.detail = subjectgate.CodeBadPayload, "unknown session control command"
 	}
 	s.replyControl(command, result)
 }
 
+func (s *Session) releaseHistory(ch channel.ID, ref string) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if s.historyInflight[ch] != ref {
+		return
+	}
+	delete(s.historyInflight, ch)
+	s.historyCount--
+}
+
 func (s *Session) readHistory(command controlCommand, route Route, reader Reader) {
-	defer s.historyWG.Done()
-	result := controlResult{}
+	started := time.Now()
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
 	if reader.Mode == ReaderMember {
 		active, err := route.Bundle.View().IsActive(rctx, reader.ActorID)
 		if err != nil {
-			result.code, result.detail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
-			s.replyControl(command, result)
+			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "channel eligibility unavailable — retry"})
 			return
 		}
 		if !active {
-			result.code, result.detail = subjectgate.CodeForbidden, "no eligibility for channel"
-			s.replyControl(command, result)
+			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeForbidden, ErrorDetail: "no eligibility for channel"})
 			return
 		}
 	}
-	// The attach path already established a root-turn-safe first screen. Every
-	// later history_before is scheduler read-ahead: a strict bounded keyset page
-	// with no semantic scan, so the client can quietly maintain a deep reservoir
-	// without repeatedly expanding a 200-row request to whole turns.
-	page, head, hasOlder, err := route.Bundle.View().ReadVisibleBeforeSeq(rctx, command.before, command.limit)
+	// Every historical surface uses the same projection. Live feed remains raw,
+	// but attach, upward paging and system.log.recent all hide housekeeping and
+	// collapse provisional progress identically: completed turns keep their
+	// terminal; an open turn keeps only its latest provisional. A single complete
+	// root is enough here because the background reservoir, unlike the first
+	// screen, is governed primarily by its bounded row waterline.
+	minimumRoots := 1
+	if command.purpose == "initial-tail" {
+		// First paint must contain enough complete conversations to be useful for
+		// channels with many tiny turns. Later hydration is governed by the bounded
+		// row/byte reservoir and only needs one semantic root boundary.
+		minimumRoots = 20
+	}
+	window, err := route.Bundle.View().ReadVisibleTurnWindowBeforeSeq(rctx, channelspec.HistoryWindowQuery{
+		BeforeSeq: command.before, TargetRows: command.limit, MinimumCompleteRoots: minimumRoots,
+	})
 	if err != nil {
-		result.code, result.detail = subjectgate.CodeUnavailable, "history unavailable — retry"
-		s.replyControl(command, result)
+		s.gw.logger.Warn("gateway.history.read_failed", "channel", string(command.channel), "ref", command.ref, "duration", time.Since(started), "error", err)
+		s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "history unavailable — retry"})
 		return
 	}
-	rows := make([]subjectgate.HistoryRow, 0, len(page))
-	for _, row := range page {
+	readAt := time.Now()
+	s.gw.logger.Info("gateway.history.read", "channel", string(command.channel), "ref", command.ref, "before_seq", command.before, "limit", command.limit, "rows", len(window.Rows), "duration", readAt.Sub(started))
+	rows := window.Rows
+	if len(rows) > command.limit {
+		rows = rows[len(rows)-command.limit:]
+	}
+	// Select a bounded suffix by encoded bytes as well as row count. Selecting
+	// from newest to oldest preserves a contiguous cursor range; anything omitted
+	// is fetched by the next batch through NextBeforeSeq.
+	encoded := make([]subjectgate.HistoryRow, 0, len(rows))
+	encodedBytes := 0
+	for index := len(rows) - 1; index >= 0; index-- {
+		row := rows[index]
 		if historyRow, ok := transportableHistoryRow(command.channel, row.Seq, row.Envelope); ok {
-			rows = append(rows, historyRow)
+			rowBytes := len(historyRow.Envelope)
+			if encodedBytes > 0 && encodedBytes+rowBytes > command.byteLimit {
+				break
+			}
+			encoded = append(encoded, historyRow)
+			encodedBytes += rowBytes
+		} else {
+			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "history row exceeds transport limit"})
+			return
 		}
 	}
-	result.history = &subjectgate.HistoryReceipt{
-		ChannelID: string(command.channel), HeadSeq: head,
-		HasOlder: hasOlder, Rows: rows,
+	slices.Reverse(encoded)
+	nextBefore := window.OldestSeq
+	oldest, newest := int64(0), int64(0)
+	if len(encoded) > 0 {
+		oldest, newest = encoded[0].Seq, encoded[len(encoded)-1].Seq
+		if len(encoded) < len(window.Rows) {
+			nextBefore = oldest
+		}
 	}
-	if len(page) > 0 {
-		result.history.OldestSeq = page[0].Seq
-		result.history.NewestSeq = page[len(page)-1].Seq
+	end := subjectgate.PageEndPayload{
+		Source: "history", Purpose: command.purpose, Generation: command.generation,
+		ChannelID: string(command.channel), HeadSeq: window.HeadSeq,
+		OldestSeq: oldest, NewestSeq: newest, ScanLowSeq: nextBefore,
+		ScanHighSeq: historyScanHigh(command.before, window.HeadSeq), NextBeforeSeq: nextBefore,
+		Rows: len(encoded), Bytes: encodedBytes, HasOlder: window.HasOlder || nextBefore > window.OldestSeq,
 	}
-	s.replyControl(command, result)
+	for _, row := range encoded {
+		feed, frameErr := subjectgate.NewFrame(subjectgate.FrameFeed, command.ref, subjectgate.FeedPayload{
+			ChannelID: string(command.channel), Seq: row.Seq, Envelope: row.Envelope,
+			Source: "history", Generation: command.generation,
+		})
+		if frameErr != nil {
+			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "history row exceeds transport limit"})
+			return
+		}
+		s.sendHistoryFrame(command, feed)
+	}
+	s.sendHistoryEnd(command, end)
+	s.gw.logger.Info("gateway.history.queued", "channel", string(command.channel), "ref", command.ref, "rows", len(window.Rows), "queue_duration", time.Since(readAt), "total_duration", time.Since(started))
+}
+
+func (s *Session) sendHistoryEnd(command controlCommand, payload subjectgate.PageEndPayload) {
+	payload.Source = "history"
+	payload.ChannelID = string(command.channel)
+	payload.Purpose = command.purpose
+	payload.Generation = command.generation
+	frame, err := subjectgate.NewFrame(subjectgate.FramePageEnd, command.ref, payload)
+	if err == nil {
+		s.sendHistoryFrame(command, frame)
+	}
+}
+
+func (s *Session) sendHistoryFrame(command controlCommand, frame subjectgate.Frame) {
+	if command.purpose == "user-demand" {
+		s.SendHistory(frame)
+		return
+	}
+	s.SendBackfill(frame)
+}
+
+func historyScanHigh(before, head int64) int64 {
+	if before > 0 {
+		return before - 1
+	}
+	return head
 }
 
 func (s *Session) replyControl(command controlCommand, result controlResult) {
@@ -782,6 +980,17 @@ func normalizeHistoryLimit(limit int) int {
 		return maxHistoryLimit
 	}
 	return limit
+}
+
+func normalizeHistoryByteLimit(limit int) int {
+	if limit <= 0 || limit > maxHistoryBytes {
+		return maxHistoryBytes
+	}
+	return limit
+}
+
+func validHistoryPurpose(purpose string) bool {
+	return purpose == "initial-tail" || purpose == "user-demand" || purpose == "hydrate"
 }
 
 func transportableHistoryRow(ch channel.ID, seq int64, value any) (subjectgate.HistoryRow, bool) {
@@ -930,9 +1139,11 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 			continue
 		}
 		fr, ferr := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
-			ChannelID: string(ch),
-			Seq:       r.Seq,
-			Envelope:  env,
+			ChannelID:  string(ch),
+			Seq:        r.Seq,
+			Envelope:   env,
+			Source:     "live",
+			Generation: s.generation,
 		})
 		if ferr != nil {
 			continue
@@ -959,6 +1170,26 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 // deliver; observer/absent → forbidden; lease-expired → unavailable) and looks up the
 // slot现场. The detach frame is整删 (no case). Error mapping照表①.
 func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
+	return s.upstream(f, nil)
+}
+
+// Dispatch is the connector-facing upstream path. History is two-phase:
+// validate/accept, publish the acceptance on the realtime lane, then release
+// the asynchronous read. This makes `receipt → rows → page_end` structural;
+// it does not depend on goroutine scheduling or the writer happening to notice
+// the high-priority lane in time.
+func (s *Session) Dispatch(f subjectgate.Frame) {
+	if f.Type != subjectgate.FrameHistoryBefore {
+		s.Send(s.Upstream(f))
+		return
+	}
+	start := make(chan struct{})
+	response := s.upstream(f, start)
+	s.Send(response)
+	close(start)
+}
+
+func (s *Session) upstream(f subjectgate.Frame, historyStart <-chan struct{}) subjectgate.Frame {
 	errFrame := func(code, detail string) subjectgate.Frame {
 		return subjectgate.NewErrorFrame(f.Ref, string(f.Type), code, detail)
 	}
@@ -977,11 +1208,16 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 		} else if f.Type == subjectgate.FrameHistoryBefore {
 			kind = controlHistoryBefore
 			var payload subjectgate.HistoryBeforePayload
-			if err := f.DecodePayload(&payload); err != nil || payload.BeforeSeq < 0 || payload.Limit < 0 || payload.Limit > maxHistoryLimit {
-				return errFrame(subjectgate.CodeBadPayload, "history before_seq must be non-negative and limit must be between 0 and 200")
+			if err := f.DecodePayload(&payload); err != nil || payload.BeforeSeq < 0 || payload.Limit < 0 || payload.Limit > maxHistoryLimit || payload.ByteLimit < 0 || payload.ByteLimit > maxHistoryBytes || !validHistoryPurpose(payload.Purpose) || payload.Generation == 0 {
+				return errFrame(subjectgate.CodeBadPayload, "history requires a positive generation, valid purpose, non-negative cursor, limit <= 200 and byte_limit <= 4MiB")
 			}
 			command.before = payload.BeforeSeq
 			command.limit = normalizeHistoryLimit(payload.Limit)
+			command.byteLimit = normalizeHistoryByteLimit(payload.ByteLimit)
+			command.generation = payload.Generation
+			command.purpose = payload.Purpose
+			command.ref = f.Ref
+			command.start = historyStart
 		}
 		reply := make(chan controlResult, 1)
 		command.kind, command.reply = kind, reply
@@ -996,26 +1232,12 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 				return errFrame(result.code, result.detail)
 			}
 			if f.Type == subjectgate.FrameHistoryBefore {
-				if result.history == nil {
+				if !result.accepted {
 					return errFrame(subjectgate.CodeUnavailable, "history unavailable — retry")
 				}
-				// Historical envelopes use the existing bounded feed carrier one by
-				// one. Aggregating a semantic page into one receipt can exceed the
-				// physical frame limit; trimming that aggregate would cut a root turn.
-				// All sends enter the same lane before the receipt, so the receipt is
-				// both correlation ack and page-complete barrier.
-				page := *result.history
-				for _, row := range page.Rows {
-					feed, err := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
-						ChannelID: page.ChannelID, Seq: row.Seq, Envelope: row.Envelope,
-					})
-					if err != nil {
-						return errFrame(subjectgate.CodeUnavailable, "history row exceeds transport limit")
-					}
-					s.Send(feed)
-				}
-				page.Rows = []subjectgate.HistoryRow{}
-				frame, err := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, page)
+				frame, err := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.HistoryAcceptedReceipt{
+					Accepted: true, ChannelID: chID, Purpose: command.purpose, Generation: command.generation,
+				})
 				if err != nil {
 					return errFrame(subjectgate.CodeUnavailable, "history receipt unavailable")
 				}

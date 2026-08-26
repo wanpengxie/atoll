@@ -307,16 +307,16 @@ member's messages arrive on the same connection, so keep it open for the session
 
 ```jsonc
 // 1. subscribe (replay from the beginning; pass a cursor to resume)
-{"v":2,"frame_type":"attach","ref":"a","payload":{"since":{}}}
+{"v":3,"frame_type":"attach","ref":"a","payload":{"since":{},"focus":"c0","history_protocol":3}}
 
 // 2. ask the c0 gate to list members
-{"v":2,"frame_type":"submit","ref":"r1","payload":{
+{"v":3,"frame_type":"submit","ref":"r1","payload":{
   "channel_id":"c0","msg_type":"system.member.list","kind":"request",
   "visibility":"public","audience":["system"],"payload":{}}}
 
 // 3. ask the steward something (an audience entry may omit id segments:
 //    "steward" resolves against the roster's agent:steward:<ts>)
-{"v":2,"frame_type":"submit","ref":"r2","payload":{
+{"v":3,"frame_type":"submit","ref":"r2","payload":{
   "channel_id":"c0","msg_type":"agent.ask","kind":"request",
   "visibility":"public","audience":["steward"],
   "payload":{"text":"reply PONG"}}}

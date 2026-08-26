@@ -27,7 +27,7 @@ func TestLaneFullAppliesBackpressureAtFixedCapacity(t *testing.T) {
 		t.Fatalf("push past capacity returned before a drain: ok=%v", ok)
 	case <-time.After(50 * time.Millisecond):
 	}
-	<-l.out
+	<-l.live
 	select {
 	case ok := <-pushed:
 		if !ok {
@@ -92,4 +92,31 @@ func TestLaneCloseRefusesPush(t *testing.T) {
 		t.Fatal("lane should be closed")
 	}
 	l.close() // idempotent
+}
+
+func TestInteractiveHistoryDoesNotQueueBehindAttachBackfill(t *testing.T) {
+	l := newLane(newCursor(nil))
+	for i := 0; i < backfillLaneCapacity; i++ {
+		if !l.pushBackfill([]byte("attach")) {
+			t.Fatalf("attach backfill %d/%d should fit", i, backfillLaneCapacity)
+		}
+	}
+	done := make(chan bool, 1)
+	go func() { done <- l.pushHistory([]byte("interactive")) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("interactive history push was refused")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("interactive history shared backpressure with attach replay")
+	}
+	select {
+	case got := <-l.history:
+		if string(got) != "interactive" {
+			t.Fatalf("history frame = %q", got)
+		}
+	default:
+		t.Fatal("interactive history did not enter its own lane")
+	}
 }
