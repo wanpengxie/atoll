@@ -16,7 +16,7 @@
 | 权限位 | **access** | 频道成员身份决定谁能做什么 |
 | cron | **timer** | 持久的叫醒；重启不丢 |
 
-> **v0.04 —— pre-release，不对数据负责。** 存储格式、API、wire 协议随时改，没有 deprecation、
+> **v0.05 —— pre-release，不对数据负责。** 存储格式、API、wire 协议随时改，没有 deprecation、
 > 没有迁移；新版本可能拒绝或覆盖旧的 node home。不要往里放任何你无法重建的东西。
 
 ## 特性
@@ -73,7 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/insta
 装完打开 `http://127.0.0.1:8832`。
 
 ```bash
-ATOLL_VERSION=v0.04 ...        # 固定某个版本，不取最新
+ATOLL_VERSION=v0.05 ...        # 固定某个版本，不取最新
 ATOLL_INSTALL_DIR=/usr/local/bin ...   # 换二进制装到哪（默认 ~/.local/bin）
 ```
 
@@ -466,7 +466,7 @@ make dev            # 只起 API server 在 :8832，home 在 /tmp/atoll-dev（�
 
 ## 状态
 
-**v0.04，pre-release。** 核心（身份、频道、账本、成员身份、device、定时器）已实现并强制，项目
+**v0.05，pre-release。** 核心（身份、频道、账本、成员身份、device、定时器）已实现并强制，项目
 正在用自己开发自己；下一步是组织层。1.0 之前：
 
 - **不对数据负责**——没有升级或迁移路径；schema、home、wire 方言都会变；新二进制可能拒绝或重刻
