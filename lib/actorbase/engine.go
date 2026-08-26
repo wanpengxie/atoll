@@ -111,7 +111,7 @@ func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
 		queueCap:  256,
 	}
 	e.serve = newServeLedger(e.life, e.queueCap)
-	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
+	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.Self, e.closureFault)
 	e.workQ = newWorkDeque(e.queueCap)
 	e.rejectQ = make(chan *message.Envelope, e.queueCap)
 	e.rejectStop = make(chan struct{})

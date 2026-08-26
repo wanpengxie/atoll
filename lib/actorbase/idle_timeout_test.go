@@ -3,12 +3,14 @@ package actorbase
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func waitTerminal(pen *fakePen, before int, budget time.Duration) bool {
@@ -101,5 +103,52 @@ func TestServeLedgerTouchRestartsWindow(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(300 * time.Millisecond):
 		t.Fatal("in-station ctx did not collapse after one window of silence")
+	}
+}
+
+// relayPen behaves like a remote cell's proxy pen: it relays the envelope
+// without welding the sender into the caller's copy (the home welds its own
+// copy), so the out-station ledger never learns who sent the request.
+type relayPen struct {
+	mu      sync.Mutex
+	written []*message.Envelope
+}
+
+func (p *relayPen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	copied := *env
+	p.written = append(p.written, &copied)
+	return harness.WriteResult{MessageID: env.ID}, nil
+}
+
+// A caller whose registered request carries no sender — every daemon-hosted
+// actor — must still address its own cancel / timeout terminal to itself.
+func TestAuthorTwoTerminalNamesSelfWhenRequestCopyHasNoSender(t *testing.T) {
+	pen := &relayPen{}
+	e := newTestEngine(t, &fakePen{self: "actor:test"}, Hooks{}, 8, 8)
+	e.lifeCtx = context.Background()
+	e.pen = pen
+	e.call = newCallLedger(e.life, pen, e.clockFn, Hooks{}, func() actor.ActorID { return "tool:remote:1" }, nil)
+
+	id, err := e.Submit(behavior.RequestSpec{Type: "work", Audience: message.Audience{"actor:callee"}, Cause: message.Root()})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if pen.written[0].Sender.ID != "" {
+		t.Fatal("test premise: the relayed request copy must carry no sender")
+	}
+	if err := e.call.cancel(id); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if len(pen.written) != 2 {
+		t.Fatalf("cancel wrote %d envelopes, want the request + one terminal", len(pen.written))
+	}
+	terminal := pen.written[1]
+	if terminal.Kind != message.KindResponse || terminal.ParentID != id {
+		t.Fatalf("terminal=%+v", terminal)
+	}
+	if len(terminal.Audience) != 1 || terminal.Audience[0] != "tool:remote:1" {
+		t.Fatalf("author#2 terminal audience=%v, want [tool:remote:1] (self)", terminal.Audience)
 	}
 }

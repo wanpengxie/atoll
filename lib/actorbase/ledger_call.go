@@ -120,6 +120,12 @@ type callLedger struct {
 	pen   harness.Pen
 	clock func() time.Time
 	hooks Hooks
+	// self is this engine's bound id. The registered request copy may carry
+	// no sender: identity is welded by the pen, and a REMOTE cell's proxy pen
+	// relays the empty envelope for the home to weld, so the copy in this
+	// ledger never learns it. An author#2 terminal answers the request's
+	// sender — us — so closure builds from a copy that names self.
+	self func() actor.ActorID
 	// onFault is the fault sink (F5): a failed/rejected obligation write
 	// (fireTimeout/cancel) — a liveness-guarantee hole — is reported here. Wired
 	// by engine.New to engine.closureFault; nil = faults ignored (the ledger
@@ -130,8 +136,19 @@ type callLedger struct {
 	entries map[message.ID]*callEntry
 }
 
-func newCallLedger(life func() context.Context, pen harness.Pen, clock func() time.Time, hooks Hooks, onFault func(message.ID, error)) *callLedger {
-	return &callLedger{life: life, pen: pen, clock: clock, hooks: hooks, onFault: onFault, entries: make(map[message.ID]*callEntry)}
+func newCallLedger(life func() context.Context, pen harness.Pen, clock func() time.Time, hooks Hooks, self func() actor.ActorID, onFault func(message.ID, error)) *callLedger {
+	return &callLedger{life: life, pen: pen, clock: clock, hooks: hooks, self: self, onFault: onFault, entries: make(map[message.ID]*callEntry)}
+}
+
+// closureRequest is the request an author#2 terminal answers: the registered
+// copy, with the sender filled in from self when the pen never welded it here.
+func (l *callLedger) closureRequest(e *callEntry) *message.Envelope {
+	if e.req == nil || e.req.Sender.ID != "" || l.self == nil {
+		return e.req
+	}
+	req := *e.req
+	req.Sender.ID = l.self()
+	return &req
 }
 
 // fault reports a closure-write fault if a sink is wired.
@@ -336,7 +353,7 @@ func (l *callLedger) fireTimeout(id message.ID) {
 	// The membrane fail-closes a genuinely-dead write; ctx is only the transport
 	// pipe. A failed/rejected write (Respond maps a benign terminal-duplicate to
 	// a nil error, so that stays silent) is a liveness hole and is reported.
-	_, werr := behavior.Respond(context.WithoutCancel(l.life()), l.pen, l.clock, e.req, behavior.ResponseSpec{
+	_, werr := behavior.Respond(context.WithoutCancel(l.life()), l.pen, l.clock, l.closureRequest(e), behavior.ResponseSpec{
 		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalUnansweredTimeout),
 		Payload: payload,
@@ -384,7 +401,7 @@ func (l *callLedger) cancel(id message.ID) error {
 	// WithoutCancel (F5): same rationale as fireTimeout — the obligation write's
 	// WHEN authority is the pen membrane, not the ctx; a failed/rejected write
 	// (duplicate excepted) is reported as a liveness fault.
-	_, werr := behavior.Respond(context.WithoutCancel(l.life()), l.pen, l.clock, e.req, behavior.ResponseSpec{
+	_, werr := behavior.Respond(context.WithoutCancel(l.life()), l.pen, l.clock, l.closureRequest(e), behavior.ResponseSpec{
 		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalUnansweredTimeout),
 		Payload: payload,

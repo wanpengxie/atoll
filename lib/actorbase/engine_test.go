@@ -196,7 +196,7 @@ func newTestEngine(t *testing.T, pen *fakePen, hooks Hooks, serveCap, queueCap i
 		queueCap:  queueCap,
 	}
 	e.serve = newServeLedger(e.life, serveCap)
-	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
+	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.Self, e.closureFault)
 	e.workQ = newWorkDeque(queueCap)
 	e.rejectQ = make(chan *message.Envelope, queueCap)
 	e.rejectStop = make(chan struct{})
