@@ -62,7 +62,7 @@ func TestCoreCreatesAndDeletesMemberThroughTargetSvcactor(t *testing.T) {
 
 	const (
 		channelName = "e2e-membrane-control"
-		declID      = "e2e-membrane-echo"
+		declID      = "e2e-membrane-codex"
 	)
 	created := createChannelWithRoot(t, ws, c0ChannelID, registrar, channelName)
 	targetID := stringField(t, created, "channel_id")
@@ -86,7 +86,7 @@ func TestCoreCreatesAndDeletesMemberThroughTargetSvcactor(t *testing.T) {
 	}
 
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
-		"id": declID, "name": declID, "class": "echo", "config": map[string]any{}, "visibility": "private",
+		"id": declID, "name": declID, "class": "codex", "config": map[string]any{}, "visibility": "private",
 	})
 	introduced := ws.request(c0ChannelID, "system.member.create", peer, map[string]any{"decl_id": declID})
 	member := stringField(t, introduced, "member")

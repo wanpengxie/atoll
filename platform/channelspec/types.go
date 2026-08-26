@@ -28,11 +28,12 @@ type ChannelDesiredFacts struct {
 	ParentID channel.ID
 }
 
-// ResolveActorPrincipal applies the platform's single attribution rule: an
-// actor's explicit principal wins; otherwise its source declaration's owner is
-// the principal. The lookup is intentionally supplied by the caller because
-// channel homes and the c0 registrar reach declaration truth through different
-// read ports.
+// ResolveActorPrincipal derives an effective principal for a policy decision:
+// an actor's explicit principal wins; otherwise its source declaration's owner
+// supplies attribution. The derived value is not the actor's stored identity
+// and must never be written back into its seat. The lookup is supplied by the
+// caller because channel homes and the c0 registrar reach declaration truth
+// through different read ports.
 func ResolveActorPrincipal(
 	ctx context.Context,
 	facts ActorFacts,

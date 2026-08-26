@@ -156,15 +156,16 @@ func (h *Home) resolveIntroduction(
 	if err != nil {
 		return actorctl.IntroduceRequest{}, err
 	}
-	principal := ""
-	if kind == actor.KindAgent {
-		principal = facts.OwnerPrincipal
-	}
 	// The birth name comes from the declaration's name, never from its id: the
 	// id may be opaque (a peer declaration is keyed by the target channel's
 	// uuid) while the name is the readable word members address each other by.
+	// An ordinary declaration birth carries no explicit principal. Declaration
+	// ownership controls the recipe and can supply derived attribution where a
+	// policy asks for it; it does not mean every instance of that recipe is the
+	// owner's identity. Principal-bound agents enter only through a trusted
+	// identity-carrying genesis/initial-seat path.
 	return actorctl.IntroduceRequest{
-		DeclID: declID, Seed: facts.Name, Kind: kind, Principal: principal, Singleton: facts.Singleton, Placement: placement,
+		DeclID: declID, Seed: facts.Name, Kind: kind, Singleton: facts.Singleton, Placement: placement,
 		Definition: storespec.ActorDefinition{
 			Class:  facts.Class,
 			Config: append(json.RawMessage(nil), facts.Config...),

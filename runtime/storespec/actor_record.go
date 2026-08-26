@@ -117,8 +117,11 @@ func (r ActorRecord) Clone() ActorRecord {
 // segment still tells them apart. Deriving the name from the key forces one of
 // the two to give up its nature; carrying both keeps each honest.
 type ActorDraft struct {
-	Kind         actor.Kind
-	Seed         string
+	Kind actor.Kind
+	Seed string
+	// Principal is explicit seat identity, not declaration ownership.
+	// Declaration-backed births normally leave it empty; trusted genesis
+	// identity carry is the agent path that may set it.
 	Principal    string
 	SourceDeclID string
 	Singleton    bool
@@ -144,10 +147,11 @@ func (a IdentityAdmission) Valid() bool {
 	return a.ID != "" && validKind
 }
 
-// ActorFacts is the narrow identity-fact projection: who is behind one actor
-// and what kind it is. It is the question-shaped answer used by request-side
-// authorization and by door policy (owner derivation) — never a whole record,
-// never a general authority.
+// ActorFacts is the narrow identity-fact projection: an explicit principal
+// binding, declaration provenance and kind. Principal never means "owner of
+// SourceDeclID"; a policy that needs derived attribution resolves that owner
+// deliberately from SourceDeclID. It is never a whole record or a general
+// authority.
 type ActorFacts struct {
 	Kind         actor.Kind
 	Principal    string

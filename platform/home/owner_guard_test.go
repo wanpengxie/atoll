@@ -9,8 +9,24 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type ownedRoutingResolver struct {
+	routingResolver
+	owner string
+}
+
+func (r ownedRoutingResolver) ResolveDeclaration(ctx context.Context, ch channel.ID, source string) (channelspec.DeclarationFacts, error) {
+	facts, err := r.routingResolver.ResolveDeclaration(ctx, ch, source)
+	if err != nil {
+		return channelspec.DeclarationFacts{}, err
+	}
+	facts.OwnerPrincipal = r.owner
+	facts.Visibility = "private"
+	return facts, nil
+}
 
 // The owner terminal guard is the ONLY protection line left after the store
 // cascade chokepoint was deleted, so it must be exercised for real: with a
@@ -129,9 +145,75 @@ func TestOwnerTerminalGuardRecognizesAgentPrincipal(t *testing.T) {
 	if ownerID == "" {
 		t.Fatal("agent owner seat missing")
 	}
+	resourceFacts, err := h.actors.ResourceActorFacts(ctx, ownerID)
+	if err != nil || !resourceFacts.Owner {
+		t.Fatalf("explicit principal-bound agent owner facts=%+v err=%v", resourceFacts, err)
+	}
 	_, err = h.opEntry.remove(ctx, removeRequest{Target: ownerID, InitiatorActorID: ownerID})
 	var opErr *channelspec.OperationError
 	if !errors.As(err, &opErr) || opErr.Code != channelspec.ErrCodeProtectedActor {
 		t.Fatalf("removing agent owner: err=%v, want %s", err, channelspec.ErrCodeProtectedActor)
+	}
+}
+
+func TestDeclarationOwnerDoesNotBecomeAgentSeatPrincipal(t *testing.T) {
+	const ownerPrincipal = "steward"
+	resolver := ownedRoutingResolver{owner: ownerPrincipal}
+	h, err := Open(completeHomeTestConfig(Config{
+		ChannelID:           "declaration-owner-is-not-seat-principal",
+		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver: resolver, IntroductionResolver: resolver,
+		ReconcileInterval: time.Hour, Bootstrap: true,
+		Genesis: &storespec.ChannelGenesis{
+			ChannelID: "declaration-owner-is-not-seat-principal", Type: "channel",
+			OwnerPrincipal: ownerPrincipal, CreatedAt: time.Now().UnixMilli(),
+		},
+		BootstrapHumanPrincipals: []string{ownerPrincipal},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.closeInternal("test") })
+	ctx := context.Background()
+
+	identities, err := h.controller.ActiveIdentities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ownerID actor.ActorID
+	for _, identity := range identities {
+		if identity.Kind == actor.KindHuman {
+			ownerID = identity.ID
+		}
+	}
+	if ownerID == "" {
+		t.Fatal("human owner seat missing")
+	}
+
+	command, err := h.resolveIntroduction(ctx, "codex-template", "", ownerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Principal != "" {
+		t.Fatalf("ordinary declaration birth principal=%q, want empty", command.Principal)
+	}
+	introduced, err := h.actors.Introduce(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, active, err := h.actors.ActorFacts(ctx, introduced.ActorID)
+	if err != nil || !active || facts.Principal != "" {
+		t.Fatalf("introduced facts=%+v active=%v err=%v", facts, active, err)
+	}
+	resourceFacts, err := h.actors.ResourceActorFacts(ctx, introduced.ActorID)
+	if err != nil || resourceFacts.Owner {
+		t.Fatalf("declaration instance resource facts=%+v err=%v", resourceFacts, err)
+	}
+	removed, err := h.opEntry.remove(ctx, removeRequest{Target: introduced.ActorID, InitiatorActorID: ownerID})
+	if err != nil {
+		t.Fatalf("remove declaration instance: %v", err)
+	}
+	if len(removed.Removed) != 1 || removed.Removed[0] != introduced.ActorID {
+		t.Fatalf("removed=%v, want [%s]", removed.Removed, introduced.ActorID)
 	}
 }

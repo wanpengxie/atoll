@@ -47,9 +47,12 @@ type AdmitRequest struct {
 // was fetched, its visibility judged and its placement host chosen at the
 // Platform door; the command carries only mechanical facts.
 type IntroduceRequest struct {
-	DeclID     string
-	Seed       string
-	Kind       actor.Kind
+	DeclID string
+	Seed   string
+	Kind   actor.Kind
+	// Principal is an explicit identity binding carried by a trusted
+	// identity-import path. An ordinary declaration birth leaves it empty;
+	// ownership of DeclID is not the identity of the member it produces.
 	Principal  string
 	Singleton  bool
 	Definition storespec.ActorDefinition
