@@ -41,18 +41,25 @@ func MergeResponsePayload(payload json.RawMessage, status, reason string) (json.
 }
 
 // ResponseSpec is the caller-supplied shape of a response (status/reason +
-// optional visibility override + the raw payload). The response audience is NOT
-// caller-adjustable: a response always goes to the request's sender (harness
-// Step 8 enforces audience == parent sender), so there is no audience field.
+// optional visibility override + the raw payload). Audience is the one
+// exception to "everything derives from the request in hand": a response
+// normally goes to the request's sender (left nil → request.Sender.ID), but a
+// CALLER closing its own request (author#2) answers itself and names itself
+// here — its registered copy of the request never carried a sender (identity
+// is pen-welded, and a remote cell's proxy pen relays the envelope unwelded),
+// so the sender is not a source it can read. Harness Step 8 still enforces
+// audience == parent sender against truth, so this field cannot redirect a
+// response anywhere the substrate would not have sent it.
 type ResponseSpec struct {
 	Status     string
 	Reason     string
 	Payload    json.RawMessage
 	Visibility message.Visibility
+	Audience   message.Audience
 }
 
 // BuildResponseFromRequest assembles a kind=response envelope from the request
-// envelope held in hand. Audience defaults to the request sender;
+// envelope held in hand. Audience is spec.Audience, else the request sender;
 // visibility/correlation inherit from the request. The response id is a random
 // uuid correlation anchor; parent_id (=request id) + the One-Law terminal
 // uniqueness index — not the id — guarantee "one terminal per request". The
@@ -79,7 +86,10 @@ func BuildResponseFromRequest(
 	if vis == "" {
 		vis = request.Visibility
 	}
-	audience := message.Audience{request.Sender.ID}
+	audience := spec.Audience
+	if len(audience) == 0 {
+		audience = message.Audience{request.Sender.ID}
+	}
 	// A response's cause is never in doubt — it is the request in hand. It goes
 	// through the same derivation every other envelope uses, so there is one
 	// account of what parent and correlation mean, not two that could drift.
