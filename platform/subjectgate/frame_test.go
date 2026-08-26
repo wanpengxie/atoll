@@ -74,8 +74,10 @@ func TestFrameRoundTrip(t *testing.T) {
 		{"resource", FrameResource, ResourcePayload{ChannelID: "c1", Op: ResRead, ResourceID: "res:1"}},
 		{"observe", FrameObserve, ObservePayload{ChannelID: "c1"}},
 		{"unobserve", FrameUnobserve, UnobservePayload{ChannelID: "c1"}},
-		{"history_before", FrameHistoryBefore, HistoryBeforePayload{ChannelID: "c1", BeforeSeq: 7, Limit: 50}},
+		{"history_before", FrameHistoryBefore, HistoryBeforePayload{ChannelID: "c1", BeforeSeq: 7, Limit: 50, Generation: 1, Purpose: "hydrate", Priority: "background"}},
+		{"history_cancel", FrameHistoryCancel, HistoryCancelPayload{ChannelID: "c1", TargetRef: "history-1", Generation: 1}},
 		{"feed", FrameFeed, FeedPayload{ChannelID: "c1", Seq: 5, Envelope: json.RawMessage(`{}`)}},
+		{"checkpoint", FrameCheckpoint, CheckpointPayload{ChannelID: "c1", ScanLowSeq: 1, ScannedSeq: 5, Generation: 1}},
 		{"receipt", FrameReceipt, SubmitReceipt{MessageID: "m1"}},
 		{"error", FrameError, ErrorPayload{Frame: "submit", Code: CodeBadPayload, Detail: "bad"}},
 		{"observe_ended", FrameObserveEnded, ObserveEndedPayload{ChannelID: "c1", Reason: ObserveEndedNowMember}},
@@ -105,7 +107,7 @@ func TestFrameRoundTrip(t *testing.T) {
 }
 
 func TestDirectionalUnknownTypePolicy(t *testing.T) {
-	b := []byte(`{"v":4,"frame_type":"teleport","payload":{"future":true}}`)
+	b := []byte(`{"v":5,"frame_type":"teleport","payload":{"future":true}}`)
 	if _, err := ParseUpstreamFrame(b); !errors.Is(err, ErrUnknownFrameType) {
 		t.Fatalf("upstream unknown kind must fail closed, got %v", err)
 	}
@@ -120,17 +122,17 @@ func TestDirectionalUnknownTypePolicy(t *testing.T) {
 
 func TestUpstreamUnknownFieldsRejected(t *testing.T) {
 	for _, b := range []string{
-		`{"v":4,"frame_type":"attach","ref":"r1","unexpected":true,"payload":{}}`,
-		`{"v":4,"frame_type":"attach","ref":"r1","payload":{"since":{},"unexpected":true}}`,
-		`{"v":4,"frame_type":"submit","ref":"r1","payload":{"channel_id":"c1","msg_type":"m","unexpected":true}}`,
-		`{"v":4,"frame_type":"resolve","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","decision":"ok","unexpected":true}}`,
-		`{"v":4,"frame_type":"cancel","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","unexpected":true}}`,
-		`{"v":4,"frame_type":"after","ref":"r1","payload":{"channel_id":"c1","duration_ms":1,"msg_type":"m","unexpected":true}}`,
-		`{"v":4,"frame_type":"cancel_timer","ref":"r1","payload":{"channel_id":"c1","timer_id":"t1","unexpected":true}}`,
-		`{"v":4,"frame_type":"resource","ref":"r1","payload":{"channel_id":"c1","op":"read","resource_id":"r1","unexpected":true}}`,
-		`{"v":4,"frame_type":"observe","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
-		`{"v":4,"frame_type":"unobserve","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
-		`{"v":4,"frame_type":"history_before","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":5,"frame_type":"attach","ref":"r1","unexpected":true,"payload":{}}`,
+		`{"v":5,"frame_type":"attach","ref":"r1","payload":{"since":{},"unexpected":true}}`,
+		`{"v":5,"frame_type":"submit","ref":"r1","payload":{"channel_id":"c1","msg_type":"m","unexpected":true}}`,
+		`{"v":5,"frame_type":"resolve","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","decision":"ok","unexpected":true}}`,
+		`{"v":5,"frame_type":"cancel","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","unexpected":true}}`,
+		`{"v":5,"frame_type":"after","ref":"r1","payload":{"channel_id":"c1","duration_ms":1,"msg_type":"m","unexpected":true}}`,
+		`{"v":5,"frame_type":"cancel_timer","ref":"r1","payload":{"channel_id":"c1","timer_id":"t1","unexpected":true}}`,
+		`{"v":5,"frame_type":"resource","ref":"r1","payload":{"channel_id":"c1","op":"read","resource_id":"r1","unexpected":true}}`,
+		`{"v":5,"frame_type":"observe","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":5,"frame_type":"unobserve","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":5,"frame_type":"history_before","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
 	} {
 		f, err := ParseUpstreamFrame([]byte(b))
 		if err == nil {
@@ -143,7 +145,7 @@ func TestUpstreamUnknownFieldsRejected(t *testing.T) {
 }
 
 func TestDownstreamUnknownFieldsIgnored(t *testing.T) {
-	b := []byte(`{"v":4,"frame_type":"feed","future_envelope":true,"payload":{"channel_id":"c1","seq":1,"envelope":{},"future_payload":true}}`)
+	b := []byte(`{"v":5,"frame_type":"feed","future_envelope":true,"payload":{"channel_id":"c1","seq":1,"envelope":{},"future_payload":true}}`)
 	down, err := ParseDownstream(b)
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +161,7 @@ func TestDownstreamUnknownFieldsIgnored(t *testing.T) {
 }
 
 func TestFrameVersionRejected(t *testing.T) {
-	// Any pre-v4 envelope is refused; history wire upgrades are atomic.
+	// Any pre-v5 envelope is refused; history wire upgrades are atomic.
 	b := []byte(`{"v":3,"frame_type":"attach"}`)
 	if _, err := ParseEnvelope(b); err == nil {
 		t.Fatal("expected version mismatch to be refused")

@@ -27,6 +27,7 @@ const (
 	maxHistoryLimit           = 200
 	initialHistoryParallelism = 4
 	maxHistoryInflight        = 4
+	maxBackgroundHistory      = 3
 	maxHistoryBytes           = 4 << 20
 )
 
@@ -50,6 +51,7 @@ const (
 	controlObserve controlKind = iota + 1
 	controlUnobserve
 	controlHistoryBefore
+	controlHistoryCancel
 )
 
 type controlCommand struct {
@@ -60,7 +62,10 @@ type controlCommand struct {
 	byteLimit  int
 	generation uint64
 	purpose    string
+	priority   string
 	ref        string
+	targetRef  string
+	readCtx    context.Context
 	// start is a connector-owned publication barrier. A history read may not
 	// enqueue backfill until its accepted receipt is already on the live lane.
 	// Direct in-process callers leave it nil and retain the synchronous API.
@@ -72,6 +77,12 @@ type controlResult struct {
 	code     string
 	detail   string
 	accepted bool
+}
+
+type historyRequest struct {
+	ref      string
+	priority string
+	cancel   context.CancelFunc
 }
 
 // eligState is the session's资格账 snapshot (spec §3.2 v0.8, 六轮 P1-2 修形): the pump
@@ -129,12 +140,13 @@ type Session struct {
 
 	// subs is the订阅集 (PUMP-OWNED, no lock). elig is the資格账 the pump publishes
 	// for Upstream (atomic single-writer).
-	subs            map[channel.ID]*subscription
-	elig            atomic.Pointer[eligState]
-	controls        chan controlCommand
-	historyMu       sync.Mutex
-	historyInflight map[channel.ID]string
-	historyCount    int
+	subs                   map[channel.ID]*subscription
+	elig                   atomic.Pointer[eligState]
+	controls               chan controlCommand
+	historyMu              sync.Mutex
+	historyInflight        map[channel.ID]historyRequest
+	historyCount           int
+	historyBackgroundCount int
 
 	onceClose sync.Once
 	historyWG sync.WaitGroup
@@ -157,7 +169,7 @@ func (g *Gateway) Attach(principal string, since map[channel.ID]int64, generatio
 		wake:            make(chan struct{}, 1),
 		subs:            map[channel.ID]*subscription{},
 		controls:        make(chan controlCommand, 32),
-		historyInflight: map[channel.ID]string{},
+		historyInflight: map[channel.ID]historyRequest{},
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.elig.Store(&eligState{routes: map[channel.ID]Route{}, paused: map[channel.ID]struct{}{}, failed: map[channel.ID]struct{}{}})
@@ -333,7 +345,7 @@ func (s *Session) PrepareHistoryMetadata(focus channel.ID) []subjectgate.History
 			)
 			continue
 		}
-		s.lane.cursor.advance(item.ch, item.entry.HeadSeq)
+		s.lane.cursor.anchor(item.ch, item.entry.HeadSeq)
 	}
 	return entries
 }
@@ -790,11 +802,18 @@ func (s *Session) handleControl(command controlCommand) {
 		s.historyMu.Lock()
 		if s.historyCount >= maxHistoryInflight {
 			result.code, result.detail = subjectgate.CodeUnavailable, "history batch capacity reached — retry"
+		} else if command.priority == "background" && s.historyBackgroundCount >= maxBackgroundHistory {
+			result.code, result.detail = subjectgate.CodeUnavailable, "background history capacity reached — retry"
 		} else if _, exists := s.historyInflight[command.channel]; exists {
 			result.code, result.detail = subjectgate.CodeUnavailable, "history batch already in flight for channel"
 		} else {
-			s.historyInflight[command.channel] = command.ref
+			readCtx, cancel := context.WithCancel(s.ctx)
+			s.historyInflight[command.channel] = historyRequest{ref: command.ref, priority: command.priority, cancel: cancel}
 			s.historyCount++
+			if command.priority == "background" {
+				s.historyBackgroundCount++
+			}
+			command.readCtx = readCtx
 		}
 		s.historyMu.Unlock()
 		if result.code != "" {
@@ -815,8 +834,22 @@ func (s *Session) handleControl(command controlCommand) {
 					return
 				}
 			}
-			s.readHistory(command, route, reader)
+			s.readHistory(command.readCtx, command, route, reader)
 		}(route, reader)
+		result.accepted = true
+	case controlHistoryCancel:
+		if command.generation != s.generation {
+			result.code, result.detail = subjectgate.CodeUnavailable, "stale connection generation"
+			break
+		}
+		s.historyMu.Lock()
+		request, exists := s.historyInflight[command.channel]
+		if exists && request.ref == command.targetRef {
+			request.cancel()
+		}
+		s.historyMu.Unlock()
+		// Cancellation is idempotent. Completion may have won the race, which is
+		// already the desired terminal state and must not turn cancel into an error.
 		result.accepted = true
 	default:
 		result.code, result.detail = subjectgate.CodeBadPayload, "unknown session control command"
@@ -827,16 +860,21 @@ func (s *Session) handleControl(command controlCommand) {
 func (s *Session) releaseHistory(ch channel.ID, ref string) {
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
-	if s.historyInflight[ch] != ref {
+	request, exists := s.historyInflight[ch]
+	if !exists || request.ref != ref {
 		return
 	}
+	request.cancel()
 	delete(s.historyInflight, ch)
 	s.historyCount--
+	if request.priority == "background" {
+		s.historyBackgroundCount--
+	}
 }
 
-func (s *Session) readHistory(command controlCommand, route Route, reader Reader) {
+func (s *Session) readHistory(baseCtx context.Context, command controlCommand, route Route, reader Reader) {
 	started := time.Now()
-	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
+	rctx, cancel := context.WithTimeout(baseCtx, s.gw.tRead)
 	defer cancel()
 	if reader.Mode == ReaderMember {
 		active, err := route.Bundle.View().IsActive(rctx, reader.ActorID)
@@ -866,6 +904,9 @@ func (s *Session) readHistory(command controlCommand, route Route, reader Reader
 		BeforeSeq: command.before, TargetRows: command.limit, MinimumCompleteRoots: minimumRoots,
 	})
 	if err != nil {
+		if errors.Is(rctx.Err(), context.Canceled) {
+			return
+		}
 		s.gw.logger.Warn("gateway.history.read_failed", "channel", string(command.channel), "ref", command.ref, "duration", time.Since(started), "error", err)
 		s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "history unavailable — retry"})
 		return
@@ -912,6 +953,9 @@ func (s *Session) readHistory(command controlCommand, route Route, reader Reader
 		Rows: len(encoded), Bytes: encodedBytes, HasOlder: window.HasOlder || nextBefore > window.OldestSeq,
 	}
 	for _, row := range encoded {
+		if rctx.Err() != nil {
+			return
+		}
 		feed, frameErr := subjectgate.NewFrame(subjectgate.FrameFeed, command.ref, subjectgate.FeedPayload{
 			ChannelID: string(command.channel), Seq: row.Seq, Envelope: row.Envelope,
 			Source: "history", Generation: command.generation,
@@ -938,7 +982,7 @@ func (s *Session) sendHistoryEnd(command controlCommand, payload subjectgate.Pag
 }
 
 func (s *Session) sendHistoryFrame(command controlCommand, frame subjectgate.Frame) {
-	if command.purpose == "user-demand" {
+	if command.priority == "foreground" {
 		s.SendHistory(frame)
 		return
 	}
@@ -991,6 +1035,10 @@ func normalizeHistoryByteLimit(limit int) int {
 
 func validHistoryPurpose(purpose string) bool {
 	return purpose == "initial-tail" || purpose == "user-demand" || purpose == "hydrate"
+}
+
+func validHistoryPriority(priority string) bool {
+	return priority == "foreground" || priority == "background"
 }
 
 func transportableHistoryRow(ch channel.ID, seq int64, value any) (subjectgate.HistoryRow, bool) {
@@ -1136,7 +1184,11 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 	for _, r := range rows {
 		env, merr := json.Marshal(r.Envelope)
 		if merr != nil {
-			continue
+			// Never publish a checkpoint across a visible row the transport did
+			// not publish. Keeping the cursor before this row makes the next pump
+			// retry it; advancing would turn an encoding failure into false cache
+			// coverage on the browser.
+			return false, true
 		}
 		fr, ferr := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
 			ChannelID:  string(ch),
@@ -1146,11 +1198,11 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 			Generation: s.generation,
 		})
 		if ferr != nil {
-			continue
+			return false, true
 		}
 		b, berr := fr.Marshal()
 		if berr != nil {
-			continue
+			return false, true
 		}
 		if !s.lane.push(b) {
 			return false, false // Session/lane closed
@@ -1158,6 +1210,19 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 		s.lane.cursor.advance(ch, r.Seq)
 	}
 	if scanned > at {
+		checkpoint, frameErr := subjectgate.NewFrame(subjectgate.FrameCheckpoint, "", subjectgate.CheckpointPayload{
+			ChannelID: string(ch), ScanLowSeq: at + 1, ScannedSeq: scanned, Generation: s.generation,
+		})
+		if frameErr != nil {
+			return false, true
+		}
+		encoded, marshalErr := checkpoint.Marshal()
+		if marshalErr != nil {
+			return false, true
+		}
+		if !s.lane.push(encoded) {
+			return false, false
+		}
 		s.lane.cursor.advance(ch, scanned)
 	}
 	return len(rows) == feedBatch, true
@@ -1196,7 +1261,7 @@ func (s *Session) upstream(f subjectgate.Frame, historyStart <-chan struct{}) su
 	switch f.Type {
 	case subjectgate.FrameAttach:
 		return errFrame(subjectgate.CodeBadPayload, "attach is the opening frame, not a mid-stream verb")
-	case subjectgate.FrameObserve, subjectgate.FrameUnobserve, subjectgate.FrameHistoryBefore:
+	case subjectgate.FrameObserve, subjectgate.FrameUnobserve, subjectgate.FrameHistoryBefore, subjectgate.FrameHistoryCancel:
 		chID, derr := channelIDOf(f)
 		if derr != nil || subjectgate.RequireChannelID(chID) != nil {
 			return errFrame(subjectgate.CodeBadPayload, "missing required channel_id")
@@ -1205,17 +1270,26 @@ func (s *Session) upstream(f subjectgate.Frame, historyStart <-chan struct{}) su
 		command := controlCommand{channel: channel.ID(chID)}
 		if f.Type == subjectgate.FrameUnobserve {
 			kind = controlUnobserve
+		} else if f.Type == subjectgate.FrameHistoryCancel {
+			kind = controlHistoryCancel
+			var payload subjectgate.HistoryCancelPayload
+			if err := f.DecodePayload(&payload); err != nil || payload.Generation == 0 || payload.TargetRef == "" {
+				return errFrame(subjectgate.CodeBadPayload, "history cancel requires a positive generation and target_ref")
+			}
+			command.generation = payload.Generation
+			command.targetRef = payload.TargetRef
 		} else if f.Type == subjectgate.FrameHistoryBefore {
 			kind = controlHistoryBefore
 			var payload subjectgate.HistoryBeforePayload
-			if err := f.DecodePayload(&payload); err != nil || payload.BeforeSeq < 0 || payload.Limit < 0 || payload.Limit > maxHistoryLimit || payload.ByteLimit < 0 || payload.ByteLimit > maxHistoryBytes || !validHistoryPurpose(payload.Purpose) || payload.Generation == 0 {
-				return errFrame(subjectgate.CodeBadPayload, "history requires a positive generation, valid purpose, non-negative cursor, limit <= 200 and byte_limit <= 4MiB")
+			if err := f.DecodePayload(&payload); err != nil || payload.BeforeSeq < 0 || payload.Limit < 0 || payload.Limit > maxHistoryLimit || payload.ByteLimit < 0 || payload.ByteLimit > maxHistoryBytes || !validHistoryPurpose(payload.Purpose) || !validHistoryPriority(payload.Priority) || payload.Generation == 0 {
+				return errFrame(subjectgate.CodeBadPayload, "history requires a positive generation, valid purpose and priority, non-negative cursor, limit <= 200 and byte_limit <= 4MiB")
 			}
 			command.before = payload.BeforeSeq
 			command.limit = normalizeHistoryLimit(payload.Limit)
 			command.byteLimit = normalizeHistoryByteLimit(payload.ByteLimit)
 			command.generation = payload.Generation
 			command.purpose = payload.Purpose
+			command.priority = payload.Priority
 			command.ref = f.Ref
 			command.start = historyStart
 		}
@@ -1236,11 +1310,17 @@ func (s *Session) upstream(f subjectgate.Frame, historyStart <-chan struct{}) su
 					return errFrame(subjectgate.CodeUnavailable, "history unavailable — retry")
 				}
 				frame, err := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.HistoryAcceptedReceipt{
-					Accepted: true, ChannelID: chID, Purpose: command.purpose, Generation: command.generation,
+					Accepted: true, ChannelID: chID, Purpose: command.purpose, Priority: command.priority, Generation: command.generation,
 				})
 				if err != nil {
 					return errFrame(subjectgate.CodeUnavailable, "history receipt unavailable")
 				}
+				return frame
+			}
+			if f.Type == subjectgate.FrameHistoryCancel {
+				frame, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.HistoryCancelReceipt{
+					ChannelID: chID, TargetRef: command.targetRef, Generation: command.generation,
+				})
 				return frame
 			}
 			if f.Type == subjectgate.FrameObserve {

@@ -40,3 +40,14 @@ func (c *cursor) advance(ch channel.ID, seq int64) {
 		c.pos[ch] = seq
 	}
 }
+
+// anchor sets the exact history/live seam captured during attach. Unlike a
+// delivered-feed advance, this may move backward: a reconnect cursor can name
+// a previous server world, while the attach head is authoritative for this
+// session and everything after it must remain live-observable.
+func (c *cursor) anchor(ch channel.ID, seq int64) {
+	if seq < 0 {
+		seq = 0
+	}
+	c.pos[ch] = seq
+}

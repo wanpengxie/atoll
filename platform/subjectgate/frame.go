@@ -11,12 +11,12 @@ import (
 
 // FrameVersion is the wire envelope version every frame carries in `v`. A frame
 // with a different version is refused at Unmarshal (fail-closed): a version
-// mismatch is never silently reinterpreted. v4 makes history an explicitly
+// mismatch is never silently reinterpreted. v5 makes history an explicitly
 // correlated, concurrent batch protocol. Attach carries metadata only; every
 // history row and terminal echoes the client generation and batch ref. It is a
 // breaking wire change;
 // the only deployment form is atoll and atoll-web switching in the same batch.
-const FrameVersion = 4
+const FrameVersion = 5
 
 // MaxFrameBytes caps one serialized frame at 512KB (build spec §S2 envelope
 // note). A larger frame is refused (connector maps to a CloseMessageTooBig).
@@ -39,8 +39,10 @@ const (
 	FrameObserve       FrameType = "observe"
 	FrameUnobserve     FrameType = "unobserve"
 	FrameHistoryBefore FrameType = "history_before"
+	FrameHistoryCancel FrameType = "history_cancel"
 	// Downstream.
 	FrameFeed         FrameType = "feed"
+	FrameCheckpoint   FrameType = "checkpoint"
 	FrameReceipt      FrameType = "receipt"
 	FrameError        FrameType = "error"
 	FrameObserveEnded FrameType = "observe_ended"
@@ -246,6 +248,8 @@ func ParseUpstreamFrame(b []byte) (Frame, error) {
 		err = validatePayloadStrict[UnobservePayload](f.Payload)
 	case FrameHistoryBefore:
 		err = validatePayloadStrict[HistoryBeforePayload](f.Payload)
+	case FrameHistoryCancel:
+		err = validatePayloadStrict[HistoryCancelPayload](f.Payload)
 	default:
 		return f, fmt.Errorf("%w: %q", ErrUnknownFrameType, f.Type)
 	}
@@ -284,6 +288,7 @@ func decodeStrictJSON(raw []byte, out any) error {
 type Downstream interface{ downstreamFrame() }
 
 type FeedFrame struct{ Frame }
+type CheckpointFrame struct{ Frame }
 type ReceiptFrame struct{ Frame }
 type ErrorFrame struct{ Frame }
 type ObserveEndedFrame struct{ Frame }
@@ -291,6 +296,7 @@ type PageEndFrame struct{ Frame }
 type UnknownFrame struct{ Frame }
 
 func (FeedFrame) downstreamFrame()         {}
+func (CheckpointFrame) downstreamFrame()   {}
 func (ReceiptFrame) downstreamFrame()      {}
 func (ErrorFrame) downstreamFrame()        {}
 func (ObserveEndedFrame) downstreamFrame() {}
@@ -307,6 +313,8 @@ func ParseDownstream(b []byte) (Downstream, error) {
 	switch f.Type {
 	case FrameFeed:
 		return FeedFrame{Frame: f}, nil
+	case FrameCheckpoint:
+		return CheckpointFrame{Frame: f}, nil
 	case FrameReceipt:
 		return ReceiptFrame{Frame: f}, nil
 	case FrameError:
@@ -406,9 +414,18 @@ type HistoryBeforePayload struct {
 	Limit      int    `json:"limit,omitempty"`
 	ByteLimit  int    `json:"byte_limit,omitempty"`
 	Generation uint64 `json:"generation"`
-	// Purpose only selects the transport priority lane. It never changes the
-	// historical projection or authorization rules.
-	Purpose string `json:"purpose"` // initial-tail | user-demand | hydrate
+	// Purpose describes why the data is requested and may tune projection size;
+	// Priority independently selects admission and the transport lane.
+	Purpose  string `json:"purpose"`  // initial-tail | user-demand | hydrate
+	Priority string `json:"priority"` // foreground | background
+}
+
+// HistoryCancelPayload cancels one previously accepted history batch. The
+// cancel frame has its own ref; TargetRef names the batch being released.
+type HistoryCancelPayload struct {
+	ChannelID  string `json:"channel_id"`
+	TargetRef  string `json:"target_ref"`
+	Generation uint64 `json:"generation"`
 }
 
 // ResourceOp is the closed resource-verb enum (build spec §S2 resource row).
@@ -452,6 +469,17 @@ type FeedPayload struct {
 	Envelope   json.RawMessage `json:"envelope"`
 	Source     string          `json:"source"` // live | history
 	Generation uint64          `json:"generation"`
+}
+
+// CheckpointPayload proves the exact visible-log interval scanned by one live
+// pump pass. Feed rows alone cannot prove whether missing seqs were filtered or
+// not yet delivered, so clients may extend durable cache coverage only from
+// this generation-scoped watermark.
+type CheckpointPayload struct {
+	ChannelID  string `json:"channel_id"`
+	ScanLowSeq int64  `json:"scan_low_seq"`
+	ScannedSeq int64  `json:"scanned_seq"`
+	Generation uint64 `json:"generation"`
 }
 
 // AttachReceipt is the report-in ack. ContractVersion is the websocket side of
@@ -503,6 +531,13 @@ type HistoryAcceptedReceipt struct {
 	Accepted   bool   `json:"accepted"`
 	ChannelID  string `json:"channel_id"`
 	Purpose    string `json:"purpose"`
+	Priority   string `json:"priority"`
+	Generation uint64 `json:"generation"`
+}
+
+type HistoryCancelReceipt struct {
+	ChannelID  string `json:"channel_id"`
+	TargetRef  string `json:"target_ref"`
 	Generation uint64 `json:"generation"`
 }
 

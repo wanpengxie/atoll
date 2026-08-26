@@ -56,3 +56,15 @@ func TestLaneCursorAdvanceMonotonic(t *testing.T) {
 		t.Fatalf("cursor = %d, want 8", got)
 	}
 }
+
+func TestAttachAnchorCanReplaceAStaleFutureCursor(t *testing.T) {
+	cur := newCursor(map[channel.ID]int64{"c": 9_999})
+	cur.anchor("c", 42)
+	if got := cur.at("c"); got != 42 {
+		t.Fatalf("anchor=%d want 42", got)
+	}
+	cur.advance("c", 43)
+	if got := cur.at("c"); got != 43 {
+		t.Fatalf("advance after anchor=%d want 43", got)
+	}
+}

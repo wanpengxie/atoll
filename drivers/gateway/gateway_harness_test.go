@@ -650,11 +650,22 @@ func admitRows(t *testing.T, h *testChannel, n int) {
 // observed for each channel. Pump tests deliberately observe this public boundary:
 // cursor is owner-only session state and must not be read from another goroutine.
 type feedObserver struct {
-	mu    sync.Mutex
-	last  map[channel.ID]int64
-	count map[channel.ID]int
-	seqs  map[channel.ID][]int64
-	ends  map[string]subjectgate.PageEndPayload
+	mu          sync.Mutex
+	last        map[channel.ID]int64
+	count       map[channel.ID]int
+	seqs        map[channel.ID][]int64
+	ends        map[string]subjectgate.PageEndPayload
+	checkpoints map[channel.ID][]subjectgate.CheckpointPayload
+}
+
+func (o *feedObserver) latestCheckpoint(ch channel.ID) (subjectgate.CheckpointPayload, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	values := o.checkpoints[ch]
+	if len(values) == 0 {
+		return subjectgate.CheckpointPayload{}, false
+	}
+	return values[len(values)-1], true
 }
 
 func (o *feedObserver) pageEnd(ref string) (subjectgate.PageEndPayload, bool) {
@@ -688,10 +699,11 @@ func (o *feedObserver) sequences(ch channel.ID) []int64 {
 // The function returns the wire observer and a stop func that waits for its goroutine.
 func observeFeed(s *Session, onFeed ...func(channel.ID, int)) (*feedObserver, func()) {
 	observer := &feedObserver{
-		last:  make(map[channel.ID]int64),
-		count: make(map[channel.ID]int),
-		seqs:  make(map[channel.ID][]int64),
-		ends:  make(map[string]subjectgate.PageEndPayload),
+		last:        make(map[channel.ID]int64),
+		count:       make(map[channel.ID]int),
+		seqs:        make(map[channel.ID][]int64),
+		ends:        make(map[string]subjectgate.PageEndPayload),
+		checkpoints: make(map[channel.ID][]subjectgate.CheckpointPayload),
 	}
 	ready := make(chan struct{})
 	done := make(chan struct{})
@@ -736,6 +748,14 @@ func observeFeed(s *Session, onFeed ...func(channel.ID, int)) (*feedObserver, fu
 				if f.DecodePayload(&payload) == nil {
 					observer.mu.Lock()
 					observer.ends[f.Ref] = payload
+					observer.mu.Unlock()
+				}
+			} else if err == nil && f.Type == subjectgate.FrameCheckpoint {
+				var payload subjectgate.CheckpointPayload
+				if f.DecodePayload(&payload) == nil {
+					observer.mu.Lock()
+					ch := channel.ID(payload.ChannelID)
+					observer.checkpoints[ch] = append(observer.checkpoints[ch], payload)
 					observer.mu.Unlock()
 				}
 			}

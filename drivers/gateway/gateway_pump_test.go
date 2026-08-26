@@ -297,7 +297,7 @@ func TestHistoryBeforePagesWithoutMovingLiveCursor(t *testing.T) {
 		stop()
 	}()
 	request, err := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-1", subjectgate.HistoryBeforePayload{
-		ChannelID: "c", BeforeSeq: 0, Limit: 3, Generation: 1, Purpose: "user-demand",
+		ChannelID: "c", BeforeSeq: 0, Limit: 3, Generation: 1, Purpose: "user-demand", Priority: "foreground",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -342,7 +342,7 @@ func TestAcceptedHistoryFailureAlwaysEndsWithCorrelatedPageEnd(t *testing.T) {
 	}()
 
 	request, _ := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-error", subjectgate.HistoryBeforePayload{
-		ChannelID: "c", BeforeSeq: 10, Limit: 10, Generation: 1, Purpose: "hydrate",
+		ChannelID: "c", BeforeSeq: 10, Limit: 10, Generation: 1, Purpose: "hydrate", Priority: "background",
 	})
 	response := s.Upstream(request)
 	var accepted subjectgate.HistoryAcceptedReceipt
@@ -375,7 +375,7 @@ func TestDispatchQueuesHistoryAcceptanceBeforeStartingBackfill(t *testing.T) {
 	defer s.Close()
 
 	request, _ := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-barrier", subjectgate.HistoryBeforePayload{
-		ChannelID: "c", BeforeSeq: 0, Limit: 3, Generation: 1, Purpose: "hydrate",
+		ChannelID: "c", BeforeSeq: 0, Limit: 3, Generation: 1, Purpose: "hydrate", Priority: "background",
 	})
 	dispatched := make(chan struct{})
 	go func() {
@@ -426,7 +426,7 @@ func TestHistoryReadNeverBlocksRealtimeFeed(t *testing.T) {
 	feed, stop := observeFeed(s)
 	s.StartFeed()
 	request, err := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "slow-history", subjectgate.HistoryBeforePayload{
-		ChannelID: "c", BeforeSeq: 0, Limit: 20, Generation: 1, Purpose: "user-demand",
+		ChannelID: "c", BeforeSeq: 0, Limit: 20, Generation: 1, Purpose: "user-demand", Priority: "foreground",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -459,6 +459,71 @@ func TestHistoryReadNeverBlocksRealtimeFeed(t *testing.T) {
 	waitFor(t, func() bool { _, ok := feed.pageEnd("slow-history"); return ok }, "history did not complete after release")
 	s.Close()
 	stop()
+}
+
+func TestHistoryCancelStopsReadAndReleasesAdmission(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "history-cancel"
+	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, 3)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	res.set(principal, []Route{{
+		Channel: "c", SubjectID: id,
+		Bundle: blockingHistoryBundle{Bundle: h, started: started, release: release},
+	}}, nil, nil)
+	s, _ := g.Attach(principal, nil, 3)
+	s.StartFeed()
+	defer s.Close()
+
+	request, _ := subjectgate.NewFrame(subjectgate.FrameHistoryBefore, "history-to-cancel", subjectgate.HistoryBeforePayload{
+		ChannelID: "c", Limit: 20, Generation: 3, Purpose: "user-demand", Priority: "foreground",
+	})
+	response := s.Upstream(request)
+	if response.Type != subjectgate.FrameReceipt {
+		t.Fatalf("history was not accepted: %+v", response)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("history read did not start")
+	}
+	cancelFrame, _ := subjectgate.NewFrame(subjectgate.FrameHistoryCancel, "cancel-1", subjectgate.HistoryCancelPayload{
+		ChannelID: "c", TargetRef: "history-to-cancel", Generation: 3,
+	})
+	cancelled := s.Upstream(cancelFrame)
+	if cancelled.Type != subjectgate.FrameReceipt {
+		t.Fatalf("history cancel was not accepted: %+v", cancelled)
+	}
+	waitFor(t, func() bool {
+		s.historyMu.Lock()
+		defer s.historyMu.Unlock()
+		return s.historyCount == 0 && len(s.historyInflight) == 0
+	}, "cancelled history did not release admission")
+}
+
+func TestLivePumpPublishesExactScannedCheckpoint(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	const principal = "checkpoint"
+	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, 4)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(principal, nil, 7)
+	feed, stop := observeFeed(s)
+	s.StartFeed()
+	defer func() { s.Close(); stop() }()
+	waitFor(t, func() bool {
+		checkpoint, ok := feed.latestCheckpoint("c")
+		return ok && checkpoint.ScanLowSeq == 1 && checkpoint.ScannedSeq >= feed.lastSeq("c")
+	}, "live scan checkpoint was not published")
+	checkpoint, _ := feed.latestCheckpoint("c")
+	if checkpoint.Generation != 7 || checkpoint.ScannedSeq < checkpoint.ScanLowSeq {
+		t.Fatalf("invalid checkpoint: %+v", checkpoint)
+	}
 }
 
 // TestStaticBacklogFullDelivery (DoD-7⑤): a channel with a static backlog >2×feedBatch
