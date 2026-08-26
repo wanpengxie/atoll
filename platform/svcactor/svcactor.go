@@ -443,7 +443,13 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 		if life.Err() != nil {
 			return gateFailure(channel.GateChannelUnavailable, "service actor stopped while request was in flight")
 		}
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, actorbase.ErrCallClosed) {
+		if errors.Is(err, actorbase.ErrCallClosed) {
+			// Our out-station account closed the relayed request on its sliding
+			// deadline (author#2 already wrote the local terminal). Say so in the
+			// caller's words — the remote reads this detail, not our error type.
+			return receiverFailure(string(message.TerminalUnansweredTimeout), "downstream request closed by its deadline: no progress or response within the window")
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return receiverFailure(string(message.TerminalUnansweredTimeout), err.Error())
 		}
 		return receiverFailure("receiver_unavailable", err.Error())

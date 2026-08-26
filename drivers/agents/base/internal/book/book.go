@@ -32,6 +32,11 @@ type Request struct {
 	TurnKind      runtimeproto.TurnKind
 	Options       runtimeproto.TurnOptions
 	Resumed       bool
+	// LastHeartbeatMs is when (unix ms) this row last had a queued provisional
+	// written for it (the admission frame counts as the first). The loop's
+	// queued heartbeat throttles on it while the row waits in the buffer. Kept
+	// as a plain integer: the book is transition state and carries no clock.
+	LastHeartbeatMs int64
 }
 
 type TurnPhase uint8
@@ -50,6 +55,10 @@ type Turn struct {
 	Scope             effectcap.Scope
 	AnchorParent      string
 	AnchorCorrelation string
+	// StartedAtMs is when (unix ms) the loop opened this turn (the Starting op
+	// was issued); queued heartbeats report it so a waiting caller can see how
+	// long the turn ahead of it has been running.
+	StartedAtMs int64
 }
 
 type ActionKind uint8

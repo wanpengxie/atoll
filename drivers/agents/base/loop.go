@@ -1127,7 +1127,54 @@ func (l *agentLoop) admitBufferedAt(id book.RequestID, idx int, resumed, release
 		return
 	}
 	if row.Location == book.Buffered {
+		row.LastHeartbeatMs = l.now().UnixMilli()
 		l.exec.progress(string(id), message.StatusQueued, map[string]any{"controls": l.queuedControls()})
+	}
+}
+
+// queuedHeartbeatEvery is the floor between two queued heartbeats for the
+// same buffered request.
+//
+// A request waiting behind a long turn hears nothing after its admission
+// frame, and the caller's sliding deadline (actorbase.DefaultTimeout, 5 min)
+// reads that silence as "no progress" — the request times out and is dropped
+// before the turn ever reaches it. The heartbeat is deliberately NOT a timer
+// and NOT an engine mechanism: it is written only when the running turn has
+// just produced a real runtime event (touchQueued is called from the tool /
+// stage progress sites), so a stuck runtime stops the heartbeat and the
+// waiting caller times out exactly as before. It says "I am processing
+// someone else, you are behind them, and I am demonstrably moving" — a claim
+// only the loop can make. 60 s against a 5 min window leaves four beats of
+// slack; a 30 min turn adds at most 30 rows per waiting request.
+const queuedHeartbeatEvery = 60 * time.Second
+
+// touchQueued re-affirms every buffered request whose last queued frame is
+// older than queuedHeartbeatEvery. Same frame shape as admission (status +
+// controls), plus the position in line, when the turn ahead started, and a
+// heartbeat marker so the front end can tell a re-affirmation from a move.
+func (l *agentLoop) touchQueued() {
+	if len(l.state.Buffer) == 0 {
+		return
+	}
+	nowMs := l.now().UnixMilli()
+	for pos, id := range l.state.Buffer {
+		row := l.state.Requests[id]
+		if row == nil || row.Location != book.Buffered {
+			continue
+		}
+		if nowMs-row.LastHeartbeatMs < queuedHeartbeatEvery.Milliseconds() {
+			continue
+		}
+		row.LastHeartbeatMs = nowMs
+		value := map[string]any{
+			"controls":  l.queuedControls(),
+			"position":  pos + 1,
+			"heartbeat": true,
+		}
+		if t := l.state.Turn; t != nil && t.StartedAtMs != 0 {
+			value["current_turn_since"] = t.StartedAtMs
+		}
+		l.exec.progress(string(id), message.StatusQueued, value)
 	}
 }
 
@@ -1259,7 +1306,7 @@ func (l *agentLoop) beginTurn(tail book.RequestID, messages []runtimeproto.Input
 	}
 	op := l.opID()
 	owner.Location = book.Starting
-	l.state.Turn = &book.Turn{Serial: l.nextTurn, Phase: book.TurnStarting, StartOp: op, Owner: tail, Scope: owner.Scope, AnchorParent: owner.ParentID, AnchorCorrelation: owner.CorrelationID}
+	l.state.Turn = &book.Turn{Serial: l.nextTurn, Phase: book.TurnStarting, StartOp: op, Owner: tail, Scope: owner.Scope, AnchorParent: owner.ParentID, AnchorCorrelation: owner.CorrelationID, StartedAtMs: l.now().UnixMilli()}
 	l.exec.progress(string(owner.ID), message.StatusProcessing, map[string]any{"controls": l.processingControls()})
 	cmd := runtimeproto.StartCommand{Op: op, Messages: messages, Background: l.takeBackground(), Scope: owner.Scope, Kind: owner.TurnKind, Options: owner.Options}
 	if err := l.exec.runtimeStart(cmd); err != nil {
@@ -1509,6 +1556,7 @@ func (l *agentLoop) handleRuntimeEvent(e runtimeEvent) {
 	case evTool:
 		if t := l.state.Turn; t != nil && t.ID == e.turnID {
 			l.progressTool(e.tool)
+			l.touchQueued()
 		} else {
 			l.logLate("Tool", e.turnID)
 		}
@@ -1519,6 +1567,7 @@ func (l *agentLoop) handleRuntimeEvent(e runtimeEvent) {
 		if t := l.state.Turn; t != nil && t.ID == e.turnID && t.Owner != "" {
 			if row := l.state.Requests[t.Owner]; row != nil {
 				l.progressStage(e.progress.Kind, e.progress.Text)
+				l.touchQueued()
 			}
 		}
 	case evTurnEnded:
