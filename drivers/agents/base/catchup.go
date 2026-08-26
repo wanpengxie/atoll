@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	catchupLimit         = 5
+	// catchupLimit counts complete conversation turns (system.log.recent's
+	// unit); the char budget below bounds bytes.
+	catchupLimit         = 20
 	catchupCharBudget    = 64 << 10
 	catchupQueryBudget   = 5 * time.Second
 	catchupRetryInterval = 100 * time.Millisecond

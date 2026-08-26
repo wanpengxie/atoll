@@ -105,7 +105,7 @@ func TestFrameRoundTrip(t *testing.T) {
 }
 
 func TestDirectionalUnknownTypePolicy(t *testing.T) {
-	b := []byte(`{"v":2,"frame_type":"teleport","payload":{"future":true}}`)
+	b := []byte(`{"v":3,"frame_type":"teleport","payload":{"future":true}}`)
 	if _, err := ParseUpstreamFrame(b); !errors.Is(err, ErrUnknownFrameType) {
 		t.Fatalf("upstream unknown kind must fail closed, got %v", err)
 	}
@@ -120,17 +120,17 @@ func TestDirectionalUnknownTypePolicy(t *testing.T) {
 
 func TestUpstreamUnknownFieldsRejected(t *testing.T) {
 	for _, b := range []string{
-		`{"v":2,"frame_type":"attach","ref":"r1","unexpected":true,"payload":{}}`,
-		`{"v":2,"frame_type":"attach","ref":"r1","payload":{"since":{},"unexpected":true}}`,
-		`{"v":2,"frame_type":"submit","ref":"r1","payload":{"channel_id":"c1","msg_type":"m","unexpected":true}}`,
-		`{"v":2,"frame_type":"resolve","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","decision":"ok","unexpected":true}}`,
-		`{"v":2,"frame_type":"cancel","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","unexpected":true}}`,
-		`{"v":2,"frame_type":"after","ref":"r1","payload":{"channel_id":"c1","duration_ms":1,"msg_type":"m","unexpected":true}}`,
-		`{"v":2,"frame_type":"cancel_timer","ref":"r1","payload":{"channel_id":"c1","timer_id":"t1","unexpected":true}}`,
-		`{"v":2,"frame_type":"resource","ref":"r1","payload":{"channel_id":"c1","op":"read","resource_id":"r1","unexpected":true}}`,
-		`{"v":2,"frame_type":"observe","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
-		`{"v":2,"frame_type":"unobserve","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
-		`{"v":2,"frame_type":"history_before","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":3,"frame_type":"attach","ref":"r1","unexpected":true,"payload":{}}`,
+		`{"v":3,"frame_type":"attach","ref":"r1","payload":{"since":{},"unexpected":true}}`,
+		`{"v":3,"frame_type":"submit","ref":"r1","payload":{"channel_id":"c1","msg_type":"m","unexpected":true}}`,
+		`{"v":3,"frame_type":"resolve","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","decision":"ok","unexpected":true}}`,
+		`{"v":3,"frame_type":"cancel","ref":"r1","payload":{"channel_id":"c1","req_id":"q1","unexpected":true}}`,
+		`{"v":3,"frame_type":"after","ref":"r1","payload":{"channel_id":"c1","duration_ms":1,"msg_type":"m","unexpected":true}}`,
+		`{"v":3,"frame_type":"cancel_timer","ref":"r1","payload":{"channel_id":"c1","timer_id":"t1","unexpected":true}}`,
+		`{"v":3,"frame_type":"resource","ref":"r1","payload":{"channel_id":"c1","op":"read","resource_id":"r1","unexpected":true}}`,
+		`{"v":3,"frame_type":"observe","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":3,"frame_type":"unobserve","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
+		`{"v":3,"frame_type":"history_before","ref":"r1","payload":{"channel_id":"c1","unexpected":true}}`,
 	} {
 		f, err := ParseUpstreamFrame([]byte(b))
 		if err == nil {
@@ -143,7 +143,7 @@ func TestUpstreamUnknownFieldsRejected(t *testing.T) {
 }
 
 func TestDownstreamUnknownFieldsIgnored(t *testing.T) {
-	b := []byte(`{"v":2,"frame_type":"feed","future_envelope":true,"payload":{"channel_id":"c1","seq":1,"envelope":{},"future_payload":true}}`)
+	b := []byte(`{"v":3,"frame_type":"feed","future_envelope":true,"payload":{"channel_id":"c1","seq":1,"envelope":{},"future_payload":true}}`)
 	down, err := ParseDownstream(b)
 	if err != nil {
 		t.Fatal(err)
@@ -159,8 +159,8 @@ func TestDownstreamUnknownFieldsIgnored(t *testing.T) {
 }
 
 func TestFrameVersionRejected(t *testing.T) {
-	// v1 (the pre-连接模型勘误期 envelope) is now refused — v2 is the current version.
-	b := []byte(`{"v":1,"frame_type":"attach"}`)
+	// Any pre-v3 envelope is refused; history wire upgrades are atomic.
+	b := []byte(`{"v":2,"frame_type":"attach"}`)
 	if _, err := ParseEnvelope(b); err == nil {
 		t.Fatal("expected version mismatch to be refused")
 	}

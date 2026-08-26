@@ -236,3 +236,94 @@ func TestHistoryWindowBoundsStandaloneEvents(t *testing.T) {
 		t.Fatalf("standalone page = rows:%d oldest:%d older:%v", len(window.Rows), window.OldestSeq, window.HasOlder)
 	}
 }
+
+func housekeepingRow(seq int64, id, word string, kind message.Kind, parent string, terminal bool) storespec.StoredRow {
+	row := historyRow(seq, id, kind, parent, id, terminal)
+	row.Envelope.Type = word
+	return row
+}
+
+// A quiet channel's tail is mostly actor.describe / agent.context / system.*
+// probes. They are root requests with terminals, so a boundary that counts
+// them reports "twenty complete turns" over a window holding no conversation.
+func TestHistoryWindowIgnoresHousekeepingRootsAndDropsThem(t *testing.T) {
+	seq := int64(1)
+	var rows []storespec.StoredRow
+	rows = appendCompletedRoot(rows, &seq, "talk-one", 2, false)
+	rows = appendCompletedRoot(rows, &seq, "talk-two", 2, false)
+	for index := 0; index < 30; index++ {
+		id := fmt.Sprintf("probe-%02d", index)
+		rows = append(rows, housekeepingRow(seq, id, "actor.describe", message.KindRequest, "", false))
+		seq++
+		rows = append(rows, housekeepingRow(seq, id+"-done", "actor.describe", message.KindResponse, id, true))
+		seq++
+		poll := fmt.Sprintf("poll-%02d", index)
+		rows = append(rows, housekeepingRow(seq, poll, "system.log.recent", message.KindRequest, "", false))
+		seq++
+		rows = append(rows, housekeepingRow(seq, poll+"-done", "system.log.recent", message.KindResponse, poll, true))
+		seq++
+	}
+	query := &historyQueryStub{rows: rows}
+	window, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{TargetRows: 60, MinimumCompleteRoots: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := window.OldestSeq, int64(1); got != want {
+		t.Fatalf("oldest seq = %d, want %d: the window must reach back past the probes to two real turns", got, want)
+	}
+	for _, row := range window.Rows {
+		if channelspec.HousekeepingWord(row.Envelope.Type) {
+			t.Fatalf("housekeeping row %s rode the window", row.Envelope.ID)
+		}
+	}
+	roots := 0
+	for _, row := range window.Rows {
+		if row.Envelope.Kind == message.KindRequest && row.Envelope.ParentID == "" {
+			roots++
+		}
+	}
+	if roots != 2 {
+		t.Fatalf("conversation roots = %d, want 2", roots)
+	}
+}
+
+// system.log.recent asks for N complete turns with TargetRows=1: the row count
+// never governs the boundary, only the turn count does — and a channel whose
+// newest rows are all probes still answers with real conversation.
+func TestRecentTurnsWindowIsGovernedByTurnCountAlone(t *testing.T) {
+	seq := int64(1)
+	var rows []storespec.StoredRow
+	for _, name := range []string{"a", "b", "c", "d"} {
+		rows = appendCompletedRoot(rows, &seq, name, 3, false)
+	}
+	for index := 0; index < 5; index++ {
+		id := fmt.Sprintf("poll-%d", index)
+		rows = append(rows, housekeepingRow(seq, id, "system.log.recent", message.KindRequest, "", false))
+		seq++
+		rows = append(rows, housekeepingRow(seq, id+"-done", "system.log.recent", message.KindResponse, id, true))
+		seq++
+	}
+	query := &historyQueryStub{rows: rows}
+	window, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{TargetRows: 1, MinimumCompleteRoots: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := 0
+	for _, row := range window.Rows {
+		if channelspec.HousekeepingWord(row.Envelope.Type) {
+			t.Fatalf("probe %s leaked into recent turns", row.Envelope.ID)
+		}
+		if row.Envelope.Kind == message.KindRequest && row.Envelope.ParentID == "" {
+			roots++
+		}
+	}
+	if roots != 2 {
+		t.Fatalf("roots = %d, want exactly the newest 2 complete turns (c, d)", roots)
+	}
+	if window.Rows[0].Envelope.ID != "c-root" {
+		t.Fatalf("first row = %s, want c-root", window.Rows[0].Envelope.ID)
+	}
+	if !window.HasOlder {
+		t.Fatal("a and b remain older")
+	}
+}

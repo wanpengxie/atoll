@@ -271,15 +271,15 @@ curl -s -H "$AUTH" http://127.0.0.1:8832/obs/channel/c0/actors
 
 ```jsonc
 // 1. 订阅（从头回放；传游标则续传）
-{"v":2,"frame_type":"attach","ref":"a","payload":{"since":{}}}
+{"v":3,"frame_type":"attach","ref":"a","payload":{"since":{},"focus":"c0","history_protocol":3}}
 
 // 2. 让 c0 的门列出成员
-{"v":2,"frame_type":"submit","ref":"r1","payload":{
+{"v":3,"frame_type":"submit","ref":"r1","payload":{
   "channel_id":"c0","msg_type":"system.member.list","kind":"request",
   "visibility":"public","audience":["system"],"payload":{}}}
 
 // 3. 问 steward 一句（audience 允许省略 id 的段："steward" 会解到名册里的 agent:steward:<ts>）
-{"v":2,"frame_type":"submit","ref":"r2","payload":{
+{"v":3,"frame_type":"submit","ref":"r2","payload":{
   "channel_id":"c0","msg_type":"agent.ask","kind":"request",
   "visibility":"public","audience":["steward"],
   "payload":{"text":"reply PONG"}}}

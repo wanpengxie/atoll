@@ -166,6 +166,12 @@ func historyBoundary(rows []storespec.StoredRow, target, minimumRoots int, atBeg
 		if envelope.Kind != message.KindRequest || envelope.ParentID != "" {
 			continue
 		}
+		// A capability probe or a log poll is a root request too, but it is not
+		// a turn anyone reads back to. Counting it lets a quiet channel's tail
+		// fill the "twenty complete turns" quota with zero conversation.
+		if channelspec.HousekeepingWord(envelope.Type) {
+			continue
+		}
 		rootIndexes = append(rootIndexes, index)
 		if terminalParents[envelope.ID] {
 			completeRootIndexes = append(completeRootIndexes, index)
@@ -222,6 +228,12 @@ func projectHistoryWindow(raw []storespec.StoredRow, boundary int, head int64, h
 		boundary = 0
 	}
 	rows := raw[boundary:]
+	housekeeping := make(map[message.ID]bool)
+	for _, row := range rows {
+		if row.Envelope.Kind == message.KindRequest && channelspec.HousekeepingWord(row.Envelope.Type) {
+			housekeeping[row.Envelope.ID] = true
+		}
+	}
 	terminalParents := make(map[message.ID]bool)
 	latestProvisional := make(map[message.ID]int64)
 	for _, row := range rows {
@@ -236,6 +248,11 @@ func projectHistoryWindow(raw []storespec.StoredRow, boundary int, head int64, h
 	}
 	projected := make([]channelspec.VisibleMessageRow, 0, len(rows))
 	for _, row := range rows {
+		// Housekeeping never rides a history window: the timeline hides it
+		// anyway, and each describe carries a whole word table.
+		if housekeeping[row.Envelope.ID] || housekeeping[row.Envelope.ParentID] {
+			continue
+		}
 		include := row.Envelope.Kind != message.KindResponse || row.IsTerminal
 		if row.Envelope.Kind == message.KindResponse && !row.IsTerminal && !terminalParents[row.Envelope.ParentID] {
 			include = latestProvisional[row.Envelope.ParentID] == row.Seq

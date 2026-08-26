@@ -349,7 +349,7 @@ func dialWS(t *testing.T, base, cookie string, since map[string]int64) *wsClient
 	}
 	go client.readLoop()
 	t.Cleanup(client.close)
-	if err := conn.WriteJSON(wireFrame("attach", "attach", map[string]any{"since": since})); err != nil {
+	if err := conn.WriteJSON(wireFrame("attach", "attach", map[string]any{"since": since, "focus": "", "history_protocol": 3})); err != nil {
 		t.Fatal(err)
 	}
 	ack := client.awaitAck("attach", 10*time.Second)
@@ -364,7 +364,7 @@ func dialWS(t *testing.T, base, cookie string, since map[string]int64) *wsClient
 }
 
 func wireFrame(frameType, ref string, payload any) map[string]any {
-	frame := map[string]any{"v": 2, "frame_type": frameType}
+	frame := map[string]any{"v": 3, "frame_type": frameType}
 	if ref != "" {
 		frame["ref"] = ref
 	}

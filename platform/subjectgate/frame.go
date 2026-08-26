@@ -11,12 +11,10 @@ import (
 
 // FrameVersion is the wire envelope version every frame carries in `v`. A frame
 // with a different version is refused at Unmarshal (fail-closed): a version
-// mismatch is never silently reinterpreted. v2 (连接模型勘误期): the connection
-// is channel-blind (attach drops channel_id, business frames carry a required
-// channel_id, binding_gen is gone) — a breaking change from v1, so v1 frames are
-// refused; the only deployment form is the same-repo atoll-web switching in the
-// same batch (atomic deploy).
-const FrameVersion = 2
+// mismatch is never silently reinterpreted. v3 adds the bounded history page
+// protocol to the channel-blind connection model. It is a breaking wire change;
+// the only deployment form is atoll and atoll-web switching in the same batch.
+const FrameVersion = 3
 
 // MaxFrameBytes caps one serialized frame at 512KB (build spec §S2 envelope
 // note). A larger frame is refused (connector maps to a CloseMessageTooBig).
@@ -44,6 +42,7 @@ const (
 	FrameReceipt      FrameType = "receipt"
 	FrameError        FrameType = "error"
 	FrameObserveEnded FrameType = "observe_ended"
+	FramePageEnd      FrameType = "page_end"
 )
 
 // Human words live at the membrane because resolve-frame validation depends
@@ -286,12 +285,14 @@ type FeedFrame struct{ Frame }
 type ReceiptFrame struct{ Frame }
 type ErrorFrame struct{ Frame }
 type ObserveEndedFrame struct{ Frame }
+type PageEndFrame struct{ Frame }
 type UnknownFrame struct{ Frame }
 
 func (FeedFrame) downstreamFrame()         {}
 func (ReceiptFrame) downstreamFrame()      {}
 func (ErrorFrame) downstreamFrame()        {}
 func (ObserveEndedFrame) downstreamFrame() {}
+func (PageEndFrame) downstreamFrame()      {}
 func (UnknownFrame) downstreamFrame()      {}
 
 // ParseDownstream decodes a server frame into the known union or the unknown
@@ -310,6 +311,8 @@ func ParseDownstream(b []byte) (Downstream, error) {
 		return ErrorFrame{Frame: f}, nil
 	case FrameObserveEnded:
 		return ObserveEndedFrame{Frame: f}, nil
+	case FramePageEnd:
+		return PageEndFrame{Frame: f}, nil
 	default:
 		return UnknownFrame{Frame: f}, nil
 	}
@@ -317,14 +320,16 @@ func ParseDownstream(b []byte) (Downstream, error) {
 
 // --- Upstream payloads (build spec §S2 逐帧字段表) -------------------------------
 
-// AttachPayload is the report-in + cursor-table handoff (连接模型勘误期 v2):
+// AttachPayload is the report-in + cursor-table handoff (history wire v3):
 // since is a multi-key游标表 keyed by any channel id (channel_id is gone — a
 // connection is channel-blind). A key with no eligibility is silently dropped
 // (a harmless read位置 — the client may hold a stale cursor for a channel it已
 // left). The receipt echoes the attach ref and carries the server contract
 // version (see AttachReceipt — the websocket half of version discovery).
 type AttachPayload struct {
-	Since map[string]int64 `json:"since,omitempty"`
+	Since           map[string]int64 `json:"since,omitempty"`
+	Focus           string           `json:"focus"`
+	HistoryProtocol int              `json:"history_protocol"`
 }
 
 // RequireChannelID validates a business frame payload's required channel_id
@@ -470,11 +475,13 @@ type AttachReceipt struct {
 // Truncated says the submitted device cursor was older than this tail, so the
 // server deliberately starts at OldestSeq instead of replaying an unbounded gap.
 type HistoryEntry struct {
-	ChannelID string `json:"channel_id"`
-	HeadSeq   int64  `json:"head_seq"`
-	OldestSeq int64  `json:"oldest_seq,omitempty"`
-	HasOlder  bool   `json:"has_older"`
-	Truncated bool   `json:"truncated"`
+	ChannelID   string `json:"channel_id"`
+	HeadSeq     int64  `json:"head_seq"`
+	OldestSeq   int64  `json:"oldest_seq,omitempty"`
+	HasOlder    bool   `json:"has_older"`
+	Truncated   bool   `json:"truncated"`
+	ErrorCode   string `json:"error_code,omitempty"`
+	ErrorDetail string `json:"error_detail,omitempty"`
 }
 
 type HistoryRow struct {
@@ -482,18 +489,23 @@ type HistoryRow struct {
 	Envelope json.RawMessage `json:"envelope"`
 }
 
-// HistoryReceipt is the page-complete barrier for an on-demand history read.
-// The gateway emits the page's ascending envelopes through ordinary feed
-// frames immediately before this correlated receipt, avoiding an aggregate
-// frame that could exceed the wire limit. Rows remains as an empty compatibility
-// field so clients written for the earlier aggregate carrier remain harmless.
-type HistoryReceipt struct {
-	ChannelID string       `json:"channel_id"`
-	HeadSeq   int64        `json:"head_seq"`
-	OldestSeq int64        `json:"oldest_seq,omitempty"`
-	NewestSeq int64        `json:"newest_seq,omitempty"`
-	HasOlder  bool         `json:"has_older"`
-	Rows      []HistoryRow `json:"rows"`
+// HistoryAcceptedReceipt acknowledges that a history read has entered the
+// bounded backfill lane. Completion is carried by one correlated page_end.
+type HistoryAcceptedReceipt struct {
+	Accepted bool `json:"accepted"`
+}
+
+// PageEndPayload is the mandatory terminal for an attach tail or one accepted
+// history_before page. Ref remains on the frame envelope, never in this payload.
+type PageEndPayload struct {
+	Source      string `json:"source"` // attach | page
+	ChannelID   string `json:"channel_id"`
+	HeadSeq     int64  `json:"head_seq"`
+	OldestSeq   int64  `json:"oldest_seq,omitempty"`
+	NewestSeq   int64  `json:"newest_seq,omitempty"`
+	HasOlder    bool   `json:"has_older"`
+	ErrorCode   string `json:"error_code,omitempty"`
+	ErrorDetail string `json:"error_detail,omitempty"`
 }
 
 // MembershipEntry names one channel the attached principal holds membership

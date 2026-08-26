@@ -58,11 +58,8 @@ type SystemActor struct {
 	operate   OperateExecutor
 	peer      Peer
 	resolve   func(string) (actor.ActorID, error)
-	logbook   interface {
-		MaxSeq(context.Context) (int64, error)
-		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
-	}
-	logger *slog.Logger
+	recent    func(context.Context, int) (channelspec.HistoryWindow, error)
+	logger    *slog.Logger
 }
 
 // Deps bundles the channel services the system actor needs.
@@ -81,12 +78,12 @@ type Deps struct {
 	// from a non-c0 channel is framed and sent to c0 through it.
 	Peer          Peer
 	ResolveTarget func(string) (actor.ActorID, error)
-	// Logbook is the channel-scoped read face. It intentionally exposes no
-	// append capability to the system actor.
-	Logbook interface {
-		MaxSeq(context.Context) (int64, error)
-		ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error)
-	}
+	// RecentTurns is the channel-scoped read face behind system.log.recent:
+	// the newest N complete conversation turns, read backwards and projected
+	// the same way a history window is (housekeeping words skipped, open
+	// requests keep only their latest provisional). It intentionally exposes
+	// no append capability and no raw-row scan to the system actor.
+	RecentTurns func(ctx context.Context, turns int) (channelspec.HistoryWindow, error)
 }
 
 // New constructs the channel system actor's process state (exported so a
@@ -110,7 +107,7 @@ func New(deps Deps) *SystemActor {
 		operate:   deps.Operate,
 		peer:      deps.Peer,
 		resolve:   deps.ResolveTarget,
-		logbook:   deps.Logbook,
+		recent:    deps.RecentTurns,
 		logger:    logger,
 	}
 }

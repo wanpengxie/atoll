@@ -101,6 +101,10 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		writeErr(ws, f.Ref, "attach", subjectgate.CodeBadPayload, err.Error())
 		return
 	}
+	if ap.HistoryProtocol != subjectgate.FrameVersion {
+		writeErr(ws, f.Ref, "attach", subjectgate.CodeBadPayload, "history_protocol must match wire version")
+		return
+	}
 
 	sess, aerr := c.gw.Attach(principal, parseSince(ap))
 	if aerr != nil {
@@ -126,8 +130,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 	if !sess.PrimeFeed() {
 		return
 	}
-	history := sess.PrepareInitialHistory(0)
-	slices.SortFunc(history, func(a, b subjectgate.HistoryEntry) int { return strings.Compare(a.ChannelID, b.ChannelID) })
+	history := sess.PrepareInitialHistory(channel.ID(ap.Focus))
 	routes, complete := sess.MembershipSnapshot()
 	entries := make([]subjectgate.MembershipEntry, 0, len(routes))
 	for _, route := range routes {
@@ -142,7 +145,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		History:             history,
 	})
 	sess.Send(receipt)
-	sess.FlushInitialHistory()
+	sess.FlushInitialHistory(f.Ref)
 	sess.LaunchFeed()
 
 	// Reader loop: the SINGLE ws reader. detach is整删 (no client-visible unbind);
@@ -157,31 +160,93 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 			sess.Send(errFrame(fr.Ref, string(fr.Type), subjectgate.CodeBadPayload, perr.Error()))
 			continue
 		}
-		sess.Send(sess.Upstream(fr))
+		sess.Dispatch(fr)
 	}
 }
 
 func (c *Connector) writerPump(ws *websocket.Conn, sess *gateway.Session) {
-	down := sess.Down()
+	live := sess.LiveDown()
+	history := sess.HistoryDown()
+	backfill := sess.BackfillDown()
 	done := sess.Done()
 	ping := time.NewTicker(wsPingPeriod)
 	defer ping.Stop()
+	var pendingBackfill []byte
+	var pendingHistory []byte
 	for {
+		var b []byte
+		// Keepalive is checked at every frame boundary as well as while idle;
+		// a continuous backfill must not starve pings until the pong deadline.
 		select {
 		case <-done:
 			return
-		case b := <-down:
-			_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
-			if err := ws.WriteMessage(websocket.TextMessage, b); err != nil {
-				sess.Close()
-				return
-			}
 		case <-ping.C:
 			_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
 				sess.Close()
 				return
 			}
+			continue
+		default:
+		}
+		if pendingHistory != nil {
+			select {
+			case <-done:
+				return
+			case b = <-live:
+			default:
+				b = pendingHistory
+				pendingHistory = nil
+			}
+		} else if pendingBackfill != nil {
+			// A backfill frame selected while live was empty is only a candidate.
+			// Re-check both higher lanes at the next frame boundary.
+			select {
+			case <-done:
+				return
+			case b = <-live:
+			case pendingHistory = <-history:
+				continue
+			default:
+				b = pendingBackfill
+				pendingBackfill = nil
+			}
+		} else {
+			select {
+			case <-done:
+				return
+			case b = <-live:
+			default:
+				select {
+				case <-done:
+					return
+				case b = <-live:
+				case pendingHistory = <-history:
+					continue
+				default:
+					select {
+					case <-done:
+						return
+					case b = <-live:
+					case pendingHistory = <-history:
+						continue
+					case pendingBackfill = <-backfill:
+						continue
+					case <-ping.C:
+						_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
+						if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+							sess.Close()
+							return
+						}
+						continue
+					}
+				}
+			}
+		}
+		_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		if err := ws.WriteMessage(websocket.TextMessage, b); err != nil {
+			sess.Close()
+			return
 		}
 	}
 }

@@ -314,7 +314,14 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			},
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
 			Logger:   logger, Operate: h.opEntry, Peer: gatePeer,
-			ResolveTarget: h.actors.ResolveTarget, Logbook: h.query,
+			ResolveTarget: h.actors.ResolveTarget,
+			// system.log.recent reads backwards through the SAME turn window the
+			// attach first screen uses: N complete conversation turns, housekeeping
+			// skipped, provisional collapsed. TargetRows=1 leaves the boundary to
+			// the turn count alone.
+			RecentTurns: func(ctx context.Context, turns int) (channelspec.HistoryWindow, error) {
+				return readVisibleTurnWindow(ctx, h.visible, channelspec.HistoryWindowQuery{TargetRows: 1, MinimumCompleteRoots: turns})
+			},
 		}))
 	}, nil)
 	if err != nil {

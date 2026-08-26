@@ -654,6 +654,14 @@ type feedObserver struct {
 	last  map[channel.ID]int64
 	count map[channel.ID]int
 	seqs  map[channel.ID][]int64
+	ends  map[string]subjectgate.PageEndPayload
+}
+
+func (o *feedObserver) pageEnd(ref string) (subjectgate.PageEndPayload, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	value, ok := o.ends[ref]
+	return value, ok
 }
 
 func (o *feedObserver) lastSeq(ch channel.ID) int64 {
@@ -683,6 +691,7 @@ func observeFeed(s *Session, onFeed ...func(channel.ID, int)) (*feedObserver, fu
 		last:  make(map[channel.ID]int64),
 		count: make(map[channel.ID]int),
 		seqs:  make(map[channel.ID][]int64),
+		ends:  make(map[string]subjectgate.PageEndPayload),
 	}
 	ready := make(chan struct{})
 	done := make(chan struct{})
@@ -690,32 +699,45 @@ func observeFeed(s *Session, onFeed ...func(channel.ID, int)) (*feedObserver, fu
 		defer close(done)
 		close(ready)
 		for {
+			var b []byte
 			select {
-			case b, ok := <-s.Down():
-				if !ok {
-					return
-				}
-				f, err := subjectgate.ParseEnvelope(b)
-				if err == nil && f.Type == subjectgate.FrameFeed {
-					var payload subjectgate.FeedPayload
-					if f.DecodePayload(&payload) != nil {
-						continue
-					}
-					ch := channel.ID(payload.ChannelID)
-					observer.mu.Lock()
-					observer.count[ch]++
-					observer.seqs[ch] = append(observer.seqs[ch], payload.Seq)
-					count := observer.count[ch]
-					if payload.Seq > observer.last[ch] {
-						observer.last[ch] = payload.Seq
-					}
-					observer.mu.Unlock()
-					for _, fn := range onFeed {
-						fn(ch, count)
-					}
-				}
 			case <-s.Done():
 				return
+			case b = <-s.LiveDown():
+			default:
+				select {
+				case <-s.Done():
+					return
+				case b = <-s.LiveDown():
+				case b = <-s.BackfillDown():
+				case b = <-s.HistoryDown():
+				}
+			}
+			f, err := subjectgate.ParseEnvelope(b)
+			if err == nil && f.Type == subjectgate.FrameFeed {
+				var payload subjectgate.FeedPayload
+				if f.DecodePayload(&payload) != nil {
+					continue
+				}
+				ch := channel.ID(payload.ChannelID)
+				observer.mu.Lock()
+				observer.count[ch]++
+				observer.seqs[ch] = append(observer.seqs[ch], payload.Seq)
+				count := observer.count[ch]
+				if payload.Seq > observer.last[ch] {
+					observer.last[ch] = payload.Seq
+				}
+				observer.mu.Unlock()
+				for _, fn := range onFeed {
+					fn(ch, count)
+				}
+			} else if err == nil && f.Type == subjectgate.FramePageEnd {
+				var payload subjectgate.PageEndPayload
+				if f.DecodePayload(&payload) == nil {
+					observer.mu.Lock()
+					observer.ends[f.Ref] = payload
+					observer.mu.Unlock()
+				}
 			}
 		}
 	}()
