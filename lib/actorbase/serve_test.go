@@ -95,6 +95,13 @@ func (f *fakeSys) Call(cause message.Cause, target actor.ActorID, msgType string
 func (f *fakeSys) CallFor(message.Cause, harness.Caller, actor.ActorID, string, any) (Pending, error) {
 	panic("not implemented")
 }
+func (f *fakeSys) CallSpecFor(caller harness.Caller, spec behavior.RequestSpec) (Pending, error) {
+	target := actor.ActorID("")
+	if len(spec.Audience) > 0 {
+		target = spec.Audience[0]
+	}
+	return f.CallFor(spec.Cause, caller, target, spec.Type, spec.Payload)
+}
 
 func (f *fakeSys) State() StateHandle { panic("not implemented") }
 

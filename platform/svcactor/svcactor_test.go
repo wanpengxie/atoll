@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -34,14 +35,15 @@ func (svcPending) Cancel() error                                                
 
 type svcSys struct {
 	actorbase.Sys
-	caller  harness.Caller
-	target  actor.ActorID
-	word    string
-	payload json.RawMessage
-	callErr error
-	reply   any
-	fail    string
-	state   actorbase.StateHandle
+	caller    harness.Caller
+	target    actor.ActorID
+	word      string
+	payload   json.RawMessage
+	callErr   error
+	expiresAt *int64
+	reply     any
+	fail      string
+	state     actorbase.StateHandle
 }
 
 type memoryState struct {
@@ -117,6 +119,11 @@ func (s *svcSys) Fail(_ actorbase.Msg, code, _ string, _ ...map[string]any) (mes
 
 func (s *svcSys) State() actorbase.StateHandle { return s.state }
 
+func (s *svcSys) CallSpecFor(caller harness.Caller, spec behavior.RequestSpec) (actorbase.Pending, error) {
+	s.expiresAt = spec.ExpiresAt
+	return s.CallFor(spec.Cause, caller, spec.Audience[0], spec.Type, json.RawMessage(spec.Payload))
+}
+
 func (s *svcSys) CallFor(_ message.Cause, caller harness.Caller, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	s.caller, s.target, s.word = caller, target, word
 	s.payload, _ = json.Marshal(payload)
@@ -145,7 +152,7 @@ func TestDispatchPreservesBodyAndEffectiveCaller(t *testing.T) {
 	deps := serviceDeps("target")
 	s := &service{deps: deps, table: ServiceTable{Endpoints: map[string]actor.ActorID{"work": "tool:worker:1"}}}
 	sys := &svcSys{}
-	req := channel.Request{From: channel.From{Channel: "caller", Actor: "agent:alice:1", RequestID: "remote"}, Type: "work", Payload: json.RawMessage(`{"origin":"business","n":1}`)}
+	req := channel.Request{From: channel.From{Channel: "caller", Actor: "agent:alice:1", RequestID: "remote"}, Deadline: 1_700_000_000_000, Type: "work", Payload: json.RawMessage(`{"origin":"business","n":1}`)}
 	result := s.dispatch(context.Background(), context.Background(), sys, "caller", req, nil)
 	if result.Fail != nil || string(result.Body) != `{"value":{"ok":true}}` {
 		t.Fatalf("result=%+v", result)
@@ -155,6 +162,20 @@ func TestDispatchPreservesBodyAndEffectiveCaller(t *testing.T) {
 	}
 	if sys.caller.Channel != "caller" || sys.caller.Actor != "agent:alice:1" {
 		t.Fatalf("caller=%+v", sys.caller)
+	}
+	// The remote caller's declared deadline crosses the membrane as the local
+	// request's own ExpiresAt — never replaced by this engine's default.
+	if sys.expiresAt == nil || *sys.expiresAt != req.Deadline {
+		t.Fatalf("expiresAt=%v, want the frame deadline %d", sys.expiresAt, req.Deadline)
+	}
+	// And an undeclared one stays undeclared (the engine's default applies).
+	sys = &svcSys{}
+	req.Deadline = 0
+	if r := s.dispatch(context.Background(), context.Background(), sys, "caller", req, nil); r.Fail != nil {
+		t.Fatalf("result=%+v", r)
+	}
+	if sys.expiresAt != nil {
+		t.Fatalf("expiresAt=%d for an undeclared frame deadline, want nil", *sys.expiresAt)
 	}
 }
 
@@ -574,6 +595,9 @@ type concurrentSys struct {
 func (s *concurrentSys) Life() context.Context      { return s.ctx }
 func (*concurrentSys) State() actorbase.StateHandle { return emptyState{} }
 func (s *concurrentSys) CallFor(message.Cause, harness.Caller, actor.ActorID, string, any) (actorbase.Pending, error) {
+	return s.pending, nil
+}
+func (s *concurrentSys) CallSpecFor(harness.Caller, behavior.RequestSpec) (actorbase.Pending, error) {
 	return s.pending, nil
 }
 

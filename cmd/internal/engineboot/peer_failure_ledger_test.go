@@ -35,7 +35,7 @@ func ensurePeerFailureReceiver() {
 			"remote.inactive":    {Description: "route to a receiver removed during peer propagation tests"},
 			"remote.shutdown":    {Description: "end the receiver while a peer request is in flight"},
 			"remote.bad-origin":  {Description: "exercise the peer relationship gate"},
-			"remote.timeout":     {Description: "outlive a B-side receiver deadline"},
+			"remote.timeout":     {Description: "outlive the caller's declared deadline as carried to the B-side receiver"},
 			"remote.hang":        {Description: "remain in flight for A-side closure tests"},
 			"remote.port-closed": {Description: "exercise a closed service port"},
 		}}
@@ -285,9 +285,15 @@ func TestA9AllElevenFailureRowsTraverseFramesAndRealCallerLedger(t *testing.T) {
 	proxy := installPeerFailureProxy(t, core, registrar, "failure-proxy", proxyDef)
 
 	assertCallerLedgerFailure(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, proxy, "remote.bad-origin", map[string]any{}), string(channel.GateBadOrigin))
-	// (B-side default-deadline case removed: actorbase.DefaultTimeout is a
-	// 5-minute sliding window now, outside this test's budget. Deadline
-	// closure is asserted through the explicit expires_at case below.)
+	// The caller's declared deadline crosses the membrane: the B-side receiver's
+	// window is this 250ms, not the B engine's 5-minute default. Whichever closer
+	// lands first — B's relayed unanswered_timeout or A's reaper — states the same
+	// fact, so the assertion is on the reason.
+	bSideExpires := time.Now().Add(250 * time.Millisecond).UnixMilli()
+	bSideTerminal := decodeCallerClosure(t, controlledCallerLedger(t, core, proxy, "remote.timeout", &bSideExpires, false, nil))
+	if bSideTerminal.Status != message.StatusFailed || bSideTerminal.Reason != string(message.TerminalUnansweredTimeout) {
+		t.Fatalf("B-side deadline terminal=%+v", bSideTerminal)
+	}
 
 	expires := time.Now().Add(150 * time.Millisecond).UnixMilli()
 	deadlineRaw := controlledCallerLedger(t, core, proxy, "remote.hang", &expires, false, func() {

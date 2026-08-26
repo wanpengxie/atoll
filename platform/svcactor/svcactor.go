@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"log/slog"
 	"strings"
 	"sync"
@@ -398,7 +399,16 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	// hold and could not point at. The link between the two trees is recorded
 	// as the inbound audit event below, carrying the远端 request id — that is
 	// the seam between two ledgers, and it is not a parent relation.
-	pending, err := sys.CallFor(message.Root(), from, target, req.Type, json.RawMessage(req.Payload))
+	// The frame carries the remote caller's declared deadline (peeractor sends
+	// it as Request.Deadline); it crosses the membrane as this local request's
+	// own ExpiresAt so the receiver's window is the caller's, not this
+	// engine's default. Absent → the default.
+	spec := behavior.RequestSpec{Cause: message.Root(), Type: req.Type, Payload: json.RawMessage(req.Payload), Audience: message.Audience{target}}
+	if req.Deadline > 0 {
+		deadline := req.Deadline
+		spec.ExpiresAt = &deadline
+	}
+	pending, err := sys.CallSpecFor(from, spec)
 	if err != nil {
 		var resolveErr *actorbase.TargetResolveError
 		if errors.As(err, &resolveErr) {

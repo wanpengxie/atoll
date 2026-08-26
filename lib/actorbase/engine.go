@@ -724,6 +724,14 @@ func (e *engine) CallFor(cause message.Cause, caller harness.Caller, target acto
 	return &pendingTicket{call: e.call, id: id}, nil
 }
 
+func (e *engine) CallSpecFor(caller harness.Caller, spec behavior.RequestSpec) (Pending, error) {
+	id, err := e.submit(spec, &caller)
+	if err != nil {
+		return nil, err
+	}
+	return &pendingTicket{call: e.call, id: id}, nil
+}
+
 // submit is Submit/Call's shared body: resolve a missing deadline, build,
 // register (subscribe-before-send), write, and arm author#2 on success.
 func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (message.ID, error) {

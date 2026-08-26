@@ -108,6 +108,11 @@ type Sys interface {
 	// forwarded on behalf of a foreign caller may still legitimately begin a
 	// new errand on THIS ledger (a frame arriving across the membrane does).
 	CallFor(cause message.Cause, caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error)
+	// CallSpecFor is CallFor over a full RequestSpec — for a relay that must
+	// carry a foreign caller's DECLARED deadline (ExpiresAt) across the
+	// membrane instead of letting this engine stamp its own default. spec's
+	// Audience names the target; its Payload is the application body as-is.
+	CallSpecFor(caller harness.Caller, spec behavior.RequestSpec) (Pending, error)
 
 	// --- State arm ------------------------------------------------------
 	State() StateHandle
