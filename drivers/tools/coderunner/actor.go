@@ -50,13 +50,19 @@ func (a *coderunnerActor) run(sys actorbase.Sys) error {
 		if msg.Kind != message.KindRequest {
 			continue
 		}
-		if msg.Type != TypeRun {
+		switch msg.Type {
+		case TypeRun, TypeValidate:
+		default:
 			_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("coderunner does not answer %q", msg.Type))
 			continue
 		}
 		a.inflight.Add(1)
 		go func(msg actorbase.Msg) {
 			defer a.inflight.Done()
+			if msg.Type == TypeValidate {
+				a.handleValidate(sys, msg)
+				return
+			}
 			a.handle(sys, msg)
 		}(msg)
 	}
@@ -167,10 +173,40 @@ type declarationRow struct {
 	DefaultClass string `json:"default_class"`
 }
 
+// resolution is one requires list resolved against the channel: what each
+// requirement resolved to, what was absent, and every present candidate per
+// requirement (more than one = ambiguous; the first sorted one is used).
+type resolution struct {
+	resolved   map[string]actor.ActorID
+	missing    []string
+	candidates map[string][]string
+}
+
+func (r resolution) ambiguous() map[string][]string {
+	var out map[string][]string
+	for name, ids := range r.candidates {
+		if len(ids) > 1 {
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[name] = append([]string(nil), ids...)
+		}
+	}
+	return out
+}
+
 func resolveRequirements(sys actorbase.Sys, msg actorbase.Msg, requires []string, logger *slog.Logger) (map[string]actor.ActorID, []string, error) {
+	res, err := resolveRequirementsDetailed(sys, msg, requires, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	return res.resolved, res.missing, nil
+}
+
+func resolveRequirementsDetailed(sys actorbase.Sys, msg actorbase.Msg, requires []string, logger *slog.Logger) (resolution, error) {
 	resolved := make(map[string]actor.ActorID, len(requires))
 	if len(requires) == 0 {
-		return resolved, nil, nil
+		return resolution{resolved: resolved}, nil
 	}
 	needDirectory := false
 	for _, requirement := range requires {
@@ -181,20 +217,20 @@ func resolveRequirements(sys actorbase.Sys, msg actorbase.Msg, requires []string
 		}
 	}
 	if !needDirectory {
-		return resolved, nil, nil
+		return resolution{resolved: resolved}, nil
 	}
 
 	membersMsg, err := callAndWait(sys, msg, actor.SystemActorID, message.TypeSystemMemberList, struct{}{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("list channel members: %w", err)
+		return resolution{}, fmt.Errorf("list channel members: %w", err)
 	}
 	var catalog introspect.Catalog
 	if err := json.Unmarshal(membersMsg.Payload, &catalog); err != nil {
-		return nil, nil, fmt.Errorf("decode member directory: %w", err)
+		return resolution{}, fmt.Errorf("decode member directory: %w", err)
 	}
 	templatesMsg, err := callAndWait(sys, msg, actor.SystemActorID, message.TypeSystemActorTemplateList, struct{}{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("list actor templates: %w", err)
+		return resolution{}, fmt.Errorf("list actor templates: %w", err)
 	}
 	var declarations []declarationRow
 	if err := json.Unmarshal(templatesMsg.Payload, &declarations); err != nil {
@@ -202,16 +238,21 @@ func resolveRequirements(sys actorbase.Sys, msg actorbase.Msg, requires []string
 			Value []declarationRow `json:"value"`
 		}
 		if wrappedErr := json.Unmarshal(templatesMsg.Payload, &wrapped); wrappedErr != nil || wrapped.Value == nil {
-			return nil, nil, fmt.Errorf("decode actor templates: %w", err)
+			return resolution{}, fmt.Errorf("decode actor templates: %w", err)
 		}
 		declarations = wrapped.Value
 	}
-	resolved, missing := resolveDirectory(requires, catalog, declarations, logger)
-	return resolved, missing, nil
+	return resolveDirectoryDetailed(requires, catalog, declarations, logger), nil
 }
 
 func resolveDirectory(requires []string, catalog introspect.Catalog, declarations []declarationRow, logger *slog.Logger) (map[string]actor.ActorID, []string) {
+	res := resolveDirectoryDetailed(requires, catalog, declarations, logger)
+	return res.resolved, res.missing
+}
+
+func resolveDirectoryDetailed(requires []string, catalog introspect.Catalog, declarations []declarationRow, logger *slog.Logger) resolution {
 	resolved := make(map[string]actor.ActorID, len(requires))
+	allCandidates := make(map[string][]string, len(requires))
 	classes := make(map[string]string, len(declarations))
 	for _, declaration := range declarations {
 		classes[declaration.Name] = declaration.DefaultClass
@@ -240,9 +281,10 @@ func resolveDirectory(requires []string, catalog introspect.Catalog, declaration
 		}
 		sort.Strings(candidates)
 		resolved[requirement] = actor.ActorID(candidates[0])
+		allCandidates[requirement] = candidates
 		logger.Info(fmt.Sprintf("resolved %s -> %s (%d candidates)", requirement, candidates[0], len(candidates)))
 	}
-	return resolved, missing
+	return resolution{resolved: resolved, missing: missing, candidates: allCandidates}
 }
 
 func callAndWait(sys actorbase.Sys, msg actorbase.Msg, target actor.ActorID, typ string, payload any) (actorbase.Msg, error) {

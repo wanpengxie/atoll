@@ -1,34 +1,63 @@
+// Atoll code-mode runtime for Node: an MCP client over stdio. The host (the Go
+// coderunner actor) is the MCP server; the declared actors' words are its
+// tools. This file is one implementation of that contract — any MCP client in
+// any language can stand here.
+import { pathToFileURL } from "node:url";
+
+const PROTOCOL_VERSION = "2025-06-18";
+const TOOL_CONTEXT = "atoll_context";
+const TOOL_RETURN = "atoll_return";
+const TOOL_FAIL = "atoll_fail";
+
 const pending = new Map();
 const controller = new AbortController();
 let cancelled = false;
-let nextCallID = 1;
-let started = false;
+let nextID = 1;
 let inputBuffer = "";
+let progressCount = 0;
+let requestID = null;
+// (target or actor id) + " " + word → tool name, from tools/list _meta.
+const toolNames = new Map();
 
-function send(frame) {
-  process.stdout.write(JSON.stringify(frame) + "\n");
+function send(msg) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+}
+
+function request(method, params) {
+  const id = nextID++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    send({ id, method, params });
+  });
+}
+
+function notify(method, params) {
+  send({ method, params });
 }
 
 function textOf(values) {
-  return values.map((value) => {
-    if (typeof value === "string") return value;
-    try {
-      const encoded = JSON.stringify(value);
-      return encoded === undefined ? String(value) : encoded;
-    } catch {
-      return String(value);
-    }
-  }).join(" ");
+  return values
+    .map((value) => {
+      if (typeof value === "string") return value;
+      try {
+        const encoded = JSON.stringify(value);
+        return encoded === undefined ? String(value) : encoded;
+      } catch {
+        return String(value);
+      }
+    })
+    .join(" ");
 }
 
-function log(stream, values) {
-  send({ op: "log", stream, text: textOf(values) });
+function logMessage(level, logger, values) {
+  notify("notifications/message", { level, logger, data: textOf(values) });
 }
 
-console.log = (...values) => log("stdout", values);
-console.info = (...values) => log("stdout", values);
-console.warn = (...values) => log("stderr", values);
-console.error = (...values) => log("stderr", values);
+console.log = (...values) => logMessage("info", "console", values);
+console.info = (...values) => logMessage("info", "console", values);
+console.debug = (...values) => logMessage("debug", "console", values);
+console.warn = (...values) => logMessage("warning", "console", values);
+console.error = (...values) => logMessage("error", "console", values);
 
 class AtollError extends Error {
   constructor(code, detail) {
@@ -39,28 +68,51 @@ class AtollError extends Error {
   }
 }
 
-function answer(frame) {
-  const item = pending.get(frame.id);
-  if (!item) return;
-  pending.delete(frame.id);
-  if (frame.ok) item.resolve(frame.payload);
-  else item.reject(new AtollError(frame.error?.code || "call_failed", frame.error?.detail || ""));
+function callArguments(input) {
+  if (input !== null && typeof input === "object" && !Array.isArray(input)) return input;
+  return { $input: input === undefined ? null : input };
 }
 
-function makeAtoll(start) {
+function textContent(result) {
+  if (!result || !Array.isArray(result.content)) return undefined;
+  const block = result.content.find((c) => c && c.type === "text");
+  return block ? block.text : undefined;
+}
+
+function unwrapResult(result) {
+  if (result && result.isError) {
+    const structured = result.structuredContent || {};
+    throw new AtollError(structured.error_code || "call_failed", structured.detail || textContent(result) || "");
+  }
+  if (result && result.structuredContent !== undefined) return result.structuredContent;
+  const text = textContent(result);
+  if (text === undefined) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function callTool(name, args, meta) {
+  const params = { name, arguments: args };
+  if (meta) params._meta = meta;
+  return unwrapResult(await request("tools/call", params));
+}
+
+function makeAtoll(context) {
   const atoll = {
-    actors: Object.freeze({ ...start.actors }),
+    actors: Object.freeze({ ...(context.actors || {}) }),
     signal: controller.signal,
-    self: start.self,
-    channel: start.channel,
-    requestId: start.request_id,
+    self: context.self,
+    channel: context.channel,
+    requestId: context.request_id,
     call({ target, type, input, deadlineMs } = {}) {
       if (cancelled) return Promise.reject(new AtollError("cancelled", "execution cancelled"));
-      const id = nextCallID++;
-      return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-        send({ op: "call", id, target, type, input: input === undefined ? null : input, deadline_ms: deadlineMs });
-      });
+      const name = toolNames.get(`${target} ${type}`);
+      if (!name) return Promise.reject(new AtollError("undeclared_capability", `${target} ${type} is not in requires`));
+      const meta = Number.isFinite(deadlineMs) && deadlineMs > 0 ? { "atoll/deadline_ms": Math.floor(deadlineMs) } : undefined;
+      return callTool(name, callArguments(input), meta);
     },
     async all(thunks, options = {}) {
       if (!Array.isArray(thunks)) throw new TypeError("atoll.all expects an array of thunks");
@@ -79,70 +131,99 @@ function makeAtoll(start) {
       return values;
     },
     log(...values) {
-      log("log", values);
+      logMessage("info", "atoll", values);
     },
     progress(status, value) {
-      send({ op: "progress", status, value: value === undefined ? null : value });
+      progressCount += 1;
+      notify("notifications/progress", {
+        progressToken: requestID,
+        progress: progressCount,
+        message: status,
+        value: value === undefined ? null : value,
+      });
     },
   };
   return Object.freeze(atoll);
 }
 
-function errorFrame(kind, error, fallback, exit = false) {
+async function fail(kind, error, fallback) {
   const message = error instanceof Error ? error.message : String(error ?? fallback);
   const stack = error instanceof Error && error.stack ? error.stack : undefined;
-  const line = JSON.stringify({ op: "error", kind, message, stack }) + "\n";
-  if (exit) process.stdout.write(line, () => process.exit(1));
-  else process.stdout.write(line);
+  try {
+    await callTool(TOOL_FAIL, { kind, message, stack });
+  } catch {
+    // The host is gone or already finished; exiting is all that is left.
+  }
+  process.exit(1);
 }
 
-async function execute(start) {
-  const atoll = makeAtoll(start);
+async function main() {
+  await request("initialize", {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: { name: "atoll-coderunner-node", version: "1" },
+  });
+  notify("notifications/initialized", {});
+  const listed = await request("tools/list", {});
+  for (const tool of listed.tools || []) {
+    const meta = tool._meta || {};
+    const target = meta["atoll/target"];
+    const word = meta["atoll/word"];
+    if (!target || !word) continue;
+    toolNames.set(`${target} ${word}`, tool.name);
+    if (meta["atoll/actor"]) toolNames.set(`${meta["atoll/actor"]} ${word}`, tool.name);
+  }
+  const context = await callTool(TOOL_CONTEXT, {});
+  requestID = context.request_id;
+  const atoll = makeAtoll(context);
+
+  const programPath = process.env.ATOLL_PROGRAM;
   let mod;
   try {
-    mod = await import(start.program);
+    if (!programPath) throw new Error("ATOLL_PROGRAM is not set");
+    mod = await import(pathToFileURL(programPath).href);
   } catch (error) {
-    errorFrame("syntax", error, "program import failed", true);
-    return;
+    return fail("syntax", error, "program import failed");
   }
   if (typeof mod.run !== "function") {
-    errorFrame("invalid_output", null, "program does not export run", true);
-    return;
+    return fail("invalid_output", null, "program does not export run");
   }
   let value;
   try {
-    value = await mod.run({ atoll, args: start.args });
+    value = await mod.run({ atoll, args: context.args });
   } catch (error) {
-    errorFrame("exception", error, "program threw", true);
-    return;
+    return fail("exception", error, "program threw");
   }
   let encoded;
   try {
     encoded = JSON.stringify(value);
     if (encoded === undefined) throw new TypeError("run returned undefined");
   } catch (error) {
-    errorFrame("invalid_output", error, "run result is not JSON serializable", true);
-    return;
+    return fail("invalid_output", error, "run result is not JSON serializable");
   }
-  process.stdout.write(`{"op":"result","value":${encoded}}\n`, () => process.exit(0));
+  await callTool(TOOL_RETURN, { value: JSON.parse(encoded) });
+  process.exit(0);
 }
 
-function receive(frame) {
-  if (frame.op === "start" && !started) {
-    started = true;
-    void execute(frame).catch((error) => {
-      errorFrame("exception", error, "runner failed", true);
-    });
+function receive(msg) {
+  if (!msg || msg.jsonrpc !== "2.0") return;
+  if (msg.method === undefined && msg.id !== undefined) {
+    const item = pending.get(msg.id);
+    if (!item) return;
+    pending.delete(msg.id);
+    if (msg.error) {
+      const data = msg.error.data || {};
+      item.reject(new AtollError(data.code || "rpc_error", data.detail || msg.error.message || ""));
+    } else {
+      item.resolve(msg.result);
+    }
     return;
   }
-  if (frame.op === "answer") {
-    answer(frame);
-    return;
+  if (msg.method !== undefined && msg.id !== undefined) {
+    if (msg.method === "ping") send({ id: msg.id, result: {} });
+    else send({ id: msg.id, error: { code: -32601, message: `method not found: ${msg.method}` } });
   }
-  if (frame.op === "cancel") {
-    cancelled = true;
-    controller.abort();
-  }
+  // Notifications from the host: none defined; ignore.
 }
 
 process.stdin.setEncoding("utf8");
@@ -156,15 +237,26 @@ process.stdin.on("data", (chunk) => {
     if (!line.trim()) continue;
     try {
       receive(JSON.parse(line));
-    } catch (error) {
-      errorFrame("invalid_output", error, "invalid runner input");
+    } catch {
+      // A malformed host line is not the program's fault; drop it.
     }
+  }
+});
+// The host ends the session by closing our stdin: abort the program.
+process.stdin.on("end", () => {
+  cancelled = true;
+  controller.abort();
+  for (const [id, item] of pending) {
+    pending.delete(id);
+    item.reject(new AtollError("cancelled", "execution cancelled"));
   }
 });
 
 process.on("uncaughtException", (error) => {
-  errorFrame("exception", error, "uncaught exception", true);
+  void fail("exception", error, "uncaught exception");
 });
 process.on("unhandledRejection", (error) => {
-  errorFrame("exception", error, "unhandled rejection", true);
+  void fail("exception", error, "unhandled rejection");
 });
+
+void main().catch((error) => fail("exception", error, "runtime failed"));

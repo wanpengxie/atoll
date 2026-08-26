@@ -76,6 +76,42 @@ func TestCoderunnerHumanJourney(t *testing.T) {
 		t.Fatalf("dependency-missing request started node: %s", missingRunID)
 	}
 
+	// code.validate: the pre-flight half of code.run. Same resolution, plus
+	// each resolved actor's manifest; never starts Node.
+	validateID, validated := ws.requestWithID(c0ChannelID, "code.validate", runnerID, map[string]any{
+		"requires": []string{"echo", "system", "mcp:nonexistent"},
+	})
+	if validated["ok"] != false {
+		t.Fatalf("validate with a missing requirement must not be ok: %v", validated)
+	}
+	validateMissing, _ := validated["missing"].([]any)
+	if len(validateMissing) != 1 || validateMissing[0] != "mcp:nonexistent" {
+		t.Fatalf("validate missing=%v", validated)
+	}
+	validateResolved, _ := validated["resolved"].(map[string]any)
+	echoEntry, _ := validateResolved["echo"].(map[string]any)
+	if echoEntry["actor"] != echoID || echoEntry["class"] != "echo" {
+		t.Fatalf("validate resolved echo=%v (want %s)", echoEntry, echoID)
+	}
+	echoWords, _ := echoEntry["words"].(map[string]any)
+	if _, ok := echoWords["echo.say"]; !ok {
+		t.Fatalf("validate must carry echo's words, got %v", echoWords)
+	}
+	systemEntry, _ := validateResolved["system"].(map[string]any)
+	systemWords, _ := systemEntry["words"].(map[string]any)
+	if _, ok := systemWords["system.member.list"]; !ok {
+		t.Fatalf("validate must carry the system door's words, got %v", systemEntry)
+	}
+	if strings.Contains(tailLog(daemonLog, 100), `"request":"`+validateID+`"`) {
+		t.Fatalf("code.validate started node: %s", validateID)
+	}
+	_, badValidate, badValidateErr := ws.tryRequest(c0ChannelID, "code.validate", runnerID, map[string]any{
+		"requires": []string{}, "program": "export async function run(){}",
+	})
+	if badValidateErr == nil || badValidate["error_code"] != "invalid_input" {
+		t.Fatalf("code.validate must refuse program (code is not config): %v err=%v", badValidate, badValidateErr)
+	}
+
 	_, thrown, thrownErr := ws.tryRequest(c0ChannelID, "code.run", runnerID, map[string]any{
 		"program": `export async function run({atoll}) { atoll.log("before"); throw new Error("x") }`, "requires": []string{},
 	})
@@ -129,6 +165,55 @@ func TestCoderunnerHumanJourney(t *testing.T) {
 	_, invalid, invalidErr := ws.tryRequest(c0ChannelID, "code.run", fixedID, map[string]any{"program": fixedProgram})
 	if invalidErr == nil || invalid["error_code"] != "invalid_input" {
 		t.Fatalf("fixed mode accepted request program: %v err=%v", invalid, invalidErr)
+	}
+	// A fixed-program member validates its own config and takes no input.
+	fixedValidated := ws.request(c0ChannelID, "code.validate", fixedID, map[string]any{})
+	fixedResolved, _ := fixedValidated["resolved"].(map[string]any)
+	fixedEcho, _ := fixedResolved["echo"].(map[string]any)
+	if fixedValidated["ok"] != true || fixedEcho["actor"] != echoID {
+		t.Fatalf("fixed validate=%v", fixedValidated)
+	}
+	_, fixedOverride, fixedOverrideErr := ws.tryRequest(c0ChannelID, "code.validate", fixedID, map[string]any{"requires": []string{"echo"}})
+	if fixedOverrideErr == nil || fixedOverride["error_code"] != "invalid_input" {
+		t.Fatalf("fixed mode accepted a requires override in validate: %v err=%v", fixedOverride, fixedOverrideErr)
+	}
+
+	// A second runtime, same contract: the Python MCP client runs a Python
+	// program against the same channel, and the ledger looks identical.
+	if _, err := exec.LookPath("python3"); err == nil {
+		pythonRuntime, err := filepath.Abs(filepath.Join("..", "drivers", "tools", "coderunner", "runtimes", "python", "atoll_runtime.py"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pythonID := introduceClass(t, ws, registrar, "coderunner-python", "coderunner-python", "coderunner", map[string]any{
+			"runtime": map[string]any{"command": "python3", "args": []string{pythonRuntime}, "suffix": ".py"},
+		})
+		waitActorPresence(t, ws, pythonID, true, daemon, daemonLog)
+		pythonProgram := "async def run(atoll, args):\n" +
+			"    out = await atoll.call(target='echo', type='echo.say', input={'text': args['text']})\n" +
+			"    print('py says', out['text'])\n" +
+			"    return {'text': out['text'], 'lang': 'python'}\n"
+		pythonRunID, python := ws.requestWithID(c0ChannelID, "code.run", pythonID, map[string]any{
+			"program": pythonProgram, "requires": []string{"echo"}, "args": map[string]any{"text": "snake"},
+		})
+		pythonValue, _ := python["value"].(map[string]any)
+		if pythonValue["text"] != "snake" || pythonValue["lang"] != "python" {
+			t.Fatalf("python result=%v", python)
+		}
+		pythonLogs, _ := python["logs"].([]any)
+		var sawPrint bool
+		for _, entry := range pythonLogs {
+			row, _ := entry.(map[string]any)
+			if row["stream"] == "stdout" && row["text"] == "py says snake" {
+				sawPrint = true
+			}
+		}
+		if !sawPrint {
+			t.Fatalf("python print did not reach logs: %v", python["logs"])
+		}
+		assertCoderunnerCalls(t, api, pythonRunID, pythonID, echoID, rootID, 1, true)
+	} else {
+		t.Log("python3 unavailable; second-runtime scenario skipped")
 	}
 }
 

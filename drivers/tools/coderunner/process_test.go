@@ -3,29 +3,27 @@
 package coderunner
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 )
 
 func TestStopTerminatesRunnerProcessGroup(t *testing.T) {
-	run, stdout, stderr, err := startNode(defaultNode, t.TempDir())
+	path := filepath.Join(t.TempDir(), "hang.mjs")
+	if err := os.WriteFile(path, []byte(`export async function run(){ await new Promise(() => {}); }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command, args, _ := Config{}.runtime()
+	run, stdout, stderr, err := startRuntime(command, args, t.TempDir(), path)
 	if err != nil {
 		t.Skipf("node unavailable: %v", err)
 	}
 	go io.Copy(io.Discard, stdout)
 	go io.Copy(io.Discard, stderr)
-	program := `export async function run(){ await new Promise(() => {}); }`
-	if err := run.write(startFrame{
-		Op: "start", Program: "data:text/javascript;base64," + base64.StdEncoding.EncodeToString([]byte(program)),
-		Args: json.RawMessage("null"), Actors: map[string]string{}, Self: "tool:runner:1", Channel: "c", RequestID: "r",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	time.Sleep(50 * time.Millisecond)
 	run.stop()
 	select {

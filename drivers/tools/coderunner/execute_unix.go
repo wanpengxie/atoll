@@ -3,32 +3,29 @@
 package coderunner
 
 import (
-	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
-	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 const (
 	maxConcurrency = 8
 	maxLogs        = 1 << 20
-	// One browser subject frame is capped at 512 KiB. Execution still trips at
-	// maxLogs, while the terminal's JSON-encoded log array stays below that
-	// transport ceiling with room for the envelope and failure metadata.
+	// maxCapturedLogs bounds the logs carried in a terminal payload so the
+	// envelope stays under the browser frame ceiling.
 	maxCapturedLogs = 384 << 10
 	termGrace       = 2 * time.Second
+	programEnv      = "ATOLL_PROGRAM"
 )
 
 type logBuffer struct {
@@ -61,7 +58,7 @@ func (b *logBuffer) add(stream, text string) {
 func (b *logBuffer) snapshot() []logEntry {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]logEntry(nil), b.entries...)
+	return append(make([]logEntry, 0, len(b.entries)), b.entries...)
 }
 
 func (b *logBuffer) forceExceeded() { b.once.Do(func() { close(b.exceeded) }) }
@@ -76,10 +73,12 @@ type processRun struct {
 	waitErr   error
 }
 
-func startNode(node, cwd string) (*processRun, io.ReadCloser, io.ReadCloser, error) {
-	cmd := exec.Command(node, "--input-type=module", "-e", runnerSource)
+// startRuntime spawns the runtime with the program's path in the
+// environment; stdin/stdout are the MCP session, stderr is captured as output.
+func startRuntime(command string, args []string, cwd, programPath string) (*processRun, io.ReadCloser, io.ReadCloser, error) {
+	cmd := exec.Command(command, args...)
 	cmd.Dir = cwd
-	cmd.Env = selectedEnvironment()
+	cmd.Env = append(selectedEnvironment(), programEnv+"="+programPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -135,9 +134,13 @@ func (p *processRun) write(value any) error {
 	return err
 }
 
+// stop ends the session the MCP stdio way — close the runtime's stdin, then
+// SIGTERM the process group, then SIGKILL after the grace period.
 func (p *processRun) stop() {
 	p.terminate.Do(func() {
-		_ = p.write(map[string]string{"op": "cancel"})
+		p.writeMu.Lock()
+		_ = p.stdin.Close()
+		p.writeMu.Unlock()
 		if p.cmd.Process == nil {
 			return
 		}
@@ -152,68 +155,49 @@ func (p *processRun) stop() {
 	})
 }
 
-type pendingSet struct {
-	mu    sync.Mutex
-	items map[int64]actorbase.Pending
-}
-
-func (p *pendingSet) reserve(id int64) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if id <= 0 {
-		return false
+// writeProgram materialises the program as a file the runtime imports; the
+// stdio pair stays free for the protocol.
+func (a *coderunnerActor) writeProgram(requestID string, program string, suffix string) (string, error) {
+	dir := a.deps.WorkspaceDir
+	if dir == "" {
+		dir = os.TempDir()
 	}
-	if _, exists := p.items[id]; exists {
-		return false
+	dir = filepath.Join(dir, ".coderunner")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
 	}
-	p.items[id] = nil
-	return true
-}
-
-func (p *pendingSet) attach(id int64, pending actorbase.Pending) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, exists := p.items[id]; !exists {
-		return false
+	path := filepath.Join(dir, "run-"+sanitizeToolName(requestID)+suffix)
+	if err := os.WriteFile(path, []byte(program), 0o600); err != nil {
+		return "", err
 	}
-	p.items[id] = pending
-	return true
-}
-
-func (p *pendingSet) take(id int64) actorbase.Pending {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	pending := p.items[id]
-	delete(p.items, id)
-	return pending
-}
-
-func (p *pendingSet) cancelAll() {
-	p.mu.Lock()
-	items := p.items
-	p.items = make(map[int64]actorbase.Pending)
-	p.mu.Unlock()
-	for _, pending := range items {
-		if pending != nil {
-			_ = pending.Cancel()
-		}
-	}
-}
-
-type terminalFrame struct {
-	result  json.RawMessage
-	failure *runtimeFailure
+	return path, nil
 }
 
 func (a *coderunnerActor) execute(sys actorbase.Sys, msg actorbase.Msg, spec runSpec, actors map[string]actor.ActorID) {
-	run, stdout, stderr, err := startNode(a.cfg.Node, a.deps.WorkspaceDir)
+	table, err := a.buildToolTable(sys, msg, actors)
 	if err != nil {
-		failWithFields(sys, msg, "runtime_failed", "start node: "+err.Error(), runtimeFailure{Kind: "exit", Message: err.Error()})
+		_, _ = sys.Fail(msg, "dependency_missing", err.Error())
 		return
 	}
-	a.logger().Info("coderunner node started", "request", string(msg.ID), "pid", run.cmd.Process.Pid)
+	command, args, suffix := a.cfg.runtime()
+	programPath, err := a.writeProgram(string(msg.ID), spec.program, suffix)
+	if err != nil {
+		failWithFields(sys, msg, "runtime_failed", "write program: "+err.Error(), runtimeFailure{Kind: "exit", Message: err.Error()})
+		return
+	}
+	defer os.Remove(programPath)
+	cwd := a.deps.WorkspaceDir
+	if cwd == "" {
+		cwd = os.TempDir()
+	}
+	run, stdout, stderr, err := startRuntime(command, args, cwd, programPath)
+	if err != nil {
+		failWithFields(sys, msg, "runtime_failed", "start runtime "+command+": "+err.Error(), runtimeFailure{Kind: "exit", Message: err.Error()})
+		return
+	}
+	a.logger().Info("coderunner node started", "request", string(msg.ID), "pid", run.cmd.Process.Pid, "runtime", command)
 	logs := newLogBuffer()
-	pending := &pendingSet{items: make(map[int64]actorbase.Pending)}
+	pending := newPendingSet()
 	defer func() {
 		pending.cancelAll()
 		run.stop()
@@ -223,33 +207,28 @@ func (a *coderunnerActor) execute(sys actorbase.Sys, msg actorbase.Msg, spec run
 		}
 	}()
 
-	actorStrings := make(map[string]string, len(actors))
-	for requirement, id := range actors {
-		actorStrings[requirement] = string(id)
-	}
-	program := "data:text/javascript;base64," + base64.StdEncoding.EncodeToString([]byte(spec.program))
-	if err := run.write(startFrame{
-		Op: "start", Program: program, Args: spec.args, Actors: actorStrings,
-		Self: string(sys.Self()), Channel: string(a.deps.ChannelID), RequestID: string(msg.ID),
-	}); err != nil {
-		failWithFields(sys, msg, "runtime_failed", "write runner start: "+err.Error(), runtimeFailure{Kind: "exit", Message: err.Error()})
-		return
-	}
-
 	go scanStderr(stderr, logs)
 	terminal := make(chan terminalFrame, 1)
 	streamDone := make(chan struct{})
-	go a.readFrames(sys, msg, spec, actors, run, stdout, logs, pending, terminal, streamDone)
+	host := &mcpHost{
+		actor: a, sys: sys, msg: msg, spec: spec, actors: actors, table: table,
+		run: run, logs: logs, pending: pending, terminal: terminal,
+	}
+	go host.serve(stdout, streamDone)
 
+	outputLimit := func() {
+		run.stop()
+		pending.cancelAll()
+		failWithFields(sys, msg, "output_limit", "execution logs exceeded 1 MiB", struct {
+			Logs []logEntry `json:"logs"`
+		}{Logs: logs.snapshot()})
+	}
 	select {
 	case frame := <-terminal:
 		pending.cancelAll()
 		select {
 		case <-logs.exceeded:
-			run.stop()
-			failWithFields(sys, msg, "output_limit", "execution logs exceeded 1 MiB", struct {
-				Logs []logEntry `json:"logs"`
-			}{Logs: logs.snapshot()})
+			outputLimit()
 			return
 		default:
 		}
@@ -260,11 +239,7 @@ func (a *coderunnerActor) execute(sys actorbase.Sys, msg actorbase.Msg, spec run
 		}
 		_, _ = sys.Reply(msg, runResult{Value: frame.result, Logs: logs.snapshot()})
 	case <-logs.exceeded:
-		run.stop()
-		pending.cancelAll()
-		failWithFields(sys, msg, "output_limit", "execution logs exceeded 1 MiB", struct {
-			Logs []logEntry `json:"logs"`
-		}{Logs: logs.snapshot()})
+		outputLimit()
 	case <-msg.Ctx().Done():
 		run.stop()
 		pending.cancelAll()
@@ -280,7 +255,7 @@ func (a *coderunnerActor) execute(sys actorbase.Sys, msg actorbase.Msg, spec run
 		<-run.done
 		waitErr := run.err()
 		kind := "invalid_output"
-		messageText := "runner closed stdout without a result"
+		messageText := "runtime ended the session without a result"
 		if waitErr != nil {
 			kind = "exit"
 			messageText = waitErr.Error()
@@ -303,134 +278,6 @@ func scanStderr(reader io.Reader, logs *logBuffer) {
 			return
 		}
 	}
-}
-
-func (a *coderunnerActor) readFrames(
-	sys actorbase.Sys,
-	msg actorbase.Msg,
-	spec runSpec,
-	actors map[string]actor.ActorID,
-	run *processRun,
-	stdout io.Reader,
-	logs *logBuffer,
-	pending *pendingSet,
-	terminal chan<- terminalFrame,
-	done chan<- struct{},
-) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 32*1024), 16<<20)
-	semaphore := make(chan struct{}, maxConcurrency)
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		var frame nodeFrame
-		if err := json.Unmarshal(line, &frame); err != nil {
-			logs.add("stdout", string(line))
-			continue
-		}
-		switch frame.Op {
-		case "call":
-			semaphore <- struct{}{}
-			go func(frame nodeFrame) {
-				defer func() { <-semaphore }()
-				a.handleCall(sys, msg, spec, actors, run, pending, frame)
-			}(frame)
-		case "log":
-			stream := frame.Stream
-			if stream != "stdout" && stream != "stderr" && stream != "log" {
-				stream = "log"
-			}
-			logs.add(stream, frame.Text)
-		case "progress":
-			var value any
-			if len(frame.Value) > 0 {
-				_ = json.Unmarshal(frame.Value, &value)
-			}
-			_, _ = sys.Progress(msg, frame.Status, value)
-		case "result":
-			terminal <- terminalFrame{result: append(json.RawMessage(nil), frame.Value...)}
-			return
-		case "error":
-			terminal <- terminalFrame{failure: &runtimeFailure{Kind: frame.Kind, Message: frame.Message, Stack: frame.Stack}}
-			return
-		default:
-			logs.add("stdout", string(line))
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		logs.add("stdout", err.Error())
-		logs.forceExceeded()
-	}
-	close(done)
-}
-
-func (a *coderunnerActor) handleCall(
-	sys actorbase.Sys,
-	msg actorbase.Msg,
-	spec runSpec,
-	actors map[string]actor.ActorID,
-	run *processRun,
-	pending *pendingSet,
-	frame nodeFrame,
-) {
-	if !pending.reserve(frame.ID) {
-		_ = run.write(answerFrame{Op: "answer", ID: frame.ID, Error: &callError{Code: "invalid_call", Detail: "call id must be positive and unique while in flight"}})
-		return
-	}
-	defer pending.take(frame.ID)
-	target, ok := allowedTarget(frame.Target, actors)
-	if !ok {
-		_ = run.write(answerFrame{Op: "answer", ID: frame.ID, Error: &callError{Code: "undeclared_capability", Detail: frame.Target + " is not in requires"}})
-		return
-	}
-	input := frame.Input
-	if len(input) == 0 {
-		input = json.RawMessage("null")
-	}
-	var pd actorbase.Pending
-	var err error
-	if spec.forward {
-		pd, err = sys.CallFor(msg.Cause(), actorbase.EffectiveCaller(msg), target, frame.Type, input)
-	} else {
-		pd, err = sys.Call(msg.Cause(), target, frame.Type, input)
-	}
-	if err != nil {
-		_ = run.write(answerFrame{Op: "answer", ID: frame.ID, Error: &callError{Code: "call_failed", Detail: err.Error()}})
-		return
-	}
-	if !pending.attach(frame.ID, pd) {
-		_ = pd.Cancel()
-		return
-	}
-	wait := defaultCallDeadline
-	if frame.DeadlineMS > 0 {
-		if frame.DeadlineMS > math.MaxInt64/int64(time.Millisecond) {
-			wait = time.Duration(math.MaxInt64)
-		} else {
-			wait = time.Duration(frame.DeadlineMS) * time.Millisecond
-		}
-	}
-	wait = boundedWait(msg.Ctx(), wait)
-	response, err := pd.Wait(msg.Ctx(), wait)
-	if err != nil {
-		_ = pd.Cancel()
-		_ = run.write(answerFrame{Op: "answer", ID: frame.ID, Error: &callError{Code: "call_failed", Detail: err.Error()}})
-		return
-	}
-	var outcome struct {
-		Status string `json:"status"`
-		message.Failure
-	}
-	_ = json.Unmarshal(response.Payload, &outcome)
-	if outcome.Status != message.StatusCompleted {
-		failure := outcome.Failure
-		code := failure.ErrorCode
-		if code == "" {
-			code = "call_failed"
-		}
-		_ = run.write(answerFrame{Op: "answer", ID: frame.ID, Error: &callError{Code: code, Detail: failure.Detail}})
-		return
-	}
-	_ = run.write(answerFrame{Op: "answer", ID: frame.ID, OK: true, Payload: response.Payload})
 }
 
 func allowedTarget(value string, actors map[string]actor.ActorID) (actor.ActorID, bool) {
