@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -150,6 +151,129 @@ func TestCoderunnerHumanJourney(t *testing.T) {
 		t.Fatalf("output limit=%v err=%v", flooded, floodedErr)
 	}
 	waitForNodeChild(t, daemon.cmd.Process.Pid, false)
+
+	// --- closure matrix: timeout / late result / concurrency / no auto retry ---
+
+	// timeout: the declared deadline (a short expires_at on the run) collapses
+	// the receiver's in-station account first, so the coderunner's own
+	// `timeout` terminal is a late write and is refused — the receiver never
+	// closes a deadline. What must hold: the runtime is killed promptly, and
+	// the substrate reaper closes the run as unanswered_timeout, system-signed,
+	// within one reconcile cadence (30 s). Logs cannot ride that terminal.
+	timeoutID := ws.submitWithExpiry(c0ChannelID, "code.run", runnerID, map[string]any{
+		"program": `export async function run(){ console.log("before hang"); await new Promise(resolve => setTimeout(resolve, 60000)); return null }`, "requires": []string{},
+	}, time.Now().Add(1500*time.Millisecond).UnixMilli())
+	waitForNodeChild(t, daemon.cmd.Process.Pid, true)
+	waitForNodeChild(t, daemon.cmd.Process.Pid, false)
+	timeoutEnvelope := ws.awaitEnvelope(func(envelope map[string]any) bool {
+		if envelope["kind"] != "response" || envelope["parent_id"] != timeoutID {
+			return false
+		}
+		body, _ := envelope["payload"].(map[string]any)
+		return body["status"] == "failed"
+	}, 45*time.Second)
+	timeoutTerminal, _ := timeoutEnvelope["payload"].(map[string]any)
+	timeoutSender, _ := timeoutEnvelope["sender"].(map[string]any)
+	if timeoutTerminal["reason"] != "unanswered_timeout" || timeoutTerminal["closed_by"] != "system" || timeoutSender["id"] != "system" {
+		t.Fatalf("timeout terminal=%v sender=%v (want the reaper's system-signed unanswered_timeout)", timeoutTerminal, timeoutSender)
+	}
+	if n := countTerminals(t, api, timeoutID); n != 1 {
+		t.Fatalf("timed-out run has %d terminals, want exactly 1 (the coderunner's late `timeout` must be refused)", n)
+	}
+
+	// late result: a run is cancelled while its child call (echo countdown, 3 s)
+	// is still counting. The child is cancelled with the run; echo's real
+	// answer lands after closure and is absorbed as late — exactly one
+	// terminal on the run and exactly one on the child.
+	lateID := ws.submit(c0ChannelID, "code.run", "request", []string{runnerID}, map[string]any{
+		"program": `export async function run({atoll}){ return await atoll.call({target:"echo", type:"countdown.start", input:{seconds:3, note:"late"}, deadlineMs: 20000}) }`, "requires": []string{"echo"},
+	})
+	lateChild := ws.awaitEnvelope(func(envelope map[string]any) bool {
+		return envelope["kind"] == "request" && envelope["type"] == "countdown.start" && envelope["parent_id"] == lateID
+	}, 15*time.Second)
+	lateChildID, _ := lateChild["id"].(string)
+	ws.cancel(c0ChannelID, lateID)
+	lateTerminal := ws.awaitTerminal(lateID, 15*time.Second)
+	if lateTerminal["error_code"] != "unanswered_timeout" || lateTerminal["cancelled"] != true {
+		t.Fatalf("late-run terminal=%v", lateTerminal)
+	}
+	// Wait past the countdown so echo's late Reply has definitely been attempted.
+	time.Sleep(4 * time.Second)
+	if n := countTerminals(t, api, lateID); n != 1 {
+		t.Fatalf("run %s has %d terminals, want exactly 1", lateID, n)
+	}
+	if n := countTerminals(t, api, lateChildID); n != 1 {
+		t.Fatalf("late child %s has %d terminals, want exactly 1 (the cancel; echo's answer must be absorbed as late)\nrows under child: %s\nrows under run: %s\nserver log:\n%s\ndaemon log:\n%s", lateChildID, n, dumpUnder(t, api, lateChildID), dumpUnder(t, api, lateID), tailLog(h.server.logPath, 60), tailLog(daemonLog, 60))
+	}
+	waitForNodeChild(t, daemon.cmd.Process.Pid, false)
+
+	// concurrency (the only "busy" a tool has): three runs on one member at
+	// once, each its own process, each its own terminal; and one run fanning
+	// 20 child calls through the 8-wide host semaphore, all answered.
+	parallelIDs := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		id := ws.submit(c0ChannelID, "code.run", "request", []string{runnerID}, map[string]any{
+			"program": `export async function run({args}){ await new Promise(resolve => setTimeout(resolve, 500)); return args.i }`, "requires": []string{}, "args": map[string]any{"i": i},
+		})
+		parallelIDs[id] = false
+	}
+	parallelValues := map[string]any{}
+	ws.awaitEnvelope(func(envelope map[string]any) bool {
+		if envelope["kind"] != "response" {
+			return false
+		}
+		parent, _ := envelope["parent_id"].(string)
+		if _, mine := parallelIDs[parent]; !mine {
+			return false
+		}
+		body, _ := envelope["payload"].(map[string]any)
+		if body["status"] != "completed" {
+			return false
+		}
+		parallelIDs[parent] = true
+		parallelValues[parent] = body["value"]
+		for _, seen := range parallelIDs {
+			if !seen {
+				return false
+			}
+		}
+		return true
+	}, 20*time.Second)
+	seenValues := map[any]bool{}
+	for _, value := range parallelValues {
+		seenValues[value] = true
+	}
+	if len(seenValues) != 3 {
+		t.Fatalf("parallel runs did not each return their own arg: %v", parallelValues)
+	}
+	waitForNodeChild(t, daemon.cmd.Process.Pid, false)
+
+	fanID, fanned := ws.requestWithID(c0ChannelID, "code.run", runnerID, map[string]any{
+		"program": `export async function run({atoll}){ const outs = await atoll.all(Array.from({length:20}, (_, i) => () => atoll.call({target:"echo", type:"echo.say", input:{text:"n"+i}}))); return outs.map(o => o.text) }`, "requires": []string{"echo"},
+	})
+	if fanValues, _ := fanned["value"].([]any); len(fanValues) != 20 {
+		t.Fatalf("fan-out returned %d of 20: %v", len(fanValues), fanned)
+	}
+	assertCoderunnerCalls(t, api, fanID, runnerID, echoID, rootID, 20, true)
+
+	// no automatic retry: a failed run stays failed; nothing spawns a second
+	// attempt on the caller's behalf. A retry is the caller's own new request.
+	failedRetryID, _, failedRetryErr := ws.tryRequest(c0ChannelID, "code.run", runnerID, map[string]any{
+		"program": `export async function run(){ throw new Error("flaky") }`, "requires": []string{},
+	})
+	if failedRetryErr == nil {
+		t.Fatal("flaky program unexpectedly succeeded")
+	}
+	assertNoChildType(t, api, failedRetryID, "code.run")
+	if n := countRequests(t, api, "code.run", failedRetryID); n != 0 {
+		t.Fatalf("%d runtime-created attempts hang off the failed run; retries belong to the caller", n)
+	}
+	retryID, retried := ws.requestWithID(c0ChannelID, "code.run", runnerID, map[string]any{
+		"program": `export async function run(){ return "second attempt" }`, "requires": []string{},
+	})
+	if retried["value"] != "second attempt" || retryID == failedRetryID {
+		t.Fatalf("explicit retry=%v", retried)
+	}
 
 	fixedProgram := `export async function run({atoll,args}) { const out=await atoll.call({target:"echo",type:"echo.say",input:{text:args.text}}); return {text:out.text} }`
 	fixedID := introduceClass(t, ws, registrar, "coderunner-fixed", "coderunner-fixed", "coderunner", map[string]any{
@@ -330,6 +454,115 @@ func assertNoChildType(t *testing.T, api *apiClient, parentID, msgType string) {
 			}
 		case <-timer.C:
 			return
+		}
+	}
+}
+
+// submitWithExpiry is submit with a declared request deadline (expires_at_ms).
+func (c *wsClient) submitWithExpiry(channelID, msgType, audience string, payload any, expiresAtMs int64) string {
+	c.t.Helper()
+	wireRef++
+	ref := fmt.Sprintf("submit-%d", wireRef)
+	body := map[string]any{
+		"channel_id": channelID, "msg_type": msgType, "kind": "request", "visibility": "public",
+		"payload": payload, "audience": []string{audience}, "expires_at_ms": expiresAtMs,
+	}
+	if err := c.conn.WriteJSON(wireFrame("submit", ref, body)); err != nil {
+		c.t.Fatal(err)
+	}
+	ack := c.awaitAck(ref, 10*time.Second)
+	if ack["frame_type"] == "error" {
+		c.t.Fatalf("submit %s rejected: %v", msgType, ack["payload"])
+	}
+	receipt, _ := ack["payload"].(map[string]any)
+	id, _ := receipt["message_id"].(string)
+	if id == "" {
+		c.t.Fatalf("submit receipt omitted message_id: %v", ack)
+	}
+	return id
+}
+
+// awaitTerminal returns the terminal payload of request id.
+func (c *wsClient) awaitTerminal(id string, timeout time.Duration) map[string]any {
+	c.t.Helper()
+	terminal := c.awaitEnvelope(func(envelope map[string]any) bool {
+		if envelope["kind"] != "response" || envelope["parent_id"] != id {
+			return false
+		}
+		body, _ := envelope["payload"].(map[string]any)
+		return body["status"] == "completed" || body["status"] == "failed"
+	}, timeout)
+	body, _ := terminal["payload"].(map[string]any)
+	return body
+}
+
+// countTerminals replays the ledger and counts terminal responses under id.
+func countTerminals(t *testing.T, api *apiClient, id string) int {
+	t.Helper()
+	audit := dialWS(t, api.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0})
+	timer := time.NewTimer(1500 * time.Millisecond)
+	defer timer.Stop()
+	count := 0
+	for {
+		select {
+		case item := <-audit.feed:
+			envelope, _ := item["envelope"].(map[string]any)
+			if envelope == nil || envelope["kind"] != "response" || envelope["parent_id"] != id {
+				continue
+			}
+			body, _ := envelope["payload"].(map[string]any)
+			if body["status"] == "completed" || body["status"] == "failed" {
+				count++
+			}
+		case <-timer.C:
+			return count
+		}
+	}
+}
+
+// countRequests replays the ledger and counts requests of msgType whose
+// correlation (errand) is rootID — the shape a runtime-created retry would have.
+func countRequests(t *testing.T, api *apiClient, msgType, rootID string) int {
+	t.Helper()
+	audit := dialWS(t, api.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0})
+	timer := time.NewTimer(1500 * time.Millisecond)
+	defer timer.Stop()
+	count := 0
+	for {
+		select {
+		case item := <-audit.feed:
+			envelope, _ := item["envelope"].(map[string]any)
+			if envelope == nil || envelope["kind"] != "request" || envelope["type"] != msgType {
+				continue
+			}
+			if envelope["id"] != rootID && (envelope["correlation_id"] == rootID || envelope["parent_id"] == rootID) {
+				count++
+			}
+		case <-timer.C:
+			return count
+		}
+	}
+}
+
+// dumpUnder renders every ledger row whose parent is id, for failure output.
+func dumpUnder(t *testing.T, api *apiClient, id string) string {
+	t.Helper()
+	audit := dialWS(t, api.base, api.cookieHeader(), map[string]int64{c0ChannelID: 0})
+	timer := time.NewTimer(1500 * time.Millisecond)
+	defer timer.Stop()
+	var rows []string
+	for {
+		select {
+		case item := <-audit.feed:
+			envelope, _ := item["envelope"].(map[string]any)
+			if envelope == nil || envelope["parent_id"] != id {
+				continue
+			}
+			sender, _ := envelope["sender"].(map[string]any)
+			payload, _ := json.Marshal(envelope["payload"])
+			rows = append(rows, fmt.Sprintf("%v %v from %v: %s", envelope["kind"], envelope["type"], sender["id"], payload))
+		case <-timer.C:
+			return strings.Join(rows, "\n")
 		}
 	}
 }
