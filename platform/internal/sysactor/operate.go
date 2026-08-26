@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/channelspec"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -41,13 +42,16 @@ const (
 	TypeMemberRestart = message.TypeSystemMemberRestart
 )
 
-// OperateRequest is the decoded delivery an OperateExecutor acts on: the gate
-// has already authorised it (sender is an active member) and supplies the
-// channel scope + the operator's id; the raw payload is left for the executor to
-// decode (the payload schema is the executor's concern — the gate is kind-blind
-// and payload-blind, it only routes the closed verb set and enforces membership).
+// OperateRequest is the decoded delivery an OperateExecutor acts on. Initiator
+// is the immediate, target-channel actor that wrote the request; Caller is the
+// effective origin the gate authorised. They are identical for a local call.
+// Across a peer membrane Initiator is the target's svcactor while Caller names
+// the remote actor and channel carried in the trusted request context. Keeping
+// both prevents a remote provenance identity from being mistaken for a member
+// of the target roster. The raw payload remains the executor's concern.
 type OperateRequest struct {
 	ChannelID channel.ID
+	Initiator actor.ActorID
 	Caller    harness.Caller
 	Anchor    string
 	// Cause is the control word itself. Everything the executor writes as a
@@ -102,7 +106,7 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, unauthorizedSenderCode, fmt.Sprintf("%q is not an active member of this channel, so it may not use the channel control words; check the roster with system.member.list", caller.Actor))
 		return
 	}
-	req := OperateRequest{ChannelID: msg.ChannelID, Caller: caller, Anchor: string(msg.ID), Cause: msg.Cause(), Payload: msg.Payload}
+	req := OperateRequest{ChannelID: msg.ChannelID, Initiator: msg.Sender.ID, Caller: caller, Anchor: string(msg.ID), Cause: msg.Cause(), Payload: msg.Payload}
 	result, err := s.operate.Execute(msg.Ctx(), msg.Type, req)
 	if err != nil {
 		var oe *OperateError

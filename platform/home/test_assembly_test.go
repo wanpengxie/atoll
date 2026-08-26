@@ -84,7 +84,7 @@ func introduceHumanForTest(h *Home, ctx context.Context, kind actor.Kind, princi
 func removeActorForTest(h *Home, ctx context.Context, target actor.ActorID) error {
 	payload, _ := json.Marshal(map[string]any{"member": target})
 	_, err := h.opEntry.Execute(ctx, sysactor.TypeMemberDelete, sysactor.OperateRequest{
-		Caller: harness.Caller{Channel: h.channelID, Actor: target}, Anchor: uuid.NewString(),
+		Initiator: target, Caller: harness.Caller{Channel: h.channelID, Actor: target}, Anchor: uuid.NewString(),
 		Cause: message.Root(), Payload: payload,
 	})
 	return err

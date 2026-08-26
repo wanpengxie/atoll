@@ -136,13 +136,13 @@ func (e *opEntry) Execute(
 				Code: string(channelspec.ErrCodeBadPayload), Detail: "decl_id required",
 			}
 		}
-		result, err := e.introduce(ctx, payload.DeclID, payload.DesiredHost, req.Caller.Actor)
+		result, err := e.introduce(ctx, payload.DeclID, payload.DesiredHost, req.Initiator)
 		if err != nil {
 			return nil, asOperateError(err)
 		}
 		by := map[string]any{"caller": req.Caller}
-		if facts, active, factsErr := e.home.actors.ActorFacts(ctx, req.Caller.Actor); factsErr == nil && active && facts.SourceDeclID == payload.DeclID {
-			by = map[string]any{"fork_of": req.Caller.Actor}
+		if facts, active, factsErr := e.home.actors.ActorFacts(ctx, req.Initiator); factsErr == nil && active && facts.SourceDeclID == payload.DeclID {
+			by = map[string]any{"fork_of": req.Initiator}
 		}
 		e.home.narrateBirth(ctx, req.Cause, result.ActorID, result.Created, map[string]any{
 			"decl_id": payload.DeclID, "by": by,
@@ -197,7 +197,7 @@ func (e *opEntry) Execute(
 			return nil, asOperateError(err)
 		}
 		result, err := e.remove(ctx, removeRequest{
-			Target: resolved, InitiatorActorID: req.Caller.Actor, Cause: req.Cause,
+			Target: resolved, InitiatorActorID: req.Initiator, Cause: req.Cause,
 		})
 		if err != nil {
 			return nil, asOperateError(err)

@@ -58,11 +58,13 @@ type stubExecutor struct {
 	created   int
 	deleted   int
 	restarted int
+	last      OperateRequest
 	err       error
 	result    any
 }
 
 func (s *stubExecutor) Execute(ctx context.Context, operation string, req OperateRequest) (any, error) {
+	s.last = req
 	switch operation {
 	case TypeMemberCreate:
 		return s.Create(ctx, req)
@@ -112,6 +114,31 @@ func TestOperate_MemberAllowed(t *testing.T) {
 	}
 	if len(sys.replies) != 1 || len(sys.fails) != 0 {
 		t.Fatalf("want 1 reply 0 fails, got %d replies %d fails", len(sys.replies), len(sys.fails))
+	}
+	if ex.last.Initiator != "agent:alice:1" || ex.last.Caller.Actor != "agent:alice:1" || ex.last.Caller.Channel != "ch" {
+		t.Fatalf("operate identities=%+v", ex.last)
+	}
+}
+
+func TestOperate_RemoteCallerKeepsLocalInitiator(t *testing.T) {
+	ex := &stubExecutor{result: map[string]string{"ok": "true"}}
+	s := New(Deps{Authority: memberRegistry{}, Operate: ex})
+	sys := &failSys{}
+	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "op-remote", ChannelID: "target", Kind: message.KindRequest, Type: TypeMemberCreate,
+		Sender:   message.Sender{Kind: actor.KindPeer, ID: "peer:svcactor:2"},
+		Audience: message.Audience{actor.SystemActorID},
+		Payload:  json.RawMessage(`{"_context":{"caller":{"channel":"c0","actor":"agent:steward:1"}},"body":{"decl_id":"claude"}}`),
+	})
+	s.handle(sys, msg)
+	if ex.created != 1 || len(sys.fails) != 0 {
+		t.Fatalf("created=%d fails=%+v", ex.created, sys.fails)
+	}
+	if ex.last.Initiator != "peer:svcactor:2" {
+		t.Fatalf("initiator=%q, want target svcactor", ex.last.Initiator)
+	}
+	if ex.last.Caller.Channel != "c0" || ex.last.Caller.Actor != "agent:steward:1" {
+		t.Fatalf("caller=%+v, want remote provenance", ex.last.Caller)
 	}
 }
 

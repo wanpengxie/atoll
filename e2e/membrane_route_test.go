@@ -55,6 +55,49 @@ func TestDoorCarriesChannelRequestThroughSvcactor(t *testing.T) {
 	}
 }
 
+func TestCoreCreatesAndDeletesMemberThroughTargetSvcactor(t *testing.T) {
+	h := newHarness(t)
+	_, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
+	registrar := findRegistrar(t, ws)
+
+	const (
+		channelName = "e2e-membrane-control"
+		declID      = "e2e-membrane-echo"
+	)
+	created := createChannelWithRoot(t, ws, c0ChannelID, registrar, channelName)
+	targetID := stringField(t, created, "channel_id")
+	awaitDoor(t, ws, targetID)
+	peer := "peer:c0." + channelName
+
+	// Channel creation seats its peer asynchronously in c0. Wait for that
+	// local handle before exercising the membrane rather than retrying a value
+	// mutation whose first reply might merely have been delayed.
+	deadline := time.Now().Add(30 * time.Second)
+	var lastPeerErr error
+	for time.Now().Before(deadline) {
+		_, _, lastPeerErr = ws.tryRequest(c0ChannelID, "system.member.get", systemActor, map[string]any{"member": peer})
+		if lastPeerErr == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastPeerErr != nil {
+		t.Fatalf("target peer %s did not become active: %v", peer, lastPeerErr)
+	}
+
+	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
+		"id": declID, "name": declID, "class": "echo", "config": map[string]any{}, "visibility": "private",
+	})
+	introduced := ws.request(c0ChannelID, "system.member.create", peer, map[string]any{"decl_id": declID})
+	member := stringField(t, introduced, "member")
+
+	removed := ws.request(c0ChannelID, "system.member.delete", peer, map[string]any{"decl_id": declID})
+	rows, ok := removed["removed"].([]any)
+	if !ok || len(rows) != 1 || rows[0] != member {
+		t.Fatalf("remote delete=%v, want removed member %s", removed, member)
+	}
+}
+
 func svcactorOriginMatches(envelope map[string]any, channelID string) bool {
 	payload, _ := envelope["payload"].(map[string]any)
 	context, _ := payload["_context"].(map[string]any)

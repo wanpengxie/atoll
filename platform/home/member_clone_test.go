@@ -66,6 +66,7 @@ func TestMemberCloneCreatesAnotherIdentityAndNarratesForkOrigin(t *testing.T) {
 	parent := routingAgent(t, h, decl)
 	value, err := h.opEntry.Execute(context.Background(), sysactor.TypeMemberCreate, sysactor.OperateRequest{
 		ChannelID: h.channelID,
+		Initiator: parent,
 		Caller:    harness.Caller{Channel: h.channelID, Actor: parent},
 		Anchor:    "clone-request",
 		Cause:     message.Root(),
