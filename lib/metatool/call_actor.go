@@ -40,7 +40,9 @@ Result shapes (fast-path, default):
 
 wait parameter:
   - omit / true (default behaviour above is bounded; pass wait=true for sync):
-    wait=true waits up to the request deadline before degrading to an ack.
+    wait=true waits up to the tool-call budget (~115s) before degrading to an ack;
+    the request itself keeps running (deadline = 5 min of silence, restarted by
+    each progress) and is collected with await_result.
   - wait=false: returns the ack IMMEDIATELY without waiting at all. Use this to
     FAN OUT several calls in parallel, then await_result / cancel each as needed.
 `),
@@ -50,7 +52,7 @@ wait parameter:
     "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs or agent:research-assistant. Look up via list_actors."},
     "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimi.command. MUST be a request-allowed type for the chosen actor."},
     "payload": {"type": "object", "description": "Type-specific payload. Consult describe_type for its documented shape."},
-    "wait": {"type": "boolean", "description": "Optional. Omit for bounded fast-path (final inline within ~15s, else ack). true = wait up to the request deadline (sync). false = return ack immediately without waiting (fan-out)."}
+    "wait": {"type": "boolean", "description": "Optional. Omit for bounded fast-path (final inline within ~15s, else ack). true = wait up to the tool-call budget (~115s) before degrading to an ack (sync). false = return ack immediately without waiting (fan-out)."}
   },
   "required": ["actor_id", "type"]
 }`),

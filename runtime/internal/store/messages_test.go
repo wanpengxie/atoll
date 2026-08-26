@@ -767,3 +767,34 @@ func TestExpiredOpenRequests_ManyRowsPaginate(t *testing.T) {
 		t.Fatalf("pages = %d, want 3", pages)
 	}
 }
+
+// The reaper evaluates the SLIDING deadline from truth: a provisional
+// response restarts the window (expires_at − ts) from its own ts, so a request
+// past its declared expires_at is not due until that span of silence has
+// elapsed since its latest progress.
+func TestExpiredOpenRequests_ProgressSlidesDeadline(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+	// ts=1000, expires_at=1500 → span 500.
+	req := newEnv("s1", message.KindRequest, message.Audience{"tool:xhs"},
+		withSender(actor.KindAgent, "planner"), withType("xhs.publish"), withExpiresAt(1500))
+	if _, err := cs.Log.Append(ctx, req, false, storespec.AppendMetadata{}); err != nil {
+		t.Fatalf("Append s1: %v", err)
+	}
+	progress := newEnv("s1-p1", message.KindResponse, message.Audience{"planner"},
+		withSender(actor.KindTool, "tool:xhs"), withParent("s1"), withType("xhs.publish"),
+		func(e *message.Envelope) { e.TS = 1400; e.TSReceived = 1400 })
+	if _, err := cs.Log.Append(ctx, progress, false, storespec.AppendMetadata{}); err != nil {
+		t.Fatalf("Append s1-p1: %v", err)
+	}
+	// Declared expires_at (1500) has passed at 1800, but the window restarted
+	// at 1400 → due at 1900.
+	rows, _, err := cs.Expiry.ExpiredOpenRequests(ctx, 1800, storespec.ExpiryCursor{}, 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("at 1800: rows=%d err=%v, want none (progress at 1400 slid the deadline to 1900)", len(rows), err)
+	}
+	rows, _, err = cs.Expiry.ExpiredOpenRequests(ctx, 1900, storespec.ExpiryCursor{}, 10)
+	if err != nil || len(rows) != 1 || rows[0].Row.Envelope.ID != "s1" {
+		t.Fatalf("at 1900: rows=%v err=%v, want [s1]", rows, err)
+	}
+}

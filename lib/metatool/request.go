@@ -5,9 +5,13 @@ import (
 	"time"
 )
 
-// DefaultTimeout is the closure deadline used when a RequestSpec leaves
-// Timeout unset. The fast-path Await window is derived from whatever deadline
-// is in force (min(FastPathWindow, deadline)), never a separate knob.
+// DefaultTimeout is the closure deadline the short, synchronous introspection
+// tools (describe/list/system) declare on their own requests. A generic
+// call_actor request that leaves Timeout unset declares NO deadline of its
+// own: the engine stamps its sliding default (actorbase.DefaultTimeout, restarted
+// by every progress), so a long agent turn that keeps reporting is never
+// refused as late. The fast-path Await window is derived from whatever
+// deadline is in force (min(FastPathWindow, deadline)), never a separate knob.
 const (
 	DefaultTimeout     = 30 * time.Second
 	ToolCallBudget     = 120 * time.Second
@@ -33,9 +37,10 @@ type RequestSpec struct {
 	EnvelopeType   string
 	HandlerActorID string
 	Payload        json.RawMessage
-	// Timeout is the closure deadline (author#2's ExpiresAt). Zero uses
-	// DefaultTimeout. It is not a wait-window knob — the fast-path Await window
-	// is always min(FastPathWindow, Timeout).
+	// Timeout is the closure deadline (author#2's ExpiresAt), a sliding window
+	// restarted by each progress. Zero leaves it to the engine's default.
+	// It is not a wait-window knob — the fast-path Await window is always
+	// min(FastPathWindow, Timeout).
 	Timeout  time.Duration
 	WaitMode WaitMode
 }

@@ -558,7 +558,23 @@ func (e *engine) Progress(msg Msg, status string, v any) (message.ID, error) {
 	// the write discipline that used to live here). Deliberately NO
 	// serve.close: a provisional never closes the request — that asymmetry
 	// with Reply/Fail is THIS method's whole meaning and stays engine-side.
-	return behavior.Progress(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), status, v)
+	id, err := behavior.Progress(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), status, v)
+	if err == nil {
+		// Progress is activity: the request's sliding deadline restarts from
+		// this write, on the in-station account exactly as on the caller's
+		// out-station one and in the reaper's view of truth.
+		e.serve.touch(msg.ID)
+	}
+	return id, err
+}
+
+// deadlineSpan is the request's sliding-window length: expires_at − ts. Zero
+// when the envelope declares no deadline (an in-flight-forever request).
+func deadlineSpan(env *message.Envelope) time.Duration {
+	if env == nil || env.ExpiresAt == nil {
+		return 0
+	}
+	return time.Duration(*env.ExpiresAt-env.TS) * time.Millisecond
 }
 
 // --- Sys: unregistered writes (event / request-without-closure) ------------
@@ -754,8 +770,7 @@ func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (mess
 		return "", fmt.Errorf("actorbase: call rejected: %s (%s)", out.RejectReason, out.RejectDetail)
 	}
 	if env.ExpiresAt != nil {
-		d := time.Until(time.UnixMilli(*env.ExpiresAt))
-		e.call.arm(env.ID, d)
+		e.call.arm(env.ID, deadlineSpan(env))
 	}
 	return out.MessageID, nil
 }

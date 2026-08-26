@@ -211,8 +211,10 @@ func TestExecuteCallActor_FanOutSubmitsRequest(t *testing.T) {
 	if env.CorrelationID != "trigger-1" {
 		t.Fatalf("submit correlation = %q, want the trigger's errand trigger-1", env.CorrelationID)
 	}
-	if got.ExpiresAt == nil {
-		t.Fatal("submit ExpiresAt nil — the closure deadline must be stamped")
+	// A call_actor without a declared timeout leaves the deadline to the
+	// engine (ceiling + progress-reset idle window), so the spec carries none.
+	if got.ExpiresAt != nil {
+		t.Fatalf("submit ExpiresAt = %v — an undeclared timeout must leave the deadline to the engine", *got.ExpiresAt)
 	}
 	// wait=false → immediate ack.
 	if rv.Value["status"] != "accepted" {

@@ -432,7 +432,9 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 }
 
 // ExpiredOpenRequests implements storespec.ExpiryQuery (期12 S3): request
-// rows whose DECLARED expires_at passed with no terminal response — the
+// rows whose declared deadline — a SLIDING window of expires_at − ts, restarted
+// by every provisional response on the ledger — passed with no terminal
+// response, i.e. span of silence since the latest activity — the
 // substrate expiry reaper's level-scan feed (ix_messages_expires's first
 // consumer; the partial index covers exactly this WHERE shape). Keyset
 // pagination over (expires_at, seq) with PER-ROW scan-error isolation: a
@@ -459,9 +461,16 @@ func (m *messages) ExpiredOpenRequests(ctx context.Context, beforeMs int64, cur 
 	                    AND r.kind = 'response'
 	                    AND r.is_terminal = 1
 	               )
+	               -- sliding window: the deadline restarts from the latest
+	               -- provisional response. expires_at <= now (index prefilter
+	               -- above) is necessary but not sufficient; the row is due only
+	               -- when span = expires_at - ts has elapsed since that activity.
+	               AND COALESCE((SELECT MAX(p.ts) FROM messages p
+	                              WHERE p.parent_id = m.id AND p.kind = 'response'), m.ts)
+	                   + (m.expires_at - m.ts) <= ?
 	             ORDER BY m.expires_at ASC, m.seq ASC
 	             LIMIT ?`
-	rows, err := m.db.QueryContext(ctx, q, beforeMs, cur.ExpiresAt, cur.ExpiresAt, cur.Seq, limit)
+	rows, err := m.db.QueryContext(ctx, q, beforeMs, cur.ExpiresAt, cur.ExpiresAt, cur.Seq, beforeMs, limit)
 	if err != nil {
 		return nil, cur, fmt.Errorf("store: expired open requests: %w", err)
 	}

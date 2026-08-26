@@ -35,6 +35,16 @@ type Hooks struct {
 	TimeoutResolver func(target actor.ActorID, reqType string) (time.Duration, bool)
 }
 
-// DefaultTimeout is the closure deadline used when neither the caller nor
-// Hooks.TimeoutResolver supplies one.
-const DefaultTimeout = 30 * time.Second
+// DefaultTimeout is the closure deadline (ExpiresAt) used when neither the
+// caller nor Hooks.TimeoutResolver supplies one.
+//
+// A deadline is a SLIDING window, one semantic everywhere: span = expires_at −
+// ts, and the request is unanswered when span elapses after its latest
+// activity (the request itself, or the most recent provisional response
+// written for it). Every progress the receiver writes restarts the window.
+// The caller's out-station timer, the receiver's in-station timer and the
+// substrate reaper all evaluate exactly this rule — the reaper from truth (the
+// progress rows are on the ledger), the two timers from memory as its
+// low-latency observers. So 5 minutes means "5 minutes of silence", not "5
+// minutes of work": a turn that keeps reporting progress never times out.
+const DefaultTimeout = 5 * time.Minute

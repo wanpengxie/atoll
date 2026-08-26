@@ -106,10 +106,16 @@ func (x *Exec) now() time.Time {
 // deadline.
 func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.RequestSpec, time.Duration) {
 	deadline := spec.Timeout
-	if deadline <= 0 {
-		deadline = DefaultTimeout
+	var expiresAt *int64
+	if deadline > 0 {
+		t := x.now().Add(deadline).UnixMilli()
+		expiresAt = &t
+	} else {
+		// No declared deadline: the engine stamps its own (a sliding window
+		// that every progress restarts), and that window is the honest "how
+		// long until you hear something" estimate for the ack and the wait.
+		deadline = actorbase.DefaultTimeout
 	}
-	expiresAt := x.now().Add(deadline).UnixMilli()
 	return behavior.RequestSpec{
 		Type:       spec.EnvelopeType,
 		Payload:    spec.Payload,
@@ -120,7 +126,7 @@ func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.R
 		// one place in the tree that remembered to copy them; everywhere else
 		// silently claimed to be a root. It is one required input now.
 		Cause:     message.From(rc.Trigger.Envelope),
-		ExpiresAt: &expiresAt,
+		ExpiresAt: expiresAt,
 	}, deadline
 }
 
@@ -135,7 +141,13 @@ func (x *Exec) resolveWindow(mode WaitMode, deadline time.Duration) time.Duratio
 	case WaitNone:
 		return 0
 	case WaitUnbounded:
-		return ResolveFastPathWindow(deadline, DefaultTimeout, true)
+		// "Sync" is bounded by the tool-call budget: the request itself keeps
+		// running past it and is collected with await_result.
+		window := ResolveFastPathWindow(deadline, DefaultTimeout, true)
+		if window > MaxSynchronousWait {
+			window = MaxSynchronousWait
+		}
+		return window
 	default: // WaitFastPath
 		window := ResolveFastPathWindow(deadline, DefaultTimeout, false)
 		if window > fpw {

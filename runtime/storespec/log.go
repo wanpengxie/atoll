@@ -187,8 +187,10 @@ type ExpiredRow struct {
 // tail/behavior/channelkit consumers whose fakes would all be forced to grow
 // an irrelevant method. ix_messages_expires's first consumer.
 type ExpiryQuery interface {
-	// ExpiredOpenRequests returns request rows with a declared expires_at <=
-	// beforeMs and no terminal response, ordered by (expires_at, seq)
+	// ExpiredOpenRequests returns request rows whose sliding deadline has
+	// passed at beforeMs — span = expires_at − ts elapsed since the latest of
+	// the request and its provisional responses — with no terminal response,
+	// ordered by (expires_at, seq)
 	// ascending, strictly after cur, at most limit rows. nextCur points past
 	// the last row returned; the ZERO nextCur means the scan reached the end
 	// (wrap to the top next sweep) — the implementation, not the caller,

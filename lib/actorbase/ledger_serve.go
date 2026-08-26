@@ -20,6 +20,9 @@ type serveEntry struct {
 	// carries no ExpiresAt — an in-flight-forever entry, closed only by a
 	// terminal write or a delivered cancel).
 	timer *time.Timer
+	// span is the request's sliding deadline window (expires_at − ts); touch
+	// restarts timer from each provisional response this actor writes.
+	span time.Duration
 }
 
 // serveLedger is the in-station account (spec §1.5): "只登记 kind=request…
@@ -78,11 +81,27 @@ func (l *serveLedger) admitOnce(env *message.Envelope) (admitted, existed bool) 
 	e := &serveEntry{ctx: ctx, cancel: cancel}
 	if env.ExpiresAt != nil {
 		id := env.ID
-		d := time.Until(time.UnixMilli(*env.ExpiresAt))
-		e.timer = time.AfterFunc(d, func() { l.close(id) })
+		e.span = deadlineSpan(env)
+		e.timer = time.AfterFunc(time.Until(time.UnixMilli(*env.ExpiresAt)), func() { l.close(id) })
 	}
 	l.entries[env.ID] = e
 	return true, false
+}
+
+// touch restarts id's sliding deadline after this actor wrote a provisional
+// response for it: the caller's window and the reaper's view both restart
+// from that row, and the in-station ctx must not collapse ahead of them.
+func (l *serveLedger) touch(id message.ID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.entries[id]
+	if !ok || e.span <= 0 || e.timer == nil {
+		return
+	}
+	if !e.timer.Stop() {
+		return // close is already firing
+	}
+	e.timer = time.AfterFunc(e.span, func() { l.close(id) })
 }
 
 // ctxFor resolves the ctx an Admitted id's delivery should carry — the

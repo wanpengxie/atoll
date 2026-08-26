@@ -285,7 +285,9 @@ func TestA9AllElevenFailureRowsTraverseFramesAndRealCallerLedger(t *testing.T) {
 	proxy := installPeerFailureProxy(t, core, registrar, "failure-proxy", proxyDef)
 
 	assertCallerLedgerFailure(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, proxy, "remote.bad-origin", map[string]any{}), string(channel.GateBadOrigin))
-	assertCallerLedgerFailure(t, controlledCallerLedger(t, core, proxy, "remote.timeout", nil, false, nil), string(message.TerminalUnansweredTimeout))
+	// (B-side default-deadline case removed: actorbase.DefaultTimeout is a
+	// 5-minute sliding window now, outside this test's budget. Deadline
+	// closure is asserted through the explicit expires_at case below.)
 
 	expires := time.Now().Add(150 * time.Millisecond).UnixMilli()
 	deadlineRaw := controlledCallerLedger(t, core, proxy, "remote.hang", &expires, false, func() {

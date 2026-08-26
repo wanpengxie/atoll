@@ -31,6 +31,10 @@ type callEntry struct {
 	req    *message.Envelope
 	ch     chan *message.Envelope
 	timer  *time.Timer
+	// span is the request's sliding deadline window (expires_at − ts): the
+	// timer is (re)armed to span from the latest activity — the request
+	// write, then every provisional response match sees.
+	span time.Duration
 	// final marks the entry buffered-final (F4): set under the ledger lock the
 	// instant match hands a FINAL response to ch. Once set, the entry's ONLY
 	// exit is wait consuming it — fireTimeout and cancel become no-ops (they
@@ -160,18 +164,32 @@ func (l *callLedger) forget(id message.ID) {
 	l.mu.Unlock()
 }
 
-// arm starts entry id's author#2 durable deadline timer (only once the
-// write has landed — a request that never sent has no deadline to keep).
-func (l *callLedger) arm(id message.ID, d time.Duration) {
-	if d <= 0 {
+// arm starts entry id's author#2 sliding-deadline timer (only once the write
+// has landed — a request that never sent has no deadline to keep). span is
+// expires_at − ts; the timer restarts from every provisional response (see
+// match), so it fires only after span of silence.
+func (l *callLedger) arm(id message.ID, span time.Duration) {
+	if span <= 0 {
 		return
 	}
 	l.mu.Lock()
 	e, ok := l.entries[id]
 	if ok {
-		e.timer = time.AfterFunc(d, func() { l.fireTimeout(id) })
+		e.span = span
+		e.timer = time.AfterFunc(span, func() { l.fireTimeout(id) })
 	}
 	l.mu.Unlock()
+}
+
+// touchLocked restarts e's sliding window on a provisional response.
+func (l *callLedger) touchLocked(e *callEntry, id message.ID) {
+	if e.span <= 0 || e.timer == nil {
+		return
+	}
+	if !e.timer.Stop() {
+		return // already firing; fireTimeout owns the entry from here
+	}
+	e.timer = time.AfterFunc(e.span, func() { l.fireTimeout(id) })
 }
 
 // stopTimers halts every armed author#2 deadline timer — engine.Stop calls it
@@ -215,6 +233,7 @@ func (l *callLedger) match(env *message.Envelope) bool {
 	_, final := behavior.ParseFinalStatus(env.Payload)
 	if !final {
 		e.progress.push(env)
+		l.touchLocked(e, env.ParentID)
 		l.mu.Unlock()
 		return true
 	}
@@ -303,9 +322,13 @@ func (l *callLedger) fireTimeout(id message.ID) {
 	// the entry is deleted above — no send can follow this close.
 	close(e.ch)
 	l.mu.Unlock()
+	detail := "no response before deadline"
+	if e.span > 0 {
+		detail = "no progress or response for " + e.span.String()
+	}
 	payload, _ := json.Marshal(map[string]string{
 		"error_code": string(message.TerminalUnansweredTimeout),
-		"detail":     "no response before deadline",
+		"detail":     detail,
 	})
 	// The WHEN authority for this obligation write is the pen's live membrane,
 	// not the ctx (F5): WithoutCancel keeps the provenance value chain but strips
@@ -320,6 +343,11 @@ func (l *callLedger) fireTimeout(id message.ID) {
 	})
 	if werr != nil {
 		l.fault(id, werr)
+	}
+	// The account is closed; tell the receiver's in-station account so a turn
+	// that went silent stops burning work nobody will collect.
+	if l.hooks.Canceller != nil {
+		l.hooks.Canceller(e.target, id)
 	}
 }
 
