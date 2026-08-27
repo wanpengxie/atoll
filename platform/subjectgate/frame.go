@@ -555,9 +555,9 @@ type PageEndPayload struct {
 	HeadSeq       int64  `json:"head_seq"`
 	OldestSeq     int64  `json:"oldest_seq,omitempty"`
 	NewestSeq     int64  `json:"newest_seq,omitempty"`
-	ScanLowSeq    int64  `json:"scan_low_seq,omitempty"`
-	ScanHighSeq   int64  `json:"scan_high_seq,omitempty"`
-	NextBeforeSeq int64  `json:"next_before_seq,omitempty"`
+	ScanLowSeq    int64  `json:"scan_low_seq"`
+	ScanHighSeq   int64  `json:"scan_high_seq"`
+	NextBeforeSeq int64  `json:"next_before_seq"`
 	Rows          int    `json:"rows"`
 	Bytes         int    `json:"bytes"`
 	HasOlder      bool   `json:"has_older"`

@@ -57,6 +57,28 @@ func TestNewErrorFrameCarriesFlatContract(t *testing.T) {
 	}
 }
 
+func TestPageEndCarriesZeroHistoryCursors(t *testing.T) {
+	f, err := NewFrame(FramePageEnd, "history-empty", PageEndPayload{
+		Source: "history", ChannelID: "c1", Purpose: "hydrate", Generation: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := f.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		`"scan_low_seq":0`,
+		`"scan_high_seq":0`,
+		`"next_before_seq":0`,
+	} {
+		if !strings.Contains(string(b), field) {
+			t.Fatalf("empty history cursor %s was omitted from page_end: %s", field, b)
+		}
+	}
+}
+
 // TestFrameRoundTrip round-trips every frame type through tolerant envelope
 // parsing and asserts the version bit rides.
 func TestFrameRoundTrip(t *testing.T) {
