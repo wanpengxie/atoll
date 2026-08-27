@@ -250,6 +250,7 @@ const (
 	scheduleMethodSchedule scheduleMethod = "schedule"
 	scheduleMethodCancel   scheduleMethod = "cancel"
 	scheduleMethodAck      scheduleMethod = "ack"
+	scheduleMethodList     scheduleMethod = "list"
 )
 
 // scheduleRequest is the daemon→home KindSchedule payload. The whole ScheduleReq
@@ -267,6 +268,8 @@ type scheduleRequest struct {
 // the schedule path; empty on cancel). Errors ride coded ack fields.
 type scheduleResponse struct {
 	ID schedule.TimerID `json:"id,omitempty"`
+	// Timers carries the list verdict. Absent on every other method.
+	Timers []schedule.TimerInfo `json:"timers,omitempty"`
 }
 
 // decode turns one decoded schedule frame into the ingress's operand. It
@@ -285,6 +288,10 @@ func (r scheduleRequest) decode() (remoteingress.ScheduleRequest, error) {
 	case scheduleMethodAck:
 		return remoteingress.ScheduleRequest{
 			Method: remoteingress.ScheduleAck, ID: r.ID,
+		}, nil
+	case scheduleMethodList:
+		return remoteingress.ScheduleRequest{
+			Method: remoteingress.ScheduleList,
 		}, nil
 	default:
 		return remoteingress.ScheduleRequest{}, errors.New("link: invalid schedule method")
@@ -570,6 +577,31 @@ func (h *remoteScheduleHandle) Ack(ctx context.Context, id schedule.TimerID) err
 		return txErr
 	}
 	return ackErr
+}
+
+// List satisfies schedule.ScheduleHandle over the wire. Like the other verbs it
+// carries no author: the home mints the handle against the endpoint-authenticated
+// identity, so a daemon cell can only ever list its own alarms.
+func (h *remoteScheduleHandle) List(ctx context.Context) ([]schedule.TimerInfo, error) {
+	payload, err := json.Marshal(scheduleRequest{Method: scheduleMethodList})
+	if err != nil {
+		return nil, err
+	}
+	raw, ackErr, txErr := h.relay.roundTrip(ctx, payload)
+	if txErr != nil {
+		return nil, txErr
+	}
+	if ackErr != nil {
+		return nil, ackErr
+	}
+	var resp scheduleResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Timers == nil {
+		return []schedule.TimerInfo{}, nil
+	}
+	return resp.Timers, nil
 }
 
 // Open satisfies accessdoor.FileOpener (期11 spec §5/§3.9'): runs

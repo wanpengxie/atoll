@@ -181,6 +181,36 @@ func (s *timerStore) NextFireAt(ctx context.Context) (int64, bool, error) {
 // in the same statement (author is in the WHERE clause), so a handle can only
 // ever cancel its own timers. A foreign or absent id is the same
 // existed=false, never leaking whether some OTHER author's timer exists.
+// ListOwned reads one author's pending rows. Payload is deliberately NOT
+// selected: the列表 answers "which alarms do I have", and an intent's contents
+// are a separate question (a list read must not become a content read).
+func (s *timerStore) ListOwned(ctx context.Context, author actor.ActorID) ([]timerspec.TimerRow, error) {
+	const q = `SELECT timer_id, fire_at, type, COALESCE(correlation_id, ''), created_at
+	           FROM timers WHERE author_id=? AND state='pending' ORDER BY fire_at, timer_id`
+	rows, err := s.db.QueryContext(ctx, q, string(author))
+	if err != nil {
+		return nil, fmt.Errorf("store: timers list-owned %q: %w", author, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]timerspec.TimerRow, 0)
+	for rows.Next() {
+		var id, typ, corr string
+		row := timerspec.TimerRow{AuthorID: author}
+		if err := rows.Scan(&id, &row.FireAt, &typ, &corr, &row.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: timers list-owned scan: %w", err)
+		}
+		row.ID = timerspec.TimerID(id)
+		row.Type = typ
+		row.CorrelationID = corr
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: timers list-owned rows: %w", err)
+	}
+	return out, nil
+}
+
 func (s *timerStore) CancelOwned(ctx context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM timers WHERE timer_id=? AND author_id=? AND state='pending'`,

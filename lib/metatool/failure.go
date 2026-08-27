@@ -82,6 +82,11 @@ var actorErrorClasses = map[string]failureClass{
 	// The subject named does not exist.
 	"not_found":      {NotFound, hintNotFound, false},
 	"decl_not_found": {NotFound, hintNotFound, false},
+	// A pending alarm named by system.timer.reset is no longer pending — it
+	// fired, was cancelled, or never belonged to this subject. Resending is
+	// pointless (an alarm that rang cannot be un-rung); the caller either sets
+	// a fresh one or reads system.timer.list to see what it actually has.
+	"timer_gone": {NotFound, hintNotFound, false},
 
 	// Authority facts. Retrying identically can never succeed.
 	"permission_denied":   {PermissionDenied, hintDenied, false},

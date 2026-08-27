@@ -435,12 +435,24 @@ func (l *agentLoop) frozen(now time.Time) bool { return now.Before(l.frozenUntil
 
 func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	if msg.Kind == message.KindEvent {
-		if msg.Type == typeHoldExpired {
+		switch {
+		case msg.Type == typeHoldExpired:
 			l.handleHoldExpired(msg.Payload)
+		case l.isTimerFire(msg):
+			l.postTimerWake(msg)
 		}
 		return
 	}
-	if msg.Kind != message.KindRequest || msg.Sender.ID == l.sys.Self() {
+	if msg.Kind != message.KindRequest {
+		return
+	}
+	// A request this actor sent itself is normally noise and is ignored. The
+	// one exception is the alarm commission the loop Posts to itself: it is
+	// self-addressed BY CONSTRUCTION (that is what gives the alarm turn an
+	// owner). The exception runs BOTH ways — a commission is by definition
+	// from yourself, so one arriving from anyone else is not an alarm and is
+	// refused the same way the word is left out of the advertised vocabulary.
+	if self := msg.Sender.ID == l.sys.Self(); self != (msg.Type == TypeTimerWake) {
 		return
 	}
 	l.exec.install(msg)

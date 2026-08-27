@@ -36,6 +36,9 @@ func (r *recordingSchedule) only(t *testing.T) schedule.ScheduleReq {
 	}
 	return r.reqs[0]
 }
+func (r *recordingSchedule) List(context.Context) ([]schedule.TimerInfo, error) {
+	return []schedule.TimerInfo{}, nil
+}
 
 func schedulingEngine(t *testing.T) (*engine, *recordingSchedule) {
 	t.Helper()

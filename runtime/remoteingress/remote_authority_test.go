@@ -242,6 +242,9 @@ func (h scheduleShell) Cancel(context.Context, schedule.TimerID) error {
 func (h scheduleShell) Ack(context.Context, schedule.TimerID) error {
 	return h.log.record("schedule.ack", h.authority)
 }
+func (h scheduleShell) List(context.Context) ([]schedule.TimerInfo, error) {
+	return []schedule.TimerInfo{}, nil
+}
 
 // ---------------------------------------------------------------------------
 // Rig

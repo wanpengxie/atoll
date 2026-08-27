@@ -116,6 +116,9 @@ func (fakeSchedule) Schedule(_ context.Context, _ schedule.ScheduleReq) (schedul
 }
 func (fakeSchedule) Cancel(_ context.Context, _ schedule.TimerID) error { return nil }
 func (fakeSchedule) Ack(_ context.Context, _ schedule.TimerID) error    { return nil }
+func (fakeSchedule) List(_ context.Context) ([]schedule.TimerInfo, error) {
+	return []schedule.TimerInfo{}, nil
+}
 
 type failingAckSchedule struct {
 	mu    sync.Mutex
@@ -132,6 +135,9 @@ func (s *failingAckSchedule) Ack(_ context.Context, id schedule.TimerID) error {
 	s.calls = append(s.calls, id)
 	s.mu.Unlock()
 	return s.err
+}
+func (s *failingAckSchedule) List(context.Context) ([]schedule.TimerInfo, error) {
+	return []schedule.TimerInfo{}, nil
 }
 
 // fakeSpawn is an actorcaps.LifecycleHandle double.

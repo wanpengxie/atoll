@@ -72,6 +72,12 @@ type TimerStore interface {
 	// NextFireAt returns the earliest pending FireAt (ok=false when empty) —
 	// the poll/wake loop's sleep-until target.
 	NextFireAt(ctx context.Context) (fireAt int64, ok bool, err error)
+	// ListOwned returns author's pending rows, earliest first — the durable
+	// half of "what alarms do I have set". Author is the WHERE clause, the
+	// same non-ambient posture as CancelOwned: a caller can only ever see the
+	// rows it asked about, and an author with none gets an empty slice rather
+	// than an error.
+	ListOwned(ctx context.Context, author actor.ActorID) ([]TimerRow, error)
 	// CancelOwned deletes id IFF its author matches — Cancel's non-ambient
 	// check lives in the same statement (author is the WHERE clause, so a
 	// handle can only ever cancel its own timers; a foreign/absent id is the

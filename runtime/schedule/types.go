@@ -64,6 +64,19 @@ type ScheduleReq struct {
 	CorrelationID string
 }
 
+// TimerInfo is one pending alarm as a READ answers it: the coordinates that
+// say "which alarm, when, and what will it say", and nothing else. Payload is
+// deliberately absent — an alarm's contents are the author's composed bytes,
+// and listing alarms must not become reading their contents (a separate
+// question deserving its own word if it is ever wanted).
+type TimerInfo struct {
+	ID        TimerID
+	Home      TimerHome
+	FireAt    int64 // UnixMilli
+	Type      string
+	CreatedAt int64
+}
+
 // ScheduleHandle is the caps-injected access surface for the time channel —
 // welded to one author at Mint (non-ambient, mirrors harness.Pen /
 // accessdoor.AccessHandle). The cell (in-process) implementation and the port
@@ -80,6 +93,12 @@ type ScheduleHandle interface {
 	// the timer will not ring.
 	Cancel(ctx context.Context, id TimerID) error
 	Ack(ctx context.Context, id TimerID) error
+	// List returns every pending alarm belonging to THIS handle's welded
+	// author, both homes merged, earliest first. Author is not a parameter for
+	// the same reason it is not one on Schedule: there is structurally nowhere
+	// for a caller to name a different one. An author with no alarms gets an
+	// empty slice, never an error.
+	List(ctx context.Context) ([]TimerInfo, error)
 }
 
 // Minter is the engine's caps-injection mint surface (same pattern as

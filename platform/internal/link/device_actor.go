@@ -133,7 +133,7 @@ func ServeLaneActor(
 			if err != nil {
 				return nil, err
 			}
-			return json.Marshal(scheduleResponse{ID: response.ID})
+			return json.Marshal(scheduleResponse{ID: response.ID, Timers: response.Timers})
 		},
 		resolveTarget: func(_ context.Context, target string) (actor.ActorID, error) {
 			if !current() {

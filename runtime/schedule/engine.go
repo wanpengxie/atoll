@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -273,6 +274,40 @@ func (e *Engine) schedule(
 //
 // Unexported for the same reason as schedule: the welded face is
 // ScheduleHandle.Cancel, minted per author.
+// listOwned merges the two homes into one author-scoped answer. The durable
+// half is a WHERE clause in the store; the memory half is this instance's own
+// alarm set, which no store can see — so the merge belongs here, at the one
+// place that holds both, rather than in every caller.
+func (e *Engine) listOwned(ctx context.Context, author actor.ActorID) ([]TimerInfo, error) {
+	rows, err := e.deps.Store.ListOwned(ctx, author)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TimerInfo, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, TimerInfo{
+			ID: row.ID, Home: TimerHomeDurable, FireAt: row.FireAt,
+			Type: row.Type, CreatedAt: row.CreatedAt,
+		})
+	}
+	e.mu.Lock()
+	for _, t := range e.mem {
+		if t.author == author {
+			out = append(out, TimerInfo{
+				ID: t.id, Home: TimerHomeMemory, FireAt: t.fireAt, Type: t.typ,
+			})
+		}
+	}
+	e.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].FireAt != out[j].FireAt {
+			return out[i].FireAt < out[j].FireAt
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 func (e *Engine) cancel(ctx context.Context, author actor.ActorID, id TimerID) error {
 	e.mu.Lock()
 	if t, ok := e.mem[id]; ok && t.author == author {

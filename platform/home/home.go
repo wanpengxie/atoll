@@ -131,6 +131,7 @@ type Home struct {
 	admittedWriter harness.AdmittedWriter
 	stateHandles   accessdoor.StateHandleResolver
 	engine         *schedule.Engine
+	timers         timerPort
 
 	signal         *tap.Signal
 	delivery       *tap.Pump

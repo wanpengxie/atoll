@@ -23,6 +23,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
 	"github.com/wanpengxie/atoll/runtime/remoteingress"
@@ -203,8 +204,16 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: open scheduler: %w", err)
 	}
 	// The engine IS kept: Home starts it, closes it, and hands it forgotten ids.
-	// The minter beside it is not — that one is assembly ingredient only.
 	h.engine = engine
+	// The minter is kept too, but only inside the timer port: system.timer.*
+	// must be able to mint a handle for the subject its door authenticated,
+	// which is the one thing an ordinary actor's own welded handle can never do.
+	h.timers = timerPort{
+		minter: schedMinter,
+		authority: func(id actor.ActorID) capauth.Authority {
+			return h.controller.IdentityAuthorityFor(id)
+		},
+	}
 
 	h.managedCaps, err = managedcaps.New(
 		h.minter,
@@ -315,6 +324,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
 			Logger:   logger, Operate: h.opEntry, Peer: gatePeer,
 			ResolveTarget: h.actors.ResolveTarget,
+			Timers:        h.timers,
 			// system.log.recent reads backwards through the SAME turn window the
 			// attach first screen uses: N complete conversation turns, housekeeping
 			// skipped, provisional collapsed. TargetRows=1 leaves the boundary to

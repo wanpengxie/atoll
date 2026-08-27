@@ -49,6 +49,13 @@ func (h boundScheduleHandle) Ack(ctx context.Context, id TimerID) error {
 	return err
 }
 
+func (h boundScheduleHandle) List(ctx context.Context) ([]TimerInfo, error) {
+	if err := h.authorize(ctx); err != nil {
+		return nil, err
+	}
+	return h.engine.listOwned(ctx, h.author)
+}
+
 // minter is Minter's sole implementation, sealed inside the package — New
 // hands out the interface only, never the concrete type (mirrors
 // harness.minter / accessdoor.minter).
@@ -74,3 +81,6 @@ func (h rejectedScheduleHandle) Schedule(context.Context, ScheduleReq) (TimerID,
 }
 func (h rejectedScheduleHandle) Cancel(context.Context, TimerID) error { return h.err }
 func (h rejectedScheduleHandle) Ack(context.Context, TimerID) error    { return h.err }
+func (h rejectedScheduleHandle) List(context.Context) ([]TimerInfo, error) {
+	return nil, h.err
+}

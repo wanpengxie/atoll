@@ -174,7 +174,18 @@ const (
 	typeHoldExpired = "agent.hold_expired"
 )
 
-func (d definition) supports(typ string) bool { _, ok := d.controls[typ]; return ok }
+// supports gates intake. TypeTimerWake is accepted but deliberately NOT in the
+// controls set: that set is also the advertised vocabulary (accepted(), and the
+// refusal text that names it), and the alarm commission is one the loop sends
+// ITSELF — advertising it would invite callers to send a word whose whole
+// meaning is "this agent's own earlier intent came back".
+func (d definition) supports(typ string) bool {
+	if typ == TypeTimerWake {
+		return true
+	}
+	_, ok := d.controls[typ]
+	return ok
+}
 
 // accepted lists what this agent does take, sorted. A refusal that names only
 // the rejected word leaves the sender to go looking; naming the alternatives

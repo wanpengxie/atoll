@@ -132,6 +132,7 @@ const (
 	ScheduleSet    ScheduleMethod = "schedule"
 	ScheduleCancel ScheduleMethod = "cancel"
 	ScheduleAck    ScheduleMethod = "ack"
+	ScheduleList   ScheduleMethod = "list"
 )
 
 type ScheduleRequest struct {
@@ -142,6 +143,9 @@ type ScheduleRequest struct {
 
 type ScheduleResponse struct {
 	ID schedule.TimerID
+	// Timers answers ScheduleList — the identity's pending alarms, both homes
+	// merged. Empty on every other method.
+	Timers []schedule.TimerInfo
 }
 
 type ingress struct {
@@ -260,6 +264,9 @@ func (i *ingress) Schedule(
 		return ScheduleResponse{}, handle.Cancel(ctx, request.ID)
 	case ScheduleAck:
 		return ScheduleResponse{}, handle.Ack(ctx, request.ID)
+	case ScheduleList:
+		timers, err := handle.List(ctx)
+		return ScheduleResponse{Timers: timers}, err
 	default:
 		return ScheduleResponse{}, ErrInvalidRequest
 	}

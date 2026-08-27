@@ -59,6 +59,7 @@ type SystemActor struct {
 	peer      Peer
 	resolve   func(string) (actor.ActorID, error)
 	recent    func(context.Context, int) (channelspec.HistoryWindow, error)
+	timers    TimerPort
 	logger    *slog.Logger
 }
 
@@ -84,6 +85,10 @@ type Deps struct {
 	// requests keep only their latest provisional). It intentionally exposes
 	// no append capability and no raw-row scan to the system actor.
 	RecentTurns func(ctx context.Context, turns int) (channelspec.HistoryWindow, error)
+	// Timers is the injected alarm executor behind system.timer.*. The gate
+	// authenticates the subject; this port mints that subject's schedule handle
+	// and acts. Nil → the timer words are inert (same posture as Operate).
+	Timers TimerPort
 }
 
 // New constructs the channel system actor's process state (exported so a
@@ -108,6 +113,7 @@ func New(deps Deps) *SystemActor {
 		peer:      deps.Peer,
 		resolve:   deps.ResolveTarget,
 		recent:    deps.RecentTurns,
+		timers:    deps.Timers,
 		logger:    logger,
 	}
 }
@@ -156,6 +162,10 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		case message.TypeSystemLogRecent:
 			s.respondLogbookRecent(sys, msg)
+			return
+		case message.TypeSystemTimerSet, message.TypeSystemTimerCancel,
+			message.TypeSystemTimerReset, message.TypeSystemTimerList:
+			s.handleTimer(sys, msg)
 			return
 		case TypeMemberCreate, TypeMemberAdmit, TypeMemberDelete, TypeMemberRestart:
 			// Channel operate face (NP-1=c): in-gate control plane. Permission +

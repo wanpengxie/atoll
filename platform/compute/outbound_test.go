@@ -139,6 +139,9 @@ func (p outboundProbeSchedule) Ack(context.Context, schedule.TimerID) error {
 	p.probe.scheduleCalls.Add(1)
 	return nil
 }
+func (p outboundProbeSchedule) List(context.Context) ([]schedule.TimerInfo, error) {
+	return []schedule.TimerInfo{}, nil
+}
 
 type outboundProbeLifecycle struct{ probe *outboundProbe }
 

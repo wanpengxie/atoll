@@ -36,6 +36,7 @@ type fakeStore struct {
 	nextErr   error
 	cancelErr error
 	markErr   error
+	listErr   error
 }
 
 func newFakeStore() *fakeStore {
@@ -98,6 +99,27 @@ func (s *fakeStore) NextFireAt(ctx context.Context) (int64, bool, error) {
 		}
 	}
 	return next, ok, nil
+}
+
+func (s *fakeStore) ListOwned(_ context.Context, author actor.ActorID) ([]timerspec.TimerRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	out := make([]timerspec.TimerRow, 0)
+	for _, r := range s.rows {
+		if r.AuthorID == author {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].FireAt != out[j].FireAt {
+			return out[i].FireAt < out[j].FireAt
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
 
 func (s *fakeStore) CancelOwned(ctx context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {

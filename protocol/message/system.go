@@ -52,6 +52,10 @@ const (
 	TypeSystemMemberDelete          = "system.member.delete"
 	TypeSystemMemberRestart         = "system.member.restart"
 	TypeSystemLogRecent             = "system.log.recent"
+	TypeSystemTimerSet              = "system.timer.set"
+	TypeSystemTimerCancel           = "system.timer.cancel"
+	TypeSystemTimerReset            = "system.timer.reset"
+	TypeSystemTimerList             = "system.timer.list"
 	TypeSystemMemberCreated         = "system.member.created"
 	TypeSystemMemberDeleted         = "system.member.deleted"
 	TypeSystemChannelInbound        = "system.channel.inbound"
@@ -94,6 +98,10 @@ var systemEntries = [...]SystemEntry{
 	{Name: TypeSystemMemberDelete, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberRestart, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemLogRecent, Kind: KindRequest, Locus: SystemLocusMembrane},
+	{Name: TypeSystemTimerSet, Kind: KindRequest, Locus: SystemLocusMembrane},
+	{Name: TypeSystemTimerCancel, Kind: KindRequest, Locus: SystemLocusMembrane},
+	{Name: TypeSystemTimerReset, Kind: KindRequest, Locus: SystemLocusMembrane},
+	{Name: TypeSystemTimerList, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberCreated, Kind: KindEvent, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberDeleted, Kind: KindEvent, Locus: SystemLocusMembrane},
 	{Name: TypeSystemChannelInbound, Kind: KindEvent, Locus: SystemLocusMembrane},

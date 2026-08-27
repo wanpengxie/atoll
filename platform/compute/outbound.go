@@ -880,6 +880,14 @@ func (s outboundSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
 	return bundle.Schedule.Ack(ctx, id)
 }
 
+func (s outboundSchedule) List(ctx context.Context) ([]schedule.TimerInfo, error) {
+	bundle, err := s.slot.loadIdentity()
+	if err != nil {
+		return nil, err
+	}
+	return bundle.Schedule.List(ctx)
+}
+
 // outboundLifecycle acts AS THE CURRENT TERM, alongside the pen and the
 // resource arm. The wire says so already: link's handler table states that
 // carrying the attempt key IS the permission matrix, and end-self carries it
