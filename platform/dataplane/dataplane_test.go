@@ -63,8 +63,8 @@ func issueTestTicket(t *testing.T, issue Issuer, mode access.Operation) Grant {
 	grant, err := issue.Issue(t.Context(), IssueSpec{
 		Address: "daemon://host/c0.test/docs/a.txt", Path: "docs/a.txt",
 		ChannelID: "channel-a", Mode: mode,
-		HostID:    "daemon-a", HostName: "host",
-		Caller:    testCaller,
+		HostID: "daemon-a", HostName: "host",
+		Caller: testCaller,
 	})
 	if err != nil || grant.Ticket == "" {
 		t.Fatalf("Issue = (%+v, %v)", grant, err)

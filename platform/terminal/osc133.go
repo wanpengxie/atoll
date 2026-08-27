@@ -178,7 +178,7 @@ func (s *Scanner) interpret(body string, done *[]Event) {
 // unquoteShell undoes zsh's ${(q)} quoting well enough to store the text. It
 // is deliberately lenient: this value is a record for humans and agents to
 // read, never something re-executed, so a residual backslash is cosmetic and
-//恒不值得为它建一个完整的 shell 词法器。
+// 恒不值得为它建一个完整的 shell 词法器。
 func unquoteShell(in string) string {
 	in = strings.TrimSpace(in)
 	if len(in) >= 2 && in[0] == '\'' && in[len(in)-1] == '\'' {
@@ -197,7 +197,6 @@ func unquoteShell(in string) string {
 	}
 	return b.String()
 }
-
 
 // StripControl removes escape sequences from a captured output tail. The tail
 // is a record for people and agents to READ — colour codes and cursor moves

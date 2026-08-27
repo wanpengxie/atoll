@@ -70,10 +70,10 @@ type Record struct {
 	Cmd    string `json:"cmd,omitempty"`
 	// Cwd is where the command ran. The same command means different things
 	// in different trees, so the record is incomplete without it.
-	Cwd       string `json:"cwd,omitempty"`
-	ExitCode  int    `json:"exit_code"`
-	HasExit   bool   `json:"-"`
-	DurationMs int64 `json:"duration_ms,omitempty"`
+	Cwd        string `json:"cwd,omitempty"`
+	ExitCode   int    `json:"exit_code"`
+	HasExit    bool   `json:"-"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
 	// Parent is the session's opening row. Commands hang from it so a session
 	// reads as one errand rather than a scatter of unrelated roots.
 	Parent string `json:"-"`
@@ -95,18 +95,18 @@ type Session struct {
 	Channel channel.ID
 	Caller  actor.ActorID
 
-	mu       sync.Mutex
-	dev      io.ReadWriteCloser
-	viewer   chan []byte // non-nil while a viewer is attached
-	closed   bool
-	graceAt  *time.Timer
-	scanner  Scanner
-	openCmd  time.Time
-	tail     []byte
-	inCmd    bool
+	mu      sync.Mutex
+	dev     io.ReadWriteCloser
+	viewer  chan []byte // non-nil while a viewer is attached
+	closed  bool
+	graceAt *time.Timer
+	scanner Scanner
+	openCmd time.Time
+	tail    []byte
+	inCmd   bool
 	// replay 是给屏幕的环（MaxReplay）；tail 是给账本的每命令尾部（MaxOutputTail）。
 	// 两者量纲不同、用途不同，恒不合并。
-	replay   []byte
+	replay []byte
 	// ended is closed when the session is over for good, and endReason says
 	// why. A viewer that cannot tell "the shell exited" from "the connection
 	// dropped" will reconnect into a brand-new shell, which is never what the
@@ -140,10 +140,10 @@ func (s *Session) finish(reason string) {
 
 // Manager owns every live session on this node.
 type Manager struct {
-	opener   Opener
-	record   Recorder
-	now      func() time.Time
-	grace    time.Duration
+	opener Opener
+	record Recorder
+	now    func() time.Time
+	grace  time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]*Session
