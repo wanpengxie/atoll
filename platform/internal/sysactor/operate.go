@@ -36,10 +36,11 @@ const unauthorizedSenderCode = "unauthorized_sender"
 // Linux's closed verb set + open file-name noun = the pattern; ioctl = the escape
 // hatch this law forbids).
 const (
-	TypeMemberCreate  = message.TypeSystemMemberCreate
-	TypeMemberAdmit   = message.TypeSystemMemberAdmit
-	TypeMemberDelete  = message.TypeSystemMemberDelete
-	TypeMemberRestart = message.TypeSystemMemberRestart
+	TypeMemberCreate     = message.TypeSystemMemberCreate
+	TypeMemberAdmit      = message.TypeSystemMemberAdmit
+	TypeMemberDelete     = message.TypeSystemMemberDelete
+	TypeMemberRestart    = message.TypeSystemMemberRestart
+	TypeMemberRestartAll = message.TypeSystemMemberRestartAll
 )
 
 // OperateRequest is the decoded delivery an OperateExecutor acts on. Initiator

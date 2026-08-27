@@ -166,7 +166,7 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		case message.TypeSystemTimerSet, message.TypeSystemTimerCancel, message.TypeSystemTimerList:
 			s.handleTimer(sys, msg)
 			return
-		case TypeMemberCreate, TypeMemberAdmit, TypeMemberDelete, TypeMemberRestart:
+		case TypeMemberCreate, TypeMemberAdmit, TypeMemberDelete, TypeMemberRestart, TypeMemberRestartAll:
 			// Channel operate face (NP-1=c): in-gate control plane. Permission +
 			// routing here; the injected executor does the intent write + Home call.
 			s.handleOperate(sys, msg)

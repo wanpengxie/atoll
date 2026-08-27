@@ -61,13 +61,18 @@ const (
 	TypeSystemMemberGet             = "system.member.get"
 	TypeSystemMemberDelete          = "system.member.delete"
 	TypeSystemMemberRestart         = "system.member.restart"
-	TypeSystemLogRecent             = "system.log.recent"
-	TypeSystemTimerSet              = "system.timer.set"
-	TypeSystemTimerCancel           = "system.timer.cancel"
-	TypeSystemTimerList             = "system.timer.list"
-	TypeSystemMemberCreated         = "system.member.created"
-	TypeSystemMemberDeleted         = "system.member.deleted"
-	TypeSystemChannelInbound        = "system.channel.inbound"
+	// Restarting EVERY member is named in the member namespace, not the
+	// channel one, because that is what it does and where its locus belongs:
+	// system.channel.* requests are the registry acting on channels, while
+	// this is the channel giving its own members a fresh term.
+	TypeSystemMemberRestartAll = "system.member.restart_all"
+	TypeSystemLogRecent        = "system.log.recent"
+	TypeSystemTimerSet         = "system.timer.set"
+	TypeSystemTimerCancel      = "system.timer.cancel"
+	TypeSystemTimerList        = "system.timer.list"
+	TypeSystemMemberCreated    = "system.member.created"
+	TypeSystemMemberDeleted    = "system.member.deleted"
+	TypeSystemChannelInbound   = "system.channel.inbound"
 )
 
 var systemEntries = [...]SystemEntry{
@@ -107,6 +112,7 @@ var systemEntries = [...]SystemEntry{
 	{Name: TypeSystemMemberDelete, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberRestart, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemLogRecent, Kind: KindRequest, Locus: SystemLocusMembrane},
+	{Name: TypeSystemMemberRestartAll, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemTimerSet, Kind: KindRequest, Locus: SystemLocusLocal},
 	{Name: TypeSystemTimerCancel, Kind: KindRequest, Locus: SystemLocusLocal},
 	{Name: TypeSystemTimerList, Kind: KindRequest, Locus: SystemLocusLocal},

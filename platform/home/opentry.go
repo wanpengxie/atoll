@@ -228,11 +228,91 @@ func (e *opEntry) Execute(
 		}
 		return map[string]any{"member": payload.Member}, nil
 
+	case sysactor.TypeMemberRestartAll:
+		var payload struct{}
+		if err := actorbase.DecodeStrictEmpty(req.Payload, &payload); err != nil {
+			return nil, &sysactor.OperateError{
+				Code: string(channelspec.ErrCodeBadPayload), Detail: err.Error(),
+			}
+		}
+		return e.restartChannel(ctx)
+
 	default:
 		return nil, &sysactor.OperateError{
 			Code: string(channelspec.ErrCodeNotAcceptedSource), Detail: "operation is not accepted",
 		}
 	}
+}
+
+// restartChannel is the break-glass recovery the channel restart button sends:
+// give every WORKING member a fresh term, in place. It is deliberately not a
+// new capability — it walks the roster and drives the same per-member restart
+// the management word already exposes, so "restart the channel" can never come
+// to mean anything the channel could not already do one member at a time.
+//
+// Only agent and tool are restarted, and that single rule is the whole
+// exclusion policy: a human cell has no running work to recover; system and the
+// registrar are the kernel's own residents (restarting the actor that is
+// executing the restart is a self-reference with no payoff); svcactor and the
+// channel peers are platform plumbing, and a peer in particular is another
+// channel's door — recycling it would interrupt calls that have nothing to do
+// with the channel being rescued. Every one of those falls outside agent|tool
+// by kind, so the policy needs no special cases to enumerate.
+//
+// Partial failure does NOT abort the walk. This runs when a channel is already
+// wedged, so one member that refuses to come back must not keep the others
+// stuck; the caller is told exactly who restarted, who failed and why.
+//
+// KNOWN GAP (deliberate, see .dalek/pm — Dev backlog D4): a restart does not
+// close the requests the restarted members were serving. Controller.Restart
+// mints a new AttemptKey and leaves the actor ACTIVE, so the receiver-
+// unavailable reconciler (which only fires for deregistered actors) does not
+// see it, and the old body's in-station ledger dies with it unanswered. Those
+// requests stay open until their own deadline reaps them. Making restart close
+// them the way death does is a separate decision, because it would terminate
+// every in-flight request of every restarted member, not only the wedged ones.
+func (e *opEntry) restartChannel(ctx context.Context) (any, error) {
+	identities, err := e.home.actors.ActiveIdentities()
+	if err != nil {
+		return nil, asOperateError(err)
+	}
+	restarted := make([]actor.ActorID, 0, len(identities))
+	failed := make([]map[string]any, 0)
+	skipped := make([]map[string]any, 0)
+	for _, identity := range identities {
+		if identity.Kind != actor.KindAgent && identity.Kind != actor.KindTool {
+			skipped = append(skipped, map[string]any{
+				"member": identity.ID, "kind": string(identity.Kind),
+				"reason": "only agent and tool members run work that a restart recovers",
+			})
+			continue
+		}
+		if err := e.home.actors.Restart(ctx, actorctl.RestartRequest{ActorID: identity.ID}); err != nil {
+			// Keep the member's own verdict when it has one; a bare Go error
+			// from the controller is an availability fact, not a caller mistake.
+			var opErr *channelspec.OperationError
+			code := string(channelspec.ErrCodeAuthorityUnavailable)
+			if errors.As(err, &opErr) {
+				code = string(opErr.Code)
+			}
+			e.home.logger.Warn("platform.channel_restart.member_failed",
+				"channel", e.home.channelID, "member", identity.ID, "error", err)
+			failed = append(failed, map[string]any{
+				"member": identity.ID, "error_code": code, "detail": err.Error(),
+			})
+			continue
+		}
+		restarted = append(restarted, identity.ID)
+	}
+	e.home.logger.Info("platform.channel_restart.done",
+		"channel", e.home.channelID,
+		"restarted", len(restarted), "failed", len(failed), "skipped", len(skipped))
+	return map[string]any{
+		"restarted": restarted, "failed": failed, "skipped": skipped,
+		"counts": map[string]any{
+			"restarted": len(restarted), "failed": len(failed), "skipped": len(skipped),
+		},
+	}, nil
 }
 
 // narrateBirth writes the "joined the channel" narration for a freshly created
