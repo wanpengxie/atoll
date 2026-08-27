@@ -435,8 +435,13 @@ func (l *agentLoop) frozen(now time.Time) bool { return now.Before(l.frozenUntil
 
 func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	if msg.Kind == message.KindEvent {
+		// Fires are routed by WHICH timer rang, never by what it is called:
+		// system.timer.set lets a caller name any msg_type, so dispatching the
+		// hold timer by its type would let an alarm named agent.hold_expired
+		// walk into the loop's private hold branch (and be swallowed there
+		// instead of waking anyone).
 		switch {
-		case msg.Type == typeHoldExpired:
+		case l.isOwnHoldFire(msg):
 			l.handleHoldExpired(msg.Payload)
 		case l.isTimerFire(msg):
 			l.postTimerWake(msg)
@@ -449,10 +454,21 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	// A request this actor sent itself is normally noise and is ignored. The
 	// one exception is the alarm commission the loop Posts to itself: it is
 	// self-addressed BY CONSTRUCTION (that is what gives the alarm turn an
-	// owner). The exception runs BOTH ways — a commission is by definition
-	// from yourself, so one arriving from anyone else is not an alarm and is
-	// refused the same way the word is left out of the advertised vocabulary.
-	if self := msg.Sender.ID == l.sys.Self(); self != (msg.Type == TypeTimerWake) {
+	// owner).
+	self := msg.Sender.ID == l.sys.Self()
+	if self && msg.Type != TypeTimerWake {
+		return
+	}
+	// The exception runs BOTH ways: a commission is by definition from
+	// yourself, so one arriving from anyone else is not an alarm. It is
+	// REFUSED rather than dropped — a silently ignored request leaves its
+	// sender waiting out the whole deadline for an answer that was never
+	// coming, and the word is deliberately absent from accepted() so the
+	// refusal names what this agent does take.
+	if !self && msg.Type == TypeTimerWake {
+		l.exec.install(msg)
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported",
+			detail: TypeTimerWake + " is an agent's own alarm commission and cannot be sent by another actor; it accepts " + strings.Join(l.def.accepted(), ", ")})
 		return
 	}
 	l.exec.install(msg)

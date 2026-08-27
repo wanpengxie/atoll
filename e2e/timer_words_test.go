@@ -106,52 +106,29 @@ func TestTimerWordsArmFireAndVanishFromThePendingSet(t *testing.T) {
 	}
 }
 
-// Cancelling and re-timing are the other two verbs. reset is a cancel plus a
-// set — the store has no update — so it answers with a NEW id and names the one
-// it replaced rather than pretending the id survived; and an alarm that already
-// vanished cannot be reset at all.
-func TestTimerResetReplacesAndCancelStopsAnAlarm(t *testing.T) {
+// Cancelling reports whether the alarm was still pending, and reports it the
+// same way for "already gone", "never existed" and "not yours" — so no caller
+// can probe for another member's alarms by watching the answer change.
+func TestTimerCancelStopsAnAlarmAndDoesNotLeak(t *testing.T) {
 	h := newHarness(t)
 	_, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
 
 	armed := ws.request(c0ChannelID, "system.timer.set", systemActor, map[string]any{
 		"duration_ms": 3_600_000, "msg_type": "e2e.later",
 	})
-	first := stringField(t, armed, "timer_id")
+	id := stringField(t, armed, "timer_id")
 
-	moved := ws.request(c0ChannelID, "system.timer.reset", systemActor, map[string]any{
-		"timer_id": first, "duration_ms": 7_200_000,
-	})
-	second := stringField(t, moved, "timer_id")
-	if second == first {
-		t.Fatal("reset must answer with a new id, not pretend the old one survived")
-	}
-	if stringField(t, moved, "replaced") != first {
-		t.Fatalf("reset=%v, want it to name the replaced id", moved)
-	}
-
-	// The alarm it replaced is gone, so resetting it again is refused rather
-	// than silently arming a third one.
-	_, failure, err := ws.tryRequest(c0ChannelID, "system.timer.reset", systemActor, map[string]any{
-		"timer_id": first, "duration_ms": 1000,
-	})
-	if err == nil {
-		t.Fatal("resetting a replaced alarm was accepted")
-	}
-	if failure["error_code"] != "timer_gone" {
-		t.Fatalf("terminal=%v, want timer_gone", failure)
-	}
-
-	cancelled := ws.request(c0ChannelID, "system.timer.cancel", systemActor, map[string]any{"timer_id": second})
+	cancelled := ws.request(c0ChannelID, "system.timer.cancel", systemActor, map[string]any{"timer_id": id})
 	if cancelled["existed"] != true {
 		t.Fatalf("cancel=%v, want existed", cancelled)
 	}
-	// Cancelling it again reports existed=false rather than failing: "already
-	// gone", "never existed" and "not yours" are deliberately the same answer,
-	// so no caller can probe for another member's alarms.
-	again := ws.request(c0ChannelID, "system.timer.cancel", systemActor, map[string]any{"timer_id": second})
+	again := ws.request(c0ChannelID, "system.timer.cancel", systemActor, map[string]any{"timer_id": id})
 	if again["existed"] != false {
 		t.Fatalf("second cancel=%v, want existed=false", again)
+	}
+	unknown := ws.request(c0ChannelID, "system.timer.cancel", systemActor, map[string]any{"timer_id": "never-existed"})
+	if unknown["existed"] != false {
+		t.Fatalf("unknown cancel=%v, want existed=false", unknown)
 	}
 }
 

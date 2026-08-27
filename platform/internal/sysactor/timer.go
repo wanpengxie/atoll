@@ -1,6 +1,7 @@
 package sysactor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,7 +18,7 @@ import (
 // After/CancelTimer, welded to the holder — any Go body can set its own alarm).
 // What it lacked was a WORD: a callable ability needs an actor identity and an
 // endpoint, not merely a handler, and a per-actor handle is by construction
-// neither. Hence these four verbs live on the channel's system actor.
+// neither. Hence these three verbs live on the channel's system actor.
 //
 // The system actor is also the ONLY place they could live. ScheduleReq is
 // structurally self-targeted (no target field; the author is welded at Mint),
@@ -86,18 +87,24 @@ type timerIDPayload struct {
 	Subject string `json:"subject,omitempty"`
 }
 
-type timerResetPayload struct {
-	TimerID    string `json:"timer_id,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	FireAt     int64  `json:"fire_at,omitempty"`
-	Subject    string `json:"subject,omitempty"`
-}
-
 type timerListPayload struct {
 	Subject string `json:"subject,omitempty"`
 }
 
-// handleTimer is the gate for all four verbs: authorise the sender, resolve the
+// timerPayloadBytes normalises what the author composed. A literal JSON null is
+// not "no payload" to a decoder — it is four bytes that survive all the way to
+// the fire, where the harness refuses the envelope and the alarm dies as a
+// poison row LONG after set already answered success. The capability path
+// (actorbase) already collapses null to absent; the word path must agree, or
+// the same alarm behaves differently depending on which door armed it.
+func timerPayloadBytes(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return nil
+	}
+	return raw
+}
+
+// handleTimer is the gate for all three verbs: authorise the sender, resolve the
 // subject, hand the rest to the injected port.
 func (s *SystemActor) handleTimer(sys actorbase.Sys, msg actorbase.Msg) {
 	if s.timers == nil {
@@ -118,8 +125,6 @@ func (s *SystemActor) handleTimer(sys actorbase.Sys, msg actorbase.Msg) {
 		s.timerSet(sys, msg)
 	case message.TypeSystemTimerCancel:
 		s.timerCancel(sys, msg)
-	case message.TypeSystemTimerReset:
-		s.timerReset(sys, msg)
 	case message.TypeSystemTimerList:
 		s.timerList(sys, msg)
 	}
@@ -142,7 +147,7 @@ func (s *SystemActor) timerSubject(msg actorbase.Msg, declared string, write boo
 		return self, nil
 	}
 	if write {
-		return "", &OperateError{Code: "forbidden", Detail: "a timer may only be set, reset or cancelled for yourself; subject names another member"}
+		return "", &OperateError{Code: "forbidden", Detail: "a timer may only be set or cancelled for yourself; subject names another member"}
 	}
 	subject := actor.ActorID(declared)
 	if s.authority == nil {
@@ -207,7 +212,7 @@ func (s *SystemActor) timerSet(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	handle, err := s.timers.Set(msg.Ctx(), subject, TimerSet{
-		FireAt: fireAt, Type: p.MsgType, Payload: p.Payload, Home: home,
+		FireAt: fireAt, Type: p.MsgType, Payload: timerPayloadBytes(p.Payload), Home: home,
 	})
 	if err != nil {
 		s.failTimer(sys, msg, err)
@@ -242,70 +247,6 @@ func (s *SystemActor) timerCancel(sys actorbase.Sys, msg actorbase.Msg) {
 	// someone else" alike — the store's own non-leaking verdict, passed through
 	// rather than re-interpreted here.
 	_, _ = sys.Reply(msg, map[string]any{"timer_id": p.TimerID, "existed": existed})
-}
-
-// timerReset is cancel + set. The store has no update, and inventing one would
-// entangle "move an alarm" with "a fired alarm is not retractable"; returning a
-// NEW id and naming the replaced one is the honest shape. A vanished id fails
-// the whole word rather than silently becoming "armed a new one".
-func (s *SystemActor) timerReset(sys actorbase.Sys, msg actorbase.Msg) {
-	var p timerResetPayload
-	if err := actorbase.DecodeStrict(msg.Payload, &p); err != nil {
-		_, _ = sys.Fail(msg, "bad_payload", err.Error())
-		return
-	}
-	if p.TimerID == "" {
-		_, _ = sys.Fail(msg, "bad_payload", "timer_id required")
-		return
-	}
-	subject, opErr := s.timerSubject(msg, p.Subject, true)
-	if opErr != nil {
-		_, _ = sys.Fail(msg, opErr.Code, opErr.Detail)
-		return
-	}
-	fireAt, opErr := s.timerFireAt(p.DurationMs, p.FireAt)
-	if opErr != nil {
-		_, _ = sys.Fail(msg, opErr.Code, opErr.Detail)
-		return
-	}
-	// The pending row carries what the alarm will SAY; reset moves only when it
-	// says it, so the type and home are read back rather than re-supplied.
-	pending, err := s.timers.List(msg.Ctx(), subject)
-	if err != nil {
-		s.failTimer(sys, msg, err)
-		return
-	}
-	var found *TimerInfo
-	for i := range pending {
-		if pending[i].ID == p.TimerID {
-			found = &pending[i]
-			break
-		}
-	}
-	if found == nil {
-		_, _ = sys.Fail(msg, "timer_gone", fmt.Sprintf("timer %q is not pending for %q — it may have fired, been cancelled, or never existed", p.TimerID, subject))
-		return
-	}
-	existed, err := s.timers.Cancel(msg.Ctx(), subject, p.TimerID)
-	if err != nil {
-		s.failTimer(sys, msg, err)
-		return
-	}
-	if !existed {
-		_, _ = sys.Fail(msg, "timer_gone", fmt.Sprintf("timer %q fired or was cancelled while being reset", p.TimerID))
-		return
-	}
-	handle, err := s.timers.Set(msg.Ctx(), subject, TimerSet{
-		FireAt: fireAt, Type: found.Type, Home: found.Home,
-	})
-	if err != nil {
-		s.failTimer(sys, msg, err)
-		return
-	}
-	_, _ = sys.Reply(msg, map[string]any{
-		"timer_id": handle.ID, "fire_at": handle.FireAt,
-		"replaced": p.TimerID, "subject": string(subject),
-	})
 }
 
 func (s *SystemActor) timerList(sys actorbase.Sys, msg actorbase.Msg) {

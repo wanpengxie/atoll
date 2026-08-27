@@ -192,12 +192,12 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	e.lifeCtx = context.Background()
 
 	if _, err := e.Emit(behavior.EventSpec{
-		ID:            "ev-own-id",
-		Type:          "human.note",
-		Payload:       json.RawMessage(`{"text":"hi"}`),
-		Visibility:    message.VisibilityPublic,
-		Audience:      message.Audience{actor.ActorID("agent:worker")},
-		Cause:         message.Anchored("req-parent", "corr-1"),
+		ID:         "ev-own-id",
+		Type:       "human.note",
+		Payload:    json.RawMessage(`{"text":"hi"}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{actor.ActorID("agent:worker")},
+		Cause:      message.Anchored("req-parent", "corr-1"),
 	}); err != nil {
 		t.Fatalf("Emit = %v", err)
 	}
@@ -217,13 +217,13 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 
 	deadline := int64(1893456000000)
 	if _, err := e.Post(behavior.RequestSpec{
-		ID:            "req-own-id",
-		Type:          "human.approve",
-		Payload:       json.RawMessage(`{"amount":10}`),
-		Audience:      message.Audience{actor.ActorID("agent:worker")},
-		Visibility:    message.VisibilityPublic,
-		Cause:         message.Anchored("ev-parent", "corr-2"),
-		ExpiresAt:     &deadline,
+		ID:         "req-own-id",
+		Type:       "human.approve",
+		Payload:    json.RawMessage(`{"amount":10}`),
+		Audience:   message.Audience{actor.ActorID("agent:worker")},
+		Visibility: message.VisibilityPublic,
+		Cause:      message.Anchored("ev-parent", "corr-2"),
+		ExpiresAt:  &deadline,
 	}); err != nil {
 		t.Fatalf("Post = %v", err)
 	}

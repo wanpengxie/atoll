@@ -4,7 +4,17 @@ package message
 type SystemLocus string
 
 const (
-	SystemLocusC0       SystemLocus = "c0"
+	SystemLocusC0 SystemLocus = "c0"
+	// SystemLocusLocal is a channel-local word that must NOT cross the
+	// membrane. A caller in another channel has no coordinate here, so a word
+	// whose whole meaning is "do this as yourself, in this channel" cannot be
+	// honoured for it — the legitimate cross-channel shape is to ask a member
+	// of this channel to act, the way you hand work to another company's staff
+	// rather than reaching into their building. The membrane reads this locus
+	// both when advertising words on a channel card and when routing an
+	// inbound request, so the refusal is structural rather than a check one
+	// door has to remember.
+	SystemLocusLocal    SystemLocus = "local"
 	SystemLocusMembrane SystemLocus = "membrane"
 )
 
@@ -54,7 +64,6 @@ const (
 	TypeSystemLogRecent             = "system.log.recent"
 	TypeSystemTimerSet              = "system.timer.set"
 	TypeSystemTimerCancel           = "system.timer.cancel"
-	TypeSystemTimerReset            = "system.timer.reset"
 	TypeSystemTimerList             = "system.timer.list"
 	TypeSystemMemberCreated         = "system.member.created"
 	TypeSystemMemberDeleted         = "system.member.deleted"
@@ -98,10 +107,9 @@ var systemEntries = [...]SystemEntry{
 	{Name: TypeSystemMemberDelete, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberRestart, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemLogRecent, Kind: KindRequest, Locus: SystemLocusMembrane},
-	{Name: TypeSystemTimerSet, Kind: KindRequest, Locus: SystemLocusMembrane},
-	{Name: TypeSystemTimerCancel, Kind: KindRequest, Locus: SystemLocusMembrane},
-	{Name: TypeSystemTimerReset, Kind: KindRequest, Locus: SystemLocusMembrane},
-	{Name: TypeSystemTimerList, Kind: KindRequest, Locus: SystemLocusMembrane},
+	{Name: TypeSystemTimerSet, Kind: KindRequest, Locus: SystemLocusLocal},
+	{Name: TypeSystemTimerCancel, Kind: KindRequest, Locus: SystemLocusLocal},
+	{Name: TypeSystemTimerList, Kind: KindRequest, Locus: SystemLocusLocal},
 	{Name: TypeSystemMemberCreated, Kind: KindEvent, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberDeleted, Kind: KindEvent, Locus: SystemLocusMembrane},
 	{Name: TypeSystemChannelInbound, Kind: KindEvent, Locus: SystemLocusMembrane},

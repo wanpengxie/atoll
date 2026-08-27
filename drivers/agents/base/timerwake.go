@@ -31,8 +31,13 @@ import (
 // the terminal is the published copy of what the model already said, and
 // feeding it back would put the same sentence in front of the model twice, once
 // as its own words and once as an incoming message. Post leaves no waiter, so
-// engine.Receive finds no match and drops the terminal — the echo is cut
-// structurally, not by convention.
+// engine.Receive finds no match and drops the terminal.
+//
+// That cuts the REAL-TIME loop, and only that: agent.timer.wake is not a
+// housekeeping word, so a restart's catchup still reads the commission and its
+// terminal back out of the ledger as ordinary history. That is history, not an
+// echo — but the honest claim is "no real-time feedback loop", never "it can
+// never reach the model again".
 const (
 	// TypeTimerWake is the self-commission an alarm turns into.
 	TypeTimerWake = "agent.timer.wake"
@@ -55,6 +60,14 @@ func (l *agentLoop) isTimerFire(msg actorbase.Msg) bool {
 	return msg.Kind == message.KindEvent &&
 		msg.Sender.ID == l.sys.Self() &&
 		strings.HasPrefix(string(msg.ID), timerFireIDPrefix)
+}
+
+// isOwnHoldFire recognises the loop's PRIVATE hold-expiry timer by the id it
+// armed, not by the type it chose. Type is caller-nameable through
+// system.timer.set; a timer id is not.
+func (l *agentLoop) isOwnHoldFire(msg actorbase.Msg) bool {
+	return l.holdTimer != "" && l.isTimerFire(msg) &&
+		string(msg.ID) == timerFireIDPrefix+string(l.holdTimer)
 }
 
 type timerWakePayload struct {

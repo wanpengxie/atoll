@@ -243,7 +243,10 @@ func (h scheduleShell) Ack(context.Context, schedule.TimerID) error {
 	return h.log.record("schedule.ack", h.authority)
 }
 func (h scheduleShell) List(context.Context) ([]schedule.TimerInfo, error) {
-	return []schedule.TimerInfo{}, nil
+	if err := h.log.record("schedule.list", h.authority); err != nil {
+		return nil, err
+	}
+	return []schedule.TimerInfo{{ID: "timer:1", Home: schedule.TimerHomeDurable, FireAt: 42, Type: "standup"}}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -554,5 +557,34 @@ func TestSelfLifecycleEndGoesThroughTheTypedCommand(t *testing.T) {
 	}
 	if active, err := r.controller.IsActive(ctx, remoteActor); err != nil || active {
 		t.Fatalf("actor still active after EndSelf: active=%v err=%v", active, err)
+	}
+}
+
+// A remote cell asking "what alarms do I have" is answered for the identity the
+// ENDPOINT authenticated, never one the frame names: ScheduleRequest carries no
+// author, so the ingress mints the handle against the coordinate it was called
+// with. This is the read half of the same weld Schedule/Cancel already had.
+func TestRemoteScheduleListAnswersForTheEndpointIdentity(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+
+	response, err := r.ingress.Schedule(ctx, remoteActor, remoteingress.ScheduleRequest{
+		Method: remoteingress.ScheduleList,
+	})
+	if err != nil {
+		t.Fatalf("list err=%v", err)
+	}
+	if len(response.Timers) != 1 || response.Timers[0].Type != "standup" {
+		t.Fatalf("timers=%+v", response.Timers)
+	}
+	if response.ID != "" {
+		t.Fatalf("list answered a timer id %q; that field belongs to set alone", response.ID)
+	}
+	want := "schedule.list:" + string(remoteActor)
+	r.log.mu.Lock()
+	admitted := append([]string(nil), r.log.admitted...)
+	r.log.mu.Unlock()
+	if len(admitted) != 1 || admitted[0] != want {
+		t.Fatalf("admitted=%v, want the list to run as the endpoint's identity %q", admitted, want)
 	}
 }

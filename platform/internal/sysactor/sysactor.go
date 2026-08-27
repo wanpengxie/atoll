@@ -163,8 +163,7 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		case message.TypeSystemLogRecent:
 			s.respondLogbookRecent(sys, msg)
 			return
-		case message.TypeSystemTimerSet, message.TypeSystemTimerCancel,
-			message.TypeSystemTimerReset, message.TypeSystemTimerList:
+		case message.TypeSystemTimerSet, message.TypeSystemTimerCancel, message.TypeSystemTimerList:
 			s.handleTimer(sys, msg)
 			return
 		case TypeMemberCreate, TypeMemberAdmit, TypeMemberDelete, TypeMemberRestart:

@@ -85,6 +85,27 @@ func TestTimerFireBecomesASelfCommission(t *testing.T) {
 	}
 }
 
+// Fires are routed by WHICH timer rang, not by what it is called: a caller can
+// name any msg_type through system.timer.set, so dispatching by type would let
+// an alarm named agent.hold_expired walk into the loop's private hold branch
+// and be swallowed there instead of waking anyone.
+func TestAnAlarmNamedLikeTheHoldTimerStillWakesTheAgent(t *testing.T) {
+	l, sys := newWakeLoop(t)
+	l.holdTimer = "hold-99"
+
+	// The loop's own hold timer, recognised by its id.
+	l.handleIntake(fireEvent("timer:hold-99", typeHoldExpired, "agent:test:1", `{"hold_id":"nobody"}`))
+	if len(sys.posts) != 0 {
+		t.Fatal("the loop's own hold timer must not become an alarm commission")
+	}
+
+	// A caller-armed alarm that merely borrows the name.
+	l.handleIntake(fireEvent("timer:user-1", typeHoldExpired, "agent:test:1", `{}`))
+	if len(sys.posts) != 1 {
+		t.Fatalf("posts=%d, want the borrowed-name alarm to still wake its owner", len(sys.posts))
+	}
+}
+
 // Only the schedule engine's own fire qualifies. The deterministic `timer:` id
 // alone is not enough (any actor could address a look-alike at this agent), and
 // self-authorship alone is not enough either (ordinary self-emitted events must
@@ -144,9 +165,11 @@ func TestSelfAddressedRequestsAreIgnoredExceptTheCommission(t *testing.T) {
 
 	// A commission is by definition from yourself. One arriving from somebody
 	// else is not an alarm, and accepting it would let any caller fake "your
-	// own earlier intent came back" — the one thing the wake text promises.
-	t.Run("a commission from somebody else is refused", func(t *testing.T) {
-		l, _ := newWakeLoop(t)
+	// own earlier intent came back" — the one thing the wake text promises. It
+	// is refused OUT LOUD: silently dropping it would leave the sender waiting
+	// out its whole deadline for an answer that was never coming.
+	t.Run("a commission from somebody else is refused out loud", func(t *testing.T) {
+		l, sys := newWakeLoop(t)
 		foreign := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 			ID: "w3", Kind: message.KindRequest, Type: TypeTimerWake,
 			Sender:   message.Sender{Kind: actor.KindAgent, ID: "agent:other:1"},
@@ -156,6 +179,10 @@ func TestSelfAddressedRequestsAreIgnoredExceptTheCommission(t *testing.T) {
 		l.handleIntake(foreign)
 		if l.state.Requests["w3"] != nil {
 			t.Fatal("a commission from another actor must be refused")
+		}
+		got := sys.terminal("w3")
+		if len(got) != 1 || got[0].code != "type_unsupported" {
+			t.Fatalf("terminal=%+v, want a type_unsupported refusal", got)
 		}
 	})
 }

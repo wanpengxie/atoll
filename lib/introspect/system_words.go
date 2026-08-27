@@ -56,17 +56,13 @@ func SystemWordSpecs() map[string]WordSpec {
 		message.TypeSystemMemberDelete:          systemWord("Remove a member from the channel this request reaches.", "Exactly one of: member (string actor id or unambiguous segment), or decl_id (string): the actor template the member was seated from, which removes that template's single seat and fails as ambiguous if it has more than one.", objectSchema(`"member":{"type":"string"},"decl_id":{"type":"string"}`)),
 		message.TypeSystemMemberRestart:         systemWord("Restart a live member's cell generation.", "member (string actor id or unambiguous segment).", objectSchema(`"member":{"type":"string"}`, "member")),
 		message.TypeSystemTimerSet: systemWord(
-			"Set an alarm for yourself: at the chosen instant the substrate delivers a message you compose now, authored by you and addressed to you. An agent that receives one wakes into an ordinary turn; other actors receive it as an event. The alarm belongs to the caller — subject may name another member on system.timer.list only.",
+			"Set an alarm for yourself: at the chosen instant the substrate delivers a message you compose now, authored by you and addressed to you. An agent that receives one wakes into an ordinary turn; other actors receive it as an event. The alarm belongs to the caller — subject may name another member on system.timer.list only. Channel-local: this word does not cross a channel membrane, so a caller from another channel asks a member HERE to act instead of arming an alarm it could never own.",
 			"exactly one of duration_ms (positive integer, milliseconds from now) or fire_at (integer, absolute unix milliseconds); msg_type (string, the type of the message the alarm will deliver); payload (optional object, delivered byte for byte); home (optional \"durable\" or \"memory\", default durable — durable survives a restart, memory does not).",
 			objectSchema(`"duration_ms":{"type":"integer","minimum":1},"fire_at":{"type":"integer"},"msg_type":{"type":"string"},"payload":{"type":"object"},"home":{"type":"string","enum":["durable","memory"]},"subject":{"type":"string"}`, "msg_type")),
 		message.TypeSystemTimerCancel: systemWord(
 			"Cancel one of your pending alarms. existed=false means it had already fired, never existed, or is not yours — the three are deliberately indistinguishable, so no caller can probe for another member's alarms.",
 			"timer_id (string).",
 			objectSchema(`"timer_id":{"type":"string"},"subject":{"type":"string"}`, "timer_id")),
-		message.TypeSystemTimerReset: systemWord(
-			"Move a pending alarm to a new instant, keeping what it will say. This is a cancel plus a set, so it answers with a NEW timer_id and names the replaced one; an alarm that already fired cannot be reset (timer_gone).",
-			"timer_id (string); exactly one of duration_ms (positive integer, milliseconds from now) or fire_at (integer, absolute unix milliseconds).",
-			objectSchema(`"timer_id":{"type":"string"},"duration_ms":{"type":"integer","minimum":1},"fire_at":{"type":"integer"},"subject":{"type":"string"}`, "timer_id")),
 		message.TypeSystemTimerList: systemWord(
 			"List pending alarms, earliest first. Answers with the coordinates only (timer_id, fire_at, msg_type, home) and never the payload: this reads which alarms exist, not what they will say. subject may name any active member of this channel — a channel is one permission boundary.",
 			"subject (optional full actor id; omit for your own alarms).",

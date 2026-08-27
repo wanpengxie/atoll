@@ -142,6 +142,28 @@ func TestTimerSubjectIsWriteRestrictedButReadOpen(t *testing.T) {
 	})
 }
 
+// A literal JSON null is not "no payload" to a decoder — it is four bytes that
+// survive to the fire, where the harness refuses the envelope and the alarm
+// dies as a poison row long after set answered success. The capability path
+// already collapses null to absent; the word path must agree, or the same
+// alarm behaves differently depending on which door armed it.
+func TestTimerSetNormalisesANullPayloadToAbsent(t *testing.T) {
+	for _, payload := range []string{
+		`{"duration_ms":5000,"msg_type":"x","payload":null}`,
+		`{"duration_ms":5000,"msg_type":"x"}`,
+	} {
+		port := &fakeTimers{}
+		sys := &failSys{}
+		timerActor(t, port).handle(sys, requestMsg("tn", message.TypeSystemTimerSet, []byte(payload)))
+		if len(sys.fails) != 0 {
+			t.Fatalf("%s: unexpected failure %+v", payload, sys.fails)
+		}
+		if got := port.setReq[0].Payload; len(got) != 0 {
+			t.Fatalf("%s: payload=%s, want absent", payload, got)
+		}
+	}
+}
+
 // WHEN has exactly two spellings and they are mutually exclusive: accepting
 // both would leave the substrate to guess which one the author meant.
 func TestTimerSetRefusesAmbiguousOrMissingInstant(t *testing.T) {
@@ -190,52 +212,6 @@ func TestTimerCancelReportsExistenceWithoutLeaking(t *testing.T) {
 	}
 }
 
-// Reset moves WHEN and keeps WHAT: the pending row supplies the type and home,
-// so a caller cannot quietly rewrite what an alarm will say by "moving" it.
-// Because the store has no update, it answers with a new id and names the one
-// it replaced rather than pretending the id survived.
-func TestTimerResetKeepsTheMessageAndNamesTheReplacedID(t *testing.T) {
-	port := &fakeTimers{pending: map[actor.ActorID][]TimerInfo{
-		"agent:caller:1": {{ID: "old", Home: "memory", FireAt: 10, Type: "standup"}},
-	}}
-	sys := &failSys{}
-	timerActor(t, port).handle(sys, requestMsg("t7", message.TypeSystemTimerReset,
-		[]byte(`{"timer_id":"old","duration_ms":9000}`)))
-
-	if len(sys.fails) != 0 {
-		t.Fatalf("unexpected failure: %+v", sys.fails)
-	}
-	if len(port.cancelID) != 1 || port.cancelID[0] != "old" {
-		t.Fatalf("cancelled=%v, want the old id", port.cancelID)
-	}
-	req := port.setReq[0]
-	if req.Type != "standup" || req.Home != "memory" {
-		t.Fatalf("re-armed as %+v, want the pending row's own type and home", req)
-	}
-	if req.FireAt != 1_009_000 {
-		t.Fatalf("fire_at=%d, want clock+duration", req.FireAt)
-	}
-	value, _ := sys.replies[0].v.(map[string]any)
-	if value["timer_id"] != "new-timer" || value["replaced"] != "old" {
-		t.Fatalf("reply=%+v", value)
-	}
-}
-
-// An alarm that already rang cannot be un-rung, so reset fails the whole word
-// rather than silently turning into "armed a new one".
-func TestTimerResetRefusesAVanishedAlarm(t *testing.T) {
-	port := &fakeTimers{}
-	sys := &failSys{}
-	timerActor(t, port).handle(sys, requestMsg("t8", message.TypeSystemTimerReset,
-		[]byte(`{"timer_id":"gone","duration_ms":9000}`)))
-	if len(sys.fails) != 1 || sys.fails[0].code != "timer_gone" {
-		t.Fatalf("fails=%+v, want timer_gone", sys.fails)
-	}
-	if len(port.setFor) != 0 {
-		t.Fatal("a vanished alarm must not be quietly re-armed")
-	}
-}
-
 // A non-member gets the same refusal the other control words give, and an
 // unfilled injection point synthesizes nothing at all (the caller's own closure
 // reaps the request) rather than inventing a failure the operator never wired.
@@ -271,5 +247,36 @@ func TestTimerPortErrorKeepsItsCode(t *testing.T) {
 	var oe *OperateError
 	if !errors.As(port.setErr, &oe) {
 		t.Fatal("fixture is not an OperateError")
+	}
+}
+
+// The timer words are channel-LOCAL and must never cross a membrane. A caller
+// in another channel has no coordinate here, so "set an alarm for yourself"
+// cannot be honoured for it: the sender the door would read is this channel's
+// own svcactor, which would arm an alarm owned by the door itself and wake
+// nobody. The legitimate cross-channel shape is to ask a member HERE to act,
+// the way work is handed to another company's staff rather than reaching into
+// their building. The refusal is structural — the membrane reads the locus
+// both when advertising a channel card and when routing an inbound request —
+// so this pins the locus rather than a check one door has to remember.
+func TestTimerWordsAreChannelLocalAndNeverCrossTheMembrane(t *testing.T) {
+	for _, word := range []string{
+		message.TypeSystemTimerSet,
+		message.TypeSystemTimerCancel,
+		message.TypeSystemTimerList,
+	} {
+		entry, ok := message.Parse(word)
+		if !ok {
+			t.Fatalf("%s is not a registered system word", word)
+		}
+		if entry.Locus != message.SystemLocusLocal {
+			t.Fatalf("%s locus=%q, want %q", word, entry.Locus, message.SystemLocusLocal)
+		}
+		if message.IsMembraneWord(word) {
+			t.Fatalf("%s is relayable across the membrane", word)
+		}
+		if message.IsSpaceWord(word) {
+			t.Fatalf("%s is routed to c0", word)
+		}
 	}
 }
