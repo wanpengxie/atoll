@@ -454,8 +454,23 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 	case subjectgate.ResCreate:
 		if p.Address != "" {
 			id := resource.ResourceID(p.Address)
-			out, err := rh.CreateFileDecided(id, p.WithContent)
+			var out accessdoor.Outcome
+			var err error
+			switch p.NodeType {
+			case "", string(accessdoor.FileNodeRegular):
+				out, err = rh.CreateFileDecided(id, p.WithContent)
+			case string(accessdoor.FileNodeDirectory):
+				if p.WithContent {
+					return errFrame(f, subjectgate.CodeBadPayload, "directory create cannot include content")
+				}
+				out, err = rh.CreateDirectory(id)
+			default:
+				return errFrame(f, subjectgate.CodeBadPayload, "node_type must be regular or directory")
+			}
 			return resourceOutcomeFrameFor(f, id, out, err)
+		}
+		if p.NodeType != "" {
+			return errFrame(f, subjectgate.CodeBadPayload, "node_type is valid only for file address create")
 		}
 		out, err := rh.Create(rid, p.Args)
 		return resourceOutcomeFrameFor(f, rid, out, err)
@@ -482,11 +497,14 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 		if err != nil {
 			return mapVerbErrFrame(err, f)
 		}
+		if page.Reject == accessdoor.QueryBadCursor {
+			return errFrame(f, subjectgate.CodeBadCursor, "resource list cursor is invalid for this directory")
+		}
 		items := make([]subjectgate.ResourceEntry, 0, len(page.Entries))
 		for _, it := range page.Entries {
 			items = append(items, subjectgate.ResourceEntry{
 				ID: string(it.ID), Kind: string(it.Kind), Ops: wireOps(it.Ops),
-				Meta: subjectgate.ResourceMeta{Size: it.Size, ModifiedAt: it.ModifiedAt},
+				Meta: subjectgate.ResourceMeta{NodeType: string(it.NodeType), Size: it.Size, ModifiedAt: it.ModifiedAt},
 			})
 		}
 		return receipt(f, subjectgate.ResourcePage{Items: items, Next: page.Next})
@@ -502,7 +520,7 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 func wireMeta(meta accessdoor.StatMeta) *subjectgate.ResourceMeta {
 	return &subjectgate.ResourceMeta{
 		Kind: string(meta.Kind), CreatedAt: meta.CreatedAt,
-		CreatedBy: string(meta.CreatedBy), Size: meta.Size, ModifiedAt: meta.ModifiedAt,
+		CreatedBy: string(meta.CreatedBy), NodeType: string(meta.NodeType), Size: meta.Size, ModifiedAt: meta.ModifiedAt,
 	}
 }
 

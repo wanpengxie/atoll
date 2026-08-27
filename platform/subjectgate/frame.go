@@ -119,6 +119,7 @@ const (
 	CodePathOutsideChannel = "path_outside_channel"
 	CodePathRelative       = "path_relative"
 	CodeHostOffline        = "host_offline"
+	CodeBadCursor          = "bad_cursor"
 	// (CodeNotMember / CodeStaleBinding retired with the client-visible binding
 	// axis — see the retired-words note by the FrameType consts. Eligibility
 	// refusal is uniformly CodeForbidden.)
@@ -456,6 +457,9 @@ type ResourcePayload struct {
 	Query       *ResourceQuery  `json:"query,omitempty"`
 	Address     string          `json:"address,omitempty"`
 	WithContent bool            `json:"with_content,omitempty"`
+	// NodeType refines file-kind create without adding another frame family.
+	// Empty means a regular file for backward compatibility.
+	NodeType string `json:"node_type,omitempty"`
 }
 
 // (PresencePayload retired with the "presence" frame word — see the retired-
@@ -660,7 +664,11 @@ type ResourceMeta struct {
 	Kind      string `json:"kind,omitempty"`
 	CreatedAt int64  `json:"created_at,omitempty"`
 	CreatedBy string `json:"created_by,omitempty"`
-	Size      int64  `json:"size"`
+	// NodeType is the physical node fact for file-kind resources. It is
+	// deliberately separate from Kind: file selects the byte locus, while
+	// directory/regular/other tells a browser whether to navigate or open.
+	NodeType string `json:"node_type,omitempty"`
+	Size     int64  `json:"size"`
 	// ModifiedAt is Unix milliseconds. It is omitted rather than zeroed when
 	// the device reported none, because a reader showing "1970" is worse than
 	// one showing nothing.

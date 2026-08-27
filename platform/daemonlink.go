@@ -5,6 +5,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/remoteingress"
@@ -26,18 +27,19 @@ type DaemonMembrane struct {
 }
 
 type DaemonFileInfo struct {
-	Path string
-	Size int64
+	Path     string
+	NodeType accessdoor.FileNodeType
+	Size     int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
 }
 
 type DaemonRoutes interface {
 	PokePlan(string, string)
-	FileCreate(context.Context, string, string, string) error
+	FileCreate(context.Context, string, string, string, accessdoor.FileNodeType) error
 	FileDelete(context.Context, string, string, string) error
 	FileStat(context.Context, string, string, string) (DaemonFileInfo, bool, error)
-	FileList(context.Context, string, string, string) ([]DaemonFileInfo, error)
+	FileList(context.Context, string, string, string, int, string) ([]DaemonFileInfo, string, error)
 	AttachedDaemons(string) []string
 	LaneAttached(string, string) bool
 	// LaneWorkspace answers where a daemon keeps a channel's directory on its

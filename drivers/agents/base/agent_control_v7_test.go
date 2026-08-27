@@ -71,6 +71,9 @@ func (v7Resource) CreateFile(resource.ResourceID, bool) (accessdoor.FileAccess, 
 func (v7Resource) CreateFileDecided(resource.ResourceID, bool) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{}, nil
 }
+func (v7Resource) CreateDirectory(resource.ResourceID) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
 
 type v7Sys struct {
 	actorbase.Sys

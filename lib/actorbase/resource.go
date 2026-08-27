@@ -67,6 +67,9 @@ type ResourceHandle interface {
 	// CreateFileDecided asks the door to authorize a file create but leaves
 	// route redemption to the caller (the human HTTP byte leg uses this form).
 	CreateFileDecided(id resource.ResourceID, withContent bool) (accessdoor.Outcome, error)
+	// CreateDirectory creates one directory node through the same Resource
+	// create decision as CreateFile. Directories have no byte-transfer leg.
+	CreateDirectory(id resource.ResourceID) (accessdoor.Outcome, error)
 }
 
 // StateHandle is sys.State()'s thin wrap over the actor-scoped (collapsed)

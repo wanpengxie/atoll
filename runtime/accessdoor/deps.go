@@ -2,6 +2,7 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -36,20 +37,33 @@ type StorageMounts interface {
 }
 
 type FileInfo struct {
-	Path string
-	Size int64
+	Path     string
+	NodeType FileNodeType
+	Size     int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
 }
 
+// FileNodeType is re-exported at the door face so callers never import the
+// kernel-only resourcespec package directly.
+type FileNodeType = resourcespec.FileNodeType
+
+const (
+	FileNodeRegular   = resourcespec.FileNodeRegular
+	FileNodeDirectory = resourcespec.FileNodeDirectory
+	FileNodeOther     = resourcespec.FileNodeOther
+)
+
 // FileControl performs metadata operations on the host's channel directory.
 // It is not an existence registry: every answer comes from the filesystem.
 type FileControl interface {
-	Create(context.Context, string, string) error
+	Create(context.Context, string, string, FileNodeType) error
 	Delete(context.Context, string, string) error
 	Stat(context.Context, string, string) (FileInfo, bool, error)
-	List(context.Context, string, string) ([]FileInfo, error)
+	List(context.Context, string, string, int, string) ([]FileInfo, string, error)
 }
+
+var ErrMalformedFileCursor = errors.New("accessdoor: malformed file cursor")
 
 // TransferSpec is one authorized-but-unfinished byte transfer. Caller travels
 // with it because the bytes move later, on a connection this door never sees,

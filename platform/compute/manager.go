@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
@@ -1548,7 +1549,7 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 				mark := l.manager.beginStorageOp(string(stream.Channel), request.Op, request.Path)
 				switch request.Op {
 				case link.FileCreate:
-					reply.OK = files.Create(request.Path) == nil
+					reply.OK = files.Create(request.Path, request.NodeType) == nil
 					if !reply.OK {
 						reply.Reason = "compute: create failed"
 					}
@@ -1557,6 +1558,9 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 					reply.OK = err == nil
 					if err != nil {
 						reply.Reason = err.Error()
+						if errors.Is(err, accessdoor.ErrMalformedFileCursor) {
+							reply.Code = link.FileErrorBadCursor
+						}
 					}
 				case link.FileStat:
 					info, found, err := files.Stat(request.Path)
@@ -1564,7 +1568,7 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 					if err != nil {
 						reply.Reason = err.Error()
 					} else if found {
-						reply.Entries = []link.FileEntry{{Path: info.Path, Size: info.Size, ModifiedAt: info.ModifiedAt}}
+						reply.Entries = []link.FileEntry{{Path: info.Path, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt}}
 					}
 				case link.FileRoot:
 					// Answered from the value bindLane installed, not from a
@@ -1578,13 +1582,14 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 						reply.Reason = "compute: channel workspace unavailable"
 					}
 				case link.FileList:
-					rows, err := files.List(request.Path)
+					rows, next, err := files.List(request.Path, request.Limit, request.Cursor)
 					reply.OK = err == nil
 					if err != nil {
 						reply.Reason = err.Error()
 					} else {
+						reply.Next = next
 						for _, row := range rows {
-							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, Size: row.Size, ModifiedAt: row.ModifiedAt})
+							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
 						}
 					}
 				}

@@ -23,6 +23,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
 const (
@@ -1365,39 +1366,39 @@ func (h *Host) currentLane(daemonID string, chID channel.ID) *serverLane {
 	return carrier.lanes[chID]
 }
 
-func (h *Host) file(ctx context.Context, daemonID, chID, op, path string) (link.FileReply, error) {
+func (h *Host) file(ctx context.Context, daemonID, chID string, request link.FileRequest) (link.FileReply, error) {
 	lane := h.currentLane(daemonID, channel.ID(chID))
 	if lane == nil {
 		return link.FileReply{}, ErrLaneUnavailable
 	}
-	return lane.file(ctx, op, path)
+	return lane.file(ctx, request)
 }
 
-func (h *Host) FileCreate(ctx context.Context, daemonID, chID, path string) error {
-	_, err := h.file(ctx, daemonID, chID, link.FileCreate, path)
+func (h *Host) FileCreate(ctx context.Context, daemonID, chID, path string, nodeType accessdoor.FileNodeType) error {
+	_, err := h.file(ctx, daemonID, chID, link.FileRequest{Op: link.FileCreate, Path: path, NodeType: nodeType})
 	return err
 }
 func (h *Host) FileDelete(ctx context.Context, daemonID, chID, path string) error {
-	_, err := h.file(ctx, daemonID, chID, link.FileDelete, path)
+	_, err := h.file(ctx, daemonID, chID, link.FileRequest{Op: link.FileDelete, Path: path})
 	return err
 }
 func (h *Host) FileStat(ctx context.Context, daemonID, chID, path string) (platform.DaemonFileInfo, bool, error) {
-	reply, err := h.file(ctx, daemonID, chID, link.FileStat, path)
+	reply, err := h.file(ctx, daemonID, chID, link.FileRequest{Op: link.FileStat, Path: path})
 	if err != nil || !reply.Found || len(reply.Entries) == 0 {
 		return platform.DaemonFileInfo{}, reply.Found, err
 	}
-	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, Size: reply.Entries[0].Size, ModifiedAt: reply.Entries[0].ModifiedAt}, true, nil
+	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, NodeType: reply.Entries[0].NodeType, Size: reply.Entries[0].Size, ModifiedAt: reply.Entries[0].ModifiedAt}, true, nil
 }
-func (h *Host) FileList(ctx context.Context, daemonID, chID, path string) ([]platform.DaemonFileInfo, error) {
-	reply, err := h.file(ctx, daemonID, chID, link.FileList, path)
+func (h *Host) FileList(ctx context.Context, daemonID, chID, path string, limit int, cursor string) ([]platform.DaemonFileInfo, string, error) {
+	reply, err := h.file(ctx, daemonID, chID, link.FileRequest{Op: link.FileList, Path: path, Limit: limit, Cursor: cursor})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]platform.DaemonFileInfo, 0, len(reply.Entries))
 	for _, row := range reply.Entries {
-		out = append(out, platform.DaemonFileInfo{Path: row.Path, Size: row.Size, ModifiedAt: row.ModifiedAt})
+		out = append(out, platform.DaemonFileInfo{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
 	}
-	return out, nil
+	return out, reply.Next, nil
 }
 
 // LaneWorkspace answers where this daemon keeps this channel's directory on

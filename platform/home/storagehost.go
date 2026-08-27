@@ -94,23 +94,23 @@ type daemonFiles struct {
 	chID   channelpkg.ID
 }
 
-func (f daemonFiles) Create(ctx context.Context, daemonID, path string) error {
-	return f.routes.FileCreate(ctx, daemonID, string(f.chID), path)
+func (f daemonFiles) Create(ctx context.Context, daemonID, path string, nodeType accessdoor.FileNodeType) error {
+	return f.routes.FileCreate(ctx, daemonID, string(f.chID), path, nodeType)
 }
 func (f daemonFiles) Delete(ctx context.Context, daemonID, path string) error {
 	return f.routes.FileDelete(ctx, daemonID, string(f.chID), path)
 }
 func (f daemonFiles) Stat(ctx context.Context, daemonID, path string) (accessdoor.FileInfo, bool, error) {
 	info, found, err := f.routes.FileStat(ctx, daemonID, string(f.chID), path)
-	return accessdoor.FileInfo{Path: info.Path, Size: info.Size, ModifiedAt: info.ModifiedAt}, found, err
+	return accessdoor.FileInfo{Path: info.Path, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt}, found, err
 }
-func (f daemonFiles) List(ctx context.Context, daemonID, prefix string) ([]accessdoor.FileInfo, error) {
-	rows, err := f.routes.FileList(ctx, daemonID, string(f.chID), prefix)
+func (f daemonFiles) List(ctx context.Context, daemonID, prefix string, limit int, cursor string) ([]accessdoor.FileInfo, string, error) {
+	rows, next, err := f.routes.FileList(ctx, daemonID, string(f.chID), prefix, limit, cursor)
 	out := make([]accessdoor.FileInfo, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, accessdoor.FileInfo{Path: row.Path, Size: row.Size, ModifiedAt: row.ModifiedAt})
+		out = append(out, accessdoor.FileInfo{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
 	}
-	return out, err
+	return out, next, err
 }
 
 type daemonTransferControl struct {

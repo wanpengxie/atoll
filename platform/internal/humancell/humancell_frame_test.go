@@ -662,6 +662,29 @@ func TestInterpretResourceCreate(t *testing.T) {
 	}
 }
 
+func TestInterpretResourceDirectoryCreate(t *testing.T) {
+	rh := &fakeResource{out: accessdoor.Outcome{}}
+	fs := &fakeSys{self: "human:alice", rh: rh}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResource, "r", subjectgate.ResourcePayload{
+		ChannelID: "c1", Op: subjectgate.ResCreate,
+		Address: "daemon://local-device/c0/docs", NodeType: "directory",
+	})
+	got := interpretFrame(fs, newDeps("human:alice", nil, false), f)
+	if got.Type != subjectgate.FrameReceipt || rh.directory != "daemon://local-device/c0/docs" {
+		t.Fatalf("directory create = frame %q address %q", got.Type, rh.directory)
+	}
+}
+
+func TestInterpretResourceListBadCursor(t *testing.T) {
+	fs := &fakeSys{self: "human:alice", rh: &fakeResource{page: accessdoor.ListPage{Reject: accessdoor.QueryBadCursor}}}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResource, "r", subjectgate.ResourcePayload{
+		ChannelID: "c1", Op: subjectgate.ResList, Query: &subjectgate.ResourceQuery{Cursor: "wrong-directory"},
+	})
+	if got := decodeErr(t, interpretFrame(fs, newDeps("human:alice", nil, false), f)); got.Code != subjectgate.CodeBadCursor {
+		t.Fatalf("bad cursor code = %q", got.Code)
+	}
+}
+
 func TestPublishPresenceMapping(t *testing.T) {
 	fs := &fakeSys{}
 	publishPresence(fs, subjectgate.LevelOnline)
@@ -680,7 +703,18 @@ var _ actorbase.ResourceHandle = (*fakeResource)(nil)
 
 type fakeResource struct {
 	actorbase.ResourceHandle
-	out accessdoor.Outcome
+	out       accessdoor.Outcome
+	directory resource.ResourceID
+	page      accessdoor.ListPage
+}
+
+func (f *fakeResource) CreateDirectory(id resource.ResourceID) (accessdoor.Outcome, error) {
+	f.directory = id
+	return f.out, nil
+}
+
+func (f *fakeResource) List(accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	return f.page, nil
 }
 
 func (f *fakeResource) Create(resource.ResourceID, []byte) (accessdoor.Outcome, error) {

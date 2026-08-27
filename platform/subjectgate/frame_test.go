@@ -238,8 +238,8 @@ func TestResourceResultsAreSpelledForTheWire(t *testing.T) {
 		},
 		{
 			name:  "stat",
-			value: ResourceStat{Exists: true, Meta: &ResourceMeta{Kind: "file", CreatedAt: 7, CreatedBy: "human:root:1", Size: 9, ModifiedAt: 1787245669712}},
-			want:  `{"exists":true,"meta":{"kind":"file","created_at":7,"created_by":"human:root:1","size":9,"modified_at":1787245669712}}`,
+			value: ResourceStat{Exists: true, Meta: &ResourceMeta{Kind: "file", CreatedAt: 7, CreatedBy: "human:root:1", NodeType: "regular", Size: 9, ModifiedAt: 1787245669712}},
+			want:  `{"exists":true,"meta":{"kind":"file","created_at":7,"created_by":"human:root:1","node_type":"regular","size":9,"modified_at":1787245669712}}`,
 		},
 		{
 			// A device that reports no mtime omits the field rather than sending
@@ -254,8 +254,8 @@ func TestResourceResultsAreSpelledForTheWire(t *testing.T) {
 			// names, and dropping them made every reader stat each row to fill
 			// in a file list.
 			name:  "page",
-			value: ResourcePage{Items: []ResourceEntry{{ID: "daemon://host/c0/a.png", Kind: "file", Ops: []string{"read", "write"}, Meta: ResourceMeta{Size: 9, ModifiedAt: 1787245669712}}}, Next: "cur2"},
-			want:  `{"items":[{"id":"daemon://host/c0/a.png","kind":"file","ops":["read","write"],"meta":{"size":9,"modified_at":1787245669712}}],"next":"cur2"}`,
+			value: ResourcePage{Items: []ResourceEntry{{ID: "daemon://host/c0/a.png", Kind: "file", Ops: []string{"read", "write"}, Meta: ResourceMeta{NodeType: "regular", Size: 9, ModifiedAt: 1787245669712}}}, Next: "cur2"},
+			want:  `{"items":[{"id":"daemon://host/c0/a.png","kind":"file","ops":["read","write"],"meta":{"node_type":"regular","size":9,"modified_at":1787245669712}}],"next":"cur2"}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

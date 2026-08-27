@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
 // laneRPCTimeout is a test seam. Production always leaves it at the protocol
@@ -38,11 +39,11 @@ type serverLane struct {
 	// tracks compartment readiness, which varies under a live lane.
 	workspaceRoot string
 	pending       map[string]chan link.LaneFrame
-	actors       map[uint64]func()
-	nextActor    uint64
-	exchanges    map[uint64]net.Conn
-	nextExchange uint64
-	exchangeWG   sync.WaitGroup
+	actors        map[uint64]func()
+	nextActor     uint64
+	exchanges     map[uint64]net.Conn
+	nextExchange  uint64
+	exchangeWG    sync.WaitGroup
 }
 
 func newServerLane(carrier *carrierRow, stream *link.LaneStream, membrane membraneRow) *serverLane {
@@ -353,7 +354,7 @@ func (l *serverLane) workspace(ctx context.Context) (string, error) {
 	if cached != "" {
 		return cached, nil
 	}
-	reply, err := l.file(ctx, link.FileRoot, "")
+	reply, err := l.file(ctx, link.FileRequest{Op: link.FileRoot})
 	if err != nil {
 		return "", err
 	}
@@ -366,9 +367,9 @@ func (l *serverLane) workspace(ctx context.Context) (string, error) {
 	return reply.Root, nil
 }
 
-func (l *serverLane) file(ctx context.Context, op, path string) (link.FileReply, error) {
+func (l *serverLane) file(ctx context.Context, request link.FileRequest) (link.FileReply, error) {
 	reply, err := l.storageRoundTrip(ctx, link.LaneFrame{
-		Kind: link.LaneFileRequest, FileRequest: &link.FileRequest{Op: op, Path: path},
+		Kind: link.LaneFileRequest, FileRequest: &request,
 	})
 	if err != nil {
 		return link.FileReply{}, err
@@ -377,6 +378,9 @@ func (l *serverLane) file(ctx context.Context, op, path string) (link.FileReply,
 		return link.FileReply{}, errors.New("daemonhost: malformed file reply")
 	}
 	if !reply.FileReply.OK {
+		if reply.FileReply.Code == link.FileErrorBadCursor {
+			return *reply.FileReply, accessdoor.ErrMalformedFileCursor
+		}
 		return *reply.FileReply, errors.New(reply.FileReply.Reason)
 	}
 	return *reply.FileReply, nil

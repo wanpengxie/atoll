@@ -53,15 +53,16 @@ type CompartmentBuilder func(
 type LocalFileOpener interface {
 	OpenRead(path string) (io.ReadSeekCloser, error)
 	OpenWrite(path string) (accessdoor.WriteHandle, error)
-	Create(path string) error
+	Create(path string, nodeType accessdoor.FileNodeType) error
 	Delete(path string) error
 	Stat(path string) (FileInfo, bool, error)
-	List(prefix string) ([]FileInfo, error)
+	List(prefix string, limit int, cursor string) ([]FileInfo, string, error)
 }
 
 type FileInfo struct {
-	Path string
-	Size int64
+	Path     string
+	NodeType accessdoor.FileNodeType
+	Size     int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
 }

@@ -940,6 +940,15 @@ func (r resourceAdapter) CreateFileDecided(id resource.ResourceID, withContent b
 	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindFile, WithContent: withContent}, nil)
 }
 
+func (r resourceAdapter) CreateDirectory(id resource.ResourceID) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
+	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{
+		Kind: accessdoor.KindFile, NodeType: accessdoor.FileNodeDirectory,
+	}, nil)
+}
+
 type stateAdapter struct {
 	h        accessdoor.AccessHandle
 	ctx      func() context.Context

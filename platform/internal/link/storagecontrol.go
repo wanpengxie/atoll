@@ -3,6 +3,8 @@ package link
 import (
 	"errors"
 	"fmt"
+
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
 const (
@@ -22,17 +24,24 @@ const (
 	// LaneAttached refuses: compartment readiness varies while a lane lives,
 	// this does not.
 	FileRoot = "root"
+	// FileErrorBadCursor preserves the access-plane query verdict across the
+	// device lane without publishing filesystem error text as protocol.
+	FileErrorBadCursor = "bad_cursor"
 )
 
 type FileRequest struct {
-	RequestID string `json:"request_id"`
-	Op        string `json:"op"`
-	Path      string `json:"path"`
+	RequestID string                  `json:"request_id"`
+	Op        string                  `json:"op"`
+	Path      string                  `json:"path"`
+	NodeType  accessdoor.FileNodeType `json:"node_type,omitempty"`
+	Limit     int                     `json:"limit,omitempty"`
+	Cursor    string                  `json:"cursor,omitempty"`
 }
 
 type FileEntry struct {
-	Path string `json:"path"`
-	Size int64  `json:"size"`
+	Path     string                  `json:"path"`
+	NodeType accessdoor.FileNodeType `json:"node_type"`
+	Size     int64                   `json:"size"`
 	// ModifiedAt is Unix milliseconds. It rides with Size because the device's
 	// one stat answers both, and omitempty because a device that predates the
 	// field simply says nothing rather than claiming the epoch.
@@ -45,6 +54,8 @@ type FileReply struct {
 	Found     bool        `json:"found,omitempty"`
 	Entries   []FileEntry `json:"entries,omitempty"`
 	Reason    string      `json:"reason,omitempty"`
+	Code      string      `json:"code,omitempty"`
+	Next      string      `json:"next,omitempty"`
 	// Root carries the FileRoot answer only.
 	Root string `json:"root,omitempty"`
 }
@@ -61,6 +72,18 @@ func (m FileRequest) validate() error {
 			return errors.New("link: file_request.path must be empty for root")
 		}
 		return nil
+	}
+	if m.Op != FileCreate && m.NodeType != "" {
+		return errors.New("link: file_request.node_type belongs to create")
+	}
+	if m.Op != FileList && (m.Limit != 0 || m.Cursor != "") {
+		return errors.New("link: file_request limit/cursor belong to list")
+	}
+	if m.Op == FileList && m.Limit <= 0 {
+		return errors.New("link: file_request.list requires a positive limit")
+	}
+	if m.Op == FileCreate && m.NodeType != "" && m.NodeType != accessdoor.FileNodeRegular && m.NodeType != accessdoor.FileNodeDirectory {
+		return fmt.Errorf("link: invalid file node type %q", m.NodeType)
 	}
 	if m.Op == FileList && m.Path == "" {
 		return nil

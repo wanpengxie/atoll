@@ -35,6 +35,7 @@ type StatMeta struct {
 	Kind      resourcespec.ResourceKind
 	CreatedAt int64
 	CreatedBy actor.ActorID
+	NodeType  FileNodeType
 	Size      int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
@@ -53,9 +54,10 @@ type ListQuery struct {
 }
 
 type ListEntry struct {
-	ID   resource.ResourceID
-	Kind resourcespec.ResourceKind
-	Ops  OpSet
+	ID       resource.ResourceID
+	Kind     resourcespec.ResourceKind
+	Ops      OpSet
+	NodeType FileNodeType
 	// Size is the byte count, which a channel's file listing gets from the
 	// device's filesystem in the same breath as the name. Other kinds leave it
 	// zero, exactly as stat already does for them — every entry carries its
@@ -69,6 +71,15 @@ type ListPage struct {
 	Entries []ListEntry
 	Next    string
 	Reject  QueryReject
+}
+
+func fileNodeOps(nodeType FileNodeType) OpSet {
+	if nodeType == "" || nodeType == FileNodeRegular {
+		return OpSet{access.OpRead, access.OpWrite, access.OpDelete}
+	}
+	// A directory (and an unsupported physical node) has no byte stream. The
+	// query itself provides navigation; delete is its only object operation.
+	return OpSet{access.OpDelete}
 }
 
 const (
@@ -94,6 +105,15 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 		return fmt.Errorf("%w: invalid create kind", ErrMalformed)
 	}
 	if spec.Kind == resourcespec.KindFile {
+		if spec.NodeType == "" {
+			spec.NodeType = resourcespec.FileNodeRegular
+		}
+		if spec.NodeType != resourcespec.FileNodeRegular && spec.NodeType != resourcespec.FileNodeDirectory {
+			return fmt.Errorf("%w: invalid file node type", ErrMalformed)
+		}
+		if spec.NodeType == resourcespec.FileNodeDirectory && spec.WithContent {
+			return fmt.Errorf("%w: a directory cannot carry content", ErrMalformed)
+		}
 		if initial != nil {
 			return fmt.Errorf("%w: file bytes use the byte path", ErrMalformed)
 		}
@@ -102,6 +122,8 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 		}
 	} else if _, err := resourcespec.ParseFileAddress(string(id)); err == nil {
 		return fmt.Errorf("%w: kv id must not be a file address", ErrMalformed)
+	} else if spec.NodeType != "" {
+		return fmt.Errorf("%w: node type belongs to file create", ErrMalformed)
 	}
 	return nil
 }
@@ -141,7 +163,11 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	if d.deps.Files == nil {
 		return Outcome{}, errors.New("accessdoor: file control unavailable")
 	}
-	if err := d.deps.Files.Create(ctx, mount.DaemonID, address.Path); err != nil {
+	nodeType := spec.NodeType
+	if nodeType == "" {
+		nodeType = resourcespec.FileNodeRegular
+	}
+	if err := d.deps.Files.Create(ctx, mount.DaemonID, address.Path, nodeType); err != nil {
 		return executeFailure(ctx, err)
 	}
 	return Outcome{}, nil
@@ -174,7 +200,7 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 		if !found {
 			return StatResult{Reject: QueryNotFound}, nil
 		}
-		return StatResult{Meta: StatMeta{Kind: resourcespec.KindFile, Size: info.Size, ModifiedAt: info.ModifiedAt}, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}}, nil
+		return StatResult{Meta: StatMeta{Kind: resourcespec.KindFile, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt}, Ops: fileNodeOps(info.NodeType)}, nil
 	}
 	meta, found, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
@@ -208,9 +234,6 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		if d.deps.ChannelName == "" || prefix.Channel != d.deps.ChannelName {
 			return ListPage{}, fmt.Errorf("%w: file address names a different channel", ErrMalformed)
 		}
-		if q.Cursor != "" {
-			return ListPage{Reject: QueryBadCursor}, nil
-		}
 		if _, err := d.authorizeMember(ctx, caller); err != nil {
 			return ListPage{}, nil
 		}
@@ -221,7 +244,10 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		if d.deps.Files == nil {
 			return ListPage{}, errors.New("accessdoor: file control unavailable")
 		}
-		rows, err := d.deps.Files.List(ctx, mount.DaemonID, prefix.Path)
+		rows, next, err := d.deps.Files.List(ctx, mount.DaemonID, prefix.Path, normalizeListLimit(q.Limit), q.Cursor)
+		if errors.Is(err, ErrMalformedFileCursor) {
+			return ListPage{Reject: QueryBadCursor}, nil
+		}
 		if err != nil {
 			return ListPage{}, err
 		}
@@ -231,9 +257,9 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 			if err != nil {
 				return ListPage{}, err
 			}
-			entries = append(entries, ListEntry{ID: resource.ResourceID(address), Kind: resourcespec.KindFile, Ops: OpSet{access.OpRead, access.OpWrite, access.OpDelete}, Size: row.Size, ModifiedAt: row.ModifiedAt})
+			entries = append(entries, ListEntry{ID: resource.ResourceID(address), Kind: resourcespec.KindFile, Ops: fileNodeOps(row.NodeType), NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
 		}
-		return ListPage{Entries: entries}, nil
+		return ListPage{Entries: entries, Next: next}, nil
 	}
 	limit := normalizeListLimit(q.Limit)
 	rows, next, err := d.deps.Registry.List(ctx, q.Prefix, limit, q.Cursor)
