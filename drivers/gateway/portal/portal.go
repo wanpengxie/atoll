@@ -21,10 +21,10 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/dataplane"
-	"github.com/wanpengxie/atoll/platform/terminal"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/obs"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/platform/terminal"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -37,12 +37,12 @@ const sessionCookie = "atoll_session"
 const sessionTTL = 30 * 24 * time.Hour
 
 type Config struct {
-	Registry        *lagoon.Registry
-	Lobby           func(context.Context) (channelhost.Bundle, error)
-	Sessions        *gateway.SessionStore
-	Gateway         *gateway.Gateway
-	DaemonHost      *daemonhost.Host
-	DataPlane       dataplane.Redeemer
+	Registry   *lagoon.Registry
+	Lobby      func(context.Context) (channelhost.Bundle, error)
+	Sessions   *gateway.SessionStore
+	Gateway    *gateway.Gateway
+	DaemonHost *daemonhost.Host
+	DataPlane  dataplane.Redeemer
 	// Terminals owns live terminal sessions. Nil disables the terminal line
 	// entirely — /pty then answers unavailable, and nothing else changes.
 	Terminals       *terminal.Manager
@@ -51,7 +51,10 @@ type Config struct {
 	// never on restart. Carried on the attach receipt for client-side cache
 	// invalidation.
 	Boot string
-	Obs             ObsPlane
+	Obs  ObsPlane
+	// Updater owns the current node binary. It is deliberately outside the
+	// channel control plane: an upgrade restarts this process, not a member.
+	Updater UpdateService
 	// Web is the browser UI, served from this same origin because the UI
 	// addresses the node over relative paths. Nil serves no UI; the entrance
 	// then answers unknown paths the way it always has.
@@ -60,6 +63,11 @@ type Config struct {
 
 type ObsPlane interface {
 	Pull(ctx context.Context, principal, escapedPath, rawQuery string) (obs.Observation, error)
+}
+
+type UpdateService interface {
+	Status(context.Context, bool) (any, error)
+	Start(context.Context) (any, error)
 }
 type Portal struct {
 	cfg Config
@@ -80,6 +88,8 @@ func New(cfg Config) *Portal {
 	p.mux.HandleFunc("GET /compute", p.compute)
 	p.mux.HandleFunc("GET /files", p.files)
 	p.mux.HandleFunc("PUT /files", p.files)
+	p.mux.HandleFunc("GET /api/update", p.updateStatus)
+	p.mux.HandleFunc("POST /api/update", p.updateStart)
 	p.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	p.mux.HandleFunc("/", p.fallback)
 	return p
@@ -236,7 +246,7 @@ func (p *Portal) observe(w http.ResponseWriter, r *http.Request) {
 
 func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/ws", "/compute", "/healthz", ptyPath:
+	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/api/update", "/ws", "/compute", "/healthz", ptyPath:
 		writeError(w, http.StatusMethodNotAllowed, string(codeNotFound), "method not allowed")
 		return
 	}
@@ -249,6 +259,47 @@ func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.serveUI(w, r)
+}
+
+func (p *Portal) updateStatus(w http.ResponseWriter, r *http.Request) {
+	if !p.authorizeUpdate(w, r) {
+		return
+	}
+	answer, err := p.cfg.Updater.Status(r.Context(), r.URL.Query().Get("check") == "1")
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, answer)
+}
+
+func (p *Portal) updateStart(w http.ResponseWriter, r *http.Request) {
+	if !p.authorizeUpdate(w, r) {
+		return
+	}
+	answer, err := p.cfg.Updater.Start(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, string(codeConflictExists), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, answer)
+}
+
+func (p *Portal) authorizeUpdate(w http.ResponseWriter, r *http.Request) bool {
+	principal, ok := p.authenticate(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, string(codeNotAuthenticated), "invalid session")
+		return false
+	}
+	if principal != channelspec.RootPrincipalID {
+		writeError(w, http.StatusForbidden, string(codePermissionDenied), "only root may upgrade this node")
+		return false
+	}
+	if p.cfg.Updater == nil {
+		writeError(w, http.StatusServiceUnavailable, string(codeUnavailable), "automatic update unavailable")
+		return false
+	}
+	return true
 }
 
 // serveUI answers everything the node itself did not claim. A path naming a

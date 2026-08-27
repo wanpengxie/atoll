@@ -20,11 +20,11 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
-	"github.com/wanpengxie/atoll/platform/terminal"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/platform/obs"
+	"github.com/wanpengxie/atoll/platform/terminal"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/web"
@@ -40,6 +40,7 @@ type Config struct {
 	RootPassword     string
 	StewardClass     string // agent class carved as c0 steward on first install; empty = codex
 	OpenRegistration bool   // node policy: expose system.principal.create to the lobby (default closed)
+	Updater          portal.UpdateService
 }
 
 type Engine struct {
@@ -198,7 +199,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		Now:      func() int64 { return time.Now().UnixMilli() },
 	})
 	e.terminals = terminal.NewManager(ptyOpener{host: e.daemonHost}, portal.NewRecorder(e.acquireChannel))
-	p := portal.New(portal.Config{Terminals: e.terminals, Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, ContractVersion: contractVersion, Boot: fmt.Sprintf("%s@%d", installed.C0Genesis.ChannelID, installed.C0Genesis.CreatedAt), Web: web.Assets()})
+	p := portal.New(portal.Config{Terminals: e.terminals, Registry: e.registry, Lobby: e.acquireLobby, Sessions: e.sessions, Gateway: e.gateway, DaemonHost: e.daemonHost, DataPlane: e.dataRedeemer, Obs: observationPlane, Updater: cfg.Updater, ContractVersion: contractVersion, Boot: fmt.Sprintf("%s@%d", installed.C0Genesis.ChannelID, installed.C0Genesis.CreatedAt), Web: web.Assets()})
 	e.handler = p
 	e.gateway.Start()
 	if err := e.host.StartConvergence(); err != nil {

@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wanpengxie/atoll/cmd/internal/autoupdate"
 	"github.com/wanpengxie/atoll/cmd/internal/buildinfo"
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
 	"github.com/wanpengxie/atoll/cmd/internal/engineboot"
@@ -59,6 +60,9 @@ func main() {
 			return
 		case "status":
 			cmdStatus(os.Args[2:])
+			return
+		case "update-worker":
+			cmdUpdateWorker(os.Args[2:])
 			return
 		}
 	}
@@ -102,6 +106,27 @@ func main() {
 	if *rootPassword == "" {
 		*rootPassword = os.Getenv("ATOLL_ROOT_PASSWORD")
 	}
+	self, err := os.Executable()
+	if err != nil {
+		log.Fatalf("up: executable: %v", err)
+	}
+	startArgs := []string{"--dir", *dir, "--addr", *addr}
+	if *steward != "" {
+		startArgs = append(startArgs, "--steward", *steward)
+	}
+	if *openReg {
+		startArgs = append(startArgs, "--open-registration")
+	}
+	updater, err := autoupdate.New(autoupdate.Config{
+		Home:           *dir,
+		CurrentVersion: buildinfo.Version,
+		Executable:     self,
+		ParentPID:      os.Getpid(),
+		StartArgs:      startArgs,
+	})
+	if err != nil {
+		log.Fatalf("up: automatic update: %v", err)
+	}
 
 	serverHome := filepath.Join(*dir, "server")
 	channelDir := filepath.Join(serverHome, "channels")
@@ -130,6 +155,7 @@ func main() {
 		RootPassword:     *rootPassword,
 		StewardClass:     *steward,
 		OpenRegistration: *openReg,
+		Updater:          updater,
 	}, logger)
 	if err != nil {
 		log.Fatalf("up: %v", err)
@@ -203,6 +229,18 @@ func main() {
 	}
 	if exitCode != 0 {
 		os.Exit(exitCode)
+	}
+}
+
+func cmdUpdateWorker(args []string) {
+	fs := flag.NewFlagSet("update-worker", flag.ExitOnError)
+	request := fs.String("request", "", "update request file")
+	_ = fs.Parse(args)
+	if *request == "" {
+		log.Fatal("update-worker: --request required")
+	}
+	if err := autoupdate.RunWorker(*request); err != nil {
+		log.Fatalf("update-worker: %v", err)
 	}
 }
 

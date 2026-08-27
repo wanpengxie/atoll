@@ -37,6 +37,23 @@ type obsPlaneStub struct {
 	err                    error
 }
 
+type updateServiceStub struct {
+	statusCalls int
+	startCalls  int
+	check       bool
+}
+
+func (s *updateServiceStub) Status(_ context.Context, check bool) (any, error) {
+	s.statusCalls++
+	s.check = check
+	return map[string]any{"current_version": "v0.06", "latest_version": "v0.07", "available": true, "status": "idle"}, nil
+}
+
+func (s *updateServiceStub) Start(context.Context) (any, error) {
+	s.startCalls++
+	return map[string]any{"status": "starting"}, nil
+}
+
 func (s *obsPlaneStub) Pull(_ context.Context, principal, path, query string) (obs.Observation, error) {
 	s.principal, s.path, s.query = principal, path, query
 	return s.answer, s.err
@@ -115,6 +132,36 @@ func TestFallbacksReturnContractJSONWithoutCORS(t *testing.T) {
 				t.Fatalf("code=%q is outside the closed set", body["code"])
 			}
 		})
+	}
+}
+
+func TestUpdateAPIIsAuthenticatedRootOnlyAndDispatches(t *testing.T) {
+	sessions := gateway.NewSessionStore()
+	updates := &updateServiceStub{}
+	p := New(Config{ContractVersion: "test", Sessions: sessions, Updater: updates})
+	request := func(principal, method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		if principal != "" {
+			req.Header.Set("Authorization", "Bearer "+sessions.Mint(principal, time.Hour))
+		}
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request("", http.MethodGet, "/api/update"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request("alice", http.MethodGet, "/api/update"); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-root status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request("root", http.MethodGet, "/api/update?check=1"); rec.Code != http.StatusOK || !updates.check {
+		t.Fatalf("check status=%d check=%v body=%s", rec.Code, updates.check, rec.Body.String())
+	}
+	if rec := request("root", http.MethodPost, "/api/update"); rec.Code != http.StatusAccepted || updates.startCalls != 1 {
+		t.Fatalf("start status=%d calls=%d body=%s", rec.Code, updates.startCalls, rec.Body.String())
+	}
+	if rec := request("root", http.MethodDelete, "/api/update"); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("wrong method status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
