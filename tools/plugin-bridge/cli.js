@@ -2,44 +2,60 @@
 'use strict'
 
 // atoll-plugin-bridge — an OPTIONAL tool for one situation: your browser is on
-// your laptop, and the atoll plugin adapter that wants to drive it is running
-// somewhere else. Nobody else needs to run this. If the adapter is on the same
-// machine as your browser, the plugin reaches it directly and this program has
+// your laptop, and the atoll plugin adapters that want to drive it are running
+// somewhere else. Nobody else needs to run this. If the adapters are on the same
+// machine as your browser, the plugins reach them directly and this program has
 // no job to do (it will say so and exit).
 //
 // It is a forwarder and nothing else. It holds no state, understands none of
-// the frames it carries, and cannot be told at runtime where to connect: the
-// upstream address comes from the command line, once, at launch. That is
-// deliberate — a forwarder that could be re-pointed by something arriving over
-// its own socket would be an open proxy wearing a helpful name.
+// the frames it carries, knows nothing about xhs or kimi or any other adapter,
+// and cannot be told at runtime where to connect: every route comes from the
+// command line, once, at launch. That is deliberate — a forwarder that could be
+// re-pointed by something arriving over its own socket would be an open proxy
+// wearing a helpful name.
 //
 //   plugin ──dials──▶ this bridge (127.0.0.1:8090) ──dials──▶ adapter (remote)
 //
 // The direction matters: the adapter LISTENS and the plugin DIALS IN. So the
 // bridge stands in for the adapter locally — the plugin keeps its existing
 // localhost configuration and never learns anything moved.
+//
+// One process carries as many routes as you give it, because you may well have
+// two plugins installed. Each route is a PAIR, not a port in a list: the local
+// port is fixed by the plugin that dials it, the remote address is wherever
+// `listen.set` put that adapter, and neither can be derived from the other. So
+// they are named together, and each route runs independently — one adapter
+// being unreachable leaves the others carrying traffic.
 
 const http = require('http')
 const net = require('net')
 const { WebSocketServer, WebSocket } = require('ws')
 
-const USAGE = `atoll-plugin-bridge — forward a local browser plugin to a remote atoll adapter
+const USAGE = `atoll-plugin-bridge — forward local browser plugins to remote atoll adapters
 
-  atoll-plugin-bridge --upstream <ws-url> [--listen <host:port>]
+  atoll-plugin-bridge --map <local-host:port>=<ws-url> [--map ...]
 
-  --upstream  Required. Where the adapter is listening, as a WebSocket URL,
-              e.g. ws://100.64.0.7:8090/device
-              Get it from the adapter itself: send xhs.listen.get (or
-              kimi.listen.get) and use the address it reports.
-  --listen    Where this bridge listens for the plugin. Default 127.0.0.1:8090
-              (xhs); use 127.0.0.1:8091 for kimi. Must be a loopback address:
-              this endpoint is keyless, exactly like the adapter's.
-  --quiet     Only report errors.
-  --help      Print this.
+  --map    Required, repeatable. One route: where this bridge listens for a
+           plugin, and where it forwards to. Give one --map per adapter.
+
+             --map 127.0.0.1:8090=ws://100.64.0.7:8090/device   # xhs
+             --map 127.0.0.1:8091=ws://100.64.0.7:8091/device   # kimi
+
+           LEFT is the port your plugin already dials — the plugin decides it,
+           so it does not change. RIGHT is where that adapter is listening; ask
+           the adapter itself with xhs.listen.get / kimi.listen.get and use the
+           address it reports. The two sides are unrelated: the ports need not
+           match, and nothing here can guess one from the other.
+
+           The local side must be a loopback address, because this endpoint is
+           keyless — exactly like the adapter's.
+
+  --quiet  Only report errors.
+  --help   Print this.
 `
 
 function parseArgs (argv) {
-  const out = { listen: '127.0.0.1:8090', quiet: false }
+  const out = { maps: [], quiet: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     switch (arg) {
@@ -50,13 +66,12 @@ function parseArgs (argv) {
       case '--quiet':
         out.quiet = true
         break
-      case '--upstream':
-      case '--listen': {
+      case '--map': {
         const value = argv[++i]
         if (value === undefined || value.startsWith('--')) {
           throw new Error(`${arg} needs a value`)
         }
-        out[arg.slice(2)] = value
+        out.maps.push(value)
         break
       }
       default:
@@ -66,29 +81,43 @@ function parseArgs (argv) {
   return out
 }
 
-// splitHostPort keeps the local listen address to the same shape the adapter
-// accepts, and refuses a wildcard for the same reason the adapter does: this
-// endpoint has no key, so "listen everywhere" would hand your browser to every
-// network this machine happens to be on.
-function splitHostPort (addr) {
+// parseMap splits one route. The separator is the FIRST '=', because the
+// upstream URL on the right may contain one and the local address never does.
+function parseMap (spec) {
+  const at = spec.indexOf('=')
+  if (at <= 0) {
+    throw new Error(`--map must be <local-host:port>=<ws-url>, got ${spec}`)
+  }
+  return {
+    listen: checkListen(spec.slice(0, at)),
+    upstream: checkUpstream(spec.slice(at + 1)),
+    spec
+  }
+}
+
+// checkListen keeps the local side to the same shape the adapter accepts, and
+// refuses a wildcard for the same reason the adapter does: this endpoint has no
+// key, so "listen everywhere" would hand your browser to every network this
+// machine happens to be on.
+function checkListen (addr) {
   const at = addr.lastIndexOf(':')
-  if (at <= 0) throw new Error(`--listen must be host:port, got ${addr}`)
+  if (at <= 0) throw new Error(`the local side of --map must be host:port, got ${addr}`)
   const host = addr.slice(0, at).replace(/^\[|\]$/g, '')
   const port = Number(addr.slice(at + 1))
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error(`--listen port is not a port: ${addr}`)
+    throw new Error(`the local side of --map is not a port: ${addr}`)
   }
   if (host === '' || host === '0.0.0.0' || host === '::') {
-    throw new Error(`--listen ${addr} is a wildcard; this endpoint is keyless, so name the loopback address explicitly`)
+    throw new Error(`--map local side ${addr} is a wildcard; this endpoint is keyless, so name the loopback address explicitly`)
   }
   const family = net.isIP(host)
   const loopback = host === 'localhost' ||
     (family === 4 && host.startsWith('127.')) ||
     (family === 6 && (host === '::1' || host === '0:0:0:0:0:0:0:1'))
   if (!loopback) {
-    throw new Error(`--listen ${addr} is not loopback; the bridge serves the browser on THIS machine, and exposing it further would let anyone who can reach it drive your browser`)
+    throw new Error(`--map local side ${addr} is not loopback; the bridge serves the browser on THIS machine, and exposing it further would let anyone who can reach it drive your browser`)
   }
-  return { host, port }
+  return { host, port, addr }
 }
 
 function checkUpstream (raw) {
@@ -96,42 +125,18 @@ function checkUpstream (raw) {
   try {
     url = new URL(raw)
   } catch {
-    throw new Error(`--upstream is not a URL: ${raw}`)
+    throw new Error(`the upstream side of --map is not a URL: ${raw}`)
   }
   if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
-    throw new Error(`--upstream must be ws:// or wss://, got ${url.protocol}`)
+    throw new Error(`the upstream side of --map must be ws:// or wss://, got ${url.protocol}`)
   }
   return url.toString()
 }
 
-function main () {
-  let args
-  try {
-    args = parseArgs(process.argv.slice(2))
-  } catch (err) {
-    process.stderr.write(`${err.message}\n\n${USAGE}`)
-    process.exit(2)
-  }
-  if (args.help) {
-    process.stdout.write(USAGE)
-    return
-  }
-  if (!args.upstream) {
-    process.stderr.write(`--upstream is required\n\n${USAGE}`)
-    process.exit(2)
-  }
-
-  let upstream, listen
-  try {
-    upstream = checkUpstream(args.upstream)
-    listen = splitHostPort(args.listen)
-  } catch (err) {
-    process.stderr.write(`${err.message}\n`)
-    process.exit(2)
-  }
-
-  const log = args.quiet ? () => {} : (...m) => process.stderr.write(`${m.join(' ')}\n`)
-
+// startRoute brings up one local endpoint forwarding to one upstream. Each
+// route owns its own single-connection slot: two plugins are two conversations,
+// and a new xhs connection has no business displacing a live kimi one.
+function startRoute (route, log, onFatal, onListening) {
   const server = http.createServer((req, res) => {
     res.writeHead(426, { 'content-type': 'text/plain' })
     res.end('this endpoint speaks WebSocket only\n')
@@ -149,13 +154,13 @@ function main () {
 
   wss.on('connection', (plugin) => {
     if (current) {
-      // One plugin, one bridge — mirrors the adapter, which also keeps a single
+      // One plugin per route, mirroring the adapter, which also keeps a single
       // connection and lets the newest one win.
-      log('bridge: a new plugin connected; dropping the previous one')
+      log(`${route.listen.addr}: a new plugin connected; dropping the previous one`)
       current.plugin.close()
     }
 
-    const up = new WebSocket(upstream)
+    const up = new WebSocket(route.upstream)
     const pair = { plugin, up }
     current = pair
 
@@ -165,13 +170,13 @@ function main () {
     const backlog = []
     const closePair = (why) => {
       if (current === pair) current = null
-      if (why) log(`bridge: ${why}`)
+      if (why) log(`${route.listen.addr}: ${why}`)
       try { plugin.close() } catch {}
       try { up.close() } catch {}
     }
 
     up.on('open', () => {
-      log(`bridge: plugin ⇄ ${upstream}`)
+      log(`${route.listen.addr}: plugin ⇄ ${route.upstream}`)
       for (const frame of backlog.splice(0)) up.send(frame)
     })
     up.on('message', (data, isBinary) => {
@@ -191,33 +196,90 @@ function main () {
   // ws forwards the http server's errors onto the WebSocketServer, so the
   // handler has to sit on both — an unhandled 'error' there would surface as a
   // raw stack trace instead of the sentence that tells the operator what to do.
-  const onError = (err) => {
-    if (err.code === 'EADDRINUSE') {
-      // Almost always this means an adapter is already running on this machine
-      // — in which case the plugin can reach it directly and the bridge is not
-      // wanted. Say that, rather than a bare errno.
-      process.stderr.write(
-        `${args.listen} is already in use.\n` +
-        'If an atoll adapter is already running here, your plugin can reach it directly and you do not need this bridge.\n' +
-        'Otherwise pass --listen with a free port and point the plugin at it.\n')
-      process.exit(3)
-    }
-    process.stderr.write(`bridge: ${err.message}\n`)
-    process.exit(1)
-  }
+  const onError = (err) => onFatal(route, err)
   server.on('error', onError)
   wss.on('error', onError)
 
-  server.listen(listen.port, listen.host, () => {
-    log(`bridge: listening on ${args.listen}/device, forwarding to ${upstream}`)
-    log('bridge: point your browser plugin at this address; nothing else needs to change')
+  server.listen(route.listen.port, route.listen.host, () => {
+    log(`listening on ${route.listen.addr}/device → ${route.upstream}`)
+    onListening()
   })
+
+  return { server, wss }
+}
+
+function main () {
+  let args
+  try {
+    args = parseArgs(process.argv.slice(2))
+  } catch (err) {
+    process.stderr.write(`${err.message}\n\n${USAGE}`)
+    process.exit(2)
+  }
+  if (args.help) {
+    process.stdout.write(USAGE)
+    return
+  }
+  if (args.maps.length === 0) {
+    process.stderr.write(`at least one --map is required\n\n${USAGE}`)
+    process.exit(2)
+  }
+
+  let routes
+  try {
+    routes = args.maps.map(parseMap)
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`)
+    process.exit(2)
+  }
+  const seen = new Set()
+  for (const route of routes) {
+    if (seen.has(route.listen.addr)) {
+      process.stderr.write(`${route.listen.addr} appears in more than one --map; each local address can forward to exactly one adapter\n`)
+      process.exit(2)
+    }
+    seen.add(route.listen.addr)
+  }
+
+  const log = args.quiet ? () => {} : (...m) => process.stderr.write(`${m.join(' ')}\n`)
+
+  // A route that cannot bind stops the whole bridge rather than leaving a
+  // half-started one: a plugin whose route silently never came up looks exactly
+  // like a hung adapter, and that is a much worse afternoon than an error at
+  // launch saying which --map to drop.
+  const onFatal = (route, err) => {
+    if (err.code === 'EADDRINUSE') {
+      // Almost always this means an adapter is already running on this machine
+      // — in which case that plugin can reach it directly and this route is not
+      // wanted. Say that, rather than a bare errno.
+      process.stderr.write(
+        `${route.listen.addr} is already in use.\n` +
+        'If an atoll adapter is already running here, your plugin can reach it directly and you do not need this route.\n' +
+        `Drop --map ${route.spec}, or give it a free local port and point the plugin at that instead.\n`)
+      process.exit(3)
+    }
+    process.stderr.write(`${route.listen.addr}: ${err.message}\n`)
+    process.exit(1)
+  }
+
+  // The "ready" line waits for every route to actually bind, so it can never
+  // appear above an error saying one of them did not.
+  let pending = routes.length
+  const onListening = () => {
+    if (--pending === 0) {
+      log(`bridge: ${routes.length} route${routes.length === 1 ? '' : 's'} up; point your plugins at the local addresses above, nothing else needs to change`)
+    }
+  }
+  const running = routes.map((route) => startRoute(route, log, onFatal, onListening))
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.on(signal, () => {
       log('bridge: stopping')
-      wss.close()
-      server.close(() => process.exit(0))
+      for (const { server, wss } of running) {
+        wss.close()
+        server.close()
+      }
+      process.exit(0)
     })
   }
 }

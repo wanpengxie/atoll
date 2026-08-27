@@ -67,7 +67,7 @@ function freePort () {
 test('a frame sent by the plugin reaches the adapter and its reply comes back', async (t) => {
   const upstream = await startUpstream()
   const port = await freePort()
-  const bridge = startBridge(['--upstream', upstream.url, '--listen', `127.0.0.1:${port}`])
+  const bridge = startBridge(['--map', `127.0.0.1:${port}=${upstream.url}`])
   t.after(() => { bridge.child.kill(); upstream.close() })
 
   await waitFor(() => bridge.text().includes('listening on'))
@@ -92,7 +92,7 @@ test('a frame sent by the plugin reaches the adapter and its reply comes back', 
 test('a frame sent before the upstream is up is still delivered', async (t) => {
   const upstream = await startUpstream()
   const port = await freePort()
-  const bridge = startBridge(['--upstream', upstream.url, '--listen', `127.0.0.1:${port}`])
+  const bridge = startBridge(['--map', `127.0.0.1:${port}=${upstream.url}`])
   t.after(() => { bridge.child.kill(); upstream.close() })
   await waitFor(() => bridge.text().includes('listening on'))
 
@@ -115,7 +115,7 @@ test('a frame sent before the upstream is up is still delivered', async (t) => {
 test('losing the adapter closes the plugin connection', async (t) => {
   const upstream = await startUpstream()
   const port = await freePort()
-  const bridge = startBridge(['--upstream', upstream.url, '--listen', `127.0.0.1:${port}`])
+  const bridge = startBridge(['--map', `127.0.0.1:${port}=${upstream.url}`])
   t.after(() => { bridge.child.kill() })
   await waitFor(() => bridge.text().includes('listening on'))
 
@@ -142,12 +142,12 @@ test('refuses to start when the local port is already taken, and explains why', 
   await new Promise((resolve) => squatter.on('listening', resolve))
   const port = squatter.address().port
 
-  const bridge = startBridge(['--upstream', upstream.url, '--listen', `127.0.0.1:${port}`])
+  const bridge = startBridge(['--map', `127.0.0.1:${port}=${upstream.url}`])
   const code = await new Promise((resolve) => bridge.child.on('exit', resolve))
 
   assert.strictEqual(code, 3)
   assert.match(bridge.text(), /already in use/)
-  assert.match(bridge.text(), /do not need this bridge/)
+  assert.match(bridge.text(), /do not need this route/)
   squatter.close()
   upstream.close()
 })
@@ -162,7 +162,7 @@ test('refuses a wildcard or routable local bind', async () => {
     [':9', /host:port/],
     ['10.0.0.1:9', /not loopback/]
   ]) {
-    const bridge = startBridge(['--upstream', upstream.url, '--listen', addr])
+    const bridge = startBridge(['--map', `${addr}=${upstream.url}`])
     const code = await new Promise((resolve) => bridge.child.on('exit', resolve))
     assert.strictEqual(code, 2, `${addr} should have been refused`)
     assert.match(bridge.text(), pattern)
@@ -170,9 +170,87 @@ test('refuses a wildcard or routable local bind', async () => {
   upstream.close()
 })
 
-test('refuses to run without an upstream', async () => {
+test('refuses to run without a route', async () => {
   const bridge = startBridge([])
   const code = await new Promise((resolve) => bridge.child.on('exit', resolve))
   assert.strictEqual(code, 2)
-  assert.match(bridge.text(), /--upstream is required/)
+  assert.match(bridge.text(), /at least one --map is required/)
+})
+
+// Two plugins installed means two adapters, two local ports and two upstreams —
+// and the pairing between them cannot be derived, only stated. One process
+// carries both, and the routes are genuinely independent: a frame on one must
+// not reach the other's adapter, and one plugin connecting must not disturb the
+// other's live connection.
+test('two routes run side by side without crossing', async (t) => {
+  const a = await startUpstream()
+  const b = await startUpstream()
+  const portA = await freePort()
+  const portB = await freePort()
+  const bridge = startBridge([
+    '--map', `127.0.0.1:${portA}=${a.url}`,
+    '--map', `127.0.0.1:${portB}=${b.url}`
+  ])
+  t.after(() => { bridge.child.kill(); a.close(); b.close() })
+  await waitFor(() => (bridge.text().match(/listening on/g) || []).length === 2)
+
+  const pluginA = new WebSocket(`ws://127.0.0.1:${portA}/device`)
+  const pluginB = new WebSocket(`ws://127.0.0.1:${portB}/device`)
+  const repliesA = []
+  const repliesB = []
+  pluginA.on('message', (raw) => repliesA.push(JSON.parse(raw.toString())))
+  pluginB.on('message', (raw) => repliesB.push(JSON.parse(raw.toString())))
+  await Promise.all([
+    new Promise((resolve) => pluginA.on('open', resolve)),
+    new Promise((resolve) => pluginB.on('open', resolve))
+  ])
+
+  pluginA.send(JSON.stringify({ correlation_id: 'a-1', cmd: 'search', params: {} }))
+  pluginB.send(JSON.stringify({ correlation_id: 'b-1', cmd: 'navigate', params: {} }))
+  await waitFor(() => repliesA.length > 0 && repliesB.length > 0)
+
+  assert.strictEqual(repliesA[0].correlation_id, 'a-1')
+  assert.strictEqual(repliesB[0].correlation_id, 'b-1')
+  assert.deepStrictEqual(a.seen.map((f) => f.cmd), ['search'])
+  assert.deepStrictEqual(b.seen.map((f) => f.cmd), ['navigate'])
+  assert.strictEqual(pluginA.readyState, WebSocket.OPEN, 'the second plugin displaced the first')
+  assert.strictEqual(pluginB.readyState, WebSocket.OPEN)
+  pluginA.close()
+  pluginB.close()
+})
+
+// The same local port cannot forward to two adapters, and that is a mistake
+// worth catching at launch rather than as "one of my plugins randomly talks to
+// the wrong thing".
+test('refuses the same local address twice', async () => {
+  const upstream = await startUpstream()
+  const bridge = startBridge([
+    '--map', `127.0.0.1:9=${upstream.url}`,
+    '--map', `127.0.0.1:9=${upstream.url}`
+  ])
+  const code = await new Promise((resolve) => bridge.child.on('exit', resolve))
+  assert.strictEqual(code, 2)
+  assert.match(bridge.text(), /more than one --map/)
+  upstream.close()
+})
+
+// A route that cannot bind must stop the whole bridge. A half-started bridge
+// where one plugin's route silently never came up is indistinguishable from a
+// hung adapter, which is far harder to diagnose than an error at launch.
+test('one unbindable route stops the whole bridge and names it', async () => {
+  const upstream = await startUpstream()
+  const squatter = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => squatter.on('listening', resolve))
+  const taken = squatter.address().port
+  const free = await freePort()
+
+  const bridge = startBridge([
+    '--map', `127.0.0.1:${free}=${upstream.url}`,
+    '--map', `127.0.0.1:${taken}=${upstream.url}`
+  ])
+  const code = await new Promise((resolve) => bridge.child.on('exit', resolve))
+  assert.strictEqual(code, 3)
+  assert.match(bridge.text(), new RegExp(`127\\.0\\.0\\.1:${taken} is already in use`))
+  squatter.close()
+  upstream.close()
 })

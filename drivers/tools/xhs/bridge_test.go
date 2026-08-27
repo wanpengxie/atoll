@@ -43,8 +43,7 @@ func TestPluginBridgeCarriesARequestToTheRealAdapter(t *testing.T) {
 	// The bridge, standing in for the adapter on a local port the plugin dials.
 	local := freeLoopbackAddr(t)
 	cmd := exec.Command(node, filepath.Join(root, "cli.js"),
-		"--upstream", "ws://"+a.ListenAddr()+"/device",
-		"--listen", local)
+		"--map", local+"=ws://"+a.ListenAddr()+"/device")
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
