@@ -65,6 +65,35 @@ func TestResolveChannelCreateProducesTypedTrustedSeats(t *testing.T) {
 	}
 }
 
+// An ordinary seated agent (the member.create birth) carries no explicit
+// principal: its seat intent travels by declaration alone, exactly like a
+// recipe seat. Only a trusted identity carry (the steward case above) brings
+// a principal across.
+func TestResolveChannelCreateCarriesDeclarationOnlyForOrdinaryAgents(t *testing.T) {
+	s := New(Deps{ActorFacts: createFacts{
+		"human:root:1":  {Kind: actor.KindHuman, Principal: "root"},
+		"agent:codex:3": {Kind: actor.KindAgent, SourceDeclID: "codex"},
+	}})
+	raw, createErr := s.resolveChannelCreate(context.Background(), json.RawMessage(`{
+		"name":"child",
+		"recipe":{},
+		"initial_actor_ids":["human:root:1","agent:codex:3"]
+	}`))
+	if createErr != nil {
+		t.Fatal(createErr.detail)
+	}
+	var got lagoon.ResolvedChannelCreate
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.InitialSeats) != 2 {
+		t.Fatalf("initial seats=%+v", got.InitialSeats)
+	}
+	if seat := got.InitialSeats[1]; seat.Kind != actor.KindAgent || seat.Principal != "" || seat.DeclID != "codex" || seat.SourceActorID != "agent:codex:3" {
+		t.Fatalf("agent seat=%+v", seat)
+	}
+}
+
 func TestResolveChannelCreateRejectsPlatformManagedKindsAndDuplicates(t *testing.T) {
 	s := New(Deps{ActorFacts: createFacts{
 		"peer:child:1": {Kind: actor.KindPeer, SourceDeclID: "child"},
