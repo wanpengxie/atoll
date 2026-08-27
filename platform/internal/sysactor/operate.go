@@ -41,6 +41,7 @@ const (
 	TypeMemberDelete     = message.TypeSystemMemberDelete
 	TypeMemberRestart    = message.TypeSystemMemberRestart
 	TypeMemberRestartAll = message.TypeSystemMemberRestartAll
+	TypeRequestCancel    = message.TypeSystemRequestCancel
 )
 
 // OperateRequest is the decoded delivery an OperateExecutor acts on. Initiator
