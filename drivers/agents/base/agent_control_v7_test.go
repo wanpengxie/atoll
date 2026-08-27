@@ -698,7 +698,6 @@ func TestAgentControl25ReplaceFailuresAreAtomicAndSuccessNeedsNoFreeze(t *testin
 		{name: "format", sender: "caller", payload: `{"target":"target","old_text":"old"}`, code: "invalid_args", location: book.Buffered},
 		{name: "attachment format", sender: "caller", payload: `{"target":"target","old_text":"old","new_text":"new","attachments":{}}`, code: "invalid_args", location: book.Buffered},
 		{name: "missing target", sender: "caller", payload: `{"target":"missing","old_text":"old","new_text":"new"}`, code: errorCASMismatch, location: book.Buffered},
-		{name: "ownership", sender: "other", payload: `{"target":"target","old_text":"old","new_text":"new"}`, code: "target_not_owned", location: book.Buffered},
 		{name: "location", sender: "caller", payload: `{"target":"target","old_text":"old","new_text":"new"}`, code: errorCASMismatch, location: book.Workspace},
 		{name: "old text", sender: "caller", payload: `{"target":"target","old_text":"wrong","new_text":"new"}`, code: errorCASMismatch, location: book.Buffered},
 		{name: "capacity", sender: "caller", payload: `{"target":"target","old_text":"old","new_text":"much larger"}`, code: errorBaseCapacity, location: book.Buffered, maxBytes: 14},
@@ -843,13 +842,23 @@ func TestAgentControl35SteerTargetAdmission(t *testing.T) {
 			t.Fatalf("terminal=%v", got)
 		}
 	})
-	t.Run("target must belong to sender", func(t *testing.T) {
+	// A channel is one permission boundary, so steering a queued request does
+	// NOT require having sent it. The case that made this matter: a request an
+	// agent relayed on somebody's behalf is owned by the relaying agent, so an
+	// owner-only rule left the person whose errand it is unable to touch their
+	// own work while watching it sit in the queue.
+	t.Run("target need not belong to the sender", func(t *testing.T) {
 		l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
 		row := &book.Request{ID: "target", Sender: "owner", Location: book.Buffered}
 		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
 		l.handleIntake(v7Request("insert", TypeSteer, "other", `{"target":"target"}`))
-		if got := sys.terminal("insert"); len(got) != 1 || got[0].code != "target_not_owned" {
-			t.Fatalf("terminal=%v", got)
+		got := sys.terminal("insert")
+		if len(got) != 1 || got[0].fail {
+			t.Fatalf("terminal=%v, want the steer accepted", got)
+		}
+		// Nothing was running, so being moved to the front means being started.
+		if l.state.Turn == nil || l.state.Turn.Owner != "target" {
+			t.Fatalf("turn=%+v, want the steered target to have started", l.state.Turn)
 		}
 	})
 	t.Run("target and text are mutually exclusive", func(t *testing.T) {

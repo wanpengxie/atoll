@@ -696,10 +696,13 @@ func (l *agentLoop) handleSteerTarget(msg actorbase.Msg, targetID book.RequestID
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorCASMismatch, detail: "steer target is not buffered"})
 		return
 	}
-	if row.Sender != string(msg.Sender.ID) {
-		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "target_not_owned", detail: "steer target belongs to a different sender"})
-		return
-	}
+	// No sender check: a channel is ONE permission boundary, so steering a
+	// queued request is open to every member that may write here — the same
+	// rule agent.interrupt has always followed. Restricting it to the original
+	// sender left the commonest case unreachable: a request an agent relayed on
+	// somebody's behalf could be seen waiting in the queue and touched by
+	// nobody, because its sender is the relaying agent rather than the person
+	// whose errand it is.
 	turn := l.state.Turn
 	if turn == nil || turn.Phase != book.TurnActive {
 		l.state.RemoveFromBuffer(targetID)
@@ -876,9 +879,9 @@ func (l *agentLoop) validateReplace(msg actorbase.Msg) (replacePayload, string, 
 	if target == nil {
 		return replacePayload{}, errorCASMismatch, "replace target does not exist"
 	}
-	if target.Sender != string(msg.Sender.ID) {
-		return replacePayload{}, "target_not_owned", "replace target belongs to a different sender"
-	}
+	// Open to any member that may write here, for the same reason steer is —
+	// see handleSteerTarget. The replacement row is authored by whoever sent
+	// the replace, so the ledger keeps saying who actually changed what.
 	if target.Location != book.Buffered || l.state.IndexInBuffer(targetID) < 0 || target.Input.Text != *payload.OldText {
 		return replacePayload{}, errorCASMismatch, "replace target is not buffered at the expected text"
 	}

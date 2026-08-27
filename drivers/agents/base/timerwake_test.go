@@ -6,10 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/drivers/agents/base/internal/book"
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // postingSys captures the self-commission the loop writes when an alarm rings.
@@ -183,6 +186,69 @@ func TestSelfAddressedRequestsAreIgnoredExceptTheCommission(t *testing.T) {
 		got := sys.terminal("w3")
 		if len(got) != 1 || got[0].code != "type_unsupported" {
 			t.Fatalf("terminal=%+v, want a type_unsupported refusal", got)
+		}
+	})
+}
+
+// Controlling a queued request does not require having sent it. Relayed work
+// is the case that forces this: when an agent forwards somebody's errand, the
+// queued row's sender is the relaying AGENT, so an owner-only rule left the
+// person whose errand it is watching their own work sit in the queue with
+// nothing they could do to it. A channel is one permission boundary, so every
+// member that may write here may steer or replace what is waiting.
+func TestQueuedWorkIsControllableByAnyMemberNotOnlyItsSender(t *testing.T) {
+	t.Run("replace", func(t *testing.T) {
+		l, sys, _ := newV7Loop(t, nil)
+		l.state.Turn = &book.Turn{Phase: book.TurnActive, ID: "busy"}
+		relayed := &book.Request{
+			ID: "relayed", Sender: "agent:relay:1", Location: book.Buffered,
+			Input: runtimeproto.Input{Text: "old"}, Bytes: 3,
+			Scope: l.vault.Mint("relayed", "relayed"),
+		}
+		l.state.Requests[relayed.ID] = relayed
+		l.state.Buffer, l.state.BufferBytes = []book.RequestID{relayed.ID}, relayed.Bytes
+
+		l.handleIntake(v7Request("edit", TypeReplace, "human:root:1",
+			`{"target":"relayed","old_text":"old","new_text":"new"}`))
+
+		if got := sys.terminal("edit"); len(got) != 0 && got[0].fail {
+			t.Fatalf("terminal=%v, want the replace accepted", got)
+		}
+		if l.state.Requests["relayed"] != nil {
+			t.Fatal("the replaced row is still in the table")
+		}
+		row := l.state.Requests["edit"]
+		if row == nil || row.Input.Text != "new" {
+			t.Fatalf("replacement row=%+v, want it carrying the new text", row)
+		}
+		// The ledger still says who actually changed it: the replacement is
+		// authored by whoever sent the replace, not by the original relay.
+		if row.Sender != "human:root:1" {
+			t.Fatalf("replacement sender=%q, want the actor that sent the replace", row.Sender)
+		}
+	})
+
+	t.Run("steer", func(t *testing.T) {
+		l, sys, _ := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+		// Distinct callers so the two do not merge into one batch — the point
+		// being asserted is the ORDER change, not what a batch happens to own.
+		first := &book.Request{ID: "first", Sender: "human:root:1", Location: book.Buffered,
+			Input: runtimeproto.Input{Caller: harness.Caller{Actor: "human:root:1"}}}
+		relayed := &book.Request{ID: "relayed", Sender: "agent:relay:1", Location: book.Buffered,
+			Input: runtimeproto.Input{Caller: harness.Caller{Actor: "agent:relay:1"}}}
+		l.state.Requests[first.ID], l.state.Requests[relayed.ID] = first, relayed
+		l.state.Buffer = []book.RequestID{first.ID, relayed.ID}
+
+		l.handleIntake(v7Request("insert", TypeSteer, "human:root:1", `{"target":"relayed"}`))
+
+		got := sys.terminal("insert")
+		if len(got) != 1 || got[0].fail {
+			t.Fatalf("terminal=%v, want the steer accepted", got)
+		}
+		// Nothing was running, so reaching the front means being started: the
+		// relayed row jumps ahead of the one that was queued before it.
+		if l.state.Turn == nil || l.state.Turn.Owner != "relayed" {
+			t.Fatalf("turn=%+v, want the relayed row to have started", l.state.Turn)
 		}
 	})
 }
