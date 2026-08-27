@@ -84,6 +84,7 @@ func New(cfg Config) *Portal {
 	p.mux.HandleFunc("POST /api/identity/register", p.register)
 	p.mux.HandleFunc("POST /api/identity/login", p.login)
 	p.mux.HandleFunc("POST /api/identity/logout", p.logout)
+	p.mux.HandleFunc("GET /api/identity/session", p.identitySession)
 	p.mux.HandleFunc("GET /ws", p.serveWS)
 	p.mux.HandleFunc("GET /compute", p.compute)
 	p.mux.HandleFunc("GET /files", p.files)
@@ -246,7 +247,7 @@ func (p *Portal) observe(w http.ResponseWriter, r *http.Request) {
 
 func (p *Portal) fallback(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/api/update", "/ws", "/compute", "/healthz", ptyPath:
+	case "/api/identity/register", "/api/identity/login", "/api/identity/logout", "/api/identity/session", "/api/update", "/ws", "/compute", "/healthz", ptyPath:
 		writeError(w, http.StatusMethodNotAllowed, string(codeNotFound), "method not allowed")
 		return
 	}
@@ -516,6 +517,14 @@ func (p *Portal) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+func (p *Portal) identitySession(w http.ResponseWriter, r *http.Request) {
+	principal, ok := p.authenticate(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, string(codeNotAuthenticated), "invalid session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": principal})
 }
 func (p *Portal) serveWS(w http.ResponseWriter, r *http.Request) {
 	principal, ok := p.authenticate(r)

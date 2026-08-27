@@ -165,6 +165,25 @@ func TestUpdateAPIIsAuthenticatedRootOnlyAndDispatches(t *testing.T) {
 	}
 }
 
+func TestIdentitySessionReturnsTheCookiePrincipal(t *testing.T) {
+	sessions := gateway.NewSessionStore()
+	p := New(Config{ContractVersion: "test", Sessions: sessions})
+
+	unauthenticated := httptest.NewRecorder()
+	p.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/identity/session", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/identity/session", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sessions.Mint("alice", time.Hour)})
+	authenticated := httptest.NewRecorder()
+	p.ServeHTTP(authenticated, req)
+	if authenticated.Code != http.StatusOK || authenticated.Body.String() != "{\"id\":\"alice\"}\n" {
+		t.Fatalf("authenticated status=%d body=%s", authenticated.Code, authenticated.Body.String())
+	}
+}
+
 // The one membership this entrance's tests are about: alice is human:alice:7 in
 // c0 and nothing anywhere else.
 func filePortal(t *testing.T, plane *filePlaneStub) (*Portal, *gateway.SessionStore) {
