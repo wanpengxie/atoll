@@ -28,3 +28,4 @@ output/*
 !/web/dist/
 /web/dist/*
 !/web/dist/.gitkeep
+node_modules/

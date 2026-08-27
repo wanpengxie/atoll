@@ -15,6 +15,14 @@ import (
 // TypeCommand is the one request type this adapter serves inward.
 const TypeCommand = "kimi.command"
 
+// The endpoint words. They are the adapter's OWN words, not the plugin's: they
+// are answered locally and stay answerable when no plugin is attached, which is
+// exactly when someone needs to move the endpoint.
+const (
+	TypeListenSet = "kimi.listen.set"
+	TypeListenGet = "kimi.listen.get"
+)
+
 // commandDeadline bounds one browser primitive. Browser actions are sub-second
 // to a few seconds; navigate + page load can be slow. A single 60s budget covers
 // them all — there is no xhs.publish-style minutes-long operation here. A request

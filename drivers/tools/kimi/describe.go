@@ -7,8 +7,9 @@ import (
 )
 
 // describe.go is the actor.describe self-answer catalog — discovery is the
-// actor answering live (no external catalog). kimi exposes one word,
-// kimi.command, whose input schema closes the browser-primitive action set.
+// actor answering live (no external catalog). kimi exposes one work word,
+// kimi.command, whose input schema closes the browser-primitive action set,
+// plus the two endpoint words every plugin adapter answers about itself.
 
 func manifest() introspect.Manifest {
 	return introspect.Manifest{
@@ -20,6 +21,18 @@ func manifest() introspect.Manifest {
 				OutputSchema: json.RawMessage(`{"type":"object"}`),
 				ErrorCodes:   []string{"device_offline", "invalid_action", "timeout"},
 				Examples:     []json.RawMessage{json.RawMessage(`{"action":"navigate","args":{"url":"https://example.com"}}`)},
+			},
+			TypeListenSet: {
+				Description:  "Move this adapter's private device endpoint to a new listen address. Binds the new address first; on failure the previous listener keeps serving. Survives restart. The endpoint is keyless, so whatever can reach the address can drive the plugin — a wildcard bind (0.0.0.0, ::) is refused.",
+				InputSchema:  json.RawMessage(`{"type":"object","required":["listen_addr"],"properties":{"listen_addr":{"type":"string","description":"host:port, e.g. 127.0.0.1:8091 or 100.64.0.2:8091"}}}`),
+				OutputSchema: json.RawMessage(`{"type":"object","properties":{"desired_addr":{"type":"string"},"actual_addr":{"type":"string"},"online":{"type":"boolean"},"loopback":{"type":"boolean"},"persisted":{"type":"boolean"}}}`),
+				ErrorCodes:   []string{"invalid_args", "bind_failed"},
+				Examples:     []json.RawMessage{json.RawMessage(`{"listen_addr":"127.0.0.1:8091"}`)},
+			},
+			TypeListenGet: {
+				Description:  "Report this adapter's device endpoint: the address asked for, the address actually bound, and whether a plugin is attached right now.",
+				InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+				OutputSchema: json.RawMessage(`{"type":"object","properties":{"desired_addr":{"type":"string"},"actual_addr":{"type":"string"},"online":{"type":"boolean"},"loopback":{"type":"boolean"}}}`),
 			},
 		},
 	}

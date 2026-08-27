@@ -1,0 +1,23 @@
+{
+  "name": "@atoll/plugin-bridge",
+  "version": "0.1.0",
+  "description": "Optional end-side forwarder that lets a browser plugin on your own machine reach an atoll plugin adapter running somewhere else.",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "bin": {
+    "atoll-plugin-bridge": "cli.js"
+  },
+  "files": [
+    "cli.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

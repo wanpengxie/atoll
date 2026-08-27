@@ -19,8 +19,11 @@
 //     set fails invalid_action before anything reaches the device. No other
 //     actor ever learns what a browser extension is.
 //
-//   - Outward (device face): a PRIVATE WS endpoint owned by this package (the
-//     extension connect-ins to it). The wire is the minimal request/response
+//   - Outward (device face): a PRIVATE WS endpoint (the extension connect-ins
+//     to it), supplied by drivers/tools/plugindevice — the transport is shared
+//     with xhs, this package keeps only its own dialect (the action allowlist
+//     and its budget) and the two endpoint words kimi.listen.set /
+//     kimi.listen.get. The wire is the minimal request/response
 //     primitive {correlation_id, cmd, params} down / {correlation_id, ok,
 //     result|error} up — NOT a channel envelope, NOT any device_transit frame
 //     family. correlation_id pairs a reply to its request.
@@ -31,7 +34,7 @@
 // in-hand). Because Sys is concurrency-safe and Msg is immutable (spec §1.2
 // fan-out), the device's read-loop goroutine calls sys.Reply/sys.Fail directly
 // to close a request; an internal mutex guards the conn + in-flight table (the
-// one cross-goroutine state device.go itself owns). A small actor-owned local
+// one cross-goroutine state the shared transport owns). A small actor-owned local
 // maintenance goroutine performs bind retry and reaping without depending on
 // daemon↔Server Schedule availability.
 //
@@ -50,9 +53,13 @@
 //     device_offline) but NOT projected as a channel event — there is no
 //     consumer yet and the audience of a device-presence broadcast is undefined. Emit
 //     it additively once a consumer + named audience exist.
-//   - The endpoint serves a LOCAL loopback extension, so a dropped socket
-//     surfaces as a read error and flips offline. Ping/pong keepalive + read
-//     deadlines (for a half-dead WAN peer that never sends FIN) are additive.
+//   - The endpoint defaults to loopback, where a dropped socket surfaces as a
+//     read error and flips offline. kimi.listen.set can move it to a routable
+//     address (so a browser on the operator's own laptop can reach a server-side
+//     adapter); keepalive is armed for exactly that case, because a half-dead
+//     WAN peer that never sends FIN would otherwise hold the single connection
+//     slot and keep the real extension out. The endpoint stays KEYLESS, so the
+//     bound address is the whole trust boundary — a wildcard bind is refused.
 //   - The downstream write carries a write deadline, so a stuck peer fails the
 //     conn instead of freezing the adapter.
 //
@@ -60,9 +67,6 @@
 //
 //   - actor.go    Actor struct + NewActor + Def + run (Proc body) + handle
 //     dispatch + describe dispatch.
-//   - device.go   WS listener + accept + read loop + in-flight table + sweep +
-//     downstream send (write-deadline bounded).
-//   - wire.go     the minimal device frame structs.
 //   - types.go    the single inward type + action allowlist + payload shape + deadline.
 //   - describe.go the WordSpec catalog for actor.describe.
 package kimi

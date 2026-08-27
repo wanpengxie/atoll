@@ -36,6 +36,7 @@ const (
 	hintUnavailable  = "A dependency was momentarily unavailable. This one is genuinely transient: a retry may succeed"
 	hintResultUnkown = "The outcome is unknown — the action may or may not have taken effect. Do NOT resubmit merely because the result is unclear; establish what happened first"
 	hintInternal     = "The target failed internally. Read error.detail; retry only if the detail says the condition was transient"
+	hintAddrHeld     = "The address could not be bound because something else is holding it, or it is not an address this host can listen on. Nothing was changed — whatever was serving before still is. Pick a different port, or wait for the current holder to release it, before trying again"
 	hintCancelled    = "The call was cancelled before it finished. Something asked for it to stop, so resending it repeats work that was deliberately abandoned — confirm the cancellation was not yours before trying again"
 )
 
@@ -87,6 +88,12 @@ var actorErrorClasses = map[string]failureClass{
 	// nothing is retryable by itself: the work was withdrawn, so a caller that
 	// still wants it asks again rather than retrying this one.
 	"dismissed": {PermissionDenied, hintDenied, false},
+
+	// An endpoint that could not take the address it was asked to take. Unlike
+	// the other conflicts this one CAN clear on its own — a predecessor holding
+	// the port releases it — so it is retryable, and the failing side is left
+	// exactly as it was rather than half-moved.
+	"bind_failed": {Conflict, hintAddrHeld, true},
 
 	// Authority facts. Retrying identically can never succeed.
 	"permission_denied":   {PermissionDenied, hintDenied, false},

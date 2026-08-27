@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"strings"
 	"time"
 
+	"github.com/wanpengxie/atoll/drivers/tools/plugindevice"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -18,15 +18,17 @@ import (
 // DefaultActorID is the registry id this adapter owns.
 const DefaultActorID actor.ActorID = "tool:kimi"
 
-// DefaultListenAddr is the loopback addr this adapter's private device WS
-// endpoint binds by default. Owned here, not by the composition root — the
-// adapter knows its own port (8091, distinct from xhs's 8090).
+// DefaultListenAddr is the addr this adapter's private device WS endpoint binds
+// when nothing has been set. Owned here, not by the composition root — the
+// adapter knows its own port (8091, distinct from xhs's 8090). It is loopback
+// because the endpoint is keyless: the default must be the safe one, and moving
+// it off loopback is a deliberate act through kimi.listen.set.
 const DefaultListenAddr = "127.0.0.1:8091"
 
-// Config drives an Actor. ListenAddr is the LOOPBACK address the private device
-// WS endpoint binds (e.g. "127.0.0.1:8091", or "127.0.0.1:0" to let the OS pick
-// — tests read the resolved addr back via ListenAddr()). The loopback bind is
-// the trust boundary (default-trust-local): there is no device key.
+// Config drives an Actor. ListenAddr is the STARTING address of the private
+// device WS endpoint (e.g. "127.0.0.1:8091", or "127.0.0.1:0" to let the OS
+// pick — tests read the resolved addr back via ListenAddr()). A stored address
+// from a previous kimi.listen.set wins over it at birth.
 type Config struct {
 	ListenAddr string
 	// NowFn returns the current time; defaults to time.Now. Injectable so
@@ -37,7 +39,7 @@ type Config struct {
 	// deadlines promptly without a production-tuned constant.
 	ReaperInterval time.Duration
 	// BindRetryInterval is how long the retry loop waits between listen attempts
-	// when the loopback port is still held (Q8=B: exclusive-resource contention
+	// when the port is still held (Q8=B: exclusive-resource contention
 	// is domain policy — the actor re-tries until it can bind or is killed).
 	// Defaults to defaultBindRetryInterval; tests inject a shorter one.
 	BindRetryInterval time.Duration
@@ -51,14 +53,14 @@ type Config struct {
 const defaultReaperInterval = time.Second
 
 // defaultBindRetryInterval is the production listen-retry cadence for the
-// exclusive loopback port (Q8=B). A predecessor incarnation releases the port
+// exclusive port (Q8=B). A predecessor incarnation releases the port
 // within its death grace, so a sub-second retry lands the successor promptly.
 const defaultBindRetryInterval = 500 * time.Millisecond
 
 // Actor is the kimi (Kimi WebBridge) adapter's process state. The inward
 // (channel) face is run()'s dispatch off sys.Recv(); the outward (device) face
-// is the embedded *device, which owns the WS endpoint, the connection, the
-// in-flight table, and the reaper.
+// is the shared plugindevice.Device, which owns the WS endpoint, the
+// connection, the in-flight table, and the reaper.
 //
 // sys is bound once, at run()'s first line (birth) — before that this Actor is
 // a half-built value NewActor produced, never handed a Proc's identity. The
@@ -73,7 +75,8 @@ const defaultBindRetryInterval = 500 * time.Millisecond
 type Actor struct {
 	sys               actorbase.Sys
 	clock             func() time.Time
-	dev               *device
+	dev               *plugindevice.Device
+	startAddr         string
 	reaperInterval    time.Duration
 	bindRetryInterval time.Duration
 	logger            *slog.Logger
@@ -99,13 +102,24 @@ func NewActor(cfg Config) *Actor {
 	if bindRetryInterval <= 0 {
 		bindRetryInterval = defaultBindRetryInterval
 	}
+	addr := cfg.ListenAddr
+	if addr == "" {
+		addr = DefaultListenAddr
+	}
 	a := &Actor{
 		clock:             clock,
+		startAddr:         addr,
 		reaperInterval:    reaperInterval,
 		bindRetryInterval: bindRetryInterval,
 		logger:            logger,
 	}
-	a.dev = newDevice(a, cfg.ListenAddr, clock, logger)
+	a.dev = plugindevice.New(plugindevice.Deps{
+		Tool:       "kimi",
+		Sys:        func() actorbase.Sys { return a.sys },
+		Clock:      clock,
+		Logger:     logger,
+		OnPresence: a.publishDevicePresence,
+	})
 	return a
 }
 
@@ -127,12 +141,15 @@ func Def(cfg Config) actorbase.Def {
 // device teardown is its resource release.
 func (a *Actor) run(sys actorbase.Sys) error {
 	a.sys = sys
-	// The trust model assumes a loopback bind (only same-machine processes can
-	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR (not a
-	// resource-contention error): fail fast (positive death) rather than retry
-	// forever or start a serviceable-but-exposed endpoint.
-	if !isLoopbackAddr(a.dev.addrCfg) {
-		return fmt.Errorf("kimi: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
+	// Where a previous kimi.listen.set put the endpoint wins over the config
+	// default, because that setting was an operator decision and a restart must
+	// not quietly undo it.
+	addr := plugindevice.StartAddr(sys, a.startAddr, a.logger)
+	// A malformed or wildcard addr is a CONFIG ERROR (not resource contention):
+	// fail fast (positive death) rather than retry forever or start a
+	// serviceable-but-wrongly-exposed endpoint.
+	if err := plugindevice.ValidateAddr(addr); err != nil {
+		return fmt.Errorf("kimi: %w", err)
 	}
 	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
 	// publish offline so the home shows a definite state, not unknown.
@@ -140,11 +157,11 @@ func (a *Actor) run(sys actorbase.Sys) error {
 	maintenanceDone := make(chan struct{})
 	go func() {
 		defer close(maintenanceDone)
-		a.maintainDevice(sys.Life())
+		a.maintainDevice(sys.Life(), addr)
 	}()
 	defer func() {
 		<-maintenanceDone
-		_ = a.dev.stop(context.Background())
+		_ = a.dev.Stop(context.Background())
 	}()
 
 	for {
@@ -159,12 +176,12 @@ func (a *Actor) run(sys actorbase.Sys) error {
 // maintainDevice owns only this adapter's local physical resources. It does
 // not use Schedule: a daemon↔Server disconnect may make channel capabilities
 // fail-closed, but it must not kill or rebuild an otherwise-live incarnation.
-func (a *Actor) maintainDevice(ctx context.Context) {
+func (a *Actor) maintainDevice(ctx context.Context, addr string) {
 	for {
-		if err := a.dev.start(); err == nil {
+		if err := a.dev.Bind(addr); err == nil {
 			break
 		} else {
-			a.logger.Warn("kimi.device.bind_retry", "addr", a.dev.addrCfg, "err", err.Error())
+			a.logger.Warn("kimi.device.bind_retry", "addr", addr, "err", err.Error())
 		}
 		timer := time.NewTimer(a.bindRetryInterval)
 		select {
@@ -182,7 +199,7 @@ func (a *Actor) maintainDevice(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.dev.sweep()
+			a.dev.Sweep()
 		}
 	}
 }
@@ -190,27 +207,18 @@ func (a *Actor) maintainDevice(ctx context.Context) {
 // publishDevicePresence pushes a device-presence edge (L3) on the actor-source obs axis.
 // Best-effort, advisory (never authoritative — that is send→terminal).
 func (a *Actor) publishDevicePresence(online bool) {
+	if a.sys == nil {
+		return
+	}
 	_ = a.sys.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(online))
-}
-
-// isLoopbackAddr reports whether host:port binds the loopback interface (the
-// trust boundary for the keyless device endpoint). An unparseable or hostname
-// host is treated as non-loopback (warn, don't guess).
-func isLoopbackAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // ListenAddr returns the resolved device-endpoint address (useful when the
 // config asked for port 0). Empty until run() has bound.
-func (a *Actor) ListenAddr() string { return a.dev.addr() }
+func (a *Actor) ListenAddr() string { return a.dev.Addr() }
+
+// Online reports whether a browser device is currently attached.
+func (a *Actor) Online() bool { return a.dev.Online() }
 
 // handle dispatches one delivered Msg. It NEVER blocks on the device: a
 // supported request is encoded, registered in the in-flight table, and pushed
@@ -224,8 +232,20 @@ func (a *Actor) handle(msg actorbase.Msg) {
 		return
 	}
 
+	// The endpoint words are answered by the adapter ITSELF — they are about
+	// where the plugin plugs in, so they must work precisely when no plugin is
+	// attached and cannot be forwarded down the very connection they configure.
+	switch msg.Type {
+	case TypeListenSet:
+		a.dev.HandleSet(context.Background(), a.sys, msg)
+		return
+	case TypeListenGet:
+		a.dev.HandleGet(a.sys, msg)
+		return
+	}
+
 	if msg.Type != TypeCommand {
-		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("the kimi adapter does not answer %q; it accepts only %s", msg.Type, TypeCommand))
+		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("the kimi adapter does not answer %q; it accepts %s", msg.Type, strings.Join([]string{TypeCommand, TypeListenSet, TypeListenGet}, ", ")))
 		return
 	}
 
@@ -251,8 +271,9 @@ func (a *Actor) handle(msg actorbase.Msg) {
 		params = json.RawMessage("{}")
 	}
 
-	if err := a.dev.dispatch(msg, cmd.Action, commandDeadline, params); err != nil {
-		// dispatch only errors for the digestible offline case; the device
+	spec := plugindevice.Spec{Cmd: cmd.Action, Deadline: commandDeadline}
+	if err := a.dev.Dispatch(msg, spec, params); err != nil {
+		// Dispatch only errors for the digestible offline case; the device
 		// being absent is a business failure, not a crash.
 		_, _ = a.sys.Fail(msg, "device_offline", err.Error()+"; the browser device backing this adapter is not connected — check it with list_actors and retry once it is present")
 	}

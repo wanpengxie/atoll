@@ -11,10 +11,14 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/drivers/tools/plugindevice"
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
@@ -46,6 +50,7 @@ type fakeSys struct {
 	once   sync.Once
 	life   context.Context
 	cancel context.CancelFunc
+	state  *fakeState
 
 	mu      sync.Mutex
 	replies []replyRec
@@ -60,8 +65,46 @@ func newFakeSys(selfID actor.ActorID) *fakeSys {
 		quit:   make(chan struct{}),
 		life:   life,
 		cancel: cancel,
+		state:  newFakeState(),
 	}
 }
+
+// fakeState is an in-memory StateHandle. The adapter reads its stored listen
+// address at birth and writes it on xhs.listen.set, so the double has to model
+// state rather than nil-panic on it.
+type fakeState struct {
+	mu   sync.Mutex
+	kv   map[resource.ResourceID][]byte
+	fail bool
+}
+
+func newFakeState() *fakeState { return &fakeState{kv: map[resource.ResourceID][]byte{}} }
+
+func (s *fakeState) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.kv[id]
+	return accessdoor.Outcome{Value: v, Found: ok}, nil
+}
+
+func (s *fakeState) Put(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail {
+		return accessdoor.Outcome{RejectReason: access.AccessDenied}, nil
+	}
+	s.kv[id] = append([]byte(nil), args...)
+	return accessdoor.Outcome{}, nil
+}
+
+func (s *fakeState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.kv, id)
+	return accessdoor.Outcome{}, nil
+}
+
+func (f *fakeSys) State() actorbase.StateHandle { return f.state }
 
 func (f *fakeSys) push(msg actorbase.Msg) {
 	select {
@@ -203,10 +246,7 @@ func waitOnline(t *testing.T, a *Actor) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		a.dev.mu.Lock()
-		c := a.dev.conn
-		a.dev.mu.Unlock()
-		if c != nil {
+		if a.Online() {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -232,17 +272,17 @@ func dialExtension(t *testing.T, a *Actor) *fakeExtension {
 	return &fakeExtension{conn: conn}
 }
 
-func (f *fakeExtension) read(t *testing.T) downFrame {
+func (f *fakeExtension) read(t *testing.T) plugindevice.DownFrame {
 	t.Helper()
 	_ = f.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	var d downFrame
+	var d plugindevice.DownFrame
 	if err := f.conn.ReadJSON(&d); err != nil {
 		t.Fatalf("extension read: %v", err)
 	}
 	return d
 }
 
-func (f *fakeExtension) reply(t *testing.T, up upFrame) {
+func (f *fakeExtension) reply(t *testing.T, up plugindevice.UpFrame) {
 	t.Helper()
 	if err := f.conn.WriteJSON(up); err != nil {
 		t.Fatalf("extension reply: %v", err)
@@ -286,7 +326,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	result, _ := json.Marshal(map[string]any{"results": []map[string]any{{"id": "n1"}}})
-	ext.reply(t, upFrame{CorrelationID: "req-1", OK: true, Result: result})
+	ext.reply(t, plugindevice.UpFrame{CorrelationID: "req-1", OK: true, Result: result})
 
 	rep, ok := sys.waitReply(t, "req-1", 2*time.Second)
 	if !ok {
