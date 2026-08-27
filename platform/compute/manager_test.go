@@ -24,6 +24,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
@@ -32,6 +33,16 @@ type emptyFactories struct{}
 
 func (emptyFactories) BuildClass(actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
+}
+
+func TestApplyFileReplyErrorPreservesBadCursorCode(t *testing.T) {
+	reply := &link.FileReply{}
+	if !applyFileReplyError(reply, accessdoor.ErrMalformedFileCursor) {
+		t.Fatal("malformed cursor was not reported as an error")
+	}
+	if reply.OK || reply.Code != link.FileErrorBadCursor || reply.Reason == "" {
+		t.Fatalf("file reply = %+v", reply)
+	}
 }
 
 type teardownOrderActor struct {

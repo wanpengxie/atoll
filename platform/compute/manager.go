@@ -29,6 +29,18 @@ import (
 // budget.
 var laneRPCTimeout = link.LaneRPCTimeout
 
+func applyFileReplyError(reply *link.FileReply, err error) bool {
+	reply.OK = err == nil
+	if err == nil {
+		return false
+	}
+	reply.Reason = err.Error()
+	if errors.Is(err, accessdoor.ErrMalformedFileCursor) {
+		reply.Code = link.FileErrorBadCursor
+	}
+	return true
+}
+
 // compartmentJoinTimeout bounds one compartment's teardown. Every step of that
 // teardown runs under it, including the ones that accept no context of their
 // own — teardown holds the coordinate out of service while it runs. It is a
@@ -1555,13 +1567,7 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 					}
 				case link.FileDelete:
 					err := files.Delete(request.Path)
-					reply.OK = err == nil
-					if err != nil {
-						reply.Reason = err.Error()
-						if errors.Is(err, accessdoor.ErrMalformedFileCursor) {
-							reply.Code = link.FileErrorBadCursor
-						}
-					}
+					applyFileReplyError(reply, err)
 				case link.FileStat:
 					info, found, err := files.Stat(request.Path)
 					reply.OK, reply.Found = err == nil, found
@@ -1583,10 +1589,7 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 					}
 				case link.FileList:
 					rows, next, err := files.List(request.Path, request.Limit, request.Cursor)
-					reply.OK = err == nil
-					if err != nil {
-						reply.Reason = err.Error()
-					} else {
+					if !applyFileReplyError(reply, err) {
 						reply.Next = next
 						for _, row := range rows {
 							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
