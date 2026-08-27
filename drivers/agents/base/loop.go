@@ -499,6 +499,9 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	case TypeUnhold:
 		l.handleUnhold(msg)
 		return
+	case TypeDismiss:
+		l.handleDismiss(msg)
+		return
 	case TypeInterrupt:
 		l.handleInterrupt(msg)
 		return
@@ -688,6 +691,41 @@ func parseSteerTarget(raw json.RawMessage) (steerForm, book.RequestID, error) {
 		}
 	}
 	return steerText, "", nil
+}
+
+// handleDismiss answers a WAITING request on somebody's say-so, and answers it
+// as the actor that owes the answer.
+//
+// This is not cancellation reaching around the receiver. A terminal may be
+// written by the receiver, by the caller closing its own account, or by the
+// substrate — a third party is none of those, so "drop that queued task" can
+// only be a thing the holder is ASKED to do. Which is also the truthful
+// account: the task really is answered here, by the actor it was waiting on,
+// and the answer says who asked for it.
+//
+// Only buffered requests qualify. Work already running is stopped with
+// agent.interrupt, and a request that has left the queue has an answer of its
+// own coming — quietly re-answering either would be writing over a fact.
+func (l *agentLoop) handleDismiss(msg actorbase.Msg) {
+	var payload struct {
+		Target *string `json:"target"`
+	}
+	if err := decodeStrict(msg.Payload, &payload); err != nil || payload.Target == nil || strings.TrimSpace(*payload.Target) == "" {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args",
+			detail: "agent.dismiss requires target"})
+		return
+	}
+	targetID := book.RequestID(strings.TrimSpace(*payload.Target))
+	row := l.state.Requests[targetID]
+	if row == nil || row.Location != book.Buffered || l.state.IndexInBuffer(targetID) < 0 {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorCASMismatch,
+			detail: "dismiss target is not waiting; running work is stopped with " + TypeInterrupt})
+		return
+	}
+	l.finish(targetID, terminalCandidate{fail: true, code: "dismissed",
+		detail: "dismissed by " + string(msg.Sender.ID) + " before it ran"})
+	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{"dismissed": string(targetID)}})
+	l.startNext()
 }
 
 func (l *agentLoop) handleSteerTarget(msg actorbase.Msg, targetID book.RequestID) {
@@ -1213,7 +1251,7 @@ func (l *agentLoop) touchQueued() {
 // 宣告"此刻可以对它用哪些控制词"。全量快照、后帧覆盖前帧、终态帧恒不带。
 // 前端据此画按钮，不查任何表；能力差异（steer/interrupt）只在这里收敛。
 func (l *agentLoop) queuedControls() []map[string]any {
-	controls := []map[string]any{{"word": TypeReplace}}
+	controls := []map[string]any{{"word": TypeReplace}, {"word": TypeDismiss}}
 	if l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilitySteer] {
 		controls = append(controls, map[string]any{"word": TypeSteer})
 	}

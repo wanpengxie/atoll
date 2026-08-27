@@ -83,6 +83,11 @@ var actorErrorClasses = map[string]failureClass{
 	"not_found":      {NotFound, hintNotFound, false},
 	"decl_not_found": {NotFound, hintNotFound, false},
 
+	// A waiting task that somebody dropped before it ran. Nothing is wrong and
+	// nothing is retryable by itself: the work was withdrawn, so a caller that
+	// still wants it asks again rather than retrying this one.
+	"dismissed": {PermissionDenied, hintDenied, false},
+
 	// Authority facts. Retrying identically can never succeed.
 	"permission_denied":   {PermissionDenied, hintDenied, false},
 	"forbidden":           {PermissionDenied, hintDenied, false},

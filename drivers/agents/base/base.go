@@ -45,7 +45,7 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 	if cfg.Runtime.Documentation.SkillDoc == "" {
 		cfg.Runtime.Documentation.SkillDoc = doc
 	}
-	d := definition{cfg: cfg, controls: map[string]struct{}{TypeAsk: {}, TypeCompact: {}, TypeNew: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeHold: {}, TypeUnhold: {}, TypeReplace: {}, TypeInterrupt: {}}}
+	d := definition{cfg: cfg, controls: map[string]struct{}{TypeAsk: {}, TypeCompact: {}, TypeNew: {}, TypeSelect: {}, TypeContext: {}, TypeQueue: {}, TypeHold: {}, TypeUnhold: {}, TypeReplace: {}, TypeInterrupt: {}, TypeDismiss: {}}}
 	if cfg.Runtime.Capabilities[runtimeproto.CapabilityFork] {
 		d.controls[TypeFork] = struct{}{}
 	}
@@ -159,18 +159,24 @@ func cloneCapabilities(in map[string]bool) map[string]bool {
 }
 
 const (
-	TypeAsk         = "agent.ask"
-	TypeFork        = "agent.fork"
-	TypeCompact     = "agent.compact"
-	TypeNew         = "agent.new"
-	TypeSelect      = "agent.select"
-	TypeContext     = "agent.context"
-	TypeSteer       = "agent.steer"
-	TypeInterrupt   = "agent.interrupt"
-	TypeHold        = "agent.hold"
-	TypeUnhold      = "agent.unhold"
-	TypeReplace     = "agent.replace"
-	TypeQueue       = "agent.queue"
+	TypeAsk       = "agent.ask"
+	TypeFork      = "agent.fork"
+	TypeCompact   = "agent.compact"
+	TypeNew       = "agent.new"
+	TypeSelect    = "agent.select"
+	TypeContext   = "agent.context"
+	TypeSteer     = "agent.steer"
+	TypeInterrupt = "agent.interrupt"
+	TypeHold      = "agent.hold"
+	TypeUnhold    = "agent.unhold"
+	TypeReplace   = "agent.replace"
+	TypeQueue     = "agent.queue"
+	// TypeDismiss drops a request that is still WAITING, answered by the actor
+	// holding it. Cancelling your own request is the caller closing its own
+	// account; dropping somebody else's cannot be, because a bystander is not
+	// an authorized closure author — but the receiver always is, so the honest
+	// shape is to ask the receiver to answer it rather than to reach around it.
+	TypeDismiss     = "agent.dismiss"
 	typeHoldExpired = "agent.hold_expired"
 )
 

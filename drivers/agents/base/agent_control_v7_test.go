@@ -152,7 +152,7 @@ func newV7Loop(t *testing.T, capabilities map[string]bool) (*agentLoop, *v7Sys, 
 	exec := newExecutor(sys, vault)
 	exec.bindRuntime(rt)
 	local, cancel := context.WithCancel(context.Background())
-	controls := map[string]struct{}{TypeAsk: {}, TypeQueue: {}, TypeCompact: {}, TypeSelect: {}, TypeContext: {}, TypeSteer: {}, TypeInterrupt: {}, TypeHold: {}, TypeUnhold: {}, TypeReplace: {}}
+	controls := map[string]struct{}{TypeAsk: {}, TypeQueue: {}, TypeCompact: {}, TypeSelect: {}, TypeContext: {}, TypeSteer: {}, TypeInterrupt: {}, TypeHold: {}, TypeUnhold: {}, TypeReplace: {}, TypeDismiss: {}}
 	l := &agentLoop{
 		def: definition{cfg: Config{Runtime: runtimeproto.Spec{Capabilities: capabilities}, RequestMaxCount: 16, BufferMaxCount: 16, BufferMaxBytes: 1 << 20, BatchMaxCount: 16, ReceiptDeadline: time.Hour}, controls: controls},
 		sys: sys, rt: rt, vault: vault, exec: exec, state: book.New(), inbox: newLoopInbox(64), local: local, cancel: cancel,

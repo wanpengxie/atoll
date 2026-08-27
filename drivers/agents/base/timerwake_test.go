@@ -252,3 +252,89 @@ func TestQueuedWorkIsControllableByAnyMemberNotOnlyItsSender(t *testing.T) {
 		}
 	})
 }
+
+// Dropping somebody else's waiting task is answered BY the actor holding it,
+// not around it. That is both the only authorised shape (a bystander is not a
+// closure author) and the truthful one: the task really is answered here, and
+// the answer names who asked.
+func TestDismissIsAnsweredByTheHolderAndNamesWhoAsked(t *testing.T) {
+	l, sys, _ := newV7Loop(t, nil)
+	// Something is running, so the next ask waits — and it is somebody else's:
+	// an agent relayed it, which is exactly the case a sender-only rule left
+	// unreachable.
+	v7Activate(t, l, "running")
+	l.handleIntake(v7Request("waiting", TypeAsk, "agent:relay:1", `{"text":"relayed errand"}`))
+	if l.state.IndexInBuffer("waiting") < 0 {
+		t.Fatal("the relayed ask did not queue")
+	}
+
+	l.handleIntake(v7Request("drop", TypeDismiss, "human:root:1", `{"target":"waiting"}`))
+
+	// The dismissed task gets its own terminal — the queue does not just
+	// silently lose a row that somebody was owed an answer for.
+	dropped := sys.terminal("waiting")
+	if len(dropped) != 1 || !dropped[0].fail || dropped[0].code != "dismissed" {
+		t.Fatalf("target terminal=%v, want a dismissed failure", dropped)
+	}
+	if l.state.Requests["waiting"] != nil || l.state.IndexInBuffer("waiting") >= 0 {
+		t.Fatal("the dismissed task is still in the queue")
+	}
+	// And the ask itself is answered too.
+	if got := sys.terminal("drop"); len(got) != 1 || got[0].fail {
+		t.Fatalf("dismiss terminal=%v, want it accepted", got)
+	}
+}
+
+// Only WAITING work can be dismissed: running work is stopped with interrupt,
+// and re-answering something that already has an answer coming would be
+// writing over a fact.
+func TestDismissRefusesWorkThatIsNotWaiting(t *testing.T) {
+	for _, tc := range []struct{ name, payload string }{
+		{"unknown target", `{"target":"nobody"}`},
+		{"no target", `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, sys, _ := newV7Loop(t, nil)
+			l.handleIntake(v7Request("drop", TypeDismiss, "human:root:1", tc.payload))
+			got := sys.terminal("drop")
+			if len(got) != 1 || !got[0].fail {
+				t.Fatalf("terminal=%v, want a refusal", got)
+			}
+		})
+	}
+
+	t.Run("running work", func(t *testing.T) {
+		l, sys, _ := newV7Loop(t, nil)
+		v7Activate(t, l, "running")
+		l.handleIntake(v7Request("drop", TypeDismiss, "human:root:1", `{"target":"running"}`))
+		got := sys.terminal("drop")
+		if len(got) != 1 || !got[0].fail || got[0].code != errorCASMismatch {
+			t.Fatalf("terminal=%v, want it refused as not-waiting", got)
+		}
+	})
+}
+
+// The button has to come from somewhere: a waiting task advertises dismiss in
+// its own progress account, which is the only place the front end reads
+// controls from.
+func TestWaitingWorkAdvertisesDismiss(t *testing.T) {
+	l, sys, _ := newV7Loop(t, nil)
+	l.state.Turn = &book.Turn{Phase: book.TurnActive, ID: "busy"}
+	l.handleIntake(v7Request("queued", TypeAsk, "caller", `{"text":"wait"}`))
+
+	frames := sys.progresses("queued")
+	if len(frames) == 0 {
+		t.Fatal("no queued frame at all")
+	}
+	value, _ := frames[0].value.(map[string]any)
+	controls, _ := value["controls"].([]map[string]any)
+	found := false
+	for _, entry := range controls {
+		if entry["word"] == TypeDismiss {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("queued controls=%v, want %s advertised", controls, TypeDismiss)
+	}
+}
