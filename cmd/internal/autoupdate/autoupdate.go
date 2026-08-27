@@ -169,9 +169,10 @@ func (m *Manager) Start(ctx context.Context) (any, error) {
 		_ = writeState(m.cfg.Home, s)
 		return s, err
 	}
+	workerPID := cmd.Process.Pid
 	_ = cmd.Process.Release()
 	_ = logFile.Close()
-	s.WorkerPID = cmd.Process.Pid
+	s.WorkerPID = workerPID
 	if current, err := readState(m.cfg.Home); err == nil && current.Status == "starting" {
 		current.WorkerPID = s.WorkerPID
 		_ = writeState(m.cfg.Home, current)

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -80,6 +81,32 @@ func TestWorkerSpawnFailureIsRetryableInsteadOfStuckActive(t *testing.T) {
 	if s.Status != "failed" || !s.Available {
 		t.Fatalf("snapshot=%+v", s)
 	}
+}
+
+func TestStartReturnsTheDetachedWorkerPIDBeforeReleasingProcess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("v0.07")) }))
+	defer server.Close()
+	home := t.TempDir()
+	executable := filepath.Join(home, "worker-stub")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(Config{Home: home, CurrentVersion: "v0.06", Executable: executable, ParentPID: os.Getpid(), OSSBase: server.URL, GitHubBase: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Status(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := got.(Snapshot)
+	if s.WorkerPID <= 0 {
+		t.Fatalf("worker pid=%d", s.WorkerPID)
+	}
+	_ = syscall.Kill(s.WorkerPID, syscall.SIGKILL)
 }
 
 func TestLatestFallsBackToGitHubRedirectTag(t *testing.T) {
