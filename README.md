@@ -17,7 +17,7 @@ permissions; Atoll gives agents **actors**, **channels** and **membership**.
 | permission bits | **access** | channel membership decides who may do what |
 | cron | **timer** | a durable wake-up; survives restarts |
 
-> **v0.05 — pre-release, not data-safe.** Storage formats, APIs and the wire
+> **v0.06 — pre-release, not data-safe.** Storage formats, APIs and the wire
 > protocol change without deprecation or migration; a newer build may refuse or
 > overwrite an older node home. Keep nothing in it you cannot recreate.
 
@@ -85,7 +85,7 @@ curl -f#SL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/insta
 Then open `http://127.0.0.1:8832`.
 
 ```bash
-ATOLL_VERSION=v0.05 ...               # pin a release instead of taking the latest
+ATOLL_VERSION=v0.06 ...               # pin a release instead of taking the latest
 ATOLL_INSTALL_DIR=/usr/local/bin ...   # where the binary goes (default ~/.local/bin)
 ```
 
@@ -530,7 +530,7 @@ invariant is broken — read the header comment of a failing test before changin
 
 ## Status
 
-**v0.05, pre-release.** The core (identity, channels, ledger, membership, devices,
+**v0.06, pre-release.** The core (identity, channels, ledger, membership, devices,
 timers) is implemented and enforced and the project is used to develop itself;
 the organisation layer is next. Until 1.0:
 
