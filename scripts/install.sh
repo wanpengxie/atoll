@@ -26,7 +26,8 @@
 #   2. steward     — pick which detected agent becomes c0's steward
 #   3. password    — root password (typed twice, or generated)
 #   4. home / addr / confirm
-#   5. install     — writes <home>/atoll.env + <home>/server/root-password, runs `atoll up`
+#   5. install     — writes <home>/atoll.env, runs `atoll up`; the password is
+#                    shown once on the terminal and never written to disk
 #
 # 铁律：第 4 步"开始安装？"之前恒不落任何持久动作——不搬 home、不装二进制、
 # 不建目录、不写文件。确认前只收集与只读检查；答 n 时机器与你来之前一样。
@@ -497,7 +498,7 @@ echo "  addr        : $ADDR"
 [ -n "$STEWARD" ] && echo "  steward     : $STEWARD"
 echo "  web UI      : http://$ADDR （在二进制里，跟 API 同一个端口）"
 echo "  token       : $HOME_DIR/server/atoll-token（本地自动化用 Bearer）"
-[ -n "$PASSWORD" ] && echo "  密码文件    : $HOME_DIR/server/root-password（0600）"
+[ -n "$PASSWORD" ] && echo "  密码        : 安装结束时显示一次，只此一次（本机只留 bcrypt 哈希，不留明码）"
 confirm "  开始安装并启动？" y || { echo "已取消（机器上没有落任何东西）"; exit 0; }
 echo
 
@@ -517,9 +518,19 @@ mkdir -p "$HOME_DIR/server"
   [ -n "$STEWARD" ] && echo "ATOLL_STEWARD=$STEWARD"
 } > "$HOME_DIR/.atoll.env.new"
 mv -f "$HOME_DIR/.atoll.env.new" "$HOME_DIR/atoll.env"
-if [ -n "$PASSWORD" ]; then
-  (umask 077; printf '%s\n' "$PASSWORD" > "$HOME_DIR/server/.root-password.new")
-  mv -f "$HOME_DIR/server/.root-password.new" "$HOME_DIR/server/root-password"
+# 密码恒不落盘。节点存的是 bcrypt 哈希，明码只在下面向你显示一次。
+#
+# 早先的版本会把它写进 server/root-password。那份明码只在**这次运行会把密码
+# 显示给你**时才删——否则删掉就是把人锁在外面拿走他唯一的副本。直接打开既有
+# 实例（不设密码）时只提醒，不动它。
+if [ -f "$HOME_DIR/server/root-password" ]; then
+  if [ -n "$PASSWORD" ]; then
+    rm -f "$HOME_DIR/server/root-password"
+    ok "已删除旧版留下的明码文件 server/root-password（新密码在下面显示）"
+  else
+    warn "$HOME_DIR/server/root-password 是旧版留下的明码副本。"
+    warn "记下里面的密码后请自行删除；节点本身只用 bcrypt 哈希，不需要它。"
+  fi
 fi
 ok "已写 $HOME_DIR/atoll.env"
 
@@ -553,7 +564,11 @@ echo
 bold "atoll 已在跑"
 echo "  打开        : http://$ADDR    （账号填 root 即可）"
 echo "  登录 API    : POST http://$ADDR/api/identity/login  {\"email\":\"root\",\"password\":<密码>}"
-[ -n "$PASSWORD" ] && echo "  密码        : 见 $HOME_DIR/server/root-password"
+if [ -n "$PASSWORD" ]; then
+  echo "  密码        : $PASSWORD"
+  echo "                ↑ 现在记下来。本机只存 bcrypt 哈希，没有第二份，之后读不出来。"
+  echo "                忘了就用新密码重新引导一次：ATOLL_ROOT_PASSWORD=新密码 atoll up --dir $HOME_DIR"
+fi
 echo "  token       : $HOME_DIR/server/atoll-token"
 echo "  日志        : $LOG"
 [ -n "$STEWARD" ] && echo "  c0 里的 steward 是 ${STEWARD}——登录后在 c0 直接对它说话"

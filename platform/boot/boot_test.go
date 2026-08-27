@@ -204,7 +204,21 @@ func TestEnsureGeneratesRootPasswordWhenNotSupplied(t *testing.T) {
 	}
 }
 
-func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
+// Startup is inert with respect to credentials UNLESS it is handed a password.
+//
+// This used to assert that a password given to an existing install was ignored
+// outright, and the thing that assertion protected was real: a stale
+// ATOLL_ROOT_PASSWORD in someone's environment must not silently take over root
+// on the next restart. What changed is that nothing keeps the plaintext any
+// more — the installer shows it once and the node stores only a bcrypt hash —
+// so ignoring the password left no way back in at all after forgetting it.
+//
+// The protection is kept in a different shape: reseeding is idempotent by
+// comparison, so a value left in the environment rewrites nothing and reports
+// nothing, and a real change is announced. And the authority never widened —
+// whoever can run `atoll up` against this home can already open the registry
+// file and edit it directly.
+func TestStartupLeavesCredentialsAloneUnlessGivenAPassword(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	first, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "first"}))
@@ -220,24 +234,63 @@ func TestEnsureMarkerMakesStartupReadOnlyForCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	second, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "second"}))
+	// An ordinary restart — no password — must not touch it.
+	second, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Installed || second.RootPassword != "" {
-		t.Fatalf("startup reran installer: %+v", second)
+	if second.Installed || second.RootPassword != "" || second.PasswordReseeded {
+		t.Fatalf("startup reran installer or rotated a credential: %+v", second)
 	}
 	db, err = sql.Open("sqlite", second.RegistryDBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
 	var after string
 	if err := db.QueryRow(`SELECT secret_hash FROM credentials WHERE principal_id='root'`).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
+	_ = db.Close()
 	if before != after {
-		t.Fatal("startup rewrote root credential")
+		t.Fatal("an ordinary restart rewrote the root credential")
+	}
+
+	// The same password again is a no-op, not a rotation: a value sitting in the
+	// environment must not make every restart look like a credential change.
+	same, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "first"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.PasswordReseeded {
+		t.Fatal("an unchanged password was reported as a rotation")
+	}
+
+	// A DIFFERENT password replaces it, and says so. This is the only way back
+	// in after forgetting the password, because nothing keeps the plaintext.
+	third, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: root, RootPassword: "second"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Installed || third.RootPassword != "" {
+		t.Fatalf("startup reran installer: %+v", third)
+	}
+	if !third.PasswordReseeded {
+		t.Fatal("the password changed but the boot did not report it")
+	}
+	db, err = sql.Open("sqlite", third.RegistryDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var reseeded string
+	if err := db.QueryRow(`SELECT secret_hash FROM credentials WHERE principal_id='root'`).Scan(&reseeded); err != nil {
+		t.Fatal(err)
+	}
+	if reseeded == before {
+		t.Fatal("a new password did not replace the credential")
+	}
+	if bcrypt.CompareHashAndPassword([]byte(reseeded), []byte("second")) != nil {
+		t.Fatal("the new password does not open the account")
 	}
 }
 

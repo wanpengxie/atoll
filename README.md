@@ -152,7 +152,6 @@ What the installer leaves behind:
 ├── atoll-up.log              # node log (JSON lines)
 ├── server/
 │   ├── atoll-token           # bearer token for local automation (0600)
-│   ├── root-password         # if you set/generated one (0600)
 │   ├── registry.db           # space registry
 │   └── channels/             # one SQLite ledger per channel
 └── device/                   # the local device's identity + working dirs
@@ -164,9 +163,12 @@ Check it is alive:
 curl -s http://127.0.0.1:8832/healthz      # {"status":"ok"}
 ```
 
-Account: `root` (`root@atoll.local` spelled out also works), with the password you chose (or the generated one in
-`~/.atoll/server/root-password`). Stop with `Ctrl-C`; the node is single-homed, so
-a second `atoll up` on the same `--dir` is refused by a lock.
+Account: `root` (`root@atoll.local` spelled out also works), with the password you
+chose — a generated one is shown once, at the end of install. The node keeps only
+a bcrypt hash, so there is no second copy to read afterwards. Forgotten it? Boot
+again with a new one: `ATOLL_ROOT_PASSWORD=new atoll up --dir ~/.atoll` (giving
+the same password again does nothing). Stop with `Ctrl-C`; the node is
+single-homed, so a second `atoll up` on the same `--dir` is refused by a lock.
 
 ### 3. Open the web UI
 

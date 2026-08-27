@@ -92,12 +92,23 @@ func TestCredentialsNeverLandInProcessLogs(t *testing.T) {
 		"registered password": userPassword,
 		"rejected password":   wrongPassword,
 		"device key":          deviceKey,
+		// The install-time root password used to be printed here on purpose,
+		// and that exception is withdrawn: the node's log is the worst home for
+		// it (default permissions, tens of megabytes, tailed and pasted), and
+		// copying the secret there defeated every other precaution taken with
+		// it. It is now shown once on the installer's terminal and nowhere else.
+		"install root password": rootPassword,
 	}
 	logs, err := filepath.Glob(filepath.Join(h.root, "logs", "*.log"))
 	if err != nil || len(logs) == 0 {
 		t.Fatalf("no process logs found: %v", err)
 	}
-	installPrinted := false
+	// The positive control has to be something the node really writes and
+	// nothing else does. It used to be the root password itself, which was
+	// convenient precisely because that was a bug; with the secret gone, the
+	// install line it sat on serves the same purpose and costs nothing.
+	const installMarker = "atoll installed"
+	sawInstallLine := false
 	for _, path := range logs {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -108,13 +119,12 @@ func TestCredentialsNeverLandInProcessLogs(t *testing.T) {
 				t.Fatalf("%s leaked into %s", name, filepath.Base(path))
 			}
 		}
-		installPrinted = installPrinted || strings.Contains(string(raw), rootPassword)
+		sawInstallLine = sawInstallLine || strings.Contains(string(raw), installMarker)
 	}
-	// Positive control: installation deliberately prints the root password
-	// once (that exception is a ruling). If the scanner cannot even see that
-	// line, it is reading the wrong logs and the green above proves nothing.
-	if !installPrinted {
-		t.Fatal("scanner never saw the install-time root password line; log scan is not reading real output")
+	// Without a control, "no secret was found" is also what reading the wrong
+	// file looks like, and the green above would prove nothing.
+	if !sawInstallLine {
+		t.Fatalf("scanner never saw %q; it is reading the wrong logs", installMarker)
 	}
 }
 

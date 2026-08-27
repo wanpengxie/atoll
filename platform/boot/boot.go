@@ -49,6 +49,10 @@ type Result struct {
 	C0Genesis      lagoon.GenesisSpec
 	Installed      bool
 	RootPassword   string
+	// PasswordReseeded reports that an already-installed node had its root
+	// password replaced by the one this boot was given. Distinct from
+	// Installed, and never carries the password itself.
+	PasswordReseeded bool
 }
 
 const registryDBName = "registry.db"
@@ -135,6 +139,27 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 		return Result{}, err
 	}
 	if installed {
+		// Reseeding runs BEFORE the integrity check, because a missing root
+		// credential is one of the things that check refuses to start on — and
+		// supplying a password is exactly how you repair it. Checking first
+		// would make the broken state unrepairable by the only tool that can
+		// repair it.
+		//
+		// Booting an existing install with a root password RESEEDS it. Nothing
+		// on disk keeps the plaintext — the credential is a bcrypt hash and
+		// there is no copy to look up — so this is the way back in after
+		// forgetting it: point the same command at the same home with a new
+		// password. It is not a new authority: whoever can run this already has
+		// the registry file open in front of them.
+		//
+		// Idempotent by comparison, not by writing: a password that already
+		// matches leaves the row untouched and says nothing, so a value left
+		// sitting in the environment cannot make every restart look like a
+		// credential rotation.
+		rotated, err := reseedRootPassword(ctx, registryPath, cfg.RootPassword)
+		if err != nil {
+			return Result{}, err
+		}
 		if err := prepareStartup(ctx, c0Path, registryPath, time.Now()); err != nil {
 			return Result{}, err
 		}
@@ -142,7 +167,7 @@ func Ensure(ctx context.Context, cfg Config) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{C0DBPath: c0Path, RegistryDBPath: registryPath, C0Genesis: genesis}, nil
+		return Result{C0DBPath: c0Path, RegistryDBPath: registryPath, C0Genesis: genesis, PasswordReseeded: rotated}, nil
 	}
 	if err := removeUnpublished(c0Path, lobbyPath, registryPath); err != nil {
 		return Result{}, err
@@ -436,3 +461,63 @@ func openSQLite(path string, create bool) (*sql.DB, error) {
 
 // RegistryDDLCount is a test-visible inventory, not a second schema surface.
 func RegistryDDLCount() int { return len(registryDDL) - 1 }
+
+// reseedRootPassword replaces the root credential on an install that already
+// exists, and reports whether it actually changed anything.
+//
+// The comparison is the point. Re-running with the same password must be a
+// no-op rather than a rotation, because the alternative is that a value left in
+// the environment quietly rewrites the credential on every restart — an event
+// worth reporting that then happens constantly and means nothing.
+func reseedRootPassword(ctx context.Context, registryPath, password string) (bool, error) {
+	if password == "" {
+		return false, nil
+	}
+	db, err := openSQLite(registryPath, true)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	var stored string
+	err = db.QueryRowContext(ctx,
+		`SELECT secret_hash FROM credentials WHERE principal_id=? AND kind='password'`,
+		channelspec.RootPrincipalID).Scan(&stored)
+	switch {
+	case err == nil:
+		if bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)) == nil {
+			return false, nil // already this password; nothing to do and nothing to say
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		// No credential at all — the row was removed, or an older install never
+		// wrote one. Re-seeding is exactly the repair.
+	default:
+		return false, fmt.Errorf("boot: read root credential: %w", err)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return false, err
+	}
+	stamp := time.Now().UnixMilli()
+	res, err := db.ExecContext(ctx,
+		`UPDATE credentials SET secret_hash=?, status='active', rotated_at=? WHERE principal_id=? AND kind='password'`,
+		string(hash), stamp, channelspec.RootPrincipalID)
+	if err != nil {
+		return false, fmt.Errorf("boot: rotate root credential: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO credentials(principal_id,kind,secret_hash,status,rotated_at) VALUES(?,'password',?,'active',?)`,
+			channelspec.RootPrincipalID, string(hash), stamp); err != nil {
+			return false, fmt.Errorf("boot: seed root credential: %w", err)
+		}
+	}
+	return true, nil
+}
+
+// bcryptMatches is the comparison the login path performs, exposed for tests
+// that need to assert which password a stored hash accepts.
+func bcryptMatches(hash, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}

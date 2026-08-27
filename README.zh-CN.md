@@ -135,7 +135,6 @@ bin/atoll up --dir ~/.atoll --addr 127.0.0.1:8832   # 显式 flag 仍然优先�
 ├── atoll-up.log              # 节点日志（JSON lines）
 ├── server/
 │   ├── atoll-token           # 本地自动化用的 bearer token（0600）
-│   ├── root-password         # 如果你设了/生成了密码（0600）
 │   ├── registry.db           # space 注册表
 │   └── channels/             # 每个频道一本 SQLite 账
 └── device/                   # 本地 device 的身份 + 工作目录
@@ -147,7 +146,9 @@ bin/atoll up --dir ~/.atoll --addr 127.0.0.1:8832   # 显式 flag 仍然优先�
 curl -s http://127.0.0.1:8832/healthz      # {"status":"ok"}
 ```
 
-账号 `root`（写全 `root@atoll.local` 也行），密码是你设的那个（或 `~/.atoll/server/root-password` 里生成的那个）。
+账号 `root`（写全 `root@atoll.local` 也行），密码是你设的那个——安装器生成的那个只在安装结束时显示一次。
+节点只存 bcrypt 哈希，机器上没有第二份，之后读不出来。忘了就用新密码重新引导一次：
+`ATOLL_ROOT_PASSWORD=新密码 atoll up --dir ~/.atoll`（密码相同则什么也不做）。
 `Ctrl-C` 停止；节点是单 home 的，对同一个 `--dir` 再跑一次 `atoll up` 会被锁拒绝。
 
 ### 3. 打开 web UI

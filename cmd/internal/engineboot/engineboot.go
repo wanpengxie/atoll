@@ -75,8 +75,18 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	if installed.Installed && installed.RootPassword != "" {
-		logger.Info("atoll installed", "root_password", installed.RootPassword)
+	// The password is NOT logged. It used to be, and the node's log is the worst
+	// possible home for it: `atoll start` redirects into <dir>/atoll-up.log,
+	// which is created with the default umask (world-readable on a normal box),
+	// grows to tens of megabytes, and gets tailed and pasted around. Copying a
+	// secret out of a 0600 file into that is the whole vulnerability. The
+	// installer shows it once on the terminal; after that only the bcrypt hash
+	// exists, and `atoll up --root-password` is the way back in.
+	if installed.Installed {
+		logger.Info("atoll installed", "principal", "root")
+	}
+	if installed.PasswordReseeded {
+		logger.Info("root password replaced from the password given to this boot")
 	}
 	// Sessions live beside the install data: restart keeps every login,
 	// reinstall (directory wipe) is what revokes them.
