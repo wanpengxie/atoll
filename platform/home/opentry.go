@@ -1,14 +1,10 @@
 package home
 
 import (
-	"encoding/json"
-	"time"
-
 	"context"
 	"errors"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -232,17 +228,6 @@ func (e *opEntry) Execute(
 		}
 		return map[string]any{"member": payload.Member}, nil
 
-	case sysactor.TypeRequestCancel:
-		var payload struct {
-			RequestID message.ID `json:"request_id"`
-		}
-		if err := actorbase.DecodeStrict(req.Payload, &payload); err != nil || payload.RequestID == "" {
-			return nil, &sysactor.OperateError{
-				Code: string(channelspec.ErrCodeBadPayload), Detail: "request_id required",
-			}
-		}
-		return e.cancelRequest(ctx, payload.RequestID, req.Caller.Actor)
-
 	case sysactor.TypeMemberRestartAll:
 		var payload struct{}
 		if err := actorbase.DecodeStrictEmpty(req.Payload, &payload); err != nil {
@@ -257,57 +242,6 @@ func (e *opEntry) Execute(
 			Code: string(channelspec.ErrCodeNotAcceptedSource), Detail: "operation is not accepted",
 		}
 	}
-}
-
-// cancelRequest closes an open request on a member's say-so, authored by the
-// substrate.
-//
-// The detour is forced by the closure model, not chosen: the harness accepts a
-// terminal from exactly three kinds of author — the receiver (its own exit),
-// the caller (closing the account it opened), and the substrate. A member that
-// is neither the caller nor the receiver has no arm at all, so "let me stop
-// that" cannot be a message it writes itself; it has to be a thing it ASKS the
-// substrate to observe. That is this word.
-//
-// The terminal is byte-identical to the expiry reaper's, and deliberately so:
-// the fact recorded is "this request was closed unanswered", which is the same
-// fact whether a deadline or a person established it. Who established it rides
-// where provenance always rides — env.Sender (system) plus closed_by — never a
-// new vocabulary word, so nothing downstream has to learn a fourth way for a
-// request to end.
-func (e *opEntry) cancelRequest(ctx context.Context, requestID message.ID, asker actor.ActorID) (any, error) {
-	if e.home.systemPen == nil || e.home.requests == nil {
-		return nil, &sysactor.OperateError{
-			Code: string(channelspec.ErrCodeAuthorityUnavailable), Detail: "closure authority unavailable",
-		}
-	}
-	env, found, err := e.home.requests.FindByID(ctx, requestID)
-	if err != nil {
-		return nil, asOperateError(err)
-	}
-	if !found || env == nil || env.Kind != message.KindRequest {
-		return nil, &sysactor.OperateError{
-			Code: string(channelspec.ErrCodeBadPayload), Detail: "no such request in this channel",
-		}
-	}
-	closedBy, err := json.Marshal(map[string]any{"closed_by": "system", "cancelled": true, "requested_by": string(asker)})
-	if err != nil {
-		return nil, asOperateError(err)
-	}
-	clock := func() time.Time { return time.UnixMilli(e.home.nowMs()) }
-	// A request that answered a moment ago loses benignly: Respond maps the
-	// terminal-uniqueness conflict to success, so asking twice — or racing the
-	// real answer — is not an error the caller has to reason about.
-	if _, rerr := behavior.Respond(ctx, e.home.systemPen, clock, env, behavior.ResponseSpec{
-		Status:  message.StatusFailed,
-		Reason:  string(message.TerminalUnansweredTimeout),
-		Payload: closedBy,
-	}); rerr != nil {
-		return nil, asOperateError(rerr)
-	}
-	e.home.logger.Info("platform.request_cancel",
-		"channel", e.home.channelID, "request", string(requestID), "requested_by", string(asker))
-	return map[string]any{"request_id": string(requestID)}, nil
 }
 
 // restartChannel is the break-glass recovery the channel restart button sends:

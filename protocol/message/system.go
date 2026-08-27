@@ -66,19 +66,13 @@ const (
 	// system.channel.* requests are the registry acting on channels, while
 	// this is the channel giving its own members a fresh term.
 	TypeSystemMemberRestartAll = "system.member.restart_all"
-	// TypeSystemRequestCancel lets a member ask the substrate to close an open
-	// request it did not send. The detour through the system actor is not
-	// ceremony: closure authorship is a closed set (receiver, the caller
-	// itself, or the substrate), so a third party has no arm of its own and
-	// the system actor is the only author that can honour the ask.
-	TypeSystemRequestCancel  = "system.request.cancel"
-	TypeSystemLogRecent      = "system.log.recent"
-	TypeSystemTimerSet       = "system.timer.set"
-	TypeSystemTimerCancel    = "system.timer.cancel"
-	TypeSystemTimerList      = "system.timer.list"
-	TypeSystemMemberCreated  = "system.member.created"
-	TypeSystemMemberDeleted  = "system.member.deleted"
-	TypeSystemChannelInbound = "system.channel.inbound"
+	TypeSystemLogRecent        = "system.log.recent"
+	TypeSystemTimerSet         = "system.timer.set"
+	TypeSystemTimerCancel      = "system.timer.cancel"
+	TypeSystemTimerList        = "system.timer.list"
+	TypeSystemMemberCreated    = "system.member.created"
+	TypeSystemMemberDeleted    = "system.member.deleted"
+	TypeSystemChannelInbound   = "system.channel.inbound"
 )
 
 var systemEntries = [...]SystemEntry{
@@ -119,7 +113,6 @@ var systemEntries = [...]SystemEntry{
 	{Name: TypeSystemMemberRestart, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemLogRecent, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberRestartAll, Kind: KindRequest, Locus: SystemLocusMembrane},
-	{Name: TypeSystemRequestCancel, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemTimerSet, Kind: KindRequest, Locus: SystemLocusLocal},
 	{Name: TypeSystemTimerCancel, Kind: KindRequest, Locus: SystemLocusLocal},
 	{Name: TypeSystemTimerList, Kind: KindRequest, Locus: SystemLocusLocal},
