@@ -18,15 +18,16 @@ import (
 // DefaultActorID is the registry id this adapter owns.
 const DefaultActorID actor.ActorID = "tool:kimi"
 
-// DefaultListenAddr is the addr this adapter's private device WS endpoint binds
-// when nothing has been set. Owned here, not by the composition root — the
-// adapter knows its own port (8091, distinct from xhs's 8090). It is loopback
-// because the endpoint is keyless: the default must be the safe one, and moving
-// it off loopback is a deliberate act through kimi.listen.set.
-const DefaultListenAddr = "127.0.0.1:8091"
+// DefaultListenAddr is the addr this adapter's device WS endpoint binds when
+// nothing has been set. The port is NOT ours to choose: 10086 is where the
+// kimi-webbridge extension dials, compiled into the extension, so an adapter
+// standing in for that server has to be there. It is loopback because the
+// endpoint is keyless: the default must be the safe one, and moving it off
+// loopback is a deliberate act through kimi.listen.set.
+const DefaultListenAddr = "127.0.0.1:10086"
 
 // Config drives an Actor. ListenAddr is the STARTING address of the private
-// device WS endpoint (e.g. "127.0.0.1:8091", or "127.0.0.1:0" to let the OS
+// device WS endpoint (e.g. "127.0.0.1:10086", or "127.0.0.1:0" to let the OS
 // pick — tests read the resolved addr back via ListenAddr()). A stored address
 // from a previous kimi.listen.set wins over it at birth.
 type Config struct {
@@ -115,6 +116,7 @@ func NewActor(cfg Config) *Actor {
 	}
 	a.dev = plugindevice.New(plugindevice.Deps{
 		Tool:       "kimi",
+		Protocol:   plugindevice.WebbridgeProtocol{},
 		Sys:        func() actorbase.Sys { return a.sys },
 		Clock:      clock,
 		Logger:     logger,

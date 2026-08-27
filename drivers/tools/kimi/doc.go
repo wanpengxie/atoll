@@ -19,11 +19,22 @@
 //     set fails invalid_action before anything reaches the device. No other
 //     actor ever learns what a browser extension is.
 //
-//   - Outward (device face): a PRIVATE WS endpoint (the extension connect-ins
-//     to it), supplied by drivers/tools/plugindevice — the transport is shared
-//     with xhs, this package keeps only its own dialect (the action allowlist
-//     and its budget) and the two endpoint words kimi.listen.set /
-//     kimi.listen.get. The wire is the minimal request/response
+//   - Outward (device face): the WS endpoint the kimi-webbridge Chrome extension
+//     dials, supplied by drivers/tools/plugindevice — the transport is shared
+//     with xhs, this package keeps only its own dialect (the action allowlist,
+//     its budget, and plugindevice.WebbridgeProtocol) and the two endpoint words
+//     kimi.listen.set / kimi.listen.get.
+//
+//     The wire is NOT ours: it is kimi-webbridge's own (npm: kimi-webbridge,
+//     MIT), read off that package's server, because this adapter stands in for
+//     exactly that server. /ws, a hello/hello_ack handshake the extension needs
+//     before it considers itself ready, {type:"tool_call",requestId,payload:
+//     {name,args}} down, {type:"tool_result",responseToRequestId,payload:
+//     {data|error}} up, and a {"type":"ping"} every 15s answered with
+//     {"type":"pong"}. Port 10086 is likewise the extension's choice, not ours.
+//     See plugindevice/protocol.go. The older text below described a frame
+//     family this adapter never actually spoke to a real extension: the minimal
+//     request/response
 //     primitive {correlation_id, cmd, params} down / {correlation_id, ok,
 //     result|error} up — NOT a channel envelope, NOT any device_transit frame
 //     family. correlation_id pairs a reply to its request.

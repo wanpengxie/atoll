@@ -11,7 +11,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/atoll/drivers/tools/plugindevice"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -274,35 +273,95 @@ func waitOnline(t *testing.T, a *Actor) {
 	}
 }
 
-// fakeExtension is a gorilla WS client standing in for the browser extension.
+// fakeExtension is a gorilla WS client standing in for the kimi-webbridge
+// Chrome extension. It speaks that extension's OWN protocol — /ws, a hello
+// handshake, tool_call/tool_result — because that is what the adapter has to
+// satisfy; a double that spoke a frame family of our own choosing would prove
+// nothing about the real thing.
 type fakeExtension struct {
 	conn *websocket.Conn
 }
 
+// toolCall is one command the adapter pushes down.
+type toolCall struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Payload   struct {
+		Name string          `json:"name"`
+		Args json.RawMessage `json:"args"`
+	} `json:"payload"`
+}
+
 func dialExtension(t *testing.T, a *Actor) *fakeExtension {
 	t.Helper()
-	url := "ws://" + a.ListenAddr() + "/device"
+	url := "ws://" + a.ListenAddr() + "/ws"
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("dial extension: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return &fakeExtension{conn: conn}
+	ext := &fakeExtension{conn: conn}
+	ext.hello(t)
+	return ext
 }
 
-func (f *fakeExtension) read(t *testing.T) plugindevice.DownFrame {
+// hello performs the handshake the real extension performs. It is not optional:
+// the extension does not consider itself ready until the ack comes back, so an
+// adapter that skipped it would look connected and answer nothing.
+func (f *fakeExtension) hello(t *testing.T) {
 	t.Helper()
-	_ = f.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	var d plugindevice.DownFrame
-	if err := f.conn.ReadJSON(&d); err != nil {
-		t.Fatalf("extension read: %v", err)
+	if err := f.conn.WriteJSON(map[string]any{
+		"type":    "hello",
+		"payload": map[string]any{"extensionVersion": "test"},
+	}); err != nil {
+		t.Fatalf("extension hello: %v", err)
 	}
-	return d
+	_ = f.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var ack struct {
+		Type string `json:"type"`
+	}
+	if err := f.conn.ReadJSON(&ack); err != nil {
+		t.Fatalf("no answer to hello: %v", err)
+	}
+	if ack.Type != "hello_ack" {
+		t.Fatalf("answer to hello was %q, want hello_ack", ack.Type)
+	}
 }
 
-func (f *fakeExtension) reply(t *testing.T, up plugindevice.UpFrame) {
+// read waits for the next tool_call, stepping over heartbeats.
+func (f *fakeExtension) read(t *testing.T) toolCall {
 	t.Helper()
-	if err := f.conn.WriteJSON(up); err != nil {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_ = f.conn.SetReadDeadline(deadline)
+		var call toolCall
+		if err := f.conn.ReadJSON(&call); err != nil {
+			t.Fatalf("extension read: %v", err)
+		}
+		if call.Type == "tool_call" {
+			return call
+		}
+	}
+}
+
+func (f *fakeExtension) reply(t *testing.T, requestID string, data any) {
+	t.Helper()
+	if err := f.conn.WriteJSON(map[string]any{
+		"type":                "tool_result",
+		"responseToRequestId": requestID,
+		"payload":             map[string]any{"data": data},
+	}); err != nil {
+		t.Fatalf("extension reply: %v", err)
+	}
+}
+
+func (f *fakeExtension) replyError(t *testing.T, requestID, message string) {
+	t.Helper()
+	if err := f.conn.WriteJSON(map[string]any{
+		"type":                "tool_result",
+		"responseToRequestId": requestID,
+		"payload":             map[string]any{"error": message},
+	}); err != nil {
 		t.Fatalf("extension reply: %v", err)
 	}
 }
@@ -338,20 +397,19 @@ func TestRoundTrip(t *testing.T) {
 	sys.push(req)
 
 	down := ext.read(t)
-	if down.CorrelationID != "req-1" {
-		t.Errorf("correlation_id=%q want req-1", down.CorrelationID)
+	if down.RequestID != "req-1" {
+		t.Errorf("requestId=%q want req-1", down.RequestID)
 	}
-	if down.Cmd != "navigate" {
-		t.Errorf("cmd=%q want navigate", down.Cmd)
+	if down.Payload.Name != "navigate" {
+		t.Errorf("name=%q want navigate", down.Payload.Name)
 	}
 	var params map[string]any
-	_ = json.Unmarshal(down.Params, &params)
+	_ = json.Unmarshal(down.Payload.Args, &params)
 	if params["url"] != "x" {
 		t.Errorf("params.url=%v want x", params["url"])
 	}
 
-	result, _ := json.Marshal(map[string]any{"tabId": 7})
-	ext.reply(t, plugindevice.UpFrame{CorrelationID: "req-1", OK: true, Result: result})
+	ext.reply(t, "req-1", map[string]any{"tabId": 7})
 
 	rep, ok := sys.waitReply(t, "req-1", 2*time.Second)
 	if !ok {
@@ -439,11 +497,11 @@ func TestInvalidAction(t *testing.T) {
 		t.Errorf("code=%q want invalid_action", fail.code)
 	}
 
-	// Nothing must have been dispatched: the extension sees no down-frame.
+	// Nothing must have been dispatched: the extension sees no tool_call.
 	_ = ext.conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
-	var d plugindevice.DownFrame
-	if err := ext.conn.ReadJSON(&d); err == nil {
-		t.Fatalf("expected no down-frame for invalid action, got cmd=%q", d.Cmd)
+	var call toolCall
+	if err := ext.conn.ReadJSON(&call); err == nil && call.Type == "tool_call" {
+		t.Fatalf("expected no tool_call for invalid action, got name=%q", call.Payload.Name)
 	}
 }
 

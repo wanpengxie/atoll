@@ -29,7 +29,41 @@
 
 const http = require('http')
 const net = require('net')
-const { WebSocketServer, WebSocket } = require('ws')
+const path = require('path')
+
+// This is the one dependency, and it is not vendored — a fresh clone has no
+// node_modules. Node would otherwise resolve `ws` from ANY ancestor directory,
+// so an unrelated project's old copy gets picked up and the failure surfaces as
+// "WebSocketServer is not a constructor" several frames deep. Name the problem
+// here instead, and say which copy was found.
+const { WebSocketServer, WebSocket } = loadWs()
+
+function loadWs () {
+  let ws, from
+  try {
+    ws = require('ws')
+    from = require.resolve('ws')
+  } catch {
+    fatalDependency(`ws is not installed.\n\nRun:  npm install --prefix ${__dirname}`)
+  }
+  if (typeof ws.WebSocketServer !== 'function' || typeof ws.WebSocket !== 'function') {
+    // Resolved something called ws, but too old (WebSocketServer landed in
+    // ws 7.4) or not the package we mean.
+    fatalDependency(
+      `the "ws" package found at\n  ${from}\n` +
+      'is too old or is not the package this needs (WebSocketServer is missing).\n\n' +
+      'It was picked up from an ancestor directory because this tool\'s own\n' +
+      'dependencies are not installed. Install them and it will be used instead:\n\n' +
+      `  npm install --prefix ${__dirname}\n\n` +
+      `(the required version is in ${path.join(__dirname, 'package.json')})`)
+  }
+  return ws
+}
+
+function fatalDependency (message) {
+  process.stderr.write(`atoll-plugin-bridge: ${message}\n`)
+  process.exit(4)
+}
 
 const USAGE = `atoll-plugin-bridge — forward local browser plugins to remote atoll adapters
 

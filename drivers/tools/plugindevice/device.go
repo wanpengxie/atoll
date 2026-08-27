@@ -87,6 +87,8 @@ type Deps struct {
 	Logger *slog.Logger
 	// OnPresence is called on the online/offline edges of the connection.
 	OnPresence func(online bool)
+	// Protocol is the plugin family's language. nil ⇒ AtollProtocol.
+	Protocol Protocol
 }
 
 type pending struct {
@@ -97,6 +99,15 @@ type pending struct {
 // Device owns one adapter's outward transport.
 type Device struct {
 	deps Deps
+
+	// writeMu serialises OUTBOUND frames. The transport used to have a single
+	// writer (only the worker goroutine dispatched), but a protocol with a
+	// handshake and an application heartbeat has three — the read loop answers
+	// hello, the beat loop pings, the worker dispatches — and gorilla forbids
+	// concurrent writes. It is deliberately NOT mu: mu guards the in-flight
+	// table and must never be held across a blocking wire write. Lock order is
+	// always writeMu → mu (writes may drop the conn), never the reverse.
+	writeMu sync.Mutex
 
 	mu       sync.Mutex
 	desired  string
@@ -115,6 +126,9 @@ func New(deps Deps) *Device {
 	}
 	if deps.Clock == nil {
 		deps.Clock = time.Now
+	}
+	if deps.Protocol == nil {
+		deps.Protocol = AtollProtocol{}
 	}
 	return &Device{deps: deps, inflight: make(map[string]*pending)}
 }
@@ -164,7 +178,7 @@ func (d *Device) Bind(addr string) error {
 		return fmt.Errorf("%s: device listen %q: %w", d.deps.Tool, addr, err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/device", d.handleAccept)
+	mux.HandleFunc(d.deps.Protocol.Path(), d.handleAccept)
 	srv := &http.Server{Handler: mux}
 	d.mu.Lock()
 	d.listener = ln
@@ -206,7 +220,7 @@ func (d *Device) Rebind(ctx context.Context, addr string) (string, error) {
 		return "", fmt.Errorf("%s: device listen %q: %w", d.deps.Tool, addr, err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/device", d.handleAccept)
+	mux.HandleFunc(d.deps.Protocol.Path(), d.handleAccept)
 	srv := &http.Server{Handler: mux}
 
 	d.mu.Lock()
@@ -307,7 +321,18 @@ func (d *Device) handleAccept(w http.ResponseWriter, r *http.Request) {
 func (d *Device) readLoop(conn *websocket.Conn, exposed bool) {
 	defer d.wg.Done()
 	conn.SetReadLimit(maxFrameBytes)
-	if exposed {
+
+	// Whose keepalive to run is the protocol's call, not the address's. A plugin
+	// whose family defines an application-level heartbeat answers THAT and not a
+	// WS-level ping, so sending only control frames would leave the transport
+	// satisfied and the plugin unaware. Where the protocol defines none, the
+	// control-frame ping still guards a routable bind — a half-dead WAN peer
+	// that never sends FIN would otherwise hold the exclusive slot forever.
+	if every, frame, ok := d.deps.Protocol.Heartbeat(); ok {
+		stopBeat := make(chan struct{})
+		defer close(stopBeat)
+		go d.beatLoop(conn, every, frame, stopBeat)
+	} else if exposed {
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 		conn.SetPongHandler(func(string) error {
 			return conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -317,11 +342,11 @@ func (d *Device) readLoop(conn *websocket.Conn, exposed bool) {
 		go d.pingLoop(conn, stopPing)
 	}
 	for {
-		var up UpFrame
-		if err := conn.ReadJSON(&up); err != nil {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
 			break
 		}
-		d.handleUp(up)
+		d.handleInbound(conn, d.deps.Protocol.Decode(raw))
 	}
 
 	d.mu.Lock()
@@ -349,8 +374,7 @@ func (d *Device) pingLoop(conn *websocket.Conn, stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-ticker.C:
-			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := d.send(conn, websocket.PingMessage, nil); err != nil {
 				d.DropConn(conn)
 				return
 			}
@@ -358,16 +382,45 @@ func (d *Device) pingLoop(conn *websocket.Conn, stop <-chan struct{}) {
 	}
 }
 
-// handleUp matches one reply to its in-flight request and authors the channel
-// terminal directly. An unknown correlation_id (already reaped, or a stray) is
-// dropped. Taking the pending out of the table under the lock makes the close
-// atomic: a correlation can be claimed by the read loop OR the reaper, never
-// both.
-func (d *Device) handleUp(up UpFrame) {
+// beatLoop sends the protocol's own heartbeat frame. A failed send drops the
+// connection rather than leaving the exclusive slot held by something that will
+// never answer.
+func (d *Device) beatLoop(conn *websocket.Conn, every time.Duration, frame []byte, stop <-chan struct{}) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			d.writeFrame(conn, frame)
+		}
+	}
+}
+
+// handleInbound acts on one decoded message. A result closes its in-flight
+// request and authors the channel terminal directly; a handshake is answered on
+// the spot; anything else is dropped. An unknown correlation (already reaped, or
+// a stray) is dropped too. Taking the pending out of the table under the lock
+// makes the close atomic: a correlation can be claimed by the read loop OR the
+// reaper, never both.
+func (d *Device) handleInbound(conn *websocket.Conn, in Inbound) {
+	switch in.Kind {
+	case InboundIgnore:
+		return
+	case InboundReply:
+		// A handshake is transport business, not the actor's: it is answered
+		// here so the plugin reaches its ready state without any request having
+		// to exist yet.
+		d.writeFrame(conn, in.Reply)
+		d.deps.Logger.Info(d.deps.Tool+".device.ready", "actor", d.selfID(), "detail", in.Note)
+		return
+	}
+
 	d.mu.Lock()
-	p, ok := d.inflight[up.CorrelationID]
+	p, ok := d.inflight[in.CorrelationID]
 	if ok {
-		delete(d.inflight, up.CorrelationID)
+		delete(d.inflight, in.CorrelationID)
 	}
 	d.mu.Unlock()
 	if !ok {
@@ -377,30 +430,53 @@ func (d *Device) handleUp(up UpFrame) {
 	if sys == nil {
 		return
 	}
-	if up.OK {
-		if _, err := sys.Reply(p.request, up.Result); err != nil {
-			d.deps.Logger.Warn(d.deps.Tool+".device.reply_failed", "correlation_id", up.CorrelationID, "err", err.Error())
+	if in.OK {
+		if _, err := sys.Reply(p.request, in.Result); err != nil {
+			d.deps.Logger.Warn(d.deps.Tool+".device.reply_failed", "correlation_id", in.CorrelationID, "err", err.Error())
 		}
 		return
 	}
 	code, detail := "device_error", "device reported a failure"
-	if up.Error != nil {
-		if up.Error.Code != "" {
-			code = up.Error.Code
-		}
-		if up.Error.Message != "" {
-			detail = up.Error.Message
-		}
+	if in.ErrCode != "" {
+		code = in.ErrCode
+	}
+	if in.ErrMsg != "" {
+		detail = in.ErrMsg
 	}
 	if _, err := sys.Fail(p.request, code, detail); err != nil {
-		d.deps.Logger.Warn(d.deps.Tool+".device.fail_failed", "correlation_id", up.CorrelationID, "err", err.Error())
+		d.deps.Logger.Warn(d.deps.Tool+".device.fail_failed", "correlation_id", in.CorrelationID, "err", err.Error())
+	}
+}
+
+// send writes one frame under the write lock, with a deadline so a stuck peer
+// fails the connection instead of holding the lock. Every outbound frame goes
+// through here — dispatches, handshake answers, heartbeats and control pings —
+// because they come from three different goroutines and the socket takes one
+// writer at a time.
+func (d *Device) send(conn *websocket.Conn, kind int, frame []byte) error {
+	d.writeMu.Lock()
+	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	err := conn.WriteMessage(kind, frame)
+	d.writeMu.Unlock()
+	return err
+}
+
+// writeFrame sends one transport-owned frame (handshake answer, heartbeat) and
+// drops the connection if it cannot land. Request frames go through Dispatch
+// instead, so they register in-flight first.
+func (d *Device) writeFrame(conn *websocket.Conn, frame []byte) {
+	if err := d.send(conn, websocket.TextMessage, frame); err != nil {
+		d.DropConn(conn)
 	}
 }
 
 // Dispatch sends one inward request down to the plugin and registers it as
 // in-flight.
 func (d *Device) Dispatch(msg actorbase.Msg, spec Spec, params json.RawMessage) error {
-	frame := DownFrame{CorrelationID: string(msg.ID), Cmd: spec.Cmd, Params: params}
+	frame, err := d.deps.Protocol.EncodeCall(string(msg.ID), spec.Cmd, params)
+	if err != nil {
+		return fmt.Errorf("%s: encode %s: %w", d.deps.Tool, spec.Cmd, err)
+	}
 
 	d.mu.Lock()
 	conn := d.conn
@@ -412,11 +488,10 @@ func (d *Device) Dispatch(msg actorbase.Msg, spec Spec, params json.RawMessage) 
 	d.inflight[string(msg.ID)] = &pending{request: msg, deadline: d.deps.Clock().Add(spec.Deadline)}
 	d.mu.Unlock()
 
-	// Write OUTSIDE the lock, with a deadline: a stuck peer must never freeze
-	// the mutex. Only the worker goroutine dispatches, so conn writes stay
-	// single-writer. The socket deadline is REAL wall-clock.
-	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	if err := conn.WriteJSON(frame); err != nil {
+	// Write OUTSIDE the in-flight lock, with a deadline: a stuck peer must never
+	// freeze the mutex that sweep, stop and accept all share. The socket
+	// deadline is REAL wall-clock.
+	if err := d.send(conn, websocket.TextMessage, frame); err != nil {
 		// The frame did not reach the device. Leave the entry in-flight (the
 		// reaper times it out); treat the conn as dead so the next dispatch
 		// sees offline.
