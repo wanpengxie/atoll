@@ -67,7 +67,7 @@
 校验 sha256，然后进入和源码安装**完全同一个**交互向导：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wanpengxie/atoll/main/scripts/install.sh | bash
+curl -fsSL https://atoll-package.oss-cn-beijing.aliyuncs.com/install.sh | bash
 ```
 
 装完打开 `http://127.0.0.1:8832`。
@@ -77,7 +77,9 @@ ATOLL_VERSION=v0.06 ...        # 固定某个版本，不取最新
 ATOLL_INSTALL_DIR=/usr/local/bin ...   # 换二进制装到哪（默认 ~/.local/bin）
 ```
 
-包和 `checksums.txt` 都在 [Releases](https://github.com/wanpengxie/atoll/releases)；
+安装器优先走北京 OSS 镜像，下载中断会重试并续传，OSS 不通时自动回退 GitHub；
+`ATOLL_DOWNLOAD_BASE` 可以指定其他镜像。包和 `checksums.txt` 同时发布在 OSS 和
+[GitHub Releases](https://github.com/wanpengxie/atoll/releases)；
 mac 分 Apple Silicon / Intel 两个，Linux 分 amd64 / arm64，脚本按 `uname` 自己选。
 
 steward 用的 codex / claude CLI 仍然要你自己装好并登录 —— 那是你的账号，装机脚本不替你登。

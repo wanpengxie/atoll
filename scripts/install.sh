@@ -11,12 +11,14 @@
 #
 # Where the binary comes from is decided, not asked: one lying next to this
 # script is it (a release tarball); otherwise a source checkout builds one;
-# otherwise it is downloaded from the matching GitHub release. Every route then
-# runs the same wizard — a user installing and a developer testing must not be
-# walking different code.
+# otherwise it is downloaded from the matching release. The public OSS mirror
+# is tried first and GitHub remains the fallback. Every route then runs the same
+# wizard — a user installing and a developer testing must not be walking
+# different code.
 #
 #   ATOLL_VERSION=v0.01   pin a release instead of taking the latest
 #   ATOLL_BIN=/path/atoll  use a binary you already have
+#   ATOLL_DOWNLOAD_BASE=https://...  override the preferred release mirror
 #
 # What it does, in order:
 #   0. acquire     — find or fetch the binary (see above)
@@ -87,6 +89,8 @@ fi
 [ -n "${HOME:-}" ] || { echo "atoll installer 需要 HOME 环境变量（当前未设置）" >&2; exit 1; }
 
 REPO_SLUG="${ATOLL_REPO:-wanpengxie/atoll}"
+DOWNLOAD_BASE="${ATOLL_DOWNLOAD_BASE:-https://atoll-package.oss-cn-beijing.aliyuncs.com}"
+DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
 
 # 管道模式（curl|bash / 守卫 re-exec）下 $0 不是脚本文件，dirname 只会指到
 # 无关目录——这时"旁边的二进制/源码树"判据全部失效，恒走 release 下载或
@@ -165,6 +169,36 @@ sha256_of() {
   fi
 }
 
+# Small control files are fetched before the archive so a flaky metadata request
+# cannot throw away a package that already finished downloading. curl's retry
+# set is deliberately limited to options present in the older curl shipped by
+# macOS; each request still has a hard upper bound.
+fetch_small() { # fetch_small URL DEST
+  curl -fsSL --connect-timeout 15 --max-time 60 \
+    --retry 4 --retry-delay 2 --retry-max-time 180 \
+    -o "$2" "$1" </dev/null
+}
+
+# Keep a partial archive across transient failures within this installer run and
+# resume it with Range. If an origin refuses Range (curl 33), discard only that
+# partial and retry once from byte zero. The final sha256 remains authoritative.
+fetch_archive() { # fetch_archive URL DEST
+  local url=$1 dest=$2 attempt rc
+  for attempt in 1 2 3 4 5; do
+    if [ -t 2 ]; then
+      if curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+          -C - --progress-bar -o "$dest" "$url" </dev/null; then return 0; else rc=$?; fi
+    else
+      if curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+          -C - -o "$dest" "$url" </dev/null; then return 0; else rc=$?; fi
+    fi
+    [ "$rc" = 33 ] && rm -f "$dest"
+    [ "$attempt" = 5 ] && return "$rc"
+    warn "下载中断，2 秒后从断点重试（${attempt}/5）"
+    sleep 2
+  done
+}
+
 # download_release fetches the build for this machine. mac ships as two builds
 # because Intel and Apple Silicon are not interchangeable; nobody is asked which
 # one — uname already knows.
@@ -172,7 +206,8 @@ sha256_of() {
 PENDING_BIN_SRC=""
 download_release() {
   command -v curl >/dev/null || { bad "需要 curl"; exit 1; }
-  local os arch ver name base want got rc
+  local os arch ver name base want got rc mirror_latest github_latest candidate
+  local -a candidates
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m)
   case "$arch" in
@@ -184,18 +219,47 @@ download_release() {
 
   ver="${ATOLL_VERSION:-}"
   if [ -z "$ver" ]; then
-    # 版本号从 github.com 的 releases/latest 重定向里拿，跟下载包同一个域——
-    # 能下到包就能查到版本。恒不走 api.github.com：它无凭据限流 60 次/小时/IP，
-    # 且在部分网络环境（如国内）经常直接不通，而包下载是通的。
-    echo "  … 查询最新发行版（github.com）"
-    ver=$(curl -fsSLI --connect-timeout 15 --max-time 30 -o /dev/null -w '%{url_effective}' \
+    echo "  … 查询最新发行版（OSS 镜像）"
+    mirror_latest=$(mktemp "${TMPDIR:-/tmp}/atoll-latest.XXXXXX")
+    if fetch_small "$DOWNLOAD_BASE/releases/latest" "$mirror_latest" 2>/dev/null; then
+      ver=$(tr -d '[:space:]' < "$mirror_latest")
+    fi
+    rm -f "$mirror_latest"
+    # 镜像尚未配置或暂时不可达时，仍可从 GitHub 的 latest 重定向取版本。
+    case "$ver" in
+      v[0-9]*) ;;
+      *)
+        echo "  … OSS 不可用，回退查询 GitHub"
+        github_latest=$(curl -fsSLI --connect-timeout 15 --max-time 60 \
+          --retry 3 --retry-delay 2 --retry-max-time 120 \
+          -o /dev/null -w '%{url_effective}' \
           "https://github.com/$REPO_SLUG/releases/latest" 2>/dev/null </dev/null || true)
-    ver="${ver##*/}"
+        ver="${github_latest##*/}"
+        ;;
+    esac
     case "$ver" in ""|latest) bad "查不到最新发行版；用 ATOLL_VERSION=<tag> 指定一个"; exit 1 ;; esac
   fi
+  case "$ver" in v[0-9]*) ;; *) bad "发行版号不合法：$ver"; exit 1 ;; esac
   name="atoll_${ver}_${os}_${arch}"
-  base="https://github.com/$REPO_SLUG/releases/download/$ver"
   DL_TMP=$(mktemp -d "${TMPDIR:-/tmp}/atoll-dl.XXXXXX")
+
+  # 先拿同源校验清单，再碰大包。一次安装恒从同一个 origin 取清单和包，
+  # 不把两个镜像在不同时间的内容拼起来；sha256 是最后一道硬门。
+  candidates=(
+    "$DOWNLOAD_BASE/releases/$ver"
+    "https://github.com/$REPO_SLUG/releases/download/$ver"
+  )
+  base=""
+  for candidate in "${candidates[@]}"; do
+    echo "  … 检查发行源 ${candidate%%/releases/*}"
+    if fetch_small "$candidate/checksums.txt" "$DL_TMP/checksums.txt" 2>/dev/null; then
+      base="$candidate"
+      break
+    fi
+  done
+  [ -n "$base" ] || { bad "OSS 和 GitHub 都拿不到 checksums.txt，装机中止"; exit 1; }
+  want=$(awk -v f="$name.tar.gz" '$2==f || $2=="*"f {print $1; exit}' "$DL_TMP/checksums.txt")
+  [ -n "$want" ] || { bad "checksums.txt 里没有 $name.tar.gz 的条目，装机中止"; exit 1; }
 
   # 下载进度：终端上交给 curl 的进度条；没有终端（CI、docker exec、重定向）
   # 时 --progress-bar 会完全静默，就自己每 5 秒报一次已下载量——慢可以，
@@ -207,7 +271,7 @@ download_release() {
   size_note=""; [ "${total:-0}" -gt 0 ] && size_note="（$((total/1024/1024)) MB）"
   echo "  ↓ $name.tar.gz $size_note"
   if [ -t 2 ]; then
-    curl -fL --connect-timeout 15 --progress-bar -o "$DL_TMP/$name.tar.gz" "$base/$name.tar.gz" </dev/null \
+    fetch_archive "$base/$name.tar.gz" "$DL_TMP/$name.tar.gz" \
       || { bad "下载失败：$base/$name.tar.gz"; exit 1; }
   else
     ( while [ ! -f "$DL_TMP/.done" ]; do
@@ -217,7 +281,7 @@ download_release() {
         if [ "${total:-0}" -gt 0 ]; then echo "    … $((got/1024)) KB / $((total/1024)) KB"; else echo "    … 已下载 $((got/1024)) KB"; fi
       done ) &
     watcher=$!
-    if curl -fsSL --connect-timeout 15 -o "$DL_TMP/$name.tar.gz" "$base/$name.tar.gz" </dev/null; then rc=0; else rc=$?; fi
+    if fetch_archive "$base/$name.tar.gz" "$DL_TMP/$name.tar.gz"; then rc=0; else rc=$?; fi
     : > "$DL_TMP/.done"; wait "$watcher" 2>/dev/null || true
     [ "$rc" = 0 ] || { bad "下载失败：$base/$name.tar.gz"; exit 1; }
   fi
@@ -225,10 +289,6 @@ download_release() {
   # 校验 fail-closed：README 承诺了 sha256 校验，那它就恒不许被静默跳过。
   # 包和清单来自同一个 release，这道校验防的是传输截断和坏包，不是有意
   # 投毒——那要靠签名，这个版本还没有。
-  curl -fsSL --connect-timeout 15 --max-time 60 -o "$DL_TMP/checksums.txt" "$base/checksums.txt" </dev/null \
-    || { bad "拿不到 checksums.txt，无法校验，装机中止（网络恢复后重试）"; exit 1; }
-  want=$(awk -v f="$name.tar.gz" '$2==f || $2=="*"f {print $1; exit}' "$DL_TMP/checksums.txt")
-  [ -n "$want" ] || { bad "checksums.txt 里没有 $name.tar.gz 的条目，装机中止"; exit 1; }
   got=$(sha256_of "$DL_TMP/$name.tar.gz")
   [ -n "$got" ] || { bad "机器上没有 sha256sum/shasum，无法校验，装机中止"; exit 1; }
   if [ "$want" != "$got" ]; then

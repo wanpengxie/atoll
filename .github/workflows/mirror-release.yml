@@ -1,0 +1,94 @@
+name: Mirror an existing release to OSS
+
+# 给已经发到 GitHub、但尚未进入 OSS 的版本补镜像。只搬 GitHub Release 上
+# 已有的字节，不重新构建，避免“同一个 tag 两套二进制”。latest 和安装脚本
+# 恒在全部包上传并验收之后才更新。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '已有 GitHub Release 的版本号（如 v0.06）'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oss-mirror-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+      OSS_REGION: cn-beijing
+      OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
+      OSS_BUCKET: atoll-package
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: validate version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$VERSION" in v[0-9]*) ;; *) echo "非法版本号: $VERSION"; exit 1 ;; esac
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: download and verify GitHub release bytes
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          mkdir dist
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir dist \
+            --pattern 'atoll_*.tar.gz' --pattern checksums.txt
+          test "$(find dist -maxdepth 1 -name 'atoll_*.tar.gz' | wc -l)" -eq 4
+          (cd dist && sha256sum -c checksums.txt)
+
+      - name: install ossutil
+        run: |
+          url=https://gosspublic.alicdn.com/ossutil/v2/2.3.0/ossutil-2.3.0-linux-amd64.zip
+          curl -fL --retry 4 --retry-delay 2 -o /tmp/ossutil.zip "$url"
+          echo '3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a  /tmp/ossutil.zip' | sha256sum -c -
+          unzip -q /tmp/ossutil.zip -d /tmp/ossutil
+          echo "/tmp/ossutil/ossutil-2.3.0-linux-amd64" >> "$GITHUB_PATH"
+
+      - name: upload immutable release bytes
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          for file in dist/*.tar.gz dist/checksums.txt; do
+            ossutil api put-object \
+              --bucket "$OSS_BUCKET" \
+              --key "releases/$VERSION/${file#dist/}" \
+              --body "file://$file" \
+              --object-acl public-read \
+              --cache-control 'public, max-age=31536000, immutable' \
+              --forbid-overwrite
+          done
+
+      - name: publish pointers last
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          printf '%s\n' "$VERSION" > /tmp/atoll-latest
+          ossutil api put-object --bucket "$OSS_BUCKET" --key releases/latest \
+            --body file:///tmp/atoll-latest --object-acl public-read --cache-control no-cache
+          ossutil api put-object --bucket "$OSS_BUCKET" --key install.sh \
+            --body file://scripts/install.sh --object-acl public-read --cache-control no-cache
+
+      - name: public read acceptance
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          base=https://atoll-package.oss-cn-beijing.aliyuncs.com
+          test "$(curl -fsSL --retry 4 "$base/releases/latest")" = "$VERSION"
+          curl -fsSL --retry 4 "$base/releases/$VERSION/checksums.txt" -o /tmp/public-checksums
+          cmp dist/checksums.txt /tmp/public-checksums
+          curl -fsSL --retry 4 "$base/install.sh" | bash -n

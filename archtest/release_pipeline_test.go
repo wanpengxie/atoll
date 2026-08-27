@@ -23,8 +23,29 @@ func TestReleaseCannotBypassCI(t *testing.T) {
 		"needs: [core-ci, web-ci]",
 		"uses: actions/download-artifact@v4",
 		"if: github.event_name == 'push'",
+		"secrets.OSS_ACCESS_KEY_ID",
+		"secrets.OSS_ACCESS_KEY_SECRET",
+		"OSS_BUCKET: atoll-package",
+		"releases/$VERSION",
+		"name: publish GitHub release",
+		"put_public /tmp/atoll-latest releases/latest 'no-cache'",
 	} {
 		requireWorkflowText(t, release, want, "Release quality gate is incomplete")
+	}
+}
+
+func TestOSSMirrorMovesExistingReleaseBytes(t *testing.T) {
+	mirror := readWorkflow(t, "../.github/workflows/mirror-release.yml")
+	for _, want := range []string{
+		"gh release download",
+		"sha256sum -c checksums.txt",
+		"secrets.OSS_ACCESS_KEY_ID",
+		"secrets.OSS_ACCESS_KEY_SECRET",
+		"--forbid-overwrite",
+		"name: publish pointers last",
+		"name: public read acceptance",
+	} {
+		requireWorkflowText(t, mirror, want, "OSS mirror must preserve and verify released bytes")
 	}
 }
 

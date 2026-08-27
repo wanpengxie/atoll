@@ -137,7 +137,43 @@ jobs:
             || { echo "根路径没有吐出页面——UI 没打进去"; exit 1; }
           kill %1 || true
 
-      - name: publish
+      # ossutil 2.3.0 来自阿里云官方分发，版本和 sha256 一起钉死；不执行远端
+      # install.sh，也不把第三方 Action 放进发行信任链。
+      - name: install ossutil
+        if: github.event_name == 'push'
+        run: |
+          url=https://gosspublic.alicdn.com/ossutil/v2/2.3.0/ossutil-2.3.0-linux-amd64.zip
+          curl -fL --retry 4 --retry-delay 2 -o /tmp/ossutil.zip "$url"
+          echo '3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a  /tmp/ossutil.zip' | sha256sum -c -
+          unzip -q /tmp/ossutil.zip -d /tmp/ossutil
+          echo "/tmp/ossutil/ossutil-2.3.0-linux-amd64" >> "$GITHUB_PATH"
+
+      # 先铺不可变的版本字节。它们成功之前不创建 GitHub Release；同时也不写
+      # latest，所以外界不会观察到一套只有一半的发行版。
+      - name: stage OSS release bytes
+        if: github.event_name == 'push'
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_REGION: cn-beijing
+          OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
+          OSS_BUCKET: atoll-package
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          put_public() {
+            src=$1 key=$2 cache=$3
+            ossutil api put-object \
+              --bucket "$OSS_BUCKET" --key "$key" --body "file://$src" \
+              --object-acl public-read --cache-control "$cache" --forbid-overwrite
+          }
+
+          # 版本目录是内容地址：包和校验文件都长缓存，发布后不再改。
+          for file in dist/*.tar.gz dist/checksums.txt; do
+            put_public "$file" "releases/$VERSION/${file#dist/}" 'public, max-age=31536000, immutable'
+          done
+
+      - name: publish GitHub release
         # workflow_dispatch 是不打 tag 的全链路试跑，恒不得暗中创建 release/tag。
         if: github.event_name == 'push'
         env:
@@ -145,5 +181,28 @@ jobs:
         run: |
           gh release create "${{ steps.v.outputs.version }}" \
             --title "atoll ${{ steps.v.outputs.version }}" \
-            --notes "$(printf '装：\n\n```\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | bash\n```\n\n前端：atoll-web %s\n' "$GITHUB_REPOSITORY" "${{ needs.web-ci.outputs.version }}")" \
+            --notes "$(printf '装：\n\n```\ncurl -fsSL https://atoll-package.oss-cn-beijing.aliyuncs.com/install.sh | bash\n```\n\nGitHub/OSS 双源，安装器自动回退。\n\n前端：atoll-web %s\n' "${{ needs.web-ci.outputs.version }}")" \
             dist/*.tar.gz dist/checksums.txt
+
+      - name: publish OSS pointers
+        if: github.event_name == 'push'
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_REGION: cn-beijing
+          OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
+          OSS_BUCKET: atoll-package
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          put_public() {
+            src=$1 key=$2 cache=$3
+            ossutil api put-object \
+              --bucket "$OSS_BUCKET" --key "$key" --body "file://$src" \
+              --object-acl public-read --cache-control "$cache"
+          }
+
+          # 可变指针最后写：观察到新 latest 的人，前面的整套字节一定已就位。
+          printf '%s\n' "$VERSION" > /tmp/atoll-latest
+          put_public /tmp/atoll-latest releases/latest 'no-cache'
+          put_public scripts/install.sh install.sh 'no-cache'
