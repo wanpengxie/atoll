@@ -19,8 +19,9 @@ func TestDismissIsAnsweredByTheHolder(t *testing.T) {
 
 	const deviceName = "e2e-dismiss-daemon"
 	device := registrarRequest(t, ws, c0ChannelID, registrar, "system.device.create", map[string]any{"name": deviceName})
+	deviceID := stringField(t, device, "id")
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.device.attach", map[string]any{
-		"channel_id": c0ChannelID, "device_id": stringField(t, device, "id"),
+		"channel_id": c0ChannelID, "device_id": deviceID,
 	})
 	daemonLog := filepath.Join(h.root, "logs", "dismiss-daemon.log")
 	daemon := startProc(t, "dismiss-daemon", filepath.Join(e2eBinDir, "atoll-daemon"), []string{
@@ -34,7 +35,7 @@ func TestDismissIsAnsweredByTheHolder(t *testing.T) {
 		"config":     map[string]any{"tool_id": systemActor, "tool_type": "system.member.list"},
 		"visibility": "private",
 	})
-	seated := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": decl})
+	seated := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": decl, "desired_host": deviceID})
 	agentID := stringField(t, seated, "member")
 
 	waitActorPresence(t, ws, agentID, true, daemon, daemonLog)

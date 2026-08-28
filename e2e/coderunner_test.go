@@ -20,8 +20,9 @@ func TestCoderunnerHumanJourney(t *testing.T) {
 	api, ws := rootClient(t, h, map[string]int64{c0ChannelID: 0})
 	registrar := findRegistrar(t, ws)
 	device := registrarRequest(t, ws, c0ChannelID, registrar, "system.device.create", map[string]any{"name": "coderunner-host"})
+	deviceID := stringField(t, device, "id")
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.device.attach", map[string]any{
-		"channel_id": c0ChannelID, "device_id": stringField(t, device, "id"),
+		"channel_id": c0ChannelID, "device_id": deviceID,
 	})
 	daemonLog := filepath.Join(h.root, "logs", "coderunner-daemon.log")
 	daemon := startProc(t, "coderunner-daemon", filepath.Join(e2eBinDir, "atoll-daemon"), []string{
@@ -29,8 +30,8 @@ func TestCoderunnerHumanJourney(t *testing.T) {
 		"--key", stringField(t, device, "key"), "--name", "coderunner-host", "--home", h.daemonHome,
 	}, h.env, filepath.Join(h.root, "work"), daemonLog)
 
-	echoID := introduceClass(t, ws, registrar, "coderunner-echo", "coderunner-echo", "echo", map[string]any{})
-	runnerID := introduceClass(t, ws, registrar, "coderunner-mode-one", "coderunner-mode-one", "coderunner", map[string]any{})
+	echoID := introduceClass(t, ws, registrar, "coderunner-echo", "coderunner-echo", "echo", deviceID, map[string]any{})
+	runnerID := introduceClass(t, ws, registrar, "coderunner-mode-one", "coderunner-mode-one", "coderunner", deviceID, map[string]any{})
 	waitActorPresence(t, ws, echoID, true, daemon, daemonLog)
 	waitActorPresence(t, ws, runnerID, true, daemon, daemonLog)
 
@@ -276,7 +277,7 @@ func TestCoderunnerHumanJourney(t *testing.T) {
 	}
 
 	fixedProgram := `export async function run({atoll,args}) { const out=await atoll.call({target:"echo",type:"echo.say",input:{text:args.text}}); return {text:out.text} }`
-	fixedID := introduceClass(t, ws, registrar, "coderunner-fixed", "coderunner-fixed", "coderunner", map[string]any{
+	fixedID := introduceClass(t, ws, registrar, "coderunner-fixed", "coderunner-fixed", "coderunner", deviceID, map[string]any{
 		"program": fixedProgram, "requires": []string{"echo"},
 	})
 	waitActorPresence(t, ws, fixedID, true, daemon, daemonLog)
@@ -309,7 +310,7 @@ func TestCoderunnerHumanJourney(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pythonID := introduceClass(t, ws, registrar, "coderunner-python", "coderunner-python", "coderunner", map[string]any{
+		pythonID := introduceClass(t, ws, registrar, "coderunner-python", "coderunner-python", "coderunner", deviceID, map[string]any{
 			"runtime": map[string]any{"command": "python3", "args": []string{pythonRuntime}, "suffix": ".py"},
 		})
 		waitActorPresence(t, ws, pythonID, true, daemon, daemonLog)
@@ -397,12 +398,15 @@ func waitForNodeChild(t *testing.T, parentPID int, want bool) {
 	t.Fatalf("node child presence under daemon %d did not become %v; children=%v", parentPID, want, last)
 }
 
-func introduceClass(t *testing.T, ws *wsClient, registrar, declID, name, class string, config map[string]any) string {
+// deviceID is named rather than left to the channel's default: c0 always has
+// the node's local device attached, so an unnamed seat lands there and never on
+// the daemon this test started.
+func introduceClass(t *testing.T, ws *wsClient, registrar, declID, name, class, deviceID string, config map[string]any) string {
 	t.Helper()
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
 		"id": declID, "name": name, "class": class, "config": config, "visibility": "private",
 	})
-	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID})
+	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID, "desired_host": deviceID})
 	return stringField(t, introduced, "member")
 }
 

@@ -3,6 +3,7 @@ package home
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -59,15 +60,47 @@ func TestADeviceThisChannelCannotReachIsRefused(t *testing.T) {
 	}
 }
 
-// No preference keeps the old behaviour, so every existing caller is unchanged.
-func TestNoPreferenceStillLandsSomewhere(t *testing.T) {
-	h := placementHome("laptop", "phone")
+// No preference resolves to the node's local device — the same default channel
+// genesis applies — and NOT to whichever device happens to be first. The set is
+// ordered with the local device last on purpose: passing it by accident is the
+// failure this pins.
+func TestNoPreferenceLandsOnTheLocalDevice(t *testing.T) {
+	h := placementHome("laptop", "phone", channelspec.LocalDeviceID)
+	placement, err := h.resolveDaemonPlacement(context.Background(), "")
+	if err != nil {
+		t.Fatalf("resolveDaemonPlacement: %v", err)
+	}
+	if placement.Host != channelspec.LocalDeviceID {
+		t.Fatalf("host = %q, want %q", placement.Host, channelspec.LocalDeviceID)
+	}
+}
+
+// One attached device is not a choice, so no preference is needed to resolve it
+// — a channel with a single remote daemon and no local one still seats.
+func TestNoPreferenceWithASingleDeviceSeatsOnIt(t *testing.T) {
+	h := placementHome("laptop")
 	placement, err := h.resolveDaemonPlacement(context.Background(), "")
 	if err != nil {
 		t.Fatalf("resolveDaemonPlacement: %v", err)
 	}
 	if placement.Host != "laptop" {
-		t.Fatalf("host = %q, want the first attached device", placement.Host)
+		t.Fatalf("host = %q, want laptop", placement.Host)
+	}
+}
+
+// Several devices and none of them local: there is no defensible pick, so the
+// seating is refused rather than guessed. The refusal must name the candidates,
+// because "say which" is useless to a caller who cannot see the list.
+func TestNoPreferenceAmongPeerDevicesIsRefused(t *testing.T) {
+	h := placementHome("laptop", "phone")
+	_, err := h.resolveDaemonPlacement(context.Background(), "")
+	if code := operationCode(t, err); code != channelspec.ErrCodeInvalidDesiredHost {
+		t.Fatalf("code = %q, want %q", code, channelspec.ErrCodeInvalidDesiredHost)
+	}
+	for _, candidate := range []string{"laptop", "phone"} {
+		if !strings.Contains(err.Error(), candidate) {
+			t.Fatalf("refusal %q does not name candidate %q", err.Error(), candidate)
+		}
 	}
 }
 

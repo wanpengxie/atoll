@@ -29,7 +29,7 @@ func TestHumanFileCreatePutAndGetThroughDataPlane(t *testing.T) {
 		"description": "File host readiness probe.",
 		"config":      map[string]any{}, "visibility": "private",
 	})
-	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declarationID})
+	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declarationID, "desired_host": deviceID})
 	echoID := stringField(t, introduced, "member")
 
 	daemonLog := filepath.Join(h.root, "logs", "file-host.log")

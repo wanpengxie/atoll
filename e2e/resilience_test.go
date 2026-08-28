@@ -30,7 +30,7 @@ func setupDaemonEcho(t *testing.T, h *harness, ws *wsClient, declID string) (*pr
 		"description": "Echo seat for the resilience runs.",
 		"config":      map[string]any{}, "visibility": "private",
 	})
-	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID})
+	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID, "desired_host": deviceID})
 	echoID := stringField(t, introduced, "member")
 
 	daemonLog := filepath.Join(h.root, "logs", "daemon.log")

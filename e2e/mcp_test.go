@@ -57,7 +57,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 
 	const stdioDecl = "e2e-mcp-stdio"
 	const stdioName = "local-stdio"
-	stdioID := registerAndIntroduceMCP(t, ws, registrar, stdioDecl, map[string]any{
+	stdioID := registerAndIntroduceMCP(t, ws, registrar, stdioDecl, deviceID, map[string]any{
 		"name": stdioName, "transport": "stdio", "command": python,
 		"args": []string{"-m", "server.main", "--transport", "stdio"}, "cwd": project,
 		"call_timeout_ms": 750,
@@ -106,7 +106,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 		"name": httpName, "transport": "http", "url": fmt.Sprintf("http://127.0.0.1:%d/mcp", httpPort),
 		"call_timeout_ms": 750,
 	}
-	httpID := registerAndIntroduceMCP(t, ws, registrar, httpDecl, httpConfig)
+	httpID := registerAndIntroduceMCP(t, ws, registrar, httpDecl, deviceID, httpConfig)
 	waitActorPresence(t, ws, httpID, true, daemon, daemonLog)
 	httpEcho := ws.request(c0ChannelID, httpName+".echo", httpID, map[string]any{"text": "dynamic-http"})
 	if httpEcho["text"] != "dynamic-http" {
@@ -125,7 +125,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	const renamedName = "renamed-http"
 	renamedConfig["name"] = renamedName
 	const renamedDecl = "e2e-mcp-http-renamed"
-	renamedID := registerAndIntroduceMCP(t, ws, registrar, renamedDecl, renamedConfig)
+	renamedID := registerAndIntroduceMCP(t, ws, registrar, renamedDecl, deviceID, renamedConfig)
 	waitActorPresence(t, ws, renamedID, true, daemon, daemonLog)
 	renamedDescribe := ws.request(c0ChannelID, "actor.describe", renamedID, map[string]any{})
 	assertMCPDescribe(t, renamedDescribe, renamedName, 15)
@@ -153,7 +153,7 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	missingPort := freePort(t)
 	const absentDecl = "e2e-mcp-absent"
 	const absentName = "local-absent"
-	absentID := registerAndIntroduceMCP(t, ws, registrar, absentDecl, map[string]any{
+	absentID := registerAndIntroduceMCP(t, ws, registrar, absentDecl, deviceID, map[string]any{
 		"name": absentName, "transport": "http", "url": fmt.Sprintf("http://127.0.0.1:%d/mcp", missingPort),
 	})
 	waitActorPresence(t, ws, absentID, true, daemon, daemonLog)
@@ -191,12 +191,15 @@ func TestMCPClassDynamicHumanJourney(t *testing.T) {
 	t.Logf("removed stdio actor; child pid %d no longer exists", stdioChild)
 }
 
-func registerAndIntroduceMCP(t *testing.T, ws *wsClient, registrar, declID string, config map[string]any) string {
+// deviceID is named rather than left to the channel's default: c0 always has
+// the node's local device attached, so an unnamed seat lands there and never on
+// the daemon this test started.
+func registerAndIntroduceMCP(t *testing.T, ws *wsClient, registrar, declID, deviceID string, config map[string]any) string {
 	t.Helper()
 	registrarRequest(t, ws, c0ChannelID, registrar, "system.actor.template.create", map[string]any{
 		"id": declID, "name": declID, "class": "mcp", "config": config, "visibility": "private",
 	})
-	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID})
+	introduced := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": declID, "desired_host": deviceID})
 	return stringField(t, introduced, "member")
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -19,7 +21,8 @@ import (
 // member. It is asked HERE, at the seating, and not on the declaration: a
 // declaration is a recipe and travels between channels, while a device is bound
 // per channel — the same template seated in two channels may well belong on two
-// different machines. Empty means "no preference", and the channel picks.
+// different machines. Empty means "no preference", and the channel applies its
+// default (see resolveDaemonPlacement) or refuses when it has no defensible one.
 func (h *Home) resolveIntroduction(
 	ctx context.Context,
 	declID string,
@@ -173,18 +176,25 @@ func (h *Home) resolveIntroduction(
 	}, nil
 }
 
-// resolveDaemonPlacement picks the placement host for a declaration-backed
-// actor: the first bound daemon.
 // resolveDaemonPlacement settles which machine runs a daemon-placed member.
 //
 // A named host is CHECKED, never trusted: it must be a device bound to this
 // channel, or the seating is refused. Naming a device the channel cannot reach
 // would produce a member that is declared, placed, and permanently absent.
 //
-// An unnamed host still falls back to the first bound device, and that fallback
-// is a guess — the binding order carries no intent. It is honest only while a
-// channel has one device; the moment there are several (a laptop, a phone, a
-// rented sandbox) the caller has to say which, because nothing here can know.
+// An unnamed host resolves to the node's local device, which is the same
+// default channel genesis applies (platform/lagoon: a rendered daemon
+// placement starts at channelspec.LocalDeviceID). Runtime seating used to take
+// the FIRST BOUND device instead, and that was a guess dressed as a default:
+// binding order carries no intent, so on a channel with a laptop and a phone
+// attached the answer depended on which had been attached first. Naming the
+// local device instead is a default the caller can predict and the node
+// guarantees, and it keeps one rule for both admission paths.
+//
+// When even that is unavailable — the local device is not bound here and more
+// than one remote device is — there is no defensible pick, so the seating is
+// refused and the candidates are named. Refusing is cheap; a member silently
+// seated on the wrong person's laptop is not.
 func (h *Home) resolveDaemonPlacement(ctx context.Context, desiredHost string) (storespec.Placement, error) {
 	bound, err := h.registryBindings.ListBoundDeviceIDs(ctx, h.channelID)
 	if err != nil {
@@ -196,7 +206,7 @@ func (h *Home) resolveDaemonPlacement(ctx context.Context, desiredHost string) (
 		}
 	}
 	if desiredHost == "" {
-		return storespec.NewDaemonPlacement(bound[0])
+		return h.defaultDaemonPlacement(bound)
 	}
 	for _, id := range bound {
 		if id == desiredHost {
@@ -206,5 +216,24 @@ func (h *Home) resolveDaemonPlacement(ctx context.Context, desiredHost string) (
 	return storespec.Placement{}, &channelspec.OperationError{
 		Code:   channelspec.ErrCodeInvalidDesiredHost,
 		Detail: "device " + desiredHost + " is not attached to this channel; attach it with system.device.attach, or list this channel's devices and name one of those",
+	}
+}
+
+// defaultDaemonPlacement answers the unnamed case against a non-empty bound
+// set: the local device when this channel has it, the sole device when there is
+// exactly one, and otherwise nothing — because any pick among peers would be
+// arbitrary and the caller is the only one who knows which machine they meant.
+func (h *Home) defaultDaemonPlacement(bound []string) (storespec.Placement, error) {
+	for _, id := range bound {
+		if id == channelspec.LocalDeviceID {
+			return storespec.NewDaemonPlacement(id)
+		}
+	}
+	if len(bound) == 1 {
+		return storespec.NewDaemonPlacement(bound[0])
+	}
+	return storespec.Placement{}, &channelspec.OperationError{
+		Code: channelspec.ErrCodeInvalidDesiredHost,
+		Detail: "this channel has " + strconv.Itoa(len(bound)) + " devices attached and none of them is the node's local device, so there is no default: name one with desired_host (" + strings.Join(bound, ", ") + ")",
 	}
 }

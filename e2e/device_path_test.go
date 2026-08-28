@@ -50,7 +50,7 @@ func TestAnActorOnADeviceNamesFilesByItsOwnAbsolutePath(t *testing.T) {
 		"config":     map[string]any{"tool_id": string(systemActor), "tool_type": "system.member.list"},
 		"visibility": "private",
 	})
-	scriptIntro := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": scriptDecl})
+	scriptIntro := ws.request(c0ChannelID, "system.member.create", systemActor, map[string]any{"decl_id": scriptDecl, "desired_host": deviceID})
 	scriptID := stringField(t, scriptIntro, "member")
 	waitActorPresence(t, ws, scriptID, true, daemon, daemonLog)
 
