@@ -2,15 +2,15 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"github.com/google/uuid"
 	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -927,27 +927,31 @@ func (s *Session) readHistory(baseCtx context.Context, command controlCommand, r
 	// Select a bounded suffix by encoded bytes as well as row count. Selecting
 	// from newest to oldest preserves a contiguous cursor range; anything omitted
 	// is fetched by the next batch through NextBeforeSeq.
-	encoded := make([]subjectgate.HistoryRow, 0, len(rows))
+	encoded := make([]boundedFeedResult, 0, len(rows))
 	encodedBytes := 0
 	for index := len(rows) - 1; index >= 0; index-- {
 		row := rows[index]
-		if historyRow, ok := transportableHistoryRow(command.channel, row.Seq, row.Envelope); ok {
-			rowBytes := len(historyRow.Envelope)
-			if encodedBytes > 0 && encodedBytes+rowBytes > command.byteLimit {
-				break
-			}
-			encoded = append(encoded, historyRow)
-			encodedBytes += rowBytes
-		} else {
+		feed, feedErr := buildBoundedFeed(command.ref, command.channel, row.Seq, "history", command.generation, row.Envelope)
+		if feedErr != nil {
+			s.gw.logger.Error("gateway.history.row_untransportable", "channel", string(command.channel), "seq", row.Seq, "error", feedErr)
 			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "history row exceeds transport limit"})
 			return
 		}
+		if feed.projected {
+			s.gw.logger.Warn("gateway.history.row_projected", "channel", string(command.channel), "seq", row.Seq, "original_bytes", feed.originalBytes, "projected_bytes", len(feed.envelope))
+		}
+		rowBytes := len(feed.envelope)
+		if encodedBytes > 0 && encodedBytes+rowBytes > command.byteLimit {
+			break
+		}
+		encoded = append(encoded, feed)
+		encodedBytes += rowBytes
 	}
 	slices.Reverse(encoded)
 	nextBefore := window.OldestSeq
 	oldest, newest := int64(0), int64(0)
 	if len(encoded) > 0 {
-		oldest, newest = encoded[0].Seq, encoded[len(encoded)-1].Seq
+		oldest, newest = encoded[0].seq, encoded[len(encoded)-1].seq
 		if len(encoded) < len(window.Rows) {
 			nextBefore = oldest
 		}
@@ -963,15 +967,7 @@ func (s *Session) readHistory(baseCtx context.Context, command controlCommand, r
 		if rctx.Err() != nil {
 			return
 		}
-		feed, frameErr := subjectgate.NewFrame(subjectgate.FrameFeed, command.ref, subjectgate.FeedPayload{
-			ChannelID: string(command.channel), Seq: row.Seq, Envelope: row.Envelope,
-			Source: "history", Generation: command.generation,
-		})
-		if frameErr != nil {
-			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "history row exceeds transport limit"})
-			return
-		}
-		s.sendHistoryFrame(command, feed)
+		s.sendHistoryFrame(command, row.frame)
 	}
 	s.sendHistoryEnd(command, end)
 	s.gw.logger.Info("gateway.history.queued", "channel", string(command.channel), "ref", command.ref, "rows", len(window.Rows), "queue_duration", time.Since(readAt), "total_duration", time.Since(started))
@@ -1046,24 +1042,6 @@ func validHistoryPurpose(purpose string) bool {
 
 func validHistoryPriority(priority string) bool {
 	return priority == "foreground" || priority == "background"
-}
-
-func transportableHistoryRow(ch channel.ID, seq int64, value any) (subjectgate.HistoryRow, bool) {
-	envelope, err := json.Marshal(value)
-	if err != nil {
-		return subjectgate.HistoryRow{}, false
-	}
-	row := subjectgate.HistoryRow{Seq: seq, Envelope: envelope}
-	frame, err := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
-		ChannelID: string(ch), Seq: seq, Envelope: envelope,
-	})
-	if err != nil {
-		return subjectgate.HistoryRow{}, false
-	}
-	if _, err := frame.Marshal(); err != nil {
-		return subjectgate.HistoryRow{}, false
-	}
-	return row, true
 }
 
 func (s *Session) resolveObservation(ch channel.ID) (ObserverRoute, string, string) {
@@ -1189,29 +1167,19 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 		return false, true
 	}
 	for _, r := range rows {
-		env, merr := json.Marshal(r.Envelope)
-		if merr != nil {
+		feed, feedErr := buildBoundedFeed("", ch, r.Seq, "live", s.generation, r.Envelope)
+		if feedErr != nil {
 			// Never publish a checkpoint across a visible row the transport did
 			// not publish. Keeping the cursor before this row makes the next pump
 			// retry it; advancing would turn an encoding failure into false cache
 			// coverage on the browser.
+			s.gw.logger.Error("gateway.live.row_untransportable", "channel", string(ch), "seq", r.Seq, "error", feedErr)
 			return false, true
 		}
-		fr, ferr := subjectgate.NewFrame(subjectgate.FrameFeed, "", subjectgate.FeedPayload{
-			ChannelID:  string(ch),
-			Seq:        r.Seq,
-			Envelope:   env,
-			Source:     "live",
-			Generation: s.generation,
-		})
-		if ferr != nil {
-			return false, true
+		if feed.projected {
+			s.gw.logger.Warn("gateway.live.row_projected", "channel", string(ch), "seq", r.Seq, "original_bytes", feed.originalBytes, "projected_bytes", len(feed.envelope))
 		}
-		b, berr := fr.Marshal()
-		if berr != nil {
-			return false, true
-		}
-		if !s.lane.push(b) {
+		if !s.lane.push(feed.encoded) {
 			return false, false // Session/lane closed
 		}
 		s.lane.cursor.advance(ch, r.Seq)

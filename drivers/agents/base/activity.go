@@ -91,7 +91,7 @@ func (l *agentLoop) progressTool(v toolEvent) {
 			process["detail"] = v.Detail
 		}
 		if len(v.Output) != 0 {
-			process["output"] = v.Output
+			process["output"] = l.prepareToolOutput(v.Output)
 		}
 	default:
 		l.logger.Error("agent invalid tool phase", "phase", v.Phase)

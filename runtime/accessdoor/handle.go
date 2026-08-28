@@ -36,6 +36,16 @@ const KindKV = resourcespec.KindKV
 // reason as KindKV/CreateSpec above).
 const KindFile = resourcespec.KindFile
 
+// FormatFileAddress gives domain code the canonical name needed by the file
+// verbs without exposing resourcespec, whose raw registry/driver vocabulary is
+// deliberately confined to the runtime tree.
+func FormatFileAddress(host, channelName, path string) (resource.ResourceID, error) {
+	raw, err := resourcespec.FormatFileAddress(resourcespec.FileAddress{
+		Scheme: resourcespec.DaemonScheme, Host: host, Channel: channelName, Path: path,
+	})
+	return resource.ResourceID(raw), err
+}
+
 // AccessHandle is the STATE-FACE capability — the access-plane dual of
 // harness.Pen, narrowed to the one verb the actor-scoped (collapsed) locus
 // has any use for. It is welded to ONE caller/owner at construction and NEVER

@@ -38,7 +38,7 @@ func newClaude(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDe
 		return platform.ActorDecl{}, fmt.Errorf("claude config: %w", err)
 	}
 	cfg.Situation = situation(spec, deps, claude.Class)
-	return compose(spec, claude.NewProvider(cfg))
+	return compose(spec, claude.NewProvider(cfg), deps)
 }
 
 func newCodex(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
@@ -53,10 +53,10 @@ func newCodex(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDec
 		return platform.ActorDecl{}, fmt.Errorf("codex config: %w", err)
 	}
 	cfg.Situation = situation(spec, deps, codex.Class)
-	return compose(spec, codex.NewProvider(cfg))
+	return compose(spec, codex.NewProvider(cfg), deps)
 }
 
-func newScript(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
+func newScript(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
 	if spec.ID == "" {
 		return platform.ActorDecl{}, errors.New("script: explicit instance id required")
 	}
@@ -64,7 +64,7 @@ func newScript(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 	if err != nil {
 		return platform.ActorDecl{}, err
 	}
-	return compose(spec, script.NewProviderForTool(cfg.ToolID, cfg.ToolType))
+	return compose(spec, script.NewProviderForTool(cfg.ToolID, cfg.ToolType), deps)
 }
 
 // situation is where composition — the one place that knows both the instance
@@ -86,7 +86,7 @@ func situation(spec registry.InstanceSpec, deps registry.Deps, class string) dri
 	return out
 }
 
-func compose(spec registry.InstanceSpec, provider driverproto.Provider) (platform.ActorDecl, error) {
+func compose(spec registry.InstanceSpec, provider driverproto.Provider, deps registry.Deps) (platform.ActorDecl, error) {
 	factory, runtimeSpec, err := agentruntime.Default(provider)
 	if err != nil {
 		return platform.ActorDecl{}, err
@@ -95,7 +95,10 @@ func compose(spec registry.InstanceSpec, provider driverproto.Provider) (platfor
 	if doc == "" {
 		doc = runtimeSpec.Documentation.Description
 	}
-	definition, err := base.Def(doc, base.Config{NewRuntime: factory, Runtime: runtimeSpec})
+	definition, err := base.Def(doc, base.Config{
+		NewRuntime: factory, Runtime: runtimeSpec,
+		OutputWorkspace: deps.WorkspaceDir, OutputDevice: deps.DeviceName,
+	})
 	if err != nil {
 		return platform.ActorDecl{}, err
 	}
