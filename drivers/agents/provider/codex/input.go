@@ -22,6 +22,13 @@ func buildInput(batch []driverproto.DriverMessage, background []driverproto.Cont
 		if m.Caller.Actor != "" {
 			text = driverproto.CallerLine(m.Caller) + "\n" + text
 		}
+		// A body is more than its text: the word's other fields are its
+		// structured contract, and an agent that cannot see them cannot act on
+		// them. They go after the text, like the caller line, rather than into
+		// it — the person's words stay the person's words.
+		if fields := driverproto.FieldsLine(m.Payload); fields != "" {
+			text = text + "\n" + fields
+		}
 		if lines := driverproto.AttachmentLines(m.Attachments, self); lines != "" {
 			text = text + "\n" + lines
 		}

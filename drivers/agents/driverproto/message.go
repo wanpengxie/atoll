@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -184,4 +185,60 @@ func AttachmentLines(atts []Attachment, self Situation) string {
 		lines = append(lines, line.String())
 	}
 	return strings.Join(lines, "\n")
+}
+
+// maxFieldsLine caps the rendered remainder. A body is a word's contract and is
+// normally small, but nothing structurally prevents a large one, and a prompt is
+// not the place to discover that. Truncation is announced rather than silent:
+// an agent that sees the marker knows to read the payload another way instead of
+// trusting a sentence that stops mid-object.
+const maxFieldsLine = 2000
+
+// FieldsLine renders the parts of a request body that are NOT the text, so a
+// word's structured contract reaches the agent instead of being dropped.
+//
+// Agents used to see only body.text. That was not a decision — for a long time
+// text was all a body held — but it silently discarded every other field, which
+// meant a word could not grow a parameter an agent was supposed to act on. The
+// first thing that needs one is the origin of a person's message: which of their
+// screens they typed it on, and therefore which one to operate when asked.
+//
+// The remainder is rendered as JSON rather than flattened to key=value pairs:
+// these fields are contracts an agent will send back (a session id, a target),
+// and reproducing them exactly matters more than reading prettily. Returns ""
+// when the body is only text, or is not an object at all.
+func FieldsLine(payload json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return "" // not an object: Text already carried whatever this is
+	}
+	delete(fields, "text")
+	if len(fields) == 0 {
+		return ""
+	}
+	// Sorted so the same body always renders identically; an agent re-reading
+	// its own context must not see two spellings of one message.
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteString("[fields")
+	for _, k := range keys {
+		b.WriteByte(' ')
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.Write(fields[k])
+	}
+	b.WriteByte(']')
+	line := b.String()
+	if len(line) > maxFieldsLine {
+		return line[:maxFieldsLine] + " …truncated]"
+	}
+	return line
 }
