@@ -101,20 +101,27 @@ func Manifest() introspect.Manifest {
 			subjectgate.WordHumanApprove: {Description: "deferred approval, resolved with approve or reject"},
 
 			// Answered by the person's CLIENT, not the person. Experimental.
+			// Every UI word names a session, including the read. A person holds
+			// several screens at once, and an operation that does not say which
+			// one either acts on all of them or picks one arbitrarily; both are
+			// somebody's bad afternoon. Discovery is a separate problem and is
+			// solved separately — the origin stamped on the person's own
+			// messages says which screen they came from — rather than by
+			// letting one word skip the addressing rule.
 			subjectgate.WordUIState: {
-				Description:  "Read what this person's client is currently showing. Changes nothing — send it before acting, so an operation is aimed at what is actually on screen. Answered by the client in milliseconds, or not at all if no client is attached.",
-				InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+				Description:  "Read what one of this person's clients is currently showing. Changes nothing — send it before acting, so an operation is aimed at what is actually on screen. A person holds several screens at once, so this names one: read the session from the origin stamped on their messages. Answered in milliseconds, or not at all if that client is gone.",
+				InputSchema:  json.RawMessage(`{"type":"object","required":["session"],"properties":{"session":{"type":"string","description":"which of this person's connected clients to read"}}}`),
 				OutputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"object"},"open":{"type":"object"},"available":{"type":"object"},"viewport":{"type":"object"}}}`),
 			},
 			subjectgate.WordUINavigate: {
 				Description:  "Move this person's client to a channel, and optionally a view within it. Answers with what the client shows afterwards, so no follow-up read is needed.",
-				InputSchema:  json.RawMessage(`{"type":"object","required":["channel_id"],"properties":{"channel_id":{"type":"string"},"view":{"type":"string"}}}`),
+				InputSchema:  json.RawMessage(`{"type":"object","required":["session","channel_id"],"properties":{"session":{"type":"string","description":"which of this person's connected clients to move"},"channel_id":{"type":"string"},"view":{"type":"string"}}}`),
 				OutputSchema: json.RawMessage(`{"type":"object"}`),
 				ErrorCodes:   []string{"unknown_channel", "ui_error"},
 			},
 			subjectgate.WordUIOpen: {
 				Description:  "Open a file in this person's client, optionally scrolled to a line. The path is read through the same controlled file access the client already uses; nothing is sent to the browser address bar.",
-				InputSchema:  json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"line":{"type":"integer"}}}`),
+				InputSchema:  json.RawMessage(`{"type":"object","required":["session","path"],"properties":{"session":{"type":"string","description":"which of this person's connected clients to open it on"},"path":{"type":"string"},"line":{"type":"integer"}}}`),
 				OutputSchema: json.RawMessage(`{"type":"object"}`),
 				ErrorCodes:   []string{"not_found", "ui_error"},
 			},
