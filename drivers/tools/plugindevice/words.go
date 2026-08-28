@@ -110,12 +110,6 @@ func (d *Device) HandleGet(sys actorbase.Sys, msg actorbase.Msg) {
 	})
 }
 
-// StartAddr picks the address an incarnation should bind: what a previous
-// `set` asked for, else the adapter's default. A cold read (nothing stored yet)
-// is the ordinary first boot, never an error to die on; a stored address that
-// no longer validates is ignored with a loud line rather than taking the actor
-// down, because an actor that refuses to start is much harder to fix than one
-// listening somewhere unexpected.
 // startAddrBudget and startAddrRetry mirror the agent driver's catch-up read
 // (drivers/agents/base/persist.go): long enough for a daemon link to come up,
 // short enough that an unreachable one never delays boot past it.
@@ -137,7 +131,10 @@ const (
 //
 // A RESOLVED answer is definitive either way and returns at once: a value is
 // used, and resource_not_found means nothing was ever set — the ordinary first
-// boot, not something to wait out.
+// boot, not something to wait out. A stored address that no longer validates is
+// ignored with a loud line rather than taking the actor down: an actor that
+// refuses to start is far harder to recover than one listening somewhere
+// unexpected.
 func StartAddr(ctx context.Context, sys actorbase.Sys, fallback string, logger Logger) string {
 	deadline := time.Now().Add(startAddrBudget)
 	for attempt := 0; ; attempt++ {
