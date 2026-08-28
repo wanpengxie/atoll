@@ -138,6 +138,15 @@ func main() {
 		deviceName = host
 	}
 
+	// Announce the resolved identity before dialling. Which server and which
+	// home are the two things an operator gets wrong, and both are resolved
+	// here from flags, the home's stored identity, or a default — so printing
+	// the answer is the only way to see WHICH won. The credential is named by
+	// its length alone: enough to tell "I passed one" from "the home supplied
+	// one", never enough to leak it into a terminal scrollback or a log file.
+	logger.Info("daemon: starting",
+		"server", serverWS, "home", *home, "name", deviceName,
+		"credential_len", len(credential), "credential_from_flag", *key != "")
 	if err := devicehost.Run(ctx, devicehost.Config{
 		ServerWS:   serverWS,
 		Credential: credential,

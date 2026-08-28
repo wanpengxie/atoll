@@ -179,6 +179,14 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 			backoff = nextRedialBackoff(backoff)
 			continue
 		}
+		// Say so. A daemon is a foreground process an operator watches, and
+		// until this line the successful path printed NOTHING: connected and
+		// serving looked exactly like hung mid-dial, while a REFUSED dial
+		// printed a warning every second. An operator reading that pair
+		// concludes the silent run is the broken one and kills it — which is
+		// the opposite of the truth, and cost exactly that once.
+		logger.Info("platform.compute.carrier_attached",
+			"daemon", accepted.DaemonID, "server", cfg.ServerWS)
 		if cfg.OnAttached != nil {
 			cfg.OnAttached(accepted.DaemonID)
 		}
