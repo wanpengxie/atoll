@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -17,14 +18,30 @@ import (
 // Actor is the generic device tool as an actorbase Proc (spec §1.6): entry =
 // birth, return = death. All file and exec operations are confined to
 // <root> is already the compartment's one qualified channel directory. It
-// holds no connection and arms no timer, so run() is a bare loop
-// over sys.Recv() (echo's shape), with each delivery answered synchronously on
-// the worker goroutine through sys.Reply/sys.Fail.
+// holds no connection and arms no timer, so run() is a bare loop over
+// sys.Recv() that hands each delivery to its own goroutine (coderunner's
+// shape), answering through sys.Reply/sys.Fail from there.
+//
+// Concurrency is a requirement of this actor, not an optimisation. A device is
+// a whole machine and every word on it is potentially slow — device.exec runs
+// to a 10-minute cap — so answering deliveries one at a time means one long
+// command owns the machine and every other caller waits behind it. Reading a
+// file while a build runs is the ordinary case, not an exotic one.
+//
+// It needs no lock to do that because it shares no mutable state: sys, root,
+// clock and logger are written once at birth and only read afterwards, and
+// every word builds its own os.Root handle and its own buffers per call. The
+// isolation is in the design, so keep it there — a field mutated after birth
+// would silently make this unsafe.
 type Actor struct {
 	sys    actorbase.Sys
 	root   string
 	clock  func() time.Time
 	logger *slog.Logger
+
+	// inflight counts the goroutines still answering, so death waits for the
+	// answers it already accepted instead of stranding their callers.
+	inflight sync.WaitGroup
 }
 
 // NewActor constructs a device Actor bound to its workspace root. The identity
@@ -55,38 +72,59 @@ func Def(root string, logger *slog.Logger) actorbase.Def {
 }
 
 // run is the Proc body (spec §1.6): loop sys.Recv() until the cell dies or Stop
-// is requested — the loop's exit IS this incarnation's death. There is no
-// resource to release (no listener, no timer), so no defer teardown.
+// is requested — the loop's exit IS this incarnation's death.
+//
+// The loop itself only routes: it resolves a handler and hands the delivery to
+// a goroutine, so it is never the thing that blocks. An unrecognised type is
+// refused right here instead of on a goroutine, because a definite refusal
+// costs nothing to produce and spawning to produce it would be theatre.
+//
+// Death waits for the answers already accepted. A word cannot outlive that wait
+// by long: device.exec composes its own bound with the request context and caps
+// at MaxExecTimeoutMs, and the file words are single syscalls.
 func (a *Actor) run(sys actorbase.Sys) error {
 	a.sys = sys
+	defer a.inflight.Wait()
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
 			return err
 		}
-		a.handle(msg)
+		// A non-request has no terminal to author, so it is dropped rather than
+		// mis-handled.
+		if msg.Kind != message.KindRequest {
+			continue
+		}
+		handler := a.handlerFor(msg.Type)
+		if handler == nil {
+			a.fail(msg, "type_unsupported", fmt.Sprintf("device actor does not handle %s", msg.Type))
+			continue
+		}
+		a.inflight.Add(1)
+		go func(msg actorbase.Msg) {
+			defer a.inflight.Done()
+			handler(msg)
+		}(msg)
 	}
 }
 
-// handle dispatches one delivered Msg by type. A non-request has no terminal to
-// author, so it is dropped rather than mis-handled. Unknown types are rejected
-// with a failed terminal so the caller observes a definite outcome instead of
-// waiting for the framework timer.
-func (a *Actor) handle(msg actorbase.Msg) {
-	if msg.Kind != message.KindRequest {
-		return
-	}
-	switch msg.Type {
+// handlerFor resolves one request type to the func that answers it, or nil when
+// this actor does not serve that word. Returning the handler rather than
+// dispatching inline keeps the type list in exactly one place: the loop needs
+// to know whether a word is served BEFORE it spawns, and a second switch would
+// be a second place to forget a word.
+func (a *Actor) handlerFor(msgType string) func(actorbase.Msg) {
+	switch msgType {
 	case TypeExec:
-		a.handleExec(msg)
+		return a.handleExec
 	case TypeFileRead:
-		a.handleFileRead(msg)
+		return a.handleFileRead
 	case TypeFileWrite:
-		a.handleFileWrite(msg)
+		return a.handleFileWrite
 	case TypeFileEdit:
-		a.handleFileEdit(msg)
+		return a.handleFileEdit
 	default:
-		a.fail(msg, "type_unsupported", fmt.Sprintf("device actor does not handle %s", msg.Type))
+		return nil
 	}
 }
 

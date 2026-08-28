@@ -38,9 +38,9 @@ type failRec struct {
 
 // fakeSys is a minimal actorbase.Sys double for the device Proc: it embeds the
 // (nil) interface so any verb this actor never touches nil-panics loudly, and
-// overrides only Recv/Reply/Fail/Self/Life. The device actor answers
-// synchronously on the worker goroutine, so a single recorded reply/fail is
-// available right after the worker drains the pushed request.
+// overrides only Recv/Reply/Fail/Self/Life. The device actor answers each
+// delivery on its own goroutine, so Reply/Fail are recorded under a mutex and
+// read back through waitTerminal rather than inspected straight after a push.
 type fakeSys struct {
 	actorbase.Sys
 
@@ -159,15 +159,37 @@ func startActor(t *testing.T) (*fakeSys, string) {
 }
 
 func request(typ string, payload any) actorbase.Msg {
+	return requestID(message.ID("req-"+typ), typ, payload)
+}
+
+// requestID is request with the envelope id chosen by the caller, for the tests
+// that need two deliveries of the SAME type in flight at once.
+func requestID(id message.ID, typ string, payload any) actorbase.Msg {
 	raw, _ := json.Marshal(map[string]any{"body": payload})
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID:        message.ID("req-" + typ),
+		ID:        id,
 		ChannelID: testChannel,
 		Kind:      message.KindRequest,
 		Type:      typ,
 		Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
 		Payload:   raw,
 	})
+}
+
+// terminalRecorded reports whether a terminal (reply or fail) exists for id
+// right now, without waiting for one.
+func terminalRecorded(f *fakeSys, id message.ID) bool {
+	for _, r := range f.repliesSnapshot() {
+		if r.id == id {
+			return true
+		}
+	}
+	for _, r := range f.failsSnapshot() {
+		if r.id == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWriteReadRoundtrip(t *testing.T) {
