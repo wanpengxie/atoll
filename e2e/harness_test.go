@@ -58,7 +58,7 @@ func TestMain(m *testing.M) {
 	for _, target := range []struct {
 		name string
 		pkg  string
-	}{{"atoll-server", "./cmd/server"}, {"atoll-daemon", "./cmd/daemon"}} {
+	}{{"atoll-server", "./cmd/server"}, {"atoll-daemon", "./cmd/daemon"}, {"atoll", "./cmd/atoll"}} {
 		cmd := exec.Command("go", "build", "-race", "-o", filepath.Join(dir, target.name), target.pkg)
 		cmd.Dir = root
 		cmd.Env = os.Environ()
@@ -175,9 +175,21 @@ type harness struct {
 	env        []string
 	server     *proc
 	serverGen  int
+	// nodeDir non-empty selects the all-in-one `atoll up` binary over the bare
+	// server, and is its --dir. See newNodeHarness.
+	nodeDir string
 }
 
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarnessShell(t)
+	h.startServer()
+	return h
+}
+
+// newHarnessShell lays out the directories, port and env every node shape
+// shares, and starts nothing: the caller decides which binary serves them.
+func newHarnessShell(t *testing.T) *harness {
 	t.Helper()
 	root := t.TempDir()
 	childHome := filepath.Join(root, "home")
@@ -195,6 +207,19 @@ func newHarness(t *testing.T) *harness {
 		port:       port,
 		env:        []string{"PATH=" + os.Getenv("PATH"), "HOME=" + childHome},
 	}
+	return h
+}
+
+// newNodeHarness starts the node the way an operator actually runs one: a
+// single `atoll up` process carrying the server AND the node's own local
+// device. newHarness starts the bare server instead, which leaves the
+// local-device row with nothing behind it — fine for tests that only care about
+// a dialled-in daemon, useless for one that has to see the node's own device
+// working beside it.
+func newNodeHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarnessShell(t)
+	h.nodeDir = filepath.Join(h.root, "node")
 	h.startServer()
 	return h
 }
@@ -213,12 +238,26 @@ func (h *harness) startServer() {
 	h.t.Helper()
 	h.serverGen++
 	logPath := filepath.Join(h.root, "logs", fmt.Sprintf("server-%d.log", h.serverGen))
-	h.server = startProc(h.t, fmt.Sprintf("server-%d", h.serverGen), filepath.Join(e2eBinDir, "atoll-server"), []string{
+	// e2e registers users, and nodes are closed by default — hence
+	// --open-registration on both shapes. The all-in-one binary takes the node
+	// root as --dir and lays the server and device homes out underneath it
+	// itself; the bare server is handed its server home directly.
+	binary, args := filepath.Join(e2eBinDir, "atoll-server"), []string{
 		"--home", h.serverHome,
 		"--addr", fmt.Sprintf("127.0.0.1:%d", h.port),
 		"--root-password", rootPassword,
-		"--open-registration", // e2e registers users; nodes are closed by default
-	}, h.env, filepath.Join(h.root, "work"), logPath)
+		"--open-registration",
+	}
+	if h.nodeDir != "" {
+		binary, args = filepath.Join(e2eBinDir, "atoll"), []string{
+			"up",
+			"--dir", h.nodeDir,
+			"--addr", fmt.Sprintf("127.0.0.1:%d", h.port),
+			"--root-password", rootPassword,
+			"--open-registration",
+		}
+	}
+	h.server = startProc(h.t, fmt.Sprintf("server-%d", h.serverGen), binary, args, h.env, filepath.Join(h.root, "work"), logPath)
 	if err := waitHealth(h.base, h.server, 40*time.Second); err != nil {
 		h.t.Fatalf("%v\nserver log:\n%s", err, tailLog(logPath, 100))
 	}
