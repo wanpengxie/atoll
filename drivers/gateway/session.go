@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
 	"reflect"
 	"slices"
 	"strings"
@@ -116,6 +117,8 @@ type eligState struct {
 // frame to Upstream, and calls Close on disconnect.
 type Session struct {
 	gw         *Gateway
+	id         string
+	label      string
 	principal  string
 	generation uint64
 	lane       *lane
@@ -171,6 +174,10 @@ func (g *Gateway) Attach(principal string, since map[channel.ID]int64, generatio
 		controls:        make(chan controlCommand, 32),
 		historyInflight: map[channel.ID]historyRequest{},
 	}
+	// A connection's own name, minted here because the client must not choose it:
+	// a client that named itself could claim to be another screen, and every
+	// "operate that one" would be aimable at a device its sender does not hold.
+	s.id = "s-" + uuid.NewString()
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.elig.Store(&eligState{routes: map[channel.ID]Route{}, paused: map[channel.ID]struct{}{}, failed: map[channel.ID]struct{}{}})
 	if err := g.addDevice(principal, s); err != nil {
@@ -1407,3 +1414,16 @@ func channelIDOf(f subjectgate.Frame) (string, error) {
 	}
 	return p.ChannelID, nil
 }
+
+// ID names this connection. Stable for its lifetime and unique across the node:
+// a reconnect is a different screen as far as anything addressing it is
+// concerned, because it is a different socket with its own view of the world.
+func (s *Session) ID() string { return s.id }
+
+// Label is the client's own words for itself, or "" if it did not say.
+func (s *Session) Label() string { return s.label }
+
+// SetLabel records what the client calls itself. Purely descriptive: it is shown
+// to a person choosing between screens and is never used to address anything,
+// so two clients claiming the same label is untidy rather than dangerous.
+func (s *Session) SetLabel(label string) { s.label = label }

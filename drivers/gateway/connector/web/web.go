@@ -140,7 +140,10 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		entries = append(entries, subjectgate.MembershipEntry{ChannelID: string(route.Channel), ActorID: string(route.SubjectID)})
 	}
 	slices.SortFunc(entries, func(a, b subjectgate.MembershipEntry) int { return strings.Compare(a.ChannelID, b.ChannelID) })
+	sess.SetLabel(ap.Label)
 	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{
+		Session:             sess.ID(),
+		Label:               sess.Label(),
 		ContractVersion:     c.contractVersion,
 		Boot:                c.boot,
 		Memberships:         entries,

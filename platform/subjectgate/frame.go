@@ -372,6 +372,11 @@ type AttachPayload struct {
 	Focus           string           `json:"focus"`
 	HistoryProtocol int              `json:"history_protocol"`
 	Generation      uint64           `json:"generation"`
+	// Label is what to call this connection in front of a person: "MacBook 网页",
+	// "iPhone app". Client-declared because only the client knows what it is, and
+	// human-readable because selecting one is something a person does in words —
+	// "open it on my phone" has to land somewhere, and it will not land on a UUID.
+	Label string `json:"label,omitempty"`
 }
 
 // RequireChannelID validates a business frame payload's required channel_id
@@ -550,6 +555,13 @@ type CheckpointPayload struct {
 // per-channel resolver failure) and the list must not be read as "you are in
 // nothing" — a client keeps its prior knowledge and lets the feed catch up.
 type AttachReceipt struct {
+	// Session names THIS connection. One principal holds many at once — a phone
+	// and a laptop are both attached, neither displaces the other — so anything
+	// aimed at "the person's screen" has to say which screen, and the client has
+	// to know its own name to recognise when it is the one being addressed.
+	Session string `json:"session,omitempty"`
+	Label   string `json:"label,omitempty"`
+
 	ContractVersion     string             `json:"contract_version"`
 	Boot                string             `json:"boot,omitempty"`
 	Memberships         []MembershipEntry  `json:"memberships"`
