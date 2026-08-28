@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -47,10 +48,14 @@ func publishPresence(sys actorbase.Sys, level subjectgate.Level) {
 	_ = sys.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(level == subjectgate.LevelOnline))
 }
 
-// HumanServe is the human cell's mailbox serve loop: delivered requests route
-// through the three-choice type table. Returning on a Recv error is the
-// cooperative termination contract (spec §1.6).
-func HumanServe(sys actorbase.Sys) error {
+// HumanServe is the human cell's mailbox serve loop. Returning on a Recv error
+// is the cooperative termination contract (spec §1.6).
+type ServeDeps struct {
+	Principal string
+	Sessions  platform.HumanSessionLister
+}
+
+func HumanServe(sys actorbase.Sys, deps ServeDeps) error {
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
@@ -58,20 +63,34 @@ func HumanServe(sys actorbase.Sys) error {
 		}
 		switch msg.Kind {
 		case message.KindRequest:
-			humanServeRequest(sys, msg)
+			humanServeRequest(sys, msg, deps)
 		}
 	}
 }
 
-// humanServeRequest answers one delivered request per the three-choice type
-// table. Deferred words remain open until the person's resolve frame arrives.
-func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
+// humanServeRequest answers one delivered request per the word table. Deferred
+// words remain open until the person's resolve frame arrives.
+func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg, deps ServeDeps) {
 	switch msg.Type {
 	case subjectgate.WordHumanMessage:
 		// immediate: 收件即 completed 回执 (log 即收件箱).
 		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
 	case subjectgate.WordHumanAsk, subjectgate.WordHumanApprove:
 		// deferred: stays open until the person's resolve frame arrives.
+	case subjectgate.WordUISessionList:
+		var args struct{}
+		if err := actorbase.DecodeStrictEmpty(msg.Payload, &args); err != nil {
+			_, _ = sys.Fail(msg, "invalid_args", "invalid ui.session.list payload: "+err.Error())
+			return
+		}
+		var sessions []platform.HumanSession
+		if deps.Sessions != nil && deps.Principal != "" {
+			sessions = deps.Sessions(deps.Principal)
+		}
+		if sessions == nil {
+			sessions = []platform.HumanSession{}
+		}
+		_, _ = sys.Reply(msg, map[string]any{"sessions": sessions})
 	default:
 		if subjectgate.IsUIWord(msg.Type) {
 			// Also deferred, but on the CLIENT rather than the person: the
@@ -88,7 +107,7 @@ func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
 			// prototype.
 			return
 		}
-		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("a human member does not answer %q; it accepts %s, %s and %s, and its client answers %s, %s and %s", msg.Type, subjectgate.WordHumanMessage, subjectgate.WordHumanAsk, subjectgate.WordHumanApprove, subjectgate.WordUIState, subjectgate.WordUINavigate, subjectgate.WordUIOpen))
+		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("a human member does not answer %q; it accepts %s, %s, %s and %s, and its client answers %s, %s and %s", msg.Type, subjectgate.WordHumanMessage, subjectgate.WordHumanAsk, subjectgate.WordHumanApprove, subjectgate.WordUISessionList, subjectgate.WordUIState, subjectgate.WordUINavigate, subjectgate.WordUIOpen))
 	}
 }
 
@@ -99,17 +118,22 @@ func Manifest() introspect.Manifest {
 			subjectgate.WordHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
 			subjectgate.WordHumanAsk:     {Description: "deferred free-form question, resolved with text"},
 			subjectgate.WordHumanApprove: {Description: "deferred approval, resolved with approve or reject"},
+			subjectgate.WordUISessionList: {
+				Description:  "List this person's currently connected clients. The human cell answers immediately from the server-owned live-session directory; no session id is needed to discover the available screens.",
+				InputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false}`),
+				OutputSchema: json.RawMessage(`{"type":"object","required":["sessions"],"properties":{"sessions":{"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"label":{"type":"string"}}}}}}`),
+				ErrorCodes:   []string{"invalid_args"},
+			},
 
 			// Answered by the person's CLIENT, not the person. Experimental.
 			// Every UI word names a session, including the read. A person holds
 			// several screens at once, and an operation that does not say which
 			// one either acts on all of them or picks one arbitrarily; both are
-			// somebody's bad afternoon. Discovery is a separate problem and is
-			// solved separately — the origin stamped on the person's own
-			// messages says which screen they came from — rather than by
-			// letting one word skip the addressing rule.
+			// somebody's bad afternoon. ui.session.list discovers the currently
+			// live ids; origin remains a convenient pointer to the screen where a
+			// particular request was typed, not the discovery mechanism.
 			subjectgate.WordUIState: {
-				Description:  "Read what one of this person's clients is currently showing. Changes nothing — send it before acting, so an operation is aimed at what is actually on screen. A person holds several screens at once, so this names one: read the session from the origin stamped on their messages. Answered in milliseconds, or not at all if that client is gone.",
+				Description:  "Read what one of this person's clients is currently showing. Changes nothing — send it before acting, so an operation is aimed at what is actually on screen. A person holds several screens at once, so this names one: discover session ids with ui.session.list, or use the origin stamped on a message from that screen. Answered in milliseconds, or not at all if that client is gone.",
 				InputSchema:  json.RawMessage(`{"type":"object","required":["session"],"properties":{"session":{"type":"string","description":"which of this person's connected clients to read"}}}`),
 				OutputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"object"},"open":{"type":"object"},"available":{"type":"object"},"viewport":{"type":"object"}}}`),
 			},

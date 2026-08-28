@@ -58,6 +58,7 @@ type Config struct {
 	DeviceDirectory      DeviceDirectory
 	RegistryBindings     BindingReader
 	ServicePort          *svcactor.Port
+	HumanSessions        platform.HumanSessionLister
 }
 
 type BootstrapService struct {
@@ -142,6 +143,7 @@ type Home struct {
 	factories      ActorFactoryResolver
 	opEntry        *opEntry
 	servicePort    *svcactor.Port
+	humanSessions  platform.HumanSessionLister
 
 	systemPen    harness.Pen
 	expiryCursor storespec.ExpiryCursor

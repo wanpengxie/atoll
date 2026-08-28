@@ -1421,9 +1421,17 @@ func channelIDOf(f subjectgate.Frame) (string, error) {
 func (s *Session) ID() string { return s.id }
 
 // Label is the client's own words for itself, or "" if it did not say.
-func (s *Session) Label() string { return s.label }
+func (s *Session) Label() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.label
+}
 
 // SetLabel records what the client calls itself. Purely descriptive: it is shown
 // to a person choosing between screens and is never used to address anything,
 // so two clients claiming the same label is untidy rather than dangerous.
-func (s *Session) SetLabel(label string) { s.label = label }
+func (s *Session) SetLabel(label string) {
+	s.mu.Lock()
+	s.label = label
+	s.mu.Unlock()
+}

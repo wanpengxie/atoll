@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -132,15 +133,72 @@ func TestTheTwoFamiliesDoNotAcceptEachOthersAnswers(t *testing.T) {
 func TestAUIWordIsLeftForTheClient(t *testing.T) {
 	for _, word := range []string{subjectgate.WordUIState, subjectgate.WordUINavigate, subjectgate.WordUIOpen} {
 		fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
-		humanServeRequest(fs, msgOf(uiRequest(word)))
+		humanServeRequest(fs, msgOf(uiRequest(word)), ServeDeps{})
 		if fs.replied || fs.failed {
 			t.Fatalf("%s was closed by the cell; only the client can answer it", word)
 		}
 	}
 	// And a word that is neither is still refused, with the client's words named.
 	fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
-	humanServeRequest(fs, msgOf(uiRequest("ui.nonsense")))
+	humanServeRequest(fs, msgOf(uiRequest("ui.nonsense")), ServeDeps{})
 	if !fs.failed || fs.failCode != "type_unsupported" {
 		t.Fatalf("an unknown word should still be refused: failed=%v code=%q", fs.failed, fs.failCode)
+	}
+}
+
+func TestUISessionListIsAnsweredByTheCellFromItsOwnPrincipal(t *testing.T) {
+	fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
+	var askedFor string
+	deps := ServeDeps{
+		Principal: "alice",
+		Sessions: func(principal string) []platform.HumanSession {
+			askedFor = principal
+			return []platform.HumanSession{
+				{ID: "s-phone", Label: "Android Chrome"},
+				{ID: "s-web", Label: "Mac Chrome"},
+			}
+		},
+	}
+	humanServeRequest(fs, msgOf(uiRequest(subjectgate.WordUISessionList)), deps)
+	if !fs.replied || fs.failed {
+		t.Fatalf("ui.session.list should be answered immediately: replied=%v failed=%v", fs.replied, fs.failed)
+	}
+	if askedFor != "alice" {
+		t.Fatalf("session directory queried for %q, want the cell's principal", askedFor)
+	}
+	raw, err := json.Marshal(fs.replyVal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply struct {
+		Sessions []platform.HumanSession `json:"sessions"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if len(reply.Sessions) != 2 || reply.Sessions[0].ID != "s-phone" || reply.Sessions[1].Label != "Mac Chrome" {
+		t.Fatalf("unexpected session reply: %s", raw)
+	}
+}
+
+func TestUISessionListReturnsAnEmptyArrayWithoutADirectory(t *testing.T) {
+	fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
+	humanServeRequest(fs, msgOf(uiRequest(subjectgate.WordUISessionList)), ServeDeps{Principal: "alice"})
+	raw, err := json.Marshal(fs.replyVal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"sessions":[]}` {
+		t.Fatalf("empty directory reply=%s, want an empty array", raw)
+	}
+}
+
+func TestUISessionListRejectsArguments(t *testing.T) {
+	env := uiRequest(subjectgate.WordUISessionList)
+	env.Payload = json.RawMessage(`{"body":{"session":"not-an-input"}}`)
+	fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
+	humanServeRequest(fs, actorbase.NewMsg(actorbase.OriginLog, context.Background(), *env), ServeDeps{Principal: "alice"})
+	if !fs.failed || fs.failCode != "invalid_args" || fs.replied {
+		t.Fatalf("unexpected result: failed=%v code=%q replied=%v", fs.failed, fs.failCode, fs.replied)
 	}
 }

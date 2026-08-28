@@ -2,8 +2,10 @@ package plugindevice
 
 import (
 	"context"
+	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
@@ -114,17 +116,91 @@ func (d *Device) HandleGet(sys actorbase.Sys, msg actorbase.Msg) {
 // no longer validates is ignored with a loud line rather than taking the actor
 // down, because an actor that refuses to start is much harder to fix than one
 // listening somewhere unexpected.
-func StartAddr(sys actorbase.Sys, fallback string, logger interface {
-	Warn(string, ...any)
-}) string {
+// startAddrBudget and startAddrRetry mirror the agent driver's catch-up read
+// (drivers/agents/base/persist.go): long enough for a daemon link to come up,
+// short enough that an unreachable one never delays boot past it.
+const (
+	startAddrBudget = 5 * time.Second
+	startAddrRetry  = 100 * time.Millisecond
+)
+
+// StartAddr picks the address this incarnation should bind: what a previous
+// `set` asked for, else the adapter's default.
+//
+// It RETRIES while the state door cannot yet say, and that is the whole reason
+// this is not one call. A daemon-hosted actor boots exactly while its outbound
+// link is coming up, and until it is the door honestly answers outcome_unknown
+// rather than faking either answer. Reading once there reads "unknown", falls
+// back to the default, and silently undoes an address the operator set — which
+// is how a setting that persisted correctly still failed to survive a restart.
+// The agent driver already learned this; the shape is copied from it.
+//
+// A RESOLVED answer is definitive either way and returns at once: a value is
+// used, and resource_not_found means nothing was ever set — the ordinary first
+// boot, not something to wait out.
+func StartAddr(ctx context.Context, sys actorbase.Sys, fallback string, logger Logger) string {
+	deadline := time.Now().Add(startAddrBudget)
+	for attempt := 0; ; attempt++ {
+		addr, resolved := readStartAddr(sys, fallback, logger, attempt)
+		if resolved {
+			return addr
+		}
+		if time.Now().After(deadline) {
+			logger.Warn("plugindevice.stored_addr_unreadable", "using", fallback, "attempts", attempt+1)
+			return fallback
+		}
+		select {
+		case <-ctx.Done():
+			return fallback
+		case <-time.After(startAddrRetry):
+		}
+	}
+}
+
+// readStartAddr does one read. resolved=false means the door could not say yet
+// and the caller should ask again.
+func readStartAddr(sys actorbase.Sys, fallback string, logger Logger, attempt int) (string, bool) {
 	out, err := sys.State().Get(StateKey)
-	if err != nil || !out.Accepted() || !out.Found || len(out.Value) == 0 {
-		return fallback
+	// Every arm says which one it was. They all end at the same fallback, and
+	// folding them into one silent return makes the difference between "nothing
+	// was ever set" and "what was set could not be read" invisible — which is
+	// exactly the question being asked when an address does not survive a
+	// restart.
+	switch {
+	case err != nil:
+		// Not resolved: an error here is as likely to be the link as the store.
+		logger.Warn("plugindevice.stored_addr_read_error", "err", err.Error(), "attempt", attempt+1)
+		return "", false
+	case out.Accepted() && (!out.Found || len(out.Value) == 0):
+		logger.Info("plugindevice.stored_addr_absent", "using", fallback)
+		return fallback, true
+	case !out.Accepted() && out.RejectReason == access.ResourceNotFound:
+		// Nothing was ever set. Definitive, and the ordinary first boot.
+		logger.Info("plugindevice.stored_addr_absent", "using", fallback)
+		return fallback, true
+	case !out.Accepted():
+		// outcome_unknown and friends: the door cannot say YET. Ask again.
+		logger.Warn("plugindevice.stored_addr_unresolved", "reason", string(out.RejectReason), "attempt", attempt+1)
+		return "", false
 	}
 	stored := string(out.Value)
 	if verr := ValidateAddr(stored); verr != nil {
 		logger.Warn("plugindevice.stored_addr_rejected", "addr", stored, "err", verr.Error())
-		return fallback
+		return fallback, true
 	}
-	return stored
+	if attempt > 0 {
+		logger.Info("plugindevice.stored_addr_restored_after_link", "addr", stored, "attempts", attempt+1)
+	} else {
+		logger.Info("plugindevice.stored_addr_restored", "addr", stored)
+	}
+	return stored, true
+}
+
+// Logger is the narrow face StartAddr needs. Error and Warn are different
+// verdicts here and the caller should be able to tell them apart: a read that
+// failed is a fault, an address that never existed is a first boot.
+type Logger interface {
+	Info(string, ...any)
+	Warn(string, ...any)
+	Error(string, ...any)
 }

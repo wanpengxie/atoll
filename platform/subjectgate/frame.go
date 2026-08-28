@@ -69,6 +69,11 @@ const (
 // Experimental (附录 A): this is the hand-wired version of "a button is an
 // endpoint". The words are named here rather than derived from the interface.
 const (
+	// WordUISessionList discovers the person's live screens. Unlike the three
+	// client words below, the human cell answers this immediately from the
+	// gateway's live-session directory; no screen is asked to answer for the
+	// others.
+	WordUISessionList = "ui.session.list"
 	// WordUIState reads what the client is showing. It changes nothing, and it
 	// exists so an agent can look before it acts.
 	WordUIState = "ui.state"
@@ -79,6 +84,8 @@ const (
 )
 
 // IsUIWord reports whether t is answered by the client rather than the person.
+// ui.session.list is deliberately absent: the human cell answers it from the
+// server-owned live-session directory.
 func IsUIWord(t string) bool {
 	switch t {
 	case WordUIState, WordUINavigate, WordUIOpen:

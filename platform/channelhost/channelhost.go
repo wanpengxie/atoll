@@ -81,6 +81,7 @@ type HomeDeps struct {
 	DataPlaneRedeemer    dataplane.Redeemer
 	DeviceDirectory      home.DeviceDirectory
 	RegistryBindings     home.BindingReader
+	HumanSessions        platform.HumanSessionLister
 	OnMembraneOpen       func(channel.ID, uint64, platform.DaemonMembrane)
 	OnMembraneClose      func(channel.ID, uint64)
 	Logger               *slog.Logger
@@ -439,6 +440,7 @@ func (h *ChannelHost) openHome(
 		DataPlaneRedeemer:     h.deps.DataPlaneRedeemer,
 		DeviceDirectory:       h.deps.DeviceDirectory,
 		RegistryBindings:      h.deps.RegistryBindings,
+		HumanSessions:         h.deps.HumanSessions,
 		ServicePort:           port,
 	}
 	if bootstrap {

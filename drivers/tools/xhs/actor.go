@@ -136,7 +136,7 @@ func (a *Actor) run(sys actorbase.Sys) error {
 	// Where a previous xhs.listen.set put the endpoint wins over the config
 	// default, because that setting was an operator decision and a restart must
 	// not quietly undo it.
-	addr := plugindevice.StartAddr(sys, a.startAddr, a.logger)
+	addr := plugindevice.StartAddr(sys.Life(), sys, a.startAddr, a.logger)
 	// A malformed or wildcard addr is a CONFIG ERROR (not resource contention):
 	// fail fast (positive death) rather than retry forever or start a
 	// serviceable-but-wrongly-exposed endpoint.

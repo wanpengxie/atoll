@@ -402,6 +402,9 @@ func (h *testChannel) submitOperate(ctx context.Context, typ string, payload any
 func openTestChannel(t *testing.T, chID channel.ID, owner, member string, memberKind actor.Kind, wired *Gateway) (*testChannel, actor.ActorID) {
 	t.Helper()
 	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}, IntroductionResolver: gatewayTestCompositionResolver{}, RegistryBindings: gatewayTestBindings{}}
+	if wired != nil {
+		deps.HumanSessions = wired.HumanSessions
+	}
 	genesis := lagoon.GenesisSpec{
 		ChannelID: chID, Type: "group", OwnerPrincipal: owner, CreatedAt: time.Now().UnixMilli(),
 		Humans: []lagoon.GenesisHuman{{Principal: owner}},

@@ -28,10 +28,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -289,6 +292,32 @@ func (g *Gateway) PokeAll() {
 		session.markDirty()
 	}
 	g.kickPresence()
+}
+
+// HumanSessions returns the live client connections owned by principal. The
+// gateway is the authority for this fact: it creates session ids, seats every
+// connection in entries, and removes it on disconnect. Callers receive a
+// detached, deterministically ordered snapshot.
+func (g *Gateway) HumanSessions(principal string) []platform.HumanSession {
+	g.mu.Lock()
+	entry := g.entries[principal]
+	sessions := make([]*Session, 0)
+	if entry != nil {
+		sessions = make([]*Session, 0, len(entry.devices))
+		for session := range entry.devices {
+			sessions = append(sessions, session)
+		}
+	}
+	g.mu.Unlock()
+
+	out := make([]platform.HumanSession, 0, len(sessions))
+	for _, session := range sessions {
+		out = append(out, platform.HumanSession{ID: session.ID(), Label: session.Label()})
+	}
+	slices.SortFunc(out, func(a, b platform.HumanSession) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out
 }
 
 // kickPresence pokes the presence reconcile loop (non-blocking edge).

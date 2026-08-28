@@ -52,11 +52,11 @@ import (
 // The cell holds ZERO caller obligations (期12): a subject's own requests are
 // closed by the substrate expiry reaper (义务归位 D3) — no per-user Caller, no
 // Match plumbing.
-func humanCellFactory(h *Home, id actor.ActorID) platform.ActorFactory {
+func humanCellFactory(h *Home, id actor.ActorID, principal string) platform.ActorFactory {
 	return platform.ActorFactory{Proc: actorbase.Def{
 		Manifest: humancell.Manifest(),
 		New: func() (actorbase.Proc, error) {
-			return func(sys actorbase.Sys) error { return h.runHumanCell(id, sys) }, nil
+			return func(sys actorbase.Sys) error { return h.runHumanCell(id, principal, sys) }, nil
 		},
 	}}
 }
@@ -82,9 +82,10 @@ func (h *Home) subjectgateSlot(id actor.ActorID) (*subjectgate.Slot, bool) {
 // termination) it stops the interpreter goroutine and joins it (S1 纪律照 kimi:
 // wg join +解阻 — closing stop detaches the slot so any blocked gateway Deliver
 // unblocks with ErrNoOccupant).
-func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
+func (h *Home) runHumanCell(id actor.ActorID, principal string, sys actorbase.Sys) error {
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
+	serveDeps := humancell.ServeDeps{Principal: principal, Sessions: h.humanSessions}
 
 	if slot, ok := h.subjectgateSlot(id); ok {
 		deps := humancell.Deps{
@@ -116,7 +117,7 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 		}()
 	}
 
-	err := humancell.HumanServe(sys)
+	err := humancell.HumanServe(sys, serveDeps)
 	close(stop)
 	wg.Wait()
 	return err

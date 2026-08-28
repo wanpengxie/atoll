@@ -172,6 +172,12 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 		DataPlaneIssuer:      e.dataIssuer,
 		DataPlaneRedeemer:    e.dataRedeemer,
 		DeviceDirectory:      e.registry,
+		HumanSessions: func(principal string) []platform.HumanSession {
+			if gatewayEdge == nil {
+				return nil
+			}
+			return gatewayEdge.HumanSessions(principal)
+		},
 		OnMembraneOpen: func(ch channel.ID, generation uint64, membrane platform.DaemonMembrane) {
 			e.daemonHost.Register(ch, generation, membrane)
 			row, ok, err := e.registry.GetChannelDesired(context.Background(), ch)

@@ -69,10 +69,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 
 	h := &Home{
 		channelID: cfg.ChannelID, channelName: cfg.ChannelName, logger: logger, closeDone: make(chan struct{}),
-		nowMs:        func() int64 { return time.Now().UnixMilli() },
-		daemonRoutes: cfg.DaemonRoutes,
-		subjectgate:  subjectgate.NewRegistry(),
-		pokeCh:       make(chan struct{}, 1),
+		nowMs:         func() int64 { return time.Now().UnixMilli() },
+		daemonRoutes:  cfg.DaemonRoutes,
+		subjectgate:   subjectgate.NewRegistry(),
+		pokeCh:        make(chan struct{}, 1),
+		humanSessions: cfg.HumanSessions,
 	}
 	h.servicePort = cfg.ServicePort
 	defer func() {
@@ -282,7 +283,13 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			var ok bool
 			if input.ExecutionSpec.Kind == actor.KindHuman {
 				h.ensureSubjectSlot(input.ActorID)
-				def, ok = humanCellFactory(h, input.ActorID), true
+				facts, active, factsErr := h.actors.ActorFacts(context.Background(), input.ActorID)
+				if factsErr != nil || !active || facts.Kind != actor.KindHuman || facts.Principal == "" {
+					logger.Warn("platform.human_identity_unavailable",
+						"actor", input.ActorID, "active", active, "err", factsErr)
+					return nil
+				}
+				def, ok = humanCellFactory(h, input.ActorID, facts.Principal), true
 			} else {
 				def, ok = h.factories.LookupByClass(
 					input.ActorID,
