@@ -22,6 +22,12 @@ func buildInput(batch []driverproto.DriverMessage, background []driverproto.Cont
 		if m.Caller.Actor != "" {
 			text = driverproto.CallerLine(m.Caller) + "\n" + text
 		}
+		// Where they said it, beside who said it. A person holds several
+		// screens at once, and an agent asked to act on one has to be able to
+		// name it.
+		if line := driverproto.OriginLine(m.Origin); line != "" {
+			text = line + "\n" + text
+		}
 		// A body is more than its text: the word's other fields are its
 		// structured contract, and an agent that cannot see them cannot act on
 		// them. They go after the text, like the caller line, rather than into

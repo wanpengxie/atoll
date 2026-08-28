@@ -468,7 +468,7 @@ func (e *engine) dispatchDemand() {
 func toDriverInputs(in []runtimeproto.Input) []driverproto.DriverMessage {
 	out := make([]driverproto.DriverMessage, len(in))
 	for i, v := range in {
-		out[i] = driverproto.DriverMessage{SourceID: v.SourceID, Type: v.Type, Sender: v.Sender, Caller: v.Caller, Payload: append([]byte(nil), v.Payload...), Text: v.Text, Attachments: toDriverAttachments(v.Attachments)}
+		out[i] = driverproto.DriverMessage{SourceID: v.SourceID, Type: v.Type, Sender: v.Sender, Caller: v.Caller, Origin: toDriverOrigin(v.Origin), Payload: append([]byte(nil), v.Payload...), Text: v.Text, Attachments: toDriverAttachments(v.Attachments)}
 	}
 	return out
 }
@@ -476,7 +476,7 @@ func toDriverInput(in *runtimeproto.Input) *driverproto.DriverMessage {
 	if in == nil {
 		return nil
 	}
-	return &driverproto.DriverMessage{SourceID: in.SourceID, Type: in.Type, Sender: in.Sender, Caller: in.Caller, Payload: append([]byte(nil), in.Payload...), Text: in.Text, Attachments: toDriverAttachments(in.Attachments)}
+	return &driverproto.DriverMessage{SourceID: in.SourceID, Type: in.Type, Sender: in.Sender, Caller: in.Caller, Origin: toDriverOrigin(in.Origin), Payload: append([]byte(nil), in.Payload...), Text: in.Text, Attachments: toDriverAttachments(in.Attachments)}
 }
 
 func toDriverAttachments(in []runtimeproto.Attachment) []driverproto.Attachment {
@@ -1148,3 +1148,11 @@ func runtimeprotoToDriverTool(v runtimeproto.ToolResult) driverproto.ToolResult 
 }
 
 var _ runtimeproto.Runtime = (*engine)(nil)
+
+// toDriverOrigin carries the screen a message came from across the driver seam.
+func toDriverOrigin(o *runtimeproto.Origin) *driverproto.Origin {
+	if o == nil {
+		return nil
+	}
+	return &driverproto.Origin{Session: o.Session, Label: o.Label}
+}

@@ -19,9 +19,9 @@ func TestABodyOfOnlyTextRendersNothingExtra(t *testing.T) {
 // The point of the change: a field an agent has to send back must arrive
 // verbatim, because it will be quoted into the next request.
 func TestTheOtherFieldsReachTheAgentExactly(t *testing.T) {
-	got := FieldsLine(json.RawMessage(`{"text":"帮我切到 c0","origin":{"session":"s-7f3a","label":"MacBook 网页"}}`))
-	if !strings.Contains(got, `origin={"session":"s-7f3a","label":"MacBook 网页"}`) {
-		t.Fatalf("FieldsLine=%q, want the origin object reproduced exactly", got)
+	got := FieldsLine(json.RawMessage(`{"text":"帮我切到 c0","target":{"req":"r1","line":42}}`))
+	if !strings.Contains(got, `target={"req":"r1","line":42}`) {
+		t.Fatalf("FieldsLine=%q, want the object reproduced exactly", got)
 	}
 	if strings.Contains(got, "帮我切到") {
 		t.Fatalf("FieldsLine=%q, want the person's words left to the text", got)
@@ -45,6 +45,20 @@ func TestRenderingIsStable(t *testing.T) {
 
 // A body that is not an object, or is absent, must not produce noise: Text
 // already carried whatever it was.
+// origin is rendered on its own line beside the caller's, so repeating it here
+// would print one fact twice — as prose and again as raw JSON — on every
+// message a person sends.
+func TestOriginIsNotPrintedTwice(t *testing.T) {
+	if got := FieldsLine(json.RawMessage(`{"text":"hi","origin":{"session":"s-abc","label":"Mac Chrome"}}`)); got != "" {
+		t.Fatalf("FieldsLine=%q, want empty — OriginLine already said it", got)
+	}
+	// Other fields alongside an origin still come through.
+	got := FieldsLine(json.RawMessage(`{"text":"hi","origin":{"session":"s-abc"},"target":"r1"}`))
+	if !strings.Contains(got, "target=") || strings.Contains(got, "origin") {
+		t.Fatalf("FieldsLine=%q, want the other fields without the origin", got)
+	}
+}
+
 func TestNonObjectBodiesRenderNothing(t *testing.T) {
 	for _, body := range []string{``, `"just a string"`, `[1,2,3]`, `null`, `not json at all`} {
 		if got := FieldsLine(json.RawMessage(body)); got != "" {

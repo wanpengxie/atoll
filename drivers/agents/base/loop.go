@@ -551,6 +551,7 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		var ask struct {
 			Text        string            `json:"text"`
 			Attachments []json.RawMessage `json:"attachments,omitempty"`
+			Origin      *originSpec       `json:"origin,omitempty"`
 		}
 		if err := decodeStrict(msg.Payload, &ask); err != nil || strings.TrimSpace(ask.Text) == "" {
 			detail := "agent.ask requires text"
@@ -570,6 +571,9 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		}
 		input.Text = ask.Text
 		input.Attachments = attachments
+		if ask.Origin != nil && ask.Origin.Session != "" {
+			input.Origin = &runtimeproto.Origin{Session: ask.Origin.Session, Label: ask.Origin.Label}
+		}
 	}
 	rowBytes := len(msg.Payload)
 	if msg.Type == TypeReplace {
@@ -1064,6 +1068,25 @@ func (l *agentLoop) handleFork(msg actorbase.Msg) {
 		}
 		l.exec.terminal(string(msg.ID), terminalCandidate{value: append(json.RawMessage(nil), terminal.Payload...)})
 	}()
+}
+
+// originSpec is which of a person's screens they said something from.
+//
+// It belongs to agent.ask and to nothing else. Not to _context, which every
+// actor carries and where a human-only fact would mean nothing to anyone
+// else — and not to the control words either: an agent told to stop just
+// stops, and which screen the button was pressed on changes nothing it does.
+// What needs a place to have come from is the SENTENCE, because that is the
+// thing an agent reads and reasons about, and "open this on my phone" cannot
+// be acted on without knowing where "here" was.
+//
+// So this is one word's contract growing one field, not a rule applied to a
+// family. The client stamps agent.ask and nothing else, which is exactly what
+// is decoded here; the two sides have to name the same word, or a message dies
+// on an unknown field with no visible relation to the feature that caused it.
+type originSpec struct {
+	Session string `json:"session"`
+	Label   string `json:"label,omitempty"`
 }
 
 func decodeStrict(raw json.RawMessage, out any) error {

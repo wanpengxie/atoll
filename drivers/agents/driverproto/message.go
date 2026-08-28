@@ -25,9 +25,32 @@ type DriverMessage struct {
 	Type        string
 	Sender      string
 	Caller      harness.Caller
+	Origin      *Origin
 	Payload     json.RawMessage
 	Text        string
 	Attachments []Attachment
+}
+
+// Origin is which of a person's screens a message came from.
+type Origin struct {
+	Session string `json:"session"`
+	Label   string `json:"label,omitempty"`
+}
+
+// OriginLine renders it beside the caller line. A person holds several screens
+// at once, so knowing who spoke is not knowing where they spoke — and "open
+// this on my phone" cannot be acted on without the second.
+//
+// The session id is reproduced exactly because an agent sends it back: it is
+// what ui.* words take to say which screen to operate. The label is for reading.
+func OriginLine(o *Origin) string {
+	if o == nil || o.Session == "" {
+		return ""
+	}
+	if o.Label != "" {
+		return "[origin session=" + o.Session + " " + o.Label + "]"
+	}
+	return "[origin session=" + o.Session + "]"
 }
 
 type ContextMessage struct {
@@ -216,6 +239,10 @@ func FieldsLine(payload json.RawMessage) string {
 		return "" // not an object: Text already carried whatever this is
 	}
 	delete(fields, "text")
+	// origin has its own line beside the caller's. Leaving it here too would
+	// print the same fact twice — once as prose an agent reads, once as raw
+	// JSON — on every single message a person sends.
+	delete(fields, "origin")
 	if len(fields) == 0 {
 		return ""
 	}

@@ -40,13 +40,24 @@ type TurnOptions struct {
 }
 
 type Input struct {
-	SourceID    string
-	Type        string
-	Sender      string
-	Caller      harness.Caller
+	SourceID string
+	Type     string
+	Sender   string
+	Caller   harness.Caller
+	// Origin is which of a person's screens this came from, when they said so.
+	// A person holds several at once, so "who" and "where" are different
+	// questions and Caller only answers the first.
+	Origin      *Origin
 	Payload     json.RawMessage
 	Text        string
 	Attachments []Attachment
+}
+
+// Origin is one client connection: the id the gateway minted, and what that
+// client calls itself.
+type Origin struct {
+	Session string `json:"session"`
+	Label   string `json:"label,omitempty"`
 }
 
 type Attachment struct {
