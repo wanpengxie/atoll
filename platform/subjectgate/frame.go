@@ -57,6 +57,36 @@ const (
 	WordHumanApprove = "human.approve"
 )
 
+// UI words are answered by the person's CLIENT, not by the person.
+//
+// They live beside the human words because they share the delivery path exactly
+// — a request in the log, a resolve frame back — but they are a separate family
+// on purpose. A human word waits on somebody reading it: minutes, hours, never.
+// A UI word waits on a browser tab: milliseconds, or the tab is gone. Folding
+// them together would leave a caller unable to tell "nobody has looked yet"
+// from "there is no screen", which are not the same news.
+//
+// Experimental (附录 A): this is the hand-wired version of "a button is an
+// endpoint". The words are named here rather than derived from the interface.
+const (
+	// WordUIState reads what the client is showing. It changes nothing, and it
+	// exists so an agent can look before it acts.
+	WordUIState = "ui.state"
+	// WordUINavigate moves the client to a channel and optionally a view.
+	WordUINavigate = "ui.navigate"
+	// WordUIOpen opens a file in the client's own preview, optionally at a line.
+	WordUIOpen = "ui.open"
+)
+
+// IsUIWord reports whether t is answered by the client rather than the person.
+func IsUIWord(t string) bool {
+	switch t {
+	case WordUIState, WordUINavigate, WordUIOpen:
+		return true
+	}
+	return false
+}
+
 // Retired words (purity v3 C1/C2 — minted by the spec's frame table for
 // closed-set completeness, but with ZERO producers ever wired; a word enters
 // the closed set only WITH its producer, 词表第四问):
@@ -377,6 +407,20 @@ type ResolvePayload struct {
 	Text      *string `json:"text,omitempty"`
 	Decision  string  `json:"decision,omitempty"`
 	Note      *string `json:"note,omitempty"`
+	// Result and Error close a UI word. Exactly one is set: the client either
+	// did the thing and reports what it now shows, or it could not and says
+	// why in its own words. Free-form because the client owns this contract —
+	// the substrate carries the answer, it does not define it.
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *ResolveError   `json:"error,omitempty"`
+}
+
+// ResolveError is a UI word's failure. Code is the client's own closed set;
+// the substrate passes it through rather than inventing a taxonomy for a
+// surface it cannot see.
+type ResolveError struct {
+	Code    string `json:"code"`
+	Message string `json:"message,omitempty"`
 }
 
 type CancelPayload struct {

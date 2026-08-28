@@ -71,8 +71,24 @@ func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
 		// immediate: 收件即 completed 回执 (log 即收件箱).
 		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
 	case subjectgate.WordHumanAsk, subjectgate.WordHumanApprove:
+		// deferred: stays open until the person's resolve frame arrives.
 	default:
-		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("a human member does not answer %q; it accepts %s, %s and %s", msg.Type, subjectgate.WordHumanMessage, subjectgate.WordHumanAsk, subjectgate.WordHumanApprove))
+		if subjectgate.IsUIWord(msg.Type) {
+			// Also deferred, but on the CLIENT rather than the person: the
+			// request sits in the log, the attached client sees it addressed to
+			// its own actor, does the thing, and resolves. Nothing is pushed —
+			// the log is already the downstream channel, which is why this
+			// needs no new transport.
+			//
+			// KNOWN GAP (experimental): with no client attached this simply
+			// stays open until its deadline, where it should fail immediately
+			// the way an offline device does. The cell publishes presence
+			// already (WirePresenceSelfReport); wiring that into a fast refusal
+			// is the obvious next step and is deliberately not in this
+			// prototype.
+			return
+		}
+		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("a human member does not answer %q; it accepts %s, %s and %s, and its client answers %s, %s and %s", msg.Type, subjectgate.WordHumanMessage, subjectgate.WordHumanAsk, subjectgate.WordHumanApprove, subjectgate.WordUIState, subjectgate.WordUINavigate, subjectgate.WordUIOpen))
 	}
 }
 
@@ -83,6 +99,25 @@ func Manifest() introspect.Manifest {
 			subjectgate.WordHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
 			subjectgate.WordHumanAsk:     {Description: "deferred free-form question, resolved with text"},
 			subjectgate.WordHumanApprove: {Description: "deferred approval, resolved with approve or reject"},
+
+			// Answered by the person's CLIENT, not the person. Experimental.
+			subjectgate.WordUIState: {
+				Description:  "Read what this person's client is currently showing. Changes nothing — send it before acting, so an operation is aimed at what is actually on screen. Answered by the client in milliseconds, or not at all if no client is attached.",
+				InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+				OutputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"object"},"open":{"type":"object"},"available":{"type":"object"},"viewport":{"type":"object"}}}`),
+			},
+			subjectgate.WordUINavigate: {
+				Description:  "Move this person's client to a channel, and optionally a view within it. Answers with what the client shows afterwards, so no follow-up read is needed.",
+				InputSchema:  json.RawMessage(`{"type":"object","required":["channel_id"],"properties":{"channel_id":{"type":"string"},"view":{"type":"string"}}}`),
+				OutputSchema: json.RawMessage(`{"type":"object"}`),
+				ErrorCodes:   []string{"unknown_channel", "ui_error"},
+			},
+			subjectgate.WordUIOpen: {
+				Description:  "Open a file in this person's client, optionally scrolled to a line. The path is read through the same controlled file access the client already uses; nothing is sent to the browser address bar.",
+				InputSchema:  json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"line":{"type":"integer"}}}`),
+				OutputSchema: json.RawMessage(`{"type":"object"}`),
+				ErrorCodes:   []string{"not_found", "ui_error"},
+			},
 		},
 	}
 }
@@ -319,15 +354,52 @@ func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subject
 	if !open {
 		return prepErr(subjectgate.CodeAlreadyClosed, "request already closed")
 	}
+	// A UI word is closed by the client with a result or an error, and it is the
+	// only shape here that can FAIL. A person answering a question always
+	// produces an answer; a client asked to open a missing file has to be able
+	// to say no, and saying no is the useful half of the contract — it is the
+	// first time the front end can report that an action did not work instead
+	// of leaving somebody to notice by eye.
+	if subjectgate.IsUIWord(req.Type) {
+		if p.Text != nil || p.Decision != "" || p.Note != nil {
+			return prepErr(subjectgate.CodeBadPayload, req.Type+" resolve carries result or error, not text/decision/note")
+		}
+		msg := actorbase.NewMsg(actorbase.OriginLog, sys.Life(), *req)
+		switch {
+		case p.Error != nil:
+			if p.Error.Code == "" {
+				return prepErr(subjectgate.CodeBadPayload, "a ui error needs a code")
+			}
+			if _, err := sys.Fail(msg, p.Error.Code, p.Error.Message); err != nil {
+				return mapVerbErrFrame(err, f)
+			}
+		case len(p.Result) > 0:
+			// Decoded into a value because Reply marshals exactly once: handing
+			// it raw bytes would encode them as a base64 string and the result
+			// would vanish from truth. Same trap as the decision below, pinned
+			// by TestResolvePayloadIsMarshalledExactlyOnce.
+			var result any
+			if err := json.Unmarshal(p.Result, &result); err != nil {
+				return prepErr(subjectgate.CodeBadPayload, "result is not valid JSON: "+err.Error())
+			}
+			if _, err := sys.Reply(msg, result); err != nil {
+				return mapVerbErrFrame(err, f)
+			}
+		default:
+			return prepErr(subjectgate.CodeBadPayload, req.Type+" resolve requires exactly one of result or error")
+		}
+		return receipt(f, subjectgate.ResolveReceipt{ReqID: p.ReqID})
+	}
+
 	var answer map[string]any
 	switch req.Type {
 	case subjectgate.WordHumanAsk:
-		if p.Text == nil || p.Decision != "" || p.Note != nil {
+		if p.Text == nil || p.Decision != "" || p.Note != nil || len(p.Result) > 0 || p.Error != nil {
 			return prepErr(subjectgate.CodeBadPayload, "human.ask resolve requires only text")
 		}
 		answer = map[string]any{"text": *p.Text}
 	case subjectgate.WordHumanApprove:
-		if p.Text != nil || (p.Decision != "approve" && p.Decision != "reject") {
+		if p.Text != nil || len(p.Result) > 0 || p.Error != nil || (p.Decision != "approve" && p.Decision != "reject") {
 			return prepErr(subjectgate.CodeInvalidDecision, "human.approve decision must be approve or reject")
 		}
 		answer = map[string]any{"decision": p.Decision}
