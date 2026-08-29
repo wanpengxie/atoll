@@ -8,73 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
-
-type mountRoutes struct{}
-
-func (mountRoutes) PokePlan(string, string) {}
-func (mountRoutes) FileCreate(context.Context, string, string, string, accessdoor.FileNodeType) error {
-	return nil
-}
-func (mountRoutes) FileDelete(context.Context, string, string, string) error { return nil }
-func (mountRoutes) FileStat(context.Context, string, string, string) (platform.DaemonFileInfo, bool, error) {
-	return platform.DaemonFileInfo{}, false, nil
-}
-func (mountRoutes) FileList(context.Context, string, string, string, int, string) ([]platform.DaemonFileInfo, string, error) {
-	return nil, "", nil
-}
-func (mountRoutes) AttachedDaemons(string) []string  { return nil }
-func (mountRoutes) LaneAttached(string, string) bool { return true }
-func (mountRoutes) LaneWorkspace(context.Context, string, string) (string, bool, error) {
-	return "/workspace", true, nil
-}
-
-type mountBindings struct{}
-
-func (mountBindings) IsBound(context.Context, channel.ID, string) (bool, error) { return true, nil }
-func (mountBindings) ListBoundDeviceIDs(context.Context, channel.ID) ([]string, error) {
-	return []string{"retired-id", "live-id"}, nil
-}
-func (mountBindings) ChannelDesired(context.Context, channel.ID) (channelspec.ChannelDesiredFacts, bool, error) {
-	return channelspec.ChannelDesiredFacts{}, false, nil
-}
-
-type mountDirectory struct{}
-
-func (mountDirectory) ResolveDeviceID(_ context.Context, id string) (string, bool, bool, error) {
-	switch id {
-	case "retired-id":
-		return "old-device", false, true, nil
-	case "live-id":
-		return "retired-id", true, true, nil
-	default:
-		return "", false, false, nil
-	}
-}
-func (mountDirectory) ResolveDeviceName(_ context.Context, name string) (string, bool, bool, error) {
-	if name == "retired-id" || name == "legacy-name" {
-		return "live-id", true, true, nil
-	}
-	return "", false, false, nil
-}
-
-func TestCanonicalRetiredDeviceIDNeverFallsThroughToLegacyNameLookup(t *testing.T) {
-	mounts := daemonStorageMounts{routes: mountRoutes{}, bindings: mountBindings{}, directory: mountDirectory{}, chID: "c0"}
-	if _, found, err := mounts.ResolveStorageDaemon(t.Context(), "c0", "retired-id"); err != nil || found {
-		t.Fatalf("retired canonical id resolved through another device name: found=%v err=%v", found, err)
-	}
-	legacy, found, err := mounts.ResolveStorageDaemon(t.Context(), "c0", "legacy-name")
-	if err != nil || !found || legacy.DaemonID != "live-id" {
-		t.Fatalf("legacy display name compatibility mount=%+v found=%v err=%v", legacy, found, err)
-	}
-}
 
 // fileHost stands in for the machine at the far end of a lane: it speaks the
 // exchange protocol, so what this exercises is the real framing and the real

@@ -39,38 +39,38 @@ func TestCallerLineNamesSeedByKind(t *testing.T) {
 }
 
 func TestResolveAttachmentRequiresThisDeviceAndWorkspace(t *testing.T) {
-	self := Situation{DeviceID: "local-device", Channel: "project-id", WorkspaceDir: "/var/atoll/channels/c0.proj"}
-	local := Attachment{Address: "daemon://local-device/project-id/uploads/%E7%A0%94%E7%A9%B6-%E6%96%87%E6%A1%A3.md", Name: "研究 文档.md"}
+	self := Situation{DeviceID: "device-id", DeviceName: "local-device", Channel: "project-id", WorkspaceDir: "/var/atoll/channels/c0.proj"}
+	local := Attachment{Address: "daemon://local-device/c0.proj/uploads/%E7%A0%94%E7%A9%B6-%E6%96%87%E6%A1%A3.md", Name: "研究 文档.md"}
 	if got := ResolveAttachment(local, self); got.LocalPath != "uploads/研究-文档.md" {
 		t.Fatalf("local path=%q, want cwd-relative path", got.LocalPath)
 	}
 	foreign := local
-	foreign.Address = "daemon://other-device/project-id/uploads/研究-文档.md"
+	foreign.Address = "daemon://other-device/c0.proj/uploads/研究-文档.md"
 	if got := ResolveAttachment(foreign, self); got.LocalPath != "" {
 		t.Fatalf("foreign local path=%q, want empty", got.LocalPath)
 	}
 	wrongChannel := local
-	wrongChannel.Address = "daemon://local-device/other-id/uploads/研究-文档.md"
+	wrongChannel.Address = "daemon://local-device/c0.other/uploads/研究-文档.md"
 	if got := ResolveAttachment(wrongChannel, self); got.LocalPath != "" {
 		t.Fatalf("wrong-channel local path=%q, want empty", got.LocalPath)
 	}
 }
 
 func TestAttachmentLinesPreserveOriginalNameAndReportForeignAddress(t *testing.T) {
-	self := Situation{DeviceID: "local-device", Channel: "project-id", WorkspaceDir: "/var/atoll/channels/c0.proj"}
+	self := Situation{DeviceID: "device-id", DeviceName: "local-device", Channel: "project-id", WorkspaceDir: "/var/atoll/channels/c0.proj"}
 	atts := []Attachment{
-		{Address: "daemon://local-device/project-id/uploads/%E7%A0%94%E7%A9%B6-%E6%96%87%E6%A1%A3.md", Name: "研究 文档.md"},
-		{Address: "daemon://other-device/project-id/uploads/draft.pdf", Name: `draft "one".pdf`},
+		{Address: "daemon://local-device/c0.proj/uploads/%E7%A0%94%E7%A9%B6-%E6%96%87%E6%A1%A3.md", Name: "研究 文档.md"},
+		{Address: "daemon://other-device/c0.proj/uploads/draft.pdf", Name: `draft "one".pdf`},
 	}
 	want := "[附件 name=\"研究 文档.md\" path=\"uploads/研究-文档.md\"]\n" +
-		`[附件 name="draft \"one\".pdf" path="daemon://other-device/project-id/uploads/draft.pdf" note="not on this device"]`
+		`[附件 name="draft \"one\".pdf" path="daemon://other-device/c0.proj/uploads/draft.pdf" note="not on this device"]`
 	if got := AttachmentLines(atts, self); got != want {
 		t.Fatalf("attachment lines:\n%s\nwant:\n%s", got, want)
 	}
 	if got := AttachmentLines(nil, self); got != "" {
 		t.Fatalf("empty attachment lines=%q", got)
 	}
-	unnamed := AttachmentLines([]Attachment{{Address: "daemon://local-device/project-id/uploads/note.txt"}}, self)
+	unnamed := AttachmentLines([]Attachment{{Address: "daemon://local-device/c0.proj/uploads/note.txt"}}, self)
 	if unnamed != `[附件 path="uploads/note.txt"]` {
 		t.Fatalf("unnamed attachment line=%q", unnamed)
 	}

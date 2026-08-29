@@ -84,7 +84,8 @@ type Situation struct {
 	Class        string // the class backing it, e.g. codex
 	Channel      string // the channel it lives in
 	DeviceID     string // server-assigned daemon installation hosting this agent
-	DeviceLabel  string // optional display label; never used for routing
+	DeviceName   string // canonical registry name used in readable file addresses
+	DeviceLabel  string // optional local diagnostic label; never used for routing
 	WorkspaceDir string // absolute channel workspace path and child-process cwd
 	IsCore       bool   // whether that channel is c0, the space registry channel
 }

@@ -314,6 +314,7 @@ const (
 type SpineFrame struct {
 	Kind       string            `json:"kind"`
 	DaemonID   string            `json:"daemon_id,omitempty"`
+	DaemonName string            `json:"daemon_name,omitempty"`
 	CarrierGen CarrierGeneration `json:"carrier_gen,omitempty"`
 	Class      CarrierClass      `json:"class,omitempty"`
 	Reason     string            `json:"reason,omitempty"`
@@ -331,28 +332,28 @@ type SpineFrame struct {
 func (f SpineFrame) Validate() error {
 	switch f.Kind {
 	case SpineCarrierAccept:
-		if f.DaemonID == "" || f.CarrierGen == "" || f.Class != "" ||
+		if f.DaemonID == "" || f.DaemonName == "" || f.CarrierGen == "" || f.Class != "" ||
 			f.Reason != "" || f.Nonce != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: malformed carrier_accept")
 		}
 	case SpineCarrierReject:
 		if (f.Class != CarrierTerminal && f.Class != CarrierRetryable) || f.Reason == "" ||
-			f.DaemonID != "" || f.CarrierGen != "" || f.Nonce != "" ||
+			f.DaemonID != "" || f.DaemonName != "" || f.CarrierGen != "" || f.Nonce != "" ||
 			len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: malformed carrier_reject")
 		}
 	case SpineCompartmentPlanPoke:
-		if f.DaemonID != "" || f.CarrierGen != "" || f.Class != "" ||
+		if f.DaemonID != "" || f.DaemonName != "" || f.CarrierGen != "" || f.Class != "" ||
 			f.Reason != "" || f.Nonce != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: compartment_plan_poke carries no payload")
 		}
 	case SpineCompartmentPlanPull:
-		if f.Nonce == "" || f.DaemonID != "" || f.CarrierGen != "" ||
+		if f.Nonce == "" || f.DaemonID != "" || f.DaemonName != "" || f.CarrierGen != "" ||
 			f.Class != "" || f.Reason != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: compartment_plan_pull nonce required")
 		}
 	case SpineCompartmentPlanReply:
-		if f.Nonce == "" || f.DaemonID != "" || f.CarrierGen != "" ||
+		if f.Nonce == "" || f.DaemonID != "" || f.DaemonName != "" || f.CarrierGen != "" ||
 			f.Class != "" || f.Reason != "" {
 			return errors.New("link: malformed compartment_plan_reply")
 		}
@@ -360,7 +361,7 @@ func (f SpineFrame) Validate() error {
 			return err
 		}
 	case SpineProbe, SpineProbeReply:
-		if f.Nonce == "" || f.DaemonID != "" || f.CarrierGen != "" ||
+		if f.Nonce == "" || f.DaemonID != "" || f.DaemonName != "" || f.CarrierGen != "" ||
 			f.Class != "" || f.Reason != "" || len(f.Serve) > 0 || len(f.Unknown) > 0 {
 			return errors.New("link: probe nonce required")
 		}

@@ -24,8 +24,8 @@ type FilePrefix struct {
 }
 
 // ParseFileAddress accepts only the one canonical spelling of a daemon file
-// address: daemon://<device-id>/<channel-id>/<path>. Display names never enter
-// a ResourceID; both identity segments are stable registry ids.
+// address: daemon://<device-name>/<channel-name>/<path>. These are canonical,
+// human-readable registry names; internal authority resolves them to ids.
 func ParseFileAddress(raw string) (FileAddress, error) {
 	if raw == "" || strings.Contains(strings.ToLower(raw), "%2f") || !canonicalEscapeCase(raw) {
 		return FileAddress{}, errors.New("resourcespec: invalid daemon file address")

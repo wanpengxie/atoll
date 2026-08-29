@@ -86,9 +86,8 @@ func (r *Registry) ResolveDeviceName(ctx context.Context, name string) (string, 
 	return row.ID, row.Status == regspec.DevicePresent, found, err
 }
 
-// ResolveDeviceID decorates a stable registry identity with its display name.
-// ResolveDeviceName remains only as a compatibility read for legacy resource
-// addresses; no new authority or address may be based on the mutable label.
+// ResolveDeviceID decorates a stable registry identity with its canonical,
+// human-readable name. Authority joins by id; daemon:// addresses use name.
 func (r *Registry) ResolveDeviceID(ctx context.Context, id string) (string, bool, bool, error) {
 	row, found, err := r.store.GetDevice(ctx, id)
 	if err != nil || !found {

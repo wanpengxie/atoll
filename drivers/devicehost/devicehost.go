@@ -39,23 +39,23 @@ type Config struct {
 // Run drives the carrier until ctx ends. It is exactly the standalone daemon's
 // body: compute.Run with per-channel compartments backed by storagehost.
 func Run(ctx context.Context, cfg Config) error {
-	var attachedID atomic.Value
+	var attachedIdentity atomic.Value
 	return compute.Run(ctx, compute.Config{
 		ServerWS:   cfg.ServerWS,
 		Credential: cfg.Credential,
 		AtollHome:  cfg.AtollHome,
 		Logger:     cfg.Logger,
-		OnAttached: func(daemonID string) {
+		OnAttached: func(daemonID, daemonName string) {
 			// compute calls OnAttached before it binds the carrier and starts any
 			// compartment, so every constructor below observes the accepted id.
-			attachedID.Store(daemonID)
+			attachedIdentity.Store(struct{ id, name string }{daemonID, daemonName})
 			if cfg.OnAttached != nil {
 				cfg.OnAttached(daemonID)
 			}
 		},
 		BuildCompartment: func(chID, workspaceDir string) (compute.CompartmentResources, error) {
-			deviceID, _ := attachedID.Load().(string)
-			if deviceID == "" {
+			identity, _ := attachedIdentity.Load().(struct{ id, name string })
+			if identity.id == "" || identity.name == "" {
 				return compute.CompartmentResources{}, errors.New("devicehost: compartment built before carrier identity was accepted")
 			}
 			sh, err := storagehost.Open(workspaceDir)
@@ -65,7 +65,7 @@ func Run(ctx context.Context, cfg Config) error {
 			adapter := storageHostAdapter{host: sh}
 			return compute.CompartmentResources{
 				Factories: classFactories{
-					chID: chID, wsRoot: workspaceDir, deviceID: deviceID, deviceLabel: cfg.DeviceLabel,
+					chID: chID, wsRoot: workspaceDir, deviceID: identity.id, deviceName: identity.name, deviceLabel: cfg.DeviceLabel,
 					logger: cfg.Logger.With("channel", chID),
 				},
 				LocalFileOpener: adapter, Close: sh.Close,
@@ -82,8 +82,8 @@ func Run(ctx context.Context, cfg Config) error {
 // (logged by the caller, retried on the Host's backoff) instead of holding the
 // whole plan hostage.
 type classFactories struct {
-	chID, wsRoot, deviceID, deviceLabel string
-	logger                              *slog.Logger
+	chID, wsRoot, deviceID, deviceName, deviceLabel string
+	logger                                          *slog.Logger
 }
 
 func (f classFactories) BuildClass(
@@ -98,6 +98,7 @@ func (f classFactories) BuildClass(
 		ChannelID:    channel.ID(f.chID),
 		WorkspaceDir: f.wsRoot,
 		DeviceID:     f.deviceID,
+		DeviceName:   f.deviceName,
 		DeviceLabel:  f.deviceLabel,
 		Logger:       f.logger,
 	})

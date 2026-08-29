@@ -472,9 +472,9 @@ func (h *Host) currentCarriersLocked() []*carrierRow {
 	return out
 }
 
-func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
-	if daemonID == "" {
-		http.Error(w, "authenticated daemon id required", http.StatusUnauthorized)
+func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID, daemonName string) {
+	if daemonID == "" || daemonName == "" {
+		http.Error(w, "authenticated daemon id and name required", http.StatusUnauthorized)
 		return
 	}
 	// Admission is refused before the handshake. Upgrading first and rejecting
@@ -546,7 +546,7 @@ func (h *Host) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
 		h.runCarrier(carrier)
 	}()
 	if err := sendCarrierAccept(wire, link.SpineFrame{
-		Kind: link.SpineCarrierAccept, DaemonID: daemonID, CarrierGen: carrier.gen,
+		Kind: link.SpineCarrierAccept, DaemonID: daemonID, DaemonName: daemonName, CarrierGen: carrier.gen,
 	}); err != nil {
 		h.beginCarrierShutdown(carrier)
 		return

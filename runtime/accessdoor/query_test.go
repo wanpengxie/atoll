@@ -26,7 +26,7 @@ func TestCreateKVRejectsFileAddressBeforeWritingRegistry(t *testing.T) {
 	}
 
 	_, err = minter.MintAuthority(accessAuthority("agent:a")).Create(
-		t.Context(), "daemon://daemon-a/channel-a/docs/report.txt",
+		t.Context(), "daemon://laptop-a/c0.channel-a/docs/report.txt",
 		resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("value"),
 	)
 	if !errors.Is(err, ErrMalformed) {
@@ -64,7 +64,7 @@ func TestCreateDirectoryUsesFileCreateWithDirectoryNode(t *testing.T) {
 		StorageMounts: directMounts{}, Files: files,
 	}}
 	out, err := d.create(t.Context(), actor.ActorID("agent:a"),
-		"daemon://daemon-a/channel-a/docs", resourcespec.CreateSpec{
+		"daemon://laptop-a/c0.channel-a/docs", resourcespec.CreateSpec{
 			Kind: resourcespec.KindFile, NodeType: resourcespec.FileNodeDirectory,
 		}, nil)
 	if err != nil || !out.Accepted() {
@@ -76,7 +76,7 @@ func TestCreateDirectoryUsesFileCreateWithDirectoryNode(t *testing.T) {
 }
 
 func TestCreateDirectoryRejectsContent(t *testing.T) {
-	err := ingressCreate("daemon://daemon-a/channel-a/docs", resourcespec.CreateSpec{
+	err := ingressCreate("daemon://laptop-a/c0.channel-a/docs", resourcespec.CreateSpec{
 		Kind: resourcespec.KindFile, NodeType: resourcespec.FileNodeDirectory, WithContent: true,
 	}, nil)
 	if !errors.Is(err, ErrMalformed) {
@@ -103,7 +103,7 @@ func TestFileListRejectsPrefixForAnotherChannel(t *testing.T) {
 		Files:         &listFiles{},
 	}}
 	if _, err := d.list(t.Context(), actor.ActorID("agent:a"), ListQuery{
-		Prefix: "daemon://daemon-a/channel-b/docs/",
+		Prefix: "daemon://laptop-a/c0.channel-b/docs/",
 	}); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("cross-channel list error = %v, want ErrMalformed", err)
 	}
@@ -127,7 +127,7 @@ func TestFileListPassesPaginationToDiskAndReturnsNext(t *testing.T) {
 	}}
 
 	page, err := d.list(t.Context(), actor.ActorID("agent:a"), ListQuery{
-		Prefix: "daemon://daemon-a/channel-a/docs/", Limit: 8, Cursor: "prior-page",
+		Prefix: "daemon://laptop-a/c0.channel-a/docs/", Limit: 8, Cursor: "prior-page",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ func TestFileListPassesPaginationToDiskAndReturnsNext(t *testing.T) {
 		t.Fatalf("disk list call = (%q, %q, %d, %q)", files.daemonID, files.pathPrefix, files.limit, files.cursor)
 	}
 	for i, entry := range page.Entries[:7] {
-		want := fmt.Sprintf("daemon://daemon-a/channel-a/docs/%03d.txt", i)
+		want := fmt.Sprintf("daemon://laptop-a/c0.channel-a/docs/%03d.txt", i)
 		if string(entry.ID) != want || entry.Kind != resourcespec.KindFile {
 			t.Fatalf("entry[%d] = %+v, want id %q kind file", i, entry, want)
 		}
@@ -166,7 +166,7 @@ func TestFileListMapsMalformedDeviceCursor(t *testing.T) {
 		StorageMounts: directMounts{}, Files: files,
 	}}
 	page, err := d.list(t.Context(), actor.ActorID("agent:a"), ListQuery{
-		Prefix: "daemon://daemon-a/channel-a/docs/", Cursor: "bad",
+		Prefix: "daemon://laptop-a/c0.channel-a/docs/", Cursor: "bad",
 	})
 	if err != nil || page.Reject != QueryBadCursor {
 		t.Fatalf("file list = (%+v, %v), want bad_cursor", page, err)

@@ -27,8 +27,12 @@ type Deps struct {
 	// hosts this cell. It is routing identity. It never comes from hostname or a
 	// CLI label.
 	DeviceID string
-	// DeviceLabel is presentation only. A constructor must never use it for a
-	// resource address, placement decision, or identity comparison.
+	// DeviceName is the immutable, space-unique registry name. It is the
+	// human-readable segment of daemon:// file names; authority still joins by
+	// DeviceID.
+	DeviceName string
+	// DeviceLabel is the daemon operator's local diagnostic label. It is never
+	// used for routing, authority, or resource naming.
 	DeviceLabel string
 	Logger      *slog.Logger
 }

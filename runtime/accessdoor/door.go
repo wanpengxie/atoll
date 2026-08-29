@@ -24,13 +24,9 @@ func (d *door) fileAddress(id resource.ResourceID) (resourcespec.FileAddress, bo
 	if err != nil {
 		return resourcespec.FileAddress{}, true, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
-	if d.deps.ChannelID == "" || address.Channel != string(d.deps.ChannelID) && address.Channel != d.deps.ChannelName {
+	if d.deps.ChannelName == "" || address.Channel != d.deps.ChannelName {
 		return resourcespec.FileAddress{}, true, fmt.Errorf("%w: file address names a different channel", ErrMalformed)
 	}
-	// ChannelName is accepted only to read ledger rows written before file
-	// addresses moved from the qualified display name to the stable ChannelID.
-	// Every constructor in this package emits ChannelID, so this compatibility
-	// branch cannot mint more legacy addresses.
 	return address, true, nil
 }
 

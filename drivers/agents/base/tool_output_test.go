@@ -67,7 +67,7 @@ func (r *outputResources) CreateDirectory(id resource.ResourceID) (accessdoor.Ou
 func TestPrepareOversizedToolOutputWritesExactJSONAndReturnsPointer(t *testing.T) {
 	raw := json.RawMessage(`{"status":"completed","name":"image","result":"` + strings.Repeat("a", 4000) + `"}`)
 	resources := &outputResources{}
-	value, err := prepareOversizedToolOutput(resources, "local-device", "dev-channel", "/srv/channels/c0.dev", raw, 1024)
+	value, err := prepareOversizedToolOutput(resources, "local-device", "/srv/channels/c0.dev", raw, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestPrepareOversizedToolOutputWritesExactJSONAndReturnsPointer(t *testing.T
 	if err := json.Unmarshal(encoded, &got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.External.Stored || got.External.Path == "" || !strings.HasPrefix(got.External.ResourceID, "daemon://local-device/dev-channel/.atoll/outputs/") {
+	if !got.External.Stored || got.External.Path == "" || !strings.HasPrefix(got.External.ResourceID, "daemon://local-device/c0.dev/.atoll/outputs/") {
 		t.Fatalf("external record = %+v", got.External)
 	}
 	if got.External.OriginalBytes != len(raw) || len(got.External.SHA256) != 64 {
@@ -101,7 +101,7 @@ func TestPrepareOversizedToolOutputWritesExactJSONAndReturnsPointer(t *testing.T
 
 func TestPrepareOversizedToolOutputStorageFailureStillReturnsBoundedProjection(t *testing.T) {
 	raw := json.RawMessage(`{"status":"completed","result":"` + strings.Repeat("a", 4000) + `"}`)
-	value, storageErr := prepareOversizedToolOutput(&outputResources{fail: true}, "local-device", "dev-channel", "/srv/channels/c0.dev", raw, 1024)
+	value, storageErr := prepareOversizedToolOutput(&outputResources{fail: true}, "local-device", "/srv/channels/c0.dev", raw, 1024)
 	if storageErr == nil {
 		t.Fatal("storage failure was swallowed")
 	}

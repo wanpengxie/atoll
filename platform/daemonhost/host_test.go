@@ -23,7 +23,7 @@ import (
 func dialTestCarrier(t *testing.T, host *Host) *link.ClientCarrier {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	t.Cleanup(server.Close)
 	carrier, _, err := link.DialDeviceCarrier(
@@ -36,8 +36,8 @@ func dialTestCarrier(t *testing.T, host *Host) *link.ClientCarrier {
 	if err := carrier.ReadSpine(&frame); err != nil {
 		t.Fatal(err)
 	}
-	if frame.Kind != link.SpineCarrierAccept {
-		t.Fatalf("got verdict %q", frame.Kind)
+	if frame.Kind != link.SpineCarrierAccept || frame.DaemonID != "daemon-a" || frame.DaemonName != "laptop-a" {
+		t.Fatalf("got verdict %+v", frame)
 	}
 	return carrier
 }
@@ -605,7 +605,7 @@ func TestDuplicateCurrentIsRetryableAndKeepsIncumbent(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	defer host.Close(context.Background())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	defer server.Close()
 	rawURL := "ws" + strings.TrimPrefix(server.URL, "http")
@@ -996,7 +996,7 @@ func TestOnlyTheMatchingProbeReplyRenewsTheLease(t *testing.T) {
 func TestClosedHostRefusesCarriersBeforeTheHandshake(t *testing.T) {
 	host := New(Config{ScanInterval: time.Hour})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	defer server.Close()
 	if err := host.Close(context.Background()); err != nil {

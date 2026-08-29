@@ -34,7 +34,7 @@ func TestADeviceLocalPathBecomesTheChannelAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	if want := resource.ResourceID("daemon://daemon-a/c/docs/report.txt"); got != want {
+	if want := resource.ResourceID("daemon://laptop-a/c0.c/docs/report.txt"); got != want {
 		t.Fatalf("normalize = %q, want %q", got, want)
 	}
 }
@@ -46,7 +46,7 @@ func TestAPathThatWalksOutAndBackInIsTheFileItResolvesTo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	if want := resource.ResourceID("daemon://daemon-a/c/docs/report.txt"); got != want {
+	if want := resource.ResourceID("daemon://laptop-a/c0.c/docs/report.txt"); got != want {
 		t.Fatalf("normalize = %q, want %q", got, want)
 	}
 }
@@ -89,7 +89,7 @@ func TestOnlyRealFilesUnderTheChannelDirectoryResolve(t *testing.T) {
 // at all.
 func TestNamesThatAreAlreadyCompletePassThroughUntouched(t *testing.T) {
 	for _, raw := range []string{
-		"daemon://daemon-a/c/docs/report.txt",
+		"daemon://laptop-a/c0.c/docs/report.txt",
 		"config",
 		"some/kv/key",
 		"",
@@ -117,7 +117,7 @@ func TestAPathResolvesTheSameForACallerThatIsOnNoDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize for an unplaced caller: %v", err)
 	}
-	if want := resource.ResourceID("daemon://daemon-a/c/docs/report.txt"); got != want {
+	if want := resource.ResourceID("daemon://laptop-a/c0.c/docs/report.txt"); got != want {
 		t.Fatalf("normalize = %q, want %q", got, want)
 	}
 }
@@ -178,7 +178,7 @@ func TestAListingPrefixMayNameTheChannelDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize prefix: %v", err)
 	}
-	if want := "daemon://daemon-a/c/"; got != want {
+	if want := "daemon://laptop-a/c0.c/"; got != want {
 		t.Fatalf("prefix = %q, want %q", got, want)
 	}
 }

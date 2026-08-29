@@ -67,12 +67,10 @@ type BootstrapService struct {
 }
 
 type DeviceDirectory interface {
-	// ResolveDeviceName exists only for reading legacy daemon://name/... rows.
-	// Every new address uses the stable registry DeviceID.
+	// ResolveDeviceName translates the readable daemon:// name into the stable
+	// registry id used for binding and routing authority.
 	ResolveDeviceName(context.Context, string) (id string, present bool, found bool, err error)
-	// ResolveDeviceID decorates the canonical id with its display label. Present
-	// and found remain separate so a retired canonical id can never fall through
-	// and be reinterpreted as some other device's legacy display name.
+	// ResolveDeviceID decorates an internal id with its canonical registry name.
 	ResolveDeviceID(context.Context, string) (name string, present bool, found bool, err error)
 }
 
