@@ -39,9 +39,15 @@ const KindFile = resourcespec.KindFile
 // FormatFileAddress gives domain code the canonical name needed by the file
 // verbs without exposing resourcespec, whose raw registry/driver vocabulary is
 // deliberately confined to the runtime tree.
-func FormatFileAddress(deviceID, channelID, path string) (resource.ResourceID, error) {
+//
+// Both segments are registry NAMES, not ids: a daemon:// address is the
+// readable namespace, and ids stay the authority for bindings and routing
+// (resourcespec.ParseFileAddress says the same from the other direction). The
+// distinction is worth spelling out in the parameter names because the two are
+// both plain strings, so passing an id compiles and then resolves to nothing.
+func FormatFileAddress(deviceName, channelName, path string) (resource.ResourceID, error) {
 	raw, err := resourcespec.FormatFileAddress(resourcespec.FileAddress{
-		Scheme: resourcespec.DaemonScheme, Host: deviceID, Channel: channelID, Path: path,
+		Scheme: resourcespec.DaemonScheme, Host: deviceName, Channel: channelName, Path: path,
 	})
 	return resource.ResourceID(raw), err
 }

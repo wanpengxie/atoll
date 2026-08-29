@@ -30,16 +30,21 @@ func (d *door) fileAddress(id resource.ResourceID) (resourcespec.FileAddress, bo
 	return address, true, nil
 }
 
-func (d *door) storageMount(ctx context.Context, deviceID string) (StorageMount, error) {
+// storageMount resolves the device segment of a daemon:// address to the mount
+// that holds it. The argument is that segment verbatim, so it is a registry
+// NAME: every caller passes address.Host or prefix.Host, and the resolver
+// underneath joins by name. Naming it for an id would compile and read as
+// authority while being neither.
+func (d *door) storageMount(ctx context.Context, deviceName string) (StorageMount, error) {
 	if d.deps.StorageMounts == nil {
 		return StorageMount{}, errNoStorageMounts
 	}
-	mount, found, err := d.deps.StorageMounts.ResolveStorageDaemon(ctx, d.deps.ChannelID, deviceID)
+	mount, found, err := d.deps.StorageMounts.ResolveStorageDaemon(ctx, d.deps.ChannelID, deviceName)
 	if err != nil {
 		return StorageMount{}, err
 	}
 	if !found {
-		return StorageMount{}, fmt.Errorf("accessdoor: daemon %q is not bound to channel", deviceID)
+		return StorageMount{}, fmt.Errorf("accessdoor: daemon %q is not bound to channel", deviceName)
 	}
 	if !mount.Online {
 		return StorageMount{}, NewHostOfflineError(mount.Name)

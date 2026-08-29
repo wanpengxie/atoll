@@ -23,9 +23,17 @@ var ErrNoTerminalHost = errors.New("daemonhost: channel has no attached device")
 // "daemon 重启 / carrier 换代 → 恒即死" structural rather than a policy
 // (terminal-line-design.md §4.4).
 //
-// daemonID is a registry identity. Device selection is policy, so it is
-// resolved by the portal from the channel profile before reaching this live
-// carrier layer; the host never guesses from whichever lanes happen to exist.
+// daemonID is a registry identity and is REQUIRED. Choosing a terminal's
+// machine is policy and does not belong to this layer: the caller chooses, the
+// portal checks the choice against the channel's device bindings, and the host
+// only opens what it was given. It used to pick the sole attached device when
+// asked without one, which read as convenience but was the same guess that put
+// uploads on whichever device sorted first — a channel with one device today
+// has two tomorrow, and the guess silently changes machine.
+//
+// This is NOT the channel's default storage device: where a channel keeps
+// files and where a person wants a shell are different questions, and reading
+// one as the other would move somebody's terminal by editing a file setting.
 func (h *Host) OpenPTY(ctx context.Context, daemonID string, chID channel.ID, cols, rows uint16, integration bool) (io.ReadWriteCloser, error) {
 	if daemonID == "" {
 		return nil, ErrNoTerminalHost
