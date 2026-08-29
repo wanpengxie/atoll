@@ -192,11 +192,11 @@ func main() {
 			deviceName = "local"
 		}
 		deviceDone <- devicehost.Run(deviceCtx, devicehost.Config{
-			ServerWS:   "ws://" + eng.BoundAddr() + "/compute",
-			Credential: deviceKey,
-			DeviceName: deviceName + "-local",
-			AtollHome:  deviceHome,
-			Logger:     logger.With("part", "local-device"),
+			ServerWS:    "ws://" + eng.BoundAddr() + "/compute",
+			Credential:  deviceKey,
+			DeviceLabel: deviceName + "-local",
+			AtollHome:   deviceHome,
+			Logger:      logger.With("part", "local-device"),
 		})
 	}()
 

@@ -18,7 +18,7 @@ func TestConstructFillsThePlannedSeat(t *testing.T) {
 	const seat = actor.ActorID("tool:device:1787907279757")
 	decl, err := construct(
 		registry.InstanceSpec{ID: seat},
-		registry.Deps{DeviceName: "some-laptop", WorkspaceDir: t.TempDir()},
+		registry.Deps{DeviceID: "some-laptop", WorkspaceDir: t.TempDir()},
 	)
 	if err != nil {
 		t.Fatalf("construct: %v", err)
@@ -31,14 +31,15 @@ func TestConstructFillsThePlannedSeat(t *testing.T) {
 	}
 }
 
-// The device name is no longer the id, but it is still required: this class is
-// daemon-placed and only a daemon host supplies one, so an empty name means the
+// The planned seat no longer derives its id, but a stable device identity is
+// still required: this class is daemon-placed and only a daemon host supplies
+// one, so an empty identity means the
 // body is being built somewhere it was never meant to run.
-func TestConstructRefusesWithoutADeviceName(t *testing.T) {
+func TestConstructRefusesWithoutADeviceIdentity(t *testing.T) {
 	if _, err := construct(
 		registry.InstanceSpec{ID: "tool:device:1"},
 		registry.Deps{WorkspaceDir: t.TempDir()},
 	); err == nil {
-		t.Fatal("construct accepted an empty device name")
+		t.Fatal("construct accepted an empty device id")
 	}
 }

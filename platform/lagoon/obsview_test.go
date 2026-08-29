@@ -18,8 +18,8 @@ func TestObsProjectionGoldenJSON(t *testing.T) {
 	}{
 		{
 			"channel",
-			ObsChannelRow{ID: "child", ParentID: "c0", Name: "child", QualifiedName: "c0.child", Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "root", CreatedAt: 1},
-			`{"id":"child","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","created_at":1}`,
+			ObsChannelRow{ID: "child", ParentID: "c0", Name: "child", QualifiedName: "c0.child", Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: "root", DefaultStorageDeviceID: "local-device", CreatedAt: 1},
+			`{"id":"child","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","default_storage_device_id":"local-device","created_at":1}`,
 		},
 		{
 			"principal",

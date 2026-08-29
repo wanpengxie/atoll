@@ -398,6 +398,9 @@ func (*blockingObsRegistry) Channels(context.Context, *string) ([]obs.Row, bool,
 func (*blockingObsRegistry) Channel(context.Context, string) (obs.Row, bool, error) {
 	return obs.Row{}, false, errors.New("unexpected")
 }
+func (*blockingObsRegistry) ChannelDevices(context.Context, string) ([]obs.Row, bool, error) {
+	return nil, false, errors.New("unexpected")
+}
 func (*blockingObsRegistry) Principals(context.Context) ([]obs.Row, bool, error) {
 	return nil, false, errors.New("unexpected")
 }

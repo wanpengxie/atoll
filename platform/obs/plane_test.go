@@ -9,25 +9,28 @@ import (
 )
 
 type registryStub struct {
-	present          bool
-	presentErr       error
-	channels         []Row
-	channelsComplete bool
-	channelsErr      error
-	channel          Row
-	channelFound     bool
-	channelErr       error
-	principals       []Row
-	principalsOK     bool
-	principalsErr    error
-	daemons          []Row
-	daemonsOK        bool
-	daemonsErr       error
-	decls            []Row
-	declsOK          bool
-	declsErr         error
-	seenParent       *string
-	seenChannel      string
+	present           bool
+	presentErr        error
+	channels          []Row
+	channelsComplete  bool
+	channelsErr       error
+	channel           Row
+	channelFound      bool
+	channelErr        error
+	channelDevices    []Row
+	channelDevicesOK  bool
+	channelDevicesErr error
+	principals        []Row
+	principalsOK      bool
+	principalsErr     error
+	daemons           []Row
+	daemonsOK         bool
+	daemonsErr        error
+	decls             []Row
+	declsOK           bool
+	declsErr          error
+	seenParent        *string
+	seenChannel       string
 }
 
 func (s *registryStub) PrincipalPresent(context.Context, string) (bool, error) {
@@ -40,6 +43,10 @@ func (s *registryStub) Channels(_ context.Context, parent *string) ([]Row, bool,
 func (s *registryStub) Channel(_ context.Context, id string) (Row, bool, error) {
 	s.seenChannel = id
 	return s.channel, s.channelFound, s.channelErr
+}
+func (s *registryStub) ChannelDevices(_ context.Context, id string) ([]Row, bool, error) {
+	s.seenChannel = id
+	return s.channelDevices, s.channelDevicesOK, s.channelDevicesErr
 }
 func (s *registryStub) Principals(context.Context) ([]Row, bool, error) {
 	return s.principals, s.principalsOK, s.principalsErr
@@ -67,7 +74,8 @@ func (s *channelStub) Roster(_ context.Context, id string) ([]RosterEntry, bool,
 
 type daemonStub map[string]bool
 
-func (s daemonStub) Online(id string) bool { return s[id] }
+func (s daemonStub) Online(id string) bool             { return s[id] }
+func (s daemonStub) OnlineInChannel(id, _ string) bool { return s[id] }
 
 func TestSixObservationWordsHaveCompleteGoldenJSON(t *testing.T) {
 	tests := []struct {
@@ -118,6 +126,12 @@ func TestSixObservationWordsHaveCompleteGoldenJSON(t *testing.T) {
 				{Key: "a", Declared: json.RawMessage(`{"id":"a","kind":"human"}`), Bound: true, Device: DeviceState{Kind: DeviceKnown, Online: false, ReceivedAt: 77}},
 			}},
 			golden: `{"subject":"channel/c/ 频道/actors","kind":"actors","complete":true,"items":[{"key":"a","declared":{"id":"a","kind":"human"},"actual":{"measures":[{"name":"bound","value":true,"unknown":false,"observed_at":1000,"since":null},{"name":"device_online","value":false,"unknown":false,"observed_at":77,"since":null}]}},{"key":"z","declared":{"id":"z","kind":"tool"},"actual":{"measures":[{"name":"bound","value":false,"unknown":false,"observed_at":1000,"since":null},{"name":"device_online","value":null,"unknown":true,"reason":"no_testimony","observed_at":1000,"since":null}]}}]}`,
+		},
+		{
+			name: "channel devices", path: "/obs/channel/c0/devices",
+			registry: &registryStub{present: true, channelDevicesOK: true, channelDevices: []Row{{Key: "device-a", Declared: json.RawMessage(`{"device_id":"device-a","name":"Laptop","default_storage":true}`)}}},
+			daemons:  daemonStub{"device-a": true},
+			golden:   `{"subject":"channel/c0/devices","kind":"devices","complete":true,"items":[{"key":"device-a","declared":{"device_id":"device-a","name":"Laptop","default_storage":true},"actual":{"measures":[{"name":"online","value":true,"unknown":false,"observed_at":1000,"since":null}]}}]}`,
 		},
 	}
 

@@ -39,9 +39,9 @@ const KindFile = resourcespec.KindFile
 // FormatFileAddress gives domain code the canonical name needed by the file
 // verbs without exposing resourcespec, whose raw registry/driver vocabulary is
 // deliberately confined to the runtime tree.
-func FormatFileAddress(host, channelName, path string) (resource.ResourceID, error) {
+func FormatFileAddress(deviceID, channelID, path string) (resource.ResourceID, error) {
 	raw, err := resourcespec.FormatFileAddress(resourcespec.FileAddress{
-		Scheme: resourcespec.DaemonScheme, Host: host, Channel: channelName, Path: path,
+		Scheme: resourcespec.DaemonScheme, Host: deviceID, Channel: channelID, Path: path,
 	})
 	return resource.ResourceID(raw), err
 }

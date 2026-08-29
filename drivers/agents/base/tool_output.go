@@ -34,14 +34,14 @@ func (l *agentLoop) prepareToolOutput(raw json.RawMessage) any {
 	if len(raw) <= toolOutputInlineBytes {
 		return raw
 	}
-	value, err := prepareOversizedToolOutput(l.sys.Resource(), l.def.cfg.OutputDevice, l.def.cfg.OutputWorkspace, raw, toolOutputProjectionBytes)
+	value, err := prepareOversizedToolOutput(l.sys.Resource(), l.def.cfg.OutputDeviceID, l.def.cfg.OutputChannelID, l.def.cfg.OutputWorkspace, raw, toolOutputProjectionBytes)
 	if err != nil {
 		l.logger.Warn("agent oversized tool output degraded", "original_bytes", len(raw), "error", err)
 	}
 	return value
 }
 
-func prepareOversizedToolOutput(resources actorbase.ResourceHandle, device, workspace string, raw json.RawMessage, projectionBudget int) (any, error) {
+func prepareOversizedToolOutput(resources actorbase.ResourceHandle, deviceID, channelID, workspace string, raw json.RawMessage, projectionBudget int) (any, error) {
 	projection, meta, projectionErr := boundedjson.Project(raw, projectionBudget)
 	if projectionErr != nil {
 		projection = json.RawMessage(`{"$atoll_cut":{"type":"json","reason":"projection_failed"}}`)
@@ -49,7 +49,7 @@ func prepareOversizedToolOutput(resources actorbase.ResourceHandle, device, work
 	record := externalJSONRecord{
 		MediaType: "application/json", OriginalBytes: len(raw), SHA256: meta.SHA256,
 	}
-	address, relative, err := writeToolOutputFile(resources, device, workspace, raw)
+	address, relative, err := writeToolOutputFile(resources, deviceID, channelID, workspace, raw)
 	if err != nil {
 		record.Reason = "channel_file_write_failed"
 	} else {
@@ -58,16 +58,15 @@ func prepareOversizedToolOutput(resources actorbase.ResourceHandle, device, work
 	return map[string]any{"external_json": record, "projection": projection}, errors.Join(projectionErr, err)
 }
 
-func writeToolOutputFile(resources actorbase.ResourceHandle, device, workspace string, raw []byte) (string, string, error) {
-	if resources == nil || device == "" || workspace == "" {
+func writeToolOutputFile(resources actorbase.ResourceHandle, deviceID, channelID, workspace string, raw []byte) (string, string, error) {
+	if resources == nil || deviceID == "" || channelID == "" || workspace == "" {
 		return "", "", errors.New("tool output channel storage unavailable")
 	}
-	channelName := filepath.Base(filepath.Clean(workspace))
-	if channelName == "." || channelName == string(filepath.Separator) || channelName == "" {
-		return "", "", errors.New("tool output channel name unavailable")
+	if base := filepath.Base(filepath.Clean(workspace)); base == "." || base == string(filepath.Separator) || base == "" {
+		return "", "", errors.New("tool output workspace unavailable")
 	}
 	for _, directory := range []string{".atoll", toolOutputDirectory} {
-		address, err := toolOutputAddress(device, channelName, directory)
+		address, err := toolOutputAddress(deviceID, channelID, directory)
 		if err != nil {
 			return "", "", err
 		}
@@ -81,7 +80,7 @@ func writeToolOutputFile(resources actorbase.ResourceHandle, device, workspace s
 	}
 
 	relative := toolOutputDirectory + "/" + uuid.NewString() + ".json"
-	address, err := toolOutputAddress(device, channelName, relative)
+	address, err := toolOutputAddress(deviceID, channelID, relative)
 	if err != nil {
 		return "", "", err
 	}
@@ -107,6 +106,6 @@ func writeToolOutputFile(resources actorbase.ResourceHandle, device, workspace s
 	return string(address), relative, nil
 }
 
-func toolOutputAddress(device, channelName, relative string) (resource.ResourceID, error) {
-	return accessdoor.FormatFileAddress(device, channelName, relative)
+func toolOutputAddress(deviceID, channelID, relative string) (resource.ResourceID, error) {
+	return accessdoor.FormatFileAddress(deviceID, channelID, relative)
 }

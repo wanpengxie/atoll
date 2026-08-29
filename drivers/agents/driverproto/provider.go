@@ -83,7 +83,8 @@ type Situation struct {
 	Seed         string // its declaration id (agents are declaration-minted)
 	Class        string // the class backing it, e.g. codex
 	Channel      string // the channel it lives in
-	DeviceName   string // the device hosting this agent
+	DeviceID     string // server-assigned daemon installation hosting this agent
+	DeviceLabel  string // optional display label; never used for routing
 	WorkspaceDir string // absolute channel workspace path and child-process cwd
 	IsCore       bool   // whether that channel is c0, the space registry channel
 }

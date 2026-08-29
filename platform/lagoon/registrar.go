@@ -166,14 +166,16 @@ func (r *Registrar) ReconcileSystem(ctx context.Context) error {
 		}
 		description := "Atoll core registry and administration channel."
 		serving := 1
-		spec.Profile = regspec.ChannelProfile{Description: &description, Serving: &serving, Endpoints: map[string]regspec.EndpointSpec{}}
+		defaultStorage := channelspec.LocalDeviceID
+		spec.Profile = regspec.ChannelProfile{Description: &description, Serving: &serving, DefaultStorageDeviceID: &defaultStorage, Endpoints: map[string]regspec.EndpointSpec{}}
 		raw, err := json.Marshal(spec)
 		if err != nil {
 			return err
 		}
 		if err := r.registry.store.InsertSystemChannel(ctx, regspec.ChannelRow{
 			ID: channelspec.C0ChannelID, Name: string(channelspec.C0ChannelID), Type: "group",
-			Status: regspec.ChannelPresent, OwnerPrincipal: channelspec.RootPrincipalID, Description: description, Serving: serving, Spec: raw, CreatedAt: spec.CreatedAt,
+			Status: regspec.ChannelPresent, OwnerPrincipal: channelspec.RootPrincipalID, Description: description, Serving: serving,
+			DefaultStorageDeviceID: defaultStorage, Spec: raw, CreatedAt: spec.CreatedAt,
 		}); err != nil {
 			return err
 		}
@@ -410,7 +412,7 @@ const (
 
 	shapeChannelTemplateEdit = `{"id": "..."} plus any of name, description, visibility, body`
 
-	shapeChannelProfile = `{"channel_id": "...", "description": "...", "serving": 0 or 1}`
+	shapeChannelProfile = `{"channel_id": "...", "description": "...", "serving": 0 or 1, "default_storage_device_id": "optional attached device id"}`
 )
 
 func decodeEmpty(raw json.RawMessage) error {
@@ -519,7 +521,7 @@ func (r *Registrar) execute(sys actorbase.Sys, trigger actorbase.Msg, principal 
 		}
 		return r.clearOverlay(ctx, source, p)
 	case WordDeviceCreate:
-		var p DeviceMint
+		var p DeviceCreate
 		if err := decodePayload(raw, &p); err != nil {
 			return nil, err
 		}
@@ -561,6 +563,11 @@ func (r *Registrar) execute(sys actorbase.Sys, trigger actorbase.Msg, principal 
 			return nil, notFound("channel", string(p.ChannelID), "system.channel.list")
 		}
 		return r.channelView(ctx, row)
+	case WordChannelDeviceList:
+		if err := decodeEmpty(raw); err != nil {
+			return nil, err
+		}
+		return r.registry.ListBoundDevices(ctx, source)
 	case WordPrincipalList:
 		if err := decodeEmpty(raw); err != nil {
 			return nil, err
@@ -588,7 +595,16 @@ func (r *Registrar) execute(sys actorbase.Sys, trigger actorbase.Msg, principal 
 		if err := decodeEmpty(raw); err != nil {
 			return nil, err
 		}
-		return r.registry.ListChannelTemplates(ctx)
+		rows, err := r.registry.ListChannelTemplates(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for index := range rows {
+			if rows[index], err = materializeChannelTemplateRow(rows[index]); err != nil {
+				return nil, err
+			}
+		}
+		return rows, nil
 	case WordChannelTemplateGet:
 		var p ChannelTemplateGet
 		if err := decodePayload(raw, &p); err != nil {
@@ -601,7 +617,7 @@ func (r *Registrar) execute(sys actorbase.Sys, trigger actorbase.Msg, principal 
 		if !ok {
 			return nil, notFound("channel template", p.ID, "system.channel.template.list")
 		}
-		return row, nil
+		return materializeChannelTemplateRow(row)
 	case WordDeviceList:
 		if err := decodeEmpty(raw); err != nil {
 			return nil, err
@@ -672,6 +688,7 @@ func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owne
 }
 
 func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name string, body regspec.TemplateBody, initialSeats []InitialSeatIntent) (regspec.ChannelRow, bool, error) {
+	body = materializeChannelTemplateDefaults(body)
 	if name == "" {
 		return regspec.ChannelRow{}, false, invalid("name required: a channel needs a name, 1-63 chars of lowercase a-z, 0-9 or '-'")
 	}
@@ -726,6 +743,9 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if profile.Endpoints == nil {
 			profile.Endpoints = map[string]regspec.EndpointSpec{}
 		}
+	}
+	if *profile.DefaultStorageDeviceID == "" {
+		return regspec.ChannelRow{}, false, invalid("default_storage_device_id must name a device; use system.device.list for inventory")
 	}
 	if *profile.Serving != 0 && *profile.Serving != 1 {
 		return regspec.ChannelRow{}, false, invalid("serving must be 0 or 1")
@@ -786,7 +806,20 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	// Devices a recipe entry named. They get bound to the new channel below: a
 	// seat placed on a machine the channel cannot reach is a member that is
 	// declared, placed, and never arrives.
-	extraHosts := make([]string, 0, 1)
+	extraHosts := make(map[string]struct{})
+	if *profile.DefaultStorageDeviceID != channelspec.LocalDeviceID {
+		device, found, err := tx.GetDevice(ctx, *profile.DefaultStorageDeviceID)
+		if err != nil {
+			return regspec.ChannelRow{}, false, err
+		}
+		if !found || device.Status != regspec.DevicePresent {
+			return regspec.ChannelRow{}, false, notFound("default storage device", *profile.DefaultStorageDeviceID, "system.device.list")
+		}
+		if device.OwnerPrincipal != owner {
+			return regspec.ChannelRow{}, false, denied(fmt.Sprintf("default storage device %q belongs to %q, not channel creator %q; its owner must attach it after the channel exists", device.ID, device.OwnerPrincipal, owner))
+		}
+		extraHosts[*profile.DefaultStorageDeviceID] = struct{}{}
+	}
 	overlays := make([]regspec.OverlayRow, 0, len(body.Declarations))
 	declarationKinds := make(map[string]actor.Kind, len(body.Declarations)+1)
 	svc, err := r.renderSystem(SvcActorClass, json.RawMessage(`{}`))
@@ -853,8 +886,11 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 				if !found || device.Status != regspec.DevicePresent {
 					return regspec.ChannelRow{}, false, notFound("device", item.DesiredHost, "system.device.list")
 				}
+				if device.OwnerPrincipal != owner {
+					return regspec.ChannelRow{}, false, denied(fmt.Sprintf("device %q belongs to %q, not channel creator %q; its owner must attach it after the channel exists", device.ID, device.OwnerPrincipal, owner))
+				}
 				host = item.DesiredHost
-				extraHosts = append(extraHosts, host)
+				extraHosts[host] = struct{}{}
 			}
 			rendered.Placement.DesiredHost = host
 		}
@@ -900,7 +936,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if profile.Description != nil {
 		description = *profile.Description
 	}
-	row := regspec.ChannelRow{ID: id, ParentID: parent, Name: name, QualifiedName: qualified, Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: owner, Description: description, Serving: *profile.Serving, Spec: raw, CreatedAt: now}
+	row := regspec.ChannelRow{ID: id, ParentID: parent, Name: name, QualifiedName: qualified, Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: owner, Description: description, Serving: *profile.Serving, DefaultStorageDeviceID: *profile.DefaultStorageDeviceID, Spec: raw, CreatedAt: now}
 	if err := tx.InsertChannel(ctx, row); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
@@ -912,7 +948,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if err := tx.InsertBinding(ctx, regspec.BindingRow{ChannelID: row.ID, DeviceID: channelspec.LocalDeviceID, AttachedAt: now}); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
-	for _, host := range extraHosts {
+	for host := range extraHosts {
 		if host == channelspec.LocalDeviceID {
 			continue
 		}
@@ -1511,6 +1547,20 @@ func (r *Registrar) retireDevice(ctx context.Context, owner string, source chann
 	if row.Status == regspec.DeviceRetired {
 		return row, nil
 	}
+	channels, err := r.registry.ListPresentChannels(ctx)
+	if err != nil {
+		return regspec.DeviceRow{}, err
+	}
+	for _, ch := range channels {
+		if ch.DefaultStorageDeviceID == p.DeviceID {
+			return regspec.DeviceRow{}, reserved(fmt.Sprintf("device %q is channel %q's default file storage; choose another default_storage_device_id with system.channel.set before retiring it", p.DeviceID, ch.ID))
+		}
+		if refs, err := r.devicePlacementReferences(ctx, ch.ID, p.DeviceID); err != nil {
+			return regspec.DeviceRow{}, err
+		} else if len(refs) != 0 {
+			return regspec.DeviceRow{}, reserved(fmt.Sprintf("device %q still hosts active channel %q members (%s); delete or move those members before retiring it", p.DeviceID, ch.ID, actorIDs(refs)))
+		}
+	}
 	if err := r.registry.store.UpdateDeviceStatus(ctx, p.DeviceID, regspec.DeviceRetired); err != nil {
 		return regspec.DeviceRow{}, err
 	}
@@ -1551,6 +1601,16 @@ func (r *Registrar) detachDevice(ctx context.Context, owner string, source chann
 	if p.DeviceID == channelspec.LocalDeviceID {
 		return Confirmation{}, reserved("local device cannot be detached")
 	}
+	if ch, found, err := r.registry.GetChannelDesired(ctx, p.ChannelID); err != nil {
+		return Confirmation{}, err
+	} else if found && ch.DefaultStorageDeviceID == p.DeviceID {
+		return Confirmation{}, reserved(fmt.Sprintf("device %q is this channel's default file storage; choose another default_storage_device_id with system.channel.set before detaching it", p.DeviceID))
+	}
+	if refs, err := r.devicePlacementReferences(ctx, p.ChannelID, p.DeviceID); err != nil {
+		return Confirmation{}, err
+	} else if len(refs) != 0 {
+		return Confirmation{}, reserved(fmt.Sprintf("device %q still hosts active members (%s); delete or move those members before detaching it", p.DeviceID, actorIDs(refs)))
+	}
 	if err := r.registry.store.DeleteBinding(ctx, p.ChannelID, p.DeviceID); err != nil {
 		return Confirmation{}, err
 	}
@@ -1558,6 +1618,24 @@ func (r *Registrar) detachDevice(ctx context.Context, owner string, source chann
 		r.registry.onCommit(Change{ChannelID: p.ChannelID})
 	}
 	return Confirmation{Word: WordDeviceDetach, TargetID: p.DeviceID, Status: "detached"}, nil
+}
+
+func (r *Registrar) devicePlacementReferences(ctx context.Context, ch channel.ID, deviceID string) ([]actor.ActorID, error) {
+	reader, ok := r.facts.(DevicePlacementResolver)
+	if !ok {
+		// Unit-level registrar assemblies without a running channel host have no
+		// placement plane to inspect. Production always supplies this face.
+		return nil, nil
+	}
+	return reader.ActorsPlacedOn(ctx, ch, deviceID)
+}
+
+func actorIDs(ids []actor.ActorID) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = string(id)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (r *Registrar) authorizeBinding(ctx context.Context, owner string, source channel.ID, p DeviceBinding) error {
@@ -1596,6 +1674,9 @@ func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.Templ
 			if body.Profile.Serving != nil && *body.Profile.Serving != 0 && *body.Profile.Serving != 1 {
 				return invalid("serving must be 0 or 1")
 			}
+			if body.Profile.DefaultStorageDeviceID != nil && *body.Profile.DefaultStorageDeviceID == "" {
+				return invalid("default_storage_device_id must name a device")
+			}
 			kinds := make(map[string]actor.Kind, len(body.Declarations))
 			for _, item := range body.Declarations {
 				decl, ok, err := tx.GetDecl(ctx, item.DeclID)
@@ -1615,6 +1696,37 @@ func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.Templ
 		}
 		return nil
 	})
+}
+
+// materializeChannelTemplateDefaults makes the default part of the template
+// value itself. A nil profile used to mean "the create path will guess later",
+// which made template inspection and channel creation report different facts.
+// The local device is policy, not daemon ordering, so it is written explicitly.
+func materializeChannelTemplateDefaults(body regspec.TemplateBody) regspec.TemplateBody {
+	profile := regspec.ChannelProfile{}
+	if body.Profile != nil {
+		profile = *body.Profile
+	}
+	if profile.DefaultStorageDeviceID == nil {
+		value := channelspec.LocalDeviceID
+		profile.DefaultStorageDeviceID = &value
+	}
+	body.Profile = &profile
+	return body
+}
+
+func materializeChannelTemplateRow(row regspec.ChannelTemplateRow) (regspec.ChannelTemplateRow, error) {
+	var body regspec.TemplateBody
+	if err := json.Unmarshal(row.Body, &body); err != nil {
+		return regspec.ChannelTemplateRow{}, fmt.Errorf("channel template %q has invalid body: %w", row.ID, err)
+	}
+	body = materializeChannelTemplateDefaults(body)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return regspec.ChannelTemplateRow{}, err
+	}
+	row.Body = raw
+	return row, nil
 }
 
 func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.Tx, declarations []regspec.TemplateDeclaration) error {
@@ -1661,6 +1773,7 @@ func (r *Registrar) registerChannelTemplate(ctx context.Context, owner string, p
 	if p.Visibility != "private" && p.Visibility != "public" {
 		return regspec.ChannelTemplateRow{}, invalid(fmt.Sprintf("visibility %q is not valid: the only values are public (anyone may build from this template) and private (only you may, and this is the default)", p.Visibility))
 	}
+	p.Body = materializeChannelTemplateDefaults(p.Body)
 	if err := r.validateTemplateBody(ctx, p.Body); err != nil {
 		return regspec.ChannelTemplateRow{}, err
 	}
@@ -1702,10 +1815,16 @@ func (r *Registrar) editChannelTemplate(ctx context.Context, caller string, p Ch
 		return regspec.ChannelTemplateRow{}, invalid(fmt.Sprintf("the template would be left invalid: name is %q and visibility is %q, but a template needs a non-empty name and a visibility of public or private", row.Name, row.Visibility))
 	}
 	if p.Body != nil {
-		if err := r.validateTemplateBody(ctx, *p.Body); err != nil {
+		body := materializeChannelTemplateDefaults(*p.Body)
+		if err := r.validateTemplateBody(ctx, body); err != nil {
 			return regspec.ChannelTemplateRow{}, err
 		}
-		row.Body, _ = json.Marshal(*p.Body)
+		row.Body, _ = json.Marshal(body)
+	} else {
+		row, err = materializeChannelTemplateRow(row)
+		if err != nil {
+			return regspec.ChannelTemplateRow{}, err
+		}
 	}
 	row.UpdatedAt = r.now().UnixMilli()
 	return row, r.registry.store.UpdateChannelTemplate(ctx, row)
@@ -1748,7 +1867,17 @@ func (r *Registrar) setChannelProfile(ctx context.Context, source channel.ID, p 
 		} else if !ok {
 			return notFound("channel", string(p.ChannelID), "system.channel.list")
 		}
-		return tx.ReplaceProfile(ctx, p.ChannelID, p.Description, *p.Serving)
+		if p.DefaultStorageDeviceID != nil {
+			if *p.DefaultStorageDeviceID == "" {
+				return invalid("default_storage_device_id must name an attached device; list them with system.channel.device.list")
+			}
+			if _, ok, err := tx.Binding(ctx, p.ChannelID, *p.DefaultStorageDeviceID); err != nil {
+				return err
+			} else if !ok {
+				return invalid(fmt.Sprintf("default storage device %q is not attached to channel %q; attach it first with system.device.attach", *p.DefaultStorageDeviceID, p.ChannelID))
+			}
+		}
+		return tx.ReplaceProfile(ctx, p.ChannelID, p.Description, *p.Serving, p.DefaultStorageDeviceID)
 	})
 	if err != nil {
 		return regspec.ChannelRow{}, err
@@ -1779,6 +1908,7 @@ func (r *Registrar) channelView(ctx context.Context, row regspec.ChannelRow) (re
 	profile := spec.Profile
 	profile.Description = stringPtr(row.Description)
 	profile.Serving = intPtr(row.Serving)
+	profile.DefaultStorageDeviceID = stringPtr(row.DefaultStorageDeviceID)
 	row.Recipe = &recipe
 	row.Profile = &profile
 	return row, nil

@@ -125,8 +125,8 @@ func (d *door) normalizeFileName(ctx context.Context, caller actor.ActorID, id r
 		return "", d.outsideError(ctx, raw)
 	}
 	address, err := resourcespec.FormatFileAddress(resourcespec.FileAddress{
-		Scheme: resourcespec.DaemonScheme, Host: mount.Name,
-		Channel: d.deps.ChannelName, Path: rel,
+		Scheme: resourcespec.DaemonScheme, Host: mount.DaemonID,
+		Channel: string(d.deps.ChannelID), Path: rel,
 	})
 	if err != nil {
 		return "", err
@@ -145,7 +145,7 @@ func (d *door) normalizeFilePrefix(ctx context.Context, caller actor.ActorID, pr
 	if err != nil {
 		return "", err
 	}
-	return resourcespec.DaemonScheme + "://" + mount.Name + "/" + d.deps.ChannelName + "/" + rel, nil
+	return resourcespec.DaemonScheme + "://" + mount.DaemonID + "/" + string(d.deps.ChannelID) + "/" + rel, nil
 }
 
 // mountHolding finds the one device whose channel directory contains abs, and

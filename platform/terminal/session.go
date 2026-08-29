@@ -16,6 +16,7 @@ import (
 var (
 	ErrNoSession   = errors.New("terminal: no such session")
 	ErrNotOwner    = errors.New("terminal: session belongs to another caller")
+	ErrWrongDevice = errors.New("terminal: session belongs to another device")
 	ErrBusy        = errors.New("terminal: session already attached")
 	ErrHostOffline = errors.New("terminal: device offline")
 )
@@ -94,6 +95,7 @@ type Session struct {
 	ID      string
 	Channel channel.ID
 	Caller  actor.ActorID
+	Device  string
 
 	mu      sync.Mutex
 	dev     io.ReadWriteCloser
@@ -217,7 +219,7 @@ func (m *Manager) Open(ctx context.Context, id string, chID channel.ID, caller a
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{ID: id, Channel: chID, Caller: caller, dev: dev, ended: make(chan struct{})}
+	s := &Session{ID: id, Channel: chID, Caller: caller, Device: device, dev: dev, ended: make(chan struct{})}
 
 	m.mu.Lock()
 	if m.closed {
@@ -265,6 +267,14 @@ type Attachment struct {
 }
 
 func (m *Manager) Attach(id string, chID channel.ID, caller actor.ActorID) (*Session, *Attachment, error) {
+	return m.AttachOn(id, chID, caller, "")
+}
+
+// AttachOn additionally binds a reconnect to the device identity selected by
+// the viewer. A channel may have several terminals on several devices; a
+// channel-only browser cache key must never reconnect to whichever session id
+// happens to be left over.
+func (m *Manager) AttachOn(id string, chID channel.ID, caller actor.ActorID, device string) (*Session, *Attachment, error) {
 	m.mu.Lock()
 	s := m.sessions[id]
 	m.mu.Unlock()
@@ -276,6 +286,9 @@ func (m *Manager) Attach(id string, chID channel.ID, caller actor.ActorID) (*Ses
 	}
 	if s.Channel != chID {
 		return nil, nil, ErrNotOwner
+	}
+	if device != "" && s.Device != device {
+		return nil, nil, ErrWrongDevice
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

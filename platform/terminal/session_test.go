@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -133,6 +134,19 @@ func TestDetachKeepsTheShellAlive(t *testing.T) {
 	}
 	if m.Get("s1") == nil {
 		t.Fatal("session dropped on detach")
+	}
+}
+
+func TestAttachOnNeverCrossesDeviceIdentity(t *testing.T) {
+	m, _, _ := newTestManager(t, time.Hour)
+	if _, err := m.Open(context.Background(), "s-device", "c0", "human:root", "device-a", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.AttachOn("s-device", "c0", "human:root", "device-b"); !errors.Is(err, ErrWrongDevice) {
+		t.Fatalf("attach on another device err=%v, want %v", err, ErrWrongDevice)
+	}
+	if _, _, err := m.AttachOn("s-device", "c0", "human:root", "device-a"); err != nil {
+		t.Fatalf("attach on original device: %v", err)
 	}
 }
 

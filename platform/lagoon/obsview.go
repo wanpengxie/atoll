@@ -4,20 +4,22 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 type ObsChannelRow struct {
-	ID             channel.ID            `json:"id"`
-	ParentID       channel.ID            `json:"parent_id,omitempty"`
-	Name           string                `json:"name"`
-	QualifiedName  string                `json:"qualified_name"`
-	Type           string                `json:"type"`
-	Status         regspec.ChannelStatus `json:"status"`
-	OwnerPrincipal string                `json:"owner_principal"`
-	CreatedAt      int64                 `json:"created_at"`
+	ID                     channel.ID            `json:"id"`
+	ParentID               channel.ID            `json:"parent_id,omitempty"`
+	Name                   string                `json:"name"`
+	QualifiedName          string                `json:"qualified_name"`
+	Type                   string                `json:"type"`
+	Status                 regspec.ChannelStatus `json:"status"`
+	OwnerPrincipal         string                `json:"owner_principal"`
+	DefaultStorageDeviceID string                `json:"default_storage_device_id"`
+	CreatedAt              int64                 `json:"created_at"`
 }
 
 type ObsPrincipalRow struct {
@@ -35,6 +37,15 @@ type ObsDaemonRow struct {
 	Name           string               `json:"name"`
 	Status         regspec.DeviceStatus `json:"status"`
 	CreatedAt      int64                `json:"created_at"`
+}
+
+type ObsChannelDeviceRow struct {
+	DeviceID       string               `json:"device_id"`
+	OwnerPrincipal string               `json:"owner_principal"`
+	Name           string               `json:"name"`
+	Status         regspec.DeviceStatus `json:"status"`
+	AttachedAt     int64                `json:"attached_at"`
+	DefaultStorage bool                 `json:"default_storage"`
 }
 
 type ObsDeclRow struct {
@@ -110,6 +121,25 @@ func (r *Registry) ObsDaemons(ctx context.Context) ([]ObsDaemonRow, bool, error)
 	return out, complete, nil
 }
 
+func (r *Registry) ObsChannelDevices(ctx context.Context, id channel.ID) ([]ObsChannelDeviceRow, bool, error) {
+	ch, found, err := r.GetChannelDesired(ctx, id)
+	if err != nil || !found || ch.Status != regspec.ChannelPresent {
+		return nil, found && ch.Status == regspec.ChannelPresent, err
+	}
+	rows, err := r.ListBoundDevices(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]ObsChannelDeviceRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, ObsChannelDeviceRow{
+			DeviceID: row.DeviceID, OwnerPrincipal: row.OwnerPrincipal, Name: row.Name,
+			Status: row.Status, AttachedAt: row.AttachedAt, DefaultStorage: row.DeviceID == ch.DefaultStorageDeviceID,
+		})
+	}
+	return out, true, nil
+}
+
 func (r *Registry) ObsDecls(ctx context.Context) ([]ObsDeclRow, bool, error) {
 	rows, err := r.ListDecls(ctx)
 	if err != nil && len(rows) == 0 {
@@ -128,8 +158,13 @@ func (r *Registry) ObsDecls(ctx context.Context) ([]ObsDeclRow, bool, error) {
 }
 
 func projectObsChannel(row regspec.ChannelRow) ObsChannelRow {
+	defaultStorageDeviceID := row.DefaultStorageDeviceID
+	if defaultStorageDeviceID == "" {
+		defaultStorageDeviceID = channelspec.LocalDeviceID
+	}
 	return ObsChannelRow{
 		ID: row.ID, ParentID: row.ParentID, Name: row.Name, QualifiedName: row.QualifiedName,
-		Type: row.Type, Status: row.Status, OwnerPrincipal: row.OwnerPrincipal, CreatedAt: row.CreatedAt,
+		Type: row.Type, Status: row.Status, OwnerPrincipal: row.OwnerPrincipal,
+		DefaultStorageDeviceID: defaultStorageDeviceID, CreatedAt: row.CreatedAt,
 	}
 }

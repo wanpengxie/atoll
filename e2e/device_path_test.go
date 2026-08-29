@@ -84,7 +84,7 @@ func TestAnActorOnADeviceNamesFilesByItsOwnAbsolutePath(t *testing.T) {
 
 	// The same file under its address must be the same file. If the two forms
 	// ever diverge, one of them is addressing something nobody meant.
-	_, viaAddress, err := read("daemon://" + deviceName + "/c0/docs/report.md")
+	_, viaAddress, err := read("daemon://" + deviceID + "/c0/docs/report.md")
 	if err != nil {
 		t.Fatalf("address form was refused: %v (%v)", err, viaAddress)
 	}

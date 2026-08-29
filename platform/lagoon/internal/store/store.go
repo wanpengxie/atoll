@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	channelColumns   = "channels.id,channels.parent_id,channels.name,channels.type,channels.status,channels.owner_principal,channels.description,channels.serving,channels.spec_json,channels.created_at"
+	channelColumns   = "channels.id,channels.parent_id,channels.name,channels.type,channels.status,channels.owner_principal,channels.description,channels.serving,channels.default_storage_device_id,channels.spec_json,channels.created_at"
 	principalColumns = "principals.id,principals.kind,principals.email,principals.display_name,principals.status,principals.created_at"
 	declColumns      = "decls.id,decls.name,decls.description,decls.owner,decls.default_class,decls.config_json,decls.status,decls.visibility,decls.singleton,decls.created_at,decls.updated_at"
 	deviceColumns    = "devices.id,devices.owner_principal,devices.name,devices.key,devices.status,devices.created_at"
@@ -240,14 +240,18 @@ func (t *Tx) GetOverlay(ctx context.Context, declID string, ch channel.ID) (regs
 	return row, err == nil, err
 }
 
-func (s *Store) ReplaceProfile(ctx context.Context, ch channel.ID, description string, serving int) error {
+func (s *Store) ReplaceProfile(ctx context.Context, ch channel.ID, description string, serving int, defaultStorageDeviceID *string) error {
 	return s.InTx(ctx, func(tx *Tx) error {
-		return tx.ReplaceProfile(ctx, ch, description, serving)
+		return tx.ReplaceProfile(ctx, ch, description, serving, defaultStorageDeviceID)
 	})
 }
 
-func (tx *Tx) ReplaceProfile(ctx context.Context, ch channel.ID, description string, serving int) error {
-	_, err := tx.tx.ExecContext(ctx, `UPDATE channels SET description=?,serving=? WHERE id=?`, description, serving, ch)
+func (tx *Tx) ReplaceProfile(ctx context.Context, ch channel.ID, description string, serving int, defaultStorageDeviceID *string) error {
+	if defaultStorageDeviceID == nil {
+		_, err := tx.tx.ExecContext(ctx, `UPDATE channels SET description=?,serving=? WHERE id=?`, description, serving, ch)
+		return err
+	}
+	_, err := tx.tx.ExecContext(ctx, `UPDATE channels SET description=?,serving=?,default_storage_device_id=? WHERE id=?`, description, serving, *defaultStorageDeviceID, ch)
 	return err
 }
 
@@ -392,6 +396,25 @@ func (s *Store) ListBoundDeviceIDs(ctx context.Context, ch channel.ID) ([]string
 	return out, rows.Err()
 }
 
+func (s *Store) ListBoundDevices(ctx context.Context, ch channel.ID) ([]regspec.ChannelDeviceRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT bindings.channel_id,devices.id,devices.owner_principal,devices.name,devices.status,bindings.attached_at
+		FROM bindings JOIN devices ON devices.id=bindings.device_id
+		WHERE bindings.channel_id=? AND devices.status='present' ORDER BY devices.id`, ch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []regspec.ChannelDeviceRow
+	for rows.Next() {
+		var row regspec.ChannelDeviceRow
+		if err := rows.Scan(&row.ChannelID, &row.DeviceID, &row.OwnerPrincipal, &row.Name, &row.Status, &row.AttachedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListDevices(ctx context.Context) ([]regspec.DeviceRow, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE devices.status='present' ORDER BY devices.id`)
 	if err != nil {
@@ -493,7 +516,7 @@ func (s *Store) UpsertSteward(ctx context.Context, id string, at int64) error {
 // InsertSystemChannel carves c0's registry row once. There is no upsert:
 // a start never rewrites an existing c0 row.
 func (s *Store) InsertSystemChannel(ctx context.Context, row regspec.ChannelRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?,?,?)`, row.ID, row.Name, row.OwnerPrincipal, row.Description, row.Serving, string(row.Spec), row.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,default_storage_device_id,spec_json,created_at) VALUES(?,NULL,?,'group','present',?,?,?,?,?,?)`, row.ID, row.Name, row.OwnerPrincipal, row.Description, row.Serving, row.DefaultStorageDeviceID, string(row.Spec), row.CreatedAt)
 	return classify(err)
 }
 
@@ -503,12 +526,12 @@ func (s *Store) UpsertSystemDecl(ctx context.Context, row regspec.DeclRow) error
 }
 
 func (s *Store) InsertChannel(ctx context.Context, row regspec.ChannelRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, row.Description, row.Serving, string(row.Spec), row.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,default_storage_device_id,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, row.Description, row.Serving, row.DefaultStorageDeviceID, string(row.Spec), row.CreatedAt)
 	return classify(err)
 }
 
 func (t *Tx) InsertChannel(ctx context.Context, row regspec.ChannelRow) error {
-	_, err := t.tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, row.Description, row.Serving, string(row.Spec), row.CreatedAt)
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO channels(id,parent_id,name,type,status,owner_principal,description,serving,default_storage_device_id,spec_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, row.ID, row.ParentID, row.Name, row.Type, row.Status, row.OwnerPrincipal, row.Description, row.Serving, row.DefaultStorageDeviceID, string(row.Spec), row.CreatedAt)
 	return classify(err)
 }
 
@@ -657,6 +680,15 @@ func (s *Store) Binding(ctx context.Context, ch channel.ID, deviceID string) (re
 	return row, err == nil, err
 }
 
+func (t *Tx) Binding(ctx context.Context, ch channel.ID, deviceID string) (regspec.BindingRow, bool, error) {
+	var row regspec.BindingRow
+	err := t.tx.QueryRowContext(ctx, `SELECT channel_id,device_id,attached_at FROM bindings WHERE channel_id=? AND device_id=?`, ch, deviceID).Scan(&row.ChannelID, &row.DeviceID, &row.AttachedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return regspec.BindingRow{}, false, nil
+	}
+	return row, err == nil, err
+}
+
 func (s *Store) DeleteBinding(ctx context.Context, ch channel.ID, deviceID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM bindings WHERE channel_id=? AND device_id=?`, ch, deviceID)
 	return err
@@ -668,7 +700,7 @@ func scanChannel(s scanner) (regspec.ChannelRow, error) {
 	var row regspec.ChannelRow
 	var parent sql.NullString
 	var spec string
-	err := s.Scan(&row.ID, &parent, &row.Name, &row.Type, &row.Status, &row.OwnerPrincipal, &row.Description, &row.Serving, &spec, &row.CreatedAt)
+	err := s.Scan(&row.ID, &parent, &row.Name, &row.Type, &row.Status, &row.OwnerPrincipal, &row.Description, &row.Serving, &row.DefaultStorageDeviceID, &spec, &row.CreatedAt)
 	if parent.Valid {
 		row.ParentID = channel.ID(parent.String)
 	}

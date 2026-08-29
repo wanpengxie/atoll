@@ -26,7 +26,7 @@ func TestRegistrarWordAndAdapterSurfacesAreClosed(t *testing.T) {
 		}
 		seen[word] = true
 	}
-	if len(ReadWords) != 11 {
+	if len(ReadWords) != 12 {
 		t.Fatalf("read words=%d", len(ReadWords))
 	}
 }

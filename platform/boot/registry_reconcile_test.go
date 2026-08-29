@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform/boot"
@@ -47,6 +48,89 @@ func TestReconcileSystemLeavesExistingC0RowUntouched(t *testing.T) {
 	}
 	if row.Description != "operator description" || row.Serving != 0 {
 		t.Fatalf("reconcile rewrote existing c0 row: description=%q serving=%d", row.Description, row.Serving)
+	}
+}
+
+func TestExistingInstallAddsDefaultStorageConfigWithoutRewritingRows(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "channels")
+	installed, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: dir, RootPassword: "root-pass"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+installed.RegistryDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE channels DROP COLUMN default_storage_device_id`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM bindings WHERE channel_id=?`, channelspec.LobbyChannelID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: dir})); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", "file:"+installed.RegistryDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `SELECT id,default_storage_device_id FROM channels ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id, deviceID string
+		if err := rows.Scan(&id, &deviceID); err != nil {
+			t.Fatal(err)
+		}
+		if deviceID != channelspec.LocalDeviceID {
+			t.Fatalf("legacy channel %q default storage=%q", id, deviceID)
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("legacy channels=%d, want 2", count)
+	}
+	var boundDefaults int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channels JOIN bindings ON bindings.channel_id=channels.id AND bindings.device_id=channels.default_storage_device_id WHERE channels.status='present'`).Scan(&boundDefaults); err != nil || boundDefaults != count {
+		t.Fatalf("bound channel defaults=%d, channels=%d err=%v", boundDefaults, count, err)
+	}
+}
+
+func TestExistingInstallRefusesAnUnboundDefaultStorageDevice(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "channels")
+	installed, err := boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: dir, RootPassword: "root-pass"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+installed.RegistryDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE channels SET default_storage_device_id='missing-device' WHERE id=?`, channelspec.C0ChannelID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = boot.Ensure(ctx, withClassDefaults(boot.Config{ChannelDir: dir}))
+	if err == nil || !strings.Contains(err.Error(), `channel "c0" default storage device "missing-device" is not a present attached device`) {
+		t.Fatalf("Ensure error=%v", err)
 	}
 }
 

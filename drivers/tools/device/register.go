@@ -32,12 +32,12 @@ func init() {
 // by seating it once — a redundant second seat is merely pointless, not
 // incoherent.
 //
-// ctx.DeviceName is still required, and that check is load-bearing: this class
-// is PlacementDaemon, and only a daemon host supplies a device name. An empty
+// ctx.DeviceID is still required, and that check is load-bearing: this class
+// is PlacementDaemon, and only an accepted daemon carrier supplies it. An empty
 // one means the body is being built somewhere it was never meant to run.
 func construct(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
-	if ctx.DeviceName == "" {
-		return platform.ActorDecl{}, errors.New("device: empty device name")
+	if ctx.DeviceID == "" {
+		return platform.ActorDecl{}, errors.New("device: empty device id")
 	}
 	return platform.ActorDecl{
 		ID:      spec.ID,

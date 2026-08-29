@@ -91,6 +91,7 @@ type RegistryReader interface {
 	PrincipalPresent(ctx context.Context, principal string) (bool, error)
 	Channels(ctx context.Context, parent *string) (rows []Row, complete bool, err error)
 	Channel(ctx context.Context, id string) (row Row, found bool, err error)
+	ChannelDevices(ctx context.Context, id string) ([]Row, bool, error)
 	Principals(ctx context.Context) ([]Row, bool, error)
 	Daemons(ctx context.Context) ([]Row, bool, error)
 	Decls(ctx context.Context) ([]Row, bool, error)
@@ -125,4 +126,5 @@ type DeviceState struct {
 
 type DaemonReader interface {
 	Online(daemonID string) bool
+	OnlineInChannel(daemonID, channelID string) bool
 }

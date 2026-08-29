@@ -3,9 +3,7 @@ package daemonhost
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
-	"strings"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -25,23 +23,12 @@ var ErrNoTerminalHost = errors.New("daemonhost: channel has no attached device")
 // "daemon 重启 / carrier 换代 → 恒即死" structural rather than a policy
 // (terminal-line-design.md §4.4).
 //
-// daemonID may be empty: with one attached device the choice carries no
-// intent, so the door picks it. With more than one it must be named, for the
-// same reason system.member.create requires desired_host.
+// daemonID is a registry identity. Device selection is policy, so it is
+// resolved by the portal from the channel profile before reaching this live
+// carrier layer; the host never guesses from whichever lanes happen to exist.
 func (h *Host) OpenPTY(ctx context.Context, daemonID string, chID channel.ID, cols, rows uint16, integration bool) (io.ReadWriteCloser, error) {
 	if daemonID == "" {
-		attached := h.AttachedDaemons(string(chID))
-		switch len(attached) {
-		case 0:
-			return nil, ErrNoTerminalHost
-		case 1:
-			daemonID = attached[0]
-		default:
-			// Honest physics (data-plane axiom 5): say which machines exist
-			// so the caller can name one, rather than just refusing.
-			return nil, fmt.Errorf("daemonhost: channel has %d devices (%s) — name one with ?device=",
-				len(attached), strings.Join(attached, ", "))
-		}
+		return nil, ErrNoTerminalHost
 	}
 	lane := h.currentLane(daemonID, chID)
 	if lane == nil {

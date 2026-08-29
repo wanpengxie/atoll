@@ -30,6 +30,7 @@ const (
 	TypeSystemChannelGet            = "system.channel.get"
 	TypeSystemChannelList           = "system.channel.list"
 	TypeSystemChannelSet            = "system.channel.set"
+	TypeSystemChannelDeviceList     = "system.channel.device.list"
 	TypeSystemChannelDelete         = "system.channel.delete"
 	TypeSystemChannelTemplateCreate = "system.channel.template.create"
 	TypeSystemChannelTemplateGet    = "system.channel.template.get"
@@ -80,6 +81,7 @@ var systemEntries = [...]SystemEntry{
 	{Name: TypeSystemChannelGet, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemChannelList, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemChannelSet, Kind: KindRequest, Locus: SystemLocusC0},
+	{Name: TypeSystemChannelDeviceList, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemChannelDelete, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemChannelTemplateCreate, Kind: KindRequest, Locus: SystemLocusC0},
 	{Name: TypeSystemChannelTemplateGet, Kind: KindRequest, Locus: SystemLocusC0},

@@ -231,7 +231,7 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		if err != nil {
 			return ListPage{}, fmt.Errorf("%w: %v", ErrMalformed, err)
 		}
-		if d.deps.ChannelName == "" || prefix.Channel != d.deps.ChannelName {
+		if d.deps.ChannelID == "" || prefix.Channel != string(d.deps.ChannelID) {
 			return ListPage{}, fmt.Errorf("%w: file address names a different channel", ErrMalformed)
 		}
 		if _, err := d.authorizeMember(ctx, caller); err != nil {

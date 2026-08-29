@@ -16,7 +16,8 @@ type Config struct {
 	NewRuntime      runtimeproto.Factory
 	Runtime         runtimeproto.Spec
 	OutputWorkspace string
-	OutputDevice    string
+	OutputDeviceID  string
+	OutputChannelID string
 	RequestMaxCount int
 	BufferMaxCount  int
 	BufferMaxBytes  int

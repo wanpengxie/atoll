@@ -41,7 +41,7 @@ func (c *countingTransfers) IssueTransfer(_ context.Context, spec TransferSpec) 
 func TestColocatedFileRouteCarriesPathAndMintsNoTicket(t *testing.T) {
 	transfers := &countingTransfers{}
 	d := &door{deps: Deps{Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: &fakeMembership{lookupFound: true, lookupHost: "daemon-a"}, State: &fakeStateStore{}, ChannelID: "c", ChannelName: "c0.c", StorageMounts: directMounts{}, TransferControl: transfers}}
-	route, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://laptop-a/c0.c/docs/report.txt", access.OpWrite)
+	route, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://daemon-a/c/docs/report.txt", access.OpWrite)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,11 +60,27 @@ func TestFileDoorRejectsAddressForAnotherChannelBeforeMembership(t *testing.T) {
 		Authority: membership, State: &fakeStateStore{}, ChannelID: "channel-a", ChannelName: "c0.channel-a",
 		StorageMounts: directMounts{}, TransferControl: &countingTransfers{},
 	}}
-	if _, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://laptop-a/c0.channel-b/docs/report.txt", access.OpRead); !errors.Is(err, ErrMalformed) {
+	if _, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://daemon-a/channel-b/docs/report.txt", access.OpRead); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("mismatched address error=%v, want ErrMalformed", err)
 	}
 	if membership.calls != 0 {
 		t.Fatalf("membership consulted %d times before address-channel rejection", membership.calls)
+	}
+}
+
+func TestFileDoorReadsItsOwnLegacyQualifiedChannelAddress(t *testing.T) {
+	d := &door{deps: Deps{
+		Registry: &fakeRegistry{}, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: &fakeMembership{lookupFound: true, lookupHost: "daemon-a"},
+		State:     &fakeStateStore{}, ChannelID: "channel-a", ChannelName: "c0.channel-a",
+		StorageMounts: directMounts{}, TransferControl: &countingTransfers{},
+	}}
+	route, err := d.resolveFileRoute(t.Context(), "agent:a", "daemon://daemon-a/c0.channel-a/docs/report.txt", access.OpRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Path != "docs/report.txt" {
+		t.Fatalf("route path=%q", route.Path)
 	}
 }
 
@@ -81,7 +97,7 @@ func TestARemoteFileRouteCarriesTheActorItWasDecidedFor(t *testing.T) {
 		ChannelID: "c", ChannelName: "c0.c",
 		StorageMounts: directMounts{}, TransferControl: transfers,
 	}}
-	route, err := d.resolveFileRoute(t.Context(), "human:alice:7", "daemon://laptop-a/c0.c/docs/report.txt", access.OpWrite)
+	route, err := d.resolveFileRoute(t.Context(), "human:alice:7", "daemon://daemon-a/c/docs/report.txt", access.OpWrite)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +122,7 @@ func TestAnActorInThisProcessRedeemsItsOwnRoute(t *testing.T) {
 		StorageMounts: directMounts{}, TransferControl: &countingTransfers{}, TransferRedeem: redeem,
 	}}
 	h := boundHandle{door: d, caller: "agent:steward:9", authority: accessAuthority("agent:steward:9")}
-	fa, out, err := h.Open(t.Context(), "daemon://laptop-a/c0.c/docs/report.txt", access.OpRead)
+	fa, out, err := h.Open(t.Context(), "daemon://daemon-a/c/docs/report.txt", access.OpRead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +162,7 @@ func TestAnUnwiredDoorRefusesInsteadOfPretending(t *testing.T) {
 		StorageMounts: directMounts{}, TransferControl: &countingTransfers{},
 	}}
 	h := boundHandle{door: d, caller: "agent:steward:9", authority: accessAuthority("agent:steward:9")}
-	if _, _, err := h.Open(t.Context(), "daemon://laptop-a/c0.c/docs/report.txt", access.OpRead); !errors.Is(err, ErrFileCapabilityUnavailable) {
+	if _, _, err := h.Open(t.Context(), "daemon://daemon-a/c/docs/report.txt", access.OpRead); !errors.Is(err, ErrFileCapabilityUnavailable) {
 		t.Fatalf("unwired file face err=%v, want capability unavailable", err)
 	}
 }

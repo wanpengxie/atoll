@@ -111,6 +111,26 @@ func (p *Portal) pty(w http.ResponseWriter, r *http.Request) {
 	p.servePTY(ctx, ws, principal)
 }
 
+// terminalDevice validates an explicit target against the channel-device
+// binding. A terminal target is not the channel's storage policy, and
+// daemonhost only reports live carriers, so neither may be used to guess it.
+func (p *Portal) terminalDevice(ctx context.Context, chID channel.ID, requested string) (string, error) {
+	device := strings.TrimSpace(requested)
+	if device == "" {
+		return "", errors.New("terminal device is required")
+	}
+	bound, err := p.cfg.Registry.ListBoundDeviceIDs(ctx, chID)
+	if err != nil {
+		return "", err
+	}
+	for _, id := range bound {
+		if id == device {
+			return device, nil
+		}
+	}
+	return "", errors.New("device is not attached to channel")
+}
+
 // ptyStream is one terminal riding the shared connection.
 type ptyStream struct {
 	id      uint32
@@ -230,6 +250,11 @@ func (p *Portal) servePTY(ctx context.Context, ws *websocket.Conn, principal str
 			_ = sendJSON(map[string]any{"type": "error", "id": msg.ID, "code": codePermissionDenied, "detail": "only a human may open a terminal"})
 			return
 		}
+		device, err := p.terminalDevice(ctx, chID, msg.Device)
+		if err != nil {
+			_ = sendJSON(map[string]any{"type": "error", "id": msg.ID, "code": codeUnavailable, "detail": err.Error()})
+			return
+		}
 
 		cols, rows := msg.Cols, msg.Rows
 		if cols == 0 {
@@ -242,7 +267,7 @@ func (p *Portal) servePTY(ctx context.Context, ws *websocket.Conn, principal str
 		var att *terminal.Attachment
 		var sess *terminal.Session
 		if sessionID != "" {
-			sess, att, err = p.cfg.Terminals.Attach(sessionID, chID, caller)
+			sess, att, err = p.cfg.Terminals.AttachOn(sessionID, chID, caller, device)
 			if err != nil {
 				code := codeNotFound
 				if errors.Is(err, terminal.ErrNotOwner) {
@@ -253,12 +278,12 @@ func (p *Portal) servePTY(ctx context.Context, ws *websocket.Conn, principal str
 			}
 		} else {
 			sessionID = newSessionID()
-			sess, err = p.cfg.Terminals.Open(ctx, sessionID, chID, caller, msg.Device, cols, rows)
+			sess, err = p.cfg.Terminals.Open(ctx, sessionID, chID, caller, device, cols, rows)
 			if err != nil {
 				_ = sendJSON(map[string]any{"type": "error", "id": msg.ID, "code": codeUnavailable, "detail": err.Error()})
 				return
 			}
-			sess, att, err = p.cfg.Terminals.Attach(sessionID, chID, caller)
+			sess, att, err = p.cfg.Terminals.AttachOn(sessionID, chID, caller, device)
 			if err != nil {
 				p.cfg.Terminals.Close(sessionID)
 				_ = sendJSON(map[string]any{"type": "error", "id": msg.ID, "code": codeUnavailable, "detail": err.Error()})
@@ -271,7 +296,7 @@ func (p *Portal) servePTY(ctx context.Context, ws *websocket.Conn, principal str
 		streams[msg.ID] = st
 		mu.Unlock()
 
-		if err := sendJSON(map[string]any{"type": "ready", "id": msg.ID, "session": sessionID}); err != nil {
+		if err := sendJSON(map[string]any{"type": "ready", "id": msg.ID, "session": sessionID, "device": device}); err != nil {
 			return
 		}
 		// 屏幕先于直播。快照与订阅是同一把锁内取的（terminal.Attachment），

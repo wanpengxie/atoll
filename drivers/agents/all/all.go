@@ -76,7 +76,8 @@ func situation(spec registry.InstanceSpec, deps registry.Deps, class string) dri
 		ActorID:      string(spec.ID),
 		Class:        class,
 		Channel:      string(deps.ChannelID),
-		DeviceName:   deps.DeviceName,
+		DeviceID:     deps.DeviceID,
+		DeviceLabel:  deps.DeviceLabel,
 		WorkspaceDir: deps.WorkspaceDir,
 		IsCore:       deps.ChannelID == channelspec.C0ChannelID,
 	}
@@ -97,7 +98,7 @@ func compose(spec registry.InstanceSpec, provider driverproto.Provider, deps reg
 	}
 	definition, err := base.Def(doc, base.Config{
 		NewRuntime: factory, Runtime: runtimeSpec,
-		OutputWorkspace: deps.WorkspaceDir, OutputDevice: deps.DeviceName,
+		OutputWorkspace: deps.WorkspaceDir, OutputDeviceID: deps.DeviceID, OutputChannelID: string(deps.ChannelID),
 	})
 	if err != nil {
 		return platform.ActorDecl{}, err

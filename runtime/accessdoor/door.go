@@ -24,25 +24,29 @@ func (d *door) fileAddress(id resource.ResourceID) (resourcespec.FileAddress, bo
 	if err != nil {
 		return resourcespec.FileAddress{}, true, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
-	if d.deps.ChannelName == "" || address.Channel != d.deps.ChannelName {
+	if d.deps.ChannelID == "" || address.Channel != string(d.deps.ChannelID) && address.Channel != d.deps.ChannelName {
 		return resourcespec.FileAddress{}, true, fmt.Errorf("%w: file address names a different channel", ErrMalformed)
 	}
+	// ChannelName is accepted only to read ledger rows written before file
+	// addresses moved from the qualified display name to the stable ChannelID.
+	// Every constructor in this package emits ChannelID, so this compatibility
+	// branch cannot mint more legacy addresses.
 	return address, true, nil
 }
 
-func (d *door) storageMount(ctx context.Context, host string) (StorageMount, error) {
+func (d *door) storageMount(ctx context.Context, deviceID string) (StorageMount, error) {
 	if d.deps.StorageMounts == nil {
 		return StorageMount{}, errNoStorageMounts
 	}
-	mount, found, err := d.deps.StorageMounts.ResolveStorageDaemon(ctx, d.deps.ChannelID, host)
+	mount, found, err := d.deps.StorageMounts.ResolveStorageDaemon(ctx, d.deps.ChannelID, deviceID)
 	if err != nil {
 		return StorageMount{}, err
 	}
 	if !found {
-		return StorageMount{}, fmt.Errorf("accessdoor: daemon %q is not bound to channel", host)
+		return StorageMount{}, fmt.Errorf("accessdoor: daemon %q is not bound to channel", deviceID)
 	}
 	if !mount.Online {
-		return StorageMount{}, NewHostOfflineError(host)
+		return StorageMount{}, NewHostOfflineError(mount.Name)
 	}
 	return mount, nil
 }
@@ -86,7 +90,7 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id re
 		return nil, errors.New("accessdoor: transfer control unavailable")
 	}
 	token, err := d.deps.TransferControl.IssueTransfer(ctx, TransferSpec{
-		Address: id, HostID: mount.DaemonID, HostName: address.Host,
+		Address: id, HostID: mount.DaemonID, HostName: mount.Name,
 		Mode: mode, Caller: caller,
 	})
 	if err != nil {

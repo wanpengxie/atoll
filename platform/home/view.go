@@ -2,6 +2,7 @@ package home
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -425,6 +426,13 @@ func rosterDeviceState(snapshot presence.Snapshot) channelspec.DeviceState {
 
 func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {
 	return v.bindings.IsBound(ctx, v.channelID, daemonID)
+}
+
+func (v View) ActorsPlacedOn(_ context.Context, deviceID string) ([]actor.ActorID, error) {
+	if v.actors == nil || v.actors.home == nil || v.actors.home.controller == nil {
+		return nil, errors.New("home: actor placement view unavailable")
+	}
+	return v.actors.home.controller.ActorsPlacedOn(deviceID)
 }
 
 // OwnerPrincipal returns the channel owner straight from the immutable genesis

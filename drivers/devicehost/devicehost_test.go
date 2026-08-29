@@ -45,7 +45,7 @@ func init() {
 
 func testFactories() classFactories {
 	return classFactories{
-		chID: "c", deviceName: "dev",
+		chID: "c", deviceID: "device-id", deviceLabel: "dev",
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

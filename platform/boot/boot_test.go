@@ -63,7 +63,7 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 			t.Fatalf("table %s count=%d err=%v", table, n, err)
 		}
 	}
-	for _, column := range []string{"description", "serving"} {
+	for _, column := range []string{"description", "serving", "default_storage_device_id"} {
 		var n int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('channels') WHERE name=?`, column).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("channels.%s count=%d err=%v", column, n, err)
@@ -88,17 +88,24 @@ func TestEnsureInstallsRegistryAndPublishesMarkerLast(t *testing.T) {
 		t.Fatalf("lobby serving=%d description=%q err=%v", lobbyServing, lobbyDescription, err)
 	}
 	for _, id := range []channel.ID{channelspec.C0ChannelID, channelspec.LobbyChannelID} {
-		var description, specRaw string
+		var description, defaultStorageDeviceID, specRaw string
 		var serving int
-		if err := db.QueryRowContext(ctx, `SELECT description,serving,spec_json FROM channels WHERE id=?`, id).Scan(&description, &serving, &specRaw); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT description,serving,default_storage_device_id,spec_json FROM channels WHERE id=?`, id).Scan(&description, &serving, &defaultStorageDeviceID, &specRaw); err != nil {
 			t.Fatal(err)
 		}
 		var spec lagoon.GenesisSpec
-		if err := json.Unmarshal([]byte(specRaw), &spec); err != nil || spec.Profile.Description == nil || *spec.Profile.Description != description || spec.Profile.Serving == nil || *spec.Profile.Serving != serving {
-			t.Fatalf("channel %s frozen profile=%+v row=(%q,%d) err=%v", id, spec.Profile, description, serving, err)
+		if err := json.Unmarshal([]byte(specRaw), &spec); err != nil || spec.Profile.Description == nil || *spec.Profile.Description != description || spec.Profile.Serving == nil || *spec.Profile.Serving != serving || spec.Profile.DefaultStorageDeviceID == nil || *spec.Profile.DefaultStorageDeviceID != defaultStorageDeviceID {
+			t.Fatalf("channel %s frozen profile=%+v row=(%q,%d,%q) err=%v", id, spec.Profile, description, serving, defaultStorageDeviceID, err)
+		}
+		if defaultStorageDeviceID != channelspec.LocalDeviceID {
+			t.Fatalf("channel %s default storage=%q, want %q", id, defaultStorageDeviceID, channelspec.LocalDeviceID)
 		}
 		if len(spec.Profile.Endpoints) != 0 {
 			t.Fatalf("channel %s unexpectedly froze endpoints=%d", id, len(spec.Profile.Endpoints))
+		}
+		var bound int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bindings WHERE channel_id=? AND device_id=?`, id, defaultStorageDeviceID).Scan(&bound); err != nil || bound != 1 {
+			t.Fatalf("channel %s default storage binding=%d err=%v", id, bound, err)
 		}
 	}
 	var privateSystemDecls int

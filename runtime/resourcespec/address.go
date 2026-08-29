@@ -24,8 +24,8 @@ type FilePrefix struct {
 }
 
 // ParseFileAddress accepts only the one canonical spelling of a daemon file
-// address. It deliberately validates URI shape, not the device-name alphabet;
-// device names can only enter the registry through lagoon's validator.
+// address: daemon://<device-id>/<channel-id>/<path>. Display names never enter
+// a ResourceID; both identity segments are stable registry ids.
 func ParseFileAddress(raw string) (FileAddress, error) {
 	if raw == "" || strings.Contains(strings.ToLower(raw), "%2f") || !canonicalEscapeCase(raw) {
 		return FileAddress{}, errors.New("resourcespec: invalid daemon file address")

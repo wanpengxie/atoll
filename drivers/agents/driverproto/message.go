@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -148,7 +147,7 @@ func CallerLine(caller harness.Caller) string {
 	return "[from " + strings.Join(fields, " ") + "]"
 }
 
-// ResolveAttachment strips daemon://<device>/<channel>/<path> into a path
+// ResolveAttachment strips daemon://<device-id>/<channel-id>/<path> into a path
 // relative to the agent cwd. A device or channel mismatch leaves LocalPath
 // empty. Multi-device routing can later return a non-local result here without
 // changing callers.
@@ -162,11 +161,11 @@ func ResolveAttachment(a Attachment, self Situation) Attachment {
 	if err != nil || strings.Contains(strings.ToLower(a.Address), "%2f") ||
 		u.Scheme != "daemon" || u.Opaque != "" || u.Host == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
-		u.Host != self.DeviceName || !strings.HasPrefix(u.Path, "/") {
+		u.Host != self.DeviceID || !strings.HasPrefix(u.Path, "/") {
 		return a
 	}
 	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[0] != filepath.Base(filepath.Clean(self.WorkspaceDir)) || !validAttachmentPath(parts[1]) {
+	if len(parts) != 2 || parts[0] == "" || parts[0] != self.Channel || !validAttachmentPath(parts[1]) {
 		return a
 	}
 	a.LocalPath = parts[1]

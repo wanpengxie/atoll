@@ -86,15 +86,15 @@ func (r *Registry) ResolveDeviceName(ctx context.Context, name string) (string, 
 	return row.ID, row.Status == regspec.DevicePresent, found, err
 }
 
-// ResolveDeviceID is ResolveDeviceName's inverse: a file address spells a
-// device by name, while an actor's placement records it by id, so completing a
-// path for the caller's own device has to cross back.
-func (r *Registry) ResolveDeviceID(ctx context.Context, id string) (string, bool, error) {
+// ResolveDeviceID decorates a stable registry identity with its display name.
+// ResolveDeviceName remains only as a compatibility read for legacy resource
+// addresses; no new authority or address may be based on the mutable label.
+func (r *Registry) ResolveDeviceID(ctx context.Context, id string) (string, bool, bool, error) {
 	row, found, err := r.store.GetDevice(ctx, id)
-	if err != nil || !found || row.Status != regspec.DevicePresent {
-		return "", false, err
+	if err != nil || !found {
+		return "", false, found, err
 	}
-	return row.Name, true, nil
+	return row.Name, row.Status == regspec.DevicePresent, true, nil
 }
 
 func (r *Registry) GetDeviceFact(ctx context.Context, id string) (regspec.DeviceStatus, bool, error) {
@@ -254,6 +254,10 @@ func (r *Registry) IsBound(ctx context.Context, ch channel.ID, device string) (b
 // device credentials and other registry columns never cross it.
 func (r *Registry) ListBoundDeviceIDs(ctx context.Context, ch channel.ID) ([]string, error) {
 	return r.store.ListBoundDeviceIDs(ctx, ch)
+}
+
+func (r *Registry) ListBoundDevices(ctx context.Context, ch channel.ID) ([]regspec.ChannelDeviceRow, error) {
+	return r.store.ListBoundDevices(ctx, ch)
 }
 
 func (r *Registry) ChannelDesired(ctx context.Context, id channel.ID) (channelspec.ChannelDesiredFacts, bool, error) {

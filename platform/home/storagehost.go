@@ -22,15 +22,28 @@ type daemonStorageMounts struct {
 	chID      channelpkg.ID
 }
 
-func (m daemonStorageMounts) ResolveStorageDaemon(ctx context.Context, ch channelpkg.ID, name string) (accessdoor.StorageMount, bool, error) {
+func (m daemonStorageMounts) ResolveStorageDaemon(ctx context.Context, ch channelpkg.ID, id string) (accessdoor.StorageMount, bool, error) {
 	if m.routes == nil || m.bindings == nil || m.directory == nil {
 		return accessdoor.StorageMount{}, false, nil
 	}
-	id, present, found, err := m.directory.ResolveDeviceName(ctx, name)
-	if err != nil || !found || !present {
+	name, present, found, err := m.directory.ResolveDeviceID(ctx, id)
+	if err != nil {
 		return accessdoor.StorageMount{}, false, err
 	}
-	return m.mount(ctx, ch, id, name)
+	if found {
+		if !present {
+			return accessdoor.StorageMount{}, false, nil
+		}
+		return m.mount(ctx, ch, id, name)
+	}
+	// Compatibility read only: older ledger rows addressed the first URI
+	// segment by mutable device name. New addresses are always DeviceID-based,
+	// but old attachments must remain readable while they age out naturally.
+	legacyID, present, legacyFound, err := m.directory.ResolveDeviceName(ctx, id)
+	if err != nil || !legacyFound || !present {
+		return accessdoor.StorageMount{}, false, err
+	}
+	return m.mount(ctx, ch, legacyID, id)
 }
 
 // ListStorageMounts enumerates the channel's devices so the door can ask which
@@ -47,11 +60,11 @@ func (m daemonStorageMounts) ListStorageMounts(ctx context.Context, ch channelpk
 	}
 	out := make([]accessdoor.StorageMount, 0, len(ids))
 	for _, id := range ids {
-		name, found, err := m.directory.ResolveDeviceID(ctx, id)
+		name, present, found, err := m.directory.ResolveDeviceID(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		if !found || name == "" {
+		if !found || !present || name == "" {
 			continue
 		}
 		mount, ok, err := m.mount(ctx, ch, id, name)

@@ -236,6 +236,20 @@ func (f sourceFacts) ActorFacts(ctx context.Context, ch channel.ID, id actor.Act
 	return bundle.View().ActorFacts(ctx, id)
 }
 
+func (f sourceFacts) ActorsPlacedOn(ctx context.Context, ch channel.ID, deviceID string) ([]actor.ActorID, error) {
+	bundle, ok := f.host.Acquire(ch)
+	if !ok {
+		return nil, errors.New("source channel unavailable")
+	}
+	reader, ok := bundle.View().(interface {
+		ActorsPlacedOn(context.Context, string) ([]actor.ActorID, error)
+	})
+	if !ok {
+		return nil, errors.New("source channel placement view unavailable")
+	}
+	return reader.ActorsPlacedOn(ctx, deviceID)
+}
+
 func (f sourceFacts) SystemGenesis(context.Context) (lagoon.GenesisSpec, bool, error) {
 	return f.genesis, f.genesis.ChannelID != "", nil
 }
