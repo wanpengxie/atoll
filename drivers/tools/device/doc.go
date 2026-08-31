@@ -6,7 +6,9 @@
 // goes through device.exec: a dedicated type exists only where the shell
 // round-trip is unreliable for a model (write/edit).
 //
-// The actor id is device:<name> — one per physical device, so device identity
-// rides in the id. Credentials live in the daemon process (env/keychain),
-// never in workspace files.
+// The actor id is the channel seat named by the plan. The physical device is
+// the seat's desired_host DeviceID; it is never re-derived by this actor.
+// Human-readable file addresses use the device's canonical registry name,
+// while placement and authority continue to join by DeviceID. Credentials
+// live in the daemon process (env/keychain), never in workspace files.
 package device

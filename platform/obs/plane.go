@@ -66,6 +66,8 @@ func (p *Plane) Pull(ctx context.Context, principal, escapedPath, rawQuery strin
 		return p.pullProfile(ctx, address)
 	case "actors":
 		return p.pullActors(ctx, address)
+	case "devices":
+		return p.pullChannelDevices(ctx, address)
 	default:
 		return Observation{}, newError(ErrUnknownKind, "unknown observation kind", nil)
 	}
@@ -106,7 +108,7 @@ func parseAddress(escapedPath, rawQuery string) (address, error) {
 		}
 	case len(segments) == 3 && segments[0] == "channel":
 		switch segments[2] {
-		case "profile", "actors":
+		case "profile", "actors", "devices":
 			out = address{subject: "channel/" + segments[1] + "/" + segments[2], kind: segments[2], channel: segments[1]}
 		default:
 			return address{}, newError(ErrUnknownKind, "unknown channel observation kind", nil)
@@ -135,6 +137,25 @@ func parseAddress(escapedPath, rawQuery string) (address, error) {
 	parent := values[0]
 	out.parent = &parent
 	return out, nil
+}
+
+func (p *Plane) pullChannelDevices(ctx context.Context, a address) (Observation, error) {
+	rows, complete, err := p.registry.ChannelDevices(ctx, a.channel)
+	if err != nil {
+		return Observation{}, classify(ctx, err)
+	}
+	if p.daemons == nil {
+		return Observation{}, newError(ErrInternal, "daemon reader not wired", nil)
+	}
+	items := make([]Item, 0, len(rows))
+	for _, row := range rows {
+		if err := validRow(row); err != nil {
+			return Observation{}, err
+		}
+		online := p.daemons.OnlineInChannel(row.Key, a.channel)
+		items = append(items, Item{Key: row.Key, Declared: cloneRaw(row.Declared), Actual: actual(boolMeasure("online", online, p.now()))})
+	}
+	return observation(a, complete, items), nil
 }
 
 func (p *Plane) pullChannels(ctx context.Context, a address) (Observation, error) {

@@ -70,6 +70,7 @@ var registryDDL = [...]string{
   owner_principal TEXT NOT NULL REFERENCES principals(id),
   description TEXT NOT NULL DEFAULT '',
   serving INTEGER NOT NULL DEFAULT 1 CHECK(serving IN (0,1)),
+	default_storage_device_id TEXT NOT NULL DEFAULT 'local-device',
   spec_json TEXT NOT NULL, created_at INTEGER NOT NULL)`,
 	`CREATE TABLE principals (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('human','agent')),
@@ -225,6 +226,10 @@ func prepareStartup(ctx context.Context, c0Path, registryPath string, now time.T
 	if err != nil {
 		return err
 	}
+	if err := ensureDefaultStorageColumn(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
 	checks := []struct {
 		noun  string
 		query string
@@ -247,6 +252,63 @@ func prepareStartup(ctx context.Context, c0Path, registryPath string, now time.T
 	}
 	if err := db.Close(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ensureDefaultStorageColumn is the one additive registry upgrade needed by
+// channel file roots. Existing personal installs predate the setting; their
+// only honest default is the local device they were born with. The migration
+// also materializes the corresponding binding: a configured default that the
+// channel is not authorized to reach would be two authorities disagreeing.
+// Both operations are idempotent and happen before Lagoon opens the registry
+// with the new projection shape.
+func ensureDefaultStorageColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(channels)`)
+	if err != nil {
+		return fmt.Errorf("boot: inspect channels schema: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("boot: inspect channels schema: %w", err)
+		}
+		if name == "default_storage_device_id" {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("boot: inspect channels schema: %w", err)
+	}
+	if !found {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE channels ADD COLUMN default_storage_device_id TEXT NOT NULL DEFAULT 'local-device'`); err != nil {
+			return fmt.Errorf("boot: add channel default storage config: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO bindings(channel_id,device_id,attached_at)
+		SELECT channels.id,channels.default_storage_device_id,channels.created_at
+		FROM channels JOIN devices ON devices.id=channels.default_storage_device_id
+		WHERE channels.status='present' AND devices.status='present'`); err != nil {
+		return fmt.Errorf("boot: bind channel default storage: %w", err)
+	}
+	var channelID, deviceID string
+	err = db.QueryRowContext(ctx, `SELECT channels.id,channels.default_storage_device_id
+		FROM channels
+		LEFT JOIN devices ON devices.id=channels.default_storage_device_id
+		LEFT JOIN bindings ON bindings.channel_id=channels.id AND bindings.device_id=channels.default_storage_device_id
+		WHERE channels.status='present' AND (devices.id IS NULL OR devices.status!='present' OR bindings.device_id IS NULL)
+		LIMIT 1`).Scan(&channelID, &deviceID)
+	if err == nil {
+		return fmt.Errorf("boot: channel %q default storage device %q is not a present attached device", channelID, deviceID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("boot: validate channel default storage: %w", err)
 	}
 	return nil
 }
@@ -363,7 +425,8 @@ func install(ctx context.Context, c0Path, registryPath, password, stewardClass s
 	}
 	c0Description := "Atoll core registry and administration channel."
 	c0Serving := 1
-	c0spec := lagoon.GenesisSpec{ChannelID: channelspec.C0ChannelID, Type: "group", OwnerPrincipal: channelspec.RootPrincipalID, CreatedAt: stamp, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Seed: lagoon.SvcActorSeed, Kind: actor.KindPeer, Rendered: svcSnapshot}, {DeclID: lagoon.RegistrarDeclID, Seed: lagoon.RegistrarSeed, Kind: actor.KindSystem, Rendered: registrarSnapshot}}, Profile: regspec.ChannelProfile{Description: &c0Description, Serving: &c0Serving, Endpoints: map[string]regspec.EndpointSpec{}}}
+	defaultStorageDeviceID := channelspec.LocalDeviceID
+	c0spec := lagoon.GenesisSpec{ChannelID: channelspec.C0ChannelID, Type: "group", OwnerPrincipal: channelspec.RootPrincipalID, CreatedAt: stamp, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Seed: lagoon.SvcActorSeed, Kind: actor.KindPeer, Rendered: svcSnapshot}, {DeclID: lagoon.RegistrarDeclID, Seed: lagoon.RegistrarSeed, Kind: actor.KindSystem, Rendered: registrarSnapshot}}, Profile: regspec.ChannelProfile{Description: &c0Description, Serving: &c0Serving, DefaultStorageDeviceID: &defaultStorageDeviceID, Endpoints: map[string]regspec.EndpointSpec{}}}
 	raw, err := json.Marshal(c0spec)
 	if err != nil {
 		return err
@@ -373,7 +436,7 @@ func install(ctx context.Context, c0Path, registryPath, password, stewardClass s
 	}
 	lobbyDescription := "Registration lobby for unauthenticated guests."
 	lobbyServing := 0
-	lobbySpec := lagoon.GenesisSpec{ChannelID: channelspec.LobbyChannelID, Type: "group", OwnerPrincipal: channelspec.RootPrincipalID, CreatedAt: stamp, ParentID: channelspec.C0ChannelID, InitiatorPrincipal: channelspec.RootPrincipalID, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Seed: lagoon.SvcActorSeed, Kind: actor.KindPeer, Rendered: svcSnapshot}}, Profile: regspec.ChannelProfile{Description: &lobbyDescription, Serving: &lobbyServing, Endpoints: map[string]regspec.EndpointSpec{}}}
+	lobbySpec := lagoon.GenesisSpec{ChannelID: channelspec.LobbyChannelID, Type: "group", OwnerPrincipal: channelspec.RootPrincipalID, CreatedAt: stamp, ParentID: channelspec.C0ChannelID, InitiatorPrincipal: channelspec.RootPrincipalID, Declarations: []lagoon.GenesisDeclaration{{DeclID: lagoon.SvcActorDeclID, Seed: lagoon.SvcActorSeed, Kind: actor.KindPeer, Rendered: svcSnapshot}}, Profile: regspec.ChannelProfile{Description: &lobbyDescription, Serving: &lobbyServing, DefaultStorageDeviceID: &defaultStorageDeviceID, Endpoints: map[string]regspec.EndpointSpec{}}}
 	lobbyRaw, err := json.Marshal(lobbySpec)
 	if err != nil {
 		return err
@@ -407,6 +470,9 @@ func install(ctx context.Context, c0Path, registryPath, password, stewardClass s
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO bindings(channel_id,device_id,attached_at) VALUES(?,?,?)`, channelspec.C0ChannelID, channelspec.LocalDeviceID, stamp); err != nil {
 		return fmt.Errorf("boot: c0 local binding: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bindings(channel_id,device_id,attached_at) VALUES(?,?,?)`, channelspec.LobbyChannelID, channelspec.LocalDeviceID, stamp); err != nil {
+		return fmt.Errorf("boot: lobby local binding: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO atoll_install(id,installed_at) VALUES(1,?)`, stamp); err != nil {
 		return fmt.Errorf("boot: publish install marker: %w", err)

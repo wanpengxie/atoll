@@ -86,3 +86,6 @@ func (a viewAdapter) ActorFacts(ctx context.Context, id actor.ActorID) (channels
 func (a viewAdapter) IsBound(ctx context.Context, id string) (bool, error) {
 	return a.home.View().IsBound(ctx, id)
 }
+func (a viewAdapter) ActorsPlacedOn(ctx context.Context, deviceID string) ([]actor.ActorID, error) {
+	return a.home.View().ActorsPlacedOn(ctx, deviceID)
+}

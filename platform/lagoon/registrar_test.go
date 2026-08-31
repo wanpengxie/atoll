@@ -71,6 +71,20 @@ func TestClassCatalogPublishesProviderDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestLegacyChannelTemplateViewMaterializesDefaultStorage(t *testing.T) {
+	row, err := materializeChannelTemplateRow(regspec.ChannelTemplateRow{ID: "legacy", Body: json.RawMessage(`{"declarations":[]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body regspec.TemplateBody
+	if err := json.Unmarshal(row.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Profile == nil || body.Profile.DefaultStorageDeviceID == nil || *body.Profile.DefaultStorageDeviceID != channelspec.LocalDeviceID {
+		t.Fatalf("legacy template body=%s", row.Body)
+	}
+}
+
 func (s registrarFactsStub) ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return s.facts, s.found, s.err
 }
@@ -304,7 +318,10 @@ func TestRegistrarParameterlessWordsAcceptEmptyOrNullAndRejectFields(t *testing.
 		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, singleton INTEGER NOT NULL DEFAULT 0, created_at INTEGER, updated_at INTEGER)`,
 		`CREATE TABLE channel_templates (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, status TEXT, visibility TEXT, body_json TEXT, created_at INTEGER, updated_at INTEGER)`,
 		`CREATE TABLE devices (id TEXT PRIMARY KEY, owner_principal TEXT, name TEXT, key TEXT, status TEXT, created_at INTEGER)`,
+		`CREATE TABLE bindings (channel_id TEXT, device_id TEXT, attached_at INTEGER, PRIMARY KEY(channel_id,device_id))`,
 		`INSERT INTO principals(id,kind,email,display_name,status,created_at) VALUES('root','human','root@example.test','Root','present',1)`,
+		`INSERT INTO devices(id,owner_principal,name,key,status,created_at) VALUES('local-device','root','local-device','test-key','present',1)`,
+		`INSERT INTO bindings(channel_id,device_id,attached_at) VALUES('c0','local-device',1)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -325,6 +342,7 @@ func TestRegistrarParameterlessWordsAcceptEmptyOrNullAndRejectFields(t *testing.
 	for _, word := range []Word{
 		WordActorTemplateList,
 		WordChannelTemplateList,
+		WordChannelDeviceList,
 		WordDeviceList,
 		WordPrincipalGet,
 		WordPrincipalList,

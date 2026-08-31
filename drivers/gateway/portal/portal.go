@@ -549,7 +549,16 @@ func (p *Portal) compute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, string(codeNotAuthenticated), "invalid device credential")
 		return
 	}
-	p.cfg.DaemonHost.Serve(w, r, id)
+	device, found, err := p.cfg.Registry.GetDevice(r.Context(), id)
+	if err != nil {
+		writeError(w, 503, string(codeUnavailable), err.Error())
+		return
+	}
+	if !found || device.Name == "" {
+		writeError(w, 401, string(codeNotAuthenticated), "invalid device identity")
+		return
+	}
+	p.cfg.DaemonHost.Serve(w, r, id, device.Name)
 }
 func (p *Portal) setSession(w http.ResponseWriter, principal string) {
 	token := p.cfg.Sessions.Mint(principal, sessionTTL)

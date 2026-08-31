@@ -47,11 +47,11 @@ func (m daemonStorageMounts) ListStorageMounts(ctx context.Context, ch channelpk
 	}
 	out := make([]accessdoor.StorageMount, 0, len(ids))
 	for _, id := range ids {
-		name, found, err := m.directory.ResolveDeviceID(ctx, id)
+		name, present, found, err := m.directory.ResolveDeviceID(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		if !found || name == "" {
+		if !found || !present || name == "" {
 			continue
 		}
 		mount, ok, err := m.mount(ctx, ch, id, name)

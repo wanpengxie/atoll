@@ -67,10 +67,11 @@ type BootstrapService struct {
 }
 
 type DeviceDirectory interface {
+	// ResolveDeviceName translates the readable daemon:// name into the stable
+	// registry id used for binding and routing authority.
 	ResolveDeviceName(context.Context, string) (id string, present bool, found bool, err error)
-	// ResolveDeviceID crosses back the other way. A file address spells a
-	// device by name; an actor's placement records it by id.
-	ResolveDeviceID(context.Context, string) (name string, found bool, err error)
+	// ResolveDeviceID decorates an internal id with its canonical registry name.
+	ResolveDeviceID(context.Context, string) (name string, present bool, found bool, err error)
 }
 
 type BindingReader interface {

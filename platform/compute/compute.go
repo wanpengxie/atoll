@@ -42,13 +42,13 @@ type Config struct {
 	AtollHome        string
 	Logger           *slog.Logger
 	BuildCompartment CompartmentBuilder
-	// OnAttached, when set, is called with the server-assigned daemon id after
-	// every ACCEPTED carrier attach (initial and reconnect alike, same id).
+	// OnAttached, when set, is called with the server-assigned daemon id and
+	// canonical registry name after every ACCEPTED carrier attach.
 	// This is the one moment the daemon learns which daemons row it IS — the
 	// assembly root uses it to complete the device home's persisted identity
 	// triple {daemon_id, api_key, server_ws}. Called from the carrier
 	// goroutine; implementations must be safe for that.
-	OnAttached func(daemonID string)
+	OnAttached func(daemonID, daemonName string)
 }
 
 type daemonHostEvents struct{ outbound *DaemonOutbound }
@@ -186,9 +186,9 @@ func Run(ctx context.Context, cfg Config) (retErr error) {
 		// concludes the silent run is the broken one and kills it — which is
 		// the opposite of the truth, and cost exactly that once.
 		logger.Info("platform.compute.carrier_attached",
-			"daemon", accepted.DaemonID, "server", cfg.ServerWS)
+			"daemon", accepted.DaemonID, "name", accepted.DaemonName, "server", cfg.ServerWS)
 		if cfg.OnAttached != nil {
-			cfg.OnAttached(accepted.DaemonID)
+			cfg.OnAttached(accepted.DaemonID, accepted.DaemonName)
 		}
 		root, err := coordinatePath(filepath.Join(cfg.AtollHome, "daemons"), accepted.DaemonID)
 		if err != nil {
@@ -276,7 +276,7 @@ func awaitCarrierVerdict(wire *link.ClientCarrier) (link.SpineFrame, error) {
 		}
 		switch result.frame.Kind {
 		case link.SpineCarrierAccept:
-			if result.frame.DaemonID == "" || result.frame.CarrierGen == "" {
+			if result.frame.DaemonID == "" || result.frame.DaemonName == "" || result.frame.CarrierGen == "" {
 				return link.SpineFrame{}, errors.New("compute: malformed carrier_accept")
 			}
 			return result.frame, nil

@@ -86,6 +86,9 @@ func (productionAdapterRegistry) Channels(context.Context, *string) ([]obs.Row, 
 func (productionAdapterRegistry) Channel(context.Context, string) (obs.Row, bool, error) {
 	return obs.Row{Declared: json.RawMessage(`{"id":"c0"}`)}, true, nil
 }
+func (productionAdapterRegistry) ChannelDevices(context.Context, string) ([]obs.Row, bool, error) {
+	return nil, true, nil
+}
 func (productionAdapterRegistry) Principals(context.Context) ([]obs.Row, bool, error) {
 	return nil, true, nil
 }
@@ -98,7 +101,8 @@ func (productionAdapterRegistry) Decls(context.Context) ([]obs.Row, bool, error)
 
 type obsDaemonHostStub map[string]bool
 
-func (h obsDaemonHostStub) DaemonOnline(id string) bool { return h[id] }
+func (h obsDaemonHostStub) DaemonOnline(id string) bool    { return h[id] }
+func (h obsDaemonHostStub) LaneAttached(id, _ string) bool { return h[id] }
 
 func openObsGoldenRegistry(t *testing.T) *lagoon.Registry {
 	t.Helper()
@@ -161,7 +165,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 	}{
 		{
 			name: "space channels", path: "/obs/space/channels", query: "parent_id=c0",
-			golden: `{"subject":"space/channels","kind":"channels","complete":true,"items":[{"key":"c/ 频道","declared":{"id":"c/ 频道","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","created_at":1700000000001},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}},{"key":"c0.lobby","declared":{"id":"c0.lobby","parent_id":"c0","name":"lobby","qualified_name":"c0.lobby","type":"group","status":"present","owner_principal":"root","created_at":1700000000000},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}}]}`,
+			golden: `{"subject":"space/channels","kind":"channels","complete":true,"items":[{"key":"c/ 频道","declared":{"id":"c/ 频道","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","default_storage_device_id":"local-device","created_at":1700000000001},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}},{"key":"c0.lobby","declared":{"id":"c0.lobby","parent_id":"c0","name":"lobby","qualified_name":"c0.lobby","type":"group","status":"present","owner_principal":"root","default_storage_device_id":"local-device","created_at":1700000000000},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}}]}`,
 		},
 		{
 			name: "space principals", path: "/obs/space/principals",
@@ -177,7 +181,7 @@ func TestProductionAdaptersSixObservationWordsHaveCompleteGoldenJSON(t *testing.
 		},
 		{
 			name: "channel profile", path: "/obs/channel/" + escapedChannel + "/profile",
-			golden: `{"subject":"channel/c/ 频道/profile","kind":"profile","complete":true,"items":[{"declared":{"id":"c/ 频道","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","created_at":1700000000001},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}}]}`,
+			golden: `{"subject":"channel/c/ 频道/profile","kind":"profile","complete":true,"items":[{"declared":{"id":"c/ 频道","parent_id":"c0","name":"child","qualified_name":"c0.child","type":"group","status":"present","owner_principal":"root","default_storage_device_id":"local-device","created_at":1700000000001},"actual":{"measures":[{"name":"open","value":true,"unknown":false,"observed_at":9000,"since":null}]}}]}`,
 		},
 		{
 			name: "channel actors", path: "/obs/channel/" + escapedChannel + "/actors",

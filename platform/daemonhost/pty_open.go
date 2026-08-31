@@ -3,9 +3,7 @@ package daemonhost
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
-	"strings"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -25,23 +23,20 @@ var ErrNoTerminalHost = errors.New("daemonhost: channel has no attached device")
 // "daemon 重启 / carrier 换代 → 恒即死" structural rather than a policy
 // (terminal-line-design.md §4.4).
 //
-// daemonID may be empty: with one attached device the choice carries no
-// intent, so the door picks it. With more than one it must be named, for the
-// same reason system.member.create requires desired_host.
+// daemonID is a registry identity and is REQUIRED. Choosing a terminal's
+// machine is policy and does not belong to this layer: the caller chooses, the
+// portal checks the choice against the channel's device bindings, and the host
+// only opens what it was given. It used to pick the sole attached device when
+// asked without one, which read as convenience but was the same guess that put
+// uploads on whichever device sorted first — a channel with one device today
+// has two tomorrow, and the guess silently changes machine.
+//
+// This is NOT the channel's default storage device: where a channel keeps
+// files and where a person wants a shell are different questions, and reading
+// one as the other would move somebody's terminal by editing a file setting.
 func (h *Host) OpenPTY(ctx context.Context, daemonID string, chID channel.ID, cols, rows uint16, integration bool) (io.ReadWriteCloser, error) {
 	if daemonID == "" {
-		attached := h.AttachedDaemons(string(chID))
-		switch len(attached) {
-		case 0:
-			return nil, ErrNoTerminalHost
-		case 1:
-			daemonID = attached[0]
-		default:
-			// Honest physics (data-plane axiom 5): say which machines exist
-			// so the caller can name one, rather than just refusing.
-			return nil, fmt.Errorf("daemonhost: channel has %d devices (%s) — name one with ?device=",
-				len(attached), strings.Join(attached, ", "))
-		}
+		return nil, ErrNoTerminalHost
 	}
 	lane := h.currentLane(daemonID, chID)
 	if lane == nil {

@@ -39,7 +39,7 @@ func TestCallerLineNamesSeedByKind(t *testing.T) {
 }
 
 func TestResolveAttachmentRequiresThisDeviceAndWorkspace(t *testing.T) {
-	self := Situation{DeviceName: "local-device", WorkspaceDir: "/var/atoll/channels/c0.proj"}
+	self := Situation{DeviceID: "device-id", DeviceName: "local-device", Channel: "project-id", WorkspaceDir: "/var/atoll/channels/c0.proj"}
 	local := Attachment{Address: "daemon://local-device/c0.proj/uploads/%E7%A0%94%E7%A9%B6-%E6%96%87%E6%A1%A3.md", Name: "研究 文档.md"}
 	if got := ResolveAttachment(local, self); got.LocalPath != "uploads/研究-文档.md" {
 		t.Fatalf("local path=%q, want cwd-relative path", got.LocalPath)
@@ -57,7 +57,7 @@ func TestResolveAttachmentRequiresThisDeviceAndWorkspace(t *testing.T) {
 }
 
 func TestAttachmentLinesPreserveOriginalNameAndReportForeignAddress(t *testing.T) {
-	self := Situation{DeviceName: "local-device", WorkspaceDir: "/var/atoll/channels/c0.proj"}
+	self := Situation{DeviceID: "device-id", DeviceName: "local-device", Channel: "project-id", WorkspaceDir: "/var/atoll/channels/c0.proj"}
 	atts := []Attachment{
 		{Address: "daemon://local-device/c0.proj/uploads/%E7%A0%94%E7%A9%B6-%E6%96%87%E6%A1%A3.md", Name: "研究 文档.md"},
 		{Address: "daemon://other-device/c0.proj/uploads/draft.pdf", Name: `draft "one".pdf`},

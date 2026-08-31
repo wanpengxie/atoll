@@ -139,7 +139,7 @@ func TestCompartmentBuildsAndClosesOnlyByExplicitCommand(t *testing.T) {
 		IsBound: func(context.Context, string) (bool, error) { return bound.Load(), nil },
 	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -196,7 +196,7 @@ func TestOneCarrierServicesTwoCompartmentsAndDetachIsLocal(t *testing.T) {
 	host.Register("a", 1, membrane(&boundA))
 	host.Register("b", 1, membrane(&boundB))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	defer server.Close()
 
@@ -403,7 +403,7 @@ func TestCarrier_TombstoneStopsRedial(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	defer server.Close()
 	done := make(chan error, 1)
@@ -493,7 +493,7 @@ func TestPlanSnapshotTimeoutPreservesCompartmentsAndDropsWaiter(t *testing.T) {
 	host := daemonhost.New(daemonhost.Config{ScanInterval: time.Hour})
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	t.Cleanup(server.Close)
 	carrier, _, err := link.DialDeviceCarrier(
@@ -558,7 +558,7 @@ func startTestCompute(
 ) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithCancel(t.Context())

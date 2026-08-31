@@ -38,6 +38,19 @@ const (
 	DeviceRetired DeviceStatus = "retired"
 )
 
+// ChannelDeviceRow is the authoritative channel-scoped mount relation joined
+// with the stable device identity it references. Global device discovery and
+// channel attachment are different facts; file/terminal consumers use this
+// relation, never the global device list.
+type ChannelDeviceRow struct {
+	ChannelID      channel.ID   `json:"channel_id"`
+	DeviceID       string       `json:"device_id"`
+	OwnerPrincipal string       `json:"owner_principal"`
+	Name           string       `json:"name"`
+	Status         DeviceStatus `json:"status"`
+	AttachedAt     int64        `json:"attached_at"`
+}
+
 type CredentialStatus string
 
 const (
@@ -46,19 +59,23 @@ const (
 )
 
 type ChannelRow struct {
-	ID             channel.ID      `json:"id"`
-	ParentID       channel.ID      `json:"parent_id,omitempty"`
-	Name           string          `json:"name"`
-	QualifiedName  string          `json:"qualified_name"`
-	Type           string          `json:"type"`
-	Status         ChannelStatus   `json:"status"`
-	OwnerPrincipal string          `json:"owner_principal"`
-	Description    string          `json:"description"`
-	Serving        int             `json:"serving"`
-	Spec           json.RawMessage `json:"spec"`
-	CreatedAt      int64           `json:"created_at"`
-	Recipe         *TemplateBody   `json:"recipe,omitempty"`
-	Profile        *ChannelProfile `json:"profile,omitempty"`
+	ID             channel.ID    `json:"id"`
+	ParentID       channel.ID    `json:"parent_id,omitempty"`
+	Name           string        `json:"name"`
+	QualifiedName  string        `json:"qualified_name"`
+	Type           string        `json:"type"`
+	Status         ChannelStatus `json:"status"`
+	OwnerPrincipal string        `json:"owner_principal"`
+	Description    string        `json:"description"`
+	Serving        int           `json:"serving"`
+	// DefaultStorageDeviceID is the configured mount used when a channel file
+	// UI needs a starting root. It does not place actors and it does not rewrite
+	// an already-complete daemon:// address.
+	DefaultStorageDeviceID string          `json:"default_storage_device_id"`
+	Spec                   json.RawMessage `json:"spec"`
+	CreatedAt              int64           `json:"created_at"`
+	Recipe                 *TemplateBody   `json:"recipe,omitempty"`
+	Profile                *ChannelProfile `json:"profile,omitempty"`
 }
 
 type TemplateDeclaration struct {
@@ -80,10 +97,11 @@ type EndpointSpec struct {
 }
 
 type ChannelProfile struct {
-	Description *string                 `json:"description,omitempty"`
-	Serving     *int                    `json:"serving,omitempty"`
-	Endpoints   map[string]EndpointSpec `json:"endpoints,omitempty"`
-	SvcAgent    *string                 `json:"svc_agent"`
+	Description            *string                 `json:"description,omitempty"`
+	Serving                *int                    `json:"serving,omitempty"`
+	DefaultStorageDeviceID *string                 `json:"default_storage_device_id,omitempty"`
+	Endpoints              map[string]EndpointSpec `json:"endpoints,omitempty"`
+	SvcAgent               *string                 `json:"svc_agent"`
 }
 
 type TemplateBody struct {

@@ -42,6 +42,11 @@ func (a registryObsAdapter) Daemons(ctx context.Context) ([]obs.Row, bool, error
 	return marshalObsRows(rows, complete, err, func(row lagoon.ObsDaemonRow) string { return row.ID })
 }
 
+func (a registryObsAdapter) ChannelDevices(ctx context.Context, id string) ([]obs.Row, bool, error) {
+	rows, complete, err := a.registry.ObsChannelDevices(ctx, channel.ID(id))
+	return marshalObsRows(rows, complete, err, func(row lagoon.ObsChannelDeviceRow) string { return row.DeviceID })
+}
+
 func (a registryObsAdapter) Decls(ctx context.Context) ([]obs.Row, bool, error) {
 	rows, complete, err := a.registry.ObsDecls(ctx)
 	return marshalObsRows(rows, complete, err, func(row lagoon.ObsDeclRow) string { return row.ID })
@@ -102,8 +107,14 @@ func (a channelObsAdapter) Roster(ctx context.Context, id string) ([]obs.RosterE
 	return out, true, nil
 }
 
-type obsDaemonHost interface{ DaemonOnline(string) bool }
+type obsDaemonHost interface {
+	DaemonOnline(string) bool
+	LaneAttached(string, string) bool
+}
 
 type daemonObsAdapter struct{ host obsDaemonHost }
 
 func (a daemonObsAdapter) Online(id string) bool { return a.host.DaemonOnline(id) }
+func (a daemonObsAdapter) OnlineInChannel(id, channelID string) bool {
+	return a.host.LaneAttached(id, channelID)
+}

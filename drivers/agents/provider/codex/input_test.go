@@ -16,7 +16,7 @@ func TestInputHasNoProviderCharacterCeiling(t *testing.T) {
 }
 
 func TestBuildInputAppendsAttachmentLineToTextBlock(t *testing.T) {
-	self := driverproto.Situation{DeviceName: "local-device", WorkspaceDir: "/var/atoll/channels/c0.proj"}
+	self := driverproto.Situation{DeviceID: "device-id", DeviceName: "local-device", Channel: "project-id", WorkspaceDir: "/var/atoll/channels/c0.proj"}
 	message := driverproto.DriverMessage{
 		Text: "please read",
 		Attachments: []driverproto.Attachment{{

@@ -129,7 +129,7 @@ func TestUnexpectedSpineFrameClosesTheCarrier(t *testing.T) {
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
 	carrier := dialTestCarrier(t, host)
 	if err := carrier.SendSpine(link.SpineFrame{
-		Kind: link.SpineCarrierAccept, DaemonID: "forged",
+		Kind: link.SpineCarrierAccept, DaemonID: "forged", DaemonName: "forged-name",
 		CarrierGen: link.NewCarrierGeneration(),
 	}); err != nil {
 		t.Fatal(err)
@@ -199,7 +199,7 @@ func TestScanPokesEveryCurrentCarrierExactlyOnce(t *testing.T) {
 	dial := func(daemonID string) *link.ClientCarrier {
 		t.Helper()
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			host.Serve(w, r, daemonID)
+			host.Serve(w, r, daemonID, daemonID+"-name")
 		}))
 		t.Cleanup(server.Close)
 		carrier, _, err := link.DialDeviceCarrier(
@@ -426,7 +426,7 @@ func TestCarrierAcceptWriteFailureWithdrawsLedgerAndJoinsSupervisor(t *testing.T
 
 	host := New(Config{ScanInterval: time.Hour})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host.Serve(w, r, "daemon-a")
+		host.Serve(w, r, "daemon-a", "laptop-a")
 	}))
 	t.Cleanup(server.Close)
 	client, _, err := link.DialDeviceCarrier(

@@ -13,15 +13,15 @@ import (
 )
 
 type Config struct {
-	NewRuntime      runtimeproto.Factory
-	Runtime         runtimeproto.Spec
-	OutputWorkspace string
-	OutputDevice    string
-	RequestMaxCount int
-	BufferMaxCount  int
-	BufferMaxBytes  int
-	BatchMaxCount   int
-	ReceiptDeadline time.Duration
+	NewRuntime       runtimeproto.Factory
+	Runtime          runtimeproto.Spec
+	OutputWorkspace  string
+	OutputDeviceName string
+	RequestMaxCount  int
+	BufferMaxCount   int
+	BufferMaxBytes   int
+	BatchMaxCount    int
+	ReceiptDeadline  time.Duration
 }
 
 const (

@@ -23,8 +23,18 @@ import (
 type Deps struct {
 	ChannelID    channel.ID // the channel this cell is scoped to
 	WorkspaceDir string     // workspace root (device / agent situation facts)
-	DeviceName   string     // device identity (for the device class's id)
-	Logger       *slog.Logger
+	// DeviceID is the server-assigned identity of the daemon installation that
+	// hosts this cell. It is routing identity. It never comes from hostname or a
+	// CLI label.
+	DeviceID string
+	// DeviceName is the immutable, space-unique registry name. It is the
+	// human-readable segment of daemon:// file names; authority still joins by
+	// DeviceID.
+	DeviceName string
+	// DeviceLabel is the daemon operator's local diagnostic label. It is never
+	// used for routing, authority, or resource naming.
+	DeviceLabel string
+	Logger      *slog.Logger
 }
 
 // InstanceSpec is one actor instance's deployment params: its id and opaque
@@ -34,8 +44,10 @@ type Deps struct {
 //   - ID == "" → "use the class's default id" (the fat-daemon one-of-each case).
 //   - ID != "" → instantiate this class under that id; the SAME class can be
 //     instantiated many times under different ids (multi-agent falls out here).
-//   - device ignores ID and derives it from the device identity (essence
-//     singleton: id IS the resource).
+//
+// Every class, including device, fills the seat ID the plan supplied. Physical
+// device identity is independent host context in Deps.DeviceID; conflating it
+// with an actor seat id makes the constructor disagree with the registry plan.
 type InstanceSpec struct {
 	ID actor.ActorID
 	// Config is THE per-instance config injection point — the composition spec's

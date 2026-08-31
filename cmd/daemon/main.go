@@ -127,8 +127,8 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// Display name resolves last — an assigned device actor derives its id
-	// from DeviceName; loopers' situation facts derive from the home.
+	// The optional local label resolves last. It is diagnostic only: the
+	// accepted carrier verdict supplies the authoritative device id.
 	deviceName := *name
 	if deviceName == "" {
 		host, err := os.Hostname()
@@ -148,11 +148,11 @@ func main() {
 		"server", serverWS, "home", *home, "name", deviceName,
 		"credential_len", len(credential), "credential_from_flag", *key != "")
 	if err := devicehost.Run(ctx, devicehost.Config{
-		ServerWS:   serverWS,
-		Credential: credential,
-		DeviceName: deviceName,
-		AtollHome:  *home,
-		Logger:     logger,
+		ServerWS:    serverWS,
+		Credential:  credential,
+		DeviceLabel: deviceName,
+		AtollHome:   *home,
+		Logger:      logger,
 		// The attach verdict is the moment this home learns which daemons row
 		// it IS — persist it so the identity triple {daemon_id, api_key,
 		// server_ws} is complete and a later `atoll up` on this home claims

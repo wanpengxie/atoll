@@ -37,6 +37,7 @@ const (
 	WordChannelTemplateSet    Word = message.TypeSystemChannelTemplateSet
 	WordChannelTemplateDelete Word = message.TypeSystemChannelTemplateDelete
 	WordChannelSet            Word = message.TypeSystemChannelSet
+	WordChannelDeviceList     Word = message.TypeSystemChannelDeviceList
 	WordDeviceCreate          Word = message.TypeSystemDeviceCreate
 	WordDeviceDelete          Word = message.TypeSystemDeviceDelete
 	WordDeviceAttach          Word = message.TypeSystemDeviceAttach
@@ -64,7 +65,7 @@ var WriteWords = [...]Word{
 }
 
 var ReadWords = [...]Word{
-	WordChannelList, WordChannelGet, WordPrincipalList,
+	WordChannelList, WordChannelGet, WordChannelDeviceList, WordPrincipalList,
 	WordActorTemplateList, WordActorTemplateGet, WordDeviceList, WordPrincipalGet, WordPrincipalLogin,
 	WordChannelTemplateList, WordChannelTemplateGet, WordClassList,
 }
@@ -256,12 +257,8 @@ type OverlayClear struct {
 	DeclID    string     `json:"decl_id"`
 	ChannelID channel.ID `json:"channel_id"`
 }
-type DeviceMint struct {
+type DeviceCreate struct {
 	Name string `json:"name"`
-}
-type DeviceClaim struct {
-	DeviceID string `json:"device_id"`
-	Name     string `json:"name"`
 }
 type DeviceRetire struct {
 	DeviceID string `json:"device_id"`
@@ -304,9 +301,10 @@ type ChannelTemplateGet struct {
 }
 
 type ChannelProfileSet struct {
-	ChannelID   channel.ID `json:"channel_id"`
-	Description string     `json:"description"`
-	Serving     *int       `json:"serving"`
+	ChannelID              channel.ID `json:"channel_id"`
+	Description            string     `json:"description"`
+	Serving                *int       `json:"serving"`
+	DefaultStorageDeviceID *string    `json:"default_storage_device_id,omitempty"`
 }
 
 type ChannelDescribe struct {
@@ -359,6 +357,13 @@ type ClassCatalog interface {
 
 type SourceActorFactsResolver interface {
 	ActorFacts(context.Context, channel.ID, actor.ActorID) (channelspec.ActorFacts, bool, error)
+}
+
+// DevicePlacementResolver is an optional stronger read face supplied by the
+// production channel host. Registry mutations use it to prevent a binding or
+// device retirement from leaving active seats pointing at nowhere.
+type DevicePlacementResolver interface {
+	ActorsPlacedOn(context.Context, channel.ID, string) ([]actor.ActorID, error)
 }
 
 type Clock func() time.Time

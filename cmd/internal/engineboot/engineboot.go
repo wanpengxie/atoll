@@ -250,10 +250,9 @@ func (e *Engine) acquireChannel(_ context.Context, chID channel.ID) (channelhost
 	return bundle, nil
 }
 
-// ptyOpener adapts the daemon host to the terminal manager's Opener. An empty
-// device lets the host pick when the channel has exactly one — with a single
-// attached device the choice carries no intent, the same rule
-// system.member.create uses for desired_host.
+// ptyOpener adapts the daemon host to the terminal manager's Opener. The
+// portal has already resolved the exact registry DeviceID from channel policy
+// before this live-carrier boundary.
 type ptyOpener struct{ host *daemonhost.Host }
 
 func (o ptyOpener) OpenPTY(ctx context.Context, chID channel.ID, device string, cols, rows uint16, integration bool) (io.ReadWriteCloser, error) {

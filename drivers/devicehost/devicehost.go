@@ -9,7 +9,9 @@ package devicehost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/wanpengxie/atoll/drivers/devicehost/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
@@ -23,9 +25,11 @@ import (
 type Config struct {
 	ServerWS   string // ws(s)://host/compute
 	Credential string // daemon api key
-	DeviceName string
-	AtollHome  string // device workspace root
-	Logger     *slog.Logger
+	// DeviceLabel is operator-facing only. The accepted carrier verdict supplies
+	// the authoritative DeviceID used by every compartment and actor.
+	DeviceLabel string
+	AtollHome   string // device workspace root
+	Logger      *slog.Logger
 	// OnAttached relays compute.Config.OnAttached: the server-assigned daemon
 	// id on every accepted attach — the assembly root's chance to complete the
 	// persisted identity triple. Called from the carrier goroutine.
@@ -35,13 +39,25 @@ type Config struct {
 // Run drives the carrier until ctx ends. It is exactly the standalone daemon's
 // body: compute.Run with per-channel compartments backed by storagehost.
 func Run(ctx context.Context, cfg Config) error {
+	var attachedIdentity atomic.Value
 	return compute.Run(ctx, compute.Config{
 		ServerWS:   cfg.ServerWS,
 		Credential: cfg.Credential,
 		AtollHome:  cfg.AtollHome,
 		Logger:     cfg.Logger,
-		OnAttached: cfg.OnAttached,
+		OnAttached: func(daemonID, daemonName string) {
+			// compute calls OnAttached before it binds the carrier and starts any
+			// compartment, so every constructor below observes the accepted id.
+			attachedIdentity.Store(struct{ id, name string }{daemonID, daemonName})
+			if cfg.OnAttached != nil {
+				cfg.OnAttached(daemonID)
+			}
+		},
 		BuildCompartment: func(chID, workspaceDir string) (compute.CompartmentResources, error) {
+			identity, _ := attachedIdentity.Load().(struct{ id, name string })
+			if identity.id == "" || identity.name == "" {
+				return compute.CompartmentResources{}, errors.New("devicehost: compartment built before carrier identity was accepted")
+			}
 			sh, err := storagehost.Open(workspaceDir)
 			if err != nil {
 				return compute.CompartmentResources{}, err
@@ -49,7 +65,7 @@ func Run(ctx context.Context, cfg Config) error {
 			adapter := storageHostAdapter{host: sh}
 			return compute.CompartmentResources{
 				Factories: classFactories{
-					chID: chID, wsRoot: workspaceDir, deviceName: cfg.DeviceName,
+					chID: chID, wsRoot: workspaceDir, deviceID: identity.id, deviceName: identity.name, deviceLabel: cfg.DeviceLabel,
 					logger: cfg.Logger.With("channel", chID),
 				},
 				LocalFileOpener: adapter, Close: sh.Close,
@@ -66,8 +82,8 @@ func Run(ctx context.Context, cfg Config) error {
 // (logged by the caller, retried on the Host's backoff) instead of holding the
 // whole plan hostage.
 type classFactories struct {
-	chID, wsRoot, deviceName string
-	logger                   *slog.Logger
+	chID, wsRoot, deviceID, deviceName, deviceLabel string
+	logger                                          *slog.Logger
 }
 
 func (f classFactories) BuildClass(
@@ -81,7 +97,9 @@ func (f classFactories) BuildClass(
 	}, registry.Deps{
 		ChannelID:    channel.ID(f.chID),
 		WorkspaceDir: f.wsRoot,
+		DeviceID:     f.deviceID,
 		DeviceName:   f.deviceName,
+		DeviceLabel:  f.deviceLabel,
 		Logger:       f.logger,
 	})
 	if err != nil {
@@ -89,10 +107,10 @@ func (f classFactories) BuildClass(
 			"channel", f.chID, "actor", id, "class", class, "err", err)
 		return platform.ActorFactory{}, false
 	}
-	// A constructor that rewrites the id (device derives its own id from the
-	// device identity) would produce a body claiming an identity the plan never
-	// named. Refuse the build outright — there is no table to file it under, so
-	// the only way it could leak is by being built, and it is not.
+	// A constructor that rewrites the id would produce a body claiming an
+	// identity the plan never named. Refuse the build outright — there is no
+	// table to file it under, so the only way it could leak is by being built,
+	// and it is not.
 	if decl.ID != id {
 		f.logger.Warn("devicehost: class derived a different id",
 			"actor", id, "class", class, "derived", decl.ID)

@@ -281,6 +281,25 @@ func (c *Controller) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	return out, nil
 }
 
+// ActorsPlacedOn answers the referential-integrity question used before a
+// channel/device binding is removed. It exposes identities only; raw actor
+// records and placement DTOs remain inside the controller.
+func (c *Controller) ActorsPlacedOn(deviceID string) ([]actor.ActorID, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return nil, err
+	}
+	var out []actor.ActorID
+	for id, value := range c.actors {
+		if value.Record.Placement.Kind == storespec.PlacementDaemon && value.Record.Placement.Host == deviceID {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 // DeclaredReconcileList answers "what does declaration reconcile compare
 // against". Its only consumer is the Platform declaration pull loop.
 func (c *Controller) DeclaredReconcileList() ([]DeclaredInstance, error) {

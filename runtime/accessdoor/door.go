@@ -30,19 +30,24 @@ func (d *door) fileAddress(id resource.ResourceID) (resourcespec.FileAddress, bo
 	return address, true, nil
 }
 
-func (d *door) storageMount(ctx context.Context, host string) (StorageMount, error) {
+// storageMount resolves the device segment of a daemon:// address to the mount
+// that holds it. The argument is that segment verbatim, so it is a registry
+// NAME: every caller passes address.Host or prefix.Host, and the resolver
+// underneath joins by name. Naming it for an id would compile and read as
+// authority while being neither.
+func (d *door) storageMount(ctx context.Context, deviceName string) (StorageMount, error) {
 	if d.deps.StorageMounts == nil {
 		return StorageMount{}, errNoStorageMounts
 	}
-	mount, found, err := d.deps.StorageMounts.ResolveStorageDaemon(ctx, d.deps.ChannelID, host)
+	mount, found, err := d.deps.StorageMounts.ResolveStorageDaemon(ctx, d.deps.ChannelID, deviceName)
 	if err != nil {
 		return StorageMount{}, err
 	}
 	if !found {
-		return StorageMount{}, fmt.Errorf("accessdoor: daemon %q is not bound to channel", host)
+		return StorageMount{}, fmt.Errorf("accessdoor: daemon %q is not bound to channel", deviceName)
 	}
 	if !mount.Online {
-		return StorageMount{}, NewHostOfflineError(host)
+		return StorageMount{}, NewHostOfflineError(mount.Name)
 	}
 	return mount, nil
 }
@@ -86,7 +91,7 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, id re
 		return nil, errors.New("accessdoor: transfer control unavailable")
 	}
 	token, err := d.deps.TransferControl.IssueTransfer(ctx, TransferSpec{
-		Address: id, HostID: mount.DaemonID, HostName: address.Host,
+		Address: id, HostID: mount.DaemonID, HostName: mount.Name,
 		Mode: mode, Caller: caller,
 	})
 	if err != nil {

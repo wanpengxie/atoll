@@ -148,7 +148,7 @@ func CallerLine(caller harness.Caller) string {
 	return "[from " + strings.Join(fields, " ") + "]"
 }
 
-// ResolveAttachment strips daemon://<device>/<channel>/<path> into a path
+// ResolveAttachment strips daemon://<device-name>/<channel-name>/<path> into a path
 // relative to the agent cwd. A device or channel mismatch leaves LocalPath
 // empty. Multi-device routing can later return a non-local result here without
 // changing callers.
