@@ -1,6 +1,7 @@
 package kimi
 
 import (
+	"sync/atomic"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,12 @@ const DefaultListenAddr = "127.0.0.1:10086"
 // from a previous kimi.listen.set wins over it at birth.
 type Config struct {
 	ListenAddr string
+	// Session is the tab-group key this seat stamps on every browser command.
+	// It defaults to the channel, so two channels sharing the one browser get
+	// two Chrome tab groups instead of stealing each other's tabs. It lives on
+	// the SEAT, not on the device: the device is shared, and a device-level
+	// session would herd every channel back into one group.
+	Session string
 	// NowFn returns the current time; defaults to time.Now. Injectable so
 	// tests can shorten deadlines deterministically (the reaper reads it).
 	NowFn func() time.Time
@@ -76,8 +83,10 @@ const defaultBindRetryInterval = 500 * time.Millisecond
 type Actor struct {
 	sys               actorbase.Sys
 	clock             func() time.Time
-	dev               *plugindevice.Device
+	dev               atomic.Pointer[plugindevice.Handle]
+	session           string
 	startAddr         string
+	online            bool
 	reaperInterval    time.Duration
 	bindRetryInterval time.Duration
 	logger            *slog.Logger
@@ -114,14 +123,7 @@ func NewActor(cfg Config) *Actor {
 		bindRetryInterval: bindRetryInterval,
 		logger:            logger,
 	}
-	a.dev = plugindevice.New(plugindevice.Deps{
-		Tool:       "kimi",
-		Protocol:   plugindevice.WebbridgeProtocol{},
-		Sys:        func() actorbase.Sys { return a.sys },
-		Clock:      clock,
-		Logger:     logger,
-		OnPresence: a.publishDevicePresence,
-	})
+	a.session = cfg.Session
 	return a
 }
 
@@ -163,7 +165,9 @@ func (a *Actor) run(sys actorbase.Sys) error {
 	}()
 	defer func() {
 		<-maintenanceDone
-		_ = a.dev.Stop(context.Background())
+		if h := a.dev.Load(); h != nil {
+			_ = h.Release(context.Background())
+		}
 	}()
 
 	for {
@@ -180,10 +184,21 @@ func (a *Actor) run(sys actorbase.Sys) error {
 // fail-closed, but it must not kill or rebuild an otherwise-live incarnation.
 func (a *Actor) maintainDevice(ctx context.Context, addr string) {
 	for {
-		if err := a.dev.Bind(addr); err == nil {
+		// Attach, not Bind: the first seat on this address binds the listener,
+		// every later seat gets a handle onto the same live connection. The
+		// retry loop stays because a *foreign* holder of the port (a stray
+		// process, not another seat) is still ordinary contention.
+		h, err := plugindevice.Attach(addr, a.session, plugindevice.Deps{
+			Tool:     "kimi",
+			Protocol: plugindevice.WebbridgeProtocol{},
+			Clock:    a.clock,
+			Logger:   a.logger,
+		})
+		if err == nil {
+			a.dev.Store(h)
 			break
 		} else {
-			a.logger.Warn("kimi.device.bind_retry", "addr", addr, "err", err.Error())
+			a.logger.Warn("kimi.device.attach_retry", "addr", addr, "err", err.Error())
 		}
 		timer := time.NewTimer(a.bindRetryInterval)
 		select {
@@ -201,7 +216,19 @@ func (a *Actor) maintainDevice(ctx context.Context, addr string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.dev.Sweep()
+			h := a.dev.Load()
+			if h == nil {
+				continue
+			}
+			h.Sweep()
+			// Presence is READ here rather than pushed from the device: the
+			// device is shared, so it cannot speak in any one actor's name.
+			// Each seat notices the edge itself and publishes into its own
+			// channel.
+			if now := h.Online(); now != a.online {
+				a.online = now
+				a.publishDevicePresence(now)
+			}
 		}
 	}
 }
@@ -217,10 +244,23 @@ func (a *Actor) publishDevicePresence(online bool) {
 
 // ListenAddr returns the resolved device-endpoint address (useful when the
 // config asked for port 0). Empty until run() has bound.
-func (a *Actor) ListenAddr() string { return a.dev.Addr() }
+// The handle appears only once maintainDevice attaches, so every reader guards
+// for nil. Before that this seat has no device — which is a real, reportable
+// state ("not attached yet"), not a reason to panic.
+func (a *Actor) ListenAddr() string {
+	if h := a.dev.Load(); h != nil {
+		return h.Addr()
+	}
+	return ""
+}
 
 // Online reports whether a browser device is currently attached.
-func (a *Actor) Online() bool { return a.dev.Online() }
+func (a *Actor) Online() bool {
+	if h := a.dev.Load(); h != nil {
+		return h.Online()
+	}
+	return false
+}
 
 // handle dispatches one delivered Msg. It NEVER blocks on the device: a
 // supported request is encoded, registered in the in-flight table, and pushed
@@ -239,10 +279,18 @@ func (a *Actor) handle(msg actorbase.Msg) {
 	// attached and cannot be forwarded down the very connection they configure.
 	switch msg.Type {
 	case TypeListenSet:
-		a.dev.HandleSet(context.Background(), a.sys, msg)
+		if h := a.dev.Load(); h != nil {
+			h.HandleSet(context.Background(), a.sys, msg)
+		} else {
+			_, _ = a.sys.Fail(msg, "device_offline", "the endpoint is not bound yet")
+		}
 		return
 	case TypeListenGet:
-		a.dev.HandleGet(a.sys, msg)
+		if h := a.dev.Load(); h != nil {
+			h.HandleGet(a.sys, msg)
+		} else {
+			_, _ = a.sys.Fail(msg, "device_offline", "the endpoint is not bound yet")
+		}
 		return
 	}
 
@@ -274,9 +322,45 @@ func (a *Actor) handle(msg actorbase.Msg) {
 	}
 
 	spec := plugindevice.Spec{Cmd: cmd.Action, Deadline: commandDeadline}
-	if err := a.dev.Dispatch(msg, spec, params); err != nil {
-		// Dispatch only errors for the digestible offline case; the device
-		// being absent is a business failure, not a crash.
+	// The continuation IS the in-flight table: it closes over the very Msg the
+	// answer belongs to, so nothing has to map an id back to a request and the
+	// shared device never learns that requests exist.
+	h := a.dev.Load()
+	if h == nil {
+		_, _ = a.sys.Fail(msg, "device_offline", "this seat has not bound its device endpoint yet")
+		return
+	}
+	if err := h.Call(string(msg.ID), spec, params, func(in plugindevice.Inbound) {
+		a.settle(msg, in)
+	}); err != nil {
+		// Call only errors for the digestible offline case; the device being
+		// absent is a business failure, not a crash.
 		_, _ = a.sys.Fail(msg, "device_offline", err.Error()+"; the browser device backing this adapter is not connected — check it with list_actors and retry once it is present")
+	}
+}
+
+// settle turns one device answer into this actor's terminal. It lives here, not
+// in the transport, because what a device failure MEANS — which error_code the
+// channel sees — is this adapter's taxonomy, and because only this actor holds
+// the Sys entitled to close that request.
+func (a *Actor) settle(msg actorbase.Msg, in plugindevice.Inbound) {
+	if a.sys == nil {
+		return
+	}
+	if in.OK {
+		if _, err := a.sys.Reply(msg, in.Result); err != nil {
+			a.logger.Warn("kimi.device.reply_failed", "correlation_id", string(msg.ID), "err", err.Error())
+		}
+		return
+	}
+	code, detail := "device_error", "device reported a failure"
+	if in.ErrCode != "" {
+		code = in.ErrCode
+	}
+	if in.ErrMsg != "" {
+		detail = in.ErrMsg
+	}
+	if _, err := a.sys.Fail(msg, code, detail); err != nil {
+		a.logger.Warn("kimi.device.fail_failed", "correlation_id", string(msg.ID), "err", err.Error())
 	}
 }

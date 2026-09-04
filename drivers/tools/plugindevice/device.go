@@ -31,7 +31,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/atoll/lib/actorbase"
 )
 
 // upgrader gates the WS handshake. CheckOrigin closes the same-machine
@@ -74,26 +73,36 @@ type Spec struct {
 	Deadline time.Duration
 }
 
-// Deps is what an adapter supplies. Sys is a getter rather than a value because
-// an actor's Sys is bound at run() (birth), after the device is constructed.
+// Deps is what an adapter supplies. It is deliberately free of every actor
+// concept: a Device is ONE CONNECTION, not half an actor.
+//
+// It used to carry Sys and OnPresence, and the in-flight table used to hold
+// actorbase.Msg — so the transport answered requests, failed them on timeout,
+// and broadcast presence in some actor's name. That is exactly why it could not
+// be shared: you cannot share half an actor. Whose Sys would it be?
+//
+// Now the table holds a continuation and nothing else. Who is waiting, what
+// they will say, and which channel hears it are the ACTOR's business — which is
+// what makes N actors over one connection fall out for free rather than needing
+// a mechanism.
 type Deps struct {
 	// Tool names the adapter in logs and error text ("xhs", "kimi", …).
 	Tool string
-	// Sys returns the live Sys; it may return nil before birth.
-	Sys func() actorbase.Sys
 	// Clock is the injectable logical clock the reaper reads.
 	Clock func() time.Time
 	// Logger surfaces device-face edges. nil → discard.
 	Logger *slog.Logger
-	// OnPresence is called on the online/offline edges of the connection.
-	OnPresence func(online bool)
 	// Protocol is the plugin family's language. nil ⇒ AtollProtocol.
 	Protocol Protocol
 }
 
+// pending is one outstanding call. The deadline is the CALLER's policy (60s for
+// a browser primitive, minutes for a publish) — the device only holds the
+// number it was given and rings the bell. done is the caller's continuation;
+// the device never looks inside it.
 type pending struct {
-	request  actorbase.Msg
 	deadline time.Time
+	done     func(Inbound)
 }
 
 // Device owns one adapter's outward transport.
@@ -233,7 +242,6 @@ func (d *Device) Rebind(ctx context.Context, addr string) (string, error) {
 
 	if oldConn != nil {
 		_ = oldConn.Close()
-		d.deps.OnPresence(false)
 	}
 	if oldSrv != nil {
 		_ = oldSrv.Shutdown(ctx)
@@ -309,8 +317,7 @@ func (d *Device) handleAccept(w http.ResponseWriter, r *http.Request) {
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	d.deps.Logger.Info(d.deps.Tool+".device.online", "actor", d.selfID())
-	d.deps.OnPresence(true)
+	d.deps.Logger.Info(d.deps.Tool+".device.online", "addr", d.Addr())
 	go d.readLoop(conn, exposed)
 }
 
@@ -357,8 +364,7 @@ func (d *Device) readLoop(conn *websocket.Conn, exposed bool) {
 	d.mu.Unlock()
 	if live {
 		_ = conn.Close()
-		d.deps.Logger.Info(d.deps.Tool+".device.offline", "actor", d.selfID())
-		d.deps.OnPresence(false)
+		d.deps.Logger.Info(d.deps.Tool+".device.offline", "addr", d.Addr())
 	}
 }
 
@@ -413,7 +419,7 @@ func (d *Device) handleInbound(conn *websocket.Conn, in Inbound) {
 		// here so the plugin reaches its ready state without any request having
 		// to exist yet.
 		d.writeFrame(conn, in.Reply)
-		d.deps.Logger.Info(d.deps.Tool+".device.ready", "actor", d.selfID(), "detail", in.Note)
+		d.deps.Logger.Info(d.deps.Tool+".device.ready", "addr", d.Addr(), "detail", in.Note)
 		return
 	}
 
@@ -426,27 +432,11 @@ func (d *Device) handleInbound(conn *websocket.Conn, in Inbound) {
 	if !ok {
 		return
 	}
-	sys := d.deps.Sys()
-	if sys == nil {
-		return
-	}
-	if in.OK {
-		if _, err := sys.Reply(p.request, in.Result); err != nil {
-			d.deps.Logger.Warn(d.deps.Tool+".device.reply_failed", "correlation_id", in.CorrelationID, "err", err.Error())
-		}
-		return
-	}
-	code, detail := "device_error", "device reported a failure"
-	if in.ErrCode != "" {
-		code = in.ErrCode
-	}
-	if in.ErrMsg != "" {
-		detail = in.ErrMsg
-	}
-	if _, err := sys.Fail(p.request, code, detail); err != nil {
-		d.deps.Logger.Warn(d.deps.Tool+".device.fail_failed", "correlation_id", in.CorrelationID, "err", err.Error())
-	}
+	// The device hands the answer back to whoever asked and stops there. What
+	// that answer becomes — a Reply, a Fail, a retry — belongs to the caller.
+	p.done(in)
 }
+
 
 // send writes one frame under the write lock, with a deadline so a stuck peer
 // fails the connection instead of holding the lock. Every outbound frame goes
@@ -472,8 +462,8 @@ func (d *Device) writeFrame(conn *websocket.Conn, frame []byte) {
 
 // Dispatch sends one inward request down to the plugin and registers it as
 // in-flight.
-func (d *Device) Dispatch(msg actorbase.Msg, spec Spec, params json.RawMessage) error {
-	frame, err := d.deps.Protocol.EncodeCall(string(msg.ID), spec.Cmd, params)
+func (d *Device) Call(correlationID, session string, spec Spec, params json.RawMessage, done func(Inbound)) error {
+	frame, err := d.deps.Protocol.EncodeCall(correlationID, session, spec.Cmd, params)
 	if err != nil {
 		return fmt.Errorf("%s: encode %s: %w", d.deps.Tool, spec.Cmd, err)
 	}
@@ -485,7 +475,7 @@ func (d *Device) Dispatch(msg actorbase.Msg, spec Spec, params json.RawMessage) 
 		return errors.New("no " + d.deps.Tool + " device connected")
 	}
 	// Register before sending so a fast reply can never find an empty table.
-	d.inflight[string(msg.ID)] = &pending{request: msg, deadline: d.deps.Clock().Add(spec.Deadline)}
+	d.inflight[correlationID] = &pending{deadline: d.deps.Clock().Add(spec.Deadline), done: done}
 	d.mu.Unlock()
 
 	// Write OUTSIDE the in-flight lock, with a deadline: a stuck peer must never
@@ -495,7 +485,7 @@ func (d *Device) Dispatch(msg actorbase.Msg, spec Spec, params json.RawMessage) 
 		// The frame did not reach the device. Leave the entry in-flight (the
 		// reaper times it out); treat the conn as dead so the next dispatch
 		// sees offline.
-		d.deps.Logger.Warn(d.deps.Tool+".device.write_failed", "correlation_id", string(msg.ID), "err", err.Error())
+		d.deps.Logger.Warn(d.deps.Tool+".device.write_failed", "correlation_id", correlationID, "err", err.Error())
 		d.DropConn(conn)
 	}
 	return nil
@@ -512,8 +502,7 @@ func (d *Device) DropConn(conn *websocket.Conn) {
 	d.conn = nil
 	d.mu.Unlock()
 	_ = conn.Close()
-	d.deps.Logger.Info(d.deps.Tool+".device.offline", "actor", d.selfID())
-	d.deps.OnPresence(false)
+	d.deps.Logger.Info(d.deps.Tool+".device.offline", "addr", d.Addr())
 }
 
 // Sweep fails every past-deadline in-flight request with timeout. It is the one
@@ -531,22 +520,12 @@ func (d *Device) Sweep() {
 	}
 	d.mu.Unlock()
 
-	sys := d.deps.Sys()
-	if sys == nil {
-		return
-	}
+	// Timing is the wire's job; what a timeout MEANS is the caller's. The
+	// device rings the bell in the caller's own continuation and says nothing
+	// to any channel itself.
 	for _, p := range expired {
-		if _, err := sys.Fail(p.request, "timeout", "device did not reply within deadline"); err != nil {
-			d.deps.Logger.Warn(d.deps.Tool+".device.timeout_fail_failed", "request_id", string(p.request.ID), "err", err.Error())
-		}
+		p.done(Inbound{Kind: InboundResult, OK: false, ErrCode: "timeout", ErrMsg: "device did not reply within deadline"})
 	}
-}
-
-func (d *Device) selfID() string {
-	if sys := d.deps.Sys(); sys != nil {
-		return string(sys.Self())
-	}
-	return ""
 }
 
 // ValidateAddr refuses the two addresses that are mistakes rather than choices.

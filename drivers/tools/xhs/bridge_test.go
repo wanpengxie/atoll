@@ -97,12 +97,12 @@ func TestPluginBridgeCarriesARequestToTheRealAdapter(t *testing.T) {
 // so the bridge can take it.
 func freeLoopbackAddr(t *testing.T) string {
 	t.Helper()
-	a := NewActor(Config{ListenAddr: "127.0.0.1:0"})
-	if err := a.dev.Bind("127.0.0.1:0"); err != nil {
+	h, err := plugindevice.Attach("127.0.0.1:0", "test", plugindevice.Deps{Tool: "xhs"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	addr := a.dev.Addr()
-	if err := a.dev.Stop(t.Context()); err != nil {
+	addr := h.Addr()
+	if err := h.Release(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	return addr

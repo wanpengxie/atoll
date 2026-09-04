@@ -11,8 +11,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // A gorilla connection takes ONE writer at a time, and this transport has three
@@ -32,12 +30,7 @@ func (beatProtocol) Heartbeat() (time.Duration, []byte, bool) {
 }
 
 func TestEveryOutboundFrameIsSerialised(t *testing.T) {
-	dev := New(Deps{
-		Tool:       "test",
-		Sys:        func() actorbase.Sys { return nil },
-		Protocol:   beatProtocol{},
-		OnPresence: func(bool) {},
-	})
+	dev := New(Deps{Tool: "test", Protocol: beatProtocol{}})
 	srv := httptest.NewServer(http.HandlerFunc(dev.handleAccept))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { _ = dev.Stop(t.Context()) })
@@ -86,13 +79,7 @@ func TestEveryOutboundFrameIsSerialised(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			msg := actorbase.NewMsg(actorbase.OriginMailbox, t.Context(), message.Envelope{
-				ID:      message.ID(fmt.Sprintf("req-%d", i)),
-				Kind:    message.KindRequest,
-				Type:    "test.command",
-				Payload: json.RawMessage(`{"body":{"k":"v"}}`),
-			})
-			_ = dev.Dispatch(msg, Spec{Cmd: "noop", Deadline: time.Minute}, json.RawMessage(`{"k":"v"}`))
+			_ = dev.Call(fmt.Sprintf("req-%d", i), "s", Spec{Cmd: "noop", Deadline: time.Minute}, json.RawMessage(`{"k":"v"}`), func(Inbound) {})
 		}(i)
 	}
 	wg.Wait()

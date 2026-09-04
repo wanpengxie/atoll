@@ -427,13 +427,22 @@ func TestKindGuardDropsNonRequest(t *testing.T) {
 	}
 }
 
-//  7. FixedPortReplacement (Q8=B): a successor incarnation on the SAME fixed
-//     loopback port cannot bind while the predecessor holds it; its retry loop
-//     keeps trying and it binds once the predecessor releases the port — the
-//     exclusive-resource contention is resolved by the domain, not the kernel.
-func TestFixedPortReplacementRetriesUntilBound(t *testing.T) {
-	// Reserve a concrete loopback port, then free it so two incarnations can
-	// contend for the exact same addr.
+//  7. Two seats on the same fixed endpoint SHARE it rather than contend for it.
+//
+//     This used to assert the opposite — that a successor could not bind while a
+//     predecessor held the port, and had to retry until the port came free. That
+//     was the honest description of a design where every seat built its own
+//     listener, and it is exactly why a second channel could never seat this
+//     tool: the plugin dials ONE port, so the loser of that race had nobody on
+//     the other end even if it eventually won the port.
+//
+//     The endpoint is one physical thing. Seats share it; each keeps its own
+//     books (see plugindevice/shared.go). So the property worth pinning is that
+//     both seats are live at once, and that one leaving does not take the
+//     endpoint away from the other.
+func TestTwoSeatsShareOneFixedEndpoint(t *testing.T) {
+	// Reserve a concrete loopback port, then free it so both seats name the
+	// exact same addr (an ephemeral :0 is deliberately never shared).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
@@ -441,39 +450,42 @@ func TestFixedPortReplacementRetriesUntilBound(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 
-	// Predecessor binds the port.
-	predecessor, predSys := startActor(t, Config{ListenAddr: addr})
-	if predecessor.ListenAddr() == "" {
-		t.Fatal("predecessor never bound")
+	first, firstSys := startActor(t, Config{ListenAddr: addr})
+	if first.ListenAddr() != addr {
+		t.Fatalf("first seat bound %q, want %q", first.ListenAddr(), addr)
 	}
 
-	// Successor on the same addr: its initial bind fails (port held), so it
-	// enters the retry loop rather than dying.
-	successor := NewActor(Config{ListenAddr: addr, BindRetryInterval: 20 * time.Millisecond, ReaperInterval: 20 * time.Millisecond})
-	succSys := newFakeSys(DefaultActorID)
+	second := NewActor(Config{ListenAddr: addr, BindRetryInterval: 20 * time.Millisecond, ReaperInterval: 20 * time.Millisecond})
+	secondSys := newFakeSys(DefaultActorID)
 	done := make(chan error, 1)
-	go func() { done <- successor.run(succSys) }()
+	go func() { done <- second.run(secondSys) }()
 	t.Cleanup(func() {
-		succSys.stop()
+		secondSys.stop()
 		<-done
 	})
 
-	// It must NOT be bound while the predecessor holds the port.
-	time.Sleep(60 * time.Millisecond)
-	if successor.ListenAddr() != "" {
-		t.Fatal("successor bound while predecessor still held the port")
-	}
-
-	// Release the port (predecessor dies); the successor's retry loop must bind.
-	predSys.stop()
-
+	// The second seat must come up on the SAME endpoint, promptly — not sit in
+	// a retry loop waiting for a port it can never usefully get alone.
 	deadline := time.Now().Add(2 * time.Second)
-	for successor.ListenAddr() == "" {
+	for second.ListenAddr() != addr {
 		if time.Now().After(deadline) {
-			t.Fatal("successor never bound after predecessor released the port")
+			t.Fatalf("second seat never joined the endpoint (got %q, want %q)", second.ListenAddr(), addr)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+
+	// One seat leaving must not close the endpoint under the other: the plugin
+	// is still connected to it, and the surviving seat is still using it.
+	firstSys.stop()
+	time.Sleep(80 * time.Millisecond)
+	if second.ListenAddr() != addr {
+		t.Fatalf("endpoint went away when the other seat left: %q", second.ListenAddr())
+	}
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("endpoint stopped accepting after the other seat left: %v", err)
+	}
+	_ = conn.Close()
 }
 
 func TestDeviceMaintenanceDoesNotDependOnScheduleCapability(t *testing.T) {

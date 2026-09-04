@@ -57,7 +57,13 @@ type Protocol interface {
 	// contract, not ours — the extension has it compiled in.
 	Path() string
 	// EncodeCall builds the frame that asks the plugin to run one command.
-	EncodeCall(correlationID, cmd string, params json.RawMessage) ([]byte, error)
+	//
+	// session is an OPAQUE grouping key the caller supplies; a protocol that
+	// has no such notion ignores it. It cannot be a property of the Device,
+	// because one Device is shared by many callers and the whole point of the
+	// key is that they differ — a device-level session would put every caller
+	// back in one bucket, which is the collision this exists to prevent.
+	EncodeCall(correlationID, session, cmd string, params json.RawMessage) ([]byte, error)
 	// Decode classifies one frame from the plugin. An unparseable or unmodelled
 	// frame must return InboundIgnore rather than an error: a plugin is entitled
 	// to say things this adapter does not care about.
@@ -77,7 +83,8 @@ type AtollProtocol struct{}
 
 func (AtollProtocol) Path() string { return "/device" }
 
-func (AtollProtocol) EncodeCall(correlationID, cmd string, params json.RawMessage) ([]byte, error) {
+// EncodeCall ignores session: the atoll frame family has no grouping notion.
+func (AtollProtocol) EncodeCall(correlationID, _, cmd string, params json.RawMessage) ([]byte, error) {
 	return json.Marshal(DownFrame{CorrelationID: correlationID, Cmd: cmd, Params: params})
 }
 
@@ -130,17 +137,23 @@ type webbridgeCall struct {
 
 type webbridgeCallArg struct {
 	Name string          `json:"name"`
+	// Session groups every tab a caller opens into one Chrome tab group, so two
+	// callers sharing this one browser do not steal each other's tabs. It sits
+	// beside name/args rather than inside args: webbridge documents it as a
+	// top-level field of the request body, and args is forwarded to the page
+	// verbatim. Empty ⇒ omitted, which is the extension's own default group.
+	Session string `json:"session,omitempty"`
 	Args json.RawMessage `json:"args"`
 }
 
-func (WebbridgeProtocol) EncodeCall(correlationID, cmd string, params json.RawMessage) ([]byte, error) {
+func (WebbridgeProtocol) EncodeCall(correlationID, session, cmd string, params json.RawMessage) ([]byte, error) {
 	if len(params) == 0 {
 		params = json.RawMessage("{}")
 	}
 	return json.Marshal(webbridgeCall{
 		Type:      "tool_call",
 		RequestID: correlationID,
-		Payload:   webbridgeCallArg{Name: cmd, Args: params},
+		Payload:   webbridgeCallArg{Name: cmd, Args: params, Session: session},
 	})
 }
 

@@ -1,6 +1,7 @@
 package xhs
 
 import (
+	"sync/atomic"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,10 @@ const DefaultListenAddr = "127.0.0.1:8090"
 // from a previous xhs.listen.set wins over it at birth.
 type Config struct {
 	ListenAddr string
+	// Session is this seat's opaque grouping key on the shared device. See
+	// plugindevice/shared.go: it lives on the seat because the device is shared
+	// and the key is the one thing that must differ between seats.
+	Session string
 	// NowFn returns the current time; defaults to time.Now. Injectable so
 	// tests can shorten deadlines deterministically (the reaper reads it).
 	NowFn func() time.Time
@@ -68,7 +73,9 @@ const defaultBindRetryInterval = 500 * time.Millisecond
 type Actor struct {
 	sys               actorbase.Sys
 	clock             func() time.Time
-	dev               *plugindevice.Device
+	dev               atomic.Pointer[plugindevice.Handle]
+	session           string
+	online            bool
 	startAddr         string
 	reaperInterval    time.Duration
 	bindRetryInterval time.Duration
@@ -106,13 +113,7 @@ func NewActor(cfg Config) *Actor {
 		bindRetryInterval: bindRetryInterval,
 		logger:            logger,
 	}
-	a.dev = plugindevice.New(plugindevice.Deps{
-		Tool:       "xhs",
-		Sys:        func() actorbase.Sys { return a.sys },
-		Clock:      clock,
-		Logger:     logger,
-		OnPresence: a.publishDevicePresence,
-	})
+	a.session = cfg.Session
 	return a
 }
 
@@ -153,7 +154,9 @@ func (a *Actor) run(sys actorbase.Sys) error {
 	}()
 	defer func() {
 		<-maintenanceDone
-		_ = a.dev.Stop(context.Background())
+		if h := a.dev.Load(); h != nil {
+			_ = h.Release(context.Background())
+		}
 	}()
 
 	for {
@@ -170,10 +173,18 @@ func (a *Actor) run(sys actorbase.Sys) error {
 // fail-closed, but it must not kill or rebuild an otherwise-live incarnation.
 func (a *Actor) maintainDevice(ctx context.Context, addr string) {
 	for {
-		if err := a.dev.Bind(addr); err == nil {
+		// Attach, not Bind — see plugindevice/shared.go: the first seat on this
+		// address binds, later seats share the live connection.
+		h, err := plugindevice.Attach(addr, a.session, plugindevice.Deps{
+			Tool:   "xhs",
+			Clock:  a.clock,
+			Logger: a.logger,
+		})
+		if err == nil {
+			a.dev.Store(h)
 			break
 		} else {
-			a.logger.Warn("xhs.device.bind_retry", "addr", addr, "err", err.Error())
+			a.logger.Warn("xhs.device.attach_retry", "addr", addr, "err", err.Error())
 		}
 		timer := time.NewTimer(a.bindRetryInterval)
 		select {
@@ -191,7 +202,17 @@ func (a *Actor) maintainDevice(ctx context.Context, addr string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.dev.Sweep()
+			h := a.dev.Load()
+			if h == nil {
+				continue
+			}
+			h.Sweep()
+			// Read presence rather than being pushed it: the device is shared
+			// and cannot speak in any one actor's name.
+			if now := h.Online(); now != a.online {
+				a.online = now
+				a.publishDevicePresence(now)
+			}
 		}
 	}
 }
@@ -207,13 +228,31 @@ func (a *Actor) publishDevicePresence(online bool) {
 
 // ListenAddr returns the resolved device-endpoint address (useful when the
 // config asked for port 0). Empty until run() has bound.
-func (a *Actor) ListenAddr() string { return a.dev.Addr() }
+// The handle appears only once maintainDevice attaches, so every reader guards
+// for nil. Before that this seat has no device — which is a real, reportable
+// state ("not attached yet"), not a reason to panic.
+func (a *Actor) ListenAddr() string {
+	if h := a.dev.Load(); h != nil {
+		return h.Addr()
+	}
+	return ""
+}
 
 // Online reports whether a browser device is currently attached.
-func (a *Actor) Online() bool { return a.dev.Online() }
+func (a *Actor) Online() bool {
+	if h := a.dev.Load(); h != nil {
+		return h.Online()
+	}
+	return false
+}
 
 // Desired is the address this adapter was last asked to listen on.
-func (a *Actor) Desired() string { return a.dev.Desired() }
+func (a *Actor) Desired() string {
+	if h := a.dev.Load(); h != nil {
+		return h.Desired()
+	}
+	return ""
+}
 
 // handle dispatches one delivered request Msg. It NEVER blocks on the device: a
 // supported request is encoded, registered in the in-flight table, and pushed
@@ -232,10 +271,18 @@ func (a *Actor) handle(msg actorbase.Msg) {
 	// attached and cannot be forwarded down the very connection they configure.
 	switch msg.Type {
 	case TypeListenSet:
-		a.dev.HandleSet(context.Background(), a.sys, msg)
+		if h := a.dev.Load(); h != nil {
+			h.HandleSet(context.Background(), a.sys, msg)
+		} else {
+			_, _ = a.sys.Fail(msg, "device_offline", "the endpoint is not bound yet")
+		}
 		return
 	case TypeListenGet:
-		a.dev.HandleGet(a.sys, msg)
+		if h := a.dev.Load(); h != nil {
+			h.HandleGet(a.sys, msg)
+		} else {
+			_, _ = a.sys.Fail(msg, "device_offline", "the endpoint is not bound yet")
+		}
 		return
 	}
 
@@ -254,9 +301,41 @@ func (a *Actor) handle(msg actorbase.Msg) {
 		params = json.RawMessage("{}")
 	}
 
-	if err := a.dev.Dispatch(msg, spec, params); err != nil {
-		// Dispatch only errors for the digestible offline case; the device
-		// being absent is a business failure, not a crash.
+	h := a.dev.Load()
+	if h == nil {
+		_, _ = a.sys.Fail(msg, "device_offline", "this seat has not bound its device endpoint yet")
+		return
+	}
+	if err := h.Call(string(msg.ID), spec, params, func(in plugindevice.Inbound) {
+		a.settle(msg, in)
+	}); err != nil {
+		// Call only errors for the digestible offline case; the device being
+		// absent is a business failure, not a crash.
 		_, _ = a.sys.Fail(msg, "device_offline", err.Error()+"; the browser device backing this adapter is not connected — check it with list_actors and retry once it is present")
+	}
+}
+
+// settle turns one device answer into this actor's terminal. It lives here
+// rather than in the transport because the error taxonomy is this adapter's,
+// and because only this actor holds the Sys entitled to close the request.
+func (a *Actor) settle(msg actorbase.Msg, in plugindevice.Inbound) {
+	if a.sys == nil {
+		return
+	}
+	if in.OK {
+		if _, err := a.sys.Reply(msg, in.Result); err != nil {
+			a.logger.Warn("xhs.device.reply_failed", "correlation_id", string(msg.ID), "err", err.Error())
+		}
+		return
+	}
+	code, detail := "device_error", "device reported a failure"
+	if in.ErrCode != "" {
+		code = in.ErrCode
+	}
+	if in.ErrMsg != "" {
+		detail = in.ErrMsg
+	}
+	if _, err := a.sys.Fail(msg, code, detail); err != nil {
+		a.logger.Warn("xhs.device.fail_failed", "correlation_id", string(msg.ID), "err", err.Error())
 	}
 }

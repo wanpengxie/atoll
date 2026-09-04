@@ -58,7 +58,7 @@ func (d *Device) Status() Status {
 // A persist failure after a successful rebind is reported rather than rolled
 // back: the endpoint really did move, and telling the caller it did not would
 // be worse than telling them it may not survive a restart.
-func (d *Device) HandleSet(ctx context.Context, sys actorbase.Sys, msg actorbase.Msg) {
+func (h *Handle) HandleSet(ctx context.Context, sys actorbase.Sys, msg actorbase.Msg) {
 	var payload SetPayload
 	if err := actorbase.DecodeStrict(msg.Payload, &payload); err != nil {
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
@@ -72,7 +72,7 @@ func (d *Device) HandleSet(ctx context.Context, sys actorbase.Sys, msg actorbase
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
 		return
 	}
-	actual, err := d.Rebind(ctx, payload.ListenAddr)
+	actual, err := h.Rebind(ctx, payload.ListenAddr)
 	if err != nil {
 		// The old listener is untouched — say so, because the caller's next
 		// question is always "did I just lose the endpoint I was using".
@@ -82,9 +82,9 @@ func (d *Device) HandleSet(ctx context.Context, sys actorbase.Sys, msg actorbase
 	persisted := true
 	if out, perr := sys.State().Put(StateKey, []byte(actual)); perr != nil || !out.Accepted() {
 		persisted = false
-		d.deps.Logger.Warn(d.deps.Tool+".device.desired_persist_failed", "addr", actual)
+		h.dev.deps.Logger.Warn(h.dev.deps.Tool+".device.desired_persist_failed", "addr", actual)
 	}
-	status := d.Status()
+	status := h.Status()
 	_, _ = sys.Reply(msg, map[string]any{
 		"desired_addr": status.DesiredAddr,
 		"actual_addr":  status.ActualAddr,
@@ -95,13 +95,13 @@ func (d *Device) HandleSet(ctx context.Context, sys actorbase.Sys, msg actorbase
 }
 
 // HandleGet answers with the endpoint's current state.
-func (d *Device) HandleGet(sys actorbase.Sys, msg actorbase.Msg) {
+func (h *Handle) HandleGet(sys actorbase.Sys, msg actorbase.Msg) {
 	var empty struct{}
 	if err := actorbase.DecodeStrictEmpty(msg.Payload, &empty); err != nil {
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
 		return
 	}
-	status := d.Status()
+	status := h.Status()
 	_, _ = sys.Reply(msg, map[string]any{
 		"desired_addr": status.DesiredAddr,
 		"actual_addr":  status.ActualAddr,
