@@ -27,6 +27,10 @@ type OpID uint64
 type TurnID string
 type TurnKind = driverproto.TurnKind
 
+// OptionsSnapshot is the provider-discovered model catalog (driverproto owns
+// the shape); aliased here so the base reads it through this package alone.
+type OptionsSnapshot = driverproto.OptionsSnapshot
+
 const (
 	TurnChat    = driverproto.TurnChat
 	TurnCompact = driverproto.TurnCompact
@@ -108,6 +112,10 @@ type Runtime interface {
 	Control(ControlCommand) error
 	Terminate() error
 	EnsureReady(OpID) error
+	// Options is a read: the catalog the live worker generation discovered,
+	// ok=false when no generation is alive. It never spawns, waits or queues
+	// behind a turn — a menu must not touch the turn's control slot.
+	Options() (OptionsSnapshot, bool)
 	Close()
 }
 
@@ -138,9 +146,10 @@ const (
 )
 
 type ReadyResult struct {
-	Ready  bool
-	Code   string
-	Detail string
+	Ready   bool
+	Code    string
+	Detail  string
+	Options driverproto.OptionsSnapshot
 }
 
 // ProgressEvent 是回合内一件已完成中间产物的截断摘要（provider 无关词表，

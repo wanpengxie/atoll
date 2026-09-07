@@ -930,8 +930,12 @@ func TestAgentControl37SteerTargetOwnershipAndOriginalIndexReturn(t *testing.T) 
 			l.handleIntake(v7Request(item.id, TypeAsk, "caller", `{"text":"`+item.text+`"}`))
 		}
 		l.handleIntake(v7Request("insert", TypeSteer, "caller", `{"target":"target"}`))
-		if got := sys.terminal("insert"); len(got) != 1 || got[0].fail {
-			t.Fatalf("insert terminal=%v", got)
+		// The word is answered by the provider's verdict, not by scheduling.
+		if got := sys.terminal("insert"); len(got) != 0 {
+			t.Fatalf("insert terminal=%v, want none until the steer settles", got)
+		}
+		if got := sys.progress["target"]; len(got) == 0 || got[len(got)-1].status != message.StatusQueued || got[len(got)-1].value.(map[string]any)["steering"] != true {
+			t.Fatalf("target progress=%v, want a steering fact", got)
 		}
 		if len(rt.controls) != 1 || rt.controls[0].Content == nil || rt.controls[0].Content.Text != "insert me" {
 			t.Fatalf("controls=%+v", rt.controls)
@@ -949,6 +953,9 @@ func TestAgentControl37SteerTargetOwnershipAndOriginalIndexReturn(t *testing.T) 
 		old := sys.terminal("owner")
 		if len(old) != 1 || old[0].fail || old[0].value.(map[string]any)["preempted_by"] != book.RequestID("target") {
 			t.Fatalf("owner terminal=%v", old)
+		}
+		if word := sys.terminal("insert"); len(word) != 1 || word[0].fail || word[0].value.(map[string]any)["merged_into"] != book.RequestID("target") {
+			t.Fatalf("insert terminal=%v, want completed with merged_into", word)
 		}
 	})
 
@@ -969,6 +976,17 @@ func TestAgentControl37SteerTargetOwnershipAndOriginalIndexReturn(t *testing.T) 
 			if row := l.state.Requests["target"]; row == nil || row.Location != book.Buffered || len(sys.terminal("target")) != 0 {
 				t.Fatalf("target=%+v terminal=%v", row, sys.terminal("target"))
 			}
+			wantCode := "steer_missed"
+			if verdict == runtimeproto.ControlTimeout {
+				wantCode = errorControlTimeout
+			}
+			if word := sys.terminal("insert"); len(word) != 1 || !word[0].fail || word[0].code != wantCode {
+				t.Fatalf("insert terminal=%v, want failed %s", word, wantCode)
+			}
+			// Back in the queue, and the ledger says so with its buttons restored.
+			if got := sys.progress["target"]; len(got) == 0 || got[len(got)-1].status != message.StatusQueued || got[len(got)-1].value.(map[string]any)["steering"] != nil {
+				t.Fatalf("target progress=%v, want a plain queued fact after return", got)
+			}
 		})
 	}
 }
@@ -982,8 +1000,8 @@ func TestAgentControl38SteerAllActiveTurnSettlesBatchAndPreservesOthers(t *testi
 		l.handleIntake(v7Request("other", TypeAsk, "other", `{"text":"leave me"}`))
 		l.handleIntake(v7Request("own-2", TypeAsk, "caller", `{"text":"two"}`))
 		l.handleIntake(v7Request("insert-all", TypeSteer, "caller", `{"all":true}`))
-		if got := sys.terminal("insert-all"); len(got) != 1 || got[0].fail {
-			t.Fatalf("terminal=%v", got)
+		if got := sys.terminal("insert-all"); len(got) != 0 {
+			t.Fatalf("terminal=%v, want none until the batch settles", got)
 		}
 		if !slices.Equal(l.state.Buffer, []book.RequestID{"other"}) || len(rt.controls) != 1 || rt.controls[0].Content == nil || rt.controls[0].Content.Text != "one\n\ntwo" {
 			t.Fatalf("buffer=%v controls=%+v", l.state.Buffer, rt.controls)
@@ -1001,6 +1019,9 @@ func TestAgentControl38SteerAllActiveTurnSettlesBatchAndPreservesOthers(t *testi
 			len(preempted) != 1 || preempted[0].value.(map[string]any)["preempted_by"] != book.RequestID("own-2") ||
 			l.state.Turn.Owner != "own-2" || l.state.Requests["own-2"].Location != book.Workspace || l.state.Requests["other"].Location != book.Buffered {
 			t.Fatalf("merged=%v preempted=%v turn=%+v buffer=%v", merged, preempted, l.state.Turn, l.state.Buffer)
+		}
+		if word := sys.terminal("insert-all"); len(word) != 1 || word[0].fail || word[0].value.(map[string]any)["merged_into"] != book.RequestID("own-2") {
+			t.Fatalf("insert-all terminal=%v", word)
 		}
 	})
 

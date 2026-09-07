@@ -173,3 +173,7 @@ func TestAgentForkTraversesAgentDoorAndStoreIntoRoster(t *testing.T) {
 	members, _ := rosterMembersForSource(context.Background(), h.View(), forkDecl)
 	t.Fatalf("agent.fork did not create and narrate a second roster row: parent=%s members=%v", parent, members)
 }
+
+func (*forkTestRuntime) Options() (runtimeproto.OptionsSnapshot, bool) {
+	return runtimeproto.OptionsSnapshot{}, false
+}

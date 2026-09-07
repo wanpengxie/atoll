@@ -483,6 +483,10 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 		l.exec.terminal(string(msg.ID), terminalCandidate{value: value})
 		return
 	}
+	if msg.Type == TypeOptions {
+		l.handleOptions(msg)
+		return
+	}
 	if !l.def.supports(msg.Type) {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "type_unsupported",
 			detail: "agent does not support " + msg.Type + "; it accepts " + strings.Join(l.def.accepted(), ", ")})
@@ -757,8 +761,8 @@ func (l *agentLoop) handleSteerTarget(msg actorbase.Msg, targetID book.RequestID
 	}
 	idx := l.state.IndexInBuffer(targetID)
 	l.state.RemoveFromBuffer(targetID)
-	l.scheduleSteerTargets([]book.RequestID{targetID}, []int{idx})
-	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
+	// The word is answered when the provider decides, see Action.Word.
+	l.scheduleSteerTargets(book.RequestID(msg.ID), []book.RequestID{targetID}, []int{idx})
 }
 
 func (l *agentLoop) handleSteerAll(msg actorbase.Msg) {
@@ -784,8 +788,7 @@ func (l *agentLoop) handleSteerAll(msg actorbase.Msg) {
 		l.startNext()
 		return
 	}
-	l.scheduleSteerTargets(ids, indices)
-	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
+	l.scheduleSteerTargets(book.RequestID(msg.ID), ids, indices)
 }
 
 func (l *agentLoop) ownedBuffered(sender string) ([]book.RequestID, []int) {
@@ -874,6 +877,7 @@ func (l *agentLoop) handleHold(msg actorbase.Msg) {
 	}
 	l.freeze(id, duration)
 	if targetID != "" && l.state.Turn != nil && l.state.Turn.Owner == targetID && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
+		l.dropPendingSteer("an interrupt took the control slot before this steer was applied; its target is back in the queue")
 		l.runAdmittedInterrupt(id, book.DispRebufferOwner, id, targetID)
 	}
 	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
@@ -897,6 +901,10 @@ func (l *agentLoop) handleInterrupt(msg actorbase.Msg) {
 	id := book.RequestID(msg.ID)
 	l.freezeInterrupt(id)
 	if l.state.Turn != nil && l.def.cfg.Runtime.Capabilities[runtimeproto.CapabilityInterrupt] {
+		// A steer still waiting for the slot yields to the stronger intent: its
+		// target goes back to the queue and its word says so. One already with
+		// the provider is not touched — it settles in milliseconds.
+		l.dropPendingSteer("an interrupt took the control slot before this steer was applied; its target is back in the queue")
 		l.runAdmittedInterrupt(id, book.DispFailOwner, id, "")
 	}
 	l.exec.terminal(string(msg.ID), terminalCandidate{value: map[string]any{}})
@@ -1126,27 +1134,54 @@ func steerInput(row *book.Request) runtimeproto.Input {
 }
 
 func (l *agentLoop) validateSelection(raw json.RawMessage) (runtimeproto.TurnOptions, string, string) {
-	if len(l.def.cfg.Runtime.Selections) == 0 {
-		return runtimeproto.TurnOptions{}, "type_unsupported", "agent does not support " + TypeSelect
-	}
 	var requested runtimeproto.TurnOptions
-	if len(raw) != 0 && json.Unmarshal(raw, &requested) != nil {
-		return runtimeproto.TurnOptions{}, "invalid_args", "selection payload must be an object"
+	if err := decodeStrict(raw, &requested); err != nil {
+		return runtimeproto.TurnOptions{}, "invalid_args", "invalid agent.select payload: " + err.Error()
 	}
 	requested.Model = strings.TrimSpace(requested.Model)
 	requested.Effort = strings.TrimSpace(requested.Effort)
-	if requested.Model == "" && requested.Effort != "" {
-		requested.Model = l.options.Model
+	if requested.Model == "" {
+		return runtimeproto.TurnOptions{}, "invalid_args", "agent.select requires model; call agent.options for legal values"
 	}
-	for _, candidate := range l.def.cfg.Runtime.Selections {
-		if requested.Model != candidate.Model {
-			continue
-		}
-		if requested.Effort == "" || requested.Effort == candidate.Effort {
-			return candidate, "", ""
-		}
+	return requested, "", ""
+}
+
+func (l *agentLoop) handleOptions(msg actorbase.Msg) {
+	var payload struct{}
+	if err := decodeStrict(msg.Payload, &payload); err != nil {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "invalid_args", detail: "agent.options payload must be an empty object"})
+		return
 	}
-	return runtimeproto.TurnOptions{}, "invalid_args", "selection is not in provider selections"
+	// A menu is a read. When a worker generation is alive its catalog is
+	// already in hand, so answer from it and never touch the control slot:
+	// that slot serialises actions that change the current turn, and an
+	// options request parked there blocked every steer and interrupt until the
+	// turn ended. Only a never-started worker still goes the EnsureReady way,
+	// and then there is no turn for it to block.
+	if snapshot, ok := l.exec.runtimeOptions(); ok {
+		l.exec.terminal(string(msg.ID), terminalCandidate{value: snapshot})
+		return
+	}
+	if l.state.Running != nil || l.state.Pending != nil {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "busy", detail: "another agent control request is in progress"})
+		return
+	}
+	if len(l.state.Requests) >= l.def.cfg.RequestMaxCount {
+		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: errorBaseCapacity, detail: "agent live request table capacity exceeded"})
+		return
+	}
+	id := book.RequestID(msg.ID)
+	row := &book.Request{ID: id, Bytes: len(msg.Payload), Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(message.CorrelationID(msg.CorrelationID, msg.ID)), Location: book.ControlPending}
+	row.Scope = l.vault.Mint(row.ParentID, row.CorrelationID)
+	l.state.Requests[id] = row
+	l.watchClosure(id, msg.Ctx())
+	l.nextAction++
+	if l.nextAction == 0 {
+		l.faultNow("counter_overflow", "Base action serial overflow")
+		return
+	}
+	l.state.Pending = &book.Action{Serial: l.nextAction, Kind: book.ActionOptions, Request: id}
+	l.maybeRunAction()
 }
 
 func (l *agentLoop) watchClosure(id book.RequestID, ctx context.Context) {
@@ -1426,7 +1461,7 @@ func resumedInputText(row *book.Request) string {
 }
 
 func (l *agentLoop) scheduleSteer(id book.RequestID) {
-	l.scheduleSteerAt(id, false, -1, nil)
+	l.scheduleSteerAt(id, false, -1, nil, "")
 }
 
 func (l *agentLoop) interruptBusy() bool {
@@ -1455,17 +1490,40 @@ func (l *agentLoop) runAdmittedInterrupt(id book.RequestID, disposition book.Act
 	l.runInterrupt(a)
 }
 
-func (l *agentLoop) scheduleSteerTargets(ids []book.RequestID, indices []int) {
+func (l *agentLoop) scheduleSteerTargets(word book.RequestID, ids []book.RequestID, indices []int) {
 	if len(ids) == 0 || len(ids) != len(indices) {
+		l.answerWord(word, terminalCandidate{value: map[string]any{}})
 		return
 	}
 	content, ok := l.steerBatchInput(ids)
 	if !ok {
+		l.answerWord(word, terminalCandidate{fail: true, code: "invalid_args", detail: "steer targets carry no content"})
 		return
 	}
 	tail := ids[len(ids)-1]
 	batch := &steerBatch{IDs: append([]book.RequestID(nil), ids...), Indices: append([]int(nil), indices...), Content: content}
-	l.scheduleSteerAt(tail, true, indices[len(indices)-1], batch)
+	l.scheduleSteerAt(tail, true, indices[len(indices)-1], batch, word)
+}
+
+// answerWord writes the terminal of the control request behind an action, if
+// any. A steer that took the no-turn shortcut has no action and was answered
+// on the spot; an action whose word already closed is simply not answered.
+func (l *agentLoop) answerWord(word book.RequestID, candidate terminalCandidate) {
+	if word == "" {
+		return
+	}
+	l.exec.terminal(string(word), candidate)
+}
+
+// noteSteering tells the ledger a queued request has left the queue for the
+// control slot. Its buttons go away with the controls list: nothing can be
+// done to it until the provider says whether it was merged.
+func (l *agentLoop) noteSteering(ids []book.RequestID) {
+	for _, id := range ids {
+		if l.state.Requests[id] != nil {
+			l.exec.progress(string(id), message.StatusQueued, map[string]any{"steering": true, "controls": []map[string]any{}})
+		}
+	}
 }
 
 func (l *agentLoop) steerBatchInput(ids []book.RequestID) (runtimeproto.Input, bool) {
@@ -1493,9 +1551,10 @@ func (l *agentLoop) steerBatchInput(ids []book.RequestID) (runtimeproto.Input, b
 	return content, true
 }
 
-func (l *agentLoop) scheduleSteerAt(id book.RequestID, steerTarget bool, bufferIndex int, batch *steerBatch) {
+func (l *agentLoop) scheduleSteerAt(id book.RequestID, steerTarget bool, bufferIndex int, batch *steerBatch, word book.RequestID) {
 	row := l.state.Requests[id]
 	if row == nil {
+		l.answerWord(word, terminalCandidate{fail: true, code: errorCASMismatch, detail: "steer target vanished"})
 		return
 	}
 	l.nextAction++
@@ -1503,7 +1562,7 @@ func (l *agentLoop) scheduleSteerAt(id book.RequestID, steerTarget bool, bufferI
 		l.faultNow("counter_overflow", "Base action serial overflow")
 		return
 	}
-	a := &book.Action{Serial: l.nextAction, Kind: book.ActionSteer, Request: id, SteerTarget: steerTarget, BufferIndex: bufferIndex}
+	a := &book.Action{Serial: l.nextAction, Kind: book.ActionSteer, Request: id, SteerTarget: steerTarget, BufferIndex: bufferIndex, Word: word}
 	if batch != nil {
 		if l.steerBatches == nil {
 			l.steerBatches = make(map[uint64]steerBatch)
@@ -1521,12 +1580,35 @@ func (l *agentLoop) scheduleSteerAt(id book.RequestID, steerTarget bool, bufferI
 		if old.Kind == book.ActionSteer && old.SteerTarget {
 			l.returnSteerTarget(old)
 			delete(l.steerBatches, old.Serial)
+			l.answerWord(old.Word, terminalCandidate{fail: true, code: "superseded", detail: "a newer steer replaced this one before it was applied; its target is back in the queue"})
 		} else if l.state.Requests[old.Request] != nil {
 			l.finish(old.Request, terminalCandidate{value: map[string]any{"superseded_by": id}})
 		}
 	}
+	if steerTarget {
+		if batch != nil {
+			l.noteSteering(batch.IDs)
+		} else {
+			l.noteSteering([]book.RequestID{id})
+		}
+	}
+	l.logger.Debug("agent action queued", "serial", a.Serial, "kind", a.Kind, "request", id, "word", word, "running", l.state.Running != nil)
 	l.state.Pending = a
 	l.maybeRunAction()
+}
+
+// dropPendingSteer returns a not-yet-dispatched steer to the queue so a
+// stronger intent (interrupt) can take the slot. A steer already with the
+// provider cannot be taken back and is not touched here.
+func (l *agentLoop) dropPendingSteer(reason string) {
+	old := l.state.Pending
+	if old == nil || old.Kind != book.ActionSteer || !old.SteerTarget {
+		return
+	}
+	l.state.Pending = nil
+	l.returnSteerTarget(old)
+	delete(l.steerBatches, old.Serial)
+	l.answerWord(old.Word, terminalCandidate{fail: true, code: "superseded", detail: reason})
 }
 
 func (l *agentLoop) scheduleCleanup() {
@@ -1552,6 +1634,7 @@ func (l *agentLoop) maybeRunAction() {
 	}
 	l.state.Pending = nil
 	l.state.Running = a
+	l.logger.Debug("agent action dispatched", "serial", a.Serial, "kind", a.Kind, "request", a.Request, "word", a.Word)
 	if batch, ok := l.steerBatches[a.Serial]; ok {
 		for _, id := range batch.IDs {
 			if row := l.state.Requests[id]; row != nil {
@@ -1568,7 +1651,22 @@ func (l *agentLoop) maybeRunAction() {
 		l.runInterrupt(a)
 	case book.ActionCleanup:
 		l.runCleanup(a)
+	case book.ActionOptions:
+		l.runOptions(a)
 	}
+}
+
+func (l *agentLoop) runOptions(a *book.Action) {
+	if l.state.Requests[a.Request] == nil {
+		l.completeAction()
+		return
+	}
+	a.Op = l.opID()
+	if err := l.exec.runtimeEnsureReady(a.Op); err != nil {
+		l.faultNow("command_admission", err.Error())
+		return
+	}
+	l.armReceipt(receiptKey("ready", uint64(a.Op)))
 }
 
 func (l *agentLoop) runSteer(a *book.Action) {
@@ -1580,6 +1678,7 @@ func (l *agentLoop) runSteer(a *book.Action) {
 	if turn == nil || turn.Phase != book.TurnActive || (row.ExplicitCAS && row.ExpectedTurn != turn.ID) {
 		if a.SteerTarget {
 			l.returnSteerTarget(a)
+			l.answerWord(a.Word, terminalCandidate{fail: true, code: "steer_missed", detail: "the turn ended before this steer could be applied; the target is back in the queue and will run as the next turn"})
 			l.completeAction()
 		} else if row.ExplicitCAS {
 			l.finish(row.ID, terminalCandidate{fail: true, code: errorCASMismatch,
@@ -1850,7 +1949,20 @@ func (l *agentLoop) settleSteer(a *book.Action, e runtimeEvent) {
 		if a.SteerTarget && e.verdict != runtimeproto.ControlAccepted {
 			l.returnSteerTarget(a)
 		}
+		l.answerWord(a.Word, terminalCandidate{fail: true, code: errorCASMismatch, detail: "steer target vanished before the provider answered"})
 		return
+	}
+	if e.verdict == runtimeproto.ControlAccepted {
+		l.answerWord(a.Word, terminalCandidate{value: map[string]any{"merged_into": row.ID}})
+	} else if a.SteerTarget {
+		code, detail := "steer_missed", e.detail
+		if e.verdict == runtimeproto.ControlTimeout {
+			code = errorControlTimeout
+		}
+		if detail == "" {
+			detail = "the provider did not take this steer; the target is back in the queue and will run as the next turn"
+		}
+		l.answerWord(a.Word, terminalCandidate{fail: true, code: code, detail: detail})
 	}
 	batch, batched := l.steerBatches[a.Serial]
 	if e.verdict == runtimeproto.ControlAccepted {
@@ -1901,6 +2013,7 @@ func (l *agentLoop) returnSteerTarget(a *book.Action) {
 			row.Location = book.Buffered
 			l.state.InsertAt(batch.Indices[idx], id)
 			l.state.BufferBytes += row.Bytes
+			l.noteRequeued(id)
 		}
 		return
 	}
@@ -1911,6 +2024,13 @@ func (l *agentLoop) returnSteerTarget(a *book.Action) {
 	row.Location = book.Buffered
 	l.state.InsertAt(a.BufferIndex, row.ID)
 	l.state.BufferBytes += row.Bytes
+	l.noteRequeued(row.ID)
+}
+
+// noteRequeued is the counterpart of noteSteering: the request is waiting
+// again, with its buttons.
+func (l *agentLoop) noteRequeued(id book.RequestID) {
+	l.exec.progress(string(id), message.StatusQueued, map[string]any{"controls": l.queuedControls()})
 }
 
 func (l *agentLoop) finishControlAction(a *book.Action) {
@@ -1919,13 +2039,21 @@ func (l *agentLoop) finishControlAction(a *book.Action) {
 
 func (l *agentLoop) onReadyDone(e runtimeEvent) {
 	a := l.state.Running
-	if a == nil || a.Kind != book.ActionRestart || a.Op != e.op {
+	if a == nil || (a.Kind != book.ActionRestart && a.Kind != book.ActionOptions) || a.Op != e.op {
 		l.logLate("ReadyDone", "")
 		return
 	}
 	l.clearReceipt(receiptKey("ready", uint64(e.op)))
+	if a.Request == "" || l.state.Requests[a.Request] == nil {
+		l.completeAction()
+		return
+	}
 	if e.ready.Ready {
-		l.finish(a.Request, terminalCandidate{value: map[string]any{"restarted": true}})
+		if a.Kind == book.ActionOptions {
+			l.finish(a.Request, terminalCandidate{value: e.ready.Options})
+		} else {
+			l.finish(a.Request, terminalCandidate{value: map[string]any{"restarted": true}})
+		}
 	} else {
 		code := e.ready.Code
 		if code == "" {
@@ -1938,6 +2066,7 @@ func (l *agentLoop) onReadyDone(e runtimeEvent) {
 
 func (l *agentLoop) completeAction() {
 	if a := l.state.Running; a != nil {
+		l.logger.Debug("agent action settled", "serial", a.Serial, "kind", a.Kind, "request", a.Request, "word", a.Word)
 		delete(l.steerBatches, a.Serial)
 	}
 	l.state.Running = nil
@@ -2047,7 +2176,7 @@ func (l *agentLoop) logLate(kind string, turn runtimeproto.TurnID) {
 }
 func normalizeStartCode(code string) string {
 	switch code {
-	case errorInputTooLarge, errorProviderCrash, errorProviderFailed, errorProviderTimeout, errorBaseCapacity:
+	case "invalid_args", errorInputTooLarge, errorProviderCrash, errorProviderFailed, errorProviderTimeout, errorBaseCapacity:
 		return code
 	}
 	return errorProviderFailed

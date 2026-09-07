@@ -67,6 +67,9 @@ func TestOpenInitializesThenReadyAndSeedIsClientSession(t *testing.T) {
 	if len(seeds) != 1 || len(ready) != 1 || string(seeds[0].Value) == "" {
 		t.Fatalf("events=%#v", h.sink.snapshot())
 	}
+	if ready[0].Options.Source != driverproto.OptionsSourceNative || len(ready[0].Options.Models) == 0 {
+		t.Fatalf("ready options=%+v", ready[0].Options)
+	}
 	if !containsArgs(h.args, "--session-id", string(seeds[0].Value)) {
 		t.Fatalf("args=%q seed=%q", h.args, seeds[0].Value)
 	}

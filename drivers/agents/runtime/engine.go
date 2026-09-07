@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +64,7 @@ type generationState struct {
 	reapRevision uint64
 	sink         *generationSink
 	stagedSeed   []byte
+	options      driverproto.OptionsSnapshot
 }
 
 type controlState struct {
@@ -143,6 +145,26 @@ type engine struct {
 	turn         *turnState
 	seed         []byte
 	options      runtimeproto.TurnOptions
+	// catalog mirrors generation.options for readers outside the loop goroutine
+	// (agent.options). Written on the loop, read anywhere; nil = no live
+	// generation. It is a mirror, never the authority: the loop still owns
+	// generation.options.
+	catalog atomic.Pointer[driverproto.OptionsSnapshot]
+}
+
+// Options answers agent.options without entering the engine loop: the last
+// snapshot the live generation published, or ok=false when nothing is alive.
+func (e *engine) Options() (driverproto.OptionsSnapshot, bool) {
+	snapshot := e.catalog.Load()
+	if snapshot == nil {
+		return driverproto.OptionsSnapshot{}, false
+	}
+	return driverproto.CloneOptionsSnapshot(*snapshot), true
+}
+
+func (e *engine) publishCatalog() {
+	snapshot := driverproto.CloneOptionsSnapshot(e.generation.options)
+	e.catalog.Store(&snapshot)
 }
 
 func newEngine(provider driverproto.Provider, spec driverproto.ProviderSpec, policy Policy, deps runtimeproto.Deps, seed []byte, options runtimeproto.TurnOptions, events runtimeproto.Events) (*engine, error) {
@@ -328,7 +350,7 @@ func (e *engine) acceptEnsureReady(op runtimeproto.OpID) {
 		return
 	}
 	if e.generation.phase == generationReady {
-		e.publish(publishReadyDone{op: op, result: runtimeproto.ReadyResult{Ready: true}})
+		e.publish(publishReadyDone{op: op, result: runtimeproto.ReadyResult{Ready: true, Options: driverproto.CloneOptionsSnapshot(e.generation.options)}})
 		return
 	}
 	e.pending = &pendingDemand{kind: demandReady, op: op}
@@ -442,8 +464,16 @@ func (e *engine) dispatchDemand() {
 	}
 	if d.kind == demandReady {
 		e.pending = nil
-		e.publish(publishReadyDone{op: d.op, result: runtimeproto.ReadyResult{Ready: true}})
+		e.publish(publishReadyDone{op: d.op, result: runtimeproto.ReadyResult{Ready: true, Options: driverproto.CloneOptionsSnapshot(e.generation.options)}})
 		return
+	}
+	if d.start.Kind == runtimeproto.TurnSelect && len(e.generation.options.Models) > 0 {
+		requested := driverproto.TurnOptions{Model: d.start.Options.Model, Effort: d.start.Options.Effort}
+		if !e.generation.options.Accepts(requested) {
+			e.pending = nil
+			e.publish(publishTurnRejected{op: d.op, code: "invalid_args", detail: "model/effort is not offered by the current provider generation; call agent.options and choose a listed value"})
+			return
+		}
 	}
 	e.pending = nil
 	attempt, ok := e.ids.Attempt()
@@ -501,7 +531,7 @@ func (e *engine) handleDriverFact(f driverFact) {
 	}
 	switch x := f.event.(type) {
 	case driverproto.WorkerReady:
-		e.workerReady()
+		e.workerReady(x)
 	case driverproto.OpenRejected:
 		e.openRejected(x)
 	case driverproto.SubmissionRejected:
@@ -529,12 +559,20 @@ func (e *engine) handleDriverFact(f driverFact) {
 	}
 }
 
-func (e *engine) workerReady() {
+func (e *engine) workerReady(ready driverproto.WorkerReady) {
 	if e.generation.phase != generationOpening {
 		e.logContradiction("contradictory WorkerReady", nil)
 		return
 	}
 	e.generation.phase = generationReady
+	e.generation.options = driverproto.CloneOptionsSnapshot(ready.Options)
+	if len(e.generation.options.Models) == 0 {
+		e.generation.options = driverproto.FallbackOptions(e.providerSpec.Name, e.providerSpec.Selections, e.providerSpec.SelectionTitles, e.providerSpec.DefaultSelection, driverproto.TurnOptions{Model: e.options.Model, Effort: e.options.Effort})
+	}
+	if current := e.generation.options.Current; current.Model != "" {
+		e.options = runtimeproto.TurnOptions{Model: current.Model, Effort: current.Effort}
+	}
+	e.publishCatalog()
 	if len(e.generation.stagedSeed) > 0 {
 		e.publish(publishSeed{value: e.generation.stagedSeed})
 		e.generation.stagedSeed = nil
@@ -681,6 +719,8 @@ func (e *engine) turnEnded(x driverproto.TurnEnded) {
 	usage := runtimeproto.TurnUsage{ContextTokens: x.Usage.ContextTokens, ContextWindow: x.Usage.ContextWindow, Model: x.Usage.Model, Effort: x.Usage.Effort}
 	if e.turn.start.Kind == runtimeproto.TurnSelect && status == runtimeproto.TurnStatusOK {
 		e.options = runtimeproto.TurnOptions{Model: usage.Model, Effort: usage.Effort}
+		e.generation.options.Current = driverproto.TurnOptions{Model: usage.Model, Effort: usage.Effort}
+		e.publishCatalog()
 	}
 	e.publish(publishTurnEnded{turn: e.turn.id, status: status, text: x.FinalText, detail: x.ErrorDetail, usage: usage})
 	e.turn.terminal = true
@@ -823,6 +863,7 @@ func (e *engine) arm(kind timerKind, delay time.Duration, fact timerFact) {
 }
 
 func (e *engine) beginRetire(detail string) {
+	e.catalog.Store(nil)
 	if e.generation.phase == generationNil || e.generation.phase == generationRetiring {
 		return
 	}

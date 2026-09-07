@@ -117,6 +117,7 @@ type codexHarness struct {
 	worker *worker
 	sink   *codexEventSink
 	proc   *codexFakeProcess
+	ready  driverproto.WorkerReady
 }
 
 func newCodexHarness(t *testing.T, options driverproto.TurnOptions, inspectOpen func(map[string]any)) *codexHarness {
@@ -140,6 +141,14 @@ func newCodexHarnessWithResume(t *testing.T, options driverproto.TurnOptions, re
 	if initialized["method"] != "initialized" {
 		t.Fatalf("initialized=%v", initialized)
 	}
+	modelList := h.input()
+	if modelList["method"] != "model/list" {
+		t.Fatalf("model/list=%v", modelList)
+	}
+	h.respond(modelList, map[string]any{"data": []any{
+		map[string]any{"id": "gpt-session-default", "model": "gpt-session-default", "displayName": "Session default", "isDefault": true, "defaultReasoningEffort": "session-effort", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "session-effort"}}},
+		map[string]any{"id": "gpt-test", "model": "gpt-test", "displayName": "Test", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "low"}, map[string]any{"reasoningEffort": "medium"}, map[string]any{"reasoningEffort": "high"}}},
+	}})
 	open := h.input()
 	if inspectOpen != nil {
 		inspectOpen(open)
@@ -147,7 +156,7 @@ func newCodexHarnessWithResume(t *testing.T, options driverproto.TurnOptions, re
 	// The real thread/start|resume response reports the session's actual
 	// model/effort defaults alongside the thread (see appserver wire).
 	h.respond(open, map[string]any{"thread": map[string]any{"id": "thread-1"}, "model": "gpt-session-default", "reasoningEffort": "session-effort"})
-	h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.WorkerReady); return ok })
+	h.ready = h.waitEvent(func(event driverproto.DriverEvent) bool { _, ok := event.(driverproto.WorkerReady); return ok }).(driverproto.WorkerReady)
 	t.Cleanup(func() {
 		h.worker.Retire()
 		h.proc.close()
@@ -206,11 +215,14 @@ func (h *codexHarness) startTurn(attempt driverproto.AttemptToken, text string) 
 }
 
 func TestOpenPassesSelectedModelToThreadStart(t *testing.T) {
-	newCodexHarness(t, driverproto.TurnOptions{Model: "gpt-test", Effort: "high"}, func(open map[string]any) {
+	h := newCodexHarness(t, driverproto.TurnOptions{Model: "gpt-test", Effort: "high"}, func(open map[string]any) {
 		if open["method"] != "thread/start" || rpcParams(open)["model"] != "gpt-test" {
 			t.Fatalf("open=%v", open)
 		}
 	})
+	if h.ready.Options.Source != driverproto.OptionsSourceNative || len(h.ready.Options.Models) != 2 {
+		t.Fatalf("ready options=%+v", h.ready.Options)
+	}
 }
 
 func TestResumeReappliesYoloThreadPolicy(t *testing.T) {

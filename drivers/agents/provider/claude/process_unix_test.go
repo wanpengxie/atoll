@@ -36,6 +36,36 @@ func TestProcessWaitDoesNotCloseStdoutBeforeFinalDrain(t *testing.T) {
 	}
 }
 
+func TestProbeVersionRecognizesNativeAndNPMInstallShapes(t *testing.T) {
+	dir := t.TempDir()
+	native := filepath.Join(dir, "2.1.258")
+	if err := os.WriteFile(native, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(dir, "claude")
+	if err := os.Symlink(native, launcher); err != nil {
+		t.Fatal(err)
+	}
+	if got := probeVersion(launcher); got != "2.1.258" {
+		t.Fatalf("native version=%q", got)
+	}
+
+	pkgDir := filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-code")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cli := filepath.Join(pkgDir, "cli.js")
+	if err := os.WriteFile(cli, []byte("#!/usr/bin/env node\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@anthropic-ai/claude-code","version":"2.1.263"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := probeVersion(cli); got != "2.1.263" {
+		t.Fatalf("npm version=%q", got)
+	}
+}
+
 func TestStopTermsThenKillsProcessGroupIncludingGrandchildren(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "term-resistant")

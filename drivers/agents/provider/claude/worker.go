@@ -142,6 +142,7 @@ type worker struct {
 	options           driverproto.TurnOptions
 	lastModel         string
 	usage             driverproto.TurnUsage
+	catalog           driverproto.OptionsSnapshot
 	// hostToolCalls tracks tool_use ids the stream narrated for HOST-served
 	// tools (mcp__atoll__* → served via the sdk MCP channel → projected
 	// authoritatively by the host callback). Their tool_use/tool_result
@@ -286,6 +287,11 @@ func (w *worker) afterInitialize(c *connection, reply controlReply) {
 		return
 	}
 	w.initializeDiagnostic(reply.Response)
+	snapshot := w.optionsFromInitialize(reply.Response, w.options)
+	w.mu.Lock()
+	w.catalog = driverproto.CloneOptionsSnapshot(snapshot)
+	w.options = snapshot.Current
+	w.mu.Unlock()
 	w.fetchInitialContextWindow(c)
 }
 
@@ -324,7 +330,7 @@ func (w *worker) finishOpen(c *connection) {
 	if !resume && !w.publish(driverproto.SeedUpdated{Value: []byte(session)}) {
 		return
 	}
-	w.publish(driverproto.WorkerReady{})
+	w.publish(driverproto.WorkerReady{Options: driverproto.CloneOptionsSnapshot(w.catalog)})
 }
 
 func (w *worker) refreshContextWindow(c *connection) {
@@ -397,13 +403,7 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	c, session := w.conn, w.session
 	w.phase, w.attempt = phaseStarting, req.Attempt
 	w.target = driverproto.WorkerTurnTarget{Attempt: req.Attempt}
-	selected := req.Options
-	if selected.Model == "" {
-		selected.Model = w.options.Model
-	}
-	if selected.Effort == "" {
-		selected.Effort = w.options.Effort
-	}
+	selected := claudeSelectionForCatalog(w.options, req.Options, w.catalog)
 	w.turn = &turnState{U: u, kind: req.Kind, options: selected, steers: map[string]steerState{}, seen: map[string]map[string]bool{}}
 	w.mu.Unlock()
 	if req.Kind == driverproto.TurnSelect {

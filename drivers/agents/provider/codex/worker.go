@@ -54,6 +54,7 @@ type worker struct {
 	options driverproto.TurnOptions
 	pending driverproto.TurnOptions
 	usage   driverproto.TurnUsage
+	catalog driverproto.OptionsSnapshot
 	// sessionModel/sessionEffort are the ACTUAL defaults codex reported in the
 	// thread/start|resume response (model + reasoningEffort). When the decl
 	// configures nothing, turns run on these — usage accounting reports them
@@ -162,7 +163,49 @@ func (w *worker) afterInitialize(c *connection, seed []byte, raw json.RawMessage
 		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
 		return
 	}
+	w.discoverOptions(c, seed, initialized.UserAgent, nil, "")
+}
+
+func (w *worker) discoverOptions(c *connection, seed []byte, userAgent string, models []codexModel, cursor string) {
+	params := map[string]any{"includeHidden": false}
+	if cursor != "" {
+		params["cursor"] = cursor
+	}
+	if err := c.rpc.callAsync("model/list", params, func(raw json.RawMessage, err error) {
+		if !w.isOpening(c) {
+			return
+		}
+		if err != nil {
+			w.finishInitialize(c, seed, w.fallbackOptions(w.options, codexClientVersion(userAgent)))
+			return
+		}
+		page, ok := decodeModelList(raw)
+		if !ok {
+			w.finishInitialize(c, seed, w.fallbackOptions(w.options, codexClientVersion(userAgent)))
+			return
+		}
+		models = append(models, page.Data...)
+		if page.NextCursor != "" {
+			w.discoverOptions(c, seed, userAgent, models, page.NextCursor)
+			return
+		}
+		snapshot, ok := nativeOptions(models, w.options, codexClientVersion(userAgent))
+		if !ok {
+			snapshot = w.fallbackOptions(w.options, codexClientVersion(userAgent))
+		}
+		w.finishInitialize(c, seed, snapshot)
+	}); err != nil {
+		w.publish(driverproto.WorkerEnded{Cause: driverproto.WorkerTransportEnded, Detail: err.Error()})
+	}
+}
+
+func (w *worker) finishInitialize(c *connection, seed []byte, snapshot driverproto.OptionsSnapshot) {
+	if w.cfg.latestProbe != nil {
+		applyUpdateSignal(&snapshot.Client, w.cfg.latestProbe())
+	}
 	w.mu.Lock()
+	w.catalog = driverproto.CloneOptionsSnapshot(snapshot)
+	w.options = snapshot.Current
 	model := w.options.Model
 	w.mu.Unlock()
 	startParams := w.threadStartParams(model, "")
@@ -243,11 +286,15 @@ func (w *worker) afterSession(c *connection, resumed bool, raw json.RawMessage, 
 	}
 	w.thread, w.phase = id, phaseReady
 	w.sessionModel, w.sessionEffort = configured.Model, configured.ReasoningEffort
+	w.catalog.Current = driverproto.TurnOptions{Model: configured.Model, Effort: configured.ReasoningEffort}
+	if w.catalog.Current.Model == "" {
+		w.catalog.Current = w.options
+	}
 	w.mu.Unlock()
 	if !w.publish(driverproto.SeedUpdated{Value: encodeResumeSeed(id, w.surface.Digest())}) {
 		return
 	}
-	w.publish(driverproto.WorkerReady{})
+	w.publish(driverproto.WorkerReady{Options: driverproto.CloneOptionsSnapshot(w.catalog)})
 }
 
 func (w *worker) isOpening(c *connection) bool {
@@ -270,13 +317,7 @@ func (w *worker) Start(_ context.Context, req driverproto.StartRequest) {
 	w.phase, w.attempt = phaseStarting, req.Attempt
 	w.target = driverproto.WorkerTurnTarget{Attempt: req.Attempt}
 	if req.Kind == driverproto.TurnSelect {
-		selected := req.Options
-		if selected.Model == "" {
-			selected.Model = w.options.Model
-		}
-		if selected.Effort == "" {
-			selected.Effort = w.options.Effort
-		}
+		selected := codexSelectionForCatalog(w.options, req.Options, w.catalog)
 		w.options = selected
 		w.pending = req.Options
 		w.target.Native = driverproto.WorkerTurnRef(fmt.Sprintf("select-%d", req.Attempt))

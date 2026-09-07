@@ -69,6 +69,7 @@ const (
 	ActionTerminate
 	ActionRestart
 	ActionCleanup
+	ActionOptions
 )
 
 type ActionDisposition uint8
@@ -91,6 +92,11 @@ type Action struct {
 	OwnerAtAdmit RequestID
 	SteerTarget  bool
 	BufferIndex  int
+	// Word is the control request (agent.steer) that asked for this action. It
+	// is answered when the action settles, not when it is scheduled: "steer
+	// accepted" is a fact the provider decides, and a green tick written
+	// before that fact was the reason people retried into cas_mismatch.
+	Word RequestID
 }
 
 type State struct {

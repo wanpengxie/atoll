@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Documentation struct {
@@ -35,8 +36,8 @@ type ProviderSpec struct {
 	DefaultSelection int
 	// SelectionTitles are display metadata parallel to Selections (same index).
 	// They ride NEXT TO TurnOptions, never inside it: options participate in
-	// persistence and equality, titles never do — they only feed the
-	// agent.select manifest schema (oneOf branch titles).
+	// persistence and equality, titles never do. Providers use them only when
+	// they must construct the declaration fallback for agent.options.
 	SelectionTitles []SelectionTitle
 }
 
@@ -47,10 +48,122 @@ type SelectionTitle struct {
 	Effort string
 }
 
-// ValidateSelections rejects a selections list the agent.select manifest
-// schema cannot faithfully represent: blank fields, or a duplicate
-// (model, effort) pair — a duplicate becomes two identical oneOf branches,
-// and a fully valid submit then matches both and fails oneOf validation.
+// OptionsSnapshot is one provider worker generation's native option catalog.
+// It is actor-local runtime data: the provider discovers it while opening and
+// agent.options returns it. Declaration selections remain only the fallback
+// used when native discovery is unavailable.
+type OptionsSnapshot struct {
+	Provider    string        `json:"provider"`
+	Source      string        `json:"source"`
+	GeneratedAt string        `json:"generated_at"`
+	Models      []ModelOption `json:"models"`
+	Default     TurnOptions   `json:"default"`
+	Current     TurnOptions   `json:"current"`
+	Client      ClientInfo    `json:"client"`
+}
+
+type ModelOption struct {
+	Value       string         `json:"value"`
+	Label       string         `json:"label,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Efforts     []EffortOption `json:"efforts,omitempty"`
+}
+
+type EffortOption struct {
+	Value       string `json:"value"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type ClientInfo struct {
+	Name         string `json:"name"`
+	Current      string `json:"current,omitempty"`
+	Latest       string `json:"latest,omitempty"`
+	UpdateStatus string `json:"update_status"`
+}
+
+const (
+	OptionsSourceNative   = "native"
+	OptionsSourceFallback = "fallback"
+	UpdateCurrent         = "current"
+	UpdateAvailable       = "available"
+	UpdateUnknown         = "unknown"
+)
+
+// FallbackOptions groups the declaration's flat legal pairs into the same
+// model-first shape native providers report.
+func FallbackOptions(provider string, selections []TurnOptions, titles []SelectionTitle, defaultIndex int, current TurnOptions) OptionsSnapshot {
+	models := make([]ModelOption, 0)
+	index := map[string]int{}
+	for i, pair := range selections {
+		model := strings.TrimSpace(pair.Model)
+		if model == "" {
+			continue
+		}
+		mi, ok := index[model]
+		if !ok {
+			label := ""
+			if i < len(titles) {
+				label = titles[i].Model
+			}
+			mi = len(models)
+			index[model] = mi
+			models = append(models, ModelOption{Value: model, Label: label})
+		}
+		effort := strings.TrimSpace(pair.Effort)
+		if effort == "" {
+			continue
+		}
+		label := ""
+		if i < len(titles) {
+			label = titles[i].Effort
+		}
+		models[mi].Efforts = append(models[mi].Efforts, EffortOption{Value: effort, Label: label})
+	}
+	def := TurnOptions{}
+	if defaultIndex >= 0 && defaultIndex < len(selections) {
+		def = selections[defaultIndex]
+	}
+	if current.Model == "" {
+		current = def
+	}
+	return OptionsSnapshot{
+		Provider: provider, Source: OptionsSourceFallback, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Models: models, Default: def, Current: current,
+		Client: ClientInfo{Name: provider, UpdateStatus: UpdateUnknown},
+	}
+}
+
+func CloneOptionsSnapshot(in OptionsSnapshot) OptionsSnapshot {
+	out := in
+	out.Models = make([]ModelOption, len(in.Models))
+	for i, model := range in.Models {
+		out.Models[i] = model
+		out.Models[i].Efforts = append([]EffortOption(nil), model.Efforts...)
+	}
+	return out
+}
+
+func (s OptionsSnapshot) Accepts(options TurnOptions) bool {
+	for _, model := range s.Models {
+		if model.Value != options.Model {
+			continue
+		}
+		if options.Effort == "" {
+			return true
+		}
+		for _, effort := range model.Efforts {
+			if effort.Value == options.Effort {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ValidateSelections rejects a fallback catalog with blank fields or a
+// duplicate (model, effort) pair. The catalog is data returned by
+// agent.options; it is deliberately absent from actor.describe's schema.
 func ValidateSelections(selections []TurnOptions) error {
 	seen := map[TurnOptions]struct{}{}
 	for i, option := range selections {

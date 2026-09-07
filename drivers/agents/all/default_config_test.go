@@ -12,11 +12,10 @@ import (
 
 func TestOrdinaryAgentBuildInheritsProviderDefaultConfig(t *testing.T) {
 	tests := []struct {
-		class    string
-		branches int
+		class string
 	}{
-		{class: "codex", branches: 15},
-		{class: "claude", branches: 20},
+		{class: "codex"},
+		{class: "claude"},
 	}
 	for _, test := range tests {
 		t.Run(test.class, func(t *testing.T) {
@@ -27,14 +26,19 @@ func TestOrdinaryAgentBuildInheritsProviderDefaultConfig(t *testing.T) {
 				t.Fatal(err)
 			}
 			word := decl.Factory.Proc.Manifest.Words[base.TypeSelect]
-			var schema struct {
-				OneOf []json.RawMessage `json:"oneOf"`
-			}
+			var schema map[string]any
 			if err := json.Unmarshal(word.InputSchema, &schema); err != nil {
 				t.Fatalf("agent.select schema: %v (%s)", err, word.InputSchema)
 			}
-			if len(schema.OneOf) != test.branches {
-				t.Fatalf("oneOf branches=%d want=%d", len(schema.OneOf), test.branches)
+			if _, dynamic := schema["oneOf"]; dynamic {
+				t.Fatal("agent.select manifest must be stable; dynamic values belong to agent.options")
+			}
+			required, _ := schema["required"].([]any)
+			if len(required) != 1 || required[0] != "model" {
+				t.Fatalf("required=%v want [model]", required)
+			}
+			if _, ok := decl.Factory.Proc.Manifest.Words[base.TypeOptions]; !ok {
+				t.Fatal("agent.options missing from manifest")
 			}
 		})
 	}

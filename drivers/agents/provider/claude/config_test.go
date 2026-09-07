@@ -68,8 +68,7 @@ func TestConfigSelectionLabelsRideBesideOptionsNotInside(t *testing.T) {
 }
 
 func TestConfigRejectsDuplicateOrBlankSelections(t *testing.T) {
-	// A duplicate (model, effort) pair becomes two identical oneOf branches,
-	// making the fully valid submit match both and fail oneOf validation.
+	// A duplicate pair would create two copies of one fallback option.
 	if err := ValidateConfig(json.RawMessage(`{"selections":[{"model":"m","effort":"e"},{"model":"m","effort":"e"}]}`)); err == nil {
 		t.Fatal("duplicate selection accepted")
 	}

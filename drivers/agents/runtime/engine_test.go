@@ -130,6 +130,7 @@ type collectedEvent struct {
 	turn  runtimeproto.TurnID
 	text  string
 	usage runtimeproto.TurnUsage
+	ready runtimeproto.ReadyResult
 }
 type eventCollector struct {
 	ch    chan collectedEvent
@@ -157,8 +158,8 @@ func (c *eventCollector) TurnEnded(id runtimeproto.TurnID, _ runtimeproto.TurnSt
 func (c *eventCollector) ControlDone(op runtimeproto.OpID, id runtimeproto.TurnID, _ runtimeproto.ControlVerdict, _ string) {
 	c.ch <- collectedEvent{kind: "control", op: op, turn: id}
 }
-func (c *eventCollector) ReadyDone(op runtimeproto.OpID, _ runtimeproto.ReadyResult) {
-	c.ch <- collectedEvent{kind: "ready", op: op}
+func (c *eventCollector) ReadyDone(op runtimeproto.OpID, result runtimeproto.ReadyResult) {
+	c.ch <- collectedEvent{kind: "ready", op: op, ready: result}
 }
 func (c *eventCollector) ProviderLost(id runtimeproto.TurnID, _ runtimeproto.LostCause, detail string) {
 	c.ch <- collectedEvent{kind: "lost", turn: id, text: detail}
@@ -580,6 +581,53 @@ func newStateEngine(t *testing.T) (*engine, *testWorker, *eventCollector) {
 	return e, w, events
 }
 
+func TestReadyReturnsAnIsolatedCurrentGenerationOptionsSnapshot(t *testing.T) {
+	e, _, events := newStateEngine(t)
+	e.generation.options = driverproto.OptionsSnapshot{
+		Provider: "test", Source: driverproto.OptionsSourceNative,
+		Models:  []driverproto.ModelOption{{Value: "m", Efforts: []driverproto.EffortOption{{Value: "high"}}}},
+		Current: driverproto.TurnOptions{Model: "m", Effort: "high"},
+	}
+	e.acceptEnsureReady(23)
+	got := awaitKind(t, events, "ready")
+	if got.op != 23 || !got.ready.Ready || got.ready.Options.Current.Model != "m" {
+		t.Fatalf("ready=%+v", got)
+	}
+	got.ready.Options.Models[0].Efforts[0].Value = "mutated"
+	if e.generation.options.Models[0].Efforts[0].Value != "high" {
+		t.Fatal("ReadyDone exposed the runtime's mutable generation snapshot")
+	}
+}
+
+func TestWorkerReadyAdoptsProviderRebasedCurrentSelection(t *testing.T) {
+	e, _, _ := newStateEngine(t)
+	e.generation.phase = generationOpening
+	e.options = runtimeproto.TurnOptions{Model: "retired", Effort: "high"}
+	want := driverproto.TurnOptions{Model: "new-default", Effort: "medium"}
+	e.workerReady(driverproto.WorkerReady{Options: driverproto.OptionsSnapshot{
+		Models:  []driverproto.ModelOption{{Value: want.Model, Efforts: []driverproto.EffortOption{{Value: want.Effort}}}},
+		Current: want,
+	}})
+	if e.options != (runtimeproto.TurnOptions{Model: want.Model, Effort: want.Effort}) {
+		t.Fatalf("runtime current=%+v want=%+v", e.options, want)
+	}
+}
+
+func TestSelectRejectsValueMissingFromCurrentGenerationCatalog(t *testing.T) {
+	e, _, events := newStateEngine(t)
+	e.generation.options = driverproto.OptionsSnapshot{
+		Models: []driverproto.ModelOption{{Value: "new", Efforts: []driverproto.EffortOption{{Value: "low"}}}},
+	}
+	e.acceptStart(runtimeproto.StartCommand{Op: 24, Kind: runtimeproto.TurnSelect, Options: runtimeproto.TurnOptions{Model: "old", Effort: "low"}})
+	got := awaitKind(t, events, "rejected")
+	if got.op != 24 || got.text != "invalid_argsmodel/effort is not offered by the current provider generation; call agent.options and choose a listed value" {
+		t.Fatalf("rejection=%+v", got)
+	}
+	if e.pending != nil || e.turn != nil || e.generation.phase != generationReady {
+		t.Fatalf("rejected select mutated state: pending=%+v turn=%+v phase=%v", e.pending, e.turn, e.generation.phase)
+	}
+}
+
 func setFixtureTurn(e *engine, starting, terminal bool) (*turnState, driverproto.WorkerTurnTarget) {
 	target := driverproto.WorkerTurnTarget{Attempt: 1, Native: "native-turn"}
 	life, cancel := context.WithCancel(e.root)
@@ -835,3 +883,29 @@ var _ driverproto.Worker = (*testWorker)(nil)
 var _ driverproto.Provider = (*resumeRetryProvider)(nil)
 var _ driverproto.Worker = (*resumeRetryWorker)(nil)
 var _ runtimeproto.Events = (*eventCollector)(nil)
+
+// agent.options reads the catalog through a mirror that follows the generation:
+// present once the worker is ready, gone the moment the generation retires.
+func TestOptionsMirrorFollowsTheGeneration(t *testing.T) {
+	e, _, _ := newStateEngine(t)
+	if _, ok := e.Options(); ok {
+		t.Fatalf("options readable before any worker is ready")
+	}
+	e.generation.phase = generationOpening
+	e.workerReady(driverproto.WorkerReady{Options: driverproto.OptionsSnapshot{
+		Models:  []driverproto.ModelOption{{Value: "fable", Efforts: []driverproto.EffortOption{{Value: "high"}}}},
+		Current: driverproto.TurnOptions{Model: "fable", Effort: "high"},
+	}})
+	got, ok := e.Options()
+	if !ok || len(got.Models) != 1 || got.Models[0].Value != "fable" {
+		t.Fatalf("options=%+v ok=%v", got, ok)
+	}
+	got.Models[0].Value = "mutated"
+	if again, _ := e.Options(); again.Models[0].Value != "fable" {
+		t.Fatalf("mirror handed out shared state: %+v", again)
+	}
+	e.beginRetire("test")
+	if _, ok := e.Options(); ok {
+		t.Fatalf("options still readable after retire")
+	}
+}

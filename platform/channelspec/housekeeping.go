@@ -15,7 +15,7 @@ import "strings"
 func HousekeepingWord(word string) bool {
 	switch word {
 	case "actor.describe",
-		"agent.context", "agent.hold", "agent.unhold", "agent.interrupt",
+		"agent.context", "agent.options", "agent.hold", "agent.unhold", "agent.interrupt",
 		"agent.fork", "agent.select", "agent.new", "agent.steer", "agent.compact":
 		return true
 	}

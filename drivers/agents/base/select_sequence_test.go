@@ -73,9 +73,13 @@ func TestSelectSequenceMatchesFrontendFlow(t *testing.T) {
 		t.Fatalf("post-select context=%v", second)
 	}
 
-	// ④ Selections are pairs, not a cartesian product: (gpt-b, medium) is not
-	// in the catalog even though both values appear separately.
+	// ④ Base only validates the stable payload shape. The runtime owns the
+	// current generation catalog and rejects a stale pair before the provider.
 	l.handleIntake(v7Request("sel2", TypeSelect, "caller", `{"model":"gpt-b","effort":"medium"}`))
+	if l.state.Turn == nil {
+		t.Fatal("selection did not reach runtime validation")
+	}
+	l.onTurnRejected(runtimeEvent{kind: evTurnRejected, op: l.state.Turn.StartOp, code: "invalid_args", detail: "not in current catalog"})
 	bad := sys.terminal("sel2")
 	if len(bad) != 1 || !bad[0].fail || bad[0].code != "invalid_args" {
 		t.Fatalf("illegal select terminal=%v", bad)

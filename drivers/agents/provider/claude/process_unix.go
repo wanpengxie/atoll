@@ -4,10 +4,14 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -15,6 +19,45 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 )
+
+func probeVersion(binary string) string {
+	if strings.TrimSpace(binary) == "" {
+		return ""
+	}
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	if version := regexp.MustCompile(`^\d+(?:\.\d+){1,3}(?:[-+].+)?$`).FindString(filepath.Base(resolved)); version != "" {
+		return version
+	}
+	// npm's launcher normally resolves to .../@anthropic-ai/claude-code/cli.js.
+	// Read its own package metadata; never ask a different package manager or
+	// run a second client process to guess the worker's version.
+	dir := filepath.Dir(resolved)
+	for range 8 {
+		raw, readErr := os.ReadFile(filepath.Join(dir, "package.json"))
+		if readErr == nil {
+			var pkg struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			}
+			if json.Unmarshal(raw, &pkg) == nil && pkg.Name == "@anthropic-ai/claude-code" {
+				return strings.TrimSpace(pkg.Version)
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
 
 type childProcess struct {
 	cmd         *exec.Cmd

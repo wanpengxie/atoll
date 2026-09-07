@@ -103,10 +103,11 @@ func (x *executor) progress(id, status string, value any) {
 	}
 }
 
-func (x *executor) runtimeStart(v runtimeproto.StartCommand) error     { return x.runtime.Start(v) }
-func (x *executor) runtimeControl(v runtimeproto.ControlCommand) error { return x.runtime.Control(v) }
-func (x *executor) runtimeTerminate() error                            { return x.runtime.Terminate() }
-func (x *executor) runtimeEnsureReady(op runtimeproto.OpID) error      { return x.runtime.EnsureReady(op) }
-func (x *executor) revoke(scope effectcap.Scope)                       { x.vault.Revoke(scope) }
-func (x *executor) persistSeed(value []byte)                           { persistSeed(x.sys, value) }
-func (x *executor) persistSelection(value runtimeproto.TurnOptions)    { persistSelection(x.sys, value) }
+func (x *executor) runtimeStart(v runtimeproto.StartCommand) error       { return x.runtime.Start(v) }
+func (x *executor) runtimeControl(v runtimeproto.ControlCommand) error   { return x.runtime.Control(v) }
+func (x *executor) runtimeTerminate() error                              { return x.runtime.Terminate() }
+func (x *executor) runtimeEnsureReady(op runtimeproto.OpID) error        { return x.runtime.EnsureReady(op) }
+func (x *executor) runtimeOptions() (runtimeproto.OptionsSnapshot, bool) { return x.runtime.Options() }
+func (x *executor) revoke(scope effectcap.Scope)                         { x.vault.Revoke(scope) }
+func (x *executor) persistSeed(value []byte)                             { persistSeed(x.sys, value) }
+func (x *executor) persistSelection(value runtimeproto.TurnOptions)      { persistSelection(x.sys, value) }

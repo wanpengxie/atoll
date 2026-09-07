@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/agents/base/internal/book"
+	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
 	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -24,6 +26,15 @@ import (
 type captureRuntime struct {
 	starts   []runtimeproto.StartCommand
 	controls []runtimeproto.ControlCommand
+	readyOps []runtimeproto.OpID
+	snapshot *driverproto.OptionsSnapshot
+}
+
+func (r *captureRuntime) Options() (driverproto.OptionsSnapshot, bool) {
+	if r.snapshot == nil {
+		return driverproto.OptionsSnapshot{}, false
+	}
+	return driverproto.CloneOptionsSnapshot(*r.snapshot), true
 }
 
 func (r *captureRuntime) Start(v runtimeproto.StartCommand) error {
@@ -34,9 +45,35 @@ func (r *captureRuntime) Control(v runtimeproto.ControlCommand) error {
 	r.controls = append(r.controls, v)
 	return nil
 }
-func (*captureRuntime) Terminate() error                    { return nil }
-func (*captureRuntime) EnsureReady(runtimeproto.OpID) error { return nil }
-func (*captureRuntime) Close()                              {}
+func (*captureRuntime) Terminate() error { return nil }
+func (r *captureRuntime) EnsureReady(op runtimeproto.OpID) error {
+	r.readyOps = append(r.readyOps, op)
+	return nil
+}
+func (*captureRuntime) Close() {}
+
+func TestAgentOptionsUsesOrdinaryRequestAndReturnsGenerationSnapshot(t *testing.T) {
+	l, sys, rt := newV7Loop(t, nil)
+	l.handleIntake(v7Request("options", TypeOptions, "caller", `{}`))
+	if len(rt.readyOps) != 1 || l.state.Running == nil || l.state.Running.Kind != book.ActionOptions {
+		t.Fatalf("readyOps=%v action=%+v", rt.readyOps, l.state.Running)
+	}
+	want := driverproto.OptionsSnapshot{
+		Provider: "codex", Source: driverproto.OptionsSourceNative,
+		Models:  []driverproto.ModelOption{{Value: "gpt-new", Efforts: []driverproto.EffortOption{{Value: "high"}}}},
+		Default: driverproto.TurnOptions{Model: "gpt-new", Effort: "high"},
+		Current: driverproto.TurnOptions{Model: "gpt-new", Effort: "high"},
+		Client:  driverproto.ClientInfo{Name: "codex", Current: "1.2.3", Latest: "1.3.0", UpdateStatus: driverproto.UpdateAvailable},
+	}
+	l.onReadyDone(runtimeEvent{kind: evReadyDone, op: rt.readyOps[0], ready: runtimeproto.ReadyResult{Ready: true, Options: want}})
+	terminal := sys.terminal("options")
+	if len(terminal) != 1 || terminal[0].fail || !reflect.DeepEqual(terminal[0].value, want) {
+		t.Fatalf("terminal=%#v want=%#v", terminal, want)
+	}
+	if l.state.Running != nil || l.state.Requests["options"] != nil {
+		t.Fatalf("options action leaked: action=%+v request=%+v", l.state.Running, l.state.Requests["options"])
+	}
+}
 
 func TestCommandRequestsFormSingleItemBatches(t *testing.T) {
 	rt := &captureRuntime{}
@@ -125,7 +162,7 @@ func TestAgentVocabularyRejectsLegacyAndUnknownWords(t *testing.T) {
 	}
 }
 
-func TestSelectValidatesAgainstProviderSelections(t *testing.T) {
+func TestSelectValidatesStablePayloadShape(t *testing.T) {
 	selections := []runtimeproto.TurnOptions{{Model: "m1", Effort: "low"}, {Model: "m1", Effort: "high"}, {Model: "m2", Effort: "low"}}
 	l := &agentLoop{def: definition{cfg: Config{Runtime: runtimeproto.Spec{Selections: selections}}}, options: selections[1]}
 	tests := []struct {
@@ -133,9 +170,10 @@ func TestSelectValidatesAgainstProviderSelections(t *testing.T) {
 		want                runtimeproto.TurnOptions
 	}{
 		{name: "exact", payload: `{"model":"m2","effort":"low"}`, want: selections[2]},
-		{name: "model only takes first effort", payload: `{"model":"m1"}`, want: selections[0]},
-		{name: "effort only uses current model", payload: `{"effort":"low"}`, want: selections[0]},
-		{name: "not in table", payload: `{"model":"m2","effort":"high"}`, code: "invalid_args"},
+		{name: "model only leaves effort optional", payload: `{"model":"m1"}`, want: runtimeproto.TurnOptions{Model: "m1"}},
+		{name: "effort only is invalid", payload: `{"effort":"low"}`, code: "invalid_args"},
+		{name: "catalog validation belongs to runtime", payload: `{"model":"m2","effort":"high"}`, want: runtimeproto.TurnOptions{Model: "m2", Effort: "high"}},
+		{name: "unknown field is invalid", payload: `{"model":"m1","future":true}`, code: "invalid_args"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -146,8 +184,8 @@ func TestSelectValidatesAgainstProviderSelections(t *testing.T) {
 		})
 	}
 	l.def.cfg.Runtime.Selections = nil
-	if _, code, _ := l.validateSelection(json.RawMessage(`{"model":"m1"}`)); code != "type_unsupported" {
-		t.Fatalf("provider without table code=%q", code)
+	if _, code, _ := l.validateSelection(json.RawMessage(`{"model":"m1"}`)); code != "" {
+		t.Fatalf("stable validation unexpectedly depends on fallback table: code=%q", code)
 	}
 }
 
@@ -383,3 +421,57 @@ func jsonEqual(t *testing.T, a, b any) bool {
 }
 
 func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// agent.options is a read. With a live generation it answers from the catalog
+// mirror and never touches the control slot — the slot serialises actions that
+// change the current turn, and an options request parked there once froze
+// every steer and interrupt until the turn ended.
+func TestAgentOptionsAnswersFromLiveCatalogWithoutTouchingTheSlot(t *testing.T) {
+	l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
+	rt.snapshot = &driverproto.OptionsSnapshot{Provider: "claude", Source: driverproto.OptionsSourceNative, Models: []driverproto.ModelOption{{Value: "fable"}}}
+	v7Activate(t, l, "owner")
+	l.handleIntake(v7Request("options", TypeOptions, "caller", `{}`))
+	if got := sys.terminal("options"); len(got) != 1 || got[0].fail {
+		t.Fatalf("options terminal=%v", got)
+	}
+	if got := sys.terminal("options")[0].value.(driverproto.OptionsSnapshot); got.Provider != "claude" || len(got.Models) != 1 || got.Models[0].Value != "fable" {
+		t.Fatalf("snapshot=%+v", got)
+	}
+	if len(rt.readyOps) != 0 || l.state.Running != nil || l.state.Pending != nil {
+		t.Fatalf("readyOps=%v running=%+v pending=%+v: a read must not enter the slot", rt.readyOps, l.state.Running, l.state.Pending)
+	}
+	// And a steer right after it is dispatched at once.
+	l.handleIntake(v7Request("q", TypeAsk, "caller", `{"text":"later"}`))
+	l.handleIntake(v7Request("steer", TypeSteer, "caller", `{"target":"q"}`))
+	if len(rt.controls) != 1 || rt.controls[0].Kind != runtimeproto.ControlSteer {
+		t.Fatalf("controls=%+v, want the steer dispatched immediately", rt.controls)
+	}
+}
+
+// A steer waiting for the slot yields to an interrupt: the target goes back to
+// the queue with its buttons, and the steer word says why it did not apply.
+func TestInterruptSupersedesAPendingSteer(t *testing.T) {
+	l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true, runtimeproto.CapabilityInterrupt: true})
+	v7Activate(t, l, "owner")
+	l.handleIntake(v7Request("q", TypeAsk, "caller", `{"text":"queued work"}`))
+	l.handleIntake(v7Request("steer", TypeSteer, "caller", `{"target":"q"}`))
+	// Park the steer: pretend the slot is busy so it stays Pending.
+	if l.state.Running == nil {
+		t.Fatalf("running=%+v, want the steer dispatched", l.state.Running)
+	}
+	l.state.Pending, l.state.Running = l.state.Running, nil
+	rt.controls = nil
+	l.handleIntake(v7Request("stop", TypeInterrupt, "caller", `{}`))
+	if got := sys.terminal("stop"); len(got) != 1 || got[0].fail {
+		t.Fatalf("interrupt terminal=%v", got)
+	}
+	if word := sys.terminal("steer"); len(word) != 1 || !word[0].fail || word[0].code != "superseded" {
+		t.Fatalf("steer terminal=%v, want failed superseded", word)
+	}
+	if row := l.state.Requests["q"]; row == nil || row.Location != book.Buffered || l.state.IndexInBuffer("q") < 0 {
+		t.Fatalf("target=%+v buffer=%v, want it back in the queue", row, l.state.Buffer)
+	}
+	if len(rt.controls) != 1 || rt.controls[0].Kind != runtimeproto.ControlInterrupt {
+		t.Fatalf("controls=%+v, want the interrupt dispatched", rt.controls)
+	}
+}

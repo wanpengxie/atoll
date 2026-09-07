@@ -23,6 +23,7 @@ func TestRequiredMethodsAndFieldsGolden(t *testing.T) {
 	want := map[string][]string{
 		"initialize":                            {"capabilities.optOutNotificationMethods", "clientInfo.name", "clientInfo.title", "clientInfo.version", "result.userAgent"},
 		"initialized":                           {},
+		"model/list":                            {"cursor", "includeHidden", "data", "nextCursor", "model", "displayName", "description", "hidden", "isDefault", "defaultReasoningEffort", "supportedReasoningEfforts", "reasoningEffort"},
 		"thread/start":                          {"approvalPolicy", "cwd", "developerInstructions", "dynamicTools", "model", "result.thread.id", "sandbox"},
 		"thread/resume":                         {"approvalPolicy", "cwd", "developerInstructions", "excludeTurns", "model", "result.thread.id", "sandbox", "threadId"},
 		"item/tool/call":                        {"arguments", "callId", "result.contentItems", "result.success", "threadId", "tool", "turnId"},
@@ -77,7 +78,7 @@ func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.No
 	dir := filepath.Dir(thisFile)
 	methods := map[string]bool{}
 	declarations := map[string]ast.Node{}
-	for _, name := range []string{"worker.go", "output.go", "rpc.go"} {
+	for _, name := range []string{"worker.go", "options.go", "output.go", "rpc.go"} {
 		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -115,8 +116,8 @@ func productionProtocolSurface(t *testing.T) (map[string]bool, map[string]ast.No
 func protocolTokensForMethod(t *testing.T, method string, declarations map[string]ast.Node) map[string]bool {
 	t.Helper()
 	contexts := map[string][]string{
-		"initialize": {"Open", "afterInitialize"}, "initialized": {"afterInitialize"},
-		"thread/start": {"afterInitialize", "afterSession", "threadIDFrom", "threadStartParams", "threadPolicyParams", "dynamicTools"}, "thread/resume": {"afterInitialize", "afterSession", "threadIDFrom", "threadPolicyParams"},
+		"initialize": {"Open", "afterInitialize"}, "initialized": {"afterInitialize"}, "model/list": {"discoverOptions", "decodeModelList", "modelListResponse", "codexModel"},
+		"thread/start": {"finishInitialize", "afterSession", "threadIDFrom", "threadStartParams", "threadPolicyParams", "dynamicTools"}, "thread/resume": {"finishInitialize", "afterSession", "threadIDFrom", "threadPolicyParams"},
 		"item/tool/call":       {"prepareServerRequest", "dynamicToolCallParams", "dynamicToolResult"},
 		"thread/compact/start": {"Start"}, "thread/tokenUsage/updated": {"notification", "tokenUsageNotice"},
 		"turn/start": {"Start"}, "turn/steer": {"Control"}, "turn/interrupt": {"Control"},
@@ -158,7 +159,7 @@ func isRPCMethodLiteral(value string) bool {
 	if strings.Contains(strings.ToLower(value), "delta") {
 		return false
 	}
-	for _, prefix := range []string{"thread/", "turn/", "item/", "currentTime/"} {
+	for _, prefix := range []string{"thread/", "turn/", "item/", "model/", "currentTime/"} {
 		if strings.HasPrefix(value, prefix) {
 			return true
 		}

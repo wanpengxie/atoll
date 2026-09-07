@@ -70,7 +70,7 @@ const (
 	ControlTargetGone
 )
 
-type WorkerReady struct{}
+type WorkerReady struct{ Options OptionsSnapshot }
 type OpenRejected struct {
 	Class       FailureClass
 	Detail      string
