@@ -305,7 +305,7 @@ tool 过程（`payload.status:"processing"`，细节位于 `payload.process`）�
 | 账号 | `system.principal.create/get/list/delete` | `c0` |
 | 成员 | `system.member.create/get/list/delete/restart/admit` | 频道本身 |
 | 凭证 | `system.credential.set` | 频道本身 |
-| 日志 | `system.log.recent` | 频道本身 |
+| 日志 | `system.log.recent`、[`system.log.query`](platform/internal/sysactor/LOG_QUERY.md) | 频道本身 |
 
 agent 应答 `agent.ask / steer / interrupt / queue / stop / compact / select / context / fork`；
 人应答 `human.message / ask / approve`；每个 actor 都应答 `actor.describe`（它的 manifest：

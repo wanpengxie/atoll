@@ -68,6 +68,7 @@ const (
 	// this is the channel giving its own members a fresh term.
 	TypeSystemMemberRestartAll = "system.member.restart_all"
 	TypeSystemLogRecent        = "system.log.recent"
+	TypeSystemLogQuery         = "system.log.query"
 	TypeSystemTimerSet         = "system.timer.set"
 	TypeSystemTimerCancel      = "system.timer.cancel"
 	TypeSystemTimerList        = "system.timer.list"
@@ -114,6 +115,7 @@ var systemEntries = [...]SystemEntry{
 	{Name: TypeSystemMemberDelete, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberRestart, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemLogRecent, Kind: KindRequest, Locus: SystemLocusMembrane},
+	{Name: TypeSystemLogQuery, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemMemberRestartAll, Kind: KindRequest, Locus: SystemLocusMembrane},
 	{Name: TypeSystemTimerSet, Kind: KindRequest, Locus: SystemLocusLocal},
 	{Name: TypeSystemTimerCancel, Kind: KindRequest, Locus: SystemLocusLocal},

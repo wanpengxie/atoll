@@ -14,11 +14,12 @@ import (
 // storespec interfaces. The raw *sql.DB is confined inside runtime/internal/store;
 // this public type re-exports only the interface handles.
 type ChannelStores struct {
-	Log      storespec.MessageLog
-	Query    storespec.MessageQuery
-	Visible  storespec.VisibleMessageQuery
-	Expiry   storespec.ExpiryQuery
-	Requests storespec.RequestLookup
+	Log       storespec.MessageLog
+	Query     storespec.MessageQuery
+	Visible   storespec.VisibleMessageQuery
+	Exchanges storespec.VisibleExchangeQuery
+	Expiry    storespec.ExpiryQuery
+	Requests  storespec.RequestLookup
 	// Actors is the durable actor-record face handed to runtime/actorstore at
 	// assembly. Platform threads it there and keeps nothing: this bundle lives
 	// in one function body and is never stored, so after assembly the actor
@@ -95,6 +96,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Log:        cs.Log,
 		Query:      cs.Query,
 		Visible:    cs.Visible,
+		Exchanges:  cs.Exchanges,
 		Expiry:     cs.Expiry,
 		Requests:   cs.Requests,
 		Actors:     cs.Actors,

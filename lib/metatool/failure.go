@@ -127,6 +127,9 @@ var actorErrorClasses = map[string]failureClass{
 
 	"mcp_timeout": {Timeout, hintTimeout, false},
 	"timeout":     {Timeout, hintTimeout, false},
+	// A read-only history scan timed out; repeating its snapshot/cursor cannot
+	// duplicate a business action. Preserve this useful distinction for agents.
+	"query_timeout": {Timeout, "The read-only log query exceeded its budget. Retry later with the same filters and cursor; a smaller limit may help when there are many matches. This is not an empty search result", true},
 
 	// Cancellation is a decision somebody already made, not a fault: repeating
 	// the call would simply undo it.

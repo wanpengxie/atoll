@@ -27,11 +27,12 @@ type ChannelStores struct {
 	closeMu   sync.Mutex
 	closeDone bool
 
-	Log      storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
-	Query    storespec.MessageQuery // tail reads (no Append)
-	Visible  storespec.VisibleMessageQuery
-	Expiry   storespec.ExpiryQuery // expiry reaper's level-scan feed (期12 S3, own narrow role)
-	Requests storespec.RequestLookup
+	Log       storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
+	Query     storespec.MessageQuery // tail reads (no Append)
+	Visible   storespec.VisibleMessageQuery
+	Exchanges storespec.VisibleExchangeQuery
+	Expiry    storespec.ExpiryQuery // expiry reaper's level-scan feed (期12 S3, own narrow role)
+	Requests  storespec.RequestLookup
 
 	// Actor registry exposed via SEGREGATED interfaces (derived from role — a
 	// reader never receives any membership write). Each face a consumer needs
@@ -95,6 +96,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Log:        msgs,
 		Query:      msgs,
 		Visible:    msgs,
+		Exchanges:  msgs,
 		Expiry:     msgs,
 		Requests:   newRequestLookup(msgs),
 		Principals: reg,

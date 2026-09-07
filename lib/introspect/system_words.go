@@ -73,6 +73,7 @@ func SystemWordSpecs() map[string]WordSpec {
 			"subject (optional full actor id; omit for your own alarms).",
 			objectSchema(`"subject":{"type":"string"}`)),
 		message.TypeSystemLogRecent:      systemWord("Read the most recent complete conversation turns as their projected ledger rows (request, terminal, latest provisional of an open request); housekeeping words such as actor.describe, agent.context and system.* are excluded.", "limit (integer from 1 through 20): how many complete conversation turns.", objectSchema(`"limit":{"type":"integer","minimum":1,"maximum":20}`, "limit")),
+		message.TypeSystemLogQuery:       logQueryWord(),
 		message.TypeSystemMemberCreated:  systemWord("Record that a channel member was created.", "Event payload is emitted by the platform; callers do not send it.", objectSchema(``)),
 		message.TypeSystemMemberDeleted:  systemWord("Record that a channel member was deleted.", "Event payload is emitted by the platform; callers do not send it.", objectSchema(``)),
 		message.TypeSystemChannelInbound: systemWord("Record that a peer request entered the channel.", "Event payload is emitted by the platform; callers do not send it.", objectSchema(``)),

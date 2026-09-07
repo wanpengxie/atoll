@@ -344,7 +344,7 @@ the channel itself:
 | accounts | `system.principal.create/get/list/delete` | `c0` |
 | membership | `system.member.create/get/list/delete/restart/admit` | the channel |
 | secrets | `system.credential.set` | the channel |
-| logs | `system.log.recent` | the channel |
+| logs | `system.log.recent`, [`system.log.query`](platform/internal/sysactor/LOG_QUERY.md) | the channel |
 
 Agents answer `agent.ask / steer / interrupt / queue / stop / compact / select /
 context / fork`; people answer `human.message / ask / approve`; every actor answers

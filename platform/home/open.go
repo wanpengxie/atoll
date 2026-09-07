@@ -108,6 +108,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.closeStore = cs.Close
 	h.query = cs.Query
 	h.visible = cs.Visible
+	logReader := cs.Exchanges
 	h.expiry = cs.Expiry
 	h.requests = cs.Requests
 	h.registryBindings = cfg.RegistryBindings
@@ -338,6 +339,9 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			// the turn count alone.
 			RecentTurns: func(ctx context.Context, turns int) (channelspec.HistoryWindow, error) {
 				return readVisibleTurnWindow(ctx, h.visible, channelspec.HistoryWindowQuery{TargetRows: 1, MinimumCompleteRoots: turns})
+			},
+			QueryLog: func(ctx context.Context, query channelspec.LogQueryRequest) (channelspec.LogQueryResponse, error) {
+				return queryLog(ctx, logReader, query)
 			},
 		}))
 	}, nil)

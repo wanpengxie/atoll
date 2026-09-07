@@ -59,6 +59,7 @@ type SystemActor struct {
 	peer      Peer
 	resolve   func(string) (actor.ActorID, error)
 	recent    func(context.Context, int) (channelspec.HistoryWindow, error)
+	queryLog  func(context.Context, channelspec.LogQueryRequest) (channelspec.LogQueryResponse, error)
 	timers    TimerPort
 	logger    *slog.Logger
 }
@@ -85,6 +86,8 @@ type Deps struct {
 	// requests keep only their latest provisional). It intentionally exposes
 	// no append capability and no raw-row scan to the system actor.
 	RecentTurns func(ctx context.Context, turns int) (channelspec.HistoryWindow, error)
+	// QueryLog is the channel-scoped, read-only search and excerpt reader.
+	QueryLog func(context.Context, channelspec.LogQueryRequest) (channelspec.LogQueryResponse, error)
 	// Timers is the injected alarm executor behind system.timer.*. The gate
 	// authenticates the subject; this port mints that subject's schedule handle
 	// and acts. Nil → the timer words are inert (same posture as Operate).
@@ -113,6 +116,7 @@ func New(deps Deps) *SystemActor {
 		peer:      deps.Peer,
 		resolve:   deps.ResolveTarget,
 		recent:    deps.RecentTurns,
+		queryLog:  deps.QueryLog,
 		timers:    deps.Timers,
 		logger:    logger,
 	}
@@ -162,6 +166,9 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		case message.TypeSystemLogRecent:
 			s.respondLogbookRecent(sys, msg)
+			return
+		case message.TypeSystemLogQuery:
+			s.respondLogbookQuery(sys, msg)
 			return
 		case message.TypeSystemTimerSet, message.TypeSystemTimerCancel, message.TypeSystemTimerList:
 			s.handleTimer(sys, msg)
