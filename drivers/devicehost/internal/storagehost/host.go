@@ -61,6 +61,13 @@ type FileInfo struct {
 	// that dropped it made every reader that wanted a modified date go back and
 	// stat each row for something already in hand.
 	ModifiedAt int64
+	// MediaType is what the device believes this regular file is, as an IANA
+	// media type without parameters ("text/markdown", "application/pdf").
+	// Decided here, next to the bytes: a curated extension table first, the
+	// OS mime table second, and the first 512 bytes' magic when neither
+	// speaks. Empty for directories and other nodes; "application/octet-stream"
+	// when the device honestly does not know.
+	MediaType string
 }
 
 type NodeType string
@@ -100,7 +107,7 @@ func (h *Host) Stat(path string) (FileInfo, bool, error) {
 	if err != nil {
 		return FileInfo{}, false, err
 	}
-	return FileInfo{Path: path, NodeType: nodeType(info), Size: info.Size(), ModifiedAt: modifiedAt(info)}, true, nil
+	return FileInfo{Path: path, NodeType: nodeType(info), Size: info.Size(), ModifiedAt: modifiedAt(info), MediaType: h.mediaType(path, info)}, true, nil
 }
 
 var ErrMalformedCursor = errors.New("storagehost: malformed file cursor")
@@ -183,7 +190,7 @@ func (h *Host) List(prefix string, limit int, cursor string) ([]FileInfo, string
 		if dir != "." {
 			path = filepath.Join(dir, path)
 		}
-		out = append(out, FileInfo{Path: path, NodeType: nodeType(info), Size: info.Size(), ModifiedAt: modifiedAt(info)})
+		out = append(out, FileInfo{Path: path, NodeType: nodeType(info), Size: info.Size(), ModifiedAt: modifiedAt(info), MediaType: h.mediaType(path, info)})
 	}
 	sort.Slice(out, func(i, j int) bool { return fileSortKey(out[i]) < fileSortKey(out[j]) })
 	start := sort.Search(len(out), func(i int) bool { return fileSortKey(out[i]) > after })

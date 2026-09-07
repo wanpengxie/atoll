@@ -65,4 +65,7 @@ type FileInfo struct {
 	Size     int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
+	// MediaType is the device's verdict on a regular file's type; empty for
+	// directories and other nodes.
+	MediaType string
 }

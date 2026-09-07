@@ -42,6 +42,9 @@ type FileInfo struct {
 	Size     int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
+	// MediaType is the device's verdict on a regular file's type, empty when
+	// the device reported none (directories, or a daemon that predates it).
+	MediaType string
 }
 
 // FileNodeType is re-exported at the door face so callers never import the

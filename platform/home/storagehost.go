@@ -102,13 +102,13 @@ func (f daemonFiles) Delete(ctx context.Context, daemonID, path string) error {
 }
 func (f daemonFiles) Stat(ctx context.Context, daemonID, path string) (accessdoor.FileInfo, bool, error) {
 	info, found, err := f.routes.FileStat(ctx, daemonID, string(f.chID), path)
-	return accessdoor.FileInfo{Path: info.Path, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt}, found, err
+	return accessdoor.FileInfo{Path: info.Path, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt, MediaType: info.MediaType}, found, err
 }
 func (f daemonFiles) List(ctx context.Context, daemonID, prefix string, limit int, cursor string) ([]accessdoor.FileInfo, string, error) {
 	rows, next, err := f.routes.FileList(ctx, daemonID, string(f.chID), prefix, limit, cursor)
 	out := make([]accessdoor.FileInfo, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, accessdoor.FileInfo{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
+		out = append(out, accessdoor.FileInfo{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt, MediaType: row.MediaType})
 	}
 	return out, next, err
 }

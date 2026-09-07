@@ -39,6 +39,9 @@ type StatMeta struct {
 	Size      int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
+	// MediaType is the device's verdict on a regular file's type; empty when
+	// not reported.
+	MediaType string
 }
 
 type StatResult struct {
@@ -65,6 +68,9 @@ type ListEntry struct {
 	Size int64
 	// ModifiedAt is Unix milliseconds, zero when the device reported none.
 	ModifiedAt int64
+	// MediaType is the device's verdict on a regular file's type; empty when
+	// not reported. The door relays it, it never guesses one.
+	MediaType string
 }
 
 type ListPage struct {
@@ -200,7 +206,7 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 		if !found {
 			return StatResult{Reject: QueryNotFound}, nil
 		}
-		return StatResult{Meta: StatMeta{Kind: resourcespec.KindFile, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt}, Ops: fileNodeOps(info.NodeType)}, nil
+		return StatResult{Meta: StatMeta{Kind: resourcespec.KindFile, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt, MediaType: info.MediaType}, Ops: fileNodeOps(info.NodeType)}, nil
 	}
 	meta, found, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
@@ -257,7 +263,7 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 			if err != nil {
 				return ListPage{}, err
 			}
-			entries = append(entries, ListEntry{ID: resource.ResourceID(address), Kind: resourcespec.KindFile, Ops: fileNodeOps(row.NodeType), NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
+			entries = append(entries, ListEntry{ID: resource.ResourceID(address), Kind: resourcespec.KindFile, Ops: fileNodeOps(row.NodeType), NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt, MediaType: row.MediaType})
 		}
 		return ListPage{Entries: entries, Next: next}, nil
 	}

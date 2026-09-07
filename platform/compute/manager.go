@@ -1574,7 +1574,7 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 					if err != nil {
 						reply.Reason = err.Error()
 					} else if found {
-						reply.Entries = []link.FileEntry{{Path: info.Path, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt}}
+						reply.Entries = []link.FileEntry{{Path: info.Path, NodeType: info.NodeType, Size: info.Size, ModifiedAt: info.ModifiedAt, MediaType: info.MediaType}}
 					}
 				case link.FileRoot:
 					// Answered from the value bindLane installed, not from a
@@ -1592,7 +1592,7 @@ func (l *clientLane) storageLoop(stream *link.LaneStream) {
 					if !applyFileReplyError(reply, err) {
 						reply.Next = next
 						for _, row := range rows {
-							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
+							reply.Entries = append(reply.Entries, link.FileEntry{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt, MediaType: row.MediaType})
 						}
 					}
 				}

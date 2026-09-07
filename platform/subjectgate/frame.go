@@ -736,6 +736,11 @@ type ResourceMeta struct {
 	// the device reported none, because a reader showing "1970" is worse than
 	// one showing nothing.
 	ModifiedAt int64 `json:"modified_at,omitempty"`
+	// MediaType is the device's verdict on a regular file's type, as an IANA
+	// media type without parameters. Omitted when the device reported none,
+	// so a client falls back to its own guess only for devices that predate
+	// the field.
+	MediaType string `json:"media_type,omitempty"`
 }
 
 // ResourceStat is the resource-result form for stat.

@@ -1387,7 +1387,7 @@ func (h *Host) FileStat(ctx context.Context, daemonID, chID, path string) (platf
 	if err != nil || !reply.Found || len(reply.Entries) == 0 {
 		return platform.DaemonFileInfo{}, reply.Found, err
 	}
-	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, NodeType: reply.Entries[0].NodeType, Size: reply.Entries[0].Size, ModifiedAt: reply.Entries[0].ModifiedAt}, true, nil
+	return platform.DaemonFileInfo{Path: reply.Entries[0].Path, NodeType: reply.Entries[0].NodeType, Size: reply.Entries[0].Size, ModifiedAt: reply.Entries[0].ModifiedAt, MediaType: reply.Entries[0].MediaType}, true, nil
 }
 func (h *Host) FileList(ctx context.Context, daemonID, chID, path string, limit int, cursor string) ([]platform.DaemonFileInfo, string, error) {
 	reply, err := h.file(ctx, daemonID, chID, link.FileRequest{Op: link.FileList, Path: path, Limit: limit, Cursor: cursor})
@@ -1396,7 +1396,7 @@ func (h *Host) FileList(ctx context.Context, daemonID, chID, path string, limit 
 	}
 	out := make([]platform.DaemonFileInfo, 0, len(reply.Entries))
 	for _, row := range reply.Entries {
-		out = append(out, platform.DaemonFileInfo{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt})
+		out = append(out, platform.DaemonFileInfo{Path: row.Path, NodeType: row.NodeType, Size: row.Size, ModifiedAt: row.ModifiedAt, MediaType: row.MediaType})
 	}
 	return out, reply.Next, nil
 }

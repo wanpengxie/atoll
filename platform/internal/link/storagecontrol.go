@@ -46,6 +46,11 @@ type FileEntry struct {
 	// one stat answers both, and omitempty because a device that predates the
 	// field simply says nothing rather than claiming the epoch.
 	ModifiedAt int64 `json:"modified_at,omitempty"`
+	// MediaType is the device's verdict on a regular file's type (see
+	// storagehost.FileInfo). Omitted for directories and by devices that
+	// predate the field, so a missing value means "not reported", never
+	// "unknown type".
+	MediaType string `json:"media_type,omitempty"`
 }
 
 type FileReply struct {

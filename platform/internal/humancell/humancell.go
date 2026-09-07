@@ -607,7 +607,7 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 		for _, it := range page.Entries {
 			items = append(items, subjectgate.ResourceEntry{
 				ID: string(it.ID), Kind: string(it.Kind), Ops: wireOps(it.Ops),
-				Meta: subjectgate.ResourceMeta{NodeType: string(it.NodeType), Size: it.Size, ModifiedAt: it.ModifiedAt},
+				Meta: subjectgate.ResourceMeta{NodeType: string(it.NodeType), Size: it.Size, ModifiedAt: it.ModifiedAt, MediaType: it.MediaType},
 			})
 		}
 		return receipt(f, subjectgate.ResourcePage{Items: items, Next: page.Next})
@@ -623,7 +623,7 @@ func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame
 func wireMeta(meta accessdoor.StatMeta) *subjectgate.ResourceMeta {
 	return &subjectgate.ResourceMeta{
 		Kind: string(meta.Kind), CreatedAt: meta.CreatedAt,
-		CreatedBy: string(meta.CreatedBy), NodeType: string(meta.NodeType), Size: meta.Size, ModifiedAt: meta.ModifiedAt,
+		CreatedBy: string(meta.CreatedBy), NodeType: string(meta.NodeType), Size: meta.Size, ModifiedAt: meta.ModifiedAt, MediaType: meta.MediaType,
 	}
 }
 
