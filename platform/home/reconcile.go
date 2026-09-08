@@ -54,7 +54,7 @@ func (h *Home) reconcileDeclarations(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if instance.Kind != actor.KindAgent && instance.Kind != actor.KindTool {
+		if instance.Kind != actor.KindAgent && instance.Kind != actor.KindTool && instance.Kind != actor.KindChannel {
 			continue
 		}
 		resolveCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)

@@ -57,3 +57,35 @@ func TestConfigRejectsDuplicateLooperLane(t *testing.T) {
 		t.Fatal("duplicate Looper lane was accepted")
 	}
 }
+
+func TestConfigAcceptsBodySideHostHandleAndRejectsWhitespace(t *testing.T) {
+	raw := json.RawMessage(`{
+		"loopers":["loop"],
+		"context_actor":"context",
+		"llm_actor":"llm",
+		"host_actor":"host",
+		"max_open_works":1,
+		"max_assignments_per_looper":1,
+		"max_inputs_per_work":1,
+		"max_operation_keys":1,
+		"max_turns":1
+	}`)
+	cfg, err := ParseConfig(raw)
+	if err != nil || cfg.HostActor != "host" {
+		t.Fatalf("host handle config=%+v err=%v", cfg, err)
+	}
+	raw = json.RawMessage(`{
+		"loopers":["loop"],
+		"context_actor":"context",
+		"llm_actor":"llm",
+		"host_actor":" host ",
+		"max_open_works":1,
+		"max_assignments_per_looper":1,
+		"max_inputs_per_work":1,
+		"max_operation_keys":1,
+		"max_turns":1
+	}`)
+	if _, err := ParseConfig(raw); err == nil {
+		t.Fatal("whitespace-padded host handle was accepted")
+	}
+}

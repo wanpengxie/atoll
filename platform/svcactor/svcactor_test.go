@@ -88,11 +88,10 @@ func (s *memoryState) putCount() int {
 
 type materializeSys struct {
 	actorbase.Sys
-	ctx             context.Context
-	state           *memoryState
-	calls           int
-	recv            <-chan struct{}
-	describePayload json.RawMessage
+	ctx   context.Context
+	state *memoryState
+	calls int
+	recv  <-chan struct{}
 }
 
 func (s *materializeSys) Life() context.Context        { return s.ctx }
@@ -105,11 +104,7 @@ func (s *materializeSys) Recv() (actorbase.Msg, error) {
 }
 func (s *materializeSys) Call(_ message.Cause, _ actor.ActorID, _ string, _ any) (actorbase.Pending, error) {
 	s.calls++
-	payload := s.describePayload
-	if len(payload) == 0 {
-		payload = json.RawMessage(`{"status":"completed","class":"echo","interfaces":["actor"],"capabilities":{},"words":{"echo.say":{"description":"live echo"},"echo.alt":{"description":"live alternate"}}}`)
-	}
-	env := message.Envelope{Payload: payload}
+	env := message.Envelope{Payload: json.RawMessage(`{"status":"completed","class":"echo","interfaces":["actor"],"capabilities":{},"words":{"echo.say":{"description":"live echo"},"echo.alt":{"description":"live alternate"}}}`)}
 	return svcPending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
 }
 
@@ -299,29 +294,6 @@ func TestStructuralDispatchBranchesStayClosed(t *testing.T) {
 	})
 }
 
-func TestSystemSurfaceCanBeDisabledWithoutHidingAgentService(t *testing.T) {
-	disabled := false
-	agentID := actor.ActorID("agent:native:1")
-	deps := serviceDeps("remote")
-	deps.Members = Members{
-		IsActive: func(context.Context, actor.ActorID) (bool, error) { return true, nil },
-		ActorFacts: func(_ context.Context, id actor.ActorID) (MemberFacts, bool, error) {
-			return MemberFacts{Kind: actor.KindAgent}, id == agentID, nil
-		},
-		FirstActiveAgent: func(context.Context) (actor.ActorID, bool, error) { return agentID, true, nil },
-	}
-	s := &service{deps: deps, table: ServiceTable{SvcAgent: func() *string { value := string(agentID); return &value }(), Endpoints: map[string]actor.ActorID{}, SystemAccess: &disabled}, card: channel.Card{Words: map[string]json.RawMessage{"agent.ask": json.RawMessage(`{}`)}}, cardComplete: true}
-	if card := s.cardFor(&svcSys{}, "c0"); card.Words[message.TypeSystemMemberList] != nil || card.Words["agent.ask"] == nil {
-		t.Fatalf("actor-channel card=%+v", card)
-	}
-	for _, word := range []string{message.TypeSystemMemberList, message.TypeSystemChannelList} {
-		result := s.dispatch(context.Background(), context.Background(), &svcSys{}, "c0", channel.Request{From: channel.From{Channel: "c0"}, Type: word}, nil)
-		if result.Fail == nil || result.Fail.Code != string(channel.GateEndpointNotFound) {
-			t.Fatalf("disabled system surface word=%s result=%+v", word, result)
-		}
-	}
-}
-
 func TestServiceAgentDispatchCoversNullDefaultAndNamedStates(t *testing.T) {
 	named := "agent:named:1"
 	defaultValue := "default"
@@ -349,55 +321,6 @@ func TestServiceAgentDispatchCoversNullDefaultAndNamedStates(t *testing.T) {
 				t.Fatalf("result=%+v target=%q", result, sys.target)
 			}
 		})
-	}
-}
-
-func TestServiceAgentProjectsAndDispatchesItsWholeAgentInterface(t *testing.T) {
-	named := "agent:native:1"
-	deps := serviceDeps("target")
-	table := ServiceTable{SvcAgent: &named, Endpoints: map[string]actor.ActorID{}}
-	describe := json.RawMessage(`{
-		"status":"completed",
-		"class":"native",
-		"interfaces":["actor","agent"],
-		"capabilities":{"work_protocol_v1":true},
-		"words":{
-			"agent.ask":{"description":"create work"},
-			"agent.status":{"description":"inspect work"},
-			"workspace.read":{"description":"must remain internal"}
-		}
-	}`)
-	materialize := &materializeSys{ctx: context.Background(), describePayload: describe}
-	s := &service{deps: deps, table: table}
-	card, complete := s.buildCard(materialize, message.Root(), table)
-	if !complete {
-		t.Fatal("service Agent card was not materialized")
-	}
-	if materialize.calls != 1 {
-		t.Fatalf("describe calls=%d, want 1", materialize.calls)
-	}
-	if len(card.Words) != 2 || card.Words["agent.ask"] == nil || card.Words["agent.status"] == nil {
-		t.Fatalf("card words=%v", card.Words)
-	}
-	if card.Words["workspace.read"] != nil {
-		t.Fatalf("non-Agent word leaked through service Agent: %s", card.Words["workspace.read"])
-	}
-
-	s.card = card
-	s.cardComplete = true
-	sys := &svcSys{}
-	result := s.dispatch(context.Background(), context.Background(), sys, "caller", channel.Request{
-		From: channel.From{Channel: "caller", Actor: "human:alice:1"}, Type: "agent.status", Payload: json.RawMessage(`{"work_id":"w1"}`),
-	}, nil)
-	if result.Fail != nil || sys.target != actor.ActorID(named) || sys.word != "agent.status" || string(sys.payload) != `{"work_id":"w1"}` {
-		t.Fatalf("result=%+v target=%q word=%q payload=%s", result, sys.target, sys.word, sys.payload)
-	}
-
-	unknown := s.dispatch(context.Background(), context.Background(), &svcSys{}, "caller", channel.Request{
-		From: channel.From{Channel: "caller", Actor: "human:alice:1"}, Type: "agent.unknown", Payload: json.RawMessage(`{}`),
-	}, nil)
-	if unknown.Fail == nil || unknown.Fail.Code != string(channel.GateEndpointNotFound) {
-		t.Fatalf("unadvertised Agent word result=%+v", unknown)
 	}
 }
 
@@ -492,10 +415,7 @@ func TestServiceManifestMaterializesOnceSurvivesRestartAndUpdates(t *testing.T) 
 	}
 
 	updated := ServiceTable{Endpoints: map[string]actor.ActorID{"echo.alt": "tool:echo:1"}}
-	updatedCard, complete := restarted.buildCard(sys, message.Root(), updated)
-	if !complete {
-		t.Fatal("endpoint-only card unexpectedly incomplete")
-	}
+	updatedCard := restarted.buildCard(sys, message.Root(), updated)
 	if err := writeService(state, updated, updatedCard); err != nil {
 		t.Fatal(err)
 	}
@@ -506,65 +426,6 @@ func TestServiceManifestMaterializesOnceSurvivesRestartAndUpdates(t *testing.T) 
 	}
 	if err != nil || !found || persisted.Card == nil || altSpec.Description != "live alternate" || sys.calls != 2 || state.puts != 2 {
 		t.Fatalf("updated state=%+v spec=%+v calls=%d puts=%d found=%v err=%v", persisted, altSpec, sys.calls, state.puts, found, err)
-	}
-}
-
-func TestLegacyPersistedCardIsRematerializedForWholeAgentInterface(t *testing.T) {
-	state := newMemoryState()
-	named := "agent:native:1"
-	table := ServiceTable{SvcAgent: &named, Endpoints: map[string]actor.ActorID{}}
-	legacy, err := json.Marshal(persistedService{
-		Table: table,
-		Card:  &channel.Card{Words: map[string]json.RawMessage{"agent.ask": json.RawMessage(`{"description":"legacy ask only"}`)}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = state.Put(ServiceStateKey, legacy)
-	state.puts = 0
-	stop := make(chan struct{})
-	sys := &materializeSys{
-		ctx: context.Background(), state: state, recv: stop,
-		describePayload: json.RawMessage(`{"status":"completed","class":"native","interfaces":["actor","agent"],"capabilities":{"work_protocol_v1":true},"words":{"agent.ask":{"description":"ask"},"agent.status":{"description":"status"}}}`),
-	}
-	deps := serviceDeps("target")
-	deps.Port = NewPort()
-	defer deps.Port.Close()
-	s := &service{deps: deps, table: emptyTable()}
-	done := make(chan error, 1)
-	go func() { done <- s.serve(sys) }()
-	deadline := time.Now().Add(time.Second)
-	for state.putCount() != 1 && time.Now().Before(deadline) {
-		runtime.Gosched()
-	}
-	close(stop)
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("serve err=%v", err)
-	}
-	persisted, found, err := readService(state)
-	if err != nil || !found || persisted.CardVersion != currentCardVersion || persisted.Card == nil || persisted.Card.Words["agent.status"] == nil {
-		t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
-	}
-}
-
-func TestIncompleteServiceAgentCardRemainsEligibleForRematerialization(t *testing.T) {
-	state := newMemoryState()
-	named := "agent:native:1"
-	table := ServiceTable{SvcAgent: &named, Endpoints: map[string]actor.ActorID{}}
-	s := &service{deps: serviceDeps("target"), table: table}
-	// This answer is a valid actor description but not an Agent interface. It
-	// must not permanently cache the ask-only fallback as a complete card.
-	sys := &materializeSys{ctx: context.Background()}
-	card, complete := s.buildCard(sys, message.Root(), table)
-	if complete || card.Words["agent.ask"] == nil {
-		t.Fatalf("complete=%v card=%+v", complete, card)
-	}
-	if err := writeServiceCard(state, table, card, complete); err != nil {
-		t.Fatal(err)
-	}
-	persisted, found, err := readService(state)
-	if err != nil || !found || persisted.CardVersion >= currentCardVersion {
-		t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
 	}
 }
 
@@ -661,7 +522,6 @@ func TestServiceTableValidationRejectsInvalidReceiversAndReservedWords(t *testin
 	}{
 		{name: "reserved system word", table: ServiceTable{Endpoints: map[string]actor.ActorID{"system.x": "tool:x:1"}}, facts: MemberFacts{Kind: actor.KindTool}, live: true},
 		{name: "reserved agent ask", table: ServiceTable{Endpoints: map[string]actor.ActorID{"agent.ask": "tool:x:1"}}, facts: MemberFacts{Kind: actor.KindTool}, live: true},
-		{name: "reserved agent status", table: ServiceTable{Endpoints: map[string]actor.ActorID{"agent.status": "tool:x:1"}}, facts: MemberFacts{Kind: actor.KindTool}, live: true},
 		{name: "short receiver", table: ServiceTable{Endpoints: map[string]actor.ActorID{"work.run": "tool:x"}}, facts: MemberFacts{Kind: actor.KindTool}, live: true},
 		{name: "inactive receiver", table: ServiceTable{Endpoints: map[string]actor.ActorID{"work.run": "tool:x:1"}}, facts: MemberFacts{Kind: actor.KindTool}},
 		{name: "peer receiver", table: ServiceTable{Endpoints: map[string]actor.ActorID{"work.run": "peer:x:1"}}, facts: MemberFacts{Kind: actor.KindPeer}, live: true},
@@ -752,7 +612,7 @@ func TestBlockedServiceRequestDoesNotBlockDescribe(t *testing.T) {
 	agentID := "agent:service:1"
 	s := &service{
 		deps: deps, table: ServiceTable{SvcAgent: &agentID, Endpoints: map[string]actor.ActorID{}},
-		card: channel.Card{Words: map[string]json.RawMessage{"agent.ask": json.RawMessage(`{"description":"ask"}`)}}, cardComplete: true,
+		card: channel.Card{Words: map[string]json.RawMessage{"agent.ask": json.RawMessage(`{"description":"ask"}`)}},
 	}
 	sys := &concurrentSys{ctx: ctx, pending: blockedPending{started: started, release: release}}
 	serveDone := make(chan struct{})

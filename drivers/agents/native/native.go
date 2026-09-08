@@ -613,7 +613,7 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 	}
 	_, err := sys.Post(behavior.RequestSpec{Cause: cause, Type: agentloop.TypeStart, Audience: message.Audience{actorID(looper)}, Payload: mustJSON(agentloop.StartRequest{
 		WorkID: w.ID, AssignmentID: w.AssignmentID, ControllerActor: string(sys.Self()), Inputs: inputs, Prior: append([]json.RawMessage(nil), w.Context...), ContextActor: c.cfg.ContextActor, LLMActor: c.cfg.LLMActor,
-		WorkspaceActor: c.cfg.WorkspaceActor, Model: c.cfg.Model, MaxTurns: c.cfg.MaxTurns})})
+		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: c.cfg.Model, MaxTurns: c.cfg.MaxTurns})})
 	if err != nil {
 		w.AssignmentID, w.Looper = "", ""
 		w.Stage, w.ExecutionState, w.UpdatedAt = "blocked", "dispatch_failed", nowMillis()

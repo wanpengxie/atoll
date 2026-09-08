@@ -2,98 +2,91 @@ package engineboot
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
+	"time"
 
-	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/channelmember"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-func TestActorChannelIsAHiddenHumanlessServiceContainer(t *testing.T) {
+func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	eng, _, core, registrar := newProtocolDeliveryRig(t)
-	rootID := currentMemberID(t, core, channelspec.RootPrincipalID)
 	stewardDeclID := lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, "steward")
 	stewardID := onlyDecl(t, core, stewardDeclID)
-	recipe := map[string]any{
-		"type":    "actor",
-		"profile": map[string]any{"serving": 1, "svc_agent": stewardDeclID},
-	}
-
-	rejected := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
-		"name": "actor-with-human", "recipe": recipe, "initial_actor_ids": []any{rootID, stewardID},
-	}))
-	if rejected.Status != message.StatusFailed || rejected.ErrorCode != string(lagoon.CodeInvalidArgs) {
-		t.Fatalf("actor channel accepted a human seat: %+v", rejected)
-	}
 
 	var created lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
-		"name": "actor-service", "recipe": recipe, "initial_actor_ids": []any{stewardID},
+		"name": "actor-body", "recipe": map[string]any{
+			"type": "actor", "declarations": []any{},
+			"profile": map[string]any{"serving": 0, "svc_agent": stewardDeclID},
+		}, "initial_actor_ids": []any{stewardID},
 	}), &created)
-	child := waitBundle(t, eng, created.ChannelID)
-	row, found, err := eng.registry.GetChannelDesired(context.Background(), created.ChannelID)
-	if err != nil || !found || row.Type != lagoon.ChannelTypeActor {
-		t.Fatalf("actor channel row=%+v found=%v err=%v", row, found, err)
+	body := waitBundle(t, eng, created.ChannelID)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var seat actor.ActorID
+	for time.Now().Before(deadline) {
+		roster, _ := core.View().Roster(context.Background())
+		for _, member := range roster {
+			if member.DeclID == string(created.ChannelID) && member.Kind == actor.KindChannel {
+				seat = member.ID
+			}
+		}
+		if seat != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	roster, err := child.View().Roster(context.Background())
+	if seat == "" {
+		t.Fatal("actor body was not seated in its host as kind=channel")
+	}
+
+	roster, err := body.View().Roster(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	handle, svc, humans := false, false, 0
 	for _, member := range roster {
+		handle = handle || member.DeclID == channelmember.HandleDeclID
+		svc = svc || member.DeclID == lagoon.SvcActorDeclID
 		if member.Kind == actor.KindHuman {
-			t.Fatalf("actor channel contains human member %+v", member)
+			humans++
 		}
+	}
+	if !handle || svc || humans != 0 {
+		t.Fatalf("body roster handle=%v svcactor=%v humans=%d rows=%+v", handle, svc, humans, roster)
+	}
+
+	row, found, err := eng.registry.GetChannelDesired(context.Background(), created.ChannelID)
+	if err != nil || !found || row.Type != lagoon.ChannelTypeActor || row.Serving != 0 {
+		t.Fatalf("actor body row=%+v found=%v err=%v", row, found, err)
+	}
+	decl, found, err := eng.registry.GetDecl(context.Background(), string(created.ChannelID))
+	if err != nil || !found || decl.DefaultClass != channelmember.SeatClass || decl.Name != string(created.ChannelID) {
+		t.Fatalf("seat declaration=%+v found=%v err=%v", decl, found, err)
+	}
+	if want := actor.ActorID("channel:" + string(created.ChannelID) + ":"); len(seat) <= len(want) || seat[:len(want)] != want {
+		t.Fatalf("seat id=%q want stable prefix %q", seat, want)
 	}
 
 	var ordinary []regspec.ChannelRow
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelList), map[string]any{}), &ordinary)
-	if channelRowPresent(ordinary, created.ChannelID) {
-		t.Fatalf("actor channel leaked into ordinary list: %+v", ordinary)
-	}
-	var management []regspec.ChannelRow
-	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelList), map[string]any{"include_actor_channels": true}), &management)
-	if !channelRowPresent(management, created.ChannelID) {
-		t.Fatalf("actor channel missing from explicit management list: %+v", management)
-	}
-
-	peer := onlyDecl(t, core, string(created.ChannelID))
-	var card introspect.Describe
-	cardRaw := callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, peer, introspect.QueryDescribe, map[string]any{})
-	if err := json.Unmarshal(cardRaw, &card); err != nil {
-		t.Fatalf("decode actor-channel card: %v raw=%s", err, cardRaw)
-	}
-	if _, ok := card.Words[message.TypeSystemMemberList]; ok {
-		t.Fatalf("actor channel exposed system membrane: %+v", card.Words)
-	}
-	if _, ok := card.Words["agent.ask"]; !ok {
-		t.Fatalf("actor channel omitted service Agent: %+v", card.Words)
-	}
-	terminal := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, peer, message.TypeSystemMemberList, map[string]any{}))
-	if terminal.Status != message.StatusFailed || terminal.ErrorCode != string(channel.GateEndpointNotFound) {
-		t.Fatalf("actor channel accepted disabled channel-system word: %+v", terminal)
-	}
-	port, _, ok := eng.host.AcquirePort(created.ChannelID)
-	if !ok {
-		t.Fatal("actor channel service port unavailable")
-	}
-	spaceResult, err := port.Call(context.Background(), channelspec.C0ChannelID, channel.Request{
-		From: channel.From{Channel: channelspec.C0ChannelID}, Type: message.TypeSystemChannelList,
-	}, nil)
-	if err != nil || spaceResult.Fail == nil || spaceResult.Fail.Code != string(channel.GateEndpointNotFound) {
-		t.Fatalf("actor channel accepted direct space-system word: result=%+v err=%v", spaceResult, err)
-	}
-}
-
-func channelRowPresent(rows []regspec.ChannelRow, id channel.ID) bool {
-	for _, row := range rows {
-		if row.ID == id {
-			return true
+	for _, candidate := range ordinary {
+		if candidate.ID == created.ChannelID {
+			t.Fatal("actor body leaked into ordinary channel list")
 		}
 	}
-	return false
+	var managed []regspec.ChannelRow
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelList), map[string]any{"include_actor_channels": true}), &managed)
+	found = false
+	for _, candidate := range managed {
+		found = found || candidate.ID == channel.ID(created.ChannelID)
+	}
+	if !found {
+		t.Fatal("actor body absent from explicit management list")
+	}
 }

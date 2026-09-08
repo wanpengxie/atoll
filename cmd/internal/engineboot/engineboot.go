@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/boot"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelmember"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/daemonhost"
 	"github.com/wanpengxie/atoll/platform/dataplane"
@@ -107,7 +108,7 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolver := &assemblyResolver{registry: e.registry, logger: logger}
+	resolver := &assemblyResolver{registry: e.registry, logger: logger, channelMembers: channelmember.NewHub()}
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{genesis: installed.C0Genesis}, resolver)
 	if err := resolver.registrar.MaterializeDeclarationConfigs(context.Background()); err != nil {
 		return nil, e.fail(fmt.Errorf("materialize registry declaration configs: %w", err))

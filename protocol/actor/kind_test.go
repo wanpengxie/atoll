@@ -8,17 +8,19 @@ import "testing"
 // cast. Its whole value is therefore the pair of closures below — what it lets
 // in, and what it keeps out. Neither half was pinned anywhere before this file.
 
-// TestParseKindAcceptsTheClosedSet is the ACCEPT half: the five canonical wire
+// TestParseKindAcceptsTheClosedSet is the ACCEPT half: the canonical wire
 // forms resolve, each to its own constant, and the value that comes back
 // re-serializes to the exact string that produced it (so a row written by one
 // process and read by another cannot drift).
 func TestParseKindAcceptsTheClosedSet(t *testing.T) {
 	accepted := map[string]Kind{
-		"human":  KindHuman,
-		"agent":  KindAgent,
-		"peer":   KindPeer,
-		"system": KindSystem,
-		"tool":   KindTool,
+		"human":   KindHuman,
+		"agent":   KindAgent,
+		"peer":    KindPeer,
+		"system":  KindSystem,
+		"tool":    KindTool,
+		"channel": KindChannel,
+		"space":   KindSpace,
 	}
 	for raw, want := range accepted {
 		got, ok := ParseKind(raw)

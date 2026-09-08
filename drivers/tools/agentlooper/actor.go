@@ -26,6 +26,7 @@ import (
 
 const Class = "agent-looper"
 const maxResultTextBytes = 64 << 10
+const channelCallWord = "channel.call"
 
 type Config struct {
 	ControllerActor string `json:"controller_actor,omitempty"`
@@ -301,7 +302,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 	if turns <= 0 {
 		turns = 12
 	}
-	tools := toolDefinitions(a.start.WorkspaceActor != "")
+	tools := toolDefinitions(a.start.WorkspaceActor != "", a.start.HostActor != "")
 	for turn := 0; turn < turns; turn++ {
 		a.mu.Lock()
 		a.phase = "thinking"
@@ -341,7 +342,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 			l.report(sys, a, "completed", through, result, "", "", "confirmed")
 			return
 		}
-		if a.start.WorkspaceActor == "" {
+		if a.start.WorkspaceActor == "" && a.start.HostActor == "" {
 			l.report(sys, a, "failed", through, nil, "tool_unavailable", "model requested a tool but this looper has no workspace actor", "not_started")
 			return
 		}
@@ -349,8 +350,8 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		a.phase = "acting"
 		a.mu.Unlock()
 		for _, tc := range calls {
-			word := toolWord(tc.Name)
-			if word == "" {
+			target, word := toolTarget(a.start, tc.Name)
+			if word == "" || target == "" {
 				history = append(history, toolResult(tc, true, "unknown tool "+tc.Name))
 				a.setHistory(history)
 				if historySize(history) > agentloop.MaxHistoryBytes {
@@ -359,7 +360,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 				}
 				continue
 			}
-			toolRaw, callErr := call(ctx, sys, a.cause, actor.ActorID(a.start.WorkspaceActor), word, json.RawMessage(tc.Arguments))
+			toolRaw, callErr := call(ctx, sys, a.cause, actor.ActorID(target), word, json.RawMessage(tc.Arguments))
 			if callErr != nil {
 				if errors.Is(callErr, context.Canceled) {
 					l.report(sys, a, "cancelled", through, nil, "cancelled", callErr.Error(), "confirmed_stopped")
@@ -474,11 +475,23 @@ func toolWord(name string) string {
 	}
 	return ""
 }
-func toolDefinitions(enabled bool) []json.RawMessage {
-	if !enabled {
+func toolTarget(start agentloop.StartRequest, name string) (string, string) {
+	if name == "channel_call" {
+		return start.HostActor, channelCallWord
+	}
+	return start.WorkspaceActor, toolWord(name)
+}
+func toolDefinitions(workspace, host bool) []json.RawMessage {
+	if !workspace && !host {
 		return nil
 	}
-	specs := []struct{ name, desc, schema string }{{"read", "Read a file from the workspace.", workspaceproto.ReadInputSchema}, {"write", "Write a file in the workspace.", workspaceproto.WriteInputSchema}, {"edit", "Edit exact unique blocks in one file.", workspaceproto.EditInputSchema}, {"bash", "Execute a bash command in the workspace.", workspaceproto.BashInputSchema}}
+	specs := make([]struct{ name, desc, schema string }, 0, 5)
+	if workspace {
+		specs = append(specs, struct{ name, desc, schema string }{"read", "Read a file from the workspace.", workspaceproto.ReadInputSchema}, struct{ name, desc, schema string }{"write", "Write a file in the workspace.", workspaceproto.WriteInputSchema}, struct{ name, desc, schema string }{"edit", "Edit exact unique blocks in one file.", workspaceproto.EditInputSchema}, struct{ name, desc, schema string }{"bash", "Execute a bash command in the workspace.", workspaceproto.BashInputSchema})
+	}
+	if host {
+		specs = append(specs, struct{ name, desc, schema string }{"channel_call", "Call any member of the host Channel through this body's Seat. Discover current targets with target=system, type=system.member.list, payload={}, then inspect a target with type=actor.describe before calling its words.", `{"type":"object","additionalProperties":false,"required":["target","type","payload"],"properties":{"target":{"type":"string","minLength":1},"type":{"type":"string","minLength":1},"payload":{"type":"object"}}}`})
+	}
 	out := make([]json.RawMessage, 0, len(specs))
 	for _, s := range specs {
 		out = append(out, json.RawMessage(fmt.Sprintf(`{"name":%q,"description":%q,"parameters":%s}`, s.name, s.desc, s.schema)))

@@ -297,10 +297,6 @@ func (h *ChannelHost) provisionGenesis(ctx context.Context, spec lagoon.GenesisS
 		})
 	}
 	bootstrapService := home.BootstrapService{SvcAgent: spec.Profile.SvcAgent, Endpoints: make(map[string]string, len(spec.Profile.Endpoints))}
-	if spec.Profile.SystemAccess != nil {
-		value := *spec.Profile.SystemAccess == 1
-		bootstrapService.SystemAccess = &value
-	}
 	for word, endpoint := range spec.Profile.Endpoints {
 		bootstrapService.Endpoints[word] = endpoint.Receiver
 	}

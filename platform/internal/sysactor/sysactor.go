@@ -228,7 +228,7 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 		if err != nil {
 			s.logger.Warn("sysactor.presence_snapshot_failed", "actor", string(identity.ID), "error", err)
 		}
-		present, uptimeMs := s.liveness(snapshot)
+		present, uptimeMs := s.liveness(identity.Kind, snapshot)
 		entry := introspect.CatalogEntry{
 			ID: string(identity.ID), Kind: string(identity.Kind),
 			Present:  present,
@@ -268,8 +268,15 @@ func (s *SystemActor) snapshot(ctx context.Context, id actor.ActorID) (presence.
 	return s.presence.Snapshot(ctx, id)
 }
 
-func (s *SystemActor) liveness(snapshot presence.Snapshot) (bool, int64) {
+func (s *SystemActor) liveness(kind actor.Kind, snapshot presence.Snapshot) (bool, int64) {
 	if !snapshot.L1Present {
+		return false, 0
+	}
+	// A channel member's local Seat is only one half of its body. Unlike an
+	// ordinary in-process actor, it is present exactly while the body-side
+	// Handle is reachable; the Seat publishes that edge as its external-body
+	// testimony. Missing, stale, malformed, or offline testimony is fail-closed.
+	if kind == actor.KindChannel && !channelBodyReachable(snapshot) {
 		return false, 0
 	}
 	uptime := int64(0)
@@ -277,6 +284,15 @@ func (s *SystemActor) liveness(snapshot presence.Snapshot) (bool, int64) {
 		uptime = s.clock().Sub(snapshot.L1StartedAt).Milliseconds()
 	}
 	return true, uptime
+}
+
+func channelBodyReachable(snapshot presence.Snapshot) bool {
+	row, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	if !known || row.StaleFromPriorLife {
+		return false
+	}
+	p, ok := introspect.ParseDevicePresence(row.Val)
+	return ok && p.Online
 }
 
 func deviceTestimony(snapshot presence.Snapshot) *introspect.DevicePresence {
@@ -311,7 +327,13 @@ func (s *SystemActor) respondStatus(sys actorbase.Sys, msg actorbase.Msg) {
 		s.logger.Warn("sysactor.member_get.snapshot_failed", "actor", req.Member, "error", err)
 		return
 	}
-	present, uptime := s.liveness(snapshot)
+	kind := actor.Kind("")
+	if s.facts != nil {
+		if facts, found, factsErr := s.facts.ActorFacts(msg.Ctx(), target); factsErr == nil && found {
+			kind = facts.Kind
+		}
+	}
+	present, uptime := s.liveness(kind, snapshot)
 	answer := introspect.Status{ActorID: string(target), Member: snapshot.Member, Present: present, UptimeMs: uptime}
 	if len(snapshot.L3) > 0 {
 		answer.L3 = make(map[string]introspect.StatusTestimony, len(snapshot.L3))

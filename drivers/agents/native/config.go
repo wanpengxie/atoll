@@ -16,6 +16,7 @@ type Config struct {
 	ContextActor            string   `json:"context_actor"`
 	LLMActor                string   `json:"llm_actor"`
 	WorkspaceActor          string   `json:"workspace_actor,omitempty"`
+	HostActor               string   `json:"host_actor,omitempty"`
 	Model                   string   `json:"model,omitempty"`
 	MaxOpenWorks            int      `json:"max_open_works,omitempty"`
 	MaxAssignmentsPerLooper int      `json:"max_assignments_per_looper,omitempty"`
@@ -57,8 +58,10 @@ func ParseConfig(raw json.RawMessage) (Config, error) {
 			return Config{}, errors.New("native-agent config: actor targets must be non-blank and trimmed")
 		}
 	}
-	if cfg.WorkspaceActor != "" && strings.TrimSpace(cfg.WorkspaceActor) != cfg.WorkspaceActor {
-		return Config{}, errors.New("native-agent config: workspace_actor must be trimmed")
+	for name, target := range map[string]string{"workspace_actor": cfg.WorkspaceActor, "host_actor": cfg.HostActor} {
+		if target != "" && strings.TrimSpace(target) != target {
+			return Config{}, fmt.Errorf("native-agent config: %s must be trimmed", name)
+		}
 	}
 	if cfg.MaxOpenWorks < 1 || cfg.MaxOpenWorks > 10000 {
 		return Config{}, errors.New("native-agent config: max_open_works must be 1..10000")
@@ -78,4 +81,4 @@ func ParseConfig(raw json.RawMessage) (Config, error) {
 	return cfg, nil
 }
 
-const ConfigSchema = `{"type":"object","additionalProperties":false,"properties":{"loopers":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"context_actor":{"type":"string","minLength":1},"llm_actor":{"type":"string","minLength":1},"workspace_actor":{"type":"string"},"model":{"type":"string"},"max_open_works":{"type":"integer","minimum":1,"maximum":10000},"max_assignments_per_looper":{"type":"integer","minimum":1,"maximum":10000},"max_inputs_per_work":{"type":"integer","minimum":1,"maximum":10000},"max_operation_keys":{"type":"integer","minimum":1,"maximum":10000},"max_turns":{"type":"integer","minimum":1,"maximum":128}}}`
+const ConfigSchema = `{"type":"object","additionalProperties":false,"properties":{"loopers":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"context_actor":{"type":"string","minLength":1},"llm_actor":{"type":"string","minLength":1},"workspace_actor":{"type":"string"},"host_actor":{"description":"body-side channel Handle used to act through this Channel's Seat in its host","type":"string"},"model":{"type":"string"},"max_open_works":{"type":"integer","minimum":1,"maximum":10000},"max_assignments_per_looper":{"type":"integer","minimum":1,"maximum":10000},"max_inputs_per_work":{"type":"integer","minimum":1,"maximum":10000},"max_operation_keys":{"type":"integer","minimum":1,"maximum":10000},"max_turns":{"type":"integer","minimum":1,"maximum":128}}}`

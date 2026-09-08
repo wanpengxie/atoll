@@ -453,14 +453,14 @@ func seedBootstrap(
 		}
 		instances[declaration.SourceDeclID] = record.ID
 	}
-	if len(cfg.BootstrapService.Endpoints) == 0 && cfg.BootstrapService.SvcAgent == nil && cfg.BootstrapService.SystemAccess == nil {
+	if len(cfg.BootstrapService.Endpoints) == 0 && cfg.BootstrapService.SvcAgent == nil {
 		return nil
 	}
 	svcID := instances["svcactor"]
 	if svcID == "" {
 		return errors.New("platform: bootstrap service table has no svcactor")
 	}
-	table := svcactor.ServiceTable{Endpoints: make(map[string]actor.ActorID, len(cfg.BootstrapService.Endpoints)), SystemAccess: cfg.BootstrapService.SystemAccess}
+	table := svcactor.ServiceTable{Endpoints: make(map[string]actor.ActorID, len(cfg.BootstrapService.Endpoints))}
 	for word, declID := range cfg.BootstrapService.Endpoints {
 		id := instances[declID]
 		if id == "" {

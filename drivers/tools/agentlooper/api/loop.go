@@ -39,6 +39,7 @@ type StartRequest struct {
 	ContextActor    string            `json:"context_actor"`
 	LLMActor        string            `json:"llm_actor"`
 	WorkspaceActor  string            `json:"workspace_actor,omitempty"`
+	HostActor       string            `json:"host_actor,omitempty"`
 	Model           string            `json:"model,omitempty"`
 	MaxTurns        int               `json:"max_turns,omitempty"`
 }

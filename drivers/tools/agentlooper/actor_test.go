@@ -199,6 +199,27 @@ func TestToolResultPreservesPiContentDetailsAndUsage(t *testing.T) {
 	}
 }
 
+func TestChannelCallTargetsBodyHandleInsteadOfWorkspace(t *testing.T) {
+	start := agentloop.StartRequest{WorkspaceActor: "workspace", HostActor: "host"}
+	if target, word := toolTarget(start, "channel_call"); target != "host" || word != channelCallWord {
+		t.Fatalf("channel call target=%q word=%q", target, word)
+	}
+	if target, word := toolTarget(start, "read"); target != "workspace" || word != workspaceproto.TypeRead {
+		t.Fatalf("workspace call target=%q word=%q", target, word)
+	}
+	definitions := toolDefinitions(true, true)
+	if len(definitions) != 5 {
+		t.Fatalf("tool definitions=%d, want workspace four plus channel_call", len(definitions))
+	}
+	var host struct {
+		Name       string          `json:"name"`
+		Parameters json.RawMessage `json:"parameters"`
+	}
+	if err := json.Unmarshal(definitions[4], &host); err != nil || host.Name != "channel_call" || !json.Valid(host.Parameters) {
+		t.Fatalf("host tool=%s err=%v", definitions[4], err)
+	}
+}
+
 func TestResultTextExcerptIsBoundedWithoutBreakingUTF8(t *testing.T) {
 	input := strings.Repeat("界", maxResultTextBytes)
 	got, truncated := boundedResultText(input)

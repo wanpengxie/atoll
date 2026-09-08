@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/platform/channelmember"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
@@ -19,14 +20,24 @@ import (
 )
 
 type assemblyResolver struct {
-	registry  *lagoon.Registry
-	registrar *lagoon.Registrar
-	host      *channelhost.ChannelHost
-	logger    *slog.Logger
+	registry       *lagoon.Registry
+	registrar      *lagoon.Registrar
+	host           *channelhost.ChannelHost
+	logger         *slog.Logger
+	channelMembers *channelmember.Hub
 }
 
 func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {
 	switch class {
+	case channelmember.SeatClass, channelmember.HandleClass:
+		cfg, err := channelmember.ParseConfig(config)
+		if err != nil {
+			return platform.ActorFactory{}, false
+		}
+		if class == channelmember.SeatClass {
+			return platform.ActorFactory{Proc: channelmember.SeatDef(r.channelMembers, ch, cfg)}, true
+		}
+		return platform.ActorFactory{Proc: channelmember.HandleDef(r.channelMembers, ch, cfg)}, true
 	case lagoon.ClassRegistrar:
 		if ch != channelspec.C0ChannelID {
 			return platform.ActorFactory{}, false
@@ -128,6 +139,10 @@ func (r *assemblyResolver) PrincipalKind(ctx context.Context, id string) (actor.
 }
 func (r *assemblyResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
 	switch class {
+	case channelmember.SeatClass:
+		return actor.KindChannel, true, nil
+	case channelmember.HandleClass:
+		return actor.KindTool, true, nil
 	case lagoon.PeerActorClass, lagoon.SvcActorClass:
 		return actor.KindPeer, true, nil
 	case lagoon.ClassRegistrar:
@@ -139,7 +154,7 @@ func (r *assemblyResolver) ClassKind(_ context.Context, class string) (actor.Kin
 
 func (r *assemblyResolver) ClassPlacement(_ context.Context, class string) (channelspec.PlacementKind, bool, error) {
 	switch class {
-	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.ClassRegistrar, "human":
+	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.ClassRegistrar, channelmember.SeatClass, channelmember.HandleClass, "human":
 		return channelspec.PlacementServer, true, nil
 	}
 	p, ok := classregistry.ClassPlacement(class)
@@ -147,6 +162,20 @@ func (r *assemblyResolver) ClassPlacement(_ context.Context, class string) (chan
 }
 
 func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel.ID, facts channelspec.DeclarationFacts) error {
+	if facts.Class == channelmember.SeatClass {
+		cfg, err := channelmember.ParseConfig(facts.Config)
+		if err != nil || cfg.Host != holder {
+			return channelspec.ErrDeclarationNotFound
+		}
+		row, ok, err := r.registry.GetChannelDesired(ctx, cfg.Body)
+		if err != nil {
+			return err
+		}
+		if !ok || row.Status != regspec.ChannelPresent || row.ParentID != holder || row.Type != lagoon.ChannelTypeActor {
+			return channelspec.ErrDeclarationNotFound
+		}
+		return nil
+	}
 	if facts.Class != lagoon.PeerActorClass {
 		return nil
 	}
@@ -171,6 +200,10 @@ func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel
 }
 
 func (r *assemblyResolver) ValidateConfig(class string, config json.RawMessage) error {
+	if class == channelmember.SeatClass || class == channelmember.HandleClass {
+		_, err := channelmember.ParseConfig(config)
+		return err
+	}
 	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.ClassRegistrar {
 		if class == lagoon.PeerActorClass {
 			_, err := peeractor.ValidateConfig(config)
@@ -182,7 +215,7 @@ func (r *assemblyResolver) ValidateConfig(class string, config json.RawMessage) 
 }
 
 func (r *assemblyResolver) ResolveConfig(class string, config json.RawMessage) (json.RawMessage, error) {
-	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.ClassRegistrar {
+	if class == channelmember.SeatClass || class == channelmember.HandleClass || class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.ClassRegistrar {
 		if err := r.ValidateConfig(class, config); err != nil {
 			return nil, err
 		}
@@ -192,6 +225,12 @@ func (r *assemblyResolver) ResolveConfig(class string, config json.RawMessage) (
 }
 
 func (r *assemblyResolver) LookupClassKind(class string) (actor.Kind, bool) {
+	if class == channelmember.SeatClass {
+		return actor.KindChannel, true
+	}
+	if class == channelmember.HandleClass {
+		return actor.KindTool, true
+	}
 	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass {
 		return actor.KindPeer, true
 	}
@@ -217,7 +256,7 @@ func (r *assemblyResolver) ClassDefaultConfig(class string) (json.RawMessage, bo
 
 func (r *assemblyResolver) LookupClassPlacement(class string) (channelspec.PlacementKind, bool) {
 	switch class {
-	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.ClassRegistrar, "human":
+	case lagoon.PeerActorClass, lagoon.SvcActorClass, lagoon.ClassRegistrar, channelmember.SeatClass, channelmember.HandleClass, "human":
 		return channelspec.PlacementServer, true
 	}
 	return classregistry.ClassPlacement(class)
