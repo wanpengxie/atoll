@@ -1,62 +1,27 @@
 package home
 
 import (
-	"encoding/json"
 	"fmt"
-	"github.com/wanpengxie/atoll/platform/channelmember"
+	"strings"
+
 	"github.com/wanpengxie/atoll/platform/channelspec"
-	"github.com/wanpengxie/atoll/platform/peeractor"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// A relation key is derived from its resolved definition, never its declaration
-// alias or singleton flag. This does not create a second relation registry.
-func relationKey(def storespec.ActorDefinition) (string, error) {
-	switch def.Class {
-	case channelmember.SeatClass:
-		cfg, err := channelmember.ParseSeatConfig(def.Config)
-		if err != nil {
-			return "", err
-		}
-		return "seat:" + string(cfg.Body), nil
-	case channelmember.HandleClass:
-		cfg, err := channelmember.ParseHandleConfig(def.Config)
-		if err != nil {
-			return "", err
-		}
-		return "handle:" + string(cfg.Host), nil
-	case "peeractor":
-		target, err := peeractor.ValidateConfig(json.RawMessage(def.Config))
-		if err != nil {
-			return "", err
-		}
-		return "peer:" + string(target), nil
+// Within the channel-member protocol, the seed is the existing body Channel ID.
+// Implementation class and business configuration do not define the relationship.
+func (a *actorSystem) checkChannelMember(body string) error {
+	if body == "" || strings.Contains(body, ":") || body == string(a.home.channelID) {
+		return &channelspec.OperationError{Code: channelspec.ErrCodeBadPayload, Detail: "channel member requires a distinct body Channel ID"}
 	}
-	return "", nil
-}
-func (a *actorSystem) checkRelation(def storespec.ActorDefinition, except actor.ActorID) error {
-	key, err := relationKey(def)
+	identities, err := a.home.controller.ActiveIdentities()
 	if err != nil {
 		return err
 	}
-	if key == "" {
-		return nil
-	}
-	instances, err := a.home.controller.DeclaredReconcileList()
-	if err != nil {
-		return err
-	}
-	for _, instance := range instances {
-		if instance.ID == except {
-			continue
-		}
-		other, err := relationKey(instance.Definition)
-		if err != nil {
-			return err
-		}
-		if key == other {
-			return &channelspec.OperationError{Code: channelspec.ErrCodeConflictExists, Detail: fmt.Sprintf("relation %s already represented by %s", key, instance.ID)}
+	for _, member := range identities {
+		parts := strings.Split(string(member.ID), ":")
+		if member.Kind == actor.KindChannel && len(parts) == 3 && parts[1] == body {
+			return &channelspec.OperationError{Code: channelspec.ErrCodeConflictExists, Detail: fmt.Sprintf("channel %s is already a member: %s", body, member.ID)}
 		}
 	}
 	return nil

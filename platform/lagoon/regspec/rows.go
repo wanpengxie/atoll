@@ -79,8 +79,11 @@ type ChannelRow struct {
 }
 
 type TemplateDeclaration struct {
-	DeclID string          `json:"decl_id"`
-	Config json.RawMessage `json:"config,omitempty"`
+	// Bindings explicitly supplies top-level implementation config fields from
+	// creation inputs; class names never select or imply these bindings.
+	Bindings map[string]string `json:"bindings,omitempty"`
+	DeclID   string            `json:"decl_id"`
+	Config   json.RawMessage   `json:"config,omitempty"`
 	// DesiredHost names which device runs this seat, for a daemon-placed class.
 	// It sits on the RECIPE ENTRY rather than on the declaration because a
 	// declaration is reusable across channels while a device is bound to one:

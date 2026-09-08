@@ -35,7 +35,8 @@
         "decl_id": "pi-workspace"
       },
       {
-        "decl_id": "native-agent-handle"
+        "decl_id": "native-agent-handle",
+        "bindings": {"host": "parent_channel_id"}
       }
     ],
     "profile": {

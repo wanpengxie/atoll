@@ -749,39 +749,7 @@ func (r *Registrar) establishChannelEdges(sys actorbase.Sys, trigger actorbase.M
 			return reply
 		}
 	}
-	if row.Type == ChannelTypeActor {
-		var genesis GenesisSpec
-		if err := json.Unmarshal(row.Spec, &genesis); err != nil {
-			reply.Relation = "admission_failed"
-			reply.RelationStep = "body"
-			reply.Detail = err.Error()
-			return reply
-		}
-		found := false
-		targets := map[string]bool{}
-		for _, decl := range genesis.Declarations {
-			targets[decl.DeclID] = decl.Rendered.Singleton
-		}
-		for _, decl := range genesis.Declarations {
-			if decl.Rendered.Class == channelmember.HandleClass {
-				cfg, err := channelmember.ParseHandleConfig(decl.Rendered.Config)
-				if err == nil && cfg.Host == row.ParentID {
-					found = true
-					for name, word := range cfg.Words {
-						if !targets[word.Target] {
-							reply.Warnings = append(reply.Warnings, fmt.Sprintf("handle word %s targets non-singleton declaration %s; multiple members will return actor_ambiguous", name, word.Target))
-						}
-					}
-				}
-			}
-		}
-		if !found {
-			reply.Relation = "admission_failed"
-			reply.RelationStep = "body"
-			reply.Detail = "body created without a parent handle; introduce the body's configured handle with system.member.create"
-		}
-		sort.Strings(reply.Warnings)
-	}
+
 	return reply
 }
 
@@ -949,17 +917,11 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if r.classes == nil {
 			return regspec.ChannelRow{}, false, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 		}
-		if decl.DefaultClass == channelmember.HandleClass && channelType == ChannelTypeActor {
-			// Bind the recipe's own handle; never manufacture one from svc_agent.
-			var fields map[string]json.RawMessage
-			if err := json.Unmarshal(config, &fields); err != nil {
+		if len(item.Bindings) > 0 {
+			config, err = bindCreationConfig(config, item.Bindings, parent)
+			if err != nil {
 				return regspec.ChannelRow{}, false, err
 			}
-			if fields == nil {
-				fields = map[string]json.RawMessage{}
-			}
-			fields["host"], _ = json.Marshal(parent)
-			config, _ = json.Marshal(fields)
 			if len(item.Config) == 0 {
 				overlays = append(overlays, regspec.OverlayRow{DeclID: item.DeclID, ChannelID: id, UpdatedAt: now})
 			}
@@ -1013,6 +975,20 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			return regspec.ChannelRow{}, false, err
 		}
 		genesisDeclaration := GenesisDeclaration{DeclID: item.DeclID, Seed: decl.Name, Kind: kind, Rendered: rendered}
+		if kind == actor.KindChannel {
+			if !strings.HasPrefix(item.DeclID, "seat:") {
+				return regspec.ChannelRow{}, false, invalid("channel member requires a published seat:<channel-id> declaration")
+			}
+			bodyID := channel.ID(strings.TrimPrefix(item.DeclID, "seat:"))
+			bodyRow, exists, err := tx.GetChannel(ctx, bodyID)
+			if err != nil {
+				return regspec.ChannelRow{}, false, err
+			}
+			if !exists || bodyRow.Status != regspec.ChannelPresent {
+				return regspec.ChannelRow{}, false, notFound("body channel", string(bodyID), "system.channel.list")
+			}
+			genesisDeclaration.Seed = string(bodyID)
+		}
 		if trusted {
 			genesisDeclaration.Principal = trustedSeat.Principal
 			genesisDeclaration.SourceActorID = trustedSeat.SourceActorID
@@ -1038,20 +1014,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		declarations = append(declarations, GenesisDeclaration{DeclID: string(parent), Seed: parentDecl.Name, Kind: actor.KindPeer, Rendered: parentRendered})
 		declarationKinds[string(parent)] = actor.KindPeer
 	}
-	for _, declaration := range declarations {
-		if declaration.Rendered.Class != channelmember.HandleClass {
-			continue
-		}
-		cfg, err := channelmember.ParseHandleConfig(declaration.Rendered.Config)
-		if err != nil {
-			return regspec.ChannelRow{}, false, err
-		}
-		for name, word := range cfg.Words {
-			if declarationKinds[word.Target] == "" {
-				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("handle word %q targets declaration %q outside recipe", name, word.Target))
-			}
-		}
-	}
+
 	if err := validateServiceProfile(profile, declarationKinds); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
@@ -1879,6 +1842,9 @@ func materializeChannelTemplateRow(row regspec.ChannelTemplateRow) (regspec.Chan
 func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.Tx, declarations []regspec.TemplateDeclaration) error {
 	seen := make(map[string]struct{}, len(declarations))
 	for _, item := range declarations {
+		if _, err := bindCreationConfig(nil, item.Bindings, channelspec.C0ChannelID); err != nil {
+			return invalid(err.Error())
+		}
 		if item.DeclID == "" {
 			return invalid("every entry in declarations needs a non-empty decl_id")
 		}
@@ -1894,7 +1860,7 @@ func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.
 			return invalid(fmt.Sprintf("declaration %q is not present; list the available ones with system.actor.template.list", item.DeclID))
 		}
 		if decl.DefaultClass == PeerActorClass {
-			if item.Config != nil {
+			if item.Config != nil || len(item.Bindings) > 0 {
 				return invalid(fmt.Sprintf("declaration %q is a peer, whose config is minted by the registry and cannot be overridden here; drop the config field for this entry", item.DeclID))
 			}
 			if decl.DefaultClass != PeerActorClass {

@@ -437,16 +437,12 @@ func seedBootstrap(
 	// any member is inserted. Runtime continues to know nothing about relations.
 	relationKeys := map[string]bool{}
 	for _, decl := range cfg.BootstrapDeclarations {
-		var raw []byte
-		if decl.Config != nil {
-			raw = *decl.Config
-		}
-		key, err := relationKey(storespec.ActorDefinition{Class: decl.Class, Config: raw})
-		if err != nil {
-			return err
-		}
-		if key == "" {
+		if decl.Kind != actor.KindChannel {
 			continue
+		}
+		key := decl.Seed
+		if key == "" || key == string(cfg.ChannelID) {
+			return fmt.Errorf("invalid body Channel ID %q", key)
 		}
 		if relationKeys[key] {
 			return fmt.Errorf("duplicate genesis relation %s", key)

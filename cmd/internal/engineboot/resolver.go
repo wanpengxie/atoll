@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"log/slog"
+	"strings"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
@@ -33,7 +34,8 @@ func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class str
 	switch class {
 	case channelmember.SeatClass:
 		cfg, err := channelmember.ParseSeatConfig(config)
-		if err != nil {
+		parts := strings.Split(string(id), ":")
+		if err != nil || len(parts) != 3 || parts[1] != string(cfg.Body) {
 			return platform.ActorFactory{}, false
 		}
 		unavailable := func(ctx context.Context) error {
@@ -106,6 +108,19 @@ func (r *assemblyResolver) ResolveDeclaration(ctx context.Context, ch channel.ID
 	if !ok || decl.Status != regspec.DeclPresent {
 		return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
 	}
+	var bodyID channel.ID
+	if strings.HasPrefix(id, "seat:") {
+		// The published seat declaration is addressed by an existing Channel ID.
+		// Aliases and implementation config cannot mint another relationship.
+		bodyID = channel.ID(strings.TrimPrefix(id, "seat:"))
+		row, exists, err := r.registry.GetChannelDesired(ctx, bodyID)
+		if err != nil {
+			return channelspec.DeclarationFacts{}, err
+		}
+		if !exists || row.Status != regspec.ChannelPresent {
+			return channelspec.DeclarationFacts{}, channelspec.ErrDeclarationNotFound
+		}
+	}
 	config := append(json.RawMessage(nil), decl.Config...)
 	overlays, err := r.registry.GetOverlays(ctx, ch)
 	if err != nil {
@@ -117,7 +132,14 @@ func (r *assemblyResolver) ResolveDeclaration(ctx context.Context, ch channel.ID
 			break
 		}
 	}
+	if bodyID != "" && decl.DefaultClass == channelmember.SeatClass {
+		cfg, err := channelmember.ParseSeatConfig(config)
+		if err != nil || cfg.Body != bodyID {
+			return channelspec.DeclarationFacts{}, fmt.Errorf("seat implementation config cannot change body Channel ID %s", bodyID)
+		}
+	}
 	return channelspec.DeclarationFacts{
+		ChannelID:      bodyID,
 		OwnerPrincipal: decl.Owner, Name: decl.Name, Description: decl.Description,
 		Visibility: decl.Visibility, Class: decl.DefaultClass, Config: config, Singleton: decl.Singleton,
 	}, nil
@@ -177,12 +199,11 @@ func (r *assemblyResolver) ClassPlacement(_ context.Context, class string) (chan
 }
 
 func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel.ID, facts channelspec.DeclarationFacts) error {
-	if facts.Class == channelmember.SeatClass {
-		cfg, err := channelmember.ParseSeatConfig(facts.Config)
-		if err != nil || cfg.Body == holder {
+	if facts.ChannelID != "" {
+		if facts.ChannelID == holder {
 			return channelspec.ErrDeclarationNotFound
 		}
-		row, ok, err := r.registry.GetChannelDesired(ctx, cfg.Body)
+		row, ok, err := r.registry.GetChannelDesired(ctx, facts.ChannelID)
 		if err != nil {
 			return err
 		}

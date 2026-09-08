@@ -2,6 +2,7 @@ package engineboot
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -108,11 +109,81 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	if !found {
 		t.Fatal("actor body absent from channel list or listed without type=actor")
 	}
+	t.Run("member identity is the body id not declaration name or config", func(t *testing.T) {
+		resolver := &assemblyResolver{registry: eng.registry, host: eng.host}
+		facts, err := resolver.ResolveDeclaration(context.Background(), channelspec.C0ChannelID, "seat:"+string(created.ChannelID))
+		if err != nil || facts.ChannelID != created.ChannelID {
+			t.Fatalf("facts=%+v err=%v", facts, err)
+		}
+		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{"id": "seat-alias", "name": "arbitrary", "class": channelmember.SeatClass, "visibility": "public", "config": map[string]any{"body": created.ChannelID}}), nil)
+		failure := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, "system", "system.member.create", map[string]any{"decl_id": "seat-alias"}))
+		if failure.Status != message.StatusFailed {
+			t.Fatal("alias created another relation")
+		}
+		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{"id": "seat:absent-body", "name": "absent-body", "class": channelmember.SeatClass, "visibility": "public", "config": map[string]any{"body": created.ChannelID}}), nil)
+		if _, err := resolver.ResolveDeclaration(context.Background(), channelspec.C0ChannelID, "seat:absent-body"); err == nil {
+			t.Fatal("config manufactured a relationship to an absent channel")
+		}
+		// Configuration cannot retarget an already-minted member identity.
+		badConfig := []byte(`{"body":"different-body"}`)
+		if _, ok := resolver.BuildClass(channelspec.C0ChannelID, seat, channelmember.SeatClass, badConfig); ok {
+			t.Fatal("business config retargeted member")
+		}
+	})
+	t.Run("channel creation does not require a particular handle class", func(t *testing.T) {
+		var empty lagoon.ChannelCreateReply
+		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "body-without-handle", "recipe": map[string]any{"type": "actor"}, "initial_actor_ids": []any{}}), &empty)
+		if empty.Relation != "seated" {
+			t.Fatalf("logical membership depends on a handle implementation: %+v", empty)
+		}
+		id := onlyDecl(t, core, "seat:"+string(empty.ChannelID))
+		failure := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, id, "some.request", map[string]any{}))
+		if failure.ErrorCode != "channel_unavailable" {
+			t.Fatalf("unattached endpoint=%+v", failure)
+		}
+	})
 	// A separate host may reference the same concrete body. Retiring it must
 	// revoke its declarations without silently deleting that host's membership.
 	var unrelated lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "unrelated-host", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &unrelated)
 	other := waitBundle(t, eng, unrelated.ChannelID)
+	t.Run("parent binding leaves other handles untouched", func(t *testing.T) {
+		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{"id": "fixed-core-handle", "name": "core-handle", "class": channelmember.HandleClass, "visibility": "public", "config": map[string]any{"host": "c0", "words": map[string]any{}}}), nil)
+		var child lagoon.ChannelCreateReply
+		terminalValue(t, callMember(t, unrelated.ChannelID, other, channelspec.RootPrincipalID, "system", string(lagoon.WordChannelCreate), map[string]any{"name": "two-handles", "initial_actor_ids": []any{}, "recipe": map[string]any{"type": "actor", "declarations": []any{map[string]any{"decl_id": "body-handle", "bindings": map[string]any{"host": "parent_channel_id"}}, map[string]any{"decl_id": "fixed-core-handle"}}}}), &child)
+		if child.Relation != "seated" {
+			t.Fatalf("child=%+v", child)
+		}
+		row, found, err := eng.registry.GetChannelDesired(context.Background(), child.ChannelID)
+		if err != nil || !found {
+			t.Fatalf("row missing: %v", err)
+		}
+		var genesis lagoon.GenesisSpec
+		if err := json.Unmarshal(row.Spec, &genesis); err != nil {
+			t.Fatal(err)
+		}
+		seen := 0
+		for _, d := range genesis.Declarations {
+			want := ""
+			if d.DeclID == "body-handle" {
+				want = string(unrelated.ChannelID)
+			}
+			if d.DeclID == "fixed-core-handle" {
+				want = "c0"
+			}
+			if want == "" {
+				continue
+			}
+			cfg, err := channelmember.ParseHandleConfig(d.Rendered.Config)
+			if err != nil || string(cfg.Host) != want {
+				t.Fatalf("%s host=%s want=%s err=%v", d.DeclID, cfg.Host, want, err)
+			}
+			seen++
+		}
+		if seen != 2 {
+			t.Fatalf("handles=%d", seen)
+		}
+	})
 	terminalValue(t, callMember(t, unrelated.ChannelID, other, channelspec.RootPrincipalID, "system", "system.member.create", map[string]any{"decl_id": "seat:" + string(created.ChannelID)}), nil)
 	otherSeat := onlyDecl(t, other, "seat:"+string(created.ChannelID))
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelDelete), map[string]any{"channel_id": created.ChannelID}), nil)

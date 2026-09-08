@@ -184,7 +184,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 
 	host, err := Open(completeHomeTestConfig(Config{ChannelID: hostID, DBPath: t.TempDir() + "/host.sqlite", Bootstrap: true, CompositionResolver: resolver, IntroductionResolver: resolver, ReconcileInterval: time.Hour,
 		BootstrapDeclarations: []DeclareRequest{
-			cmDecl("body-channel", "body", actor.KindChannel, channelmember.SeatClass, seatRaw),
+			cmDecl("body-channel", string(bodyID), actor.KindChannel, channelmember.SeatClass, seatRaw),
 			cmDecl("host-tool", "host-tool", actor.KindTool, cmHostToolClass, empty),
 			cmDecl("host-trigger", "host-trigger", actor.KindAgent, cmIdleClass, empty),
 		},

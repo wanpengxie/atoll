@@ -113,7 +113,7 @@ const initialActorIDsSchema = `"initial_actor_ids":{"type":"array","description"
 // a bare object.
 const recipeSchema = `"recipe":{"type":"object","additionalProperties":false,"description":"what the new channel is born with","properties":{` +
 	`"type":{"type":"string","enum":["group","actor"],"default":"group"},` +
-	`"declarations":{"type":"array","description":"members minted at genesis; each decl_id must name an actor template visible to you (public, or one you own)","items":{"type":"object","additionalProperties":false,"required":["decl_id"],"properties":{"decl_id":{"type":"string"},"config":{"type":"object","description":"per-channel config overlay for this declaration"}}}},` +
+	`"declarations":{"type":"array","description":"members minted at genesis; each decl_id must name an actor template visible to you (public, or one you own)","items":{"type":"object","additionalProperties":false,"required":["decl_id"],"properties":{"bindings":{"type":"object","additionalProperties":{"enum":["parent_channel_id"]},"description":"explicit top-level config field bindings from creation inputs"},"decl_id":{"type":"string"},"config":{"type":"object","description":"per-channel config overlay for this declaration"}}}},` +
 	`"profile":{"type":"object","additionalProperties":false,"description":"how the channel serves callers from outside","properties":{` +
 	`"description":{"type":"string"},` +
 	`"default_storage_device_id":{"type":"string","description":"attached device whose channel directory file views open first; defaults to local-device"},` +
@@ -125,7 +125,7 @@ const recipeExampleMinimal = `{"name":"research","recipe":{"declarations":[],"pr
 
 const recipeExampleServing = `{"name":"research","recipe":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"analysis workspace","serving":1,"svc_agent":"my-analyst"}},"initial_actor_ids":["human:root:1787128257816","agent:steward:1787487131255"]}`
 
-const recipeExampleActor = `{"name":"coder","recipe":{"type":"actor","declarations":[{"decl_id":"my-agent"},{"decl_id":"my-handle","config":{"words":{"agent.ask":{"schema":{"type":"object"},"target":"my-agent"}}}}],"profile":{"serving":0}},"initial_actor_ids":[]}`
+const recipeExampleActor = `{"name":"coder","recipe":{"type":"actor","declarations":[{"decl_id":"my-agent"},{"decl_id":"my-handle","bindings":{"host":"parent_channel_id"},"config":{"words":{"agent.ask":{"schema":{"type":"object"},"target":"my-agent"}}}}],"profile":{"serving":0}},"initial_actor_ids":[]}`
 
 const templateBodyExample = `{"id":"team-channel","name":"Team channel","visibility":"public","body":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"a team workspace","serving":1,"svc_agent":"my-analyst"}}}`
 

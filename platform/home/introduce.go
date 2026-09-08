@@ -128,6 +128,9 @@ func (h *Home) resolveIntroduction(
 			Code: channelspec.ErrCodeUnknownClass, Detail: "unknown class " + facts.Class,
 		}
 	}
+	if facts.ChannelID != "" && kind != actor.KindChannel {
+		return actorctl.IntroduceRequest{}, &channelspec.OperationError{Code: channelspec.ErrCodeUnknownClass, Detail: "published channel member requires a channel-kind endpoint implementation"}
+	}
 
 	placementCtx, placementCancel := context.WithTimeout(ctx, introductionResolveTimeout)
 	placementKind, found, err := h.resolver.ClassPlacement(placementCtx, facts.Class)
@@ -167,8 +170,15 @@ func (h *Home) resolveIntroduction(
 	// policy asks for it; it does not mean every instance of that recipe is the
 	// owner's identity. Principal-bound agents enter only through a trusted
 	// identity-carrying genesis/initial-seat path.
+	seed := facts.Name
+	if kind == actor.KindChannel {
+		if facts.ChannelID == "" {
+			return actorctl.IntroduceRequest{}, &channelspec.OperationError{Code: channelspec.ErrCodeDeclNotFound, Detail: "channel member requires a registered body Channel ID"}
+		}
+		seed = string(facts.ChannelID)
+	}
 	return actorctl.IntroduceRequest{
-		DeclID: declID, Seed: facts.Name, Kind: kind, Singleton: facts.Singleton, Placement: placement,
+		DeclID: declID, Seed: seed, Kind: kind, Singleton: facts.Singleton, Placement: placement,
 		Definition: storespec.ActorDefinition{
 			Class:  facts.Class,
 			Config: append(json.RawMessage(nil), facts.Config...),
@@ -233,7 +243,7 @@ func (h *Home) defaultDaemonPlacement(bound []string) (storespec.Placement, erro
 		return storespec.NewDaemonPlacement(bound[0])
 	}
 	return storespec.Placement{}, &channelspec.OperationError{
-		Code: channelspec.ErrCodeInvalidDesiredHost,
+		Code:   channelspec.ErrCodeInvalidDesiredHost,
 		Detail: "this channel has " + strconv.Itoa(len(bound)) + " devices attached and none of them is the node's local device, so there is no default: name one with desired_host (" + strings.Join(bound, ", ") + ")",
 	}
 }

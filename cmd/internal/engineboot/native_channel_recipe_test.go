@@ -48,7 +48,8 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 	var template struct {
 		Body struct {
 			Declarations []struct {
-				DeclID string `json:"decl_id"`
+				DeclID   string            `json:"decl_id"`
+				Bindings map[string]string `json:"bindings"`
 			}
 			Profile map[string]any
 		}
@@ -65,6 +66,9 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 	}
 	found := false
 	for _, d := range template.Body.Declarations {
+		if d.DeclID == declaration.ID && d.Bindings["host"] != "parent_channel_id" {
+			t.Fatal("parent host binding must be explicit in recipe")
+		}
 		found = found || d.DeclID == declaration.ID
 	}
 	if !found {

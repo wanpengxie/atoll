@@ -19,7 +19,7 @@ func TestRelationshipUniquenessAcrossDeclarationsAndConcurrentIntroductions(t *t
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := h.actors.Introduce(context.Background(), actorctl.IntroduceRequest{DeclID: fmt.Sprintf("alias-%d", i), Seed: fmt.Sprintf("alias-%d", i), Kind: actor.KindChannel, Definition: storespec.ActorDefinition{Class: channelmember.SeatClass, Config: []byte(`{"body":"other"}`)}, Placement: storespec.NewServerPlacement()})
+			_, err := h.actors.Introduce(context.Background(), actorctl.IntroduceRequest{DeclID: fmt.Sprintf("alias-%d", i), Seed: "other", Kind: actor.KindChannel, Definition: storespec.ActorDefinition{Class: fmt.Sprintf("custom-seat-%d", i), Config: []byte(`{"arbitrary_business_config":true}`)}, Placement: storespec.NewServerPlacement()})
 			results <- err
 		}(i)
 	}
@@ -45,7 +45,10 @@ func TestRelationshipUniquenessAcrossDeclarationsAndConcurrentIntroductions(t *t
 		t.Fatal(err)
 	}
 	err = h.actors.ApplyDeclaration(context.Background(), actorctl.DeclarationChange{ActorID: second.ActorID, Definition: storespec.ActorDefinition{Class: channelmember.SeatClass, Config: []byte(`{"body":"other"}`)}})
-	if err == nil {
-		t.Fatal("reconcile retargeting bypassed relation uniqueness")
+	if err != nil {
+		t.Fatalf("business configuration was interpreted as relation identity: %v", err)
+	}
+	if err := h.actors.checkChannelMember("another-body"); err == nil {
+		t.Fatal("configuration change altered the existing channel member identity")
 	}
 }

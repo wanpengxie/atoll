@@ -89,6 +89,9 @@ type DeviceState struct {
 }
 
 type DeclarationFacts struct {
+	// ChannelID identifies an existing channel being introduced as a member.
+	// It is resolved by the registry, never inferred from implementation config.
+	ChannelID      channel.ID
 	OwnerPrincipal string
 	Name           string
 	Description    string
