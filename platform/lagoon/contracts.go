@@ -273,8 +273,7 @@ type DeviceBinding struct {
 	ChannelID channel.ID `json:"channel_id"`
 }
 type ChannelList struct {
-	ParentID             *channel.ID `json:"parent_id,omitempty"`
-	IncludeActorChannels bool        `json:"include_actor_channels,omitempty"`
+	ParentID *channel.ID `json:"parent_id,omitempty"`
 }
 type ChannelGet struct {
 	ChannelID channel.ID `json:"channel_id"`

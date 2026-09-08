@@ -13,12 +13,12 @@ import (
 func SystemWordSpecs() map[string]WordSpec {
 	return map[string]WordSpec{
 		message.TypeSystemChannelCreate: systemWordWithExamples(
-			"Create a child channel. type=actor realizes a body channel and seats it as a kind=channel member of the current channel through a Seat/Handle seam; it is not a peer service door.",
-			"name, recipe, initial_actor_ids. Actor channels forbid human seats; profile.svc_agent selects the body-side receiver but no svcactor is created.",
+			"Create a child channel from this channel. You must explicitly choose which active actors from the current channel are copied into its genesis; names such as root or steward are not actor ids. recipe.type only decides the relation with this parent: group (default) references it as a peer, actor seats it as a kind=channel member through a seat/handle seam. type constrains nothing else (service door, endpoints, humans all follow the recipe as usual).",
+			"name (string), recipe (object), initial_actor_ids (array of full actor ids from system.member.list; [] explicitly creates no copied seats). A channel whose recipe names no svc_agent accepts nothing through its service door afterwards.",
 			objectSchema(channelNameSchema+","+recipeSchema+","+initialActorIDsSchema, "name", "recipe", "initial_actor_ids"),
 			recipeExampleMinimal, recipeExampleServing, recipeExampleActor),
 		message.TypeSystemChannelGet:        systemWord("Get one channel's registered facts.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
-		message.TypeSystemChannelList:       systemWord("List workspace channels; actor body channels are hidden unless explicitly requested for management.", "parent_id (optional); include_actor_channels (optional boolean).", objectSchema(`"parent_id":{"type":"string"},"include_actor_channels":{"type":"boolean","default":false}`)),
+		message.TypeSystemChannelList:       systemWord("List registered channels, optionally below one parent. Every row carries type (group | actor); hiding actor bodies is a presentation choice, not the registry's.", "parent_id (optional string).", objectSchema(`"parent_id":{"type":"string"}`)),
 		message.TypeSystemChannelSet:        systemWord("Update a channel's profile.", "channel_id, description (strings), serving (integer 0 or 1); default_storage_device_id optionally names the attached device whose channel directory the file UI opens first.", objectSchema(`"channel_id":{"type":"string"},"description":{"type":"string"},"serving":{"type":"integer","enum":[0,1]},"default_storage_device_id":{"type":"string"}`, "channel_id", "description", "serving")),
 		message.TypeSystemChannelDeviceList: systemWord("List the devices attached to the channel this request comes from. This is the authoritative source for file, terminal, and desired_host device choices; system.device.list is only the space-wide inventory.", "No parameters.", objectSchema("")),
 		message.TypeSystemChannelDelete:     systemWord("Retire a channel.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),

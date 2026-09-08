@@ -739,15 +739,11 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	now := r.now().UnixMilli()
 	id := channel.ID(uuid.NewString())
-	defaultServing := 1
-	if channelType == ChannelTypeActor {
-		defaultServing = 0
-	}
-	profile := regspec.ChannelProfile{Serving: intPtr(defaultServing), Endpoints: map[string]regspec.EndpointSpec{}}
+	profile := regspec.ChannelProfile{Serving: intPtr(1), Endpoints: map[string]regspec.EndpointSpec{}}
 	if body.Profile != nil {
 		profile = *body.Profile
 		if profile.Serving == nil {
-			profile.Serving = intPtr(defaultServing)
+			profile.Serving = intPtr(1)
 		}
 		if profile.Endpoints == nil {
 			profile.Endpoints = map[string]regspec.EndpointSpec{}
@@ -758,17 +754,6 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	if *profile.Serving != 0 && *profile.Serving != 1 {
 		return regspec.ChannelRow{}, false, invalid("serving must be 0 or 1")
-	}
-	if channelType == ChannelTypeActor {
-		if *profile.Serving != 0 {
-			return regspec.ChannelRow{}, false, invalid("actor body channels do not expose a service door; set serving to 0")
-		}
-		if len(profile.Endpoints) != 0 {
-			return regspec.ChannelRow{}, false, invalid("actor body channels cannot declare service endpoints")
-		}
-		if profile.SvcAgent == nil {
-			return regspec.ChannelRow{}, false, invalid("actor body channels require profile.svc_agent to select their internal receiver")
-		}
 	}
 	humans := make([]GenesisHuman, 0, len(initialSeats))
 	trustedByDecl := make(map[string]InitialSeatIntent, len(initialSeats))
@@ -783,9 +768,6 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		}
 		switch seat.Kind {
 		case actor.KindHuman:
-			if channelType == ChannelTypeActor {
-				return regspec.ChannelRow{}, false, invalid("actor body channels cannot contain human seats")
-			}
 			if seat.Principal == "" || seat.DeclID != "" {
 				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("initial_seats[%d] is not a valid human identity", index))
 			}
@@ -845,14 +827,12 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	overlays := make([]regspec.OverlayRow, 0, len(body.Declarations))
 	declarationKinds := make(map[string]actor.Kind, len(body.Declarations)+1)
-	if channelType == ChannelTypeGroup {
-		svc, err := r.renderSystem(SvcActorClass, json.RawMessage(`{}`))
-		if err != nil {
-			return regspec.ChannelRow{}, false, err
-		}
-		declarations = append(declarations, GenesisDeclaration{DeclID: SvcActorDeclID, Seed: SvcActorSeed, Kind: actor.KindPeer, Rendered: svc})
-		declarationKinds[SvcActorDeclID] = actor.KindPeer
+	svc, err := r.renderSystem(SvcActorClass, json.RawMessage(`{}`))
+	if err != nil {
+		return regspec.ChannelRow{}, false, err
 	}
+	declarations = append(declarations, GenesisDeclaration{DeclID: SvcActorDeclID, Seed: SvcActorSeed, Kind: actor.KindPeer, Rendered: svc})
+	declarationKinds[SvcActorDeclID] = actor.KindPeer
 	for _, item := range declarationItems {
 		if item.DeclID == "" || declarationKinds[item.DeclID] != "" {
 			return regspec.ChannelRow{}, false, invalid("recipe declaration id is empty or duplicated")
@@ -952,7 +932,11 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if err := validateServiceProfile(profile, declarationKinds); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
-	if channelType == ChannelTypeActor {
+	// Transitional (batch A of the v3 redesign): the handle is still minted from
+	// svc_agent here; batch C replaces this with the recipe's own channel-handle
+	// declaration. type no longer constrains the service profile, so a missing
+	// svc_agent simply mints no handle (door B: the body's manager seats one later).
+	if channelType == ChannelTypeActor && profile.SvcAgent != nil {
 		receiver := *profile.SvcAgent
 		if receiver == "default" {
 			receiver = ""
@@ -962,17 +946,15 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 					break
 				}
 			}
-			if receiver == "" {
-				return regspec.ChannelRow{}, false, invalid("actor body channel has no agent receiver")
+		}
+		if receiver != "" {
+			handleConfig, _ := json.Marshal(channelmember.Config{Host: parent, Body: id, Receiver: receiver})
+			handle, err := r.renderSystem(channelmember.HandleClass, handleConfig)
+			if err != nil {
+				return regspec.ChannelRow{}, false, err
 			}
+			declarations = append(declarations, GenesisDeclaration{DeclID: channelmember.HandleDeclID, Seed: channelmember.HandleSeed, Kind: actor.KindTool, Rendered: handle})
 		}
-		handleConfig, _ := json.Marshal(channelmember.Config{Host: parent, Body: id, Receiver: receiver})
-		handle, err := r.renderSystem(channelmember.HandleClass, handleConfig)
-		if err != nil {
-			return regspec.ChannelRow{}, false, err
-		}
-		declarations = append(declarations, GenesisDeclaration{DeclID: channelmember.HandleDeclID, Seed: channelmember.HandleSeed, Kind: actor.KindTool, Rendered: handle})
-		profile.SvcAgent = nil
 	}
 	spec := GenesisSpec{ChannelID: id, Type: channelType, OwnerPrincipal: owner, CreatedAt: now, ParentID: parent, InitiatorPrincipal: owner, Humans: humans, Declarations: declarations, Profile: profile}
 	raw, err := json.Marshal(spec)
@@ -1013,7 +995,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		memberName = string(id)
 		memberConfig, _ = json.Marshal(channelmember.Config{Host: parent, Body: id})
 	}
-	if err := tx.InsertDecl(ctx, regspec.DeclRow{ID: string(id), Name: memberName, Owner: owner, DefaultClass: memberClass, Config: memberConfig, Status: regspec.DeclPresent, Visibility: "public", Singleton: channelType == ChannelTypeActor, CreatedAt: now, UpdatedAt: now}); err != nil {
+	if err := tx.InsertDecl(ctx, regspec.DeclRow{ID: string(id), Name: memberName, Owner: owner, DefaultClass: memberClass, Config: memberConfig, Status: regspec.DeclPresent, Visibility: "public", CreatedAt: now, UpdatedAt: now}); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
 	return row, true, nil
@@ -1355,17 +1337,17 @@ func (r *Registrar) systemClass(class string) bool {
 		return false
 	}
 	kind, ok := r.classes.LookupClassKind(class)
-	return ok && (kind == actor.KindPeer || kind == actor.KindSystem || kind == actor.KindChannel)
+	return ok && (kind == actor.KindPeer || kind == actor.KindSystem)
 }
 func systemDecl(id string) bool {
-	return id == SvcActorDeclID || id == RegistrarDeclID || id == channelmember.HandleDeclID
+	return id == SvcActorDeclID || id == RegistrarDeclID
 }
 
 // systemCompanion names the declarations genesis materialises itself; a
 // recipe neither introduces nor projects them. Peer handles are user-facing
 // recipe entries and are not companions.
 func systemCompanion(id string) bool {
-	return id == SvcActorDeclID || id == RegistrarDeclID || id == channelmember.HandleDeclID
+	return id == SvcActorDeclID || id == RegistrarDeclID
 }
 
 func (r *Registrar) editDecl(ctx context.Context, caller string, source channel.ID, p DeclEdit) (regspec.DeclRow, error) {
@@ -1752,17 +1734,6 @@ func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.Templ
 				}
 				kinds[item.DeclID] = kind
 			}
-			if body.Type == ChannelTypeActor {
-				if body.Profile.Serving == nil || *body.Profile.Serving != 0 {
-					return invalid("actor body channel template must set serving to 0")
-				}
-				if len(body.Profile.Endpoints) != 0 {
-					return invalid("actor body channel template cannot declare service endpoints")
-				}
-				if body.Profile.SvcAgent == nil {
-					return invalid("actor body channel template requires profile.svc_agent as its internal receiver")
-				}
-			}
 			return validateServiceProfile(*body.Profile, kinds)
 		}
 		return nil
@@ -1787,9 +1758,6 @@ func materializeChannelTemplateDefaults(body regspec.TemplateBody) regspec.Templ
 	}
 	if profile.Serving == nil {
 		value := 1
-		if body.Type == ChannelTypeActor {
-			value = 0
-		}
 		profile.Serving = &value
 	}
 	body.Profile = &profile
@@ -1980,12 +1948,6 @@ func (r *Registrar) channelView(ctx context.Context, row regspec.ChannelRow) (re
 	}
 	recipe := regspec.TemplateBody{Type: spec.Type, Profile: &spec.Profile}
 	for _, declaration := range spec.Declarations {
-		if row.Type == ChannelTypeActor && declaration.DeclID == channelmember.HandleDeclID {
-			if cfg, err := channelmember.ParseConfig(declaration.Rendered.Config); err == nil && cfg.Receiver != "" {
-				receiver := cfg.Receiver
-				spec.Profile.SvcAgent = &receiver
-			}
-		}
 		if systemCompanion(declaration.DeclID) {
 			continue
 		}
@@ -2007,15 +1969,14 @@ func (r *Registrar) readChannels(ctx context.Context, p ChannelList) ([]regspec.
 	if err != nil {
 		return nil, err
 	}
+	if p.ParentID == nil {
+		return rows, nil
+	}
 	out := rows[:0]
 	for _, row := range rows {
-		if row.Type == ChannelTypeActor && !p.IncludeActorChannels {
-			continue
+		if row.ParentID == *p.ParentID {
+			out = append(out, row)
 		}
-		if p.ParentID != nil && row.ParentID != *p.ParentID {
-			continue
-		}
-		out = append(out, row)
 	}
 	return out, nil
 }

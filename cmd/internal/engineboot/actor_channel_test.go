@@ -49,16 +49,15 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handle, svc, humans := false, false, 0
+	// type=actor decides only the parent relation: the body keeps its service
+	// door (svcactor) like any channel, and seats its handle beside it.
+	handle, svc := false, false
 	for _, member := range roster {
 		handle = handle || member.DeclID == channelmember.HandleDeclID
 		svc = svc || member.DeclID == lagoon.SvcActorDeclID
-		if member.Kind == actor.KindHuman {
-			humans++
-		}
 	}
-	if !handle || svc || humans != 0 {
-		t.Fatalf("body roster handle=%v svcactor=%v humans=%d rows=%+v", handle, svc, humans, roster)
+	if !handle || !svc {
+		t.Fatalf("body roster handle=%v svcactor=%v rows=%+v", handle, svc, roster)
 	}
 
 	row, found, err := eng.registry.GetChannelDesired(context.Background(), created.ChannelID)
@@ -73,20 +72,16 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 		t.Fatalf("seat id=%q want stable prefix %q", seat, want)
 	}
 
-	var ordinary []regspec.ChannelRow
-	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelList), map[string]any{}), &ordinary)
-	for _, candidate := range ordinary {
-		if candidate.ID == created.ChannelID {
-			t.Fatal("actor body leaked into ordinary channel list")
+	// The registry lists every channel with its type; hiding is the frontend's call.
+	var listed []regspec.ChannelRow
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelList), map[string]any{}), &listed)
+	found = false
+	for _, candidate := range listed {
+		if candidate.ID == channel.ID(created.ChannelID) {
+			found = candidate.Type == lagoon.ChannelTypeActor
 		}
 	}
-	var managed []regspec.ChannelRow
-	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelList), map[string]any{"include_actor_channels": true}), &managed)
-	found = false
-	for _, candidate := range managed {
-		found = found || candidate.ID == channel.ID(created.ChannelID)
-	}
 	if !found {
-		t.Fatal("actor body absent from explicit management list")
+		t.Fatal("actor body absent from channel list or listed without type=actor")
 	}
 }
