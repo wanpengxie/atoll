@@ -3,6 +3,8 @@ package channelmember
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -10,6 +12,8 @@ import (
 )
 
 var ErrUnreachable = errors.New("channelmember: opposite organ unavailable")
+
+var ErrPortBusy = errors.New("channelmember: port_busy")
 
 type Pair struct {
 	Host channel.ID
@@ -50,8 +54,8 @@ type link struct {
 	watchers map[uint64]func(HandleBinding)
 }
 
-// Hub contains only current port bindings. Generation-checked release makes a
-// stale incarnation unable to detach its successor.
+// Hub contains only current port bindings. An occupied slot rejects attachment;
+// its owner must release it before a successor can attach.
 type Hub struct {
 	mu    sync.RWMutex
 	next  uint64
@@ -73,9 +77,19 @@ func (h *Hub) attach(pair Pair, seat bool, call Endpoint) (func(), error) {
 		return nil, errors.New("channelmember: invalid attachment")
 	}
 	h.mu.Lock()
+	l := h.links[pair]
+	if l != nil && ((seat && l.seat.call != nil) || (!seat && l.handle.call != nil)) {
+		h.mu.Unlock()
+		side := "handle"
+		if seat {
+			side = "seat"
+		}
+		err := fmt.Errorf("%w: %s slot for host=%s body=%s already attached", ErrPortBusy, side, pair.Host, pair.Body)
+		slog.Error("channelmember.attach_rejected", "host", pair.Host, "body", pair.Body, "side", side, "err", err)
+		return nil, err
+	}
 	h.next++
 	generation := h.next
-	l := h.links[pair]
 	if l == nil {
 		l = &link{}
 		h.links[pair] = l

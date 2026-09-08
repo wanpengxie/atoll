@@ -906,9 +906,11 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			return regspec.ChannelRow{}, false, denied(fmt.Sprintf("declaration %q is private and owned by %q, not you; use a public declaration, one you own, or create your own with system.actor.template.create and visibility \"public\"", item.DeclID, decl.Owner))
 		}
 		config := decl.Config
+		if err := validateRegistryConfigOverride(decl, item); err != nil {
+			return regspec.ChannelRow{}, false, err
+		}
 		if len(item.Config) > 0 {
 			config = item.Config
-			overlays = append(overlays, regspec.OverlayRow{DeclID: item.DeclID, ChannelID: id, Config: cloneJSON(item.Config), UpdatedAt: now})
 		}
 		if r.classes == nil {
 			return regspec.ChannelRow{}, false, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
@@ -918,17 +920,13 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			if err != nil {
 				return regspec.ChannelRow{}, false, err
 			}
-			if len(item.Config) == 0 {
-				overlays = append(overlays, regspec.OverlayRow{DeclID: item.DeclID, ChannelID: id, UpdatedAt: now})
-			}
-			overlays[len(overlays)-1].Config = cloneJSON(config)
 		}
 		config, err = r.materializeConfig(decl.DefaultClass, config)
 		if err != nil {
 			return regspec.ChannelRow{}, false, err
 		}
-		if len(item.Config) > 0 {
-			overlays[len(overlays)-1].Config = cloneJSON(config)
+		if len(item.Config) > 0 || len(item.Bindings) > 0 {
+			overlays = append(overlays, regspec.OverlayRow{DeclID: item.DeclID, ChannelID: id, Config: cloneJSON(config), UpdatedAt: now})
 		}
 		kind, ok := r.classes.LookupClassKind(decl.DefaultClass)
 		if !ok {
@@ -1835,6 +1833,13 @@ func materializeChannelTemplateRow(row regspec.ChannelTemplateRow) (regspec.Chan
 	return row, nil
 }
 
+func validateRegistryConfigOverride(decl regspec.DeclRow, item regspec.TemplateDeclaration) error {
+	if (decl.DefaultClass == PeerActorClass || decl.DefaultClass == channelmember.SeatClass) && (item.Config != nil || len(item.Bindings) > 0) {
+		return invalid(fmt.Sprintf("declaration %q has registry-minted %s config and cannot be overridden here; drop the config and bindings fields for this entry", item.DeclID, decl.DefaultClass))
+	}
+	return nil
+}
+
 func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.Tx, declarations []regspec.TemplateDeclaration) error {
 	seen := make(map[string]struct{}, len(declarations))
 	for _, item := range declarations {
@@ -1855,12 +1860,9 @@ func (r *Registrar) validateTemplateDeclarations(ctx context.Context, tx *store.
 		if !ok || decl.Status != regspec.DeclPresent {
 			return invalid(fmt.Sprintf("declaration %q is not present; list the available ones with system.actor.template.list", item.DeclID))
 		}
-		if decl.DefaultClass == PeerActorClass {
-			if item.Config != nil || len(item.Bindings) > 0 {
-				return invalid(fmt.Sprintf("declaration %q is a peer, whose config is minted by the registry and cannot be overridden here; drop the config field for this entry", item.DeclID))
-			}
-			if decl.DefaultClass != PeerActorClass {
-				return invalid("peer declaration class is invalid")
+		if decl.DefaultClass == PeerActorClass || decl.DefaultClass == channelmember.SeatClass {
+			if err := validateRegistryConfigOverride(decl, item); err != nil {
+				return err
 			}
 			continue
 		}

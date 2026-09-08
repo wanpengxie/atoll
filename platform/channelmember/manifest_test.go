@@ -33,6 +33,7 @@ func TestProjectionRefreshesOnlyOnAttachmentAndFencesStaleNotifications(t *testi
 	if reads.Load() != 1 {
 		t.Fatalf("describe calls=%d", reads.Load())
 	}
+	first()
 	second, err := hub.AttachHandle(pair, func(context.Context, Request) (Response, error) {
 		reads.Add(1)
 		return Response{Payload: []byte(`{"words":{"new":{"description":"new"}}}`)}, nil

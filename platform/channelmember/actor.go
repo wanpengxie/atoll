@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -199,19 +200,34 @@ func serveConcurrent(sys actorbase.Sys, fn func(actorbase.Msg)) error {
 		go func() { defer wg.Done(); fn(msg) }()
 	}
 }
+
+var errInvalidRequest = errors.New("invalid channel message")
+
+// deliveryError preserves the receipt when waiting fails after a successful
+// dispatch. Cancellation of the wait does not prove the receiver did no work.
+type deliveryError struct {
+	id  message.ID
+	err error
+}
+
+func (e *deliveryError) Error() string {
+	return fmt.Sprintf("request %s was dispatched; outcome unknown: %v", e.id, e.err)
+}
+func (e *deliveryError) Unwrap() error { return e.err }
+
 func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Request) (Response, error) {
 	if req.Type == "" {
-		return Response{}, errors.New("message type required")
+		return Response{}, fmt.Errorf("%w: message type required", errInvalidRequest)
 	}
 	if req.Kind == message.KindRequest {
 		var wrapped struct {
 			Body json.RawMessage `json:"body"`
 		}
 		if err := actorbase.DecodeStrict(req.Payload, &wrapped); err != nil {
-			return Response{}, err
+			return Response{}, fmt.Errorf("%w: %v", errInvalidRequest, err)
 		}
 		if len(wrapped.Body) == 0 {
-			return Response{}, errors.New("request body required")
+			return Response{}, fmt.Errorf("%w: request body required", errInvalidRequest)
 		}
 		req.Payload = wrapped.Body
 	}
@@ -232,7 +248,7 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 			id = pending.RequestID()
 		}
 	default:
-		return Response{}, errors.New("call requires exactly one audience member")
+		return Response{}, fmt.Errorf("%w: call requires exactly one audience member", errInvalidRequest)
 	}
 	if err != nil {
 		return Response{}, err
@@ -241,10 +257,9 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 		audit, _ := behavior.EventSpecJSON(message.Anchored(id, id), InboundEvent, map[string]any{"from": map[string]any{"channel": req.ChannelID, "actor": req.Sender.ID, "request": req.ID}, "type": req.Type, "local_request_id": id})
 		audit.Audience = message.Audience{sys.Self()}
 		if _, err = sys.Emit(audit); err != nil {
-			if pending != nil {
-				_ = pending.Cancel()
-			}
-			return Response{}, err
+			// The action is already committed. Failure of this auxiliary record
+			// cannot undo dispatch or justify cancelling a successful Call.
+			slog.Error("channelmember.audit_failed", "channel", local, "actor", sys.Self(), "local_request_id", id, "source_request_id", req.ID, "err", err)
 		}
 	}
 	if pending == nil {
@@ -267,7 +282,7 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 	}
 	<-done
 	if err != nil {
-		return Response{}, err
+		return Response{}, &deliveryError{id: id, err: err}
 	}
 	return Response{Payload: append([]byte(nil), terminal.Payload...)}, nil
 }
@@ -313,10 +328,33 @@ func splitStatus(payload []byte) (string, []byte) {
 }
 func relay(sys actorbase.Sys, msg actorbase.Msg, response Response, err error) {
 	if err != nil {
-		code := "channel_unavailable"
-		var targetErr *actorbase.TargetResolveError
-		if errors.As(err, &targetErr) {
-			code = targetErr.Code
+		code := "internal_error"
+		var coded interface{ ErrorCode() string }
+		var rejected *actorbase.WriteRejected
+		var visibility *actorbase.InvalidVisibilityError
+		switch {
+		case errors.As(err, &coded):
+			code = coded.ErrorCode()
+		case errors.As(err, &rejected):
+			code = rejected.Reason
+		case errors.Is(err, errInvalidRequest), errors.As(err, &visibility):
+			code = "bad_payload"
+		case errors.Is(err, context.Canceled):
+			code = "cancelled"
+		case errors.Is(err, context.DeadlineExceeded):
+			code = "deadline_exceeded"
+		case errors.Is(err, actorbase.ErrCallClosed):
+			code = "call_closed"
+		case errors.Is(err, ErrUnreachable):
+			code = "channel_unavailable"
+		}
+		if code == "" {
+			code = "internal_error"
+		}
+		var dispatched *deliveryError
+		if errors.As(err, &dispatched) {
+			_, _ = sys.Fail(msg, code, err.Error(), map[string]any{"delivery": "dispatched", "local_request_id": dispatched.id, "outcome": "unknown"})
+			return
 		}
 		_, _ = sys.Fail(msg, code, err.Error())
 		return
@@ -330,7 +368,12 @@ func relay(sys actorbase.Sys, msg actorbase.Msg, response Response, err error) {
 		if code == "" {
 			code = "receiver_internal_error"
 		}
-		_, _ = sys.Fail(msg, code, terminal.Detail)
+		var fields map[string]any
+		_ = json.Unmarshal(response.Payload, &fields)
+		delete(fields, "status")
+		delete(fields, "error_code")
+		delete(fields, "detail")
+		_, _ = sys.Fail(msg, code, terminal.Detail, fields)
 		return
 	}
 	body := json.RawMessage(response.Payload)

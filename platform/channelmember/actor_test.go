@@ -61,6 +61,26 @@ func (s *testSys) CallSpecFor(c harness.Caller, spec behavior.RequestSpec) (acto
 	return nil, errors.New("captured")
 }
 
+func TestHandleProcFailsWhenPortOccupied(t *testing.T) {
+	hub := NewHub()
+	pair := Pair{Host: "host", Body: "body"}
+	release, err := hub.AttachHandle(pair, func(context.Context, Request) (Response, error) { return Response{Payload: []byte("original")}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	proc, err := HandleDef(hub, pair.Body, HandleConfig{Host: pair.Host}, memberStub{}).New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proc(&testSys{}); !errors.Is(err, ErrPortBusy) {
+		t.Fatalf("proc exit=%v want port_busy", err)
+	}
+	if got, err := hub.Deliver(context.Background(), pair, Request{}); err != nil || string(got.Payload) != "original" {
+		t.Fatalf("original binding lost: %+v %v", got, err)
+	}
+}
+
 func TestHandleChecksEffectiveMembershipBeforeDrivers(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload string
