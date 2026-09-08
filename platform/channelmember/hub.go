@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 var ErrUnreachable = errors.New("channelmember: opposite organ unavailable")
@@ -18,14 +19,11 @@ type Pair struct {
 func (p Pair) valid() bool { return p.Host != "" && p.Body != "" && p.Host != p.Body }
 
 type Request struct {
-	Target          string
-	Type            string
-	Payload         []byte
-	CallerChannel   channel.ID
-	CallerActor     string
-	CallerRequestID string
-	Deadline        int64
-	OnProgress      func(Progress)
+	message.Envelope
+	// Await distinguishes a Call ticket from Post; it is endpoint control,
+	// not a new message kind or a ledger field.
+	Await      bool
+	OnProgress func(Progress)
 }
 
 type Progress struct {
@@ -36,6 +34,12 @@ type Progress struct {
 type Response struct{ Payload []byte }
 type Endpoint func(context.Context, Request) (Response, error)
 
+// HandleBinding is a transport attachment snapshot, not membership presence.
+type HandleBinding struct {
+	Generation uint64
+	Call       Endpoint
+}
+
 type endpoint struct {
 	generation uint64
 	call       Endpoint
@@ -43,7 +47,7 @@ type endpoint struct {
 type link struct {
 	seat     endpoint
 	handle   endpoint
-	watchers map[uint64]func(bool)
+	watchers map[uint64]func(HandleBinding)
 }
 
 // Hub contains only current port bindings. Generation-checked release makes a
@@ -82,10 +86,10 @@ func (h *Hub) attach(pair Pair, seat bool, call Endpoint) (func(), error) {
 		l.handle = endpoint{generation: generation, call: call}
 	}
 	watchers := livenessWatchers(l)
-	online := l.handle.call != nil
+	binding := HandleBinding{Generation: l.handle.generation, Call: l.handle.call}
 	h.mu.Unlock()
 	if !seat {
-		notify(watchers, online)
+		notify(watchers, binding)
 	}
 	var once sync.Once
 	return func() {
@@ -110,7 +114,7 @@ func (h *Hub) attach(pair Pair, seat bool, call Endpoint) (func(), error) {
 			}
 			h.mu.Unlock()
 			if changed {
-				notify(watchers, false)
+				notify(watchers, HandleBinding{Generation: generation})
 			}
 		})
 	}, nil
@@ -119,6 +123,13 @@ func (h *Hub) attach(pair Pair, seat bool, call Endpoint) (func(), error) {
 // WatchHandle reports whether the body-side Handle is currently attached.
 // The returned release is generation-fenced in the same way as port releases.
 func (h *Hub) WatchHandle(pair Pair, observe func(bool)) (func(), error) {
+	if observe == nil {
+		return nil, errors.New("nil observer")
+	}
+	return h.WatchHandleBinding(pair, func(b HandleBinding) { observe(b.Call != nil) })
+}
+
+func (h *Hub) WatchHandleBinding(pair Pair, observe func(HandleBinding)) (func(), error) {
 	if h == nil || !pair.valid() || observe == nil {
 		return nil, errors.New("channelmember: invalid liveness watcher")
 	}
@@ -131,12 +142,12 @@ func (h *Hub) WatchHandle(pair Pair, observe func(bool)) (func(), error) {
 		h.links[pair] = l
 	}
 	if l.watchers == nil {
-		l.watchers = make(map[uint64]func(bool))
+		l.watchers = make(map[uint64]func(HandleBinding))
 	}
 	l.watchers[generation] = observe
-	online := l.handle.call != nil
+	binding := HandleBinding{Generation: l.handle.generation, Call: l.handle.call}
 	h.mu.Unlock()
-	observe(online)
+	observe(binding)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -153,20 +164,20 @@ func (h *Hub) WatchHandle(pair Pair, observe func(bool)) (func(), error) {
 	}, nil
 }
 
-func livenessWatchers(l *link) []func(bool) {
+func livenessWatchers(l *link) []func(HandleBinding) {
 	if l == nil || len(l.watchers) == 0 {
 		return nil
 	}
-	out := make([]func(bool), 0, len(l.watchers))
+	out := make([]func(HandleBinding), 0, len(l.watchers))
 	for _, watcher := range l.watchers {
 		out = append(out, watcher)
 	}
 	return out
 }
 
-func notify(watchers []func(bool), online bool) {
+func notify(watchers []func(HandleBinding), binding HandleBinding) {
 	for _, watcher := range watchers {
-		watcher(online)
+		watcher(binding)
 	}
 }
 

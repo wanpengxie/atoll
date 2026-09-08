@@ -208,7 +208,7 @@ func (r *actorRegistry) Insert(
 	// to repeat. Two peers seated from two different target channels that happen
 	// to share a name are two seats, not a conflict.
 	switch {
-	case in.SourceDeclID != "" && (in.Singleton || in.Kind == actor.KindPeer || in.Kind == actor.KindSystem || in.Kind == actor.KindChannel):
+	case in.SourceDeclID != "" && (in.Singleton || in.Kind == actor.KindPeer || in.Kind == actor.KindSystem):
 		_, found, err := lookupExisting(`SELECT `+actorRecordColumns+` FROM actor_registry
 			WHERE actor_kind=? AND source_decl_id=? AND deregistered_at IS NULL`, string(in.Kind), in.SourceDeclID)
 		if err != nil {

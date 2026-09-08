@@ -479,6 +479,12 @@ func toolTarget(start agentloop.StartRequest, name string) (string, string) {
 	if name == "channel_call" {
 		return start.HostActor, channelCallWord
 	}
+	if name == "channel_post" {
+		return start.HostActor, "channel.post"
+	}
+	if name == "channel_emit" {
+		return start.HostActor, "channel.emit"
+	}
 	return start.WorkspaceActor, toolWord(name)
 }
 func toolDefinitions(workspace, host bool) []json.RawMessage {
@@ -490,7 +496,9 @@ func toolDefinitions(workspace, host bool) []json.RawMessage {
 		specs = append(specs, struct{ name, desc, schema string }{"read", "Read a file from the workspace.", workspaceproto.ReadInputSchema}, struct{ name, desc, schema string }{"write", "Write a file in the workspace.", workspaceproto.WriteInputSchema}, struct{ name, desc, schema string }{"edit", "Edit exact unique blocks in one file.", workspaceproto.EditInputSchema}, struct{ name, desc, schema string }{"bash", "Execute a bash command in the workspace.", workspaceproto.BashInputSchema})
 	}
 	if host {
-		specs = append(specs, struct{ name, desc, schema string }{"channel_call", "Call any member of the host Channel through this body's Seat. Discover current targets with target=system, type=system.member.list, payload={}, then inspect a target with type=actor.describe before calling its words.", `{"type":"object","additionalProperties":false,"required":["target","type","payload"],"properties":{"target":{"type":"string","minLength":1},"type":{"type":"string","minLength":1},"payload":{"type":"object"}}}`})
+		for _, name := range []string{"channel_call", "channel_post", "channel_emit"} {
+			specs = append(specs, struct{ name, desc, schema string }{name, "Act through the host Seat: call waits for a result, post sends a request without waiting, emit publishes an event. Call requires exactly one audience member. Discover with audience=[system], type=system.member.list, payload={}.", `{"type":"object","additionalProperties":false,"required":["type","payload"],"properties":{"audience":{"type":"array","items":{"type":"string"}},"type":{"type":"string","minLength":1},"payload":{"type":"object"},"visibility":{"type":"string"}}}`})
+		}
 	}
 	out := make([]json.RawMessage, 0, len(specs))
 	for _, s := range specs {

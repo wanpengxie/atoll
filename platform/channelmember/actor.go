@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -22,126 +23,167 @@ const (
 	HandleDeclID = "channel-handle"
 	HandleSeed   = "host"
 	HandleCall   = "channel.call"
+	HandlePost   = "channel.post"
+	HandleEmit   = "channel.emit"
 	InboundEvent = "channelmember.inbound"
 )
 
-type Config struct {
-	Host     channel.ID `json:"host_channel"`
-	Body     channel.ID `json:"body_channel"`
-	Receiver string     `json:"receiver,omitempty"`
+// Members is the body's existing membership authority, not a relation registry.
+type Members interface {
+	MemberOfDeclaration(string) (actor.ActorID, error)
+	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 }
 
-func ParseConfig(raw json.RawMessage) (Config, error) {
-	var cfg Config
-	if err := actorbase.DecodeStrict(raw, &cfg); err != nil {
-		return Config{}, err
-	}
-	if cfg.Host == "" || cfg.Body == "" || cfg.Host == cfg.Body {
-		return Config{}, errors.New("host_channel and distinct body_channel required")
-	}
-	return cfg, nil
-}
-
-func SeatDef(hub *Hub, actualHost channel.ID, cfg Config) actorbase.Def {
-	pair := Pair{Host: cfg.Host, Body: cfg.Body}
-	return actorbase.Def{Manifest: introspect.Manifest{
-		Class: SeatClass, Interfaces: []string{"actor", "channel"}, Words: map[string]introspect.WordSpec{},
-		Dynamic: func(ctx context.Context) (map[string]introspect.WordSpec, error) {
-			response, err := hub.Deliver(ctx, pair, Request{Type: introspect.QueryDescribe, Payload: []byte(`{}`)})
-			if err != nil {
-				return nil, err
+func SeatDef(hub *Hub, host channel.ID, cfg SeatConfig, unavailable ...func(context.Context) error) actorbase.Def {
+	pair := Pair{Host: host, Body: cfg.Body}
+	projection := &manifestProjection{err: ErrUnreachable}
+	describe := func(ctx context.Context) (map[string]introspect.WordSpec, error) {
+		words, err := projection.read()
+		if errors.Is(err, ErrUnreachable) && len(unavailable) > 0 && unavailable[0] != nil {
+			if reason := unavailable[0](ctx); reason != nil {
+				return nil, fmt.Errorf("%w: %v", ErrUnreachable, reason)
 			}
-			var described struct {
-				Status string                         `json:"status"`
-				Words  map[string]introspect.WordSpec `json:"words"`
-			}
-			if err := json.Unmarshal(response.Payload, &described); err != nil {
-				return nil, fmt.Errorf("channel-seat: decode body manifest: %w", err)
-			}
-			if described.Status != message.StatusCompleted {
-				return nil, errors.New("channel-seat: body manifest unavailable")
-			}
-			return described.Words, nil
-		},
-	}, New: func() (actorbase.Proc, error) {
-		if hub == nil || actualHost != cfg.Host {
-			return nil, errors.New("channel-seat: host mismatch")
 		}
-		return func(sys actorbase.Sys) error { return runSeat(sys, hub, cfg) }, nil
-	}}
-}
-
-func HandleDef(hub *Hub, actualBody channel.ID, cfg Config) actorbase.Def {
-	return actorbase.Def{Manifest: introspect.Manifest{Class: HandleClass, Interfaces: []string{"actor", "channel-handle"}, Words: map[string]introspect.WordSpec{
-		HandleCall: {
-			Description: "act through this body channel's Seat in its host; target may be any host member, including system for discovery",
-			InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["target","type","payload"],"properties":{"target":{"type":"string"},"type":{"type":"string"},"payload":{}}}`),
-			Examples: []json.RawMessage{
-				json.RawMessage(`{"target":"system","type":"system.member.list","payload":{}}`),
-				json.RawMessage(`{"target":"tool:device:1","type":"workspace.read","payload":{"path":"README.md"}}`),
-			},
-		},
+		return words, err
+	}
+	return actorbase.Def{Manifest: introspect.Manifest{Class: SeatClass, Interfaces: []string{"actor", "channel"}, Words: map[string]introspect.WordSpec{}, Dynamic: func(ctx context.Context) (map[string]introspect.WordSpec, error) {
+		words, err := describe(ctx)
+		if errors.Is(err, ErrUnreachable) {
+			return map[string]introspect.WordSpec{}, nil
+		}
+		return words, err
 	}}, New: func() (actorbase.Proc, error) {
-		if hub == nil || actualBody != cfg.Body || cfg.Receiver == "" {
-			return nil, errors.New("channel-handle: body/receiver mismatch")
+		if hub == nil || !pair.valid() {
+			return nil, errors.New("invalid seat binding")
 		}
-		return func(sys actorbase.Sys) error { return runHandle(sys, hub, cfg) }, nil
+		return func(sys actorbase.Sys) error {
+			releaseProjection, err := hub.WatchHandleBinding(pair, func(b HandleBinding) { projection.refresh(sys.Life(), b) })
+			if err != nil {
+				return err
+			}
+			defer releaseProjection()
+			release, err := hub.AttachSeat(pair, func(ctx context.Context, req Request) (Response, error) { return actLocal(ctx, sys, host, req) })
+			if err != nil {
+				return err
+			}
+			defer release()
+			return serveConcurrent(sys, func(msg actorbase.Msg) {
+				if msg.Type == InboundEvent && msg.Sender.ID == sys.Self() {
+					return
+				}
+				if msg.Kind == message.KindRequest {
+					words, err := describe(msg.Ctx())
+					if err != nil {
+						relay(sys, msg, Response{}, err)
+						return
+					}
+					if _, ok := words[msg.Type]; !ok {
+						_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("body does not declare %q", msg.Type))
+						return
+					}
+				}
+				response, err := hub.Deliver(msg.Ctx(), pair, Request{Envelope: wireEnvelope(msg.Envelope), Await: msg.Kind == message.KindRequest, OnProgress: progressRelay(sys, msg)})
+				if msg.Kind == message.KindRequest {
+					relay(sys, msg, response, err)
+				}
+			})
+		}, nil
 	}}
 }
-
-func runSeat(sys actorbase.Sys, hub *Hub, cfg Config) error {
-	pair := Pair{Host: cfg.Host, Body: cfg.Body}
-	release, err := hub.AttachSeat(pair, func(ctx context.Context, req Request) (Response, error) {
-		return callLocal(ctx, sys, req)
-	})
-	if err != nil {
-		return err
+func HandleDef(hub *Hub, body channel.ID, cfg HandleConfig, members Members) actorbase.Def {
+	words := map[string]introspect.WordSpec{}
+	for _, word := range []string{HandleCall, HandlePost, HandleEmit} {
+		words[word] = introspect.WordSpec{
+			Description: "act as this body's member Seat in the host channel",
+			InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["type","payload"],"properties":{"type":{"type":"string","minLength":1},"payload":{},"audience":{"type":"array","items":{"type":"string"}},"visibility":{"type":"string"}}}`),
+		}
 	}
-	defer release()
-	releaseWatch, err := hub.WatchHandle(pair, func(online bool) {
-		_ = sys.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(online))
-	})
-	if err != nil {
-		return err
-	}
-	defer releaseWatch()
-	return serveConcurrent(sys, func(msg actorbase.Msg) {
-		caller := actorbase.EffectiveCaller(msg)
-		response, err := hub.Deliver(msg.Ctx(), pair, Request{Type: msg.Type, Payload: append([]byte(nil), msg.Payload...), CallerChannel: caller.Channel, CallerActor: string(caller.Actor), CallerRequestID: string(msg.ID), Deadline: deadline(msg), OnProgress: progressRelay(sys, msg)})
-		relay(sys, msg, response, err)
-	})
+	pair := Pair{Host: cfg.Host, Body: body}
+	return actorbase.Def{Manifest: introspect.Manifest{Class: HandleClass, Interfaces: []string{"actor", "channel-handle"}, Words: words}, New: func() (actorbase.Proc, error) {
+		if hub == nil || members == nil || !pair.valid() {
+			return nil, errors.New("invalid handle binding")
+		}
+		return func(sys actorbase.Sys) error {
+			release, err := hub.AttachHandle(pair, func(ctx context.Context, req Request) (Response, error) {
+				if req.Type == introspect.QueryDescribe {
+					raw, _ := json.Marshal(map[string]any{"words": cfg.ManifestWords()})
+					return Response{Payload: raw}, nil
+				}
+				if word, ok := cfg.Words[req.Type]; ok {
+					target, err := members.MemberOfDeclaration(word.Target)
+					if err != nil {
+						return Response{}, err
+					}
+					req.Audience = message.Audience{target}
+				} else if req.Kind == message.KindEvent {
+					req.Audience = nil
+				} else {
+					return Response{}, &actorbase.TargetResolveError{Code: "type_unsupported", Target: req.Type}
+				}
+				return actLocal(ctx, sys, body, req)
+			})
+			if err != nil {
+				return err
+			}
+			defer release()
+			return serveConcurrent(sys, func(msg actorbase.Msg) {
+				// Incoming events are notifications, never outbound drive instructions.
+				if msg.Kind != message.KindRequest {
+					return
+				}
+				if msg.Type != HandleCall && msg.Type != HandlePost && msg.Type != HandleEmit {
+					_, _ = sys.Fail(msg, "type_unsupported", "unknown handle word")
+					return
+				}
+				caller := actorbase.EffectiveCaller(msg)
+				if caller.Channel != body {
+					_, _ = sys.Fail(msg, "forbidden", "driver must be a body channel member")
+					return
+				}
+				facts, found, err := members.ActorFacts(msg.Ctx(), caller.Actor)
+				if err != nil {
+					relay(sys, msg, Response{}, err)
+					return
+				}
+				allowed := found && facts.Active
+				if allowed && len(cfg.Drivers) > 0 {
+					allowed = false
+					for _, decl := range cfg.Drivers {
+						if facts.SourceDeclID == decl {
+							allowed = true
+							break
+						}
+					}
+				}
+				if !allowed {
+					_, _ = sys.Fail(msg, "forbidden", "driver is inactive or not permitted")
+					return
+				}
+				var input struct {
+					Type       string             `json:"type"`
+					Payload    json.RawMessage    `json:"payload"`
+					Audience   message.Audience   `json:"audience"`
+					Visibility message.Visibility `json:"visibility"`
+				}
+				if err := actorbase.DecodeStrict(msg.Payload, &input); err != nil || input.Type == "" || len(input.Payload) == 0 || (msg.Type == HandleCall && len(input.Audience) != 1) {
+					_, _ = sys.Fail(msg, "invalid_args", "type and payload required; call requires exactly one audience member")
+					return
+				}
+				env := msg.Envelope
+				env.Type = input.Type
+				env.Payload = input.Payload
+				env.Audience = input.Audience
+				env.Visibility = input.Visibility
+				env.Kind = message.KindRequest
+				if msg.Type == HandleEmit {
+					env.Kind = message.KindEvent
+				}
+				response, err := hub.Drive(msg.Ctx(), pair, Request{Envelope: wireEnvelope(env), Await: msg.Type == HandleCall, OnProgress: progressRelay(sys, msg)})
+				relay(sys, msg, response, err)
+			})
+		}, nil
+	}}
 }
-
-func runHandle(sys actorbase.Sys, hub *Hub, cfg Config) error {
-	pair := Pair{Host: cfg.Host, Body: cfg.Body}
-	release, err := hub.AttachHandle(pair, func(ctx context.Context, req Request) (Response, error) {
-		req.Target = cfg.Receiver
-		return callLocal(ctx, sys, req)
-	})
-	if err != nil {
-		return err
-	}
-	defer release()
-	return serveConcurrent(sys, func(msg actorbase.Msg) {
-		if msg.Type != HandleCall {
-			_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("channel handle does not answer %q", msg.Type))
-			return
-		}
-		var body struct {
-			Target  string          `json:"target"`
-			Type    string          `json:"type"`
-			Payload json.RawMessage `json:"payload"`
-		}
-		if err := actorbase.DecodeStrict(msg.Payload, &body); err != nil || body.Target == "" || body.Type == "" {
-			_, _ = sys.Fail(msg, "invalid_args", "target and type required")
-			return
-		}
-		caller := actorbase.EffectiveCaller(msg)
-		response, err := hub.Drive(msg.Ctx(), pair, Request{Target: body.Target, Type: body.Type, Payload: append([]byte(nil), body.Payload...), CallerChannel: caller.Channel, CallerActor: string(caller.Actor), CallerRequestID: string(msg.ID), Deadline: deadline(msg), OnProgress: progressRelay(sys, msg)})
-		relay(sys, msg, response, err)
-	})
-}
-
 func serveConcurrent(sys actorbase.Sys, fn func(actorbase.Msg)) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -150,106 +192,133 @@ func serveConcurrent(sys actorbase.Sys, fn func(actorbase.Msg)) error {
 		if err != nil {
 			return err
 		}
-		if msg.Kind != message.KindRequest {
+		if msg.Kind != message.KindRequest && msg.Kind != message.KindEvent {
 			continue
 		}
 		wg.Add(1)
 		go func() { defer wg.Done(); fn(msg) }()
 	}
 }
-
-func callLocal(ctx context.Context, sys actorbase.Sys, req Request) (Response, error) {
-	if req.Target == "" || req.Type == "" {
-		return Response{}, errors.New("channelmember: target and type required")
+func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Request) (Response, error) {
+	if req.Type == "" {
+		return Response{}, errors.New("message type required")
 	}
-	spec := behavior.RequestSpec{Cause: message.Root(), Type: req.Type, Payload: json.RawMessage(req.Payload), Audience: message.Audience{actor.ActorID(req.Target)}}
-	if req.Deadline > 0 {
-		spec.ExpiresAt = &req.Deadline
+	if req.Kind == message.KindRequest {
+		var wrapped struct {
+			Body json.RawMessage `json:"body"`
+		}
+		if err := actorbase.DecodeStrict(req.Payload, &wrapped); err != nil {
+			return Response{}, err
+		}
+		if len(wrapped.Body) == 0 {
+			return Response{}, errors.New("request body required")
+		}
+		req.Payload = wrapped.Body
 	}
+	spec := behavior.RequestSpec{Cause: message.Root(), Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility, ExpiresAt: req.ExpiresAt}
+	var id message.ID
 	var pending actorbase.Pending
 	var err error
-	if req.CallerChannel == "" && req.CallerActor == "" {
-		pending, err = sys.Call(message.Root(), actor.ActorID(req.Target), req.Type, json.RawMessage(req.Payload))
-	} else {
-		pending, err = sys.CallSpecFor(harness.Caller{Channel: req.CallerChannel, Actor: actor.ActorID(req.CallerActor)}, spec)
+	switch {
+	case req.Kind == message.KindEvent:
+		id, err = sys.Emit(behavior.EventSpec{Cause: message.Root(), Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility})
+	case req.Kind == message.KindRequest && !req.Await:
+		id, err = sys.Post(spec)
+	case req.Kind == message.KindRequest && len(req.Audience) == 1:
+		// The existing full-spec API preserves deadline/visibility. Caller is
+		// explicitly the LOCAL organ, never the foreign driver.
+		pending, err = sys.CallSpecFor(harness.Caller{Channel: local, Actor: sys.Self()}, spec)
+		if err == nil {
+			id = pending.RequestID()
+		}
+	default:
+		return Response{}, errors.New("call requires exactly one audience member")
 	}
 	if err != nil {
 		return Response{}, err
 	}
-	if req.CallerRequestID != "" {
-		audit, auditErr := behavior.EventSpecJSON(
-			message.Anchored(pending.RequestID(), pending.RequestID()),
-			InboundEvent,
-			map[string]any{
-				"from": map[string]any{
-					"channel": req.CallerChannel,
-					"actor":   req.CallerActor,
-					"request": req.CallerRequestID,
-				},
-				"type":             req.Type,
-				"local_request_id": pending.RequestID(),
-			},
-		)
-		if auditErr != nil {
-			_ = pending.Cancel()
-			return Response{}, auditErr
-		}
-		if _, auditErr = sys.Emit(audit); auditErr != nil {
-			_ = pending.Cancel()
-			return Response{}, auditErr
+	if req.ID != "" {
+		audit, _ := behavior.EventSpecJSON(message.Anchored(id, id), InboundEvent, map[string]any{"from": map[string]any{"channel": req.ChannelID, "actor": req.Sender.ID, "request": req.ID}, "type": req.Type, "local_request_id": id})
+		audit.Audience = message.Audience{sys.Self()}
+		if _, err = sys.Emit(audit); err != nil {
+			if pending != nil {
+				_ = pending.Cancel()
+			}
+			return Response{}, err
 		}
 	}
-	progressDone := make(chan struct{})
+	if pending == nil {
+		raw, _ := json.Marshal(map[string]any{"message_id": id})
+		return Response{Payload: raw}, nil
+	}
+	done := make(chan struct{})
 	go func() {
-		defer close(progressDone)
-		for progress := range pending.Progress() {
-			if req.OnProgress == nil {
-				continue
+		defer close(done)
+		for p := range pending.Progress() {
+			if req.OnProgress != nil {
+				status, payload := splitStatus(p.Payload)
+				req.OnProgress(Progress{Status: status, Payload: payload})
 			}
-			status, payload := splitStatus(progress.Payload)
-			req.OnProgress(Progress{Status: status, Payload: payload})
 		}
 	}()
 	terminal, err := pending.Wait(ctx, 0)
 	if err != nil {
 		_ = pending.Cancel()
-		<-progressDone
+	}
+	<-done
+	if err != nil {
 		return Response{}, err
 	}
-	<-progressDone
 	return Response{Payload: append([]byte(nil), terminal.Payload...)}, nil
 }
 
+// Msg exposes an already-unwrapped application payload. Reconstitute the
+// ordinary request envelope at the seam; foreign caller attribution never
+// crosses as local authority. The receiving organ unwraps before its own Call.
+func wireEnvelope(env message.Envelope) message.Envelope {
+	if env.Kind == message.KindRequest {
+		env.Payload, _ = json.Marshal(struct {
+			Body json.RawMessage `json:"body"`
+		}{env.Payload})
+	}
+	return env
+}
 func progressRelay(sys actorbase.Sys, msg actorbase.Msg) func(Progress) {
-	return func(progress Progress) {
-		body := any(json.RawMessage(progress.Payload))
-		if len(progress.Payload) == 0 {
+	return func(p Progress) {
+		if msg.Kind != message.KindRequest {
+			return
+		}
+		var body any = json.RawMessage(p.Payload)
+		if len(p.Payload) == 0 {
 			body = map[string]any{}
 		}
-		_, _ = sys.Progress(msg, progress.Status, body)
+		_, _ = sys.Progress(msg, p.Status, body)
 	}
 }
-
 func splitStatus(payload []byte) (string, []byte) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil {
 		return message.StatusProcessing, append([]byte(nil), payload...)
 	}
 	status := message.StatusProcessing
-	if raw := fields["status"]; len(raw) != 0 {
+	if raw := fields["status"]; len(raw) > 0 {
 		_ = json.Unmarshal(raw, &status)
 	}
 	delete(fields, "status")
 	body, err := json.Marshal(fields)
 	if err != nil {
-		return status, append([]byte(nil), payload...)
+		return status, payload
 	}
 	return status, body
 }
-
 func relay(sys actorbase.Sys, msg actorbase.Msg, response Response, err error) {
 	if err != nil {
-		_, _ = sys.Fail(msg, "channel_unavailable", err.Error())
+		code := "channel_unavailable"
+		var targetErr *actorbase.TargetResolveError
+		if errors.As(err, &targetErr) {
+			code = targetErr.Code
+		}
+		_, _ = sys.Fail(msg, code, err.Error())
 		return
 	}
 	var terminal struct {
@@ -266,14 +335,7 @@ func relay(sys actorbase.Sys, msg actorbase.Msg, response Response, err error) {
 	}
 	body := json.RawMessage(response.Payload)
 	if len(body) == 0 {
-		body = json.RawMessage(`{}`)
+		body = json.RawMessage("{}")
 	}
 	_, _ = sys.Reply(msg, body)
-}
-
-func deadline(msg actorbase.Msg) int64 {
-	if msg.ExpiresAt == nil {
-		return 0
-	}
-	return *msg.ExpiresAt
 }

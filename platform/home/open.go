@@ -433,6 +433,26 @@ func seedBootstrap(
 	cfg Config,
 	nowMs func() int64,
 ) error {
+	// Genesis is a batch introduction, so validate relation uniqueness before
+	// any member is inserted. Runtime continues to know nothing about relations.
+	relationKeys := map[string]bool{}
+	for _, decl := range cfg.BootstrapDeclarations {
+		var raw []byte
+		if decl.Config != nil {
+			raw = *decl.Config
+		}
+		key, err := relationKey(storespec.ActorDefinition{Class: decl.Class, Config: raw})
+		if err != nil {
+			return err
+		}
+		if key == "" {
+			continue
+		}
+		if relationKeys[key] {
+			return fmt.Errorf("duplicate genesis relation %s", key)
+		}
+		relationKeys[key] = true
+	}
 	for _, principal := range cfg.BootstrapHumanPrincipals {
 		if principal == "" {
 			return errors.New("platform: bootstrap human principal required")

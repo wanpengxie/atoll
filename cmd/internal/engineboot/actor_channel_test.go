@@ -11,17 +11,21 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon/regspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	eng, _, core, registrar := newProtocolDeliveryRig(t)
 	stewardDeclID := lagoon.StableBootstrapDeclID(channelspec.RootPrincipalID, "steward")
 	stewardID := onlyDecl(t, core, stewardDeclID)
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{
+		"id": "body-handle", "name": "host", "class": channelmember.HandleClass, "visibility": "public", "config": map[string]any{"host": string(channelspec.C0ChannelID), "words": map[string]any{}},
+	}), nil)
 
 	var created lagoon.ChannelCreateReply
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
 		"name": "actor-body", "recipe": map[string]any{
-			"type": "actor", "declarations": []any{},
+			"type": "actor", "declarations": []any{map[string]any{"decl_id": "body-handle"}},
 			"profile": map[string]any{"serving": 0, "svc_agent": stewardDeclID},
 		}, "initial_actor_ids": []any{stewardID},
 	}), &created)
@@ -32,7 +36,7 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	for time.Now().Before(deadline) {
 		roster, _ := core.View().Roster(context.Background())
 		for _, member := range roster {
-			if member.DeclID == string(created.ChannelID) && member.Kind == actor.KindChannel {
+			if member.DeclID == "seat:"+string(created.ChannelID) && member.Kind == actor.KindChannel {
 				seat = member.ID
 			}
 		}
@@ -44,6 +48,26 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	if seat == "" {
 		t.Fatal("actor body was not seated in its host as kind=channel")
 	}
+	coreRoster, _ := core.View().Roster(context.Background())
+	peers, seats := 0, 0
+	for _, member := range coreRoster {
+		if member.DeclID == string(created.ChannelID) {
+			peers++
+		}
+		if member.DeclID == "seat:"+string(created.ChannelID) {
+			seats++
+		}
+	}
+	if peers != 1 || seats != 1 {
+		t.Fatalf("c0 actor relation peers=%d seats=%d", peers, seats)
+	}
+	var second lagoon.ChannelCreateReply
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
+		"name": "actor-body-second", "initial_actor_ids": []any{}, "recipe": map[string]any{"type": "actor", "declarations": []any{map[string]any{"decl_id": "body-handle"}}, "profile": map[string]any{"serving": 0}},
+	}), &second)
+	if second.ChannelID == created.ChannelID || second.Relation != "seated" {
+		t.Fatalf("same recipe did not create independent body: %+v", second)
+	}
 
 	roster, err := body.View().Roster(context.Background())
 	if err != nil {
@@ -53,7 +77,7 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	// door (svcactor) like any channel, and seats its handle beside it.
 	handle, svc := false, false
 	for _, member := range roster {
-		handle = handle || member.DeclID == channelmember.HandleDeclID
+		handle = handle || member.DeclID == "body-handle"
 		svc = svc || member.DeclID == lagoon.SvcActorDeclID
 	}
 	if !handle || !svc {
@@ -64,7 +88,7 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	if err != nil || !found || row.Type != lagoon.ChannelTypeActor || row.Serving != 0 {
 		t.Fatalf("actor body row=%+v found=%v err=%v", row, found, err)
 	}
-	decl, found, err := eng.registry.GetDecl(context.Background(), string(created.ChannelID))
+	decl, found, err := eng.registry.GetDecl(context.Background(), "seat:"+string(created.ChannelID))
 	if err != nil || !found || decl.DefaultClass != channelmember.SeatClass || decl.Name != string(created.ChannelID) {
 		t.Fatalf("seat declaration=%+v found=%v err=%v", decl, found, err)
 	}
@@ -83,5 +107,26 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("actor body absent from channel list or listed without type=actor")
+	}
+	// A separate host may reference the same concrete body. Retiring it must
+	// revoke its declarations without silently deleting that host's membership.
+	var unrelated lagoon.ChannelCreateReply
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "unrelated-host", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &unrelated)
+	other := waitBundle(t, eng, unrelated.ChannelID)
+	terminalValue(t, callMember(t, unrelated.ChannelID, other, channelspec.RootPrincipalID, "system", "system.member.create", map[string]any{"decl_id": "seat:" + string(created.ChannelID)}), nil)
+	otherSeat := onlyDecl(t, other, "seat:"+string(created.ChannelID))
+	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelDelete), map[string]any{"channel_id": created.ChannelID}), nil)
+	if got := onlyDecl(t, other, "seat:"+string(created.ChannelID)); got != otherSeat {
+		t.Fatalf("retirement changed unrelated seat: %s", got)
+	}
+	for _, id := range []string{string(created.ChannelID), "seat:" + string(created.ChannelID)} {
+		decl, found, err := eng.registry.GetDecl(context.Background(), id)
+		if err != nil || !found || decl.Status != "revoked" {
+			t.Fatalf("retired declaration %s: %+v %v", id, decl, err)
+		}
+	}
+	failed := decodeTerminal(t, callMember(t, unrelated.ChannelID, other, channelspec.RootPrincipalID, otherSeat, "some.request", map[string]any{}))
+	if failed.Status != message.StatusFailed || failed.ErrorCode != "channel_unavailable" {
+		t.Fatalf("retired body terminal=%+v", failed)
 	}
 }

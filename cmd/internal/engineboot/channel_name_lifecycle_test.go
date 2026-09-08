@@ -34,7 +34,7 @@ func TestChannelRetireRejectsLiveChildrenAndPreservesParent(t *testing.T) {
 	}
 }
 
-func TestChannelNameReplayReturnsExistingButRetiredNameRemainsReserved(t *testing.T) {
+func TestChannelNameReplayConflictsAndRetiredNameRemainsReserved(t *testing.T) {
 	eng, err := Boot(Config{ChannelDBDir: filepath.Join(t.TempDir(), "channels"), Addr: "127.0.0.1:0", RootPassword: "test-root-password"}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
@@ -48,9 +48,10 @@ func TestChannelNameReplayReturnsExistingButRetiredNameRemainsReserved(t *testin
 		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "reserved-name", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}), &out)
 		return out
 	}
-	first, replay := create(), create()
-	if replay.ChannelID != first.ChannelID {
-		t.Fatalf("same-name replay first=%+v replay=%+v", first, replay)
+	first := create()
+	replay := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "reserved-name", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}))
+	if replay.Status != message.StatusFailed || replay.ErrorCode != string(lagoon.CodeConflictExists) {
+		t.Fatalf("same-name replay=%+v", replay)
 	}
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelDelete), map[string]any{"channel_id": first.ChannelID}), nil)
 	conflict := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "reserved-name", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)}}))

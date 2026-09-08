@@ -65,6 +65,11 @@ func (h *Home) View() View {
 	}
 }
 
+// MemberOfDeclaration uses the same live declaration lookup as local routing.
+func (v View) MemberOfDeclaration(declID string) (actor.ActorID, error) {
+	return v.actors.MemberOfDeclaration(declID)
+}
+
 // Snapshot composes membership, current execution and testimony at read time. The
 // fields are advisory and intentionally not a linearizable transaction.
 func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {

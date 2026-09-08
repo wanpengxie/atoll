@@ -25,6 +25,9 @@ type actorSystem struct {
 	home         *Home
 	serverDomain actorhost.ExecutionDomain
 	logger       *slog.Logger
+	// Serialize relation admission and declaration retargeting in this Home.
+	// The authoritative facts remain the ordinary member definitions.
+	relationMu sync.Mutex
 
 	desiredCtx    context.Context
 	desiredCancel context.CancelFunc
@@ -143,6 +146,11 @@ func (a *actorSystem) Admit(ctx context.Context, request actorctl.AdmitRequest) 
 }
 
 func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (actorctl.IntroduceResult, error) {
+	a.relationMu.Lock()
+	defer a.relationMu.Unlock()
+	if err := a.checkRelation(request.Definition, ""); err != nil {
+		return actorctl.IntroduceResult{}, err
+	}
 	t, err := a.home.controller.Introduce(ctx, request)
 	return finishTransition(a, t, err)
 }
@@ -154,6 +162,11 @@ func (a *actorSystem) Restart(ctx context.Context, request actorctl.RestartReque
 }
 
 func (a *actorSystem) ApplyDeclaration(ctx context.Context, change actorctl.DeclarationChange) error {
+	a.relationMu.Lock()
+	defer a.relationMu.Unlock()
+	if err := a.checkRelation(change.Definition, change.ActorID); err != nil {
+		return err
+	}
 	t, err := a.home.controller.ApplyDeclaration(ctx, change)
 	_, err = finishTransition(a, t, err)
 	return err

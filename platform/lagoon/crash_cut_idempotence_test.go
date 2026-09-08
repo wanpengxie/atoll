@@ -90,6 +90,9 @@ func TestCreateCommitSurvivesCutBeforeEdgeAndRetireCleansResidual(t *testing.T) 
 	if err := createSys.reply.DecodeValue(&created); err != nil || created.ChannelID == "" {
 		t.Fatalf("created=%+v reply=%+v err=%v", created, createSys.reply, err)
 	}
+	if created.Channel != "created" || created.Relation != "admission_failed" || created.RelationStep != "parent" {
+		t.Fatalf("lost partial-creation receipt: %+v", created)
+	}
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}

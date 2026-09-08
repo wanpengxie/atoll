@@ -576,7 +576,7 @@ func (s *Store) RetireChannelAndPeer(ctx context.Context, id channel.ID, peerDec
 		if _, err := tx.tx.ExecContext(ctx, `UPDATE channels SET status='retired' WHERE id=?`, id); err != nil {
 			return err
 		}
-		_, err := tx.tx.ExecContext(ctx, `UPDATE decls SET status='revoked',updated_at=? WHERE id=?`, at, peerDecl)
+		_, err := tx.tx.ExecContext(ctx, `UPDATE decls SET status='revoked',updated_at=? WHERE id IN (?,?)`, at, peerDecl, "seat:"+string(id))
 		return err
 	})
 }

@@ -125,7 +125,7 @@ const recipeExampleMinimal = `{"name":"research","recipe":{"declarations":[],"pr
 
 const recipeExampleServing = `{"name":"research","recipe":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"analysis workspace","serving":1,"svc_agent":"my-analyst"}},"initial_actor_ids":["human:root:1787128257816","agent:steward:1787487131255"]}`
 
-const recipeExampleActor = `{"name":"coder","recipe":{"type":"actor","declarations":[{"decl_id":"my-agent"}],"profile":{"serving":0,"svc_agent":"my-agent"}},"initial_actor_ids":[]}`
+const recipeExampleActor = `{"name":"coder","recipe":{"type":"actor","declarations":[{"decl_id":"my-agent"},{"decl_id":"my-handle","config":{"words":{"agent.ask":{"schema":{"type":"object"},"target":"my-agent"}}}}],"profile":{"serving":0}},"initial_actor_ids":[]}`
 
 const templateBodyExample = `{"id":"team-channel","name":"Team channel","visibility":"public","body":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"a team workspace","serving":1,"svc_agent":"my-analyst"}}}`
 

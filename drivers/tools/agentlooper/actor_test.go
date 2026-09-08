@@ -208,8 +208,8 @@ func TestChannelCallTargetsBodyHandleInsteadOfWorkspace(t *testing.T) {
 		t.Fatalf("workspace call target=%q word=%q", target, word)
 	}
 	definitions := toolDefinitions(true, true)
-	if len(definitions) != 5 {
-		t.Fatalf("tool definitions=%d, want workspace four plus channel_call", len(definitions))
+	if len(definitions) != 7 {
+		t.Fatalf("tool definitions=%d, want workspace four plus three channel words", len(definitions))
 	}
 	var host struct {
 		Name       string          `json:"name"`

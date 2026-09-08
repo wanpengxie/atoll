@@ -37,6 +37,10 @@ type View interface {
 	Roster(context.Context) ([]channelspec.ObsRosterRow, error)
 }
 
+func (a viewAdapter) MemberOfDeclaration(declID string) (actor.ActorID, error) {
+	return a.home.View().MemberOfDeclaration(declID)
+}
+
 type bundle struct {
 	home       *home.Home
 	generation uint64

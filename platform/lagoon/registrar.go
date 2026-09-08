@@ -663,7 +663,12 @@ func denied(detail string) error   { return &Error{Code: CodePermissionDenied, D
 func reserved(detail string) error { return &Error{Code: CodeReserved, Detail: detail} }
 
 type ChannelCreateReply struct {
-	ChannelID channel.ID `json:"channel_id"`
+	ChannelID    channel.ID `json:"channel_id"`
+	Channel      string     `json:"channel"`
+	Relation     string     `json:"relation"`
+	RelationStep string     `json:"relation_step,omitempty"`
+	Detail       string     `json:"detail,omitempty"`
+	Warnings     []string   `json:"warnings,omitempty"`
 }
 
 func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owner string, source channel.ID, p ResolvedChannelCreate) (ChannelCreateReply, error) {
@@ -684,8 +689,100 @@ func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owne
 	if r.registry.onCommit != nil {
 		r.registry.onCommit(Change{ChannelID: row.ID})
 	}
-	r.postChannelEdges(sys, trigger, row, message.TypeSystemMemberCreate)
-	return ChannelCreateReply{ChannelID: row.ID}, nil
+	return r.establishChannelEdges(sys, trigger, row), nil
+}
+
+// Object creation has committed before this composition starts. Each ordinary
+// member-create result is observed; a failure returns the retained body's ID
+// and the failed step, never a fictitious all-or-nothing success.
+func (r *Registrar) establishChannelEdges(sys actorbase.Sys, trigger actorbase.Msg, row regspec.ChannelRow) ChannelCreateReply {
+	reply := ChannelCreateReply{ChannelID: row.ID, Channel: "created", Relation: "seated"}
+	steps := []struct {
+		target actor.ActorID
+		decl   string
+	}{{actor.SystemActorID, string(row.ID)}}
+	parentTarget := actor.SystemActorID
+	if row.ParentID != channelspec.C0ChannelID {
+		parentTarget = actor.ActorID("peer:" + parentQualifiedName(row.QualifiedName))
+	}
+	if row.Type == ChannelTypeActor {
+		steps = append(steps, struct {
+			target actor.ActorID
+			decl   string
+		}{parentTarget, "seat:" + string(row.ID)})
+	} else if row.ParentID != channelspec.C0ChannelID {
+		steps = append(steps, struct {
+			target actor.ActorID
+			decl   string
+		}{parentTarget, string(row.ID)})
+	}
+	for _, step := range steps {
+		pending, err := sys.Call(trigger.Cause(), step.target, message.TypeSystemMemberCreate, map[string]any{"decl_id": step.decl})
+		if err == nil {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for range pending.Progress() {
+				}
+			}()
+			terminal, waitErr := pending.Wait(trigger.Ctx(), 0)
+			if waitErr != nil {
+				_ = pending.Cancel()
+				err = waitErr
+			} else {
+				var result struct {
+					Status string `json:"status"`
+					message.Failure
+				}
+				if decodeErr := json.Unmarshal(terminal.Payload, &result); decodeErr != nil {
+					err = decodeErr
+				} else if result.Status != message.StatusCompleted {
+					err = fmt.Errorf("%s: %s", result.ErrorCode, result.Detail)
+				}
+			}
+			<-done
+		}
+		if err != nil {
+			reply.Relation = "admission_failed"
+			reply.RelationStep = "parent"
+			reply.Detail = fmt.Sprintf("%s via %s: %v", step.decl, step.target, err)
+			return reply
+		}
+	}
+	if row.Type == ChannelTypeActor {
+		var genesis GenesisSpec
+		if err := json.Unmarshal(row.Spec, &genesis); err != nil {
+			reply.Relation = "admission_failed"
+			reply.RelationStep = "body"
+			reply.Detail = err.Error()
+			return reply
+		}
+		found := false
+		targets := map[string]bool{}
+		for _, decl := range genesis.Declarations {
+			targets[decl.DeclID] = decl.Rendered.Singleton
+		}
+		for _, decl := range genesis.Declarations {
+			if decl.Rendered.Class == channelmember.HandleClass {
+				cfg, err := channelmember.ParseHandleConfig(decl.Rendered.Config)
+				if err == nil && cfg.Host == row.ParentID {
+					found = true
+					for name, word := range cfg.Words {
+						if !targets[word.Target] {
+							reply.Warnings = append(reply.Warnings, fmt.Sprintf("handle word %s targets non-singleton declaration %s; multiple members will return actor_ambiguous", name, word.Target))
+						}
+					}
+				}
+			}
+		}
+		if !found {
+			reply.Relation = "admission_failed"
+			reply.RelationStep = "body"
+			reply.Detail = "body created without a parent handle; introduce the body's configured handle with system.member.create"
+		}
+		sort.Strings(reply.Warnings)
+	}
+	return reply
 }
 
 func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name string, body regspec.TemplateBody, initialSeats []InitialSeatIntent) (regspec.ChannelRow, bool, error) {
@@ -731,11 +828,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		return regspec.ChannelRow{}, false, err
 	}
 	if len(matches) > 0 {
-		if len(matches) == 1 && matches[0].Status == regspec.ChannelPresent && matches[0].OwnerPrincipal == owner {
-			matches[0].QualifiedName = qualified
-			return matches[0], false, nil
-		}
-		return regspec.ChannelRow{}, false, conflict("sibling channel name already exists")
+		return regspec.ChannelRow{}, false, &Error{Code: "conflict_exists", Detail: fmt.Sprintf("sibling channel already exists: %s", matches[0].ID)}
 	}
 	now := r.now().UnixMilli()
 	id := channel.ID(uuid.NewString())
@@ -856,6 +949,22 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		if r.classes == nil {
 			return regspec.ChannelRow{}, false, &Error{Code: CodeResultUnknown, Detail: "class catalog unavailable"}
 		}
+		if decl.DefaultClass == channelmember.HandleClass && channelType == ChannelTypeActor {
+			// Bind the recipe's own handle; never manufacture one from svc_agent.
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(config, &fields); err != nil {
+				return regspec.ChannelRow{}, false, err
+			}
+			if fields == nil {
+				fields = map[string]json.RawMessage{}
+			}
+			fields["host"], _ = json.Marshal(parent)
+			config, _ = json.Marshal(fields)
+			if len(item.Config) == 0 {
+				overlays = append(overlays, regspec.OverlayRow{DeclID: item.DeclID, ChannelID: id, UpdatedAt: now})
+			}
+			overlays[len(overlays)-1].Config = cloneJSON(config)
+		}
 		config, err = r.materializeConfig(decl.DefaultClass, config)
 		if err != nil {
 			return regspec.ChannelRow{}, false, err
@@ -929,32 +1038,22 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 		declarations = append(declarations, GenesisDeclaration{DeclID: string(parent), Seed: parentDecl.Name, Kind: actor.KindPeer, Rendered: parentRendered})
 		declarationKinds[string(parent)] = actor.KindPeer
 	}
+	for _, declaration := range declarations {
+		if declaration.Rendered.Class != channelmember.HandleClass {
+			continue
+		}
+		cfg, err := channelmember.ParseHandleConfig(declaration.Rendered.Config)
+		if err != nil {
+			return regspec.ChannelRow{}, false, err
+		}
+		for name, word := range cfg.Words {
+			if declarationKinds[word.Target] == "" {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("handle word %q targets declaration %q outside recipe", name, word.Target))
+			}
+		}
+	}
 	if err := validateServiceProfile(profile, declarationKinds); err != nil {
 		return regspec.ChannelRow{}, false, err
-	}
-	// Transitional (batch A of the v3 redesign): the handle is still minted from
-	// svc_agent here; batch C replaces this with the recipe's own channel-handle
-	// declaration. type no longer constrains the service profile, so a missing
-	// svc_agent simply mints no handle (door B: the body's manager seats one later).
-	if channelType == ChannelTypeActor && profile.SvcAgent != nil {
-		receiver := *profile.SvcAgent
-		if receiver == "default" {
-			receiver = ""
-			for _, declaration := range declarations {
-				if declaration.Kind == actor.KindAgent {
-					receiver = declaration.DeclID
-					break
-				}
-			}
-		}
-		if receiver != "" {
-			handleConfig, _ := json.Marshal(channelmember.Config{Host: parent, Body: id, Receiver: receiver})
-			handle, err := r.renderSystem(channelmember.HandleClass, handleConfig)
-			if err != nil {
-				return regspec.ChannelRow{}, false, err
-			}
-			declarations = append(declarations, GenesisDeclaration{DeclID: channelmember.HandleDeclID, Seed: channelmember.HandleSeed, Kind: actor.KindTool, Rendered: handle})
-		}
 	}
 	spec := GenesisSpec{ChannelID: id, Type: channelType, OwnerPrincipal: owner, CreatedAt: now, ParentID: parent, InitiatorPrincipal: owner, Humans: humans, Declarations: declarations, Profile: profile}
 	raw, err := json.Marshal(spec)
@@ -985,17 +1084,11 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 			return regspec.ChannelRow{}, false, err
 		}
 	}
-	memberClass := PeerActorClass
-	memberName := qualified
-	memberConfig := targetConfig(id)
-	if channelType == ChannelTypeActor {
-		memberClass = channelmember.SeatClass
-		// The Seat is the body Channel's identity in its host. Its stable seed
-		// is therefore the body Channel ID, not the mutable qualified label.
-		memberName = string(id)
-		memberConfig, _ = json.Marshal(channelmember.Config{Host: parent, Body: id})
+	if err := tx.InsertDecl(ctx, regspec.DeclRow{ID: string(id), Name: qualified, Owner: owner, DefaultClass: PeerActorClass, Config: targetConfig(id), Status: regspec.DeclPresent, Visibility: "public", CreatedAt: now, UpdatedAt: now}); err != nil {
+		return regspec.ChannelRow{}, false, err
 	}
-	if err := tx.InsertDecl(ctx, regspec.DeclRow{ID: string(id), Name: memberName, Owner: owner, DefaultClass: memberClass, Config: memberConfig, Status: regspec.DeclPresent, Visibility: "public", CreatedAt: now, UpdatedAt: now}); err != nil {
+	seatConfig, _ := json.Marshal(channelmember.SeatConfig{Body: id})
+	if err := tx.InsertDecl(ctx, regspec.DeclRow{ID: "seat:" + string(id), Name: string(id), Owner: owner, DefaultClass: channelmember.SeatClass, Config: seatConfig, Status: regspec.DeclPresent, Visibility: "public", CreatedAt: now, UpdatedAt: now}); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
 	return row, true, nil
@@ -1065,12 +1158,17 @@ func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]act
 func (r *Registrar) postChannelEdges(sys actorbase.Sys, trigger actorbase.Msg, row regspec.ChannelRow, word string) {
 	raw, _ := json.Marshal(map[string]any{"decl_id": string(row.ID)})
 	_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw})
+	if row.Type == ChannelTypeActor {
+		raw, _ = json.Marshal(map[string]any{"decl_id": "seat:" + string(row.ID)})
+	}
 	if row.ParentID != channelspec.C0ChannelID {
 		parent := parentQualifiedName(row.QualifiedName)
 		if parent == "" {
 			return
 		}
 		_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.ActorID("peer:" + parent)}, Payload: raw})
+	} else if row.Type == ChannelTypeActor {
+		_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw})
 	}
 }
 

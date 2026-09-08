@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"log/slog"
 
 	"github.com/wanpengxie/atoll/platform"
@@ -29,15 +31,28 @@ type assemblyResolver struct {
 
 func (r *assemblyResolver) BuildClass(ch channel.ID, id actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {
 	switch class {
-	case channelmember.SeatClass, channelmember.HandleClass:
-		cfg, err := channelmember.ParseConfig(config)
+	case channelmember.SeatClass:
+		cfg, err := channelmember.ParseSeatConfig(config)
 		if err != nil {
 			return platform.ActorFactory{}, false
 		}
-		if class == channelmember.SeatClass {
-			return platform.ActorFactory{Proc: channelmember.SeatDef(r.channelMembers, ch, cfg)}, true
+		unavailable := func(ctx context.Context) error {
+			row, found, err := r.registry.GetChannelDesired(ctx, cfg.Body)
+			if err != nil {
+				return err
+			}
+			if !found || row.Status == regspec.ChannelRetired {
+				return fmt.Errorf("body channel %s is retired or absent; remove this seat with system.member.delete", cfg.Body)
+			}
+			return fmt.Errorf("body channel %s has no connected handle for this host; restore its handle or remove this seat with system.member.delete", cfg.Body)
 		}
-		return platform.ActorFactory{Proc: channelmember.HandleDef(r.channelMembers, ch, cfg)}, true
+		return platform.ActorFactory{Proc: channelmember.SeatDef(r.channelMembers, ch, cfg, unavailable)}, true
+	case channelmember.HandleClass:
+		cfg, err := channelmember.ParseHandleConfig(config)
+		if err != nil {
+			return platform.ActorFactory{}, false
+		}
+		return platform.ActorFactory{Proc: channelmember.HandleDef(r.channelMembers, ch, cfg, bodyMembers{host: r.host, body: ch})}, true
 	case lagoon.ClassRegistrar:
 		if ch != channelspec.C0ChannelID {
 			return platform.ActorFactory{}, false
@@ -163,16 +178,39 @@ func (r *assemblyResolver) ClassPlacement(_ context.Context, class string) (chan
 
 func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel.ID, facts channelspec.DeclarationFacts) error {
 	if facts.Class == channelmember.SeatClass {
-		cfg, err := channelmember.ParseConfig(facts.Config)
-		if err != nil || cfg.Host != holder {
+		cfg, err := channelmember.ParseSeatConfig(facts.Config)
+		if err != nil || cfg.Body == holder {
 			return channelspec.ErrDeclarationNotFound
 		}
 		row, ok, err := r.registry.GetChannelDesired(ctx, cfg.Body)
 		if err != nil {
 			return err
 		}
-		if !ok || row.Status != regspec.ChannelPresent || row.ParentID != holder || row.Type != lagoon.ChannelTypeActor {
+		if !ok || row.Status != regspec.ChannelPresent {
 			return channelspec.ErrDeclarationNotFound
+		}
+		return nil
+	}
+	if facts.Class == channelmember.HandleClass {
+		cfg, err := channelmember.ParseHandleConfig(facts.Config)
+		if err != nil || cfg.Host == holder {
+			return channelspec.ErrDeclarationNotFound
+		}
+		_, ok, err := r.registry.GetChannelDesired(ctx, cfg.Host)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return channelspec.ErrDeclarationNotFound
+		}
+		members := bodyMembers{host: r.host, body: holder}
+		for _, word := range cfg.Words {
+			if _, err := members.MemberOfDeclaration(word.Target); err != nil {
+				var targetErr *actorbase.TargetResolveError
+				if !errors.As(err, &targetErr) || targetErr.Code != "actor_ambiguous" {
+					return err
+				}
+			}
 		}
 		return nil
 	}
@@ -200,8 +238,12 @@ func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel
 }
 
 func (r *assemblyResolver) ValidateConfig(class string, config json.RawMessage) error {
-	if class == channelmember.SeatClass || class == channelmember.HandleClass {
-		_, err := channelmember.ParseConfig(config)
+	if class == channelmember.SeatClass {
+		_, err := channelmember.ParseSeatConfig(config)
+		return err
+	}
+	if class == channelmember.HandleClass {
+		_, err := channelmember.ParseHandleConfig(config)
 		return err
 	}
 	if class == lagoon.PeerActorClass || class == lagoon.SvcActorClass || class == lagoon.ClassRegistrar {
