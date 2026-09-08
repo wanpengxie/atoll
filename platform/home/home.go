@@ -62,8 +62,9 @@ type Config struct {
 }
 
 type BootstrapService struct {
-	SvcAgent  *string
-	Endpoints map[string]string
+	SvcAgent     *string
+	Endpoints    map[string]string
+	SystemAccess *bool
 }
 
 type DeviceDirectory interface {

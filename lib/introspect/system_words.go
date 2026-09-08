@@ -13,12 +13,12 @@ import (
 func SystemWordSpecs() map[string]WordSpec {
 	return map[string]WordSpec{
 		message.TypeSystemChannelCreate: systemWordWithExamples(
-			"Create a child channel from this channel. You must explicitly choose which active actors from the current channel are copied into its genesis; names such as root or steward are not actor ids.",
-			"name (string), recipe (object), initial_actor_ids (array of full actor ids from system.member.list; [] explicitly creates no copied seats). A channel whose recipe names no svc_agent accepts nothing through its service door afterwards.",
+			"Create a child channel from this channel. type=group creates a human workspace. type=actor creates an implementation container that is hidden from ordinary channel lists, forbids copied human seats, and is reached externally only through its service Agent.",
+			"name (string), recipe (object), initial_actor_ids (array of full actor ids from system.member.list; [] explicitly creates no copied seats). Actor channels normally use [] and default system_access to 0, which hides both channel-local and space-registry administration through the service door while preserving the internal system kernel.",
 			objectSchema(channelNameSchema+","+recipeSchema+","+initialActorIDsSchema, "name", "recipe", "initial_actor_ids"),
-			recipeExampleMinimal, recipeExampleServing),
+			recipeExampleMinimal, recipeExampleServing, recipeExampleActor),
 		message.TypeSystemChannelGet:        systemWord("Get one channel's registered facts.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
-		message.TypeSystemChannelList:       systemWord("List registered channels, optionally below one parent.", "parent_id (optional string).", objectSchema(`"parent_id":{"type":"string"}`)),
+		message.TypeSystemChannelList:       systemWord("List registered human-workspace channels, optionally below one parent. Actor implementation channels are hidden by default; management callers may opt in explicitly.", "parent_id (optional string); include_actor_channels (optional boolean, default false).", objectSchema(`"parent_id":{"type":"string"},"include_actor_channels":{"type":"boolean","default":false}`)),
 		message.TypeSystemChannelSet:        systemWord("Update a channel's profile.", "channel_id, description (strings), serving (integer 0 or 1); default_storage_device_id optionally names the attached device whose channel directory the file UI opens first.", objectSchema(`"channel_id":{"type":"string"},"description":{"type":"string"},"serving":{"type":"integer","enum":[0,1]},"default_storage_device_id":{"type":"string"}`, "channel_id", "description", "serving")),
 		message.TypeSystemChannelDeviceList: systemWord("List the devices attached to the channel this request comes from. This is the authoritative source for file, terminal, and desired_host device choices; system.device.list is only the space-wide inventory.", "No parameters.", objectSchema("")),
 		message.TypeSystemChannelDelete:     systemWord("Retire a channel.", "channel_id (string).", objectSchema(`"channel_id":{"type":"string"}`, "channel_id")),
@@ -112,17 +112,21 @@ const initialActorIDsSchema = `"initial_actor_ids":{"type":"array","description"
 // — regspec.TemplateBody is a Go type, and the word previously published it as
 // a bare object.
 const recipeSchema = `"recipe":{"type":"object","additionalProperties":false,"description":"what the new channel is born with","properties":{` +
+	`"type":{"type":"string","enum":["group","actor"],"default":"group","description":"group is a visible collaboration workspace; actor is a hidden implementation container exposed through its service Agent"},` +
 	`"declarations":{"type":"array","description":"members minted at genesis; each decl_id must name an actor template visible to you (public, or one you own)","items":{"type":"object","additionalProperties":false,"required":["decl_id"],"properties":{"decl_id":{"type":"string"},"config":{"type":"object","description":"per-channel config overlay for this declaration"}}}},` +
 	`"profile":{"type":"object","additionalProperties":false,"description":"how the channel serves callers from outside","properties":{` +
 	`"description":{"type":"string"},` +
 	`"default_storage_device_id":{"type":"string","description":"attached device whose channel directory file views open first; defaults to local-device"},` +
 	`"serving":{"type":"integer","enum":[0,1],"description":"1 makes the channel reachable through its service door"},` +
+	`"system_access":{"type":"integer","enum":[0,1],"description":"whether the service door accepts channel-local and space-registry system administration words; defaults to 1 for group and 0 for actor. Internal system services remain available to members"},` +
 	`"svc_agent":{"type":"string","description":"which agent answers agent.ask from outside. Must be a decl_id listed in declarations above and that declaration must be an agent, or the literal \"default\" to use the first active agent. Omit it and the channel answers nothing from outside."},` +
 	`"endpoints":{"type":"object","description":"extra words the service door accepts, mapped to the declaration that answers them","additionalProperties":{"type":"object","required":["receiver"],"properties":{"description":{"type":"string"},"receiver":{"type":"string"},"schema":{"type":"object"},"examples":{"type":"array"}}}}}}}}`
 
 const recipeExampleMinimal = `{"name":"research","recipe":{"declarations":[],"profile":{"description":"a channel with no members and no service door"}},"initial_actor_ids":[]}`
 
 const recipeExampleServing = `{"name":"research","recipe":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"analysis workspace","serving":1,"svc_agent":"my-analyst"}},"initial_actor_ids":["human:root:1787128257816","agent:steward:1787487131255"]}`
+
+const recipeExampleActor = `{"name":"classifier","recipe":{"type":"actor","declarations":[{"decl_id":"my-agent"}],"profile":{"description":"classifier actor","serving":1,"system_access":0,"svc_agent":"my-agent"}},"initial_actor_ids":[]}`
 
 const templateBodyExample = `{"id":"team-channel","name":"Team channel","visibility":"public","body":{"declarations":[{"decl_id":"my-analyst"}],"profile":{"description":"a team workspace","serving":1,"svc_agent":"my-analyst"}}}`
 

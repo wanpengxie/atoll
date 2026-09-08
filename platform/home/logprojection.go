@@ -88,7 +88,9 @@ func (p *logProjection) row(row storespec.StoredRow) (projectedLogRow, error) {
 		return v, nil
 	}
 	e := row.Envelope
-	v := projectedLogRow{include: !channelspec.HousekeepingWord(e.Type), source: "raw_json", links: logLinks(row)}
+	// Conversation hides control/runtime plumbing. raw is the diagnostic and
+	// recovery view, so public housekeeping rows remain inspectable there.
+	v := projectedLogRow{include: p.view == "raw" || !channelspec.HousekeepingWord(e.Type), source: "raw_json", links: logLinks(row)}
 	f := logFields(row)
 	if e.Kind == message.KindRequest {
 		v.state = "processing"
@@ -170,7 +172,7 @@ func queryLogRead(ctx context.Context, reader storespec.VisibleExchangeQuery, q 
 	if err != nil {
 		return out, err
 	}
-	if !found || row.Seq > out.HeadSeq || channelspec.HousekeepingWord(row.Envelope.Type) {
+	if !found || row.Seq > out.HeadSeq || (q.View != "raw" && channelspec.HousekeepingWord(row.Envelope.Type)) {
 		return out, channelspec.ErrLogMessageNotFound
 	}
 	v, err := p.row(row)
@@ -192,7 +194,7 @@ func queryLogRead(ctx context.Context, reader storespec.VisibleExchangeQuery, q 
 				if err != nil {
 					return out, err
 				}
-				if ok && target.Seq <= out.HeadSeq && !channelspec.HousekeepingWord(target.Envelope.Type) {
+				if ok && target.Seq <= out.HeadSeq && (q.View == "raw" || !channelspec.HousekeepingWord(target.Envelope.Type)) {
 					pv, err := p.row(target)
 					if err != nil {
 						return out, err

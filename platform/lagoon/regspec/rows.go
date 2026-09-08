@@ -97,14 +97,23 @@ type EndpointSpec struct {
 }
 
 type ChannelProfile struct {
-	Description            *string                 `json:"description,omitempty"`
-	Serving                *int                    `json:"serving,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Serving     *int    `json:"serving,omitempty"`
+	// SystemAccess controls whether the service membrane accepts channel-local
+	// or space-registry administration words. The fixed system kernel still
+	// exists for local members: disabling this public face must not break
+	// recovery, timers, or other channel-internal infrastructure.
+	SystemAccess           *int                    `json:"system_access,omitempty"`
 	DefaultStorageDeviceID *string                 `json:"default_storage_device_id,omitempty"`
 	Endpoints              map[string]EndpointSpec `json:"endpoints,omitempty"`
 	SvcAgent               *string                 `json:"svc_agent"`
 }
 
 type TemplateBody struct {
+	// Type selects the channel's product role. "group" is a human workspace;
+	// "actor" is an implementation container presented externally only through
+	// its service actor.
+	Type         string                `json:"type,omitempty"`
 	Declarations []TemplateDeclaration `json:"declarations"`
 	Profile      *ChannelProfile       `json:"profile,omitempty"`
 }

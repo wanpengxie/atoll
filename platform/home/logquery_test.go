@@ -128,6 +128,9 @@ func TestLogQueryVisibilityHousekeepingAndExactRead(t *testing.T) {
 			if !errors.Is(err, channelspec.ErrLogMessageNotFound) {
 				t.Fatalf("housekeeping read: %v", err)
 			}
+			if raw := f.query(channelspec.LogQueryRequest{ReadSeq: row.Seq, View: "raw"}); raw.Message == nil || !strings.Contains(raw.Message.PayloadText, "needle") {
+				t.Fatalf("raw housekeeping read lost diagnostic row: %+v", raw)
+			}
 		}
 	}
 	r := f.add(message.KindRequest, "agent.ask", "public question", "", false, message.VisibilityPublic)

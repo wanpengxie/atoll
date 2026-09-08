@@ -38,6 +38,14 @@ const (
 	hintInternal     = "The target failed internally. Read error.detail; retry only if the detail says the condition was transient"
 	hintAddrHeld     = "The address could not be bound because something else is holding it, or it is not an address this host can listen on. Nothing was changed — whatever was serving before still is. Pick a different port, or wait for the current holder to release it, before trying again"
 	hintCancelled    = "The call was cancelled before it finished. Something asked for it to stop, so resending it repeats work that was deliberately abandoned — confirm the cancellation was not yours before trying again"
+	hintCapacity     = "The target is temporarily at its admitted concurrency or open-work capacity. Keep the stable work or submission key, wait for existing work to settle, then retry; do not create duplicate work under a new key"
+	hintWorkNotFound = "No work visible to this calling channel has that id or submission key. List agent.status in the same channel and reuse the returned work_id; do not guess an id from another channel"
+	hintWorkClosed   = "That work is already terminal and cannot accept more input. Read it with agent.result; create a new work only if the requested follow-up is genuinely new"
+	hintOpConflict   = "That idempotency key already names a different operation. Reuse it only for the identical retry, otherwise choose a new operation_key after reading current work status"
+	hintStaleWork    = "The addressed assignment is no longer the work's current execution fence. Read agent.status and do not retry the stale internal operation"
+	hintContextLimit = "The work's retained context reached its configured bound. Start a new explicitly related work or use a supported compaction path; repeating the same oversized request will not help"
+	hintNoCheckpoint = "The related work has no durable context checkpoint yet. Inspect that work: retry only after it completes an episode, or omit related_work_id to start from a fresh context"
+	hintLedger       = "The durable decision could not be confirmed. The operation may or may not have been recorded: query by work_id or submission_key before retrying, and never change the idempotency key merely because the reply failed"
 )
 
 // PermissionDenied, NotFound, Unsupported, Conflict and Unavailable are the
@@ -81,8 +89,11 @@ var actorErrorClasses = map[string]failureClass{
 	"output_limit":         {PayloadInvalid, hintFixPayload, false},
 
 	// The subject named does not exist.
-	"not_found":      {NotFound, hintNotFound, false},
-	"decl_not_found": {NotFound, hintNotFound, false},
+	"not_found":            {NotFound, hintNotFound, false},
+	"decl_not_found":       {NotFound, hintNotFound, false},
+	"model_not_found":      {NotFound, hintNotFound, false},
+	"work_not_found":       {NotFound, hintWorkNotFound, false},
+	"assignment_not_found": {NotFound, hintWorkNotFound, false},
 
 	// A waiting task that somebody dropped before it ran. Nothing is wrong and
 	// nothing is retryable by itself: the work was withdrawn, so a caller that
@@ -105,13 +116,22 @@ var actorErrorClasses = map[string]failureClass{
 
 	// Capability facts: the thing asked for is not on offer here.
 	"type_unsupported":   {Unsupported, hintUnsupported, false},
+	"unsupported_scope":  {Unsupported, hintUnsupported, false},
 	"endpoint_not_found": {Unsupported, hintUnsupported, false},
 	"unknown_class":      {Unsupported, hintUnsupported, false},
 	"reserved":           {Unsupported, hintUnsupported, false},
 	"no_service_agent":   {Unsupported, hintNoSvcAgent, false},
 
 	// Identity collisions.
-	"conflict_exists": {Conflict, hintConflict, false},
+	"conflict_exists":        {Conflict, hintConflict, false},
+	"submission_conflict":    {Conflict, hintOpConflict, false},
+	"operation_conflict":     {Conflict, hintOpConflict, false},
+	"assignment_conflict":    {Conflict, hintStaleWork, false},
+	"operation_mismatch":     {Conflict, hintStaleWork, false},
+	"stale_assignment":       {Conflict, hintStaleWork, false},
+	"work_closed":            {Conflict, hintWorkClosed, false},
+	"path_outside_workspace": {PayloadInvalid, hintFixPayload, false},
+	"context_limit":          {PayloadInvalid, hintContextLimit, false},
 
 	// Present in the registry, absent right now.
 	"receiver_inactive":  {ActorUnreachable, hintUnreachable, true},
@@ -124,6 +144,10 @@ var actorErrorClasses = map[string]failureClass{
 	"channel_unavailable":   {Unavailable, hintUnavailable, true},
 	"authority_unavailable": {Unavailable, hintUnavailable, true},
 	"provider_failed":       {Unavailable, hintUnavailable, true},
+	"state_unavailable":     {Unavailable, hintUnavailable, true},
+	"context_unavailable":   {Unavailable, hintNoCheckpoint, true},
+	"capacity":              {Unavailable, hintCapacity, true},
+	"runtime_unavailable":   {Unavailable, hintUnavailable, true},
 
 	"mcp_timeout": {Timeout, hintTimeout, false},
 	"timeout":     {Timeout, hintTimeout, false},
@@ -138,11 +162,14 @@ var actorErrorClasses = map[string]failureClass{
 
 	// Outcome genuinely unknown — the one class where a blind retry can do
 	// real damage, so it is called out separately from a plain failure.
-	"result_unknown": {ResultUnknown, hintResultUnkown, false},
+	"result_unknown":     {ResultUnknown, hintResultUnkown, false},
+	"ledger_unavailable": {ResultUnknown, hintLedger, false},
 
 	// Downstream reported its own trouble; the detail is the useful part.
 	"mcp_tool_error":     {InternalError, hintInternal, false},
 	"mcp_result_invalid": {InternalError, hintInternal, false},
+	"provider_error":     {InternalError, hintInternal, false},
+	"tool_failed":        {InternalError, hintInternal, false},
 	"resource_error":     {InternalError, hintInternal, false},
 	"schedule_failed":    {InternalError, hintInternal, false},
 	"runtime_failed":     {InternalError, hintInternal, false},

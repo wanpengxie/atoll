@@ -157,6 +157,11 @@ type GenesisSpec struct {
 	Profile            regspec.ChannelProfile `json:"profile"`
 }
 
+const (
+	ChannelTypeGroup = "group"
+	ChannelTypeActor = "actor"
+)
+
 // Seed is the birth name the seated member is called by. It sits beside the
 // rendered snapshot rather than inside it: the snapshot's digest drives
 // reconciliation, and renaming a declaration must not restart the actor it
@@ -268,7 +273,8 @@ type DeviceBinding struct {
 	ChannelID channel.ID `json:"channel_id"`
 }
 type ChannelList struct {
-	ParentID *channel.ID `json:"parent_id,omitempty"`
+	ParentID             *channel.ID `json:"parent_id,omitempty"`
+	IncludeActorChannels bool        `json:"include_actor_channels,omitempty"`
 }
 type ChannelGet struct {
 	ChannelID channel.ID `json:"channel_id"`

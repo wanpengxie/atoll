@@ -68,7 +68,7 @@ func queryLogPage(ctx context.Context, reader storespec.VisibleExchangeQuery, q 
 			matched := []int64{}
 			for i, row := range rows {
 				scannedBytes += len(row.Envelope.Payload)
-				if channelspec.HousekeepingWord(start.Envelope.Type) || channelspec.HousekeepingWord(row.Envelope.Type) {
+				if q.View != "raw" && (channelspec.HousekeepingWord(start.Envelope.Type) || channelspec.HousekeepingWord(row.Envelope.Type)) {
 					continue
 				}
 				v, err := p.row(row)

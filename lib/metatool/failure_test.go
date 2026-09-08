@@ -41,6 +41,10 @@ func TestActorErrorCodeDecidesClassNotReason(t *testing.T) {
 		{"channel_unavailable", Unavailable, true},
 		{"device_offline", ActorUnreachable, true},
 		{"query_timeout", Timeout, true},
+		{"capacity", Unavailable, true},
+		{"work_not_found", NotFound, false},
+		{"operation_conflict", Conflict, false},
+		{"ledger_unavailable", ResultUnknown, false},
 	}
 	for _, tc := range cases {
 		payload := map[string]any{"error_code": tc.code, "detail": "the actor's own words"}

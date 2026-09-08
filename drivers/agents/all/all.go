@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/drivers/agents/driverproto"
+	"github.com/wanpengxie/atoll/drivers/agents/native"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/claude"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/codex"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/script"
@@ -24,6 +25,7 @@ func init() {
 	registry.Register(claude.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(claude.Class, full), New: newClaude, DefaultConfig: claude.DefaultConfig, ValidateConfig: claude.ValidateConfig, ConfigSchema: json.RawMessage(claude.ConfigSchema)})
 	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(codex.Class, full), New: newCodex, DefaultConfig: codex.DefaultConfig, ValidateConfig: codex.ValidateConfig, ConfigSchema: json.RawMessage(codex.ConfigSchema)})
 	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(script.Class, nil), New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }, ConfigSchema: json.RawMessage(script.ConfigSchema)})
+	registry.Register(native.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: native.Manifest(), New: native.New, DefaultConfig: native.DefaultConfig, ValidateConfig: native.ValidateConfig, ConfigSchema: json.RawMessage(native.ConfigSchema)})
 }
 
 func newClaude(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {

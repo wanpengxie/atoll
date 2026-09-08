@@ -689,6 +689,13 @@ func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owne
 
 func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner string, parent channel.ID, name string, body regspec.TemplateBody, initialSeats []InitialSeatIntent) (regspec.ChannelRow, bool, error) {
 	body = materializeChannelTemplateDefaults(body)
+	channelType := body.Type
+	if channelType == "" {
+		channelType = ChannelTypeGroup
+	}
+	if channelType != ChannelTypeGroup && channelType != ChannelTypeActor {
+		return regspec.ChannelRow{}, false, invalid("recipe type must be group or actor")
+	}
 	if name == "" {
 		return regspec.ChannelRow{}, false, invalid("name required: a channel needs a name, 1-63 chars of lowercase a-z, 0-9 or '-'")
 	}
@@ -727,6 +734,9 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	if len(matches) > 0 {
 		if len(matches) == 1 && matches[0].Status == regspec.ChannelPresent && matches[0].OwnerPrincipal == owner {
+			if matches[0].Type != channelType {
+				return regspec.ChannelRow{}, false, conflict(fmt.Sprintf("sibling %q already exists as type %q, not requested type %q", name, matches[0].Type, channelType))
+			}
 			matches[0].QualifiedName = qualified
 			return matches[0], false, nil
 		}
@@ -749,6 +759,26 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	}
 	if *profile.Serving != 0 && *profile.Serving != 1 {
 		return regspec.ChannelRow{}, false, invalid("serving must be 0 or 1")
+	}
+	if profile.SystemAccess == nil {
+		value := 1
+		if channelType == ChannelTypeActor {
+			value = 0
+		}
+		profile.SystemAccess = &value
+	}
+	if *profile.SystemAccess != 0 && *profile.SystemAccess != 1 {
+		return regspec.ChannelRow{}, false, invalid("system_access must be 0 or 1")
+	}
+	if channelType == ChannelTypeActor {
+		if *profile.Serving != 1 || profile.SvcAgent == nil {
+			return regspec.ChannelRow{}, false, invalid("an actor channel must serve exactly one agent face: set profile.serving to 1 and profile.svc_agent to an agent declaration")
+		}
+		for index, seat := range initialSeats {
+			if seat.Kind == actor.KindHuman {
+				return regspec.ChannelRow{}, false, invalid(fmt.Sprintf("actor channels cannot contain human seats; initial_seats[%d] is human", index))
+			}
+		}
 	}
 	humans := make([]GenesisHuman, 0, len(initialSeats))
 	trustedByDecl := make(map[string]InitialSeatIntent, len(initialSeats))
@@ -927,7 +957,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if err := validateServiceProfile(profile, declarationKinds); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
-	spec := GenesisSpec{ChannelID: id, Type: "group", OwnerPrincipal: owner, CreatedAt: now, ParentID: parent, InitiatorPrincipal: owner, Humans: humans, Declarations: declarations, Profile: profile}
+	spec := GenesisSpec{ChannelID: id, Type: channelType, OwnerPrincipal: owner, CreatedAt: now, ParentID: parent, InitiatorPrincipal: owner, Humans: humans, Declarations: declarations, Profile: profile}
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		return regspec.ChannelRow{}, false, err
@@ -936,7 +966,7 @@ func (r *Registrar) provisionChannel(ctx context.Context, tx *store.Tx, owner st
 	if profile.Description != nil {
 		description = *profile.Description
 	}
-	row := regspec.ChannelRow{ID: id, ParentID: parent, Name: name, QualifiedName: qualified, Type: "group", Status: regspec.ChannelPresent, OwnerPrincipal: owner, Description: description, Serving: *profile.Serving, DefaultStorageDeviceID: *profile.DefaultStorageDeviceID, Spec: raw, CreatedAt: now}
+	row := regspec.ChannelRow{ID: id, ParentID: parent, Name: name, QualifiedName: qualified, Type: channelType, Status: regspec.ChannelPresent, OwnerPrincipal: owner, Description: description, Serving: *profile.Serving, DefaultStorageDeviceID: *profile.DefaultStorageDeviceID, Spec: raw, CreatedAt: now}
 	if err := tx.InsertChannel(ctx, row); err != nil {
 		return regspec.ChannelRow{}, false, err
 	}
@@ -990,8 +1020,8 @@ func declaredIn(kinds map[string]actor.Kind) string {
 
 func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]actor.Kind) error {
 	for name, endpoint := range profile.Endpoints {
-		if strings.TrimSpace(name) == "" || name == introspect.QueryDescribe || name == "agent.ask" || strings.HasPrefix(name, "svcactor.") || strings.HasPrefix(name, "system.") {
-			return invalid(fmt.Sprintf("service endpoint name %q is empty or reserved: an endpoint may not be named actor.describe or agent.ask, nor start with svcactor. or system., because those are already answered by the door itself", name))
+		if strings.TrimSpace(name) == "" || name == introspect.QueryDescribe || strings.HasPrefix(name, "agent.") || strings.HasPrefix(name, "svcactor.") || strings.HasPrefix(name, "system.") {
+			return invalid(fmt.Sprintf("service endpoint name %q is empty or reserved: an endpoint may not be named actor.describe or start with agent., svcactor., or system., because those are already answered by the door itself", name))
 		}
 		kind, ok := kinds[endpoint.Receiver]
 		if !ok {
@@ -1666,6 +1696,9 @@ func (r *Registrar) authorizeBinding(ctx context.Context, owner string, source c
 }
 
 func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.TemplateBody) error {
+	if body.Type != ChannelTypeGroup && body.Type != ChannelTypeActor {
+		return invalid("channel template body type must be group or actor")
+	}
 	return r.registry.store.InTx(ctx, func(tx *store.Tx) error {
 		if err := r.validateTemplateDeclarations(ctx, tx, body.Declarations); err != nil {
 			return err
@@ -1676,6 +1709,12 @@ func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.Templ
 			}
 			if body.Profile.DefaultStorageDeviceID != nil && *body.Profile.DefaultStorageDeviceID == "" {
 				return invalid("default_storage_device_id must name a device")
+			}
+			if body.Profile.SystemAccess == nil || (*body.Profile.SystemAccess != 0 && *body.Profile.SystemAccess != 1) {
+				return invalid("system_access must be 0 or 1")
+			}
+			if body.Type == ChannelTypeActor && (body.Profile.Serving == nil || *body.Profile.Serving != 1 || body.Profile.SvcAgent == nil) {
+				return invalid("an actor channel template must set profile.serving to 1 and profile.svc_agent to an agent declaration")
 			}
 			kinds := make(map[string]actor.Kind, len(body.Declarations))
 			for _, item := range body.Declarations {
@@ -1703,6 +1742,9 @@ func (r *Registrar) validateTemplateBody(ctx context.Context, body regspec.Templ
 // which made template inspection and channel creation report different facts.
 // The local device is policy, not daemon ordering, so it is written explicitly.
 func materializeChannelTemplateDefaults(body regspec.TemplateBody) regspec.TemplateBody {
+	if body.Type == "" {
+		body.Type = ChannelTypeGroup
+	}
 	profile := regspec.ChannelProfile{}
 	if body.Profile != nil {
 		profile = *body.Profile
@@ -1710,6 +1752,13 @@ func materializeChannelTemplateDefaults(body regspec.TemplateBody) regspec.Templ
 	if profile.DefaultStorageDeviceID == nil {
 		value := channelspec.LocalDeviceID
 		profile.DefaultStorageDeviceID = &value
+	}
+	if profile.SystemAccess == nil {
+		value := 1
+		if body.Type == ChannelTypeActor {
+			value = 0
+		}
+		profile.SystemAccess = &value
 	}
 	body.Profile = &profile
 	return body
@@ -1897,7 +1946,7 @@ func (r *Registrar) channelView(ctx context.Context, row regspec.ChannelRow) (re
 	if err := json.Unmarshal(row.Spec, &spec); err != nil {
 		return regspec.ChannelRow{}, err
 	}
-	recipe := regspec.TemplateBody{Profile: &spec.Profile}
+	recipe := regspec.TemplateBody{Type: spec.Type, Profile: &spec.Profile}
 	for _, declaration := range spec.Declarations {
 		if systemCompanion(declaration.DeclID) {
 			continue
@@ -1919,14 +1968,15 @@ func (r *Registrar) readChannels(ctx context.Context, p ChannelList) ([]regspec.
 	if err != nil {
 		return nil, err
 	}
-	if p.ParentID == nil {
-		return rows, nil
-	}
 	out := rows[:0]
 	for _, row := range rows {
-		if row.ParentID == *p.ParentID {
-			out = append(out, row)
+		if row.Type == ChannelTypeActor && !p.IncludeActorChannels {
+			continue
 		}
+		if p.ParentID != nil && row.ParentID != *p.ParentID {
+			continue
+		}
+		out = append(out, row)
 	}
 	return out, nil
 }

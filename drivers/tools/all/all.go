@@ -15,10 +15,14 @@
 package all
 
 import (
+	_ "github.com/wanpengxie/atoll/drivers/tools/agentcontext"
+	_ "github.com/wanpengxie/atoll/drivers/tools/agentlooper"
 	_ "github.com/wanpengxie/atoll/drivers/tools/coderunner"
 	_ "github.com/wanpengxie/atoll/drivers/tools/device"
 	_ "github.com/wanpengxie/atoll/drivers/tools/echo"
 	_ "github.com/wanpengxie/atoll/drivers/tools/kimi"
 	_ "github.com/wanpengxie/atoll/drivers/tools/mcp"
+	_ "github.com/wanpengxie/atoll/drivers/tools/pillm"
+	_ "github.com/wanpengxie/atoll/drivers/tools/piworkspace"
 	_ "github.com/wanpengxie/atoll/drivers/tools/xhs"
 )

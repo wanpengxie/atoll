@@ -201,8 +201,12 @@ func TestProtocolPackageDirectionsStayAcyclic(t *testing.T) {
 	}
 	var bad []string
 	for _, f := range productionFiles(t) {
-		fromAllowed, inProtocol := allowed[f.dir]
-		if !inProtocol {
+		if !hasPathPrefix(f.dir, "protocol") {
+			continue
+		}
+		fromAllowed, known := allowed[f.dir]
+		if !known {
+			bad = append(bad, fmt.Sprintf("%s is in undeclared protocol package %q", f.path, f.dir))
 			continue
 		}
 		for _, p := range f.imports {
@@ -213,8 +217,8 @@ func TestProtocolPackageDirectionsStayAcyclic(t *testing.T) {
 		}
 	}
 	failWall(t, bad,
-		"protocol 词汇依赖恒单向且无环。",
-		"把共享词汇下沉到 actor/channel/resource，或让 message/access 只组合各自允许的根叶。")
+		"protocol 包集合闭合，词汇依赖恒单向且无环。",
+		"业务或适配器合同下沉到它的 owner；只有 owner 明确批准核心协议扩张后，才能把新 protocol 包加入黄金表。")
 }
 
 // TestProtocolTakesNoSeamOrExternalImports —— protocol 除层图约束（不 import

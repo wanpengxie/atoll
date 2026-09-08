@@ -26,10 +26,14 @@ const Class = "svcactor"
 const ServiceStateKey resource.ResourceID = "_service"
 
 const cardDescribeTimeout = time.Second
+const currentCardVersion = 2
 
 type ServiceTable struct {
 	SvcAgent  *string                  `json:"svc_agent"`
 	Endpoints map[string]actor.ActorID `json:"endpoints"`
+	// Nil keeps the pre-policy behavior for service state written by older
+	// binaries. Actor-channel genesis always writes false explicitly.
+	SystemAccess *bool `json:"system_access,omitempty"`
 }
 
 type MemberFacts struct {
@@ -59,16 +63,18 @@ type Deps struct {
 }
 
 type service struct {
-	deps     Deps
-	mu       sync.RWMutex
-	table    ServiceTable
-	card     channel.Card
-	revision uint64
+	deps         Deps
+	mu           sync.RWMutex
+	table        ServiceTable
+	card         channel.Card
+	cardComplete bool
+	revision     uint64
 }
 
 type persistedService struct {
-	Table ServiceTable  `json:"table"`
-	Card  *channel.Card `json:"card,omitempty"`
+	Table       ServiceTable  `json:"table"`
+	Card        *channel.Card `json:"card,omitempty"`
+	CardVersion int           `json:"card_version,omitempty"`
 }
 
 func manifest() introspect.Manifest {
@@ -90,7 +96,7 @@ func Def(deps Deps) actorbase.Def {
 			deps.Logger = slog.New(slog.DiscardHandler)
 		}
 		table := emptyTable()
-		s := &service{deps: deps, table: table, card: skeletonCard(table)}
+		s := &service{deps: deps, table: table, card: skeletonCard(table), cardComplete: true}
 		return s.serve, nil
 	}}
 }
@@ -103,11 +109,13 @@ func (s *service) serve(sys actorbase.Sys) error {
 		return err
 	} else if found {
 		s.table = state.Table
-		if state.Card == nil {
+		if state.Card == nil || state.CardVersion < currentCardVersion {
 			s.card = skeletonCard(state.Table)
+			s.cardComplete = false
 			materializeInitial = true
 		} else {
 			s.card = cloneCard(*state.Card)
+			s.cardComplete = true
 		}
 	}
 	var startup sync.WaitGroup
@@ -116,17 +124,18 @@ func (s *service) serve(sys actorbase.Sys) error {
 		go func(table ServiceTable) {
 			defer startup.Done()
 			// Startup materialisation: nothing on this ledger asked for it.
-			card := s.buildCard(sys, message.Root(), table)
+			card, complete := s.buildCard(sys, message.Root(), table)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if s.revision != 0 || sys.Life().Err() != nil {
 				return
 			}
-			if err := writeService(sys.State(), table, card); err != nil {
+			if err := writeServiceCard(sys.State(), table, card, complete); err != nil {
 				s.deps.Logger.Warn("svcactor.initial_card_write_failed", "error", err)
 				return
 			}
 			s.card = cloneCard(card)
+			s.cardComplete = complete
 		}(cloneTable(s.table))
 	}
 	portCtx, stopPort := context.WithCancel(sys.Life())
@@ -186,15 +195,16 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = sys.Fail(msg, "invalid_args", err.Error())
 			return
 		}
-		card := s.buildCard(sys, msg.Cause(), table)
+		card, complete := s.buildCard(sys, msg.Cause(), table)
 		s.mu.Lock()
-		if err := writeService(sys.State(), table, card); err != nil {
+		if err := writeServiceCard(sys.State(), table, card, complete); err != nil {
 			s.mu.Unlock()
 			_, _ = sys.Fail(msg, "internal_error", err.Error())
 			return
 		}
 		s.table = cloneTable(table)
 		s.card = cloneCard(card)
+		s.cardComplete = complete
 		s.revision++
 		s.mu.Unlock()
 		_, _ = sys.Reply(msg, table)
@@ -205,7 +215,7 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 
 func (s *service) validateTable(ctx context.Context, table ServiceTable) error {
 	for word, receiver := range table.Endpoints {
-		if word == "actor.describe" || word == "agent.ask" || strings.HasPrefix(word, "svcactor.") || strings.HasPrefix(word, "system.") {
+		if word == "actor.describe" || strings.HasPrefix(word, "agent.") || strings.HasPrefix(word, "svcactor.") || strings.HasPrefix(word, "system.") {
 			return errors.New("service word collides with a structural word")
 		}
 		if receiver == "" || !fullActorID(receiver) {
@@ -241,9 +251,10 @@ func fullActorID(id actor.ActorID) bool {
 // prompted the asking: rebuilding the card because someone reset the service
 // table continues that request's errand; materialising it at startup continues
 // nothing, so it says Root.
-func (s *service) buildCard(sys actorbase.Sys, cause message.Cause, table ServiceTable) channel.Card {
+func (s *service) buildCard(sys actorbase.Sys, cause message.Cause, table ServiceTable) (channel.Card, bool) {
 	card := skeletonCard(table)
 	words := card.Words
+	agentComplete := s.materializeAgentWords(sys, cause, table, words)
 	byReceiver := map[actor.ActorID][]string{}
 	for word, receiver := range table.Endpoints {
 		byReceiver[receiver] = append(byReceiver[receiver], word)
@@ -269,7 +280,55 @@ func (s *service) buildCard(sys actorbase.Sys, cause message.Cause, table Servic
 			}
 		}
 	}
-	return channel.Card{Words: words}
+	return channel.Card{Words: words}, agentComplete
+}
+
+// materializeAgentWords projects the selected Agent's whole public Agent
+// interface through the channel door. The door remains one endpoint: it does
+// not acquire a second queue or reinterpret controls. A legacy Agent that only
+// describes agent.ask consequently exposes only agent.ask; a work-aware Agent
+// exposes status/result/targeted-control with the exact schemas it owns.
+func (s *service) materializeAgentWords(sys actorbase.Sys, cause message.Cause, table ServiceTable, words map[string]json.RawMessage) bool {
+	if table.SvcAgent == nil {
+		return true
+	}
+	life := sys.Life()
+	target, _, ok := s.resolveServiceAgent(life, table)
+	if !ok {
+		return false
+	}
+	pending, err := sys.Call(cause, target, introspect.QueryDescribe, map[string]any{})
+	if err != nil {
+		return false
+	}
+	terminal, err := pending.Wait(life, cardDescribeTimeout)
+	if err != nil || len(terminal.Payload) == 0 {
+		_ = pending.Cancel()
+		return false
+	}
+	var described introspect.Describe
+	if json.Unmarshal(terminal.Payload, &described) != nil || !contains(described.Interfaces, "agent") {
+		return false
+	}
+	for name, spec := range described.Words {
+		if !strings.HasPrefix(name, "agent.") {
+			continue
+		}
+		raw, err := json.Marshal(spec)
+		if err == nil {
+			words[name] = raw
+		}
+	}
+	return true
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func skeletonCard(table ServiceTable) channel.Card {
@@ -296,9 +355,11 @@ func membraneOpen(caller, core channel.ID) bool { return caller == core }
 // caller-independent half — agent.ask plus the explicit endpoint table, whose
 // specs cost a round trip per receiver to materialise. The membrane words are
 // static protocol facts, so they are added per caller and never persisted.
-func (s *service) cardFor(caller channel.ID) channel.Card {
+
+func (s *service) cardFor(sys actorbase.Sys, caller channel.ID) channel.Card {
+	s.refreshAgentCard(sys)
 	card := s.cardSnapshot()
-	if !membraneOpen(caller, s.deps.Core) {
+	if !systemAccessOpen(s.snapshot()) || !membraneOpen(caller, s.deps.Core) {
 		return card
 	}
 	docs := introspect.SystemWordSpecs()
@@ -313,6 +374,35 @@ func (s *service) cardFor(caller channel.ID) channel.Card {
 		card.Words[entry.Name] = raw
 	}
 	return card
+}
+
+// Channel members are reconciled independently and the selected Agent may not
+// yet be active when svcactor starts. An incomplete stored card is therefore
+// retried on the next peer describe instead of hiding work words until another
+// daemon restart. Revision fencing prevents a late refresh from overwriting a
+// concurrent svcactor.set.
+func (s *service) refreshAgentCard(sys actorbase.Sys) {
+	s.mu.RLock()
+	if s.cardComplete {
+		s.mu.RUnlock()
+		return
+	}
+	table, card, revision := cloneTable(s.table), cloneCard(s.card), s.revision
+	s.mu.RUnlock()
+	if !s.materializeAgentWords(sys, message.Root(), table, card.Words) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revision != revision || s.cardComplete || sys.Life().Err() != nil {
+		return
+	}
+	if err := writeServiceCard(sys.State(), table, card, true); err != nil {
+		s.deps.Logger.Warn("svcactor.agent_card_refresh_failed", "error", err)
+		return
+	}
+	s.card = card
+	s.cardComplete = true
 }
 
 func (s *service) servePort(life context.Context, sys actorbase.Sys) {
@@ -339,7 +429,7 @@ func (s *service) servePort(life context.Context, sys actorbase.Sys) {
 					req.describe.done <- describeResponse{err: errors.New("svcactor: describe origin channel does not match bound caller")}
 					return
 				}
-				req.describe.done <- describeResponse{card: s.cardFor(req.describe.caller)}
+				req.describe.done <- describeResponse{card: s.cardFor(sys, req.describe.caller)}
 			}
 		}(req)
 	}
@@ -349,35 +439,24 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	if req.From.Channel != caller {
 		return gateFailure(channel.GateBadOrigin, "origin channel does not match the bound caller")
 	}
+	if strings.HasPrefix(req.Type, "agent.") && req.Type != "agent.ask" && !s.cardHas(req.Type) && !s.agentCardComplete() {
+		// Callers normally discover first, but direct callers must not lose a
+		// newly-live Agent word merely because svcactor started before the Agent.
+		s.refreshAgentCard(sys)
+	}
 	var target actor.ActorID
 	switch {
-	case req.Type == "agent.ask":
+	case req.Type == "agent.ask" || (strings.HasPrefix(req.Type, "agent.") && s.cardHas(req.Type)):
 		table := s.snapshot()
-		if table.SvcAgent == nil {
-			return gateFailure(channel.GateNoServiceAgent, "channel has no service agent")
+		var failure *channel.Failure
+		var ok bool
+		target, failure, ok = s.resolveServiceAgent(ctx, table)
+		if !ok {
+			return channel.Result{Fail: failure}
 		}
-		if *table.SvcAgent == "default" {
-			id, found, err := s.deps.Members.FirstActiveAgent(ctx)
-			if err != nil {
-				return gateFailure(channel.GateChannelUnavailable, err.Error())
-			}
-			if !found {
-				return gateFailure(channel.GateNoServiceAgent, "channel has no active service agent")
-			}
-			target = id
-		} else {
-			target = actor.ActorID(*table.SvcAgent)
-			active, err := s.deps.Members.IsActive(ctx, target)
-			if err != nil {
-				return gateFailure(channel.GateChannelUnavailable, err.Error())
-			}
-			if !active {
-				return gateFailure(channel.GateReceiverInactive, "service agent is inactive")
-			}
-		}
-	case membraneOpen(req.From.Channel, s.deps.Core) && message.IsMembraneWord(req.Type):
+	case systemAccessOpen(s.snapshot()) && membraneOpen(req.From.Channel, s.deps.Core) && message.IsMembraneWord(req.Type):
 		target = actor.SystemActorID
-	case message.IsSpaceWord(req.Type):
+	case systemAccessOpen(s.snapshot()) && message.IsSpaceWord(req.Type):
 		target = actor.ActorID("system:registrar")
 	default:
 		target = s.snapshot().Endpoints[req.Type]
@@ -456,6 +535,31 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	}
 	<-progressDone
 	return terminalResult(terminal.Payload)
+}
+
+func (s *service) resolveServiceAgent(ctx context.Context, table ServiceTable) (actor.ActorID, *channel.Failure, bool) {
+	if table.SvcAgent == nil {
+		return "", gateFailure(channel.GateNoServiceAgent, "channel has no service agent").Fail, false
+	}
+	if *table.SvcAgent == "default" {
+		id, found, err := s.deps.Members.FirstActiveAgent(ctx)
+		if err != nil {
+			return "", gateFailure(channel.GateChannelUnavailable, err.Error()).Fail, false
+		}
+		if !found {
+			return "", gateFailure(channel.GateNoServiceAgent, "channel has no active service agent").Fail, false
+		}
+		return id, nil, true
+	}
+	target := actor.ActorID(*table.SvcAgent)
+	active, err := s.deps.Members.IsActive(ctx, target)
+	if err != nil {
+		return "", gateFailure(channel.GateChannelUnavailable, err.Error()).Fail, false
+	}
+	if !active {
+		return "", gateFailure(channel.GateReceiverInactive, "service agent is inactive").Fail, false
+	}
+	return target, nil, true
 }
 
 func harnessCaller(from channel.From) harness.Caller {
@@ -537,8 +641,25 @@ func (s *service) cardSnapshot() channel.Card {
 	return cloneCard(s.card)
 }
 
+func (s *service) cardHas(word string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.card.Words[word]
+	return ok
+}
+
+func (s *service) agentCardComplete() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cardComplete
+}
+
 func cloneTable(in ServiceTable) ServiceTable {
 	out := emptyTable()
+	if in.SystemAccess != nil {
+		value := *in.SystemAccess
+		out.SystemAccess = &value
+	}
 	if in.SvcAgent != nil {
 		value := *in.SvcAgent
 		out.SvcAgent = &value
@@ -547,6 +668,10 @@ func cloneTable(in ServiceTable) ServiceTable {
 		out.Endpoints[word] = id
 	}
 	return out
+}
+
+func systemAccessOpen(table ServiceTable) bool {
+	return table.SystemAccess == nil || *table.SystemAccess
 }
 
 func readService(state actorbase.StateHandle) (persistedService, bool, error) {
@@ -571,7 +696,15 @@ func readService(state actorbase.StateHandle) (persistedService, bool, error) {
 }
 
 func writeService(state actorbase.StateHandle, table ServiceTable, card channel.Card) error {
-	persisted := persistedService{Table: cloneTable(table), Card: func() *channel.Card { cloned := cloneCard(card); return &cloned }()}
+	return writeServiceCard(state, table, card, true)
+}
+
+func writeServiceCard(state actorbase.StateHandle, table ServiceTable, card channel.Card, complete bool) error {
+	version := 0
+	if complete {
+		version = currentCardVersion
+	}
+	persisted := persistedService{Table: cloneTable(table), Card: func() *channel.Card { cloned := cloneCard(card); return &cloned }(), CardVersion: version}
 	raw, err := json.Marshal(persisted)
 	if err != nil {
 		return err
