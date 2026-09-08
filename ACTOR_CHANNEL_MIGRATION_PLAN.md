@@ -17,14 +17,14 @@
 | c0.dev 的 v4 Seat | `channel:87ac52ac-4067-49d0-a2e0-3b84225ae9e4:1788855895325` 在场 | 授权维护窗口内先停用旧关系，按新 Seat 声明重新引入；保留原账本和身体 |
 | pi-agent-native-v2 / `b74aae76-cda9-4d5d-91d4-d293be1e814b` | present，type=actor，serving=1；genesis 有 svcactor 和父 peer，无 Handle | 保留原服务关系；发布独立 Seat 声明。是否额外建立成员关系不能由旧 type 标签推断 |
 | c0.dev 的 v2 peer | `peer:c0.dev.pi-agent-native-v2:1788837082769` 在场 | 保留；不把 peer 原地替换成 Seat |
-| `native-agent-channel` 公共模板 | 含五个业务成员、host_actor=host；没有显式 Handle；profile.svc_agent=native-agent | 换为 docs/examples 的模板，显式引用 native-agent-handle，不再靠 svc_agent 产生 Handle |
+| `native-agent-channel` 公共模板 | 含五个业务成员、host_actor=host；没有显式 Handle；profile.svc_agent=native-agent | 换为 examples 的模板，显式引用 native-agent-handle，不再靠 svc_agent 产生 Handle |
 
 当前可见公开声明中未发现新的 `seat:<body>` 声明；v4 是唯一可见 channel-seat 声明。读取的运行节点词表仍是旧模型，这次本地测试不代表线上已升级。
 
 ## 已准备的模板
 
-- `docs/examples/native-agent-handle.json`：五个 agent 工作词的 schema、内部 target=native-agent、drivers 为 native-agent 和 agent-looper。host=c0 是声明默认值；actor 创建流程按实际父频道设置 overlay。
-- `docs/examples/native-agent-channel.json`：保留五个业务成员并显式引入该 Handle；serving=0，不配置 svc_agent；不包含 API key。
+- `examples/native-agent-handle.json`：五个 agent 工作词的 schema、内部 target=native-agent、drivers 为 native-agent 和 agent-looper。host=c0 是声明默认值；actor 创建流程按实际父频道设置 overlay。
+- `examples/native-agent-channel.json`：保留五个业务成员并显式引入该 Handle；serving=0，不配置 svc_agent；不包含 API key。
 - `TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas` 将样例 schema 与源码中的 Native Manifest 比较，防止模板漂移。
 
 ## 经授权后的执行顺序

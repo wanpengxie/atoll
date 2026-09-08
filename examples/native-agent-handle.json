@@ -1,0 +1,249 @@
+{
+  "id": "native-agent-handle",
+  "name": "host",
+  "class": "channel-handle",
+  "visibility": "public",
+  "config": {
+    "host": "c0",
+    "words": {
+      "agent.ask": {
+        "schema": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "delivery": {
+                    "const": "receipt"
+                  }
+                },
+                "required": [
+                  "delivery"
+                ]
+              },
+              "then": {
+                "required": [
+                  "submission_key"
+                ]
+              }
+            }
+          ],
+          "properties": {
+            "attachments": {
+              "type": "array"
+            },
+            "delivery": {
+              "enum": [
+                "wait",
+                "receipt"
+              ]
+            },
+            "origin": {
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "session": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session"
+              ],
+              "type": "object"
+            },
+            "related_work_id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "submission_key": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "text": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "description": "Create one addressable Agent work. Use delivery=wait for a foreground answer; use delivery=receipt plus a stable submission_key for independent lifetime and recovery. related_work_id starts an explicit branch from that visible work's latest durable context checkpoint; it does not merge results back automatically. The response supplies work_id and executable next requests.",
+        "examples": [
+          {
+            "text": "explain the failure"
+          },
+          {
+            "delivery": "receipt",
+            "submission_key": "client-job-17",
+            "text": "run the migration"
+          }
+        ],
+        "target": "native-agent"
+      },
+      "agent.interrupt": {
+        "schema": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_key": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "work_id": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "work_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "maxProperties": 0,
+              "type": "object"
+            }
+          ]
+        },
+        "description": "Request stop for one work. The empty form stops caller-visible open work Agent-wide; never use it as a fallback after a targeted failure. operation_key is supported only with work_id.",
+        "examples": [
+          {
+            "operation_key": "stop-2",
+            "work_id": "w-opaque"
+          },
+          {}
+        ],
+        "target": "native-agent"
+      },
+      "agent.result": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "work_id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "work_id"
+          ],
+          "type": "object"
+        },
+        "description": "Read one durable work result. state=open is not a successful empty result: follow the returned agent.result request later, or use the returned targeted interrupt request.",
+        "examples": [
+          {
+            "work_id": "w-opaque"
+          }
+        ],
+        "target": "native-agent"
+      },
+      "agent.status": {
+        "schema": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "type": "string"
+                },
+                "limit": {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "work_id": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "work_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "submission_key": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "submission_key"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "description": "Inspect or page caller-visible works without driving, retrying, or changing them. Selected status exposes each input's accepted/assigned/included disposition without repeating its body. Use submission_key to recover a lost cross-channel receipt; follow the opaque stable next_cursor and actor-authored next[].",
+        "examples": [
+          {
+            "work_id": "w-opaque"
+          },
+          {
+            "submission_key": "client-job-17"
+          }
+        ],
+        "target": "native-agent"
+      },
+      "agent.steer": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "operation_key": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "text": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "work_id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "work_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        "description": "Append text to one addressed work. The input may join the current episode at its next safe boundary or become a continuation; included=false does not mean it was lost. Reuse operation_key only for an identical retry.",
+        "examples": [
+          {
+            "operation_key": "input-4",
+            "text": "preserve the old API",
+            "work_id": "w-opaque"
+          }
+        ],
+        "target": "native-agent"
+      }
+    },
+    "drivers": [
+      "native-agent",
+      "agent-looper"
+    ]
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "id": "native-agent-channel",
+  "name": "native-agent-channel",
+  "visibility": "public",
+  "body": {
+    "declarations": [
+      {
+        "config": {
+          "context_actor": "agent-context",
+          "host_actor": "host",
+          "llm_actor": "pi-llm",
+          "loopers": [
+            "agent-looper"
+          ],
+          "max_assignments_per_looper": 32,
+          "max_inputs_per_work": 128,
+          "max_open_works": 32,
+          "max_operation_keys": 256,
+          "max_turns": 12,
+          "model": "deepseek/deepseek-v4-pro",
+          "workspace_actor": "pi-workspace"
+        },
+        "decl_id": "native-agent"
+      },
+      {
+        "decl_id": "agent-looper"
+      },
+      {
+        "decl_id": "agent-context"
+      },
+      {
+        "decl_id": "pi-llm"
+      },
+      {
+        "decl_id": "pi-workspace"
+      },
+      {
+        "decl_id": "native-agent-handle"
+      }
+    ],
+    "profile": {
+      "default_storage_device_id": "local-device",
+      "description": "Channel-native Pi Agent using a configurable Pi LLM provider and Pi base workspace tools.",
+      "serving": 0
+    },
+    "type": "actor"
+  }
+}

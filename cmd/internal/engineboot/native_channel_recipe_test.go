@@ -15,7 +15,7 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 		ID, Class string
 		Config    json.RawMessage
 	}
-	raw, err := os.ReadFile("../../../docs/examples/native-agent-handle.json")
+	raw, err := os.ReadFile("../../../examples/native-agent-handle.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 			Profile map[string]any
 		}
 	}
-	raw, err = os.ReadFile("../../../docs/examples/native-agent-channel.json")
+	raw, err = os.ReadFile("../../../examples/native-agent-channel.json")
 	if err != nil {
 		t.Fatal(err)
 	}
