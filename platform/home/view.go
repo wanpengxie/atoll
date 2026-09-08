@@ -70,6 +70,12 @@ func (v View) MemberOfDeclaration(declID string) (actor.ActorID, error) {
 	return v.actors.MemberOfDeclaration(declID)
 }
 
+// ResolveTarget turns a persisted actor id (kind:seed, incarnation never
+// stored) into the member alive right now, by the same rule addressing uses.
+func (v View) ResolveTarget(target string) (actor.ActorID, error) {
+	return v.actors.ResolveTarget(target)
+}
+
 // Snapshot composes membership, current execution and testimony at read time. The
 // fields are advisory and intentionally not a linearizable transaction.
 func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {

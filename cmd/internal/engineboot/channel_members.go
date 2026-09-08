@@ -26,6 +26,19 @@ func (m bodyMembers) MemberOfDeclaration(decl string) (actor.ActorID, error) {
 	}
 	return members.MemberOfDeclaration(decl)
 }
+func (m bodyMembers) ResolveTarget(target string) (actor.ActorID, error) {
+	b, ok := m.host.Acquire(m.body)
+	if !ok {
+		return "", channelmember.ErrUnreachable
+	}
+	resolver, ok := b.View().(interface {
+		ResolveTarget(string) (actor.ActorID, error)
+	})
+	if !ok {
+		return "", channelmember.ErrUnreachable
+	}
+	return resolver.ResolveTarget(target)
+}
 func (m bodyMembers) ActorFacts(ctx context.Context, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	b, ok := m.host.Acquire(m.body)
 	if !ok {

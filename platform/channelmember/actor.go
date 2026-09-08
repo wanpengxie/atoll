@@ -110,7 +110,7 @@ func HandleDef(hub *Hub, body channel.ID, cfg HandleConfig, members Members) act
 					return Response{Payload: raw}, nil
 				}
 				if word, ok := cfg.Words[req.Type]; ok {
-					target, err := members.MemberOfDeclaration(word.Target)
+					target, err := resolveWordTarget(ctx, sys.State(), members, req.Type, word.Target)
 					if err != nil {
 						return Response{}, err
 					}
