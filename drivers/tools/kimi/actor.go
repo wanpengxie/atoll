@@ -1,12 +1,12 @@
 package kimi
 
 import (
-	"sync/atomic"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/tools/plugindevice"

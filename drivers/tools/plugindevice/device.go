@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
 )
 
 // upgrader gates the WS handshake. CheckOrigin closes the same-machine
@@ -436,7 +435,6 @@ func (d *Device) handleInbound(conn *websocket.Conn, in Inbound) {
 	// that answer becomes — a Reply, a Fail, a retry — belongs to the caller.
 	p.done(in)
 }
-
 
 // send writes one frame under the write lock, with a deadline so a stuck peer
 // fails the connection instead of holding the lock. Every outbound frame goes

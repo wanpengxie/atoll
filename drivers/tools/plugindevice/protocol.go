@@ -136,14 +136,14 @@ type webbridgeCall struct {
 }
 
 type webbridgeCallArg struct {
-	Name string          `json:"name"`
+	Name string `json:"name"`
 	// Session groups every tab a caller opens into one Chrome tab group, so two
 	// callers sharing this one browser do not steal each other's tabs. It sits
 	// beside name/args rather than inside args: webbridge documents it as a
 	// top-level field of the request body, and args is forwarded to the page
 	// verbatim. Empty ⇒ omitted, which is the extension's own default group.
-	Session string `json:"session,omitempty"`
-	Args json.RawMessage `json:"args"`
+	Session string          `json:"session,omitempty"`
+	Args    json.RawMessage `json:"args"`
 }
 
 func (WebbridgeProtocol) EncodeCall(correlationID, session, cmd string, params json.RawMessage) ([]byte, error) {

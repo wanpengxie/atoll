@@ -427,19 +427,19 @@ func TestKindGuardDropsNonRequest(t *testing.T) {
 	}
 }
 
-//  7. Two seats on the same fixed endpoint SHARE it rather than contend for it.
+// 7. Two seats on the same fixed endpoint SHARE it rather than contend for it.
 //
-//     This used to assert the opposite — that a successor could not bind while a
-//     predecessor held the port, and had to retry until the port came free. That
-//     was the honest description of a design where every seat built its own
-//     listener, and it is exactly why a second channel could never seat this
-//     tool: the plugin dials ONE port, so the loser of that race had nobody on
-//     the other end even if it eventually won the port.
+//	This used to assert the opposite — that a successor could not bind while a
+//	predecessor held the port, and had to retry until the port came free. That
+//	was the honest description of a design where every seat built its own
+//	listener, and it is exactly why a second channel could never seat this
+//	tool: the plugin dials ONE port, so the loser of that race had nobody on
+//	the other end even if it eventually won the port.
 //
-//     The endpoint is one physical thing. Seats share it; each keeps its own
-//     books (see plugindevice/shared.go). So the property worth pinning is that
-//     both seats are live at once, and that one leaving does not take the
-//     endpoint away from the other.
+//	The endpoint is one physical thing. Seats share it; each keeps its own
+//	books (see plugindevice/shared.go). So the property worth pinning is that
+//	both seats are live at once, and that one leaving does not take the
+//	endpoint away from the other.
 func TestTwoSeatsShareOneFixedEndpoint(t *testing.T) {
 	// Reserve a concrete loopback port, then free it so both seats name the
 	// exact same addr (an ephemeral :0 is deliberately never shared).

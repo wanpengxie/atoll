@@ -2,9 +2,9 @@ package plugindevice
 
 import (
 	"context"
-	"net"
 	"encoding/json"
 	"errors"
+	"net"
 	"sync"
 )
 

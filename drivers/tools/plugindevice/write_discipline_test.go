@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
 )
 
 // A gorilla connection takes ONE writer at a time, and this transport has three
