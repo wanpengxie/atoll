@@ -34,7 +34,7 @@ func createdChannelID(t *testing.T, raw []byte) channel.ID {
 		t.Fatalf("system channel-create terminal=%s err=%v", raw, err)
 	}
 	var value map[string]json.RawMessage
-	if err := json.Unmarshal(terminal["value"], &value); err != nil || string(value["channel"]) != `"created"` || string(value["relation"]) != `"seated"` {
+	if err := json.Unmarshal(terminal["value"], &value); err != nil || len(value["relations"]) == 0 {
 		t.Fatalf("system channel-create value=%s err=%v", terminal["value"], err)
 	}
 	var child channel.ID

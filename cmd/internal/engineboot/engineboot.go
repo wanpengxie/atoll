@@ -110,8 +110,14 @@ func Boot(cfg Config, logger *slog.Logger) (*Engine, error) {
 	}
 	resolver := &assemblyResolver{registry: e.registry, logger: logger, channelMembers: channelmember.NewHub()}
 	resolver.registrar = lagoon.NewRegistrar(e.registry, sourceFacts{genesis: installed.C0Genesis}, resolver)
-	if err := resolver.registrar.MaterializeDeclarationConfigs(context.Background()); err != nil {
+	skipped, err := resolver.registrar.MaterializeDeclarationConfigs(context.Background())
+	if err != nil {
 		return nil, e.fail(fmt.Errorf("materialize registry declaration configs: %w", err))
+	}
+	for _, skip := range skipped {
+		// Never fatal: a declaration the current classes cannot read is left for
+		// repair on the running node (c0 up ⇒ node up).
+		logger.Warn("engineboot.declaration_config_skipped", "decl", skip.DeclID, "channel", string(skip.ChannelID), "class", skip.Class, "reason", skip.Reason)
 	}
 	// The init host opens only the already-installed c0. No gateway, device host,
 	// other channel, or convergence loop exists before registrar reconciliation.

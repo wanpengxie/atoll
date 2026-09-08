@@ -30,6 +30,16 @@ type Registrar struct {
 	now      Clock
 }
 
+// DeclarationSkip names one declaration or overlay that startup materialization
+// left untouched because its class could not resolve the stored config. The
+// caller logs it; the row stays as it is for an operator or agent to repair.
+type DeclarationSkip struct {
+	DeclID    string
+	ChannelID channel.ID
+	Class     string
+	Reason    string
+}
+
 func NewRegistrar(registry *Registry, facts SourceActorFactsResolver, classes ClassCatalog) *Registrar {
 	return &Registrar{registry: registry, facts: facts, classes: classes, now: time.Now}
 }
@@ -37,19 +47,23 @@ func NewRegistrar(registry *Registry, facts SourceActorFactsResolver, classes Cl
 // MaterializeDeclarationConfigs upgrades the registry from declaration inputs
 // to installed declaration facts. Provider defaults are resolved before any
 // actor is constructed, then the complete documents are written atomically.
-// This is deliberately fail-closed: an installed declaration that its provider
-// cannot validate prevents startup instead of becoming a runtime surprise.
-func (r *Registrar) MaterializeDeclarationConfigs(ctx context.Context) error {
+// A declaration (or overlay) whose config its provider cannot validate is
+// SKIPPED and reported, never fatal: the owner's rule is that whenever c0 can
+// come up the node comes up, and a stale or foreign config is repaired by an
+// agent on the running node, not by refusing to start it. Only the registry
+// itself failing is an error.
+func (r *Registrar) MaterializeDeclarationConfigs(ctx context.Context) ([]DeclarationSkip, error) {
 	if r == nil || r.registry == nil || r.registry.store == nil {
-		return errors.New("lagoon: registrar registry required")
+		return nil, errors.New("lagoon: registrar registry required")
 	}
 	if r.classes == nil {
-		return errors.New("lagoon: class catalog required to materialize declaration configs")
+		return nil, errors.New("lagoon: class catalog required to materialize declaration configs")
 	}
 	decls, err := r.registry.store.ListDecls(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var skipped []DeclarationSkip
 	type declUpdate struct {
 		id     string
 		config json.RawMessage
@@ -60,7 +74,8 @@ func (r *Registrar) MaterializeDeclarationConfigs(ctx context.Context) error {
 		classByDecl[decl.ID] = decl.DefaultClass
 		config, err := r.classes.ResolveConfig(decl.DefaultClass, decl.Config)
 		if err != nil {
-			return fmt.Errorf("lagoon: materialize declaration %q class %q: %w", decl.ID, decl.DefaultClass, err)
+			skipped = append(skipped, DeclarationSkip{DeclID: decl.ID, Class: decl.DefaultClass, Reason: err.Error()})
+			continue
 		}
 		if !jsonEqual(config, decl.Config) {
 			updates = append(updates, declUpdate{id: decl.ID, config: cloneJSON(config)})
@@ -68,7 +83,7 @@ func (r *Registrar) MaterializeDeclarationConfigs(ctx context.Context) error {
 	}
 	overlays, err := r.registry.store.ListPresentOverlays(ctx)
 	if err != nil {
-		return err
+		return skipped, err
 	}
 	type overlayUpdate struct {
 		declID    string
@@ -79,20 +94,22 @@ func (r *Registrar) MaterializeDeclarationConfigs(ctx context.Context) error {
 	for _, overlay := range overlays {
 		class, ok := classByDecl[overlay.DeclID]
 		if !ok {
-			return fmt.Errorf("lagoon: overlay for unknown declaration %q", overlay.DeclID)
+			skipped = append(skipped, DeclarationSkip{DeclID: overlay.DeclID, ChannelID: overlay.ChannelID, Reason: "overlay for unknown declaration"})
+			continue
 		}
 		config, err := r.classes.ResolveConfig(class, overlay.Config)
 		if err != nil {
-			return fmt.Errorf("lagoon: materialize declaration %q overlay for channel %q: %w", overlay.DeclID, overlay.ChannelID, err)
+			skipped = append(skipped, DeclarationSkip{DeclID: overlay.DeclID, ChannelID: overlay.ChannelID, Class: class, Reason: err.Error()})
+			continue
 		}
 		if !jsonEqual(config, overlay.Config) {
 			overlayUpdates = append(overlayUpdates, overlayUpdate{declID: overlay.DeclID, channelID: overlay.ChannelID, config: cloneJSON(config)})
 		}
 	}
 	if len(updates) == 0 && len(overlayUpdates) == 0 {
-		return nil
+		return skipped, nil
 	}
-	return r.registry.store.InTx(ctx, func(tx *store.Tx) error {
+	return skipped, r.registry.store.InTx(ctx, func(tx *store.Tx) error {
 		for _, update := range updates {
 			if err := tx.UpdateDeclConfig(ctx, update.id, update.config); err != nil {
 				return err
@@ -663,12 +680,19 @@ func denied(detail string) error   { return &Error{Code: CodePermissionDenied, D
 func reserved(detail string) error { return &Error{Code: CodeReserved, Detail: detail} }
 
 type ChannelCreateReply struct {
-	ChannelID    channel.ID `json:"channel_id"`
-	Channel      string     `json:"channel"`
-	Relation     string     `json:"relation"`
-	RelationStep string     `json:"relation_step,omitempty"`
-	Detail       string     `json:"detail,omitempty"`
-	Warnings     []string   `json:"warnings,omitempty"`
+	ChannelID channel.ID        `json:"channel_id"`
+	Relations []ChannelRelation `json:"relations,omitempty"`
+}
+
+// ChannelRelation names one member.create the registry POSTED for the new
+// channel. Whether that seat landed is the terminal of that request on the
+// host's own ledger (system.member.list shows the current state); the registry
+// never waits for it.
+type ChannelRelation struct {
+	Host      channel.ID `json:"host"`
+	DeclID    string     `json:"decl_id"`
+	RequestID message.ID `json:"request_id,omitempty"`
+	Error     string     `json:"error,omitempty"`
 }
 
 func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owner string, source channel.ID, p ResolvedChannelCreate) (ChannelCreateReply, error) {
@@ -692,64 +716,36 @@ func (r *Registrar) createChannel(sys actorbase.Sys, trigger actorbase.Msg, owne
 	return r.establishChannelEdges(sys, trigger, row), nil
 }
 
-// Object creation has committed before this composition starts. Each ordinary
-// member-create result is observed; a failure returns the retained body's ID
-// and the failed step, never a fictitious all-or-nothing success.
+// establishChannelEdges posts the relation steps of §6.2 and returns at once:
+// c0 always receives the control peer; the parent receives a seat (type=actor)
+// or a peer (type=group, parent ≠ c0). Each post is a request on the target's
+// ledger; its outcome lives there, not in this receipt (value paradigm, no RPC).
 func (r *Registrar) establishChannelEdges(sys actorbase.Sys, trigger actorbase.Msg, row regspec.ChannelRow) ChannelCreateReply {
-	reply := ChannelCreateReply{ChannelID: row.ID, Channel: "created", Relation: "seated"}
-	steps := []struct {
+	reply := ChannelCreateReply{ChannelID: row.ID}
+	type step struct {
+		host   channel.ID
 		target actor.ActorID
 		decl   string
-	}{{actor.SystemActorID, string(row.ID)}}
+	}
+	steps := []step{{channelspec.C0ChannelID, actor.SystemActorID, string(row.ID)}}
 	parentTarget := actor.SystemActorID
 	if row.ParentID != channelspec.C0ChannelID {
 		parentTarget = actor.ActorID("peer:" + parentQualifiedName(row.QualifiedName))
 	}
 	if row.Type == ChannelTypeActor {
-		steps = append(steps, struct {
-			target actor.ActorID
-			decl   string
-		}{parentTarget, "seat:" + string(row.ID)})
+		steps = append(steps, step{row.ParentID, parentTarget, "seat:" + string(row.ID)})
 	} else if row.ParentID != channelspec.C0ChannelID {
-		steps = append(steps, struct {
-			target actor.ActorID
-			decl   string
-		}{parentTarget, string(row.ID)})
+		steps = append(steps, step{row.ParentID, parentTarget, string(row.ID)})
 	}
-	for _, step := range steps {
-		pending, err := sys.Call(trigger.Cause(), step.target, message.TypeSystemMemberCreate, map[string]any{"decl_id": step.decl})
-		if err == nil {
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				for range pending.Progress() {
-				}
-			}()
-			terminal, waitErr := pending.Wait(trigger.Ctx(), 0)
-			if waitErr != nil {
-				_ = pending.Cancel()
-				err = waitErr
-			} else {
-				var result struct {
-					Status string `json:"status"`
-					message.Failure
-				}
-				if decodeErr := json.Unmarshal(terminal.Payload, &result); decodeErr != nil {
-					err = decodeErr
-				} else if result.Status != message.StatusCompleted {
-					err = fmt.Errorf("%s: %s", result.ErrorCode, result.Detail)
-				}
-			}
-			<-done
-		}
+	for _, st := range steps {
+		raw, _ := json.Marshal(map[string]any{"decl_id": st.decl})
+		id, err := sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: message.TypeSystemMemberCreate, Audience: message.Audience{st.target}, Payload: raw})
+		relation := ChannelRelation{Host: st.host, DeclID: st.decl, RequestID: id}
 		if err != nil {
-			reply.Relation = "admission_failed"
-			reply.RelationStep = "parent"
-			reply.Detail = fmt.Sprintf("%s via %s: %v", step.decl, step.target, err)
-			return reply
+			relation.Error = err.Error()
 		}
+		reply.Relations = append(reply.Relations, relation)
 	}
-
 	return reply
 }
 

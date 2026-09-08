@@ -227,8 +227,8 @@ func TestMaterializeDeclarationConfigsUpgradesLegacyRowsAtomically(t *testing.T)
 	}
 	defer storage.Close()
 	r := NewRegistrar(&Registry{store: storage}, nil, registrarClassStub{})
-	if err := r.MaterializeDeclarationConfigs(context.Background()); err != nil {
-		t.Fatal(err)
+	if skipped, err := r.MaterializeDeclarationConfigs(context.Background()); err != nil || len(skipped) != 0 {
+		t.Fatalf("skipped=%+v err=%v", skipped, err)
 	}
 	decl, found, err := storage.GetDecl(context.Background(), "legacy")
 	if err != nil || !found {
@@ -245,8 +245,63 @@ func TestMaterializeDeclarationConfigsUpgradesLegacyRowsAtomically(t *testing.T)
 		t.Fatalf("overlay config=%s updated_at=%d", overlay.Config, overlay.UpdatedAt)
 	}
 	// Re-running startup reconciliation is idempotent.
-	if err := r.MaterializeDeclarationConfigs(context.Background()); err != nil {
+	if _, err := r.MaterializeDeclarationConfigs(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A declaration whose stored config the current class cannot read must not
+// stop the node: it is skipped and reported, every other row is still upgraded.
+func TestMaterializeDeclarationConfigsSkipsUnreadableRowsInsteadOfFailingBoot(t *testing.T) {
+	dbPath := t.TempDir() + "/registry.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE decls (id TEXT PRIMARY KEY, name TEXT, description TEXT, owner TEXT, default_class TEXT, config_json TEXT, status TEXT, visibility TEXT, singleton INTEGER NOT NULL DEFAULT 0, created_at INTEGER, updated_at INTEGER)`,
+		`CREATE TABLE channels (id TEXT PRIMARY KEY, status TEXT)`,
+		`CREATE TABLE decl_overlays (decl_id TEXT, channel_id TEXT, config_json TEXT, updated_at INTEGER, PRIMARY KEY (decl_id, channel_id))`,
+		`INSERT INTO decls VALUES ('legacy','legacy',NULL,'root','echo','{}','present','private',0,1,7)`,
+		`INSERT INTO decls VALUES ('stale-seat','stale-seat',NULL,'root','channel-seat','not json','present','public',0,1,7)`,
+		`INSERT INTO channels VALUES ('c0','present')`,
+		`INSERT INTO decl_overlays VALUES ('legacy','c0','{"mode":"channel"}',9)`,
+		`INSERT INTO decl_overlays VALUES ('stale-seat','c0','[1]',9)`,
+		`INSERT INTO decl_overlays VALUES ('vanished','c0','{}',9)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := regstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	r := NewRegistrar(&Registry{store: storage}, nil, registrarClassStub{})
+	skipped, err := r.MaterializeDeclarationConfigs(context.Background())
+	if err != nil {
+		t.Fatalf("boot-time materialization must not fail on one unreadable row: %v", err)
+	}
+	reasons := map[string]int{}
+	for _, skip := range skipped {
+		reasons[skip.DeclID]++
+	}
+	// The store only lists overlays whose declaration exists, so the orphan
+	// overlay is invisible here; the unreadable decl and its overlay are reported.
+	if reasons["stale-seat"] != 2 || len(skipped) != 2 {
+		t.Fatalf("skipped=%+v", skipped)
+	}
+	decl, found, err := storage.GetDecl(context.Background(), "legacy")
+	if err != nil || !found || string(decl.Config) != `{"enabled":true}` {
+		t.Fatalf("healthy row not upgraded: decl=%+v found=%v err=%v", decl, found, err)
+	}
+	stale, found, err := storage.GetDecl(context.Background(), "stale-seat")
+	if err != nil || !found || string(stale.Config) != "not json" {
+		t.Fatalf("unreadable row must be left untouched: decl=%+v found=%v err=%v", stale, found, err)
 	}
 }
 

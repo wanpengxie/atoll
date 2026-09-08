@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/channelmember"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
@@ -66,7 +67,7 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
 		"name": "actor-body-second", "initial_actor_ids": []any{}, "recipe": map[string]any{"type": "actor", "declarations": []any{map[string]any{"decl_id": "body-handle"}}, "profile": map[string]any{"serving": 0}},
 	}), &second)
-	if second.ChannelID == created.ChannelID || second.Relation != "seated" {
+	if second.ChannelID == created.ChannelID || !postedRelation(second, "seat:"+string(second.ChannelID)) {
 		t.Fatalf("same recipe did not create independent body: %+v", second)
 	}
 
@@ -133,10 +134,10 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	t.Run("channel creation does not require a particular handle class", func(t *testing.T) {
 		var empty lagoon.ChannelCreateReply
 		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{"name": "body-without-handle", "recipe": map[string]any{"type": "actor"}, "initial_actor_ids": []any{}}), &empty)
-		if empty.Relation != "seated" {
+		if !postedRelation(empty, "seat:"+string(empty.ChannelID)) {
 			t.Fatalf("logical membership depends on a handle implementation: %+v", empty)
 		}
-		id := onlyDecl(t, core, "seat:"+string(empty.ChannelID))
+		id := waitDecl(t, core, "seat:"+string(empty.ChannelID))
 		failure := decodeTerminal(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, id, "some.request", map[string]any{}))
 		if failure.ErrorCode != "channel_unavailable" {
 			t.Fatalf("unattached endpoint=%+v", failure)
@@ -151,7 +152,7 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{"id": "fixed-core-handle", "name": "core-handle", "class": channelmember.HandleClass, "visibility": "public", "config": map[string]any{"host": "c0", "words": map[string]any{}}}), nil)
 		var child lagoon.ChannelCreateReply
 		terminalValue(t, callMember(t, unrelated.ChannelID, other, channelspec.RootPrincipalID, "system", string(lagoon.WordChannelCreate), map[string]any{"name": "two-handles", "initial_actor_ids": []any{}, "recipe": map[string]any{"type": "actor", "declarations": []any{map[string]any{"decl_id": "body-handle", "bindings": map[string]any{"host": "parent_channel_id"}}, map[string]any{"decl_id": "fixed-core-handle"}}}}), &child)
-		if child.Relation != "seated" {
+		if !postedRelation(child, "seat:"+string(child.ChannelID)) {
 			t.Fatalf("child=%+v", child)
 		}
 		row, found, err := eng.registry.GetChannelDesired(context.Background(), child.ChannelID)
@@ -200,4 +201,39 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 	if failed.Status != message.StatusFailed || failed.ErrorCode != "channel_unavailable" {
 		t.Fatalf("retired body terminal=%+v", failed)
 	}
+}
+
+// postedRelation reports whether the create receipt names a posted member.create
+// for decl. The seat itself lands asynchronously on the host's ledger.
+func postedRelation(reply lagoon.ChannelCreateReply, decl string) bool {
+	for _, relation := range reply.Relations {
+		if relation.DeclID == decl && relation.RequestID != "" && relation.Error == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// waitDecl polls the roster until exactly one member minted from decl exists.
+func waitDecl(t *testing.T, bundle channelhost.Bundle, decl string) actor.ActorID {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		roster, err := bundle.View().Roster(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []actor.ActorID
+		for _, row := range roster {
+			if row.DeclID == decl {
+				ids = append(ids, row.ID)
+			}
+		}
+		if len(ids) == 1 {
+			return ids[0]
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("decl %s never seated", decl)
+	return ""
 }
