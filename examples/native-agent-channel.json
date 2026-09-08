@@ -18,6 +18,21 @@
           "max_operation_keys": 256,
           "max_turns": 12,
           "model": "deepseek/deepseek-v4-pro",
+          "tool_image_max_bytes": 3145728,
+          "tool_result_max_bytes": 51200,
+          "tool_result_max_lines": 2000,
+          "tools": [
+            {"name": "read", "actor": "pi-workspace", "word": "workspace.read"},
+            {"name": "write", "actor": "pi-workspace", "word": "workspace.write"},
+            {"name": "edit", "actor": "pi-workspace", "word": "workspace.edit"},
+            {"name": "bash", "actor": "pi-workspace", "word": "workspace.bash"},
+            {"name": "grep", "actor": "pi-workspace", "word": "workspace.grep"},
+            {"name": "find", "actor": "pi-workspace", "word": "workspace.find"},
+            {"name": "ls", "actor": "pi-workspace", "word": "workspace.ls"},
+            {"name": "channel_call", "actor": "host", "word": "channel.call"},
+            {"name": "channel_post", "actor": "host", "word": "channel.post"},
+            {"name": "channel_emit", "actor": "host", "word": "channel.emit"}
+          ],
           "workspace_actor": "pi-workspace"
         },
         "decl_id": "native-agent"
@@ -32,6 +47,11 @@
         "decl_id": "pi-llm"
       },
       {
+        "config": {
+          "max_concurrency": 4,
+          "node": "node",
+          "queue_capacity": 32
+        },
         "decl_id": "pi-workspace"
       },
       {

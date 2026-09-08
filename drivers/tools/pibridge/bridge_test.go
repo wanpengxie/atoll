@@ -3,6 +3,7 @@ package pibridge
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -184,5 +185,123 @@ func TestEmbeddedPiWorkspaceUsesPiNativeArgumentValidation(t *testing.T) {
 	var bridgeErr *Error
 	if !errors.As(err, &bridgeErr) || bridgeErr.Code != "invalid_args" || !strings.Contains(bridgeErr.Detail, "Validation failed") {
 		t.Fatalf("validation error=%v", err)
+	}
+}
+
+func TestEmbeddedPiReadPaginationAndContinuation(t *testing.T) {
+	b, cwd := startTestBridge(t)
+	content := "one\ntwo\nthree\nfour\n"
+	if err := os.WriteFile(filepath.Join(cwd, "large file.txt"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	page, err := b.Call(ctx, "workspace.read", map[string]any{"path": "large file.txt", "offset": 2, "limit": 2}, cwd, nil)
+	var pageResult struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(page, &pageResult)
+	if err != nil || len(pageResult.Content) != 1 || !strings.Contains(pageResult.Content[0].Text, "two\nthree") || !strings.Contains(pageResult.Content[0].Text, "offset=4") {
+		t.Fatalf("page=%s err=%v", page, err)
+	}
+	last, err := b.Call(ctx, "workspace.read", map[string]any{"path": "large file.txt", "offset": 4, "limit": 10}, cwd, nil)
+	if err != nil || !strings.Contains(string(last), "four") {
+		t.Fatalf("last=%s err=%v", last, err)
+	}
+	if _, err := b.Call(ctx, "workspace.read", map[string]any{"path": "large file.txt", "offset": 99}, cwd, nil); err == nil {
+		t.Fatal("out-of-range offset was accepted")
+	}
+	for _, args := range []map[string]any{{"path": "large file.txt", "offset": 0}, {"path": "large file.txt", "limit": 0}} {
+		if _, err := b.Call(ctx, "workspace.read", args, cwd, nil); err == nil {
+			t.Fatalf("invalid pagination accepted: %+v", args)
+		}
+	}
+}
+
+func TestEmbeddedPiSearchAndListingTools(t *testing.T) {
+	b, cwd := startTestBridge(t)
+	if err := os.MkdirAll(filepath.Join(cwd, "dir with spaces"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "dir with spaces", "alpha.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, tc := range []struct {
+		op   string
+		args any
+		want string
+	}{
+		{"workspace.grep", map[string]any{"pattern": "needle", "path": "dir with spaces"}, "alpha.txt:1"},
+		{"workspace.grep", map[string]any{"pattern": "absent", "path": "dir with spaces"}, "No matches found"},
+		{"workspace.find", map[string]any{"pattern": "*.txt", "path": "dir with spaces"}, "alpha.txt"},
+		{"workspace.find", map[string]any{"pattern": "*.go", "path": "dir with spaces"}, "No files found"},
+		{"workspace.ls", map[string]any{"path": "dir with spaces"}, "alpha.txt"},
+	} {
+		raw, err := b.Call(ctx, tc.op, tc.args, cwd, nil)
+		if err != nil || !strings.Contains(string(raw), tc.want) {
+			t.Fatalf("%s=%s err=%v, want %q", tc.op, raw, err, tc.want)
+		}
+	}
+	cancelled, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := b.Call(cancelled, "workspace.grep", map[string]any{"pattern": "needle", "path": "."}, cwd, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled grep error=%v", err)
+	}
+}
+
+func TestEmbeddedPiImageToolResultCanReachFauxProvider(t *testing.T) {
+	b, cwd := startTestBridge(t)
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "pixel.png"), png, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	read, err := b.Call(ctx, "workspace.read", map[string]any{"path": "pixel.png"}, cwd, nil)
+	if err != nil || !strings.Contains(string(read), `"type":"image"`) || !strings.Contains(string(read), `"mimeType":"image/png"`) {
+		t.Fatalf("image read=%s err=%v", read, err)
+	}
+	var result struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(read, &result); err != nil {
+		t.Fatal(err)
+	}
+	generated, err := b.Call(ctx, "llm.generate", map[string]any{
+		"provider": "faux", "model": "faux-1",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "inspect", "timestamp": 1},
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "toolCall", "id": "tc-image", "name": "read", "arguments": map[string]any{"path": "pixel.png"}}}, "timestamp": 2},
+			map[string]any{"role": "toolResult", "toolCallId": "tc-image", "toolName": "read", "content": result.Content, "isError": false, "timestamp": 3},
+		},
+		"options": map[string]any{"faux_response": "image received"},
+	}, cwd, nil)
+	if err != nil || !strings.Contains(string(generated), "image received") {
+		t.Fatalf("generation=%s err=%v", generated, err)
+	}
+}
+
+func TestEmbeddedPiRejectsImageForTextOnlyModel(t *testing.T) {
+	b, cwd := startTestBridge(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := b.Call(ctx, "llm.generate", map[string]any{
+		"provider": "faux", "model": "faux-1",
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "image"},
+			map[string]any{"type": "image", "data": base64.StdEncoding.EncodeToString([]byte("png")), "mimeType": "image/png"},
+		}, "timestamp": 1}},
+		"options": map[string]any{"faux_supports_images": false},
+	}, cwd, nil)
+	var bridgeErr *Error
+	if !errors.As(err, &bridgeErr) || !strings.Contains(bridgeErr.Detail, "does not support image") {
+		t.Fatalf("unsupported image error=%v", err)
 	}
 }

@@ -24,8 +24,9 @@ import (
 	"github.com/google/uuid"
 )
 
-const Version = "pi-0.85.1-atoll-v5"
-const BundleSHA256 = "2b177ee75dcafcf9362754d04b969e9a2906f4be059e0ffcad78776f80d81cb5"
+const Version = "pi-0.85.1-atoll-v6"
+const BundleSHA256 = "40be48a7a6c52d922434b71314dd1a864b56bc98f6c9be00698d7683fdc89dbf"
+const maxBridgeFrameBytes = 24 << 20
 
 //go:embed bridge.mjs
 var source []byte
@@ -230,7 +231,7 @@ func selectedEnvironment(policy EnvironmentPolicy) []string {
 
 func (b *Bridge) read(r io.Reader, ready chan<- frame) {
 	s := bufio.NewScanner(r)
-	s.Buffer(make([]byte, 64<<10), 32<<20)
+	s.Buffer(make([]byte, 64<<10), maxBridgeFrameBytes)
 	first := true
 	for s.Scan() {
 		var f frame
@@ -305,6 +306,9 @@ func (b *Bridge) write(v any) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxBridgeFrameBytes {
+		return fmt.Errorf("Pi bridge frame exceeds %d bytes", maxBridgeFrameBytes)
 	}
 	raw = append(raw, '\n')
 	_, err = b.in.Write(raw)

@@ -2,7 +2,9 @@ package agentlooper
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -199,24 +201,158 @@ func TestToolResultPreservesPiContentDetailsAndUsage(t *testing.T) {
 	}
 }
 
-func TestChannelCallTargetsBodyHandleInsteadOfWorkspace(t *testing.T) {
+func TestToolResultPreservesExplicitIsErrorAndSpillDetails(t *testing.T) {
+	raw := json.RawMessage(`{"content":[{"type":"text","text":"tail"}],"details":{"fullOutputPath":"/tmp/pi-spill","truncation":{"truncated":true}},"isError":true}`)
+	result := (&looper{}).toolResult(context.Background(), &resultStoreSys{}, &assignment{}, toolCall{ID: "tc", Name: "bash"}, resolvedTool{Word: workspaceproto.TypeBash}, raw)
+	if !strings.Contains(string(result), `"isError":true`) || !strings.Contains(string(result), "/tmp/pi-spill") || !strings.Contains(string(result), "truncation") {
+		t.Fatalf("Pi failure/spill metadata lost: %s", result)
+	}
+}
+
+func TestDefaultToolsBindHostAndWorkspaceWithoutAddingSearchTools(t *testing.T) {
 	start := agentloop.StartRequest{WorkspaceActor: "workspace", HostActor: "host"}
-	if target, word := toolTarget(start, "channel_call"); target != "host" || word != channelCallWord {
-		t.Fatalf("channel call target=%q word=%q", target, word)
+	tools := configuredTools(start)
+	if len(tools) != 7 || tools[0].Actor != "workspace" || tools[0].Word != workspaceproto.TypeRead || tools[4].Actor != "host" || tools[4].Word != channelCallWord {
+		t.Fatalf("default tools=%+v", tools)
 	}
-	if target, word := toolTarget(start, "read"); target != "workspace" || word != workspaceproto.TypeRead {
-		t.Fatalf("workspace call target=%q word=%q", target, word)
+	for _, tool := range tools {
+		if tool.Name == "grep" || tool.Name == "find" || tool.Name == "ls" {
+			t.Fatalf("new search tool was silently added to compatibility defaults: %+v", tools)
+		}
 	}
-	definitions := toolDefinitions(true, true)
-	if len(definitions) != 7 {
-		t.Fatalf("tool definitions=%d, want workspace four plus three channel words", len(definitions))
+}
+
+type customToolSys struct {
+	actorbase.Sys
+	llmCalls     int
+	customCalls  int
+	definitions  []json.RawMessage
+	posts        []behavior.RequestSpec
+	toolCallName string
+}
+
+func (s *customToolSys) Call(_ message.Cause, target actor.ActorID, typ string, value any) (actorbase.Pending, error) {
+	var body any
+	switch typ {
+	case contextproto.TypeBuild:
+		body = contextproto.Artifact{ArtifactID: "ctx", Messages: []json.RawMessage{json.RawMessage(`{"role":"user","content":"run","timestamp":1}`)}}
+	case "actor.describe":
+		if target != "custom" {
+			return nil, fmt.Errorf("unexpected describe target %s", target)
+		}
+		body = map[string]any{"class": "custom", "interfaces": []string{"actor"}, "capabilities": map[string]bool{}, "words": map[string]any{
+			"custom.run": map[string]any{"description": "manifest description", "input_schema": json.RawMessage(`{"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}`)},
+		}}
+	case llmproto.TypeGenerate:
+		s.llmCalls++
+		raw, _ := json.Marshal(value)
+		var req llmproto.GenerateRequest
+		_ = json.Unmarshal(raw, &req)
+		s.definitions = req.Tools
+		if s.llmCalls == 1 {
+			name := s.toolCallName
+			if name == "" {
+				name = "custom"
+			}
+			body = llmproto.GenerateResponse{Message: mustRaw(map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "toolCall", "id": "tc", "name": name, "arguments": map[string]any{"value": "x"}}}, "timestamp": 2})}
+		} else {
+			body = llmproto.GenerateResponse{Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"done"}],"timestamp":3}`)}
+		}
+	case "custom.run":
+		if target != "custom" {
+			return nil, fmt.Errorf("unexpected custom target %s", target)
+		}
+		s.customCalls++
+		body = map[string]any{"content": []map[string]any{{"type": "text", "text": "custom result"}}}
+	default:
+		return nil, fmt.Errorf("unexpected call %s", typ)
 	}
-	var host struct {
-		Name       string          `json:"name"`
-		Parameters json.RawMessage `json:"parameters"`
+	raw, _ := json.Marshal(body)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &fields)
+	fields["status"] = json.RawMessage(`"completed"`)
+	payload, _ := json.Marshal(fields)
+	return immediatePending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: payload})}, nil
+}
+
+func (s *customToolSys) Post(spec behavior.RequestSpec) (message.ID, error) {
+	s.posts = append(s.posts, spec)
+	return "report", nil
+}
+
+func TestManifestDefinedCustomToolRunsWithoutWorkspace(t *testing.T) {
+	sys := &customToolSys{}
+	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
+	a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	(&looper{}).drive(context.Background(), sys, a)
+	if sys.llmCalls != 2 || sys.customCalls != 1 || len(sys.definitions) != 1 || !strings.Contains(string(sys.definitions[0]), "manifest description") {
+		t.Fatalf("llm=%d custom=%d definitions=%s", sys.llmCalls, sys.customCalls, sys.definitions)
 	}
-	if err := json.Unmarshal(definitions[4], &host); err != nil || host.Name != "channel_call" || !json.Valid(host.Parameters) {
-		t.Fatalf("host tool=%s err=%v", definitions[4], err)
+}
+
+func TestExplicitEmptyToolListProducesNoDefinitions(t *testing.T) {
+	empty := []agentloop.ToolBinding{}
+	if got := configuredTools(agentloop.StartRequest{WorkspaceActor: "workspace", HostActor: "host", Tools: &empty}); len(got) != 0 {
+		t.Fatalf("explicit empty tools gained defaults: %+v", got)
+	}
+}
+
+func TestUnopenedToolNameNeverReachesTarget(t *testing.T) {
+	sys := &customToolSys{toolCallName: "not_allowed"}
+	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
+	a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	(&looper{}).drive(context.Background(), sys, a)
+	if sys.customCalls != 0 || sys.llmCalls != 2 {
+		t.Fatalf("unopened tool calls=%d llm=%d", sys.customCalls, sys.llmCalls)
+	}
+}
+
+func TestInvalidManifestFailsBeforeInference(t *testing.T) {
+	sys := &customToolSys{}
+	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "missing.run"}}
+	a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	(&looper{}).drive(context.Background(), sys, a)
+	if sys.llmCalls != 0 || len(sys.posts) != 1 {
+		t.Fatalf("invalid manifest reached inference: llm=%d posts=%d", sys.llmCalls, len(sys.posts))
+	}
+	var report agentloop.ReportRequest
+	_ = json.Unmarshal(sys.posts[0].Payload, &report)
+	if report.ErrorCode != "tool_discovery_failed" {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+type refreshManifestSys struct {
+	actorbase.Sys
+	calls int
+}
+
+func (s *refreshManifestSys) Call(_ message.Cause, _ actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
+	if typ != "actor.describe" {
+		return nil, fmt.Errorf("unexpected %s", typ)
+	}
+	s.calls++
+	raw, _ := json.Marshal(map[string]any{"class": "custom", "interfaces": []string{"actor"}, "capabilities": map[string]bool{}, "words": map[string]any{"custom.run": map[string]any{"description": fmt.Sprintf("version-%d", s.calls), "input_schema": json.RawMessage(`{"type":"object"}`)}}})
+	return completedPending(raw), nil
+}
+
+func TestEachEpisodeReadsAFreshManifest(t *testing.T) {
+	sys := &refreshManifestSys{}
+	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
+	for want := 1; want <= 2; want++ {
+		a := &assignment{start: agentloop.StartRequest{Tools: &bindings}, cause: message.Root()}
+		tools, err := resolveTools(context.Background(), sys, a)
+		if err != nil || len(tools) != 1 || !strings.Contains(string(tools[0].Definition), fmt.Sprintf("version-%d", want)) {
+			t.Fatalf("episode %d tools=%+v err=%v", want, tools, err)
+		}
+	}
+}
+
+func TestInvalidInputSchemasAreRejected(t *testing.T) {
+	for _, raw := range []json.RawMessage{nil, json.RawMessage(`false`), json.RawMessage(`{"type":"string"}`), json.RawMessage(`{"type":"object","properties":42}`), json.RawMessage(`{"type":`)} {
+		if err := validInputSchema(raw); err == nil {
+			t.Fatalf("invalid schema accepted: %s", raw)
+		}
 	}
 }
 
@@ -225,6 +361,93 @@ func TestResultTextExcerptIsBoundedWithoutBreakingUTF8(t *testing.T) {
 	got, truncated := boundedResultText(input)
 	if !truncated || len(got) > maxResultTextBytes || !utf8.ValidString(got) {
 		t.Fatalf("bytes=%d truncated=%v valid=%v", len(got), truncated, utf8.ValidString(got))
+	}
+}
+
+type resultStoreSys struct {
+	actorbase.Sys
+	target  actor.ActorID
+	word    string
+	request workspaceproto.WriteRequest
+	err     error
+}
+
+func (s *resultStoreSys) Call(_ message.Cause, target actor.ActorID, word string, value any) (actorbase.Pending, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	s.target, s.word = target, word
+	raw, _ := json.Marshal(value)
+	_ = json.Unmarshal(raw, &s.request)
+	return completedPending(json.RawMessage(`{"content":[{"type":"text","text":"saved"}]}`)), nil
+}
+
+func TestLongToolTextIsBoundedAndCompleteOutputSavedOnce(t *testing.T) {
+	sys := &resultStoreSys{}
+	full := "αβγ\n" + strings.Repeat("long", 100)
+	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 10, ToolResultMaxBytes: 256, ToolImageMaxBytes: 1024}, cause: message.Root()}
+	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": full}}, "details": map[string]any{"upstream": true}})
+	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
+	if sys.target != "store" || sys.word != workspaceproto.TypeWrite || sys.request.Content != full || !strings.HasPrefix(sys.request.Path, ".atoll/tool-results/") {
+		t.Fatalf("save target=%s word=%s request=%+v", sys.target, sys.word, sys.request)
+	}
+	if !utf8.Valid(result) || !strings.Contains(string(result), "atoll_output") || !strings.Contains(string(result), "upstream") {
+		t.Fatalf("bounded result=%s", result)
+	}
+	var message struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(result, &message)
+	if len(message.Content) != 1 || len(message.Content[0].Text) > a.start.ToolResultMaxBytes || strings.Count(message.Content[0].Text, "\n") >= a.start.ToolResultMaxLines {
+		t.Fatalf("model text escaped configured boundary: %+v", message.Content)
+	}
+}
+
+func TestLongToolTextWithoutStoreOrWithSaveFailureIsAnError(t *testing.T) {
+	full := strings.Repeat("x", 100)
+	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": full}}})
+	for _, tc := range []struct {
+		name string
+		a    *assignment
+		sys  *resultStoreSys
+	}{
+		{"no store", &assignment{start: agentloop.StartRequest{ToolResultMaxLines: 10, ToolResultMaxBytes: 10}}, &resultStoreSys{}},
+		{"save failure", &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 10, ToolResultMaxBytes: 10}}, &resultStoreSys{err: errors.New("disk full")}},
+	} {
+		result := (&looper{}).toolResult(context.Background(), tc.sys, tc.a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
+		if !strings.Contains(string(result), `"isError":true`) {
+			t.Fatalf("%s result=%s", tc.name, result)
+		}
+	}
+}
+
+func TestLargeOrdinaryJSONResultUsesTheSameBoundary(t *testing.T) {
+	sys := &resultStoreSys{}
+	raw, _ := json.Marshal(map[string]any{"status": "completed", "value": strings.Repeat("json", 100)})
+	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 20, ToolResultMaxBytes: 256}, cause: message.Root()}
+	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
+	if sys.request.Content != string(raw) || !strings.Contains(string(result), "atoll_output") {
+		t.Fatalf("saved=%q result=%s", sys.request.Content, result)
+	}
+}
+
+func TestShellTextRetainsTailAndImageBlocksAreNotTextualized(t *testing.T) {
+	if got, truncated := boundedToolText("head\nmiddle\ntail", 2, 100, true); !truncated || got != "middle\ntail" {
+		t.Fatalf("tail=%q truncated=%v", got, truncated)
+	}
+	pixel := base64.StdEncoding.EncodeToString([]byte("png"))
+	a := &assignment{start: agentloop.StartRequest{ToolImageMaxBytes: 10}}
+	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": "image"}, {"type": "image", "data": pixel, "mimeType": "image/png"}}})
+	result := (&looper{}).toolResult(context.Background(), &resultStoreSys{}, a, toolCall{ID: "tc", Name: "read"}, resolvedTool{Word: workspaceproto.TypeRead}, raw)
+	if !strings.Contains(string(result), `"type":"image"`) || !strings.Contains(string(result), pixel) {
+		t.Fatalf("image block lost: %s", result)
+	}
+	a.start.ToolImageMaxBytes = 2
+	result = (&looper{}).toolResult(context.Background(), &resultStoreSys{}, a, toolCall{ID: "tc", Name: "read"}, resolvedTool{Word: workspaceproto.TypeRead}, raw)
+	if !strings.Contains(string(result), `"isError":true`) || !strings.Contains(string(result), "exceeds 2 bytes") {
+		t.Fatalf("oversized image result=%s", result)
 	}
 }
 
@@ -250,6 +473,13 @@ func (s *loopSys) Call(_ message.Cause, _ actor.ActorID, typ string, _ any) (act
 	case workspaceproto.TypeBash:
 		s.toolCalls++
 		body = map[string]any{"content": []map[string]any{{"type": "text", "text": "ok"}}}
+	case "actor.describe":
+		body = map[string]any{"class": "test", "interfaces": []string{"actor"}, "capabilities": map[string]bool{}, "words": map[string]any{
+			workspaceproto.TypeRead:  map[string]any{"description": "read", "input_schema": json.RawMessage(workspaceproto.ReadInputSchema)},
+			workspaceproto.TypeWrite: map[string]any{"description": "write", "input_schema": json.RawMessage(workspaceproto.WriteInputSchema)},
+			workspaceproto.TypeEdit:  map[string]any{"description": "edit", "input_schema": json.RawMessage(workspaceproto.EditInputSchema)},
+			workspaceproto.TypeBash:  map[string]any{"description": "bash", "input_schema": json.RawMessage(workspaceproto.BashInputSchema)},
+		}}
 	default:
 		body = map[string]any{}
 	}

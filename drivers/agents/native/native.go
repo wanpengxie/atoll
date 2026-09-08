@@ -611,9 +611,18 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 			inputs = append(inputs, w.Inputs[i].Input)
 		}
 	}
+	var tools *[]agentloop.ToolBinding
+	if c.cfg.ToolsConfigured {
+		bindings := make([]agentloop.ToolBinding, len(c.cfg.Tools))
+		for i, tool := range c.cfg.Tools {
+			bindings[i] = agentloop.ToolBinding{Name: tool.Name, Actor: tool.Actor, Word: tool.Word}
+		}
+		tools = &bindings
+	}
 	_, err := sys.Post(behavior.RequestSpec{Cause: cause, Type: agentloop.TypeStart, Audience: message.Audience{actorID(looper)}, Payload: mustJSON(agentloop.StartRequest{
 		WorkID: w.ID, AssignmentID: w.AssignmentID, ControllerActor: string(sys.Self()), Inputs: inputs, Prior: append([]json.RawMessage(nil), w.Context...), ContextActor: c.cfg.ContextActor, LLMActor: c.cfg.LLMActor,
-		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: c.cfg.Model, MaxTurns: c.cfg.MaxTurns})})
+		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: c.cfg.Model, MaxTurns: c.cfg.MaxTurns, Tools: tools,
+		ToolResultMaxLines: c.cfg.ToolResultMaxLines, ToolResultMaxBytes: c.cfg.ToolResultMaxBytes, ToolImageMaxBytes: c.cfg.ToolImageMaxBytes})})
 	if err != nil {
 		w.AssignmentID, w.Looper = "", ""
 		w.Stage, w.ExecutionState, w.UpdatedAt = "blocked", "dispatch_failed", nowMillis()

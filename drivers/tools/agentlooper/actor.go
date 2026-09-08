@@ -2,14 +2,17 @@ package agentlooper
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	contextproto "github.com/wanpengxie/atoll/drivers/tools/agentcontext/api"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	llmproto "github.com/wanpengxie/atoll/drivers/tools/pillm/api"
@@ -27,6 +30,21 @@ import (
 const Class = "agent-looper"
 const maxResultTextBytes = 64 << 10
 const channelCallWord = "channel.call"
+
+const (
+	defaultToolResultMaxLines = 2000
+	defaultToolResultMaxBytes = 50 << 10
+	defaultToolImageMaxBytes  = 3 << 20
+)
+
+var validToolName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+
+type resolvedTool struct {
+	Name       string
+	Actor      string
+	Word       string
+	Definition json.RawMessage
+}
 
 type Config struct {
 	ControllerActor string `json:"controller_actor,omitempty"`
@@ -302,12 +320,22 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 	if turns <= 0 {
 		turns = 12
 	}
-	tools := toolDefinitions(a.start.WorkspaceActor != "", a.start.HostActor != "")
+	tools, err := resolveTools(ctx, sys, a)
+	if err != nil {
+		l.report(sys, a, "failed", through, nil, "tool_discovery_failed", err.Error(), stateForError(err))
+		return
+	}
+	definitions := make([]json.RawMessage, 0, len(tools))
+	targets := make(map[string]resolvedTool, len(tools))
+	for _, tool := range tools {
+		definitions = append(definitions, tool.Definition)
+		targets[tool.Name] = tool
+	}
 	for turn := 0; turn < turns; turn++ {
 		a.mu.Lock()
 		a.phase = "thinking"
 		a.mu.Unlock()
-		raw, err := call(ctx, sys, a.cause, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: artifact.SystemPrompt, Messages: history, Tools: tools})
+		raw, err := call(ctx, sys, a.cause, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: artifact.SystemPrompt, Messages: history, Tools: definitions})
 		if err != nil {
 			state := "confirmed"
 			kind := "llm_failed"
@@ -342,16 +370,12 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 			l.report(sys, a, "completed", through, result, "", "", "confirmed")
 			return
 		}
-		if a.start.WorkspaceActor == "" && a.start.HostActor == "" {
-			l.report(sys, a, "failed", through, nil, "tool_unavailable", "model requested a tool but this looper has no workspace actor", "not_started")
-			return
-		}
 		a.mu.Lock()
 		a.phase = "acting"
 		a.mu.Unlock()
 		for _, tc := range calls {
-			target, word := toolTarget(a.start, tc.Name)
-			if word == "" || target == "" {
+			tool, ok := targets[tc.Name]
+			if !ok {
 				history = append(history, toolResult(tc, true, "unknown tool "+tc.Name))
 				a.setHistory(history)
 				if historySize(history) > agentloop.MaxHistoryBytes {
@@ -360,7 +384,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 				}
 				continue
 			}
-			toolRaw, callErr := call(ctx, sys, a.cause, actor.ActorID(target), word, json.RawMessage(tc.Arguments))
+			toolRaw, callErr := call(ctx, sys, a.cause, actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
 			if callErr != nil {
 				if errors.Is(callErr, context.Canceled) {
 					l.report(sys, a, "cancelled", through, nil, "cancelled", callErr.Error(), "confirmed_stopped")
@@ -374,7 +398,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 				}
 				continue
 			}
-			history = append(history, toolResultRaw(tc, toolRaw))
+			history = append(history, l.toolResult(ctx, sys, a, tc, tool, toolRaw))
 			a.setHistory(history)
 			if historySize(history) > agentloop.MaxHistoryBytes {
 				l.report(sys, a, "failed", through, nil, "context_limit", "Pi history exceeded the phase-one recovery limit", "confirmed")
@@ -462,49 +486,347 @@ func toolResultRaw(tc toolCall, raw json.RawMessage) json.RawMessage {
 	out, _ := json.Marshal(message)
 	return out
 }
-func toolWord(name string) string {
-	switch name {
-	case "read":
-		return workspaceproto.TypeRead
-	case "write":
-		return workspaceproto.TypeWrite
-	case "edit":
-		return workspaceproto.TypeEdit
-	case "bash":
-		return workspaceproto.TypeBash
+
+func (l *looper) toolResult(ctx context.Context, sys actorbase.Sys, a *assignment, tc toolCall, tool resolvedTool, raw json.RawMessage) json.RawMessage {
+	maxLines, maxBytes, maxImage := a.start.ToolResultMaxLines, a.start.ToolResultMaxBytes, a.start.ToolImageMaxBytes
+	if maxLines <= 0 {
+		maxLines = defaultToolResultMaxLines
 	}
-	return ""
-}
-func toolTarget(start agentloop.StartRequest, name string) (string, string) {
-	if name == "channel_call" {
-		return start.HostActor, channelCallWord
+	if maxBytes <= 0 {
+		maxBytes = defaultToolResultMaxBytes
 	}
-	if name == "channel_post" {
-		return start.HostActor, "channel.post"
+	if maxImage <= 0 {
+		maxImage = defaultToolImageMaxBytes
 	}
-	if name == "channel_emit" {
-		return start.HostActor, "channel.emit"
+	var result struct {
+		Content        []json.RawMessage `json:"content"`
+		Details        json.RawMessage   `json:"details"`
+		Usage          json.RawMessage   `json:"usage"`
+		AddedToolNames []string          `json:"addedToolNames"`
+		IsError        bool              `json:"isError"`
 	}
-	return start.WorkspaceActor, toolWord(name)
-}
-func toolDefinitions(workspace, host bool) []json.RawMessage {
-	if !workspace && !host {
-		return nil
+	piShape := json.Unmarshal(raw, &result) == nil && len(result.Content) > 0
+	if !piShape {
+		result.Content = []json.RawMessage{mustRaw(map[string]any{"type": "text", "text": string(raw)})}
 	}
-	specs := make([]struct{ name, desc, schema string }, 0, 5)
-	if workspace {
-		specs = append(specs, struct{ name, desc, schema string }{"read", "Read a file from the workspace.", workspaceproto.ReadInputSchema}, struct{ name, desc, schema string }{"write", "Write a file in the workspace.", workspaceproto.WriteInputSchema}, struct{ name, desc, schema string }{"edit", "Edit exact unique blocks in one file.", workspaceproto.EditInputSchema}, struct{ name, desc, schema string }{"bash", "Execute a bash command in the workspace.", workspaceproto.BashInputSchema})
-	}
-	if host {
-		for _, name := range []string{"channel_call", "channel_post", "channel_emit"} {
-			specs = append(specs, struct{ name, desc, schema string }{name, "Act through the host Seat: call waits for a result, post sends a request without waiting, emit publishes an event. Call requires exactly one audience member. Discover with audience=[system], type=system.member.list, payload={}.", `{"type":"object","additionalProperties":false,"required":["type","payload"],"properties":{"audience":{"type":"array","items":{"type":"string"}},"type":{"type":"string","minLength":1},"payload":{"type":"object"},"visibility":{"type":"string"}}}`})
+	var fullText strings.Builder
+	imageBytes := 0
+	for _, block := range result.Content {
+		var value struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Data     string `json:"data"`
+			MimeType string `json:"mimeType"`
+		}
+		if err := json.Unmarshal(block, &value); err != nil {
+			return toolResult(tc, true, "tool returned an invalid content block: "+err.Error())
+		}
+		switch value.Type {
+		case "text":
+			fullText.WriteString(value.Text)
+		case "image":
+			if value.MimeType != "image/png" && value.MimeType != "image/jpeg" && value.MimeType != "image/gif" && value.MimeType != "image/webp" {
+				return toolResult(tc, true, "tool returned an unsupported image MIME type")
+			}
+			if len(value.Data) > (maxImage-imageBytes+2)/3*4+4 {
+				return toolResult(tc, true, fmt.Sprintf("tool image is invalid or exceeds %d bytes", maxImage))
+			}
+			decoded, err := base64.StdEncoding.DecodeString(value.Data)
+			imageBytes += len(decoded)
+			if err != nil || imageBytes > maxImage {
+				return toolResult(tc, true, fmt.Sprintf("tool image is invalid or exceeds %d bytes", maxImage))
+			}
+		default:
+			return toolResult(tc, true, "tool returned an unsupported content block type")
 		}
 	}
-	out := make([]json.RawMessage, 0, len(specs))
-	for _, s := range specs {
-		out = append(out, json.RawMessage(fmt.Sprintf(`{"name":%q,"description":%q,"parameters":%s}`, s.name, s.desc, s.schema)))
+	full := fullText.String()
+	tail := tool.Word == workspaceproto.TypeBash || tool.Word == workspaceproto.TypePowerShell
+	excerpt, truncated := boundedToolText(full, maxLines, maxBytes, tail)
+	if !truncated {
+		out := toolResultRaw(tc, raw)
+		if !piShape {
+			return toolResult(tc, result.IsError, full)
+		}
+		if result.IsError {
+			var message map[string]any
+			if json.Unmarshal(out, &message) == nil {
+				message["isError"] = true
+				return mustRaw(message)
+			}
+		}
+		return out
 	}
-	return out
+	if a.start.WorkspaceActor == "" {
+		return toolResult(tc, true, fmt.Sprintf("tool output exceeds %d lines or %d bytes and no workspace output store is configured", maxLines, maxBytes))
+	}
+	path := ".atoll/tool-results/" + uuid.NewString() + ".txt"
+	_, err := call(ctx, sys, a.cause, actor.ActorID(a.start.WorkspaceActor), workspaceproto.TypeWrite, workspaceproto.WriteRequest{Path: path, Content: full})
+	if err != nil {
+		return toolResult(tc, true, "tool output exceeded the configured limit and the complete output could not be saved: "+err.Error())
+	}
+	noticePrefix := " "
+	excerptLines := maxLines
+	if maxLines > 1 {
+		noticePrefix = "\n"
+		excerptLines--
+	}
+	notice := fmt.Sprintf("%s[Output truncated; complete output saved to %s]", noticePrefix, path)
+	excerptBytes := maxBytes - len(notice)
+	if excerptLines < 1 {
+		excerptLines = 1
+	}
+	if excerptBytes < 0 {
+		excerptBytes = 0
+	}
+	excerpt, _ = boundedToolText(full, excerptLines, excerptBytes, tail)
+	content := make([]json.RawMessage, 0, len(result.Content))
+	textAdded := false
+	for _, block := range result.Content {
+		var head struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(block, &head)
+		if head.Type == "text" {
+			if !textAdded {
+				content = append(content, mustRaw(map[string]any{"type": "text", "text": excerpt + notice}))
+				textAdded = true
+			}
+			continue
+		}
+		content = append(content, block)
+	}
+	details := map[string]any{}
+	if len(result.Details) > 0 && string(result.Details) != "null" {
+		if json.Unmarshal(result.Details, &details) != nil {
+			details = map[string]any{"tool_details": result.Details}
+		}
+	}
+	details["atoll_output"] = map[string]any{"truncated": true, "path": path, "workspace_actor": a.start.WorkspaceActor, "retained": map[bool]string{true: "tail", false: "head"}[tail]}
+	message := map[string]any{"role": "toolResult", "toolCallId": tc.ID, "toolName": tc.Name, "content": content, "details": details, "isError": result.IsError, "timestamp": time.Now().UnixMilli()}
+	if len(result.Usage) > 0 && string(result.Usage) != "null" {
+		message["usage"] = result.Usage
+	}
+	if len(result.AddedToolNames) > 0 {
+		message["addedToolNames"] = result.AddedToolNames
+	}
+	return mustRaw(message)
+}
+
+func boundedToolText(text string, maxLines, maxBytes int, tail bool) (string, bool) {
+	if maxLines < 1 || maxBytes < 1 {
+		return "", text != ""
+	}
+	if len(text) <= maxBytes && strings.Count(text, "\n") < maxLines {
+		return text, false
+	}
+	if tail {
+		start := len(text) - maxBytes
+		if start < 0 {
+			start = 0
+		}
+		for start < len(text) && !utf8.RuneStart(text[start]) {
+			start++
+		}
+		part := text[start:]
+		for strings.Count(part, "\n") >= maxLines {
+			if i := strings.IndexByte(part, '\n'); i >= 0 {
+				part = part[i+1:]
+			} else {
+				break
+			}
+		}
+		return part, true
+	}
+	end := len(text)
+	if end > maxBytes {
+		end = maxBytes
+		for end > 0 && !utf8.RuneStart(text[end]) {
+			end--
+		}
+	}
+	part := text[:end]
+	if strings.Count(part, "\n") >= maxLines {
+		position := 0
+		for range maxLines {
+			i := strings.IndexByte(part[position:], '\n')
+			if i < 0 {
+				break
+			}
+			position += i + 1
+		}
+		part = strings.TrimSuffix(part[:position], "\n")
+	}
+	return part, true
+}
+
+func mustRaw(value any) json.RawMessage {
+	raw, _ := json.Marshal(value)
+	return raw
+}
+func configuredTools(start agentloop.StartRequest) []agentloop.ToolBinding {
+	if start.Tools != nil {
+		return append([]agentloop.ToolBinding(nil), (*start.Tools)...)
+	}
+	var tools []agentloop.ToolBinding
+	if start.WorkspaceActor != "" {
+		for _, item := range []struct{ name, word string }{
+			{"read", workspaceproto.TypeRead}, {"write", workspaceproto.TypeWrite},
+			{"edit", workspaceproto.TypeEdit}, {"bash", workspaceproto.TypeBash},
+		} {
+			tools = append(tools, agentloop.ToolBinding{Name: item.name, Actor: start.WorkspaceActor, Word: item.word})
+		}
+	}
+	if start.HostActor != "" {
+		for _, item := range []struct{ name, word string }{
+			{"channel_call", channelCallWord}, {"channel_post", "channel.post"}, {"channel_emit", "channel.emit"},
+		} {
+			tools = append(tools, agentloop.ToolBinding{Name: item.name, Actor: start.HostActor, Word: item.word})
+		}
+	}
+	return tools
+}
+
+func resolveTools(ctx context.Context, sys actorbase.Sys, a *assignment) ([]resolvedTool, error) {
+	bindings := configuredTools(a.start)
+	seen := make(map[string]struct{}, len(bindings))
+	manifests := make(map[string]introspect.Describe)
+	out := make([]resolvedTool, 0, len(bindings))
+	for _, binding := range bindings {
+		if !validToolName.MatchString(binding.Name) || strings.TrimSpace(binding.Actor) == "" || strings.TrimSpace(binding.Word) == "" {
+			return nil, fmt.Errorf("invalid tool binding %q", binding.Name)
+		}
+		if _, exists := seen[binding.Name]; exists {
+			return nil, fmt.Errorf("duplicate tool name %q", binding.Name)
+		}
+		seen[binding.Name] = struct{}{}
+		describe, ok := manifests[binding.Actor]
+		if !ok {
+			raw, err := call(ctx, sys, a.cause, actor.ActorID(binding.Actor), introspect.QueryDescribe, introspect.DescribeRequest{})
+			if err != nil {
+				return nil, fmt.Errorf("describe tool actor %q: %w", binding.Actor, err)
+			}
+			if err := json.Unmarshal(raw, &describe); err != nil {
+				return nil, fmt.Errorf("describe tool actor %q returned invalid manifest: %w", binding.Actor, err)
+			}
+			manifests[binding.Actor] = describe
+		}
+		spec, ok := describe.Words[binding.Word]
+		if !ok {
+			return nil, fmt.Errorf("tool actor %q declares no request word %q", binding.Actor, binding.Word)
+		}
+		if err := validInputSchema(spec.InputSchema); err != nil {
+			return nil, fmt.Errorf("tool %q word %q has invalid input schema: %w", binding.Name, binding.Word, err)
+		}
+		definition, err := json.Marshal(map[string]any{"name": binding.Name, "description": spec.Description, "parameters": spec.InputSchema})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resolvedTool{Name: binding.Name, Actor: binding.Actor, Word: binding.Word, Definition: definition})
+	}
+	return out, nil
+}
+
+func validInputSchema(raw json.RawMessage) error {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return errors.New("schema is missing or invalid JSON")
+	}
+	var schema map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &schema); err != nil || schema == nil {
+		return errors.New("schema must be a JSON object")
+	}
+	if err := validateSchemaShape(schema); err != nil {
+		return err
+	}
+	var typ string
+	if rawType, ok := schema["type"]; ok {
+		if err := json.Unmarshal(rawType, &typ); err != nil || typ != "object" {
+			return errors.New("schema must describe an object")
+		}
+		return nil
+	}
+	for _, keyword := range []string{"oneOf", "anyOf", "allOf"} {
+		raw, ok := schema[keyword]
+		if !ok {
+			continue
+		}
+		var alternatives []json.RawMessage
+		_ = json.Unmarshal(raw, &alternatives)
+		for _, alternative := range alternatives {
+			if err := validInputSchema(alternative); err != nil {
+				return fmt.Errorf("schema %s alternative: %w", keyword, err)
+			}
+		}
+		return nil
+	}
+	return errors.New("schema must describe an object or object alternatives")
+}
+
+func validateSchemaShape(schema map[string]json.RawMessage) error {
+	if raw, ok := schema["type"]; ok {
+		var typ string
+		if json.Unmarshal(raw, &typ) != nil || typ == "" {
+			return errors.New("schema type must be a non-empty string")
+		}
+	}
+	if raw, ok := schema["properties"]; ok {
+		var properties map[string]json.RawMessage
+		if json.Unmarshal(raw, &properties) != nil || properties == nil {
+			return errors.New("schema properties must be an object")
+		}
+		for name, child := range properties {
+			var nested map[string]json.RawMessage
+			if json.Unmarshal(child, &nested) != nil || nested == nil {
+				return fmt.Errorf("schema property %q must be an object", name)
+			}
+			if err := validateSchemaShape(nested); err != nil {
+				return fmt.Errorf("schema property %q: %w", name, err)
+			}
+		}
+	}
+	if raw, ok := schema["required"]; ok {
+		var required []string
+		if json.Unmarshal(raw, &required) != nil {
+			return errors.New("schema required must be a string array")
+		}
+	}
+	if raw, ok := schema["items"]; ok {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(raw, &nested) != nil || nested == nil {
+			return errors.New("schema items must be an object")
+		}
+		if err := validateSchemaShape(nested); err != nil {
+			return fmt.Errorf("schema items: %w", err)
+		}
+	}
+	if raw, ok := schema["additionalProperties"]; ok {
+		var allowed bool
+		if json.Unmarshal(raw, &allowed) != nil {
+			var nested map[string]json.RawMessage
+			if json.Unmarshal(raw, &nested) != nil || nested == nil {
+				return errors.New("schema additionalProperties must be boolean or object")
+			}
+			if err := validateSchemaShape(nested); err != nil {
+				return fmt.Errorf("schema additionalProperties: %w", err)
+			}
+		}
+	}
+	for _, keyword := range []string{"oneOf", "anyOf", "allOf"} {
+		raw, ok := schema[keyword]
+		if !ok {
+			continue
+		}
+		var alternatives []map[string]json.RawMessage
+		if json.Unmarshal(raw, &alternatives) != nil || len(alternatives) == 0 {
+			return fmt.Errorf("schema %s must be a non-empty object array", keyword)
+		}
+		for _, alternative := range alternatives {
+			if err := validateSchemaShape(alternative); err != nil {
+				return fmt.Errorf("schema %s: %w", keyword, err)
+			}
+		}
+	}
+	return nil
 }
 func parseModel(value string) llmproto.ModelRef {
 	for i := 0; i < len(value); i++ {

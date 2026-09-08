@@ -2,6 +2,7 @@ package native
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -12,6 +13,31 @@ func TestDefaultConfigKeepsRecoveryCollectionsBounded(t *testing.T) {
 	}
 	if cfg.MaxOpenWorks != 32 || cfg.MaxAssignmentsPerLooper != 32 || cfg.MaxInputsPerWork != 128 || cfg.MaxOperationKeys != 256 || cfg.MaxTurns != 12 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+}
+
+func TestToolsOmittedAndExplicitlyEmptyRemainDistinct(t *testing.T) {
+	omitted, err := ParseConfig(DefaultConfig())
+	if err != nil || omitted.ToolsConfigured {
+		t.Fatalf("omitted tools config=%+v err=%v", omitted, err)
+	}
+	empty, err := ParseConfig(json.RawMessage(`{"loopers":["l"],"context_actor":"c","llm_actor":"m","max_open_works":1,"max_assignments_per_looper":1,"max_inputs_per_work":1,"max_operation_keys":1,"max_turns":1,"tools":[]}`))
+	if err != nil || !empty.ToolsConfigured || len(empty.Tools) != 0 {
+		t.Fatalf("empty tools config=%+v err=%v", empty, err)
+	}
+}
+
+func TestToolAllowlistValidation(t *testing.T) {
+	base := `{"loopers":["l"],"context_actor":"c","llm_actor":"m","max_open_works":1,"max_assignments_per_looper":1,"max_inputs_per_work":1,"max_operation_keys":1,"max_turns":1,"tools":%s}`
+	for _, tools := range []string{
+		`null`,
+		`[{"name":"bad name","actor":"a","word":"x.run"}]`,
+		`[{"name":"x","actor":"a","word":"x.run"},{"name":"x","actor":"b","word":"y.run"}]`,
+		`[{"name":"x","actor":" ","word":"x.run"}]`,
+	} {
+		if _, err := ParseConfig(json.RawMessage(fmt.Sprintf(base, tools))); err == nil {
+			t.Fatalf("invalid tools accepted: %s", tools)
+		}
 	}
 }
 

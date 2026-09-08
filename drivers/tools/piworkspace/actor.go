@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -73,12 +74,28 @@ func construct(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDe
 }
 
 func manifest() introspect.Manifest {
-	return introspect.Manifest{Class: Class, Interfaces: []string{"actor", "workspace"}, Capabilities: map[string]bool{"pi_base_tools": true, "request_cancel": true}, Words: map[string]introspect.WordSpec{
+	words := map[string]introspect.WordSpec{
 		workspaceproto.TypeRead:  {Description: "Pi read tool, rooted at this Channel's workspace. Text and image content plus truncation details are preserved.", InputSchema: json.RawMessage(workspaceproto.ReadInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()},
 		workspaceproto.TypeWrite: {Description: "Pi write tool, rooted at this Channel's workspace. The default single execution lane serializes shared-workspace effects.", InputSchema: json.RawMessage(workspaceproto.WriteInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()},
 		workspaceproto.TypeEdit:  {Description: "Pi edit tool. Each oldText must identify one unique, non-overlapping region of the original file.", InputSchema: json.RawMessage(workspaceproto.EditInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()},
 		workspaceproto.TypeBash:  {Description: "Pi bash tool in this Channel's workspace. Cancellation, timeout, tail truncation and spill-path details are preserved; cwd is not an OS sandbox.", InputSchema: json.RawMessage(workspaceproto.BashInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()},
-	}}
+		workspaceproto.TypeGrep:  {Description: "Search file contents with ripgrep, rooted at this Channel's workspace. Patterns and globs are search expressions, not paths.", InputSchema: json.RawMessage(workspaceproto.GrepInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()},
+		workspaceproto.TypeFind:  {Description: "Find files by glob with fd, rooted at this Channel's workspace.", InputSchema: json.RawMessage(workspaceproto.FindInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()},
+		workspaceproto.TypeLS:    {Description: "List a directory rooted at this Channel's workspace.", InputSchema: json.RawMessage(workspaceproto.LSInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()},
+	}
+	if powerShellAvailable() {
+		words[workspaceproto.TypePowerShell] = introspect.WordSpec{Description: "Execute PowerShell in this Channel's workspace. Commands may have write side effects; cwd is not an OS sandbox.", InputSchema: json.RawMessage(workspaceproto.PowerShellInputSchema), OutputSchema: toolOutputSchema(), ErrorCodes: toolErrors()}
+	}
+	return introspect.Manifest{Class: Class, Interfaces: []string{"actor", "workspace"}, Capabilities: map[string]bool{"pi_base_tools": true, "search_tools": true, "request_cancel": true}, Words: words}
+}
+
+func powerShellAvailable() bool {
+	for _, name := range []string{"pwsh", "powershell", "powershell.exe"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
 }
 func toolOutputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","required":["content"],"properties":{"content":{"type":"array"},"details":{}},"additionalProperties":true}`)
@@ -96,48 +113,91 @@ func proc(cfg Config, deps registry.Deps) actorbase.Proc {
 			return err
 		}
 		emit(sys, "actor.ready", map[string]any{"component": Class, "runtime": pibridge.Version})
-		jobs := make(chan actorbase.Msg, cfg.QueueCapacity)
-		var wg sync.WaitGroup
-		for range cfg.MaxConcurrency {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for msg := range jobs {
-					handle(sys, b, deps.WorkspaceDir, msg)
-				}
-			}()
+		return runScheduler(sys, cfg, func(msg actorbase.Msg) { handle(sys, b, deps.WorkspaceDir, msg) }, b.Close)
+	}
+}
+
+func runScheduler(sys actorbase.Sys, cfg Config, execute func(actorbase.Msg), shutdown func()) error {
+	reads := make(chan actorbase.Msg, cfg.QueueCapacity)
+	writes := make(chan actorbase.Msg, cfg.QueueCapacity)
+	all := make(chan actorbase.Msg, cfg.QueueCapacity)
+	admitted := make(chan struct{}, cfg.QueueCapacity)
+	var wg sync.WaitGroup
+	worker := func(jobs <-chan actorbase.Msg) {
+		defer wg.Done()
+		for msg := range jobs {
+			<-admitted
+			if err := msg.Ctx().Err(); err != nil {
+				_, _ = sys.Fail(msg, "cancelled", err.Error())
+				continue
+			}
+			execute(msg)
 		}
-		defer func() {
-			// Terminate active tool calls before waiting for workers; queued calls
-			// then fail promptly against the closed bridge while the mailbox is no
-			// longer admitting new jobs.
-			b.Close()
-			close(jobs)
-			wg.Wait()
-		}()
-		for {
-			msg, err := sys.Recv()
-			if err != nil {
-				return err
-			}
-			if msg.Kind != message.KindRequest {
-				continue
-			}
-			if !isWord(msg.Type) {
-				_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("Pi workspace does not answer %q", msg.Type))
-				continue
-			}
-			select {
-			case jobs <- msg:
-			default:
-				_, _ = sys.Fail(msg, "capacity", "Pi workspace queue is full")
-			}
+	}
+	if cfg.MaxConcurrency == 1 {
+		wg.Add(1)
+		go worker(all)
+	} else {
+		wg.Add(1)
+		go worker(writes)
+		for range cfg.MaxConcurrency - 1 {
+			wg.Add(1)
+			go worker(reads)
+		}
+	}
+	defer func() {
+		// Terminate active tool calls before waiting for workers; queued calls
+		// then fail promptly against the closed bridge while the mailbox is no
+		// longer admitting new jobs.
+		shutdown()
+		if cfg.MaxConcurrency == 1 {
+			close(all)
+		} else {
+			close(reads)
+			close(writes)
+		}
+		wg.Wait()
+	}()
+	for {
+		msg, err := sys.Recv()
+		if err != nil {
+			return err
+		}
+		if msg.Kind != message.KindRequest {
+			continue
+		}
+		if !isWord(msg.Type) {
+			_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("Pi workspace does not answer %q", msg.Type))
+			continue
+		}
+		if msg.Ctx().Err() != nil {
+			_, _ = sys.Fail(msg, "cancelled", msg.Ctx().Err().Error())
+			continue
+		}
+		select {
+		case admitted <- struct{}{}:
+		default:
+			_, _ = sys.Fail(msg, "capacity", "Pi workspace queue is full")
+			continue
+		}
+		if cfg.MaxConcurrency == 1 {
+			all <- msg
+		} else if isReadWord(msg.Type) {
+			reads <- msg
+		} else {
+			writes <- msg
 		}
 	}
 }
 
 func isWord(s string) bool {
-	return s == workspaceproto.TypeRead || s == workspaceproto.TypeWrite || s == workspaceproto.TypeEdit || s == workspaceproto.TypeBash
+	if s == workspaceproto.TypePowerShell && !powerShellAvailable() {
+		return false
+	}
+	return isReadWord(s) || s == workspaceproto.TypeWrite || s == workspaceproto.TypeEdit || s == workspaceproto.TypeBash || s == workspaceproto.TypePowerShell
+}
+func isReadWord(s string) bool {
+	return s == workspaceproto.TypeRead || s == workspaceproto.TypeGrep || s == workspaceproto.TypeFind || s == workspaceproto.TypeLS
 }
 func handle(sys actorbase.Sys, b *pibridge.Bridge, cwd string, msg actorbase.Msg) {
 	path, args, err := decodeArgs(msg.Type, msg.Payload)
@@ -145,7 +205,7 @@ func handle(sys actorbase.Sys, b *pibridge.Bridge, cwd string, msg actorbase.Msg
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
 		return
 	}
-	if msg.Type != workspaceproto.TypeBash {
+	if msg.Type != workspaceproto.TypeBash && msg.Type != workspaceproto.TypePowerShell {
 		if err := safeWorkspacePath(cwd, path); err != nil {
 			_, _ = sys.Fail(msg, "path_outside_workspace", "path must remain inside the Channel workspace")
 			return
@@ -171,6 +231,12 @@ func decodeArgs(word string, raw json.RawMessage) (string, json.RawMessage, erro
 		if err := actorbase.DecodeStrict(raw, &req); err != nil {
 			return "", nil, err
 		}
+		if err := requirePositiveWhenPresent(raw, "offset", req.Offset); err != nil {
+			return "", nil, err
+		}
+		if err := requirePositiveWhenPresent(raw, "limit", req.Limit); err != nil {
+			return "", nil, err
+		}
 		path = req.Path
 	case workspaceproto.TypeWrite:
 		var req workspaceproto.WriteRequest
@@ -192,13 +258,68 @@ func decodeArgs(word string, raw json.RawMessage) (string, json.RawMessage, erro
 		if strings.TrimSpace(req.Command) == "" {
 			return "", nil, errors.New("command is required")
 		}
+	case workspaceproto.TypePowerShell:
+		var req workspaceproto.BashRequest
+		if err := actorbase.DecodeStrict(raw, &req); err != nil {
+			return "", nil, err
+		}
+		if strings.TrimSpace(req.Command) == "" {
+			return "", nil, errors.New("command is required")
+		}
+	case workspaceproto.TypeGrep:
+		var req workspaceproto.GrepRequest
+		if err := actorbase.DecodeStrict(raw, &req); err != nil {
+			return "", nil, err
+		}
+		if req.Pattern == "" || req.Context < 0 {
+			return "", nil, errors.New("pattern is required and context must be non-negative")
+		}
+		if err := requirePositiveWhenPresent(raw, "limit", req.Limit); err != nil {
+			return "", nil, err
+		}
+		path = req.Path
+	case workspaceproto.TypeFind:
+		var req workspaceproto.FindRequest
+		if err := actorbase.DecodeStrict(raw, &req); err != nil {
+			return "", nil, err
+		}
+		if req.Pattern == "" {
+			return "", nil, errors.New("pattern is required")
+		}
+		if err := requirePositiveWhenPresent(raw, "limit", req.Limit); err != nil {
+			return "", nil, err
+		}
+		path = req.Path
+	case workspaceproto.TypeLS:
+		var req workspaceproto.LSRequest
+		if err := actorbase.DecodeStrict(raw, &req); err != nil {
+			return "", nil, err
+		}
+		if err := requirePositiveWhenPresent(raw, "limit", req.Limit); err != nil {
+			return "", nil, err
+		}
+		path = req.Path
 	default:
 		return "", nil, errors.New("unsupported workspace word")
 	}
-	if word != workspaceproto.TypeBash && strings.TrimSpace(path) == "" {
+	if (word == workspaceproto.TypeRead || word == workspaceproto.TypeWrite || word == workspaceproto.TypeEdit) && strings.TrimSpace(path) == "" {
 		return "", nil, errors.New("path is required")
 	}
+	if isReadWord(word) && path == "" {
+		path = "."
+	}
 	return path, append(json.RawMessage(nil), raw...), nil
+}
+
+func requirePositiveWhenPresent(raw json.RawMessage, field string, value int) error {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil
+	}
+	if _, present := fields[field]; present && value < 1 {
+		return fmt.Errorf("%s must be positive", field)
+	}
+	return nil
 }
 func safeWorkspacePath(root, path string) error {
 	if filepath.IsAbs(path) {
