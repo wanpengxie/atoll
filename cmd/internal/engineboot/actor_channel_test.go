@@ -185,6 +185,13 @@ func TestActorChannelRealizesSeatAndHandleInsteadOfServicePair(t *testing.T) {
 			t.Fatalf("handles=%d", seen)
 		}
 	})
+	t.Run("handle admission does not require its target to be seated yet", func(t *testing.T) {
+		// Config is declared intent (a decl); which member answers is a runtime
+		// fact resolved per request (§5.2). Seating the handle first must work.
+		terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordActorTemplateCreate), map[string]any{"id": "early-handle", "name": "early", "class": channelmember.HandleClass, "visibility": "public", "config": map[string]any{"host": "c0", "words": map[string]any{"agent.ask": map[string]any{"schema": map[string]any{"type": "object"}, "target": "not-yet-seated"}}}}), nil)
+		terminalValue(t, callMember(t, unrelated.ChannelID, other, channelspec.RootPrincipalID, "system", "system.member.create", map[string]any{"decl_id": "early-handle"}), nil)
+		waitDecl(t, other, "early-handle")
+	})
 	terminalValue(t, callMember(t, unrelated.ChannelID, other, channelspec.RootPrincipalID, "system", "system.member.create", map[string]any{"decl_id": "seat:" + string(created.ChannelID)}), nil)
 	otherSeat := onlyDecl(t, other, "seat:"+string(created.ChannelID))
 	terminalValue(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelDelete), map[string]any{"channel_id": created.ChannelID}), nil)

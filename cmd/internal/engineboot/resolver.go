@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/wanpengxie/atoll/lib/actorbase"
 	"log/slog"
 	"strings"
 
@@ -224,15 +223,10 @@ func (r *assemblyResolver) AdmitIntroduction(ctx context.Context, holder channel
 		if !ok {
 			return channelspec.ErrDeclarationNotFound
 		}
-		members := bodyMembers{host: r.host, body: holder}
-		for _, word := range cfg.Words {
-			if _, err := members.MemberOfDeclaration(word.Target); err != nil {
-				var targetErr *actorbase.TargetResolveError
-				if !errors.As(err, &targetErr) || targetErr.Code != "actor_ambiguous" {
-					return err
-				}
-			}
-		}
+		// Admission checks the declared intent only (config shape, host exists).
+		// Which member answers a word is a runtime fact the handle resolves when
+		// a request arrives (design §5.2): seating the handle before its target,
+		// replacing the target's instance, or restarting it must all just work.
 		return nil
 	}
 	if facts.Class != lagoon.PeerActorClass {
