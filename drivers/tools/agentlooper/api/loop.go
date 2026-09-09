@@ -39,6 +39,10 @@ type ToolBinding struct {
 }
 
 type StartRequest struct {
+	ViewID             string            `json:"view_id,omitempty"`
+	ContextVersion     int64             `json:"context_version,omitempty"`
+	ToolTimeoutMS      int64             `json:"tool_timeout_ms,omitempty"`
+	ExecutionTimeoutMS int64             `json:"execution_timeout_ms,omitempty"`
 	WorkID             agentproto.WorkID `json:"work_id"`
 	AssignmentID       string            `json:"assignment_id"`
 	ControllerActor    string            `json:"controller_actor"`
@@ -57,23 +61,31 @@ type StartRequest struct {
 }
 
 type InputRequest struct {
+	ViewID       string            `json:"view_id,omitempty"`
+	ControlID    string            `json:"control_id,omitempty"`
+	Inputs       []Input           `json:"inputs,omitempty"`
 	WorkID       agentproto.WorkID `json:"work_id"`
 	AssignmentID string            `json:"assignment_id"`
-	Input        Input             `json:"input"`
+	Input        Input             `json:"input,omitempty"`
 }
 
 type StopRequest struct {
+	ViewID       string            `json:"view_id,omitempty"`
 	WorkID       agentproto.WorkID `json:"work_id"`
 	AssignmentID string            `json:"assignment_id"`
 	Reason       string            `json:"reason,omitempty"`
 }
 
 type InspectRequest struct {
+	ViewID       string            `json:"view_id,omitempty"`
 	WorkID       agentproto.WorkID `json:"work_id"`
 	AssignmentID string            `json:"assignment_id,omitempty"`
 }
 
 type ReportRequest struct {
+	ViewID          string            `json:"view_id,omitempty"`
+	ContextVersion  int64             `json:"context_version,omitempty"`
+	Controls        []ControlResult   `json:"controls,omitempty"`
 	WorkID          agentproto.WorkID `json:"work_id"`
 	AssignmentID    string            `json:"assignment_id"`
 	State           string            `json:"state"`
@@ -83,4 +95,12 @@ type ReportRequest struct {
 	Detail          string            `json:"detail,omitempty"`
 	ExecutionState  string            `json:"execution_state,omitempty"`
 	History         []json.RawMessage `json:"history,omitempty"`
+}
+
+// ControlResult records execution admission, not model consumption. It travels
+// in both the control response and terminal report to tolerate reply reordering.
+type ControlResult struct {
+	ControlID   string  `json:"control_id"`
+	Disposition string  `json:"disposition"`
+	Inputs      []Input `json:"inputs,omitempty"`
 }

@@ -13,6 +13,8 @@ import (
 const Class = "native-agent"
 
 type Config struct {
+	ToolTimeoutMS           int64        `json:"tool_timeout_ms,omitempty"`
+	ExecutionTimeoutMS      int64        `json:"execution_timeout_ms,omitempty"`
 	Loopers                 []string     `json:"loopers"`
 	ContextActor            string       `json:"context_actor"`
 	LLMActor                string       `json:"llm_actor"`
@@ -45,6 +47,8 @@ func DefaultConfig() json.RawMessage {
 
 func ParseConfig(raw json.RawMessage) (Config, error) {
 	cfg := Config{Loopers: []string{"agent-looper"}, ContextActor: "agent-context", LLMActor: "pi-llm", WorkspaceActor: "pi-workspace", MaxOpenWorks: 32, MaxAssignmentsPerLooper: 32, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 12, ToolResultMaxLines: 2000, ToolResultMaxBytes: 50 << 10, ToolImageMaxBytes: 3 << 20}
+	cfg.ToolTimeoutMS = 120000
+	cfg.ExecutionTimeoutMS = 1800000
 	if len(raw) == 0 {
 		return cfg, nil
 	}
@@ -102,6 +106,9 @@ func ParseConfig(raw json.RawMessage) (Config, error) {
 	if cfg.MaxTurns < 1 || cfg.MaxTurns > 128 {
 		return Config{}, errors.New("native-agent config: max_turns must be 1..128")
 	}
+	if cfg.ToolTimeoutMS < 1 || cfg.ToolTimeoutMS > 1800000 || cfg.ExecutionTimeoutMS < 1 || cfg.ExecutionTimeoutMS > 86400000 {
+		return Config{}, errors.New("native-agent config: timeouts must be positive and within tool 30m/execution 24h limits")
+	}
 	seenTools := make(map[string]struct{}, len(cfg.Tools))
 	for _, tool := range cfg.Tools {
 		if !modelToolName.MatchString(tool.Name) {
@@ -121,4 +128,4 @@ func ParseConfig(raw json.RawMessage) (Config, error) {
 	return cfg, nil
 }
 
-const ConfigSchema = `{"type":"object","additionalProperties":false,"properties":{"loopers":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"context_actor":{"type":"string","minLength":1},"llm_actor":{"type":"string","minLength":1},"workspace_actor":{"type":"string"},"host_actor":{"description":"body-side channel Handle used to act through this Channel's Seat in its host","type":"string"},"model":{"type":"string"},"max_open_works":{"type":"integer","minimum":1,"maximum":10000},"max_assignments_per_looper":{"type":"integer","minimum":1,"maximum":10000},"max_inputs_per_work":{"type":"integer","minimum":1,"maximum":10000},"max_operation_keys":{"type":"integer","minimum":1,"maximum":10000},"max_turns":{"type":"integer","minimum":1,"maximum":128},"tools":{"type":"array","items":{"type":"object","required":["name","actor","word"],"properties":{"name":{"type":"string","pattern":"^[A-Za-z_][A-Za-z0-9_-]{0,63}$"},"actor":{"type":"string","minLength":1},"word":{"type":"string","minLength":1}},"additionalProperties":false}},"tool_result_max_lines":{"type":"integer","minimum":1,"maximum":100000},"tool_result_max_bytes":{"type":"integer","minimum":1024,"maximum":4194304},"tool_image_max_bytes":{"type":"integer","minimum":1024,"maximum":3145728}}}`
+const ConfigSchema = `{"type":"object","additionalProperties":false,"properties":{"loopers":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"context_actor":{"type":"string","minLength":1},"llm_actor":{"type":"string","minLength":1},"workspace_actor":{"type":"string"},"host_actor":{"description":"body-side channel Handle used to act through this Channel's Seat in its host","type":"string"},"model":{"type":"string"},"max_open_works":{"type":"integer","minimum":1,"maximum":10000},"max_assignments_per_looper":{"type":"integer","minimum":1,"maximum":10000},"max_inputs_per_work":{"type":"integer","minimum":1,"maximum":10000},"max_operation_keys":{"type":"integer","minimum":1,"maximum":10000},"tool_timeout_ms":{"type":"integer","minimum":1,"maximum":1800000},"execution_timeout_ms":{"type":"integer","minimum":1,"maximum":86400000},"max_turns":{"type":"integer","minimum":1,"maximum":128},"tools":{"type":"array","items":{"type":"object","required":["name","actor","word"],"properties":{"name":{"type":"string","pattern":"^[A-Za-z_][A-Za-z0-9_-]{0,63}$"},"actor":{"type":"string","minLength":1},"word":{"type":"string","minLength":1}},"additionalProperties":false}},"tool_result_max_lines":{"type":"integer","minimum":1,"maximum":100000},"tool_result_max_bytes":{"type":"integer","minimum":1024,"maximum":4194304},"tool_image_max_bytes":{"type":"integer","minimum":1024,"maximum":3145728}}}`

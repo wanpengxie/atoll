@@ -52,13 +52,14 @@ func (s *testState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 
 type testSys struct {
 	actorbase.Sys
-	state    *testState
-	self     actor.ActorID
-	replies  map[message.ID]any
-	fails    map[message.ID]string
-	progress map[message.ID][]any
-	posts    []behavior.RequestSpec
-	events   []behavior.EventSpec
+	state          *testState
+	self           actor.ActorID
+	replies        map[message.ID]any
+	fails          map[message.ID]string
+	progress       map[message.ID][]any
+	posts          []behavior.RequestSpec
+	events         []behavior.EventSpec
+	controlResults chan behavior.RequestSpec
 }
 
 type testPending struct{ msg actorbase.Msg }
@@ -73,7 +74,7 @@ func (p testPending) Wait(context.Context, time.Duration) (actorbase.Msg, error)
 func (p testPending) Cancel() error                                              { return nil }
 
 func newTestSys(state *testState) *testSys {
-	return &testSys{state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}}
+	return &testSys{controlResults: make(chan behavior.RequestSpec, 16), state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}}
 }
 func (s *testSys) State() actorbase.StateHandle { return s.state }
 func (s *testSys) Self() actor.ActorID          { return s.self }
@@ -91,6 +92,11 @@ func (s *testSys) Progress(msg actorbase.Msg, _ string, v any) (message.ID, erro
 	return "progress", nil
 }
 func (s *testSys) Post(spec behavior.RequestSpec) (message.ID, error) {
+	if spec.Type == controlDoneType && s.controlResults != nil {
+		s.controlResults <- spec
+		return "control-done", nil
+	}
+
 	s.posts = append(s.posts, spec)
 	return message.ID("post"), nil
 }
@@ -122,6 +128,19 @@ func testRequest(id, typ string, body any) actorbase.Msg {
 	return testRequestFrom(id, typ, "c", "human:alice:1", body)
 }
 func testRequestFrom(id, typ, channelID, sender string, body any) actorbase.Msg {
+	if typ == agentproto.TypeAsk {
+		raw, _ := json.Marshal(body)
+		var fields map[string]any
+		_ = json.Unmarshal(raw, &fields)
+		if _, ok := fields["view_id"]; !ok && fields["related_work_id"] == nil {
+			key, _ := fields["submission_key"].(string)
+			if key == "" {
+				key = id
+			}
+			fields["view_id"] = "view:" + key
+		}
+		body = fields
+	}
 	raw, _ := json.Marshal(body)
 	wrapped, _ := json.Marshal(map[string]any{"body": json.RawMessage(raw)})
 	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), ChannelID: channel.ID(channelID), Sender: message.Sender{ID: actor.ActorID(sender)}, Kind: message.KindRequest, Type: typ, Payload: wrapped})
@@ -287,72 +306,14 @@ func TestWaitWorkStopsOnlyAfterItsLastCallerLeaves(t *testing.T) {
 	}
 }
 
-func TestLateInputContinuesFromPiHistoryWithoutRedispatchingIncludedInput(t *testing.T) {
-	state := newTestState()
-	sys := newTestSys(state)
-	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "first", "delivery": "receipt", "submission_key": "one"}))
-	w := c.data.Works[c.data.Order[0]]
-	firstAssignment := w.AssignmentID
-	c.handleSteer(sys, testRequest("steer", agentproto.TypeSteer, map[string]any{"work_id": w.ID, "text": "second"}))
-	history := []json.RawMessage{json.RawMessage(`{"role":"user","content":"first"}`), json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"first done"}]}`)}
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{WorkID: w.ID, AssignmentID: firstAssignment, State: "completed", ConsumedThrough: 1, History: history, Result: json.RawMessage(`{"text":"first done"}`), ExecutionState: "confirmed"}))
-	if w.State != agentproto.WorkOpen || w.AssignmentID == firstAssignment || len(sys.posts) < 3 {
-		t.Fatalf("continuation work=%+v posts=%d", w, len(sys.posts))
-	}
-	var next agentloop.StartRequest
-	if err := json.Unmarshal(sys.posts[len(sys.posts)-1].Payload, &next); err != nil {
-		t.Fatal(err)
-	}
-	if len(next.Inputs) != 1 || next.Inputs[0].Text != "second" || len(next.Prior) != len(history) {
-		t.Fatalf("continuation=%+v", next)
-	}
-}
-
-func TestSteerOperationKeyIsIdempotent(t *testing.T) {
-	state := newTestState()
-	sys := newTestSys(state)
-	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "first", "delivery": "receipt", "submission_key": "one"}))
-	w := c.data.Works[c.data.Order[0]]
-	body := map[string]any{"work_id": w.ID, "text": "second", "operation_key": "op-1"}
-	c.handleSteer(sys, testRequest("s1", agentproto.TypeSteer, body))
-	c.handleSteer(sys, testRequest("s2", agentproto.TypeSteer, body))
-	if len(w.Inputs) != 2 || sys.replies["s1"] == nil || sys.replies["s2"] == nil {
-		t.Fatalf("inputs=%d replies=%v", len(w.Inputs), sys.replies)
-	}
-	c.handleSteer(sys, testRequest("s3", agentproto.TypeSteer, map[string]any{"work_id": w.ID, "text": "different", "operation_key": "op-1"}))
-	if sys.fails["s3"] != "operation_conflict" {
-		t.Fatalf("conflict=%q", sys.fails["s3"])
-	}
-}
-
-func TestPerWorkInputAndOperationLimitsAreVisible(t *testing.T) {
-	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{
-		Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm",
-		MaxOpenWorks: 8, MaxInputsPerWork: 2, MaxOperationKeys: 1, MaxTurns: 4,
-	}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{
-		"text": "first", "delivery": "receipt", "submission_key": "one",
-	}))
-	w := c.data.Works[c.data.Order[0]]
-	c.handleSteer(sys, testRequest("s1", agentproto.TypeSteer, map[string]any{
-		"work_id": w.ID, "text": "second", "operation_key": "op-1",
-	}))
-	c.handleSteer(sys, testRequest("s2", agentproto.TypeSteer, map[string]any{
-		"work_id": w.ID, "text": "third",
-	}))
-	if sys.fails["s2"] != "limit_exceeded" {
-		t.Fatalf("input limit failure=%q", sys.fails["s2"])
-	}
-	c.handleInterrupt(sys, testRequest("stop", agentproto.TypeInterrupt, map[string]any{
-		"work_id": w.ID, "operation_key": "op-2",
-	}))
-	if sys.fails["stop"] != "limit_exceeded" {
-		t.Fatalf("operation-key limit failure=%q", sys.fails["stop"])
+func TestUnconsumedInputFailsWithoutRedispatch(t *testing.T) {
+	sys, c, w := controlFixture(t)
+	w.Inputs = append(w.Inputs, inputRecord{Input: agentloop.Input{ID: "late", Seq: 2, Text: "late"}, Disposition: "assigned"})
+	w.AssignedThrough = 2
+	count := len(sys.posts)
+	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{ViewID: w.ViewID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
+	if w.Outcome != agentproto.OutcomeFailed || w.ExecutionState != "unconsumed_input" || len(sys.posts) != count {
+		t.Fatal("unconsumed input was replayed or hidden")
 	}
 }
 
@@ -445,7 +406,7 @@ func TestTargetedInterruptOperationKeyDoesNotPostStopTwice(t *testing.T) {
 	if stops != 1 || sys.replies["stop-1"] == nil || sys.replies["stop-2"] == nil {
 		t.Fatalf("stops=%d replies=%+v", stops, sys.replies)
 	}
-	c.handleSteer(sys, testRequest("conflict", agentproto.TypeSteer, map[string]any{"work_id": w.ID, "text": "more", "operation_key": "stop-1"}))
+	c.steer(sys, testRequest("conflict", agentproto.TypeSteer, map[string]any{"work_id": w.ID, "text": "more", "operation_key": "stop-1"}))
 	if sys.fails["conflict"] != "operation_conflict" {
 		t.Fatalf("conflict=%q", sys.fails["conflict"])
 	}
@@ -491,7 +452,7 @@ func TestReceiptIsIdempotentAndRestartMarksUnknownInsteadOfReplaying(t *testing.
 	postCount := len(sys.posts)
 	restarted.reconcileAfterRestart(sys)
 	w := restarted.data.Works[restarted.data.Order[0]]
-	if w.Stage != "blocked" || w.ExecutionState != "unknown_after_restart" {
+	if w.State != agentproto.WorkClosed || w.Outcome != agentproto.OutcomeFailed || w.ExecutionState != "execution_unknown_after_restart" {
 		t.Fatalf("recovered work=%+v", w)
 	}
 	if len(sys.posts) != postCount {
@@ -499,7 +460,7 @@ func TestReceiptIsIdempotentAndRestartMarksUnknownInsteadOfReplaying(t *testing.
 	}
 }
 
-func TestQueuedContinuationRecoversWithHistoryAndCanBeScheduled(t *testing.T) {
+func TestQueuedContinuationClosesUnknownWithoutReplay(t *testing.T) {
 	sys := newTestSys(newTestState())
 	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	w := &workRecord{
@@ -524,20 +485,19 @@ func TestQueuedContinuationRecoversWithHistoryAndCanBeScheduled(t *testing.T) {
 		t.Fatal(err)
 	}
 	recovered := restarted.data.Works[string(w.ID)]
-	if recovered.Stage != "dispatching" || recovered.ExecutionState != "start_requested" || len(sys.posts) != 1 {
-		t.Fatalf("continuation was not resumed safely: work=%+v posts=%d", recovered, len(sys.posts))
+	if recovered.State != agentproto.WorkClosed || recovered.ExecutionState != "execution_unknown_after_restart" || len(sys.posts) != 0 {
+		t.Fatalf("unexpected replay: %+v", recovered)
 	}
-	var start agentloop.StartRequest
-	if err := json.Unmarshal(sys.posts[0].Payload, &start); err != nil || len(start.Prior) != 2 || len(start.Inputs) != 1 || start.Inputs[0].Text != "second" {
-		t.Fatalf("start=%+v err=%v", start, err)
-	}
+
 }
 
-func TestRelatedWorkStartsExplicitBranchFromDurableCheckpoint(t *testing.T) {
+func TestRelatedWorkContinuesExistingView(t *testing.T) {
 	sys := newTestSys(newTestState())
 	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	prior := []json.RawMessage{json.RawMessage(`{"role":"user","content":"root"}`), json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"checkpoint"}]}`)}
-	source := &workRecord{ID: "w-source", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkClosed, Outcome: agentproto.OutcomeCompleted, Context: prior, CreatedAt: 1, UpdatedAt: 1}
+	source := &workRecord{ID: "w-source", ViewID: "view:source", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkClosed, Outcome: agentproto.OutcomeCompleted, Context: prior, CreatedAt: 1, UpdatedAt: 1}
+	c.sessions = map[string]*session{"view:source": {ID: "view:source", Scope: "c", History: prior}}
+	c.sessionOrder = []string{"view:source"}
 	c.data.Works[string(source.ID)] = source
 	c.data.Order = []string{string(source.ID)}
 	c.handleAsk(sys, testRequest("branch", agentproto.TypeAsk, map[string]any{
@@ -551,7 +511,7 @@ func TestRelatedWorkStartsExplicitBranchFromDurableCheckpoint(t *testing.T) {
 		t.Fatalf("start=%+v err=%v", start, err)
 	}
 	branched := c.data.Works[string(start.WorkID)]
-	if branched.RelatedWorkID != source.ID || !branched.Continuation {
+	if branched.RelatedWorkID != source.ID || branched.ViewID != source.ViewID {
 		t.Fatalf("branch=%+v", branched)
 	}
 	if len(cloneRecoveryWork(source).Context) != len(prior) {

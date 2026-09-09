@@ -89,19 +89,24 @@ func manifest() introspect.Manifest {
 }
 
 type assignment struct {
-	start   agentloop.StartRequest
-	cause   message.Cause
-	cancel  context.CancelFunc
-	mu      sync.Mutex
-	inputs  []agentloop.Input
-	phase   string
-	history []json.RawMessage
+	start    agentloop.StartRequest
+	cause    message.Cause
+	cancel   context.CancelFunc
+	mu       sync.Mutex
+	inputs   []agentloop.Input
+	phase    string
+	history  []json.RawMessage
+	closed   bool
+	consumed int
+	controls []agentloop.ControlResult
 }
 type looper struct {
-	cfg    Config
-	mu     sync.Mutex
-	active map[string]*assignment
-	wg     sync.WaitGroup
+	cfg           Config
+	mu            sync.Mutex
+	active        map[string]*assignment
+	finished      map[string]*assignment
+	finishedOrder []string
+	wg            sync.WaitGroup
 }
 
 func proc(cfg Config) actorbase.Proc {
@@ -157,37 +162,57 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	l.mu.Lock()
-	if old := l.active[string(req.WorkID)]; old != nil {
-		if old.start.AssignmentID == req.AssignmentID {
-			l.mu.Unlock()
-			_, _ = sys.Reply(msg, map[string]any{"disposition": "already_accepted", "assignment_id": req.AssignmentID})
-			l.report(sys, old, "accepted", 0, nil, "", "", "confirmed_running")
+	old := l.active[req.AssignmentID]
+	if old == nil {
+		old = l.finished[req.AssignmentID]
+	}
+	if old != nil {
+		same := string(mustJSON(old.start)) == string(mustJSON(req))
+		l.mu.Unlock()
+		if !same {
+			_, _ = sys.Fail(msg, "assignment_conflict", "assignment id reused with different request")
 			return
 		}
-		l.mu.Unlock()
-		_, _ = sys.Fail(msg, "assignment_conflict", "the work already has a different active assignment")
-		l.reportRejected(sys, msg, req, "assignment_conflict", "the work already has a different active assignment")
+		old.mu.Lock()
+		closed := old.closed
+		old.mu.Unlock()
+		disposition := "already_accepted"
+		if closed {
+			disposition = "already_finished"
+		}
+		_, _ = sys.Reply(msg, map[string]any{"disposition": disposition, "assignment_id": req.AssignmentID})
 		return
 	}
+
 	if len(l.active) >= l.cfg.MaxAssignments {
 		l.mu.Unlock()
 		_, _ = sys.Fail(msg, "capacity", "looper has reached max_assignments")
 		l.reportRejected(sys, msg, req, "capacity", "looper has reached max_assignments")
 		return
 	}
-	ctx, cancel := context.WithCancel(sys.Life())
+	if req.ToolTimeoutMS < 0 || req.ExecutionTimeoutMS < 0 {
+		l.mu.Unlock()
+		_, _ = sys.Fail(msg, "invalid_args", "timeouts must be positive when configured")
+		return
+	}
+	duration := 30 * time.Minute
+	if req.ExecutionTimeoutMS > 0 {
+		duration = time.Duration(req.ExecutionTimeoutMS) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(sys.Life(), duration)
 	a := &assignment{start: req, cause: msg.Cause(), cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted"}
-	l.active[string(req.WorkID)] = a
+	l.active[req.AssignmentID] = a
 	l.wg.Add(1)
 	l.mu.Unlock()
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted", "work_id": req.WorkID, "assignment_id": req.AssignmentID})
 	l.report(sys, a, "accepted", 0, nil, "", "", "confirmed_running")
 	go func() {
 		defer l.wg.Done()
+		defer cancel()
 		l.drive(ctx, sys, a)
 		l.mu.Lock()
-		if l.active[string(req.WorkID)] == a {
-			delete(l.active, string(req.WorkID))
+		if l.active[req.AssignmentID] == a {
+			delete(l.active, req.AssignmentID)
 		}
 		l.mu.Unlock()
 	}()
@@ -204,27 +229,22 @@ func (l *looper) input(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	l.mu.Lock()
-	a := l.active[string(req.WorkID)]
+	a := l.active[req.AssignmentID]
 	l.mu.Unlock()
 	if a == nil {
 		_, _ = sys.Fail(msg, "assignment_not_found", "no active assignment for work")
 		return
 	}
-	if a.start.AssignmentID != req.AssignmentID {
+	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.ViewID != req.ViewID {
 		_, _ = sys.Fail(msg, "operation_mismatch", "input targets a stale assignment")
 		return
 	}
-	a.mu.Lock()
-	for _, in := range a.inputs {
-		if in.ID == req.Input.ID {
-			a.mu.Unlock()
-			_, _ = sys.Reply(msg, map[string]any{"disposition": "already_accepted", "input_id": req.Input.ID})
-			return
-		}
+	decision, err := a.acceptInput(req)
+	if err != nil {
+		_, _ = sys.Fail(msg, "operation_conflict", err.Error())
+		return
 	}
-	a.inputs = append(a.inputs, req.Input)
-	a.mu.Unlock()
-	_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted", "input_id": req.Input.ID, "included": false})
+	_, _ = sys.Reply(msg, decision)
 }
 
 func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
@@ -238,17 +258,20 @@ func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	l.mu.Lock()
-	a := l.active[string(req.WorkID)]
+	a := l.active[req.AssignmentID]
 	l.mu.Unlock()
 	if a == nil {
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "already_stopped", "work_id": req.WorkID})
 		return
 	}
-	if a.start.AssignmentID != req.AssignmentID {
+	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.ViewID != req.ViewID {
 		_, _ = sys.Fail(msg, "operation_mismatch", "stop targets a stale assignment")
 		return
 	}
+	a.mu.Lock()
+	a.closed = true
 	a.cancel()
+	a.mu.Unlock()
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "stop_requested", "work_id": req.WorkID, "assignment_id": req.AssignmentID})
 }
 func (l *looper) inspect(sys actorbase.Sys, msg actorbase.Msg) {
@@ -262,16 +285,25 @@ func (l *looper) inspect(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	l.mu.Lock()
-	a := l.active[string(req.WorkID)]
+	a := l.active[req.AssignmentID]
+	if a == nil {
+		a = l.finished[req.AssignmentID]
+	}
 	l.mu.Unlock()
 	if a == nil {
 		_, _ = sys.Fail(msg, "assignment_not_found", "no active assignment for work")
 		return
 	}
+	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.ViewID != req.ViewID {
+		_, _ = sys.Fail(msg, "operation_mismatch", "inspect targets a different session or incarnation")
+		return
+	}
 	a.mu.Lock()
 	phase, n := a.phase, len(a.inputs)
+	controls := append([]agentloop.ControlResult(nil), a.controls...)
+	consumed := a.consumed
 	a.mu.Unlock()
-	_, _ = sys.Reply(msg, map[string]any{"work_id": req.WorkID, "assignment_id": a.start.AssignmentID, "phase": phase, "input_count": n})
+	_, _ = sys.Reply(msg, map[string]any{"work_id": req.WorkID, "assignment_id": a.start.AssignmentID, "phase": phase, "input_count": n, "controls": controls, "consumed_count": consumed})
 }
 
 func (l *looper) authorized(msg actorbase.Msg) bool {
@@ -294,6 +326,28 @@ func targetMatches(configured, actual string) bool {
 }
 
 func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				a.mu.Lock()
+				closed := a.closed
+				a.mu.Unlock()
+				if closed {
+					return
+				}
+				_, _ = sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(agentloop.ReportRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, ViewID: a.start.ViewID, ContextVersion: a.start.ContextVersion, State: "processing"})})
+			}
+		}
+	}()
+	defer func() { stopHeartbeat(); <-heartbeatDone }()
 	a.mu.Lock()
 	inputs := append([]agentloop.Input(nil), a.inputs...)
 	a.phase = "context"
@@ -306,15 +360,22 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 	}
 	contextRaw, err := call(ctx, sys, a.cause, actor.ActorID(a.start.ContextActor), contextproto.TypeBuild, contextproto.BuildRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, Inputs: inputs, Prior: a.start.Prior})
 	if err != nil {
-		l.report(sys, a, "failed", through, nil, "context_failed", err.Error(), stateForError(err))
+		l.report(sys, a, "failed", 0, nil, "context_failed", err.Error(), stateForError(err))
 		return
 	}
 	var artifact contextproto.Artifact
 	if err := json.Unmarshal(contextRaw, &artifact); err != nil {
-		l.report(sys, a, "failed", through, nil, "context_invalid", err.Error(), "confirmed")
+		l.report(sys, a, "failed", 0, nil, "context_invalid", err.Error(), "confirmed")
 		return
 	}
 	history := append([]json.RawMessage(nil), artifact.Messages...)
+	if err := validateHistory(history); err != nil {
+		l.report(sys, a, "failed", 0, nil, "context_invalid", err.Error(), "confirmed")
+		return
+	}
+	a.mu.Lock()
+	a.consumed = len(inputs)
+	a.mu.Unlock()
 	a.setHistory(history)
 	turns := a.start.MaxTurns
 	if turns <= 0 {
@@ -332,6 +393,33 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		targets[tool.Name] = tool
 	}
 	for turn := 0; turn < turns; turn++ {
+		if ctx.Err() != nil {
+			l.report(sys, a, "cancelled", through, nil, "cancelled", ctx.Err().Error(), "confirmed_stopped")
+			return
+		}
+		pending := a.pendingInputs()
+		if len(pending) > 0 {
+			built, buildErr := call(ctx, sys, a.cause, actor.ActorID(a.start.ContextActor), contextproto.TypeBuild, contextproto.BuildRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, Inputs: pending, Prior: history})
+			var next contextproto.Artifact
+			if buildErr != nil || json.Unmarshal(built, &next) != nil {
+				l.report(sys, a, "failed", through, nil, "context_failed", "cannot build accepted control input", "confirmed")
+				return
+			}
+			history = append([]json.RawMessage(nil), next.Messages...)
+			a.mu.Lock()
+			a.consumed += len(pending)
+			a.mu.Unlock()
+			for _, in := range pending {
+				if in.Seq > through {
+					through = in.Seq
+				}
+			}
+			a.setHistory(history)
+		}
+		if err := validateHistory(history); err != nil {
+			l.report(sys, a, "failed", through, nil, "context_invalid", err.Error(), "confirmed")
+			return
+		}
 		a.mu.Lock()
 		a.phase = "thinking"
 		a.mu.Unlock()
@@ -339,6 +427,10 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		if err != nil {
 			state := "confirmed"
 			kind := "llm_failed"
+			var failure *callFailure
+			if errors.As(err, &failure) && failure.Code != "" {
+				kind = failure.Code
+			}
 			if errors.Is(err, context.Canceled) {
 				kind = "cancelled"
 				state = "confirmed_stopped"
@@ -353,18 +445,22 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 			l.report(sys, a, "failed", through, nil, "llm_invalid", err.Error(), "confirmed")
 			return
 		}
-		history = append(history, generated.Message)
-		a.setHistory(history)
-		if historySize(history) > agentloop.MaxHistoryBytes {
-			l.report(sys, a, "failed", through, nil, "context_limit", "Pi history exceeded the phase-one recovery limit before tool execution", "confirmed")
-			return
-		}
 		calls, text, err := assistantParts(generated.Message)
 		if err != nil {
-			l.report(sys, a, "failed", through, nil, "llm_invalid", err.Error(), "confirmed")
+			l.report(sys, a, "failed", through, nil, "invalid_model_response", err.Error(), "confirmed")
 			return
 		}
+		reason := stopReason(generated.Message)
+		if reason == "error" || reason == "aborted" {
+			l.report(sys, a, "failed", through, nil, "provider_error", "provider did not deliver a complete successful assistant", "confirmed")
+			return
+		}
+		history = append(history, generated.Message)
+		a.setHistory(history)
 		if len(calls) == 0 {
+			if !a.seal() {
+				continue
+			}
 			resultText, truncated := boundedResultText(text)
 			result, _ := json.Marshal(map[string]any{"text": resultText, "text_truncated": truncated, "message": generated.Message, "context_artifact_id": artifact.ArtifactID, "provider": generated.Provider, "model": generated.Model})
 			l.report(sys, a, "completed", through, result, "", "", "confirmed")
@@ -374,36 +470,59 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		a.phase = "acting"
 		a.mu.Unlock()
 		for _, tc := range calls {
+			if reason == "length" {
+				history = append(history, toolResult(tc, true, "Looper: model output truncated; this tool call was not executed"))
+				continue
+			}
+			if ctx.Err() != nil {
+				history = append(history, toolResult(tc, true, "Looper: execution cancelled before this tool was dispatched"))
+				continue
+			}
+			if !validArguments(tc.Arguments) {
+				history = append(history, toolResult(tc, true, "Looper: invalid_args; arguments must be an object; tool was not executed"))
+				continue
+			}
 			tool, ok := targets[tc.Name]
 			if !ok {
 				history = append(history, toolResult(tc, true, "unknown tool "+tc.Name))
 				a.setHistory(history)
-				if historySize(history) > agentloop.MaxHistoryBytes {
-					l.report(sys, a, "failed", through, nil, "context_limit", "Pi history exceeded the phase-one recovery limit", "confirmed")
-					return
-				}
 				continue
 			}
-			toolRaw, callErr := call(ctx, sys, a.cause, actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
+			toolTimeout := 2 * time.Minute
+			if a.start.ToolTimeoutMS > 0 {
+				toolTimeout = time.Duration(a.start.ToolTimeoutMS) * time.Millisecond
+			}
+			toolCtx, cancelTool := context.WithTimeout(ctx, toolTimeout)
+			toolRaw, callErr := call(toolCtx, sys, a.cause, actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
+			cancelTool()
 			if callErr != nil {
-				if errors.Is(callErr, context.Canceled) {
-					l.report(sys, a, "cancelled", through, nil, "cancelled", callErr.Error(), "confirmed_stopped")
-					return
+				detail := callErr.Error()
+				if errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded) {
+					detail = "Looper: no tool result received; external execution/effects unknown: " + detail
 				}
-				history = append(history, toolResult(tc, true, callErr.Error()))
+				result := toolResult(tc, true, detail)
+				var failure *callFailure
+				if errors.As(callErr, &failure) {
+					var fields map[string]json.RawMessage
+					_ = json.Unmarshal(result, &fields)
+					fields["details"] = mustRaw(map[string]any{"source": "looper_wait", "request_id": failure.RequestID, "error_code": failure.Code, "external_effects_unknown": errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded)})
+					result = mustRaw(fields)
+				}
+				history = append(history, result)
 				a.setHistory(history)
-				if historySize(history) > agentloop.MaxHistoryBytes {
-					l.report(sys, a, "failed", through, nil, "context_limit", "Pi history exceeded the phase-one recovery limit", "confirmed")
-					return
-				}
 				continue
 			}
 			history = append(history, l.toolResult(ctx, sys, a, tc, tool, toolRaw))
 			a.setHistory(history)
-			if historySize(history) > agentloop.MaxHistoryBytes {
-				l.report(sys, a, "failed", through, nil, "context_limit", "Pi history exceeded the phase-one recovery limit", "confirmed")
-				return
-			}
+		}
+		a.setHistory(history)
+		if ctx.Err() != nil {
+			l.report(sys, a, "cancelled", through, nil, "cancelled", "local execution stopped; dispatched tool effects may be unknown", "confirmed_stopped")
+			return
+		}
+		if historySize(history) > agentloop.MaxHistoryBytes {
+			l.report(sys, a, "failed", through, nil, "context_limit", "history limit exceeded after closing tool batch", "confirmed")
+			return
 		}
 	}
 	l.report(sys, a, "failed", through, nil, "turn_limit", "Agent loop reached max_turns", "confirmed")
@@ -436,6 +555,7 @@ func assistantParts(raw json.RawMessage) ([]toolCall, string, error) {
 		return nil, "", errors.New("LLM message must be an assistant object with content blocks")
 	}
 	var calls []toolCall
+	seen := map[string]bool{}
 	var text string
 	for _, block := range m.Content {
 		var head struct {
@@ -450,10 +570,10 @@ func assistantParts(raw json.RawMessage) ([]toolCall, string, error) {
 		}
 		if head.Type == "toolCall" {
 			var tc toolCall
-			var arguments map[string]json.RawMessage
-			if json.Unmarshal(block, &tc) != nil || strings.TrimSpace(tc.ID) == "" || strings.TrimSpace(tc.Name) == "" || json.Unmarshal(tc.Arguments, &arguments) != nil || arguments == nil {
-				return nil, "", errors.New("LLM tool call requires id, name, and object arguments")
+			if json.Unmarshal(block, &tc) != nil || strings.TrimSpace(tc.ID) == "" || strings.TrimSpace(tc.Name) == "" || seen[tc.ID] {
+				return nil, "", errors.New("LLM tool call requires a unique nonempty id and name")
 			}
+			seen[tc.ID] = true
 			calls = append(calls, tc)
 		}
 	}
@@ -837,24 +957,42 @@ func parseModel(value string) llmproto.ModelRef {
 	return llmproto.ModelRef{Model: value}
 }
 func call(ctx context.Context, sys actorbase.Sys, cause message.Cause, target actor.ActorID, typ string, payload any) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	pd, err := sys.Call(cause, target, typ, payload)
 	if err != nil {
 		return nil, err
 	}
 	progressDone := make(chan struct{})
+	drainCtx, stopDrain := context.WithCancel(ctx)
+	defer stopDrain()
 	go func() {
 		defer close(progressDone)
-		for range pd.Progress() {
-			// Progress is already a ledger fact. Phase one does not reinterpret
-			// provider-specific stream events as Controller state, but consuming
-			// them prevents bounded delivery from backpressuring the endpoint.
+		for {
+			select {
+			case _, ok := <-pd.Progress():
+				if !ok {
+					return
+				}
+			case <-drainCtx.Done():
+				return
+			}
 		}
 	}()
 	msg, err := pd.Wait(ctx, 0)
+	stopDrain()
 	if err != nil {
 		_ = pd.Cancel()
 		<-progressDone
-		return nil, err
+		code := "call_failed"
+		if errors.Is(err, context.Canceled) {
+			code = "cancelled"
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "deadline_exceeded"
+		}
+		return nil, &callFailure{Code: code, Detail: err.Error(), RequestID: string(pd.RequestID()), cause: err}
 	}
 	<-progressDone
 	var state struct {
@@ -865,14 +1003,18 @@ func call(ctx context.Context, sys actorbase.Sys, cause message.Cause, target ac
 		if state.ErrorCode == "" {
 			state.ErrorCode = "call_failed"
 		}
-		return nil, fmt.Errorf("%s: %s", state.ErrorCode, state.Detail)
+		return nil, &callFailure{Code: state.ErrorCode, Detail: state.Detail, RequestID: string(pd.RequestID())}
 	}
 	return append(json.RawMessage(nil), msg.Payload...), nil
 }
 func (l *looper) report(sys actorbase.Sys, a *assignment, state string, through int64, result json.RawMessage, code, detail, execution string) {
 	a.mu.Lock()
 	a.phase = state
+	if state != "accepted" {
+		a.closed = true
+	}
 	history := append([]json.RawMessage(nil), a.history...)
+	controls := append([]agentloop.ControlResult(nil), a.controls...)
 	a.mu.Unlock()
 	if historySize(history) > agentloop.MaxHistoryBytes {
 		history = nil
@@ -886,12 +1028,21 @@ func (l *looper) report(sys actorbase.Sys, a *assignment, state string, through 
 	// successor could be rejected by a lane that was already logically free.
 	if state != "accepted" {
 		l.mu.Lock()
-		if l.active[string(a.start.WorkID)] == a {
-			delete(l.active, string(a.start.WorkID))
+		if l.active[a.start.AssignmentID] == a {
+			delete(l.active, a.start.AssignmentID)
+		}
+		if l.finished == nil {
+			l.finished = map[string]*assignment{}
+		}
+		l.finished[a.start.AssignmentID] = a
+		l.finishedOrder = append(l.finishedOrder, a.start.AssignmentID)
+		for len(l.finishedOrder) > 256 {
+			delete(l.finished, l.finishedOrder[0])
+			l.finishedOrder = l.finishedOrder[1:]
 		}
 		l.mu.Unlock()
 	}
-	payload := agentloop.ReportRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, State: state, ConsumedThrough: through, Result: result, ErrorCode: code, Detail: detail, ExecutionState: execution, History: history}
+	payload := agentloop.ReportRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, ViewID: a.start.ViewID, ContextVersion: a.start.ContextVersion, Controls: controls, State: state, ConsumedThrough: through, Result: result, ErrorCode: code, Detail: detail, ExecutionState: execution, History: history}
 	_, _ = sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(payload)})
 }
 

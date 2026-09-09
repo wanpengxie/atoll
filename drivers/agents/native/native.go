@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
@@ -16,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const stateKey resource.ResourceID = "native-agent.work-projection.v1"
@@ -23,9 +25,12 @@ const maxWorkInputBytes = 4 << 20
 const maxRecoveryRecordBytes = 14 << 20
 
 type controller struct {
-	cfg  Config
-	data snapshot
-	wait map[agentproto.WorkID][]actorbase.Msg
+	cfg          Config
+	data         snapshot
+	wait         map[agentproto.WorkID][]actorbase.Msg
+	sessions     map[string]*session
+	sessionOrder []string
+	nextSession  int
 }
 
 func run(sys actorbase.Sys, cfg Config) error {
@@ -36,6 +41,7 @@ func run(sys actorbase.Sys, cfg Config) error {
 	if err := c.reconcileAfterRestart(sys); err != nil {
 		return err
 	}
+	_, _ = sys.After(10*time.Second, pulseType, map[string]any{}, schedule.TimerHomeMemory)
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
@@ -52,7 +58,13 @@ func run(sys actorbase.Sys, cfg Config) error {
 		case agentproto.TypeResult:
 			c.handleResult(sys, msg)
 		case agentproto.TypeSteer:
-			c.handleSteer(sys, msg)
+			c.steer(sys, msg)
+		case agentproto.TypeReplace, agentproto.TypeHold, agentproto.TypeUnhold:
+			c.editControl(sys, msg)
+		case controlDoneType:
+			c.controlDone(sys, msg)
+		case pulseType:
+			c.pulse(sys, msg)
 		case agentproto.TypeInterrupt:
 			c.handleInterrupt(sys, msg)
 		case agentloop.TypeReport:
@@ -389,13 +401,11 @@ func (c *controller) reconcileAfterRestart(sys actorbase.Sys) error {
 		if w.State != agentproto.WorkOpen {
 			continue
 		}
-		if w.AssignmentID != "" || w.Stage != "queued" || (w.Continuation && len(w.Context) == 0) {
-			w.Stage = "blocked"
-			if w.Continuation && w.AssignmentID == "" {
-				w.ExecutionState = "continuation_context_unavailable_after_restart"
-			} else {
-				w.ExecutionState = "unknown_after_restart"
-			}
+		{
+			w.State, w.Stage, w.Outcome = agentproto.WorkClosed, "", agentproto.OutcomeFailed
+			w.ExecutionState = "execution_unknown_after_restart"
+			w.Continuation = false
+			w.Result = mustJSON(map[string]any{"error_code": "execution_unknown", "detail": "previous incarnation ended; no model or tool request was replayed"})
 			w.UpdatedAt = nowMillis()
 			if err := c.commit(sys, message.Root(), w); err != nil {
 				return err
@@ -403,7 +413,6 @@ func (c *controller) reconcileAfterRestart(sys actorbase.Sys) error {
 			c.emit(sys, message.Root(), "agent.work.recovery_required", publicWork(w))
 		}
 	}
-	c.scheduleQueued(sys, message.Root())
 	return nil
 }
 
@@ -430,27 +439,10 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "capacity", "the Agent has reached max_open_works")
 		return
 	}
-	var prior []json.RawMessage
-	if req.RelatedWorkID != "" {
-		related, ok := c.owned(msg, req.RelatedWorkID)
-		if !ok {
-			_, _ = sys.Fail(msg, "work_not_found", "no visible related work has that id")
-			return
-		}
-		if len(related.Context) == 0 {
-			_, _ = sys.Fail(msg, "context_unavailable", "the related work has no durable context checkpoint to branch from")
-			return
-		}
-		prior = append([]json.RawMessage(nil), related.Context...)
-	}
 	now := nowMillis()
 	w := &workRecord{ID: newWorkID(), Owner: caller, SourceRequest: string(msg.ID), SubmissionKey: req.SubmissionKey,
 		SubmissionHash: submissionHash(req), RelatedWorkID: req.RelatedWorkID, Delivery: req.Delivery,
 		State: agentproto.WorkOpen, Stage: "queued", ExecutionState: "not_started", CreatedAt: now, UpdatedAt: now}
-	if len(prior) > 0 {
-		w.Context = prior
-		w.Continuation = true
-	}
 	w.Inputs = []inputRecord{{Input: agentloop.Input{
 		ID: newInputID(), Seq: 1, Text: req.Text,
 		Attachments:   append([]json.RawMessage(nil), req.Attachments...),
@@ -460,6 +452,26 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "limit_exceeded", "the work input exceeds the phase-one recovery limit")
 		return
 	}
+	s, sessionErr := c.sessionForAsk(msg, req)
+	if sessionErr != nil {
+		_, _ = sys.Fail(msg, sessionErr.Error(), "cannot select conversation")
+		return
+	}
+	if len(s.Buffer) >= maxSessionQueue {
+		_, _ = sys.Fail(msg, "capacity", "session waiting queue full")
+		return
+	}
+	var waitingBytes int
+	for _, id := range s.Buffer {
+		if queued := c.data.Works[string(id)]; queued != nil {
+			waitingBytes += inputRecordsSize(queued.Inputs)
+		}
+	}
+	if waitingBytes+inputRecordsSize(w.Inputs) > maxWorkInputBytes {
+		_, _ = sys.Fail(msg, "capacity", "session waiting input bytes exceeded")
+		return
+	}
+	w.ViewID = s.ID
 	c.data.Works[string(w.ID)] = w
 	c.data.Order = append(c.data.Order, string(w.ID))
 	if err := c.commit(sys, msg.Cause(), w); err != nil {
@@ -469,6 +481,10 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	c.emit(sys, msg.Cause(), "agent.work.accepted", map[string]any{"work": publicWork(w), "owner": caller, "input_id": w.Inputs[0].ID})
+	s.Buffer = append(s.Buffer, w.ID)
+	s.Freeze = ""
+	s.RestoreInterrupt = false
+	s.LastUsed = nowMillis()
 	if req.Delivery == agentproto.DeliveryWait {
 		c.attachWaiter(sys, msg, w)
 	} else {
@@ -533,7 +549,7 @@ func (c *controller) answerAsk(sys actorbase.Sys, msg actorbase.Msg, w *workReco
 		_, _ = sys.Reply(msg, resultPayload(w))
 		return
 	}
-	_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted", "work_id": w.ID, "work_state": w.State,
+	_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted", "work_id": w.ID, "view_id": w.ViewID, "work_state": w.State,
 		"guidance": "Keep work_id as the stable address. Poll agent.result for completion or use an actor-authored targeted control from next.",
 		"next":     nextFor(w)})
 }
@@ -563,6 +579,10 @@ func (c *controller) freeLooper() (string, bool) {
 }
 
 func (c *controller) scheduleQueued(sys actorbase.Sys, cause message.Cause) {
+	if len(c.sessions) > 0 {
+		c.scheduleSessions(sys, cause)
+		return
+	}
 	for _, id := range c.data.Order {
 		w := c.data.Works[id]
 		if w == nil || w.State != agentproto.WorkOpen || w.Stage != "queued" || w.AssignmentID != "" {
@@ -620,14 +640,17 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 		tools = &bindings
 	}
 	_, err := sys.Post(behavior.RequestSpec{Cause: cause, Type: agentloop.TypeStart, Audience: message.Audience{actorID(looper)}, Payload: mustJSON(agentloop.StartRequest{
-		WorkID: w.ID, AssignmentID: w.AssignmentID, ControllerActor: string(sys.Self()), Inputs: inputs, Prior: append([]json.RawMessage(nil), w.Context...), ContextActor: c.cfg.ContextActor, LLMActor: c.cfg.LLMActor,
+		WorkID: w.ID, AssignmentID: w.AssignmentID, ViewID: w.ViewID, ContextVersion: w.ContextVersion, ToolTimeoutMS: c.cfg.ToolTimeoutMS, ExecutionTimeoutMS: c.cfg.ExecutionTimeoutMS, ControllerActor: string(sys.Self()), Inputs: inputs, Prior: append([]json.RawMessage(nil), w.Context...), ContextActor: c.cfg.ContextActor, LLMActor: c.cfg.LLMActor,
 		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: c.cfg.Model, MaxTurns: c.cfg.MaxTurns, Tools: tools,
 		ToolResultMaxLines: c.cfg.ToolResultMaxLines, ToolResultMaxBytes: c.cfg.ToolResultMaxBytes, ToolImageMaxBytes: c.cfg.ToolImageMaxBytes})})
 	if err != nil {
 		w.AssignmentID, w.Looper = "", ""
-		w.Stage, w.ExecutionState, w.UpdatedAt = "blocked", "dispatch_failed", nowMillis()
+		w.State, w.Outcome = agentproto.WorkClosed, agentproto.OutcomeFailed
+		w.Stage, w.ExecutionState, w.UpdatedAt = "", "dispatch_failed", nowMillis()
+		w.Result = mustJSON(map[string]any{"error_code": "dispatch_failed", "detail": err.Error()})
 		_ = c.commit(sys, cause, w)
 		c.emit(sys, cause, "agent.work.dispatch_failed", map[string]any{"work_id": w.ID, "detail": err.Error()})
+		c.finishWaiters(sys, w)
 		return true
 	}
 	// A successful Post proves only that the request entered the channel. The
@@ -705,84 +728,119 @@ func (c *controller) handleResult(sys actorbase.Sys, msg actorbase.Msg) {
 	_, _ = sys.Reply(msg, resultPayload(w))
 }
 
-func (c *controller) handleSteer(sys actorbase.Sys, msg actorbase.Msg) {
-	req, err := agentproto.DecodeSteer(msg.Payload)
-	if err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
-		return
-	}
-	if req.All || req.Target != "" || req.ExpectedTurnID != "" {
-		_, _ = sys.Fail(msg, "unsupported_scope", "native Agent phase one accepts work-addressed text steering only")
-		return
-	}
-	w, ok := c.owned(msg, req.WorkID)
-	if !ok {
-		_, _ = sys.Fail(msg, "work_not_found", "no visible work has that id")
-		return
-	}
-	opKey := operationIndexKey(actorbase.EffectiveCaller(msg), req.OperationKey)
-	opHash := requestHash(struct {
-		WorkID agentproto.WorkID `json:"work_id"`
-		Text   string            `json:"text"`
-	}{req.WorkID, req.Text})
-	if req.OperationKey != "" && w.Operations != nil {
-		if prior, found := w.Operations[opKey]; found {
-			if prior.Kind != agentproto.TypeSteer || prior.Hash != opHash {
-				_, _ = sys.Fail(msg, "operation_conflict", "operation_key already names a different control")
-				return
-			}
-			_, _ = sys.Reply(msg, json.RawMessage(prior.Response))
-			return
-		}
-	}
-	if w.State == agentproto.WorkClosed {
-		_, _ = sys.Fail(msg, "work_closed", "the work is already closed")
-		return
-	}
-	if c.cfg.MaxInputsPerWork > 0 && len(w.Inputs) >= c.cfg.MaxInputsPerWork {
-		_, _ = sys.Fail(msg, "limit_exceeded", "the work has reached max_inputs_per_work")
-		return
-	}
-	if req.OperationKey != "" && c.cfg.MaxOperationKeys > 0 && len(w.Operations) >= c.cfg.MaxOperationKeys {
-		_, _ = sys.Fail(msg, "limit_exceeded", "the work has reached max_operation_keys")
-		return
-	}
-	seq := int64(len(w.Inputs) + 1)
-	caller := actorbase.EffectiveCaller(msg)
-	in := inputRecord{Input: agentloop.Input{ID: newInputID(), Seq: seq, Text: req.Text, CallerChannel: caller.Channel, CallerActor: caller.Actor}, Disposition: "accepted"}
-	if inputRecordsSize(append(append([]inputRecord(nil), w.Inputs...), in)) > maxWorkInputBytes {
-		_, _ = sys.Fail(msg, "limit_exceeded", "the work input exceeds the phase-one recovery limit")
-		return
-	}
-	old := cloneWork(w)
-	w.Inputs = append(w.Inputs, in)
-	if w.AssignmentID != "" {
-		w.AssignedThrough = seq
-	}
-	w.UpdatedAt = nowMillis()
-	response := mustJSON(map[string]any{"work_id": w.ID, "input_id": in.ID, "disposition": "accepted", "included": false})
-	if req.OperationKey != "" {
-		if w.Operations == nil {
-			w.Operations = map[string]operationRecord{}
-		}
-		w.Operations[opKey] = operationRecord{Kind: agentproto.TypeSteer, Hash: opHash, Response: response}
-	}
-	if err := c.commit(sys, msg.Cause(), w); err != nil {
-		*w = *old
-		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
-		return
-	}
-	c.emit(sys, msg.Cause(), "agent.work.input_accepted", map[string]any{"work_id": w.ID, "input_id": in.ID, "seq": seq})
-	if w.AssignmentID != "" {
-		_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeInput, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.InputRequest{WorkID: w.ID, AssignmentID: w.AssignmentID, Input: in.Input})})
-	}
-	_, _ = sys.Reply(msg, json.RawMessage(response))
-}
-
 func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 	req, err := agentproto.DecodeInterrupt(msg.Payload)
 	if err != nil {
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		return
+	}
+	if len(c.sessions) > 0 {
+		opKey := operationIndexKey(actorbase.EffectiveCaller(msg), req.OperationKey)
+		opHash := requestHash(req)
+		if req.OperationKey != "" {
+			for _, w := range c.data.Works {
+				if prior, ok := w.Operations[opKey]; ok {
+					if prior.Kind != agentproto.TypeInterrupt || prior.Hash != opHash {
+						_, _ = sys.Fail(msg, "operation_conflict", "operation_key already names different control")
+						return
+					}
+					_, _ = sys.Reply(msg, json.RawMessage(prior.Response))
+					return
+				}
+			}
+		}
+		var selected []*session
+		if req.WorkID != "" || req.ViewID != "" {
+			s, err := c.selectSession(msg, req.ViewID, req.WorkID, "")
+			if err != nil {
+				_, _ = sys.Fail(msg, err.Error(), "cannot select interrupt session")
+				return
+			}
+			selected = []*session{s}
+		} else {
+			scope := workScopeKey(actorbase.EffectiveCaller(msg))
+			for _, s := range c.sessions {
+				if s.Scope == scope {
+					selected = append(selected, s)
+				}
+			}
+		}
+		if req.WorkID != "" {
+			w := c.data.Works[string(req.WorkID)]
+			if w.State == agentproto.WorkClosed {
+				_, _ = sys.Reply(msg, map[string]any{"disposition": "already_closed", "work_id": w.ID})
+				return
+			}
+		}
+		if req.OperationKey != "" && c.cfg.MaxOperationKeys > 0 {
+			for _, v := range selected {
+				for _, w := range c.data.Works {
+					if w.ViewID == v.ID && len(w.Operations) >= c.cfg.MaxOperationKeys {
+						_, _ = sys.Fail(msg, "limit_exceeded", "max_operation_keys reached")
+						return
+					}
+				}
+			}
+		}
+		results := []map[string]any{}
+		for _, s := range selected {
+			if s.Control != nil {
+				results = append(results, map[string]any{"view_id": s.ID, "disposition": "busy"})
+				continue
+			}
+			if req.WorkID != "" && req.WorkID != s.Owner {
+				w := c.data.Works[string(req.WorkID)]
+				err := c.stop(sys, msg, w, false)
+				if err != nil {
+					results = append(results, map[string]any{"view_id": s.ID, "disposition": "failed", "detail": err.Error()})
+				} else {
+					results = append(results, map[string]any{"view_id": s.ID, "disposition": "stop_requested"})
+				}
+				continue
+			}
+			s.Freeze = "interrupt"
+			s.RestoreInterrupt = false
+			if w := c.data.Works[string(s.Owner)]; w != nil && s.Execution != "" {
+				if err := c.stop(sys, msg, w, false); err != nil {
+					results = append(results, map[string]any{"view_id": s.ID, "disposition": "failed", "detail": err.Error()})
+					continue
+				}
+			}
+			if req.WorkID == "" && req.ViewID == "" {
+				for _, id := range append([]agentproto.WorkID(nil), s.Buffer...) {
+					if w := c.data.Works[string(id)]; w != nil {
+						_ = c.stop(sys, msg, w, false)
+					}
+				}
+				s.Buffer = nil
+			}
+			results = append(results, map[string]any{"view_id": s.ID, "disposition": "stop_requested"})
+		}
+		scope := "view"
+		if req.WorkID == "" && req.ViewID == "" {
+			scope = "agent"
+		}
+		stopped := 0
+		for _, result := range results {
+			if result["disposition"] == "stop_requested" {
+				stopped++
+			}
+		}
+		response := mustJSON(map[string]any{"scope": scope, "stop_requested": stopped, "sessions": results, "disposition": "stop_requested"})
+		if req.OperationKey != "" {
+			for _, w := range c.data.Works {
+				for _, s := range selected {
+					if w.ViewID == s.ID {
+						if w.Operations == nil {
+							w.Operations = map[string]operationRecord{}
+						}
+						w.Operations[opKey] = operationRecord{Kind: agentproto.TypeInterrupt, Hash: opHash, Response: response}
+						_ = c.commit(sys, msg.Cause(), w)
+					}
+				}
+			}
+		}
+		_, _ = sys.Reply(msg, json.RawMessage(response))
 		return
 	}
 	if req.WorkID == "" {
@@ -852,7 +910,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 }
 
 func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, schedule bool) error {
-	if w.Stage == "stopping" {
+	if w.State == agentproto.WorkClosed || w.Stage == "stopping" {
 		return nil
 	}
 	old := *w
@@ -869,6 +927,9 @@ func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, s
 		}
 		c.emit(sys, msg.Cause(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
 		c.finishWaiters(sys, w)
+		if s := c.sessions[w.ViewID]; s != nil {
+			removeQueue(s, w.ID)
+		}
 		if schedule {
 			c.scheduleQueued(sys, msg.Cause())
 		}
@@ -879,7 +940,7 @@ func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, s
 		*w = old
 		return err
 	}
-	_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, AssignmentID: w.AssignmentID, Reason: "agent.interrupt"})})
+	_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, ViewID: w.ViewID, AssignmentID: w.AssignmentID, Reason: "agent.interrupt"})})
 	c.emit(sys, msg.Cause(), "agent.work.stop_requested", publicWork(w))
 	return nil
 }
@@ -891,8 +952,36 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	w := c.data.Works[string(req.WorkID)]
+	s := c.sessions[req.ViewID]
+	if s == nil && w != nil {
+		s = c.sessions[w.ViewID]
+	}
+	if s != nil && s.Execution == req.AssignmentID {
+		current := c.data.Works[string(s.Owner)]
+		if current == nil || !targetMatches(current.Looper, msg.Sender.ID.String()) || req.ContextVersion != s.Version {
+			_, _ = sys.Fail(msg, "stale_assignment", "report session identity or version mismatch")
+			return
+		}
+		for _, decision := range req.Controls {
+			c.settleControl(sys, s, decision, false)
+		}
+		if s.Control != nil && req.State != "accepted" && req.State != "processing" {
+			c.settleControl(sys, s, agentloop.ControlResult{ControlID: s.Control.ID, Disposition: "target_gone"}, false)
+		}
+		w = c.data.Works[string(s.Owner)]
+	}
 	if w == nil || req.AssignmentID != w.AssignmentID || !targetMatches(w.Looper, msg.Sender.ID.String()) {
 		_, _ = sys.Fail(msg, "stale_assignment", "report does not belong to the current assignment")
+		return
+	}
+	if req.State == "processing" {
+		w.UpdatedAt = nowMillis()
+		for _, waiting := range c.wait[w.ID] {
+			if waiting.Ctx().Err() == nil {
+				_, _ = sys.Progress(waiting, "processing", map[string]any{"work_id": w.ID, "view_id": w.ViewID, "assignment_id": w.AssignmentID, "stage": "executing"})
+			}
+		}
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "observed"})
 		return
 	}
 	if req.State != "accepted" && req.State != "completed" && req.State != "failed" && req.State != "cancelled" {
@@ -923,6 +1012,7 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = sys.Reply(msg, map[string]any{"disposition": "acknowledged", "work_id": w.ID, "stop_pending": true})
 			return
 		}
+		w.Looper = msg.Sender.ID.String()
 		w.Stage, w.ExecutionState, w.UpdatedAt = "thinking", "confirmed_running", nowMillis()
 		if err := c.commit(sys, msg.Cause(), w); err != nil {
 			*w = *old
@@ -941,6 +1031,32 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 	if len(req.History) > 0 {
 		w.Context = append([]json.RawMessage(nil), req.History...)
 	}
+	if s != nil && s.Execution == req.AssignmentID && req.State != "accepted" {
+		s.History = append([]json.RawMessage(nil), req.History...)
+		s.Version++
+		s.Execution = ""
+		s.Owner = ""
+		s.LastUsed = nowMillis()
+		if s.Rebuffer {
+			s.Rebuffer = false
+			w.AssignmentID = ""
+			w.Looper = ""
+			w.Stage = "queued"
+			w.ExecutionState = "interrupted_for_edit"
+			w.Resumed = true
+			text := "Continue interrupted work after editing. Previously dispatched tool effects may be unknown."
+			if len(w.Inputs) > 0 {
+				text += "\n" + w.Inputs[len(w.Inputs)-1].Text
+			}
+			w.Inputs = []inputRecord{{Input: agentloop.Input{ID: newInputID(), Seq: 1, Text: text, CallerActor: w.Owner.Actor, CallerChannel: w.Owner.Channel}, Disposition: "accepted"}}
+
+			s.Buffer = append([]agentproto.WorkID{w.ID}, s.Buffer...)
+			_ = c.commit(sys, msg.Cause(), w)
+			_, _ = sys.Reply(msg, map[string]any{"disposition": "rebuffered"})
+			c.scheduleQueued(sys, msg.Cause())
+			return
+		}
+	}
 	if w.Stage == "stopping" || req.State == "cancelled" {
 		w.State, w.Stage, w.Outcome, w.ExecutionState = agentproto.WorkClosed, "", agentproto.OutcomeCancelled, req.ExecutionState
 	} else if req.State == "completed" {
@@ -952,19 +1068,18 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 			}
 		}
 		if pending {
-			w.AssignmentID = ""
-			w.AssignedThrough = 0
-			w.Looper = ""
-			w.Stage = "queued"
-			w.ExecutionState = "not_started"
-			w.Continuation = true
+			w.State, w.Stage, w.Outcome = agentproto.WorkClosed, "", agentproto.OutcomeFailed
+			w.ExecutionState = "unconsumed_input"
+			w.Continuation = false
+			w.Result = mustJSON(map[string]any{"error_code": "unconsumed_input", "detail": "execution ended with accepted inputs not consumed; no continuation was replayed"})
 			w.UpdatedAt = nowMillis()
 			if err := c.commit(sys, msg.Cause(), w); err != nil {
 				*w = *old
 				_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
 				return
 			}
-			_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted_for_continuation"})
+			c.finishWaiters(sys, w)
+			_, _ = sys.Reply(msg, map[string]any{"disposition": "closed_unconsumed"})
 			c.scheduleQueued(sys, msg.Cause())
 			return
 		}
@@ -988,7 +1103,7 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 }
 
 func resultPayload(w *workRecord) agentproto.ResultResponse {
-	response := agentproto.ResultResponse{WorkID: w.ID, State: w.State, Outcome: w.Outcome, Result: append(json.RawMessage(nil), w.Result...), Next: nextFor(w)}
+	response := agentproto.ResultResponse{WorkID: w.ID, ViewID: w.ViewID, State: w.State, Outcome: w.Outcome, Result: append(json.RawMessage(nil), w.Result...), Next: nextFor(w)}
 	if w.State == agentproto.WorkOpen {
 		response.Guidance = "This work is still open; no result is implied. Call agent.result again later, inspect agent.status, or use the targeted interrupt action."
 	} else {

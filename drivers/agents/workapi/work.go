@@ -15,6 +15,9 @@ const (
 	TypeResult    = "agent.result"
 	TypeSteer     = "agent.steer"
 	TypeInterrupt = "agent.interrupt"
+	TypeReplace   = "agent.replace"
+	TypeHold      = "agent.hold"
+	TypeUnhold    = "agent.unhold"
 )
 
 const (
@@ -99,6 +102,7 @@ type Origin struct {
 // AskRequest is the work-aware agent.ask payload after the generic request
 // envelope's body has been unwrapped.
 type AskRequest struct {
+	ViewID        string            `json:"view_id,omitempty"`
 	Text          string            `json:"text"`
 	Attachments   []json.RawMessage `json:"attachments,omitempty"`
 	Origin        *Origin           `json:"origin,omitempty"`
@@ -111,6 +115,7 @@ type AskRequest struct {
 // request to insert. WorkID is the destination work. Text, target, and all are
 // mutually exclusive; All is Agent-wide and therefore has no destination.
 type SteerRequest struct {
+	ViewID         string `json:"view_id,omitempty"`
 	WorkID         WorkID `json:"work_id,omitempty"`
 	Text           string `json:"text,omitempty"`
 	ExpectedTurnID string `json:"expected_turn_id,omitempty"`
@@ -120,6 +125,7 @@ type SteerRequest struct {
 }
 
 type InterruptRequest struct {
+	ViewID       string `json:"view_id,omitempty"`
 	WorkID       WorkID `json:"work_id,omitempty"`
 	OperationKey string `json:"operation_key,omitempty"`
 }
@@ -147,6 +153,8 @@ type Receipt struct {
 }
 
 type Work struct {
+	ViewID         string      `json:"view_id,omitempty"`
+	TurnID         string      `json:"turn_id,omitempty"`
 	WorkID         WorkID      `json:"work_id"`
 	State          WorkState   `json:"state"`
 	Stage          string      `json:"stage,omitempty"`
@@ -186,6 +194,7 @@ type StatusResponse struct {
 }
 
 type ResultResponse struct {
+	ViewID   string          `json:"view_id,omitempty"`
 	WorkID   WorkID          `json:"work_id"`
 	State    WorkState       `json:"state"`
 	Outcome  Outcome         `json:"outcome,omitempty"`
@@ -207,6 +216,12 @@ func DecodeAsk(raw []byte) (AskRequest, error) {
 	}
 	if strings.TrimSpace(v.Text) == "" {
 		return AskRequest{}, invalid("ask.text is required")
+	}
+	if err := validToken("ask.view_id", v.ViewID, 256); err != nil {
+		return AskRequest{}, err
+	}
+	if v.ViewID != "" && v.RelatedWorkID != "" {
+		return AskRequest{}, invalid("view_id and related_work_id are mutually exclusive")
 	}
 	if v.Delivery == "" {
 		v.Delivery = DeliveryWait
@@ -246,11 +261,10 @@ func DecodeSteer(raw []byte) (SteerRequest, error) {
 	if forms != 1 {
 		return SteerRequest{}, invalid("steer requires exactly one of text, target, or all=true")
 	}
-	if v.All {
-		if v.WorkID != "" || v.ExpectedTurnID != "" {
-			return SteerRequest{}, invalid("steer all=true is Agent-wide and cannot select a work or turn")
-		}
-	} else if err := requiredID("steer.work_id", v.WorkID); err != nil {
+	if err := validID("steer.work_id", v.WorkID); err != nil {
+		return SteerRequest{}, err
+	}
+	if err := validToken("steer.view_id", v.ViewID, 256); err != nil {
 		return SteerRequest{}, err
 	}
 	if v.ExpectedTurnID != "" && strings.TrimSpace(v.Text) == "" {
@@ -268,6 +282,9 @@ func DecodeInterrupt(raw []byte) (InterruptRequest, error) {
 		return InterruptRequest{}, err
 	}
 	if err := validID("interrupt.work_id", v.WorkID); err != nil {
+		return InterruptRequest{}, err
+	}
+	if err := validToken("interrupt.view_id", v.ViewID, 256); err != nil {
 		return InterruptRequest{}, err
 	}
 	if err := validToken("interrupt.operation_key", v.OperationKey, 256); err != nil {

@@ -76,6 +76,15 @@ const (
 // OperateError, message.Failure and the wire would widen the protocol to carry
 // something already derivable at the only place that consumes it.
 var actorErrorClasses = map[string]failureClass{
+	"busy":             {Unavailable, hintCapacity, true},
+	"target_not_owned": {PermissionDenied, hintDenied, false},
+	"cas_mismatch":     {Conflict, hintStaleWork, false},
+	"target_gone":      {Conflict, hintStaleWork, false},
+	"scope_required":   {PayloadInvalid, "Specify view_id, work_id or a waiting request target; do not guess among concurrent views", false},
+	"view_not_found":   {Conflict, hintStaleWork, false},
+	"session_capacity": {Unavailable, hintCapacity, true},
+	"control_unknown":  {ResultUnknown, hintResultUnkown, false},
+
 	// Malformed or out-of-range arguments: fixable by resending.
 	"invalid_args":         {PayloadInvalid, hintFixPayload, false},
 	"payload_invalid":      {PayloadInvalid, hintFixPayload, false},

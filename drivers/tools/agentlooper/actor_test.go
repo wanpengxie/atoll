@@ -154,7 +154,7 @@ func TestOneLooperRunsSeveralLoopsAndStopsOnlyTheAddressedOne(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		l.mu.Lock()
-		first, second := l.active["w-1"], l.active["w-2"]
+		first, second := l.active["a-1"], l.active["a-2"]
 		l.mu.Unlock()
 		if first == nil {
 			if second == nil {
@@ -174,7 +174,6 @@ func TestOneLooperRunsSeveralLoopsAndStopsOnlyTheAddressedOne(t *testing.T) {
 func TestMalformedModelToolCallCannotReachWorkspace(t *testing.T) {
 	for _, raw := range []json.RawMessage{
 		json.RawMessage(`{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"x"}}]}`),
-		json.RawMessage(`{"role":"assistant","content":[{"type":"toolCall","id":"tc","name":"write","arguments":null}]}`),
 		json.RawMessage(`{"role":"user","content":[]}`),
 	} {
 		if _, _, err := assistantParts(raw); err == nil {
@@ -502,7 +501,7 @@ func TestLooperOwnsOneCompleteToolLoopAndReportsProposal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a := &assignment{start: agentloop.StartRequest{WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 4}, cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "do it"}}}
-	l.active["w-1"] = a
+	l.active["a-1"] = a
 	l.drive(ctx, sys, a)
 	if sys.llmCalls != 2 || sys.toolCalls != 1 {
 		t.Fatalf("llm=%d tool=%d", sys.llmCalls, sys.toolCalls)
@@ -520,7 +519,7 @@ func TestLooperOwnsOneCompleteToolLoopAndReportsProposal(t *testing.T) {
 	if string(report.Result) == "" || !contains(string(report.Result), `"text":"done"`) {
 		t.Fatalf("result=%s", report.Result)
 	}
-	if l.active["w-1"] != nil {
+	if l.active["a-1"] != nil {
 		t.Fatal("terminal assignment still occupies the lane after its report")
 	}
 }

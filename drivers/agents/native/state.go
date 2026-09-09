@@ -28,6 +28,9 @@ type operationRecord struct {
 }
 
 type workRecord struct {
+	ViewID          string                     `json:"view_id,omitempty"`
+	ContextVersion  int64                      `json:"context_version,omitempty"`
+	Resumed         bool                       `json:"resumed,omitempty"`
 	ID              agentproto.WorkID          `json:"work_id"`
 	Owner           harness.Caller             `json:"owner"`
 	SourceRequest   string                     `json:"source_request_id"`
@@ -130,7 +133,7 @@ func (s *snapshot) visible(c harness.Caller) []*workRecord {
 }
 
 func publicWork(w *workRecord) agentproto.Work {
-	return agentproto.Work{WorkID: w.ID, State: w.State, Stage: w.Stage, Outcome: w.Outcome,
+	return agentproto.Work{WorkID: w.ID, ViewID: w.ViewID, TurnID: w.AssignmentID, State: w.State, Stage: w.Stage, Outcome: w.Outcome,
 		SourceRequest: w.SourceRequest, SubmissionKey: w.SubmissionKey, RelatedWorkID: w.RelatedWorkID, ExecutionState: w.ExecutionState,
 		CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt}
 }
