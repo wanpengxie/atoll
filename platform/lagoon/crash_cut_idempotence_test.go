@@ -58,8 +58,8 @@ func (s *cutSys) Post(behavior.RequestSpec) (message.ID, error) {
 }
 
 func cutMessage(word lagoon.Word, payload any) actorbase.Msg {
-	raw, _ := json.Marshal(map[string]any{"body": payload})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	raw, _ := json.Marshal(payload)
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: message.ID("request-" + string(word)), ChannelID: channelspec.C0ChannelID,
 		Sender: message.Sender{Kind: actor.KindHuman, ID: "human:root"}, Kind: message.KindRequest, Type: string(word), Payload: raw,
 	})

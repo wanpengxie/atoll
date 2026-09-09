@@ -97,7 +97,7 @@ func TestEngine_SelfCallFailsFastZeroResidue(t *testing.T) {
 // registerEntry is the F4/F5 test setup helper: a bare in-flight out-station
 // entry, no timer, no write yet.
 func registerEntry(e *engine, id message.ID) {
-	e.call.register(&message.Envelope{ID: id, Kind: message.KindRequest, Payload: []byte(`{"body":null}`)}, "actor:callee")
+	e.call.register(&message.Envelope{ID: id, Kind: message.KindRequest, Payload: []byte(`{"_context":{},"body":{}}`)}, "actor:callee")
 }
 
 // F4a: once a final is matched (buffered), a late-firing author#2 timer
@@ -236,7 +236,7 @@ func TestEngine_WorkerExitRejectsRacingRequest(t *testing.T) {
 	var payload struct {
 		ErrorCode string `json:"error_code"`
 	}
-	_ = json.Unmarshal(last.Payload, &payload)
+	_ = json.Unmarshal(actorTestBody(last.Payload), &payload)
 	if payload.ErrorCode != "overloaded" {
 		t.Fatalf("expected error_code=overloaded, got %+v", payload)
 	}
@@ -468,7 +468,7 @@ func TestEngine_AdmittedRequestRefusedByFullDequeRejectsNow(t *testing.T) {
 	var payload struct {
 		ErrorCode string `json:"error_code"`
 	}
-	_ = json.Unmarshal(last.Payload, &payload)
+	_ = json.Unmarshal(actorTestBody(last.Payload), &payload)
 	if payload.ErrorCode != "overloaded" {
 		t.Fatalf("expected error_code=overloaded for the refused newcomer, got %+v", payload)
 	}

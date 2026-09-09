@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type immediatePending struct{ msg actorbase.Msg }
@@ -45,7 +46,7 @@ func (p *progressGatedPending) Progress() <-chan actorbase.Msg { return p.progre
 func (p *progressGatedPending) Wait(ctx context.Context, _ time.Duration) (actorbase.Msg, error) {
 	select {
 	case <-p.drained:
-		return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: json.RawMessage(`{"status":"completed","value":1}`)}), nil
+		return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: json.RawMessage(`{"status":"completed","value":1}`)}), nil
 	case <-ctx.Done():
 		return actorbase.Msg{}, ctx.Err()
 	}
@@ -53,7 +54,7 @@ func (p *progressGatedPending) Wait(ctx context.Context, _ time.Duration) (actor
 func (p *progressGatedPending) Cancel() error { return nil }
 
 type progressGatedSys struct {
-	actorbase.Sys
+	looperTestBase
 	pending *progressGatedPending
 }
 
@@ -103,7 +104,7 @@ func (cancelledPending) Wait(ctx context.Context, _ time.Duration) (actorbase.Ms
 func (cancelledPending) Cancel() error { return nil }
 
 type multiAssignmentSys struct {
-	actorbase.Sys
+	looperTestBase
 	life context.Context
 	mu   sync.Mutex
 }
@@ -126,19 +127,26 @@ func (s *multiAssignmentSys) Post(behavior.RequestSpec) (message.ID, error) {
 
 func internalRequest(id, typ string, body any) actorbase.Msg {
 	raw, _ := json.Marshal(body)
-	wrapped, _ := json.Marshal(map[string]any{"body": json.RawMessage(raw)})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: message.ID(id), Sender: message.Sender{ID: "agent:controller:1"}, Kind: message.KindRequest, Type: typ, Payload: wrapped,
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &fields)
+	var session string
+	_ = json.Unmarshal(fields["session"], &session)
+	delete(fields, "session")
+	raw, _ = json.Marshal(fields)
+	return actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Session: session}, message.Envelope{
+		ID: message.ID(id), Sender: message.Sender{ID: "agent:controller:1"}, Kind: message.KindRequest, Type: typ, Payload: raw,
 	})
 }
 
 func TestOneLooperRunsSeveralLoopsAndStopsOnlyTheAddressedOne(t *testing.T) {
 	life, cancelLife := context.WithCancel(context.Background())
 	sys := &multiAssignmentSys{life: life}
-	l := &looper{cfg: Config{ControllerActor: "controller", MaxAssignments: 2}, active: map[string]*assignment{}}
+	_, _ = sharedLooperResources.Create("ctx/session:one", []byte(`{"messages":[],"version":"seed"}`))
+	_, _ = sharedLooperResources.Create("ctx/session:two", []byte(`{"messages":[],"version":"seed"}`))
+	l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{}}
 	for index, workID := range []agentloop.StartRequest{
-		{WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "one"}}},
-		{WorkID: "w-2", AssignmentID: "a-2", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-2", Seq: 1, Text: "two"}}},
+		{SessionID: "session:one", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "one"}}},
+		{SessionID: "session:two", WorkID: "w-2", AssignmentID: "a-2", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-2", Seq: 1, Text: "two"}}},
 	} {
 		l.start(sys, internalRequest(fmt.Sprintf("start-%d", index), agentloop.TypeStart, workID))
 	}
@@ -150,7 +158,7 @@ func TestOneLooperRunsSeveralLoopsAndStopsOnlyTheAddressedOne(t *testing.T) {
 		l.wg.Wait()
 		t.Fatalf("one Looper active assignments=%d, want 2", active)
 	}
-	l.stop(sys, internalRequest("stop-1", agentloop.TypeStop, agentloop.StopRequest{WorkID: "w-1", AssignmentID: "a-1"}))
+	l.stop(sys, internalRequest("stop-1", agentloop.TypeStop, agentloop.StopRequest{SessionID: "session:one", WorkID: "w-1", AssignmentID: "a-1"}))
 	deadline := time.Now().Add(time.Second)
 	for {
 		l.mu.Lock()
@@ -222,7 +230,7 @@ func TestDefaultToolsBindHostAndWorkspaceWithoutAddingSearchTools(t *testing.T) 
 }
 
 type customToolSys struct {
-	actorbase.Sys
+	looperTestBase
 	llmCalls     int
 	customCalls  int
 	definitions  []json.RawMessage
@@ -271,7 +279,7 @@ func (s *customToolSys) Call(_ message.Cause, target actor.ActorID, typ string, 
 	_ = json.Unmarshal(raw, &fields)
 	fields["status"] = json.RawMessage(`"completed"`)
 	payload, _ := json.Marshal(fields)
-	return immediatePending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: payload})}, nil
+	return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: payload})}, nil
 }
 
 func (s *customToolSys) Post(spec behavior.RequestSpec) (message.ID, error) {
@@ -282,7 +290,7 @@ func (s *customToolSys) Post(spec behavior.RequestSpec) (message.ID, error) {
 func TestManifestDefinedCustomToolRunsWithoutWorkspace(t *testing.T) {
 	sys := &customToolSys{}
 	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
-	a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
 	(&looper{}).drive(context.Background(), sys, a)
 	if sys.llmCalls != 2 || sys.customCalls != 1 || len(sys.definitions) != 1 || !strings.Contains(string(sys.definitions[0]), "manifest description") {
 		t.Fatalf("llm=%d custom=%d definitions=%s", sys.llmCalls, sys.customCalls, sys.definitions)
@@ -299,7 +307,7 @@ func TestExplicitEmptyToolListProducesNoDefinitions(t *testing.T) {
 func TestUnopenedToolNameNeverReachesTarget(t *testing.T) {
 	sys := &customToolSys{toolCallName: "not_allowed"}
 	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
-	a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
 	(&looper{}).drive(context.Background(), sys, a)
 	if sys.customCalls != 0 || sys.llmCalls != 2 {
 		t.Fatalf("unopened tool calls=%d llm=%d", sys.customCalls, sys.llmCalls)
@@ -309,20 +317,20 @@ func TestUnopenedToolNameNeverReachesTarget(t *testing.T) {
 func TestInvalidManifestFailsBeforeInference(t *testing.T) {
 	sys := &customToolSys{}
 	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "missing.run"}}
-	a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
 	(&looper{}).drive(context.Background(), sys, a)
 	if sys.llmCalls != 0 || len(sys.posts) != 1 {
 		t.Fatalf("invalid manifest reached inference: llm=%d posts=%d", sys.llmCalls, len(sys.posts))
 	}
 	var report agentloop.ReportRequest
 	_ = json.Unmarshal(sys.posts[0].Payload, &report)
-	if report.ErrorCode != "tool_discovery_failed" {
+	if report.State != "failed" {
 		t.Fatalf("report=%+v", report)
 	}
 }
 
 type refreshManifestSys struct {
-	actorbase.Sys
+	looperTestBase
 	calls int
 }
 
@@ -364,7 +372,7 @@ func TestResultTextExcerptIsBoundedWithoutBreakingUTF8(t *testing.T) {
 }
 
 type resultStoreSys struct {
-	actorbase.Sys
+	looperTestBase
 	target  actor.ActorID
 	word    string
 	request workspaceproto.WriteRequest
@@ -381,14 +389,14 @@ func (s *resultStoreSys) Call(_ message.Cause, target actor.ActorID, word string
 	return completedPending(json.RawMessage(`{"content":[{"type":"text","text":"saved"}]}`)), nil
 }
 
-func TestLongToolTextIsBoundedAndCompleteOutputSavedOnce(t *testing.T) {
+func TestLongToolTextIsBoundedDeterministically(t *testing.T) {
 	sys := &resultStoreSys{}
 	full := "αβγ\n" + strings.Repeat("long", 100)
 	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 10, ToolResultMaxBytes: 256, ToolImageMaxBytes: 1024}, cause: message.Root()}
 	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": full}}, "details": map[string]any{"upstream": true}})
 	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
-	if sys.target != "store" || sys.word != workspaceproto.TypeWrite || sys.request.Content != full || !strings.HasPrefix(sys.request.Path, ".atoll/tool-results/") {
-		t.Fatalf("save target=%s word=%s request=%+v", sys.target, sys.word, sys.request)
+	if sys.target != "" || !strings.Contains(string(result), "Output truncated to configured limit") || strings.Contains(string(result), `"path"`) {
+		t.Fatalf("tool rendering performed a non-ledger-replayable side effect: target=%s result=%s", sys.target, result)
 	}
 	if !utf8.Valid(result) || !strings.Contains(string(result), "atoll_output") || !strings.Contains(string(result), "upstream") {
 		t.Fatalf("bounded result=%s", result)
@@ -404,9 +412,10 @@ func TestLongToolTextIsBoundedAndCompleteOutputSavedOnce(t *testing.T) {
 	}
 }
 
-func TestLongToolTextWithoutStoreOrWithSaveFailureIsAnError(t *testing.T) {
+func TestLongToolTextDoesNotDependOnOutputStore(t *testing.T) {
 	full := strings.Repeat("x", 100)
 	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": full}}})
+	var first string
 	for _, tc := range []struct {
 		name string
 		a    *assignment
@@ -416,7 +425,10 @@ func TestLongToolTextWithoutStoreOrWithSaveFailureIsAnError(t *testing.T) {
 		{"save failure", &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 10, ToolResultMaxBytes: 10}}, &resultStoreSys{err: errors.New("disk full")}},
 	} {
 		result := (&looper{}).toolResult(context.Background(), tc.sys, tc.a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
-		if !strings.Contains(string(result), `"isError":true`) {
+		if first == "" {
+			first = string(result)
+		}
+		if string(result) != first || !strings.Contains(string(result), `"truncated":true`) {
 			t.Fatalf("%s result=%s", tc.name, result)
 		}
 	}
@@ -427,8 +439,8 @@ func TestLargeOrdinaryJSONResultUsesTheSameBoundary(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"status": "completed", "value": strings.Repeat("json", 100)})
 	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 20, ToolResultMaxBytes: 256}, cause: message.Root()}
 	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
-	if sys.request.Content != string(raw) || !strings.Contains(string(result), "atoll_output") {
-		t.Fatalf("saved=%q result=%s", sys.request.Content, result)
+	if sys.request.Content != "" || !strings.Contains(string(result), "atoll_output") {
+		t.Fatalf("unexpected side effect=%q result=%s", sys.request.Content, result)
 	}
 }
 
@@ -451,7 +463,7 @@ func TestShellTextRetainsTailAndImageBlocksAreNotTextualized(t *testing.T) {
 }
 
 type loopSys struct {
-	actorbase.Sys
+	looperTestBase
 	llmCalls  int
 	toolCalls int
 	posts     []behavior.RequestSpec
@@ -488,7 +500,7 @@ func (s *loopSys) Call(_ message.Cause, _ actor.ActorID, typ string, _ any) (act
 	m["status"] = json.RawMessage(`"completed"`)
 	payload, _ := json.Marshal(m)
 	env := message.Envelope{ID: "response", Kind: message.KindResponse, Payload: payload}
-	return immediatePending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
+	return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
 }
 func (s *loopSys) Post(spec behavior.RequestSpec) (message.ID, error) {
 	s.posts = append(s.posts, spec)
@@ -500,7 +512,7 @@ func TestLooperOwnsOneCompleteToolLoopAndReportsProposal(t *testing.T) {
 	l := &looper{cfg: Config{MaxAssignments: 1}, active: map[string]*assignment{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	a := &assignment{start: agentloop.StartRequest{WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 4}, cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "do it"}}}
+	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 4}, cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "do it"}}}
 	l.active["a-1"] = a
 	l.drive(ctx, sys, a)
 	if sys.llmCalls != 2 || sys.toolCalls != 1 {
@@ -513,11 +525,12 @@ func TestLooperOwnsOneCompleteToolLoopAndReportsProposal(t *testing.T) {
 	if err := json.Unmarshal(sys.posts[0].Payload, &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.State != "completed" || report.ConsumedThrough != 1 || !json.Valid(report.Result) {
+	if report.State != "completed" {
 		t.Fatalf("report=%+v", report)
 	}
-	if string(report.Result) == "" || !contains(string(report.Result), `"text":"done"`) {
-		t.Fatalf("result=%s", report.Result)
+	context := testContextMessages("session:test")
+	if len(context) == 0 || !contains(string(context[len(context)-1]), `"text":"done"`) {
+		t.Fatalf("context=%s", mustRaw(context))
 	}
 	if l.active["a-1"] != nil {
 		t.Fatal("terminal assignment still occupies the lane after its report")

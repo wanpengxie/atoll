@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -105,7 +106,8 @@ func (f *fakeSys) CallSpecFor(caller harness.Caller, spec behavior.RequestSpec) 
 
 func (f *fakeSys) State() StateHandle { panic("not implemented") }
 
-func (f *fakeSys) Resource() ResourceHandle { panic("not implemented") }
+func (f *fakeSys) Resource() ResourceHandle   { panic("not implemented") }
+func (f *fakeSys) View() actorcaps.LedgerView { panic("not implemented") }
 
 func (f *fakeSys) After(d time.Duration, msgType string, payload any, home schedule.TimerHome) (schedule.TimerID, error) {
 	panic("not implemented")
@@ -135,11 +137,11 @@ func (f *fakeSys) Life() context.Context { return context.Background() }
 var _ Sys = (*fakeSys)(nil)
 
 func newTestMsg(msgType string) Msg {
-	return NewMsg(OriginMailbox, context.Background(), message.Envelope{
+	return NewBodyMsg(OriginMailbox, context.Background(), message.Envelope{
 		ID:      "req-1",
 		Kind:    message.KindRequest,
 		Type:    msgType,
-		Payload: json.RawMessage(`{"body":null}`),
+		Payload: json.RawMessage(`{}`),
 	})
 }
 
@@ -211,7 +213,7 @@ func TestDispatch_HandlerCtx_IsMsgCtx(t *testing.T) {
 	sys := &fakeSys{}
 	type ctxKey struct{}
 	want := context.WithValue(context.Background(), ctxKey{}, "value")
-	msg := NewMsg(OriginMailbox, want, message.Envelope{ID: "req-1", Kind: message.KindRequest, Type: "greet", Payload: json.RawMessage(`{"body":null}`)})
+	msg := NewBodyMsg(OriginMailbox, want, message.Envelope{ID: "req-1", Kind: message.KindRequest, Type: "greet", Payload: json.RawMessage(`{}`)})
 
 	var gotCtx context.Context
 	routes := map[string]Handler{

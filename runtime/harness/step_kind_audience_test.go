@@ -127,7 +127,7 @@ func TestStepKindAndAudience_DefaultRequestTTL(t *testing.T) {
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{toolID}, Payload: json.RawMessage(`{"body":null}`),
+		Audience: message.Audience{toolID}, Payload: testPayload(`{"body":null}`),
 	}
 	out, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e)
 	if err != nil {
@@ -155,7 +155,7 @@ func TestStepKindAndAudience_CallerExpiresPreserved(t *testing.T) {
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{toolID}, ExpiresAt: &custom, Payload: json.RawMessage(`{"body":null}`),
+		Audience: message.Audience{toolID}, ExpiresAt: &custom, Payload: testPayload(`{"body":null}`),
 	}
 	if _, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e); err != nil {
 		t.Fatalf("err: %v", err)

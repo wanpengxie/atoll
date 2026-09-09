@@ -22,8 +22,8 @@ import (
 func msgOf(env *message.Envelope) actorbase.Msg {
 	e := *env
 	e.Kind = message.KindRequest
-	e.Payload = json.RawMessage(`{"body":{}}`)
-	return actorbase.NewMsg(actorbase.OriginLog, context.Background(), e)
+	e.Payload = json.RawMessage(`{}`)
+	return actorbase.NewBodyMsg(actorbase.OriginLog, context.Background(), e)
 }
 
 func uiRequest(word string) *message.Envelope {
@@ -197,7 +197,7 @@ func TestUISessionListRejectsArguments(t *testing.T) {
 	env := uiRequest(subjectgate.WordUISessionList)
 	env.Payload = json.RawMessage(`{"body":{"session":"not-an-input"}}`)
 	fs := &fakeSys{self: "human:alice:1", terminalID: "resp1"}
-	humanServeRequest(fs, actorbase.NewMsg(actorbase.OriginLog, context.Background(), *env), ServeDeps{Principal: "alice"})
+	humanServeRequest(fs, actorbase.NewBodyMsg(actorbase.OriginLog, context.Background(), *env), ServeDeps{Principal: "alice"})
 	if !fs.failed || fs.failCode != "invalid_args" || fs.replied {
 		t.Fatalf("unexpected result: failed=%v code=%q replied=%v", fs.failed, fs.failCode, fs.replied)
 	}

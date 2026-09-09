@@ -30,6 +30,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -455,14 +456,15 @@ func (p *Portal) callViaLobby(ctx context.Context, word lagoon.Word, in any) (la
 				ErrorCode string `json:"error_code"`
 				Detail    string `json:"detail"`
 			}
-			if json.Unmarshal(row.Envelope.Payload, &terminal) != nil {
+			_, body, unwrapErr := harness.UnwrapPayload(row.Envelope.Payload)
+			if unwrapErr != nil || json.Unmarshal(body, &terminal) != nil {
 				return lagoon.Reply{}, errors.New("invalid registration terminal")
 			}
 			if terminal.Status == message.StatusFailed {
 				return lagoon.Reply{}, &lagoon.Error{Code: lagoon.ErrorCode(terminal.ErrorCode), Detail: terminal.Detail}
 			}
 			var reply lagoon.Reply
-			if err := json.Unmarshal(row.Envelope.Payload, &reply); err != nil {
+			if err := json.Unmarshal(body, &reply); err != nil {
 				return lagoon.Reply{}, err
 			}
 			return reply, nil

@@ -89,12 +89,16 @@ func TestHandleChecksEffectiveMembershipBeforeDrivers(t *testing.T) {
 		want          string
 	}{
 		{"foreign", `{"body":{"type":"echo","payload":{},"audience":["tool:x:1"]},"_context":{"caller":{"channel":"foreign","actor":"tool:driver:1"}}}`, memberStub{true, "driver"}, nil, "forbidden"},
-		{"inactive", `{"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{false, "driver"}, nil, "forbidden"},
-		{"wrong declaration", `{"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{true, "other"}, []string{"driver"}, "forbidden"},
-		{"allowed but disconnected", `{"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{true, "driver"}, []string{"driver"}, "channel_unavailable"},
+		{"inactive", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{false, "driver"}, nil, "forbidden"},
+		{"wrong declaration", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{true, "other"}, []string{"driver"}, "forbidden"},
+		{"allowed but disconnected", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{true, "driver"}, []string{"driver"}, "channel_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "request", ChannelID: "body", Sender: message.Sender{Kind: actor.KindTool, ID: "tool:driver:1"}, Kind: message.KindRequest, Type: HandleCall, Payload: json.RawMessage(tc.payload)})
+			app, body, err := harness.UnwrapPayload(json.RawMessage(tc.payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), app, message.Envelope{ID: "request", ChannelID: "body", Sender: message.Sender{Kind: actor.KindTool, ID: "tool:driver:1"}, Kind: message.KindRequest, Type: HandleCall, Payload: body})
 			sys := &testSys{msgs: []actorbase.Msg{m}}
 			def := HandleDef(NewHub(), "body", HandleConfig{Host: "host", Words: map[string]Word{}, Drivers: tc.drivers}, tc.members)
 			proc, err := def.New()
@@ -120,7 +124,7 @@ func TestDrivePreservesAudienceActionAndLocalAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.Kind = message.KindEvent
-	if _, err := actLocal(context.Background(), sys, "host", Request{Envelope: env}); err != nil {
+	if _, err := actLocal(context.Background(), sys, "host", Request{Envelope: wireEnvelope(env)}); err != nil {
 		t.Fatal(err)
 	}
 	if len(sys.posts) != 1 || len(sys.events) != 1 || sys.posts[0].Audience[0] != "tool:target:1" || sys.events[0].Audience[0] != "tool:target:1" {

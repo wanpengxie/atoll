@@ -36,7 +36,7 @@ func newWakeLoop(t *testing.T) (*agentLoop, *postingSys) {
 }
 
 func fireEvent(id message.ID, typ string, sender actor.ActorID, payload string) actorbase.Msg {
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: id, Kind: message.KindEvent, Type: typ, TS: 1_700_000,
 		Sender: message.Sender{Kind: actor.KindAgent, ID: sender}, Payload: json.RawMessage(payload),
 	})
@@ -139,7 +139,7 @@ func TestOnlyASelfAuthoredTimerFireCommissionsATurn(t *testing.T) {
 // send itself. Every other self-sent request stays ignored.
 func TestSelfAddressedRequestsAreIgnoredExceptTheCommission(t *testing.T) {
 	selfRequest := func(id message.ID, typ, payload string) actorbase.Msg {
-		return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 			ID: id, Kind: message.KindRequest, Type: typ,
 			Sender:   message.Sender{Kind: actor.KindAgent, ID: "agent:test:1"},
 			Audience: message.Audience{"agent:test:1"},
@@ -173,11 +173,11 @@ func TestSelfAddressedRequestsAreIgnoredExceptTheCommission(t *testing.T) {
 	// out its whole deadline for an answer that was never coming.
 	t.Run("a commission from somebody else is refused out loud", func(t *testing.T) {
 		l, sys := newWakeLoop(t)
-		foreign := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		foreign := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 			ID: "w3", Kind: message.KindRequest, Type: TypeTimerWake,
 			Sender:   message.Sender{Kind: actor.KindAgent, ID: "agent:other:1"},
 			Audience: message.Audience{"agent:test:1"},
-			Payload:  json.RawMessage(`{"body":{"text":"pretend"}}`),
+			Payload:  json.RawMessage(`{"text":"pretend"}`),
 		})
 		l.handleIntake(foreign)
 		if l.state.Requests["w3"] != nil {

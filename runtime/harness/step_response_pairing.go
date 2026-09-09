@@ -273,8 +273,12 @@ func checkFailedResponseReason(payload []byte) failedResponseReasonCheck {
 	if len(payload) == 0 {
 		return check
 	}
+	_, body, err := UnwrapPayload(payload)
+	if err != nil {
+		return check
+	}
 	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &doc); err != nil {
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return check
 	}
 	rawStatus, ok := doc["status"]
@@ -391,8 +395,12 @@ func extractPayloadStatus(payload []byte) (string, bool) {
 	if len(payload) == 0 {
 		return "", false
 	}
+	_, body, err := UnwrapPayload(payload)
+	if err != nil {
+		return "", false
+	}
 	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &doc); err != nil {
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return "", false
 	}
 	raw, ok := doc["status"]

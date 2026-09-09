@@ -3,12 +3,13 @@
   "config": {
     "drivers": [
       "native-agent",
-      "agent-looper"
+      "agent-looper",
+      "agent-main"
     ],
     "host": "c0",
     "words": {
       "agent.ask": {
-        "description": "Submit work to an explicitly selected view_id. related_work_id continues that visible work's existing view. Missing scope is rejected; main/fork routing is an outer organization concern. Receipt mode requires submission_key.",
+        "description": "Submit work in _context.session. Use the standard session=new parameter to fork a new branch. Receipt mode requires submission_key.",
         "schema": {
           "type": "object",
           "required": [
@@ -53,11 +54,6 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 256
-            },
-            "view_id": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256
             }
           },
           "allOf": [
@@ -96,9 +92,6 @@
             "target": {
               "type": "string"
             },
-            "view_id": {
-              "type": "string"
-            },
             "work_id": {
               "type": "string"
             }
@@ -112,11 +105,6 @@
         "schema": {
           "type": "object",
           "properties": {
-            "view_id": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256
-            },
             "work_id": {
               "type": "string",
               "minLength": 1,
@@ -131,6 +119,54 @@
         },
         "target": "native-agent"
       },
+      "agent.main.merge": {
+        "description": "Manage the main session branch relation.",
+        "schema": {
+          "type": "object",
+          "required": [
+            "from_session"
+          ],
+          "properties": {
+            "from_session": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "agent-main"
+      },
+      "agent.main.merge_all": {
+        "description": "Manage the main session branch relation.",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "target": "agent-main"
+      },
+      "agent.main.track": {
+        "description": "Manage the main session branch relation.",
+        "schema": {
+          "type": "object",
+          "required": [
+            "from_session",
+            "merge"
+          ],
+          "properties": {
+            "from_session": {
+              "type": "string"
+            },
+            "merge": {
+              "enum": [
+                "auto",
+                "manual",
+                "never"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "agent-main"
+      },
       "agent.replace": {
         "description": "Replace a waiting target using old_text CAS; the replacement retains its sender identity and queue position.",
         "schema": {
@@ -143,9 +179,6 @@
               "type": "string"
             },
             "target": {
-              "type": "string"
-            },
-            "view_id": {
               "type": "string"
             },
             "work_id": {
@@ -173,6 +206,120 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 256
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "native-agent"
+      },
+      "agent.session.archive": {
+        "description": "Read or change session lifecycle state.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "from_session": {
+              "type": "string"
+            },
+            "through": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "native-agent"
+      },
+      "agent.session.get": {
+        "description": "Read or change session lifecycle state.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "from_session": {
+              "type": "string"
+            },
+            "through": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "native-agent"
+      },
+      "agent.session.list": {
+        "description": "Read or change session lifecycle state.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "from_session": {
+              "type": "string"
+            },
+            "through": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "native-agent"
+      },
+      "agent.session.rename": {
+        "description": "Read or change session lifecycle state.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "from_session": {
+              "type": "string"
+            },
+            "through": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "native-agent"
+      },
+      "agent.session.reset": {
+        "description": "Read or change session lifecycle state.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "from_session": {
+              "type": "string"
+            },
+            "through": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": "native-agent"
+      },
+      "agent.session.sync": {
+        "description": "Read or change session lifecycle state.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "from_session": {
+              "type": "string"
+            },
+            "through": {
+              "type": "string"
             }
           },
           "additionalProperties": false
@@ -239,11 +386,6 @@
                 "text"
               ],
               "properties": {
-                "view_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 256
-                },
                 "work_id": {
                   "type": "string",
                   "minLength": 1,
@@ -269,11 +411,6 @@
                 "target"
               ],
               "properties": {
-                "view_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 256
-                },
                 "work_id": {
                   "type": "string",
                   "minLength": 1,
@@ -296,11 +433,6 @@
                 "all"
               ],
               "properties": {
-                "view_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 256
-                },
                 "work_id": {
                   "type": "string",
                   "minLength": 1,
@@ -325,14 +457,39 @@
         "schema": {
           "additionalProperties": false,
           "properties": {
-            "view_id": {
-              "type": "string"
-            },
             "work_id": {
               "type": "string"
             }
           },
           "type": "object"
+        },
+        "target": "native-agent"
+      },
+      "agent.options": {
+        "description": "Return available models and current selection.",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "target": "native-agent"
+      },
+      "agent.select": {
+        "description": "Select model and thinking effort.",
+        "schema": {
+          "type": "object",
+          "required": [
+            "model"
+          ],
+          "properties": {
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "effort": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         },
         "target": "native-agent"
       }

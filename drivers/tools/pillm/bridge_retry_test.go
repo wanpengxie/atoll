@@ -64,14 +64,11 @@ globalThis.fetch = async (_url, init) => {
 		t.Fatalf("actual HTTP requests=%s", counts)
 	}
 	args["messages"] = []any{map[string]any{"role": "user", "content": "permanent", "timestamp": 1}}
-	_, n, err = retryGenerate(ctx, retryTestConfig(), func(ctx context.Context) (json.RawMessage, error) { return b.Call(ctx, "llm.generate", args, dir, nil) }, noProgress)
-	if n != 1 || err == nil || strings.Contains(err.Error(), "fixture-secret") {
-		t.Fatalf("attempts=%d error=%v", n, err)
+	raw, n, err = retryGenerate(ctx, retryTestConfig(), func(ctx context.Context) (json.RawMessage, error) { return b.Call(ctx, "llm.generate", args, dir, nil) }, noProgress)
+	if n != 1 || err != nil || strings.Contains(string(raw), "fixture-secret") || !strings.Contains(string(raw), `"error_code":"auth"`) || !strings.Contains(string(raw), `"provider_status":401`) {
+		t.Fatalf("attempts=%d result=%s error=%v", n, raw, err)
 	}
 	var failure *providerFailure
-	if !errors.As(err, &failure) || failure.Code != "auth" || failure.Status != 401 || failure.ProviderCode != "invalid_request_error" {
-		t.Fatalf("structured error lost: %#v", err)
-	}
 	counts, _ = os.ReadFile(countFile)
 	if strings.Count(string(counts), "request\n") != 4 {
 		t.Fatalf("permanent error retried: %s", counts)
@@ -83,7 +80,7 @@ globalThis.fetch = async (_url, init) => {
 	}
 	args["messages"] = []any{map[string]any{"role": "user", "content": "broken-stream", "timestamp": 1}}
 	raw, n, err = retryGenerate(ctx, retryTestConfig(), func(ctx context.Context) (json.RawMessage, error) { return b.Call(ctx, "llm.generate", args, dir, nil) }, noProgress)
-	if err == nil || raw != nil || n != 1 {
+	if err != nil || raw == nil || n != 1 || !strings.Contains(string(raw), `"stopReason":"error"`) {
 		t.Fatalf("partial stream escaped/retried blindly: raw=%s n=%d err=%v", raw, n, err)
 	}
 	counts, _ = os.ReadFile(countFile)

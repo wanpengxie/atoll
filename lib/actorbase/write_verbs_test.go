@@ -205,8 +205,8 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	if ev.ID != "ev-own-id" || ev.Kind != message.KindEvent || ev.Type != "human.note" {
 		t.Fatalf("event identity = %+v", ev)
 	}
-	if string(ev.Payload) != `{"text":"hi"}` {
-		t.Fatalf("event payload = %s, want the RawMessage verbatim", ev.Payload)
+	if !jsonSemanticallyEqual(t, actorTestBody(ev.Payload), []byte(`{"text":"hi"}`)) {
+		t.Fatalf("event payload = %s", ev.Payload)
 	}
 	if ev.Visibility != message.VisibilityPublic {
 		t.Fatalf("event visibility = %q, want public", ev.Visibility)
@@ -231,7 +231,7 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 	if req.ID != "req-own-id" || req.Kind != message.KindRequest || req.Type != "human.approve" {
 		t.Fatalf("request identity = %+v", req)
 	}
-	if string(req.Payload) != `{"body":{"amount":10}}` {
+	if !jsonSemanticallyEqual(t, actorTestBody(req.Payload), []byte(`{"amount":10}`)) {
 		t.Fatalf("request payload = %s, want canonical body envelope", req.Payload)
 	}
 	if req.Visibility != message.VisibilityPublic {

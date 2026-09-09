@@ -17,10 +17,12 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func terminalValue(t *testing.T, raw json.RawMessage, out any) {
 	t.Helper()
+	_, raw, _ = harness.UnwrapPayload(raw)
 	var terminal struct {
 		Status    string          `json:"status"`
 		ErrorCode string          `json:"error_code"`

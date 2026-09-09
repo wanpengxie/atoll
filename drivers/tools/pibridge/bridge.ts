@@ -1,5 +1,14 @@
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, validateToolArguments } from "@earendil-works/pi-ai";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+  isContextOverflow,
+  isRecoverableLength,
+  isRetryableAssistantError,
+  validateToolArguments,
+} from "@earendil-works/pi-ai";
+import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   createBashTool,
   createEditTool,
@@ -176,11 +185,41 @@ async function generate(id: string, args: any, controller: AbortController) {
   send({ id, kind: "progress", event: { phase: "provider_wait" } });
   for await (const _event of stream) { /* Consume signatures and final content; never retain token event history. */ }
   const message = await stream.result();
-  if (message.stopReason === "error" || message.stopReason === "aborted") {
-    throw Object.assign(new Error("provider did not deliver a successful assistant"), failureInfo || {},
-      message.stopReason === "aborted" ? { code: "cancelled" } : {});
+	const usage = {
+		model: model.id,
+		provider: model.provider,
+		effort: typeof args.options?.thinkingLevel === "string" ? args.options.thinkingLevel : undefined,
+		input: message.usage?.input || 0,
+		output: message.usage?.output || 0,
+		cache_read: message.usage?.cacheRead || 0,
+		cache_write: message.usage?.cacheWrite || 0,
+		total: message.usage ? calculateContextTokens(message.usage) : 0,
+		context_tokens: (message.usage?.input || 0) + (message.usage?.cacheRead || 0) + (message.usage?.cacheWrite || 0),
+		context_window: model.contextWindow || 0,
+		cost: {
+			input: message.usage?.cost?.input || 0,
+			output: message.usage?.cost?.output || 0,
+			cache_read: message.usage?.cost?.cacheRead || 0,
+			cache_write: message.usage?.cost?.cacheWrite || 0,
+			total: message.usage?.cost?.total || 0,
+		},
+	};
+	const overflow = isContextOverflow(message, model.contextWindow);
+	const recoverableLength = isRecoverableLength(message, model.maxTokens);
+  if (message.stopReason === "error" || message.stopReason === "aborted" || overflow || recoverableLength) {
+	const code = message.stopReason === "aborted" ? "cancelled" : overflow ? "context_overflow" :
+		recoverableLength ? "length_recoverable" :
+		failureInfo?.status === 429 ? "rate_limited" : failureInfo?.status === 401 ? "auth" : failureInfo?.status === 403 ? "permission" :
+		failureInfo?.status === 404 ? "model_not_found" : failureInfo?.status === 400 || failureInfo?.status === 422 ? "invalid_args" :
+		failureInfo?.status === 408 || failureInfo?.status === 409 || failureInfo?.status >= 500 ? "transient_provider" :
+		failureInfo?.code === "transport_error" ? "transport_error" : "unknown_provider_error";
+	const retryable = overflow || recoverableLength || isRetryableAssistantError(message) || failureInfo?.status === 408 || failureInfo?.status === 409 || failureInfo?.status === 429 || failureInfo?.status >= 500;
+	const safeMessage = { ...message, content: code === "context_overflow" ? message.content : [], errorMessage: `Provider request failed (${code})` };
+	send({ id, kind: "result", value: { provider: model.provider, model: model.id, message: safeMessage, usage, error_code: code, retryable,
+		provider_status: failureInfo?.status, provider_code: failureInfo?.code, retry_after_ms: failureInfo?.retryAfterMS } });
+	return;
   }
-  send({ id, kind: "result", value: { provider: model.provider, model: model.id, message } });
+  send({ id, kind: "result", value: { provider: model.provider, model: model.id, message, usage } });
 }
 
 function executionEnv(cwd: string) {
@@ -252,6 +291,7 @@ async function handle(frame: any) {
       const values = models.getModels(provider).map((m) => ({
         id: m.id, name: m.name, provider: m.provider, api: m.api,
         reasoning: m.reasoning, input: m.input, contextWindow: m.contextWindow, maxTokens: m.maxTokens,
+		thinking_levels: Object.entries(m.thinkingLevelMap || {}).filter(([, value]) => value !== null).map(([level]) => level),
       }));
       send({ id, kind: "result", value: { models: values } });
     } else if (typeof frame.op === "string" && frame.op.startsWith("workspace.")) {

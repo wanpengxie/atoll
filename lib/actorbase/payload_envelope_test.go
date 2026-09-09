@@ -14,15 +14,17 @@ import (
 
 func TestRequestWritersUseOnePayloadEnvelopeAndNewMsgUnwrapsBody(t *testing.T) {
 	argsCases := []struct {
-		name string
-		args any
+		name  string
+		args  any
+		valid bool
+		want  json.RawMessage
 	}{
-		{name: "object", args: map[string]any{"x": float64(1)}},
+		{name: "object", args: map[string]any{"x": float64(1)}, valid: true, want: json.RawMessage(`{"x":1}`)},
 		{name: "array", args: []any{"x", float64(2)}},
 		{name: "scalar", args: "x"},
-		{name: "null", args: nil},
-		{name: "body context key", args: map[string]any{"_context": "application"}},
-		{name: "body caller key", args: map[string]any{"caller": "application"}},
+		{name: "null", args: nil, valid: true, want: json.RawMessage(`{}`)},
+		{name: "body context key", args: map[string]any{"_context": "application"}, valid: true, want: json.RawMessage(`{"_context":"application"}`)},
+		{name: "body caller key", args: map[string]any{"caller": "application"}, valid: true, want: json.RawMessage(`{"caller":"application"}`)},
 	}
 	writers := []struct {
 		name       string
@@ -57,7 +59,14 @@ func TestRequestWritersUseOnePayloadEnvelopeAndNewMsgUnwrapsBody(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := writer.write(e, raw, tc.args); err != nil {
+				err = writer.write(e, raw, tc.args)
+				if !tc.valid {
+					if err == nil || pen.last() != nil {
+						t.Fatalf("invalid body err=%v envelope=%+v", err, pen.last())
+					}
+					return
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
 				env := pen.last()
@@ -68,15 +77,15 @@ func TestRequestWritersUseOnePayloadEnvelopeAndNewMsgUnwrapsBody(t *testing.T) {
 				if err := json.Unmarshal(env.Payload, &outer); err != nil {
 					t.Fatalf("payload is not an object: %v", err)
 				}
-				if len(outer) != 1 && !(writer.withCaller && len(outer) == 2) {
+				if len(outer) != 2 {
 					t.Fatalf("payload keys=%v", reflect.ValueOf(outer).MapKeys())
 				}
-				if !jsonSemanticallyEqual(t, outer["body"], raw) {
-					t.Fatalf("body=%s args=%s", outer["body"], raw)
+				if !jsonSemanticallyEqual(t, outer["body"], tc.want) {
+					t.Fatalf("body=%s want=%s", outer["body"], tc.want)
 				}
 				msg := NewMsg(OriginMailbox, context.Background(), *env)
-				if !jsonSemanticallyEqual(t, msg.Payload, raw) {
-					t.Fatalf("unwrapped=%s args=%s", msg.Payload, raw)
+				if !jsonSemanticallyEqual(t, msg.Payload, tc.want) {
+					t.Fatalf("unwrapped=%s want=%s", msg.Payload, tc.want)
 				}
 				caller, ok := msg.Caller()
 				if ok != writer.withCaller {
@@ -90,14 +99,14 @@ func TestRequestWritersUseOnePayloadEnvelopeAndNewMsgUnwrapsBody(t *testing.T) {
 	}
 }
 
-func TestEmitDoesNotUseRequestPayloadEnvelope(t *testing.T) {
+func TestEmitUsesCanonicalPayloadEnvelope(t *testing.T) {
 	pen := &fakePen{self: "agent:sender:1"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	if _, err := e.Emit(behavior.EventSpec{Type: "echo.event", Payload: json.RawMessage(`{"x":1}`), Cause: message.Root()}); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(pen.last().Payload); got != `{"x":1}` {
-		t.Fatalf("event payload=%s", got)
+	if _, body, err := harness.UnwrapPayload(pen.last().Payload); err != nil || !jsonSemanticallyEqual(t, body, []byte(`{"x":1}`)) {
+		t.Fatalf("event payload=%s err=%v", pen.last().Payload, err)
 	}
 }
 
@@ -108,7 +117,7 @@ func TestEffectiveCallerPrefersContextAndFallsBackToEnvelope(t *testing.T) {
 		want    harness.Caller
 	}{
 		{name: "context", payload: json.RawMessage(`{"_context":{"caller":{"channel":"remote","actor":"human:alice:1"}},"body":{}}`), want: harness.Caller{Channel: "remote", Actor: "human:alice:1"}},
-		{name: "envelope fallback", payload: json.RawMessage(`{"body":{}}`), want: harness.Caller{Channel: "local", Actor: "agent:sender:1"}},
+		{name: "envelope fallback", payload: json.RawMessage(`{"_context":{},"body":{}}`), want: harness.Caller{Channel: "local", Actor: "agent:sender:1"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			msg := NewMsg(OriginMailbox, context.Background(), message.Envelope{
@@ -137,8 +146,6 @@ func TestNewMsgRejectsEveryNonCanonicalRequestEnvelope(t *testing.T) {
 		// _context 在场就只有一形 {caller:{channel,actor}}；下列每一种都不得
 		// 静默退化为"无 context"或零值 caller。
 		{name: "context null", raw: `{"_context":null,"body":{}}`},
-		{name: "context empty object", raw: `{"_context":{},"body":{}}`},
-		{name: "context caller null", raw: `{"_context":{"caller":null},"body":{}}`},
 		{name: "context caller empty", raw: `{"_context":{"caller":{}},"body":{}}`},
 		{name: "context caller missing actor", raw: `{"_context":{"caller":{"channel":"c"}},"body":{}}`},
 		{name: "context caller missing channel", raw: `{"_context":{"caller":{"actor":"a"}},"body":{}}`},
@@ -146,6 +153,8 @@ func TestNewMsgRejectsEveryNonCanonicalRequestEnvelope(t *testing.T) {
 		{name: "context unknown field", raw: `{"_context":{"caller":{"channel":"c","actor":"a"},"extra":1},"body":{}}`},
 		{name: "context caller unknown field", raw: `{"_context":{"caller":{"channel":"c","actor":"a","x":1}},"body":{}}`},
 		{name: "context scalar", raw: `{"_context":"c","body":{}}`},
+		{name: "body null", raw: `{"_context":{},"body":null}`},
+		{name: "body array", raw: `{"_context":{},"body":[]}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			defer func() {

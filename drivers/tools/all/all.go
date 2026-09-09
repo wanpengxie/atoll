@@ -15,8 +15,8 @@
 package all
 
 import (
-	_ "github.com/wanpengxie/atoll/drivers/tools/agentcontext"
 	_ "github.com/wanpengxie/atoll/drivers/tools/agentlooper"
+	_ "github.com/wanpengxie/atoll/drivers/tools/agentmain"
 	_ "github.com/wanpengxie/atoll/drivers/tools/coderunner"
 	_ "github.com/wanpengxie/atoll/drivers/tools/device"
 	_ "github.com/wanpengxie/atoll/drivers/tools/echo"

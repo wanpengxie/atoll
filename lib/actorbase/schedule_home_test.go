@@ -91,8 +91,8 @@ func TestAfterCarriesARawMessagePayloadAsJSONNeverAsBase64(t *testing.T) {
 	if _, err := e.After(time.Minute, "reminder.note", payload, schedule.TimerHomeDurable); err != nil {
 		t.Fatalf("After = %v", err)
 	}
-	if got := string(rec.only(t).Payload); got != string(payload) {
-		t.Fatalf("timer payload = %q, want %q (base64 回潮?)", got, string(payload))
+	if got := actorTestBody(rec.only(t).Payload); !jsonSemanticallyEqual(t, got, payload) {
+		t.Fatalf("timer payload = %q, want body %q (base64 回潮?)", got, payload)
 	}
 }
 
@@ -111,8 +111,8 @@ func TestAfterFoldsAnAbsentPayloadOnBothHomes(t *testing.T) {
 			if _, err := e.After(time.Hour, "twin.tick", nil, home); err != nil {
 				t.Fatalf("After = %v", err)
 			}
-			if got := rec.only(t).Payload; len(got) != 0 {
-				t.Fatalf("absent payload scheduled as %q, want zero length (the fire path substitutes {})", got)
+			if got := actorTestBody(rec.only(t).Payload); !jsonSemanticallyEqual(t, got, []byte(`{}`)) {
+				t.Fatalf("absent payload scheduled as %q, want canonical empty object", got)
 			}
 		})
 	}

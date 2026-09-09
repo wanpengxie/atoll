@@ -30,6 +30,7 @@ type Minter struct {
 	state     accessdoor.StateHandleResolver
 	schedule  schedule.Minter
 	lifecycle LifecycleOperations
+	view      actorcaps.LedgerView
 }
 
 func New(
@@ -38,10 +39,15 @@ func New(
 	state accessdoor.StateHandleResolver,
 	scheduleMinter schedule.Minter,
 	lifecycle LifecycleOperations,
+	views ...actorcaps.LedgerView,
 ) (*Minter, error) {
 	if pen == nil || access == nil || state == nil ||
 		scheduleMinter == nil || lifecycle == nil {
 		return nil, ErrInvalidInput
+	}
+	var view actorcaps.LedgerView
+	if len(views) > 0 {
+		view = views[0]
 	}
 	return &Minter{
 		pen:       pen,
@@ -49,6 +55,7 @@ func New(
 		state:     state,
 		schedule:  scheduleMinter,
 		lifecycle: lifecycle,
+		view:      view,
 	}, nil
 }
 
@@ -74,6 +81,7 @@ func (m *Minter) Mint(
 			id:         prepared.ActorID(),
 			attempt:    prepared.AttemptKey(),
 		},
+		View: m.view,
 	}, nil
 }
 

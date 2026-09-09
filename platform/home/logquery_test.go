@@ -2,7 +2,6 @@ package home
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -49,7 +48,7 @@ func (f *logFixture) addAs(kind message.Kind, typ, text string, parent message.I
 		sender = who
 		k, _ = actor.ParseKind(strings.SplitN(string(who), ":", 2)[0])
 	}
-	payload, _ := json.Marshal(map[string]string{"text": text})
+	payload := canonicalTestPayload(map[string]string{"text": text})
 	e := message.Envelope{
 		ID: message.ID(fmt.Sprintf("m%d", f.n)), TS: int64(f.n * 100), TSReceived: int64(f.n * 100),
 		ChannelID: "log-test", Kind: kind, Type: typ, Payload: payload, ParentID: parent,

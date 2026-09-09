@@ -86,7 +86,7 @@ func TestRetryFinalErrorMessageIsNotSuccessfulAssistant(t *testing.T) {
 		raw, n, err := retryGenerate(context.Background(), retryTestConfig(), func(context.Context) (json.RawMessage, error) {
 			return json.RawMessage(`{"message":{"role":"assistant","stopReason":"` + reason + `","content":[{"type":"text","text":"partial"}]}}`), nil
 		}, noProgress)
-		if raw != nil || n != 1 || err == nil {
+		if raw == nil || n != 1 || err != nil {
 			t.Fatalf("reason=%s attempts=%d result=%s error=%v", reason, n, raw, err)
 		}
 	}

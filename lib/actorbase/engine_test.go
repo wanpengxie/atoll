@@ -35,6 +35,14 @@ type fakePen struct {
 	reject  harness.HarnessRejectReason // when set, every Write is rejected with this reason
 }
 
+func actorTestBody(raw json.RawMessage) json.RawMessage {
+	_, body, err := harness.UnwrapPayload(raw)
+	if err != nil {
+		return raw
+	}
+	return body
+}
+
 func (p *fakePen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -210,7 +218,7 @@ func newTestEngine(t *testing.T, pen *fakePen, hooks Hooks, serveCap, queueCap i
 }
 
 func newRequestEnv(id message.ID, expiresInMs int64) *message.Envelope {
-	env := &message.Envelope{ID: id, Kind: message.KindRequest, Type: "test.req", Payload: json.RawMessage(`{"body":null}`)}
+	env := &message.Envelope{ID: id, Kind: message.KindRequest, Type: "test.req", Payload: json.RawMessage(`{"_context":{},"body":{}}`)}
 	if expiresInMs >= 0 {
 		exp := time.Now().Add(time.Duration(expiresInMs) * time.Millisecond).UnixMilli()
 		env.ExpiresAt = &exp
@@ -256,7 +264,7 @@ func TestServeAutomaticTimerAckFiresOnHandlerSuccessNotOnError(t *testing.T) {
 	e.occupant.Store(int32(occupantRunning))
 
 	// Handler success: dispatch must settle true → real Ack call to sched.
-	okEnv := &message.Envelope{ID: "timer:fired-ok", Kind: message.KindEvent, Type: "tick"}
+	okEnv := &message.Envelope{ID: "timer:fired-ok", Kind: message.KindEvent, Type: "tick", Payload: json.RawMessage(`{"_context":{},"body":{}}`)}
 	if err := e.Receive(context.Background(), okEnv); err != nil {
 		t.Fatalf("Receive(ok): %v", err)
 	}
@@ -276,7 +284,7 @@ func TestServeAutomaticTimerAckFiresOnHandlerSuccessNotOnError(t *testing.T) {
 
 	// Handler error: dispatch must settle false → NO Ack call, fired truth
 	// left intact for redelivery.
-	errEnv := &message.Envelope{ID: "timer:fired-err", Kind: message.KindEvent, Type: "boom"}
+	errEnv := &message.Envelope{ID: "timer:fired-err", Kind: message.KindEvent, Type: "boom", Payload: json.RawMessage(`{"_context":{},"body":{}}`)}
 	if err := e.Receive(context.Background(), errEnv); err != nil {
 		t.Fatalf("Receive(err): %v", err)
 	}
@@ -328,7 +336,7 @@ func TestEngine_LateReplyAfterDeadlineIsErrRequestClosed(t *testing.T) {
 		t.Fatal("expected admit to succeed")
 	}
 	ctx, _ := e.serve.ctxFor(env.ID)
-	msg := NewMsg(OriginMailbox, ctx, *env)
+	msg := NewBodyMsg(OriginMailbox, ctx, *env)
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for e.serve.len() != 0 && time.Now().Before(deadline) {
@@ -351,7 +359,7 @@ func TestEngine_ReplyClosesEntry(t *testing.T) {
 	env := newRequestEnv("req-3", -1)
 	e.serve.admit(env)
 	ctx, _ := e.serve.ctxFor(env.ID)
-	msg := NewMsg(OriginMailbox, ctx, *env)
+	msg := NewBodyMsg(OriginMailbox, ctx, *env)
 
 	if _, err := e.Reply(msg, map[string]string{"greeting": "hello"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -387,7 +395,7 @@ func TestEngine_CancelRequestClosesEntryAndCancelsMsgCtx(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ctxFor to resolve the admitted entry")
 	}
-	msg := NewMsg(OriginMailbox, ctx, *env)
+	msg := NewBodyMsg(OriginMailbox, ctx, *env)
 
 	select {
 	case <-msg.Ctx().Done():
@@ -417,6 +425,7 @@ func TestEngine_CancelRequestClosesEntryAndCancelsMsgCtx(t *testing.T) {
 
 func responseEnv(parentID message.ID, status string) *message.Envelope {
 	payload, _ := json.Marshal(map[string]string{"status": status})
+	payload, _ = harness.WrapPayload(harness.Context{}, payload)
 	return &message.Envelope{
 		ID:       message.ID("resp-" + parentID),
 		Kind:     message.KindResponse,
@@ -517,7 +526,7 @@ func TestEngine_ServeLedgerFullRoutesToRejectLane(t *testing.T) {
 	var payload struct {
 		ErrorCode string `json:"error_code"`
 	}
-	_ = json.Unmarshal(last.Payload, &payload)
+	_ = json.Unmarshal(actorTestBody(last.Payload), &payload)
 	if payload.ErrorCode != "overloaded" {
 		t.Fatalf("expected error_code=overloaded, got %+v (payload=%s)", payload, last.Payload)
 	}
@@ -594,7 +603,7 @@ func TestEngine_CallTimeoutWritesUnansweredTimeoutAndClosesEntry(t *testing.T) {
 	var payload struct {
 		ErrorCode string `json:"error_code"`
 	}
-	_ = json.Unmarshal(last.Payload, &payload)
+	_ = json.Unmarshal(actorTestBody(last.Payload), &payload)
 	if payload.ErrorCode != string(message.TerminalUnansweredTimeout) {
 		t.Fatalf("expected error_code=%s, got %+v", message.TerminalUnansweredTimeout, payload)
 	}
@@ -632,7 +641,7 @@ func TestEngine_PendingCancelSelfClosesAndSkipsCancellerWhenNil(t *testing.T) {
 		ErrorCode string `json:"error_code"`
 		Cancelled bool   `json:"cancelled"`
 	}
-	_ = json.Unmarshal(last.Payload, &payload)
+	_ = json.Unmarshal(actorTestBody(last.Payload), &payload)
 	if payload.ErrorCode != string(message.TerminalUnansweredTimeout) || !payload.Cancelled {
 		t.Fatalf("expected a cancelled unanswered_timeout terminal, got %+v", payload)
 	}

@@ -42,9 +42,9 @@ func (s *peerSys) Progress(_ actorbase.Msg, status string, _ any) (message.ID, e
 }
 
 func TestPeeractorSealsOriginFromLedgerEnvelopeAndReturnsOnlyBody(t *testing.T) {
-	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "request-a", ChannelID: "caller", Kind: message.KindRequest, Type: "work",
-		Sender: message.Sender{ID: "alice"}, Payload: json.RawMessage(`{"body":{"origin":{"channel":"forged"},"value":7}}`),
+		Sender: message.Sender{ID: "alice"}, Payload: json.RawMessage(`{"origin":{"channel":"forged"},"value":7}`),
 	})
 	sys := &peerSys{recv: []actorbase.Msg{msg}}
 	var got channel.Request
@@ -91,7 +91,7 @@ func TestPeeractorUnavailableAndRemoteFailureUseClosedCodes(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "request", ChannelID: "caller", Kind: message.KindRequest, Type: "work", Payload: json.RawMessage(`{"body":null}`)})
+			msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "request", ChannelID: "caller", Kind: message.KindRequest, Type: "work", Payload: json.RawMessage(`{}`)})
 			sys := &peerSys{recv: []actorbase.Msg{msg}}
 			_ = serve(sys, Deps{Caller: "caller", Target: "target", Seam: tc.seam, Describe: func(context.Context, channel.ID, channel.ID, channel.Describe) (channel.Card, error) {
 				return channel.Card{Words: map[string]json.RawMessage{}}, nil
@@ -104,8 +104,8 @@ func TestPeeractorUnavailableAndRemoteFailureUseClosedCodes(t *testing.T) {
 }
 
 func TestPeeractorRelaysProgressBeforeTerminal(t *testing.T) {
-	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "request", ChannelID: "caller", Kind: message.KindRequest, Type: "agent.ask", Payload: json.RawMessage(`{"body":{"text":"hi"}}`),
+	msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "request", ChannelID: "caller", Kind: message.KindRequest, Type: "agent.ask", Payload: json.RawMessage(`{"text":"hi"}`),
 	})
 	sys := &peerSys{recv: []actorbase.Msg{msg}}
 	_ = serve(sys, Deps{Caller: "caller", Target: "target", Seam: func(_ context.Context, _, _ channel.ID, request channel.Request, progress func(channel.Progress)) (channel.Result, error) {

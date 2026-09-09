@@ -31,7 +31,7 @@ func classify(err error) *providerFailure {
 	if errors.As(err, &bridge) {
 		code := bridge.Code
 		switch code {
-		case "invalid_args", "context_invalid", "auth", "permission", "model_not_found", "rate_limited", "transient_provider", "transport_error", "cancelled", "deadline_exceeded":
+		case "invalid_args", "context_invalid", "context_overflow", "length_recoverable", "auth", "permission", "model_not_found", "rate_limited", "transient_provider", "transport_error", "cancelled", "deadline_exceeded":
 		default:
 			code = "unknown_provider_error"
 		}
@@ -70,20 +70,33 @@ func retryGenerate(ctx context.Context, cfg Config, invoke func(context.Context)
 		raw, err := invoke(ctx)
 		if err == nil {
 			var result struct {
-				Message struct {
-					Role    string            `json:"role"`
-					Content []json.RawMessage `json:"content"`
-					Stop    string            `json:"stopReason"`
-				} `json:"message"`
+				Message        json.RawMessage `json:"message"`
+				ErrorCode      string          `json:"error_code"`
+				Retryable      bool            `json:"retryable"`
+				ProviderStatus int             `json:"provider_status"`
+				ProviderCode   string          `json:"provider_code"`
+				RetryAfterMS   int64           `json:"retry_after_ms"`
 			}
-			if json.Unmarshal(raw, &result) != nil || result.Message.Role != "assistant" || result.Message.Content == nil {
+			var parsed struct {
+				Role    string            `json:"role"`
+				Content []json.RawMessage `json:"content"`
+				Stop    string            `json:"stopReason"`
+			}
+			if json.Unmarshal(raw, &result) != nil || json.Unmarshal(result.Message, &parsed) != nil || parsed.Role != "assistant" || parsed.Content == nil {
 				err = &pibridge.Error{Code: "unknown_provider_error"}
-			} else if result.Message.Stop == "error" || result.Message.Stop == "aborted" {
-				code := "unknown_provider_error"
-				if result.Message.Stop == "aborted" {
-					code = "cancelled"
+			} else if parsed.Stop == "error" || parsed.Stop == "aborted" {
+				// Provider errors remain completed assistant responses so the
+				// ledger can replay them. Only a response explicitly classified as
+				// retryable is reissued inside this endpoint.
+				if result.Retryable && result.ErrorCode != "context_overflow" && result.ErrorCode != "length_recoverable" {
+					code := result.ErrorCode
+					if code == "" {
+						code = "transient_provider"
+					}
+					err = &pibridge.Error{Code: code, Status: result.ProviderStatus, ProviderCode: result.ProviderCode, RetryAfterMS: result.RetryAfterMS}
+				} else {
+					return raw, attempt, nil
 				}
-				err = &pibridge.Error{Code: code}
 			}
 		}
 		if err == nil {

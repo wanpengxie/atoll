@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	_ "modernc.org/sqlite"
 )
 
@@ -107,12 +108,9 @@ func (s *registrarSysStub) Fail(_ actorbase.Msg, code, detail string, _ ...map[s
 }
 
 func registrarMessage(word Word, payload string) actorbase.Msg {
-	wrapped, _ := json.Marshal(struct {
-		Body json.RawMessage `json:"body"`
-	}{Body: json.RawMessage(payload)})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "request", ChannelID: channel.ID("c0"), Type: string(word), Kind: message.KindRequest,
-		Sender: message.Sender{Kind: actor.KindHuman, ID: "human:root"}, Payload: wrapped,
+		Sender: message.Sender{Kind: actor.KindHuman, ID: "human:root"}, Payload: json.RawMessage(payload),
 	})
 }
 
@@ -460,16 +458,9 @@ func TestEffectiveAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 			return channelspec.ActorFacts{}, false, nil
 		}
 	}), nil)
-	wrapped, err := json.Marshal(map[string]any{
-		"_context": map[string]any{"caller": map[string]any{"channel": "ordinary", "actor": "agent:member:1"}},
-		"body":     map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &harness.Caller{Channel: "ordinary", Actor: "agent:member:1"}}, message.Envelope{
 		ID: "c0-request", ChannelID: channelspec.C0ChannelID, Sender: message.Sender{Kind: actor.KindPeer, ID: "peer:svcactor:1"},
-		Kind: message.KindRequest, Type: string(WordPrincipalGet), Payload: wrapped,
+		Kind: message.KindRequest, Type: string(WordPrincipalGet), Payload: json.RawMessage(`{}`),
 	})
 	sys := &registrarSysStub{}
 	r.handle(sys, msg)

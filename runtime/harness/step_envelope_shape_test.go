@@ -171,9 +171,9 @@ func TestStepEnvelopeShape_PayloadWellformedness(t *testing.T) {
 		"invalid JSON":       {payload: `{bad`, reject: true},
 		"null literal":       {payload: `null`, reject: true},
 		"padded null":        {payload: ` null `, reject: true},
-		"empty object":       {payload: `{}`, reject: false},
+		"empty object":       {payload: `{}`, reject: true},
 		"empty (normalized)": {payload: ``, reject: false},
-		"non-object JSON":    {payload: `"opaque"`, reject: false}, // opaque by axiom; only wellformedness + non-null are shape law
+		"non-object JSON":    {payload: `"opaque"`, reject: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

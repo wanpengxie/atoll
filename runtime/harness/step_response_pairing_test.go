@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 
@@ -23,7 +22,7 @@ func seedRequest(t *testing.T, cs *store.ChannelStores, id message.ID, caller, r
 		Kind:   message.KindRequest, Type: "xhs.publish",
 		Audience:   message.Audience{receiver},
 		Visibility: message.VisibilityPublic,
-		Payload:    json.RawMessage(`{"body":{}}`),
+		Payload:    testPayload(`{"body":{}}`),
 	}
 	if _, err := cs.Log.Append(context.Background(), parent, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed request %q: %v", id, err)
@@ -39,7 +38,7 @@ func seedEvent(t *testing.T, cs *store.ChannelStores, id message.ID) {
 		Kind:   message.KindEvent, Type: "agent.text",
 		Audience:   message.Audience{"x"},
 		Visibility: message.VisibilityPublic,
-		Payload:    json.RawMessage(`{}`),
+		Payload:    testPayload(`{}`),
 	}
 	if _, err := cs.Log.Append(context.Background(), ev, false, storespec.AppendMetadata{}); err != nil {
 		t.Fatalf("seed event %q: %v", id, err)
@@ -59,7 +58,7 @@ func response(parentID message.ID, sender, caller actor.ActorID, payload string)
 		CorrelationID: parentID,
 		Audience:      message.Audience{caller},
 		Visibility:    message.VisibilityPublic,
-		Payload:       json.RawMessage(payload),
+		Payload:       testPayload(payload),
 	}
 }
 
@@ -326,7 +325,7 @@ func requestParent() *storespec.StoredRow {
 	return &storespec.StoredRow{Envelope: message.Envelope{
 		ID: "req1", ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:caller"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:xhs"}, Payload: json.RawMessage(`{"body":null}`),
+		Audience: message.Audience{"tool:xhs"}, Payload: testPayload(`{"body":null}`),
 	}}
 }
 
@@ -361,34 +360,34 @@ func TestCheckFailedResponseReason_Branches(t *testing.T) {
 	if c := checkFailedResponseReason([]byte("{bad")); c.failed {
 		t.Fatalf("malformed payload should not be failed")
 	}
-	if c := checkFailedResponseReason([]byte(`{}`)); c.failed {
+	if c := checkFailedResponseReason(testPayload(`{}`)); c.failed {
 		t.Fatalf("no status should not be failed")
 	}
 	// status present but not failed (e.g. completed) → status unmarshal ok, !=failed.
-	if c := checkFailedResponseReason([]byte(`{"status":"completed"}`)); c.failed {
+	if c := checkFailedResponseReason(testPayload(`{"status":"completed"}`)); c.failed {
 		t.Fatalf("completed should not be failed")
 	}
 	// status non-string → unmarshal into string fails → not failed.
-	if c := checkFailedResponseReason([]byte(`{"status":123}`)); c.failed {
+	if c := checkFailedResponseReason(testPayload(`{"status":123}`)); c.failed {
 		t.Fatalf("non-string status should not be failed")
 	}
 	// failed, no reason → failed=true, hasReason=false, invalid=false.
-	c := checkFailedResponseReason([]byte(`{"status":"failed"}`))
+	c := checkFailedResponseReason(testPayload(`{"status":"failed"}`))
 	if !c.failed || c.hasReason || c.invalid {
 		t.Fatalf("failed-no-reason = %+v", c)
 	}
 	// failed, reason non-string → invalid=true.
-	c = checkFailedResponseReason([]byte(`{"status":"failed","reason":123}`))
+	c = checkFailedResponseReason(testPayload(`{"status":"failed","reason":123}`))
 	if !c.invalid || c.detail == "" {
 		t.Fatalf("failed-nonstring-reason = %+v, want invalid", c)
 	}
 	// failed, reason out of closed set → invalid via terminalFailureReasonAllowed.
-	c = checkFailedResponseReason([]byte(`{"status":"failed","reason":"not_a_reason"}`))
+	c = checkFailedResponseReason(testPayload(`{"status":"failed","reason":"not_a_reason"}`))
 	if !c.invalid {
 		t.Fatalf("failed-bad-reason should be invalid: %+v", c)
 	}
 	// failed, valid reason → valid.
-	c = checkFailedResponseReason([]byte(`{"status":"failed","reason":"receiver_internal_error"}`))
+	c = checkFailedResponseReason(testPayload(`{"status":"failed","reason":"receiver_internal_error"}`))
 	if c.invalid || c.reason != "receiver_internal_error" {
 		t.Fatalf("failed-good-reason = %+v", c)
 	}
@@ -402,13 +401,13 @@ func TestExtractPayloadStatus_Branches(t *testing.T) {
 	if _, ok := extractPayloadStatus([]byte("{nope")); ok {
 		t.Fatalf("malformed payload should be ok=false")
 	}
-	if _, ok := extractPayloadStatus([]byte(`{}`)); ok {
+	if _, ok := extractPayloadStatus(testPayload(`{}`)); ok {
 		t.Fatalf("missing status should be ok=false")
 	}
-	if _, ok := extractPayloadStatus([]byte(`{"status":5}`)); ok {
+	if _, ok := extractPayloadStatus(testPayload(`{"status":5}`)); ok {
 		t.Fatalf("non-string status should be ok=false")
 	}
-	s, ok := extractPayloadStatus([]byte(`{"status":"processing"}`))
+	s, ok := extractPayloadStatus(testPayload(`{"status":"processing"}`))
 	if !ok || s != "processing" {
 		t.Fatalf("extract = %q %v", s, ok)
 	}

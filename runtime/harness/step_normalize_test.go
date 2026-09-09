@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -31,8 +30,8 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	if e.Visibility != message.VisibilityPublic {
 		t.Fatalf("visibility = %q, want public default", e.Visibility)
 	}
-	if string(e.Payload) != "{}" {
-		t.Fatalf("payload = %q, want {} baseline", e.Payload)
+	if string(e.Payload) != `{"_context":{},"body":{}}` {
+		t.Fatalf("payload = %q, want canonical baseline", e.Payload)
 	}
 	if e.Audience == nil || len(e.Audience) != 0 {
 		t.Fatalf("event audience = %#v, want non-nil empty slice", e.Audience)
@@ -148,7 +147,7 @@ func TestStepNormalize_TimeRelationGuard(t *testing.T) {
 			exp := tc.expiresAt
 			e := &message.Envelope{
 				ID: "m1", TS: tc.ts, ChannelID: testChannelID,
-				Kind: message.KindRequest, Type: "xhs.publish", ExpiresAt: &exp, Payload: json.RawMessage(`{"body":null}`),
+				Kind: message.KindRequest, Type: "xhs.publish", ExpiresAt: &exp, Payload: testPayload(`{"body":null}`),
 			}
 			out, err := runStep(t, newStepNormalize, deps, context.Background(), e)
 			if err != nil {

@@ -2,7 +2,9 @@ package home
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -12,7 +14,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -113,6 +117,99 @@ func (v View) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int
 
 func (v View) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
 	return v.visible.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+}
+
+// Session returns one deterministic, ancestor-expanded session ledger prefix.
+// It interprets only the session tag and session.opened base edge; content
+// semantics stay in the agent materializer.
+func (v View) Session(ctx context.Context, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
+	rows, err := v.session(ctx, session, upto, map[string]bool{})
+	return actorLedgerRows(rows), err
+}
+
+func (v View) session(ctx context.Context, session string, upto message.ID, seen map[string]bool) ([]storespec.StoredRow, error) {
+	key := session + "\x00" + string(upto)
+	if seen[key] {
+		return nil, fmt.Errorf("session base cycle at %s", session)
+	}
+	seen[key] = true
+	defer delete(seen, key)
+	var all []storespec.StoredRow
+	before := int64(0)
+	for {
+		page, _, older, err := v.visible.ReadVisibleBeforeSeq(ctx, before, 256)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) > 0 {
+			all = append(page, all...)
+			before = page[0].Seq
+		}
+		if !older || len(page) == 0 {
+			break
+		}
+	}
+	limit := int64(^uint64(0) >> 1)
+	if upto != "" {
+		found := false
+		for _, row := range all {
+			if row.Envelope.ID == upto {
+				limit = row.Seq
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("session boundary %s not found", upto)
+		}
+	}
+	var own []storespec.StoredRow
+	var base *struct {
+		Session string     `json:"session"`
+		At      message.ID `json:"at"`
+	}
+	for _, row := range all {
+		if row.Seq > limit {
+			continue
+		}
+		app, body, err := harness.UnwrapPayload(row.Envelope.Payload)
+		if err != nil || app.Session != session {
+			continue
+		}
+		own = append(own, row)
+		if row.Envelope.Type == "session.opened" && base == nil {
+			var opened struct {
+				Base *struct {
+					Session string     `json:"session"`
+					At      message.ID `json:"at"`
+				} `json:"base"`
+			}
+			if json.Unmarshal(body, &opened) == nil {
+				base = opened.Base
+			}
+		}
+	}
+	if base == nil {
+		return own, nil
+	}
+	prefix, err := v.session(ctx, base.Session, base.At, seen)
+	if err != nil {
+		return nil, err
+	}
+	return append(prefix, own...), nil
+}
+
+func (v View) Tail(ctx context.Context, afterSeq int64, limit int) ([]actorcaps.LedgerRow, int64, error) {
+	rows, head, err := v.ReadVisibleAfterSeq(ctx, afterSeq, limit)
+	return actorLedgerRows(rows), head, err
+}
+
+func actorLedgerRows(rows []storespec.StoredRow) []actorcaps.LedgerRow {
+	out := make([]actorcaps.LedgerRow, len(rows))
+	for i, row := range rows {
+		out[i] = actorcaps.LedgerRow{Envelope: row.Envelope, Seq: row.Seq, IsTerminal: row.IsTerminal}
+	}
+	return out
 }
 
 // ReadVisibleTurnWindowBeforeSeq reads backwards until a root-turn-safe

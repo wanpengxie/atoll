@@ -716,7 +716,12 @@ func (e *engine) turnEnded(x driverproto.TurnEnded) {
 	} else if x.Status == driverproto.TurnInterrupted {
 		status = runtimeproto.TurnStatusInterrupted
 	}
-	usage := runtimeproto.TurnUsage{ContextTokens: x.Usage.ContextTokens, ContextWindow: x.Usage.ContextWindow, Model: x.Usage.Model, Effort: x.Usage.Effort}
+	usage := runtimeproto.TurnUsage{
+		Model: x.Usage.Model, Provider: x.Usage.Provider, Effort: x.Usage.Effort,
+		Input: x.Usage.Input, Output: x.Usage.Output, CacheRead: x.Usage.CacheRead, CacheWrite: x.Usage.CacheWrite, Total: x.Usage.Total,
+		ContextTokens: x.Usage.ContextTokens, ContextWindow: x.Usage.ContextWindow,
+		Cost: runtimeproto.UsageCost{Input: x.Usage.Cost.Input, Output: x.Usage.Cost.Output, CacheRead: x.Usage.Cost.CacheRead, CacheWrite: x.Usage.Cost.CacheWrite, Total: x.Usage.Cost.Total},
+	}
 	if e.turn.start.Kind == runtimeproto.TurnSelect && status == runtimeproto.TurnStatusOK {
 		e.options = runtimeproto.TurnOptions{Model: usage.Model, Effort: usage.Effort}
 		e.generation.options.Current = driverproto.TurnOptions{Model: usage.Model, Effort: usage.Effort}

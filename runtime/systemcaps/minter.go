@@ -24,17 +24,23 @@ type Minter struct {
 	pen      harness.Minter
 	access   accessdoor.AccessMinter
 	schedule schedule.Minter
+	view     actorcaps.LedgerView
 }
 
 func New(
 	pen harness.Minter,
 	access accessdoor.AccessMinter,
 	scheduler schedule.Minter,
+	views ...actorcaps.LedgerView,
 ) (*Minter, error) {
 	if pen == nil || access == nil || scheduler == nil {
 		return nil, ErrInvalidInput
 	}
-	return &Minter{pen: pen, access: access, schedule: scheduler}, nil
+	var view actorcaps.LedgerView
+	if len(views) > 0 {
+		view = views[0]
+	}
+	return &Minter{pen: pen, access: access, schedule: scheduler, view: view}, nil
 }
 
 // Mint mints the SystemActor's whole kernel bundle once.
@@ -49,5 +55,6 @@ func (m *Minter) Mint(context.Context) (actorcaps.Caps, error) {
 		State:     nil,
 		Schedule:  m.schedule.MintAuthority(authority),
 		Lifecycle: nil,
+		View:      m.view,
 	}, nil
 }

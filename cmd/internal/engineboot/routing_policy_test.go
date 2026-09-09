@@ -7,6 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func TestRegistrarRoutingPolicyRejectsWrongDoorAndReservedClass(t *testing.T) {
@@ -29,6 +30,7 @@ func TestRegistrarRoutingPolicyRejectsWrongDoorAndReservedClass(t *testing.T) {
 	}
 
 	describe := callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, "actor.describe", map[string]any{})
+	_, describe, _ = harness.UnwrapPayload(describe)
 	var card struct {
 		Status string                     `json:"status"`
 		Words  map[string]json.RawMessage `json:"words"`

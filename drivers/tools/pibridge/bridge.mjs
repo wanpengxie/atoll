@@ -98731,6 +98731,179 @@ function fauxProvider(options = {}) {
   };
 }
 
+// packages/ai/dist/utils/overflow.js
+var OVERFLOW_PATTERNS = [
+  /prompt is too long/i,
+  // Anthropic token overflow
+  /request_too_large/i,
+  // Anthropic request byte-size overflow (HTTP 413)
+  /input is too long for requested model/i,
+  // Amazon Bedrock
+  /exceeds the context window/i,
+  // OpenAI (Completions & Responses API)
+  /exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))/i,
+  // OpenAI-compatible proxies (LiteLLM)
+  /input token count.*exceeds the maximum/i,
+  // Google (Gemini)
+  /maximum prompt length is \d+/i,
+  // xAI (Grok)
+  /reduce the length of the messages/i,
+  // Groq
+  /maximum context length is \d+ tokens/i,
+  // OpenRouter (most backends)
+  /exceeds (?:the )?maximum allowed input length of [\d,]+ tokens?/i,
+  // OpenRouter/Poolside
+  /input \(\d+ tokens\) is longer than the model'?s context length \(\d+ tokens\)/i,
+  // Together AI
+  /exceeds the limit of \d+/i,
+  // GitHub Copilot
+  /exceeds the available context size/i,
+  // llama.cpp server
+  /greater than the context length/i,
+  // LM Studio
+  /context window exceeds limit/i,
+  // MiniMax
+  /exceeded model token limit/i,
+  // Kimi For Coding
+  /too large for model with \d+ maximum context length/i,
+  // Mistral
+  /prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?/i,
+  // DS4 server
+  /model_context_window_exceeded/i,
+  // z.ai non-standard finish_reason surfaced as error text
+  /prompt too long; exceeded (?:max )?context length/i,
+  // Ollama explicit overflow error
+  /range of input length should be/i,
+  // DashScope / Qwen Token Plan
+  /context[_ ]length[_ ]exceeded/i,
+  // Generic fallback
+  /too many tokens/i,
+  // Generic fallback
+  /token limit exceeded/i,
+  // Generic fallback
+  /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i
+  // Cerebras: 400/413 with no body
+];
+var NON_OVERFLOW_PATTERNS = [
+  /^(Throttling error|Service unavailable):/i,
+  // AWS Bedrock non-overflow errors (human-readable prefixes from formatBedrockError)
+  /rate limit/i,
+  // Generic rate limiting
+  /too many requests/i
+  // Generic HTTP 429 style
+];
+function isContextOverflow(message, contextWindow) {
+  if (message.stopReason === "error" && message.errorMessage) {
+    const isNonOverflow = NON_OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage));
+    if (!isNonOverflow && OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage))) {
+      return true;
+    }
+  }
+  if (contextWindow && message.stopReason === "stop") {
+    const inputTokens = message.usage.input + message.usage.cacheRead;
+    if (inputTokens > contextWindow) {
+      return true;
+    }
+  }
+  if (contextWindow && message.stopReason === "length" && message.usage.output === 0) {
+    const inputTokens = message.usage.input + message.usage.cacheRead;
+    if (inputTokens >= contextWindow * 0.99) {
+      return true;
+    }
+  }
+  return false;
+}
+function isRecoverableLength(message, desiredMaxOutput) {
+  return message.stopReason === "length" && desiredMaxOutput > 0 && message.usage.output < desiredMaxOutput;
+}
+
+// packages/ai/dist/utils/retry.js
+function buildProviderErrorPattern(patterns) {
+  return new RegExp(patterns.join("|"), "i");
+}
+var NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
+  // OpenCode Go/free-tier limits returned as 429 JSON error types by OpenCode's
+  // Zen API. These are subscription/account limits, not transient throttles.
+  "GoUsageLimitError",
+  "FreeUsageLimitError",
+  // OpenCode Go subscription-limit text asks users to enable available-balance
+  // usage after rolling/weekly/monthly limits are reached.
+  "Monthly usage limit reached",
+  "available balance",
+  // Generic quota/budget/billing exhaustion. `insufficient_quota` is OpenAI's
+  // quota/billing error code; the other strings cover common gateway wording.
+  "insufficient_quota",
+  "out of budget",
+  "quota exceeded",
+  "billing"
+]);
+var RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
+  // Generic provider load, HTTP status, and server-side transient failures.
+  "overloaded",
+  "rate.?limit",
+  "too many requests",
+  "429",
+  "500",
+  "502",
+  "503",
+  "504",
+  "524",
+  "service.?unavailable",
+  "server.?error",
+  "internal.?error",
+  // Wrapper/provider text for transient upstream failures, including OpenRouter
+  // "Provider returned error" responses (#2264).
+  "provider.?returned.?error",
+  "exceeded request buffer limit while retrying upstream",
+  // Network, proxy, and fetch transport failures. This includes OpenAI Codex
+  // raw-fetch failures such as "upstream connect", "connection refused", and
+  // "reset before headers" (#733), plus OpenRouter connection drops (#3317).
+  "network.?error",
+  "connection.?error",
+  "connection.?refused",
+  "connection.?lost",
+  "other side closed",
+  "fetch failed",
+  "getaddrinfo",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "upstream.?connect",
+  "reset before headers",
+  "socket hang up",
+  "socket connection was closed",
+  "timed? out",
+  "timeout",
+  "terminated",
+  // WebSocket transports can report close/error text instead of HTTP/fetch text.
+  "websocket.?closed",
+  "websocket.?error",
+  // Premature stream endings from SDKs and transports. Anthropic can throw
+  // "stream ended without ..." and "Anthropic stream ended before message_stop"
+  // (#4433); Bedrock/Smithy can throw an HTTP/2 no-response error (#3594).
+  "ended without",
+  "stream ended before message_stop",
+  "stream ended before a terminal response event",
+  "http2 request did not get a response",
+  // Provider-requested retry delay cap failures should flow through the outer
+  // retry policy so callers can surface/abort the backoff (#1123).
+  "retry delay",
+  // Explicit retry guidance emitted mid-stream by OpenAI Responses and Bedrock
+  // stream exceptions (#6019).
+  "you can retry your request",
+  "try your request again",
+  "please retry your request",
+  // gRPC based providers (e.g. NVIDIA NIM)
+  "ResourceExhausted"
+]);
+function isRetryableAssistantError(message) {
+  if (message.stopReason !== "error" || !message.errorMessage)
+    return false;
+  const errorMessage = message.errorMessage;
+  if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage))
+    return false;
+  return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
+}
+
 // node_modules/typebox/build/schema/types/_refine.mjs
 function IsRefine2(value2) {
   return guard_exports.HasPropertyKey(value2, "~refine") && guard_exports.IsArray(value2["~refine"]) && guard_exports.Every(value2["~refine"], 0, (value3) => guard_exports.IsObject(value3) && guard_exports.HasPropertyKey(value3, "check") && guard_exports.HasPropertyKey(value3, "error") && guard_exports.IsFunction(value3.check) && guard_exports.IsFunction(value3.error));
@@ -103539,6 +103712,9 @@ Received arguments:
 ${JSON.stringify(toolCall.arguments, null, 2)}`;
   throw new Error(errorMessage);
 }
+
+// ../atoll/drivers/tools/pibridge/bridge.ts
+init_estimate();
 
 // packages/telemetry/src/noop.ts
 function startNoopSpan(_options, callback) {
@@ -116464,14 +116640,45 @@ async function generate2(id, args, controller) {
   for await (const _event of stream11) {
   }
   const message = await stream11.result();
-  if (message.stopReason === "error" || message.stopReason === "aborted") {
-    throw Object.assign(
-      new Error("provider did not deliver a successful assistant"),
-      failureInfo || {},
-      message.stopReason === "aborted" ? { code: "cancelled" } : {}
-    );
+  const usage = {
+    model: model.id,
+    provider: model.provider,
+    effort: typeof args.options?.thinkingLevel === "string" ? args.options.thinkingLevel : void 0,
+    input: message.usage?.input || 0,
+    output: message.usage?.output || 0,
+    cache_read: message.usage?.cacheRead || 0,
+    cache_write: message.usage?.cacheWrite || 0,
+    total: message.usage ? calculateContextTokens(message.usage) : 0,
+    context_tokens: (message.usage?.input || 0) + (message.usage?.cacheRead || 0) + (message.usage?.cacheWrite || 0),
+    context_window: model.contextWindow || 0,
+    cost: {
+      input: message.usage?.cost?.input || 0,
+      output: message.usage?.cost?.output || 0,
+      cache_read: message.usage?.cost?.cacheRead || 0,
+      cache_write: message.usage?.cost?.cacheWrite || 0,
+      total: message.usage?.cost?.total || 0
+    }
+  };
+  const overflow = isContextOverflow(message, model.contextWindow);
+  const recoverableLength = isRecoverableLength(message, model.maxTokens);
+  if (message.stopReason === "error" || message.stopReason === "aborted" || overflow || recoverableLength) {
+    const code = message.stopReason === "aborted" ? "cancelled" : overflow ? "context_overflow" : recoverableLength ? "length_recoverable" : failureInfo?.status === 429 ? "rate_limited" : failureInfo?.status === 401 ? "auth" : failureInfo?.status === 403 ? "permission" : failureInfo?.status === 404 ? "model_not_found" : failureInfo?.status === 400 || failureInfo?.status === 422 ? "invalid_args" : failureInfo?.status === 408 || failureInfo?.status === 409 || failureInfo?.status >= 500 ? "transient_provider" : failureInfo?.code === "transport_error" ? "transport_error" : "unknown_provider_error";
+    const retryable = overflow || recoverableLength || isRetryableAssistantError(message) || failureInfo?.status === 408 || failureInfo?.status === 409 || failureInfo?.status === 429 || failureInfo?.status >= 500;
+    const safeMessage = { ...message, content: code === "context_overflow" ? message.content : [], errorMessage: `Provider request failed (${code})` };
+    send({ id, kind: "result", value: {
+      provider: model.provider,
+      model: model.id,
+      message: safeMessage,
+      usage,
+      error_code: code,
+      retryable,
+      provider_status: failureInfo?.status,
+      provider_code: failureInfo?.code,
+      retry_after_ms: failureInfo?.retryAfterMS
+    } });
+    return;
   }
-  send({ id, kind: "result", value: { provider: model.provider, model: model.id, message } });
+  send({ id, kind: "result", value: { provider: model.provider, model: model.id, message, usage } });
 }
 function executionEnv(cwd) {
   let env = envs.get(cwd);
@@ -116548,7 +116755,8 @@ async function handle(frame) {
         reasoning: m3.reasoning,
         input: m3.input,
         contextWindow: m3.contextWindow,
-        maxTokens: m3.maxTokens
+        maxTokens: m3.maxTokens,
+        thinking_levels: Object.entries(m3.thinkingLevelMap || {}).filter(([, value2]) => value2 !== null).map(([level]) => level)
       }));
       send({ id, kind: "result", value: { models: values } });
     } else if (typeof frame.op === "string" && frame.op.startsWith("workspace.")) {

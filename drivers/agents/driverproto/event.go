@@ -121,10 +121,25 @@ type Tool struct {
 	Output json.RawMessage
 }
 type TurnUsage struct {
-	ContextTokens int64
-	ContextWindow int64
-	Model         string
-	Effort        string
+	Model         string    `json:"model,omitempty"`
+	Provider      string    `json:"provider,omitempty"`
+	Effort        string    `json:"effort,omitempty"`
+	Input         int64     `json:"input"`
+	Output        int64     `json:"output"`
+	CacheRead     int64     `json:"cache_read"`
+	CacheWrite    int64     `json:"cache_write"`
+	Total         int64     `json:"total"`
+	ContextTokens int64     `json:"context_tokens"`
+	ContextWindow int64     `json:"context_window"`
+	Cost          UsageCost `json:"cost"`
+}
+
+type UsageCost struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cache_read"`
+	CacheWrite float64 `json:"cache_write"`
+	Total      float64 `json:"total"`
 }
 type TurnEnded struct {
 	Target      WorkerTurnTarget

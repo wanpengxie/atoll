@@ -84,7 +84,7 @@ func TestTimerWordsArmFireAndVanishFromThePendingSet(t *testing.T) {
 			if len(audience) != 1 || audience[0] != owner {
 				t.Fatalf("fire audience=%v, want the owner alone", audience)
 			}
-			body, _ := envelope["payload"].(map[string]any)
+			body := envelopeBody(envelope)
 			if body["note"] != "stand up" {
 				t.Fatalf("fire payload=%v, want the author's own bytes", body)
 			}

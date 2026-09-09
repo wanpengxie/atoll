@@ -223,6 +223,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		h.stateHandles,
 		schedMinter,
 		h.actors,
+		h.View(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct managed caps minter: %w", err)
@@ -235,6 +236,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		h.minter,
 		access,
 		schedMinter,
+		h.View(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct system caps minter: %w", err)

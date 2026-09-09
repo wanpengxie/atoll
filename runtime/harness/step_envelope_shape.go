@@ -80,6 +80,9 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 				Detail:       "envelope.payload=null is not legal (L0 §2.2); omit payload or send {}",
 			}, nil
 		}
+		if _, _, err := UnwrapPayload(env.Payload); err != nil {
+			return outcome{RejectReason: HarnessPayloadInvalid, Detail: "envelope.payload must be {_context,body}: " + err.Error()}, nil
+		}
 	}
 
 	// (3) kind closed set.

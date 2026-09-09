@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // call.go is the CALL face's request builder (closure author#2's write-side
@@ -94,11 +95,11 @@ func BuildRequest(
 // the ledger_call consumer is this function's only remaining caller chain.
 func ParseFinalStatus(raw []byte) (string, bool) {
 	var status string
-	if len(raw) > 0 {
+	if _, body, err := harness.UnwrapPayload(raw); err == nil {
 		var obj struct {
 			Status string `json:"status"`
 		}
-		if err := json.Unmarshal(raw, &obj); err == nil {
+		if err := json.Unmarshal(body, &obj); err == nil {
 			status = strings.TrimSpace(obj.Status)
 		}
 	}

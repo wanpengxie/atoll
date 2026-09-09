@@ -1,18 +1,19 @@
 package native
 
 import (
-	"encoding/json"
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
+	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 const (
 	maxSessions     = 256
-	sessionIdle     = 30 * time.Minute
+	sessionIdle     = time.Hour
 	maxSessionQueue = 128
 	batchMaxCount   = 16
 )
@@ -24,48 +25,79 @@ type session struct {
 	Buffer           []agentproto.WorkID
 	Execution        string
 	Owner            agentproto.WorkID
-	History          []json.RawMessage
-	Version          int64
 	LastUsed         int64
 	Freeze           string
 	HoldUntil        int64
 	RestoreInterrupt bool
 	Control          *pendingControl
 	Rebuffer         bool
+	Holder           string
+	Base             *agentloop.BoundaryRef
+	Opened           bool
+	Archived         bool
+	Merge            string
+	Merged           []string
+	Skipped          []string
+	Synced           string
+	LastBoundary     string
+	ForkPoint        string
 }
 
-func (c *controller) sessionForAsk(msg actorbase.Msg, req agentproto.AskRequest) (*session, error) {
+func (c *controller) sessionForAsk(sys actorbase.Sys, msg actorbase.Msg, req agentproto.AskRequest) (*session, error) {
 	if c.sessions == nil {
 		c.sessions = map[string]*session{}
 	}
 	scope := workScopeKey(actorbase.EffectiveCaller(msg))
+	id := msg.Context().Session
+	if id == "" {
+		id = req.SessionID
+	}
+	var base *agentloop.BoundaryRef
 	if req.RelatedWorkID != "" {
 		w, ok := c.owned(msg, req.RelatedWorkID)
 		if !ok {
 			return nil, errors.New("work_not_found")
 		}
-		if req.ViewID != "" && req.ViewID != w.ViewID {
-			return nil, errors.New("invalid_args")
-		}
-		req.ViewID = w.ViewID
-		if c.sessions[req.ViewID] == nil {
+		if c.sessions[w.SessionID] == nil {
 			return nil, errors.New("context_unavailable")
 		}
+		base = &agentloop.BoundaryRef{Session: w.SessionID, At: w.BoundaryID}
 	}
-	if req.ViewID == "" {
+	if id == "" {
 		return nil, errors.New("scope_required")
 	}
-	if s := c.sessions[req.ViewID]; s != nil {
+	if s := c.sessions[id]; s != nil {
 		if s.Scope != scope {
-			return nil, errors.New("view_not_found")
+			return nil, errors.New("session_not_found")
 		}
-		return s, nil
+		if !s.Archived {
+			return s, nil
+		}
+		// An archived branch is immutable routing truth. Refresh its ledger
+		// projection so the fork is pinned to a concrete boundary, then assign
+		// the root request a fresh session before any response is written.
+		if s.ForkPoint == "" {
+			if err := c.recoverSessionProjection(sys); err != nil {
+				return nil, errors.New("ledger_unavailable")
+			}
+			s = c.sessions[id]
+		}
+		if s == nil || !s.Archived || s.ForkPoint == "" {
+			return nil, errors.New("context_unavailable")
+		}
+		if base == nil {
+			base = &agentloop.BoundaryRef{Session: s.ID, At: s.ForkPoint}
+		}
+		id = "s-" + uuid.NewString()
+		if err := actorbase.AssignSession(sys, msg, id); err != nil {
+			return nil, errors.New("session_assignment_failed")
+		}
 	}
 
 	if len(c.sessions) >= maxSessions {
 		return nil, errors.New("session_capacity")
 	}
-	s := &session{ID: req.ViewID, Scope: scope, LastUsed: nowMillis()}
+	s := &session{ID: id, Scope: scope, LastUsed: nowMillis(), Base: base, Merge: "auto"}
 	c.sessions[s.ID] = s
 	c.sessionOrder = append(c.sessionOrder, s.ID)
 	return s, nil
@@ -73,6 +105,12 @@ func (c *controller) sessionForAsk(msg actorbase.Msg, req agentproto.AskRequest)
 
 func (c *controller) selectSession(msg actorbase.Msg, id string, work agentproto.WorkID, target string) (*session, error) {
 	scope := workScopeKey(actorbase.EffectiveCaller(msg))
+	if contextual := msg.Context().Session; contextual != "" {
+		if id != "" && id != contextual {
+			return nil, errors.New("invalid_args")
+		}
+		id = contextual
+	}
 	for _, selector := range []struct {
 		value   string
 		request bool
@@ -87,16 +125,16 @@ func (c *controller) selectSession(msg actorbase.Msg, id string, work agentproto
 		if w == nil || workScopeKey(w.Owner) != scope {
 			return nil, errors.New("work_not_found")
 		}
-		if id != "" && id != w.ViewID {
+		if id != "" && id != w.SessionID {
 			return nil, errors.New("invalid_args")
 		}
-		id = w.ViewID
+		id = w.SessionID
 	}
 
 	if id != "" {
 		s := c.sessions[id]
 		if s == nil || s.Scope != scope {
-			return nil, errors.New("view_not_found")
+			return nil, errors.New("session_not_found")
 		}
 		return s, nil
 	}
@@ -110,7 +148,7 @@ func (c *controller) selectSession(msg actorbase.Msg, id string, work agentproto
 		}
 	}
 	if selected == nil {
-		return nil, errors.New("view_not_found")
+		return nil, errors.New("session_not_found")
 	}
 	return selected, nil
 }
@@ -185,14 +223,6 @@ func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause) {
 			batch = append(batch, w)
 		}
 		owner := batch[len(batch)-1]
-		// Reserve capacity before merging requests: no ownership changes on a full lane.
-		savedCursor := c.data.NextLooper
-		_, capacity := c.freeLooper()
-		c.data.NextLooper = savedCursor
-		if !capacity {
-			owner.ExecutionState = "waiting_capacity"
-			return
-		}
 		var inputs []inputRecord
 		for _, w := range batch {
 			for _, in := range w.Inputs {
@@ -201,8 +231,6 @@ func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause) {
 			}
 		}
 		owner.Inputs = inputs
-		owner.Context = append([]json.RawMessage(nil), s.History...)
-		owner.ContextVersion = s.Version
 		if !c.dispatch(sys, owner, cause) {
 			return
 		}

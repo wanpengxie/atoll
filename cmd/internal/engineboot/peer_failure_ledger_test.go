@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const peerFailureReceiverClass = "peer-failure-receiver-test"
@@ -110,6 +111,7 @@ func assertCallerLedgerFailure(t *testing.T, raw json.RawMessage, code string) {
 	if terminal.Status != message.StatusFailed || terminal.ErrorCode != code || terminal.Detail == "" {
 		t.Fatalf("terminal=%s decoded=%+v", raw, terminal)
 	}
+	_, raw, _ = harness.UnwrapPayload(raw)
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
@@ -128,6 +130,7 @@ type callerClosure struct {
 
 func decodeCallerClosure(t *testing.T, raw json.RawMessage) callerClosure {
 	t.Helper()
+	_, raw, _ = harness.UnwrapPayload(raw)
 	var got callerClosure
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)

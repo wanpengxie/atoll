@@ -138,6 +138,10 @@ func (h *Home) emitSystemEvent(
 	if err != nil {
 		return fmt.Errorf("platform: build system event %q: %w", typ, err)
 	}
+	env.Payload, err = harness.WrapPayload(harness.Context{}, env.Payload)
+	if err != nil {
+		return fmt.Errorf("platform: wrap system event %q: %w", typ, err)
+	}
 	result, err := h.systemPen.Write(ctx, env)
 	if err != nil {
 		return fmt.Errorf("platform: write system event %q: %w", typ, err)

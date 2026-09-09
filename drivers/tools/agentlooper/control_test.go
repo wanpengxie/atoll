@@ -77,7 +77,7 @@ func (s *steeringSys) Call(c message.Cause, target actor.ActorID, typ string, v 
 func TestSteerDuringModelAndToolWaitStaysInSameExecution(t *testing.T) {
 	for _, trigger := range []string{llmproto.TypeGenerate, workspaceproto.TypeBash} {
 		t.Run(trigger, func(t *testing.T) {
-			a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "e", ViewID: "view:v", ControllerActor: "controller", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "first", Seq: 1, Text: "run"}}}
+			a := &assignment{start: agentloop.StartRequest{SessionID: "session:v", WorkID: "w", AssignmentID: "e", ControllerActor: "controller", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "first", Seq: 1, Text: "run"}}}
 			first := json.RawMessage(finalAssistant)
 			if trigger == workspaceproto.TypeBash {
 				first = json.RawMessage(`{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"tool","name":"bash","arguments":{"command":"true"}}]}`)
@@ -90,10 +90,10 @@ func TestSteerDuringModelAndToolWaitStaysInSameExecution(t *testing.T) {
 			}
 			var report agentloop.ReportRequest
 			_ = json.Unmarshal(s.posts[0].Payload, &report)
-			if report.AssignmentID != "e" || report.State != "completed" || report.ConsumedThrough != 2 || len(report.Controls) != 1 || s.llmCalls != 2 {
+			if report.TurnID != "e" || report.State != "completed" || s.llmCalls != 2 || len(a.controls) != 1 {
 				t.Fatalf("report=%+v models=%d", report, s.llmCalls)
 			}
-			if err := validateHistory(report.History); err != nil {
+			if err := validateHistory(testContextMessages("session:v")); err != nil {
 				t.Fatal(err)
 			}
 		})

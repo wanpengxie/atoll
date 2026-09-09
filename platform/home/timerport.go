@@ -2,11 +2,13 @@ package home
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/capauth"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -61,11 +63,15 @@ func (p timerPort) Set(ctx context.Context, subject actor.ActorID, req sysactor.
 	if req.Home == string(schedule.TimerHomeMemory) {
 		home = schedule.TimerHomeMemory
 	}
+	payload, err := harness.WrapPayload(harness.Context{}, json.RawMessage(req.Payload))
+	if err != nil {
+		return sysactor.TimerHandle{}, &sysactor.OperateError{Code: "bad_payload", Detail: err.Error()}
+	}
 	id, err := p.handleFor(subject).Schedule(ctx, schedule.ScheduleReq{
 		Home:    home,
 		FireAt:  req.FireAt,
 		Type:    req.Type,
-		Payload: req.Payload,
+		Payload: payload,
 	})
 	if err != nil {
 		return sysactor.TimerHandle{}, timerFault(err)

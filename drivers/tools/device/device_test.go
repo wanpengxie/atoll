@@ -165,8 +165,8 @@ func request(typ string, payload any) actorbase.Msg {
 // requestID is request with the envelope id chosen by the caller, for the tests
 // that need two deliveries of the SAME type in flight at once.
 func requestID(id message.ID, typ string, payload any) actorbase.Msg {
-	raw, _ := json.Marshal(map[string]any{"body": payload})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	raw, _ := json.Marshal(payload)
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:        id,
 		ChannelID: testChannel,
 		Kind:      message.KindRequest,

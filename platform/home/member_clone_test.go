@@ -98,7 +98,7 @@ func TestMemberCloneCreatesAnotherIdentityAndNarratesForkOrigin(t *testing.T) {
 				ForkOf string `json:"fork_of"`
 			} `json:"by"`
 		}
-		_ = json.Unmarshal(row.Envelope.Payload, &payload)
+		_ = json.Unmarshal(canonicalTestBody(row.Envelope.Payload), &payload)
 		if payload.Member == string(child) && payload.By.ForkOf == string(parent) {
 			found = true
 		}
@@ -135,7 +135,7 @@ func TestAgentForkTraversesAgentDoorAndStoreIntoRoster(t *testing.T) {
 	}
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	req, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
-		Type: base.TypeFork, Payload: json.RawMessage(`{"body":{}}`), Audience: message.Audience{parent},
+		Type: base.TypeFork, Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{parent},
 		Cause: message.Root(),
 	})
 	if err != nil {
@@ -163,7 +163,7 @@ func TestAgentForkTraversesAgentDoorAndStoreIntoRoster(t *testing.T) {
 						ForkOf actor.ActorID `json:"fork_of"`
 					} `json:"by"`
 				}
-				if json.Unmarshal(row.Envelope.Payload, &event) == nil && event.By.ForkOf == parent && event.Member != parent {
+				if json.Unmarshal(canonicalTestBody(row.Envelope.Payload), &event) == nil && event.By.ForkOf == parent && event.Member != parent {
 					return
 				}
 			}

@@ -132,7 +132,7 @@ func bodyAgentProc(sys actorbase.Sys) error {
 			Status string `json:"status"`
 			Value  string `json:"value"`
 		}
-		if json.Unmarshal(terminal.Payload, &result) != nil || result.Status != message.StatusCompleted || result.Value != "from-body" {
+		if json.Unmarshal(canonicalTestBody(terminal.Payload), &result) != nil || result.Status != message.StatusCompleted || result.Value != "from-body" {
 			_, _ = sys.Fail(msg, "reverse_call_failed", string(terminal.Payload))
 			continue
 		}
@@ -230,7 +230,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 		t.Fatal(err)
 	}
 	pen := host.minter.MintAuthority(basis.Run, basis.Kind)
-	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: "body.roundtrip", Payload: json.RawMessage(`{"body":{}}`), Audience: message.Audience{seat}, Cause: message.Root()})
+	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: "body.roundtrip", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}, Cause: message.Root()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			Status string `json:"status"`
 			Phase  string `json:"phase"`
 		}
-		_ = json.Unmarshal(response.Payload, &progress)
+		_ = json.Unmarshal(canonicalTestBody(response.Payload), &progress)
 		if progress.Status != message.StatusProcessing {
 			t.Fatalf("progress=%s", response.Payload)
 		}
@@ -269,7 +269,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 		Status    string `json:"status"`
 		Roundtrip string `json:"roundtrip"`
 	}
-	if err := json.Unmarshal(responses[2].Payload, &result); err != nil || result.Status != message.StatusCompleted || result.Roundtrip != "seat-handle-seat" {
+	if err := json.Unmarshal(canonicalTestBody(responses[2].Payload), &result); err != nil || result.Status != message.StatusCompleted || result.Roundtrip != "seat-handle-seat" {
 		t.Fatalf("terminal=%s err=%v", responses[2].Payload, err)
 	}
 	for name, h := range map[string]*Home{"host": host, "body": body} {
@@ -290,7 +290,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 	}
 
 	t.Run("event reaches body with handle identity", func(t *testing.T) {
-		event, err := behavior.BuildEvent(time.Now, behavior.EventSpec{Cause: message.Root(), Type: "host.notice", Audience: message.Audience{seat}, Payload: json.RawMessage(`{"notice":"hello"}`)})
+		event, err := behavior.BuildEvent(time.Now, behavior.EventSpec{Cause: message.Root(), Type: "host.notice", Audience: message.Audience{seat}, Payload: canonicalTestPayload(map[string]any{"notice": "hello"})})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -317,7 +317,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 		t.Fatal("incoming event lost")
 	})
 	t.Run("undeclared request rejected before body", func(t *testing.T) {
-		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "private.operation", Audience: message.Audience{seat}, Payload: json.RawMessage(`{"body":{}}`)})
+		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "private.operation", Audience: message.Audience{seat}, Payload: canonicalTestPayload(map[string]any{})})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -329,7 +329,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			responses := closureTerminalsFor(t, host, request.ID)
 			if len(responses) > 0 {
 				var failure message.Failure
-				_ = json.Unmarshal(responses[0].Payload, &failure)
+				_ = json.Unmarshal(canonicalTestBody(responses[0].Payload), &failure)
 				if failure.ErrorCode != "type_unsupported" {
 					t.Fatalf("terminal=%s", responses[0].Payload)
 				}
@@ -361,7 +361,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			{channelmember.HandleCall, `{"body":{"type":"system.member.list","audience":["system"],"payload":{}}}`, "system.member.list", actor.SystemActorID},
 			{channelmember.HandleEmit, `{"body":{"type":"body.notice","audience":["host-tool"],"payload":{"value":"hello"}}}`, "body.notice", actor.ActorID("host-tool")},
 		} {
-			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: op.word, Payload: json.RawMessage(op.payload), Audience: message.Audience{handle}})
+			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: op.word, Payload: canonicalTestPayload(json.RawMessage(op.payload)), Audience: message.Audience{handle}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -375,7 +375,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 					var result struct {
 						Status string `json:"status"`
 					}
-					_ = json.Unmarshal(response.Payload, &result)
+					_ = json.Unmarshal(canonicalTestBody(response.Payload), &result)
 					if result.Status == message.StatusFailed {
 						t.Fatalf("reverse operation failed: %s", response.Payload)
 					}
@@ -413,7 +413,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			t.Fatal(err)
 		}
 		defer endIdentityForFixture(t, body, duplicate.ActorID)
-		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "body.roundtrip", Payload: json.RawMessage(`{"body":{}}`), Audience: message.Audience{seat}})
+		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "body.roundtrip", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -425,7 +425,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			responses := closureTerminalsFor(t, host, request.ID)
 			if len(responses) > 0 {
 				var failure message.Failure
-				_ = json.Unmarshal(responses[0].Payload, &failure)
+				_ = json.Unmarshal(canonicalTestBody(responses[0].Payload), &failure)
 				if failure.ErrorCode != "actor_ambiguous" {
 					t.Fatalf("ambiguous result=%s", responses[0].Payload)
 				}
@@ -451,7 +451,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 				t.Fatal(err)
 			}
 			writer := direction.from.minter.MintAuthority(basis.Run, basis.Kind)
-			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: direction.word, Payload: json.RawMessage(direction.payload), Audience: message.Audience{direction.target}})
+			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: direction.word, Payload: canonicalTestPayload(json.RawMessage(direction.payload)), Audience: message.Audience{direction.target}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -482,7 +482,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			t.Fatal("cancel did not reach opposite callee")
 		})
 	}
-	describe, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: introspect.QueryDescribe, Payload: json.RawMessage(`{"body":{}}`), Audience: message.Audience{seat}, Cause: message.Root()})
+	describe, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: introspect.QueryDescribe, Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}, Cause: message.Root()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 				Status string                         `json:"status"`
 				Words  map[string]introspect.WordSpec `json:"words"`
 			}
-			if json.Unmarshal(rows[0].Payload, &projection) != nil || projection.Status != message.StatusCompleted || len(projection.Words["body.roundtrip"].InputSchema) == 0 {
+			if json.Unmarshal(canonicalTestBody(rows[0].Payload), &projection) != nil || projection.Status != message.StatusCompleted || len(projection.Words["body.roundtrip"].InputSchema) == 0 {
 				t.Fatalf("seat manifest=%s", rows[0].Payload)
 			}
 			if _, err := host.actors.Remove(context.Background(), actorctl.RemoveRequest{Target: seat, InitiatorActorID: trigger, Cause: message.Root()}); err != nil {

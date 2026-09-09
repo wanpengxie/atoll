@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -91,11 +92,11 @@ func (s *stubExecutor) Restart(context.Context, OperateRequest) (any, error) {
 }
 
 func operateMsg(typ string, sender actor.ActorID) actorbase.Msg {
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "op1", ChannelID: "ch", Kind: message.KindRequest, Type: typ,
 		Sender:   message.Sender{Kind: actor.KindAgent, ID: sender},
 		Audience: message.Audience{actor.SystemActorID},
-		Payload:  json.RawMessage(`{"body":{}}`),
+		Payload:  json.RawMessage(`{}`),
 	})
 }
 
@@ -124,11 +125,11 @@ func TestOperate_RemoteCallerKeepsLocalInitiator(t *testing.T) {
 	ex := &stubExecutor{result: map[string]string{"ok": "true"}}
 	s := New(Deps{Authority: memberRegistry{}, Operate: ex})
 	sys := &failSys{}
-	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &harness.Caller{Channel: "c0", Actor: "agent:steward:1"}}, message.Envelope{
 		ID: "op-remote", ChannelID: "target", Kind: message.KindRequest, Type: TypeMemberCreate,
 		Sender:   message.Sender{Kind: actor.KindPeer, ID: "peer:svcactor:2"},
 		Audience: message.Audience{actor.SystemActorID},
-		Payload:  json.RawMessage(`{"_context":{"caller":{"channel":"c0","actor":"agent:steward:1"}},"body":{"decl_id":"claude"}}`),
+		Payload:  json.RawMessage(`{"decl_id":"claude"}`),
 	})
 	s.handle(sys, msg)
 	if ex.created != 1 || len(sys.fails) != 0 {

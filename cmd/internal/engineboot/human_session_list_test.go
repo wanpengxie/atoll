@@ -7,6 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func TestHumanCellListsThePrincipalsLiveGatewaySessions(t *testing.T) {
@@ -33,6 +34,7 @@ func TestHumanCellListsThePrincipalsLiveGatewaySessions(t *testing.T) {
 	}
 	decode := func(raw json.RawMessage) {
 		t.Helper()
+		_, raw, _ = harness.UnwrapPayload(raw)
 		if err := json.Unmarshal(raw, &reply); err != nil {
 			t.Fatal(err)
 		}

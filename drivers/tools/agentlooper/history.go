@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// validateHistory checks the model transcript, not delivery in the Actor ledger.
-// IDs are scoped to an assistant batch; providers may reuse them in later turns.
-// Unknown source history is rejected rather than silently rewritten.
+// validateHistory accepts provider error/aborted assistant messages as durable
+// context when every tool call in them is paired, just like a normal assistant.
 func validateHistory(history []json.RawMessage) error {
 	var pending []toolCall
 	for i, raw := range history {
@@ -30,9 +29,6 @@ func validateHistory(history []json.RawMessage) error {
 		case "toolResult":
 			return fmt.Errorf("message %d has no pending tool call", i)
 		case "assistant":
-			if reason := stopReason(raw); reason == "error" || reason == "aborted" {
-				return fmt.Errorf("message %d is an incomplete assistant", i)
-			}
 			calls, _, err := assistantParts(raw)
 			if err != nil {
 				return fmt.Errorf("message %d: %w", i, err)
@@ -47,11 +43,6 @@ func validateHistory(history []json.RawMessage) error {
 		return fmt.Errorf("history has %d unclosed tool calls", len(pending))
 	}
 	return nil
-}
-
-func validArguments(raw json.RawMessage) bool {
-	var value map[string]json.RawMessage
-	return json.Unmarshal(raw, &value) == nil && value != nil
 }
 
 func stopReason(raw json.RawMessage) string {

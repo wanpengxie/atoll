@@ -69,7 +69,7 @@ func closureCall(t *testing.T, h *Home, caller, receiver actor.ActorID) message.
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
 		Type:     closureRequestType,
-		Payload:  json.RawMessage(`{"body":{"unit":"work"}}`),
+		Payload:  canonicalTestPayload(map[string]any{"unit": "work"}),
 		Audience: message.Audience{receiver},
 		Cause:    message.Root(),
 	})
@@ -177,7 +177,7 @@ func TestReconcileClosureCarriesARealRemovalToAReceiverUnavailableTerminal(t *te
 		Status string `json:"status"`
 		Reason string `json:"reason"`
 	}
-	if err := json.Unmarshal(terminal.Payload, &payload); err != nil {
+	if err := json.Unmarshal(canonicalTestBody(terminal.Payload), &payload); err != nil {
 		t.Fatalf("decode terminal payload %s: %v", terminal.Payload, err)
 	}
 	if payload.Status != string(message.StatusFailed) ||
@@ -297,7 +297,7 @@ func TestShutdownLeavesOpenUntilDeadlineThenReaperCloses(t *testing.T) {
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	deadline := h.nowMs() + 10_000
 	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
-		Type: closureRequestType, Payload: json.RawMessage(`{"body":{"unit":"shutdown"}}`),
+		Type: closureRequestType, Payload: canonicalTestPayload(map[string]any{"unit": "shutdown"}),
 		Audience: message.Audience{receiver}, ExpiresAt: &deadline,
 		Cause: message.Root(),
 	})
@@ -327,7 +327,7 @@ func TestShutdownLeavesOpenUntilDeadlineThenReaperCloses(t *testing.T) {
 		Status string `json:"status"`
 		Reason string `json:"reason"`
 	}
-	if err := json.Unmarshal(terminals[0].Payload, &payload); err != nil || payload.Status != string(message.StatusFailed) || payload.Reason != string(message.TerminalUnansweredTimeout) {
+	if err := json.Unmarshal(canonicalTestBody(terminals[0].Payload), &payload); err != nil || payload.Status != string(message.StatusFailed) || payload.Reason != string(message.TerminalUnansweredTimeout) {
 		t.Fatalf("deadline payload=%s err=%v", terminals[0].Payload, err)
 	}
 }

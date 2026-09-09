@@ -60,6 +60,7 @@ type testSys struct {
 	posts          []behavior.RequestSpec
 	events         []behavior.EventSpec
 	controlResults chan behavior.RequestSpec
+	assigned       map[message.ID]string
 }
 
 type testPending struct{ msg actorbase.Msg }
@@ -74,11 +75,15 @@ func (p testPending) Wait(context.Context, time.Duration) (actorbase.Msg, error)
 func (p testPending) Cancel() error                                              { return nil }
 
 func newTestSys(state *testState) *testSys {
-	return &testSys{controlResults: make(chan behavior.RequestSpec, 16), state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}}
+	return &testSys{controlResults: make(chan behavior.RequestSpec, 16), state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}, assigned: map[message.ID]string{}}
 }
 func (s *testSys) State() actorbase.StateHandle { return s.state }
 func (s *testSys) Self() actor.ActorID          { return s.self }
 func (s *testSys) Life() context.Context        { return context.Background() }
+func (s *testSys) AssignSession(msg actorbase.Msg, session string) error {
+	s.assigned[msg.ID] = session
+	return nil
+}
 func (s *testSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
 	s.replies[msg.ID] = v
 	return "reply", nil
@@ -96,6 +101,9 @@ func (s *testSys) Post(spec behavior.RequestSpec) (message.ID, error) {
 		s.controlResults <- spec
 		return "control-done", nil
 	}
+	if spec.Type == startDoneType {
+		return "start-done", nil
+	}
 
 	s.posts = append(s.posts, spec)
 	return message.ID("post"), nil
@@ -104,46 +112,54 @@ func (s *testSys) Emit(spec behavior.EventSpec) (message.ID, error) {
 	s.events = append(s.events, spec)
 	return "event", nil
 }
-func (s *testSys) Call(_ message.Cause, target actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
+func (s *testSys) Call(_ message.Cause, target actor.ActorID, typ string, payload any) (actorbase.Pending, error) {
+	if typ == agentloop.TypeStart || typ == agentloop.TypeInput || typ == agentloop.TypeInspect || typ == agentloop.TypeStop {
+		raw, _ := json.Marshal(payload)
+		s.posts = append(s.posts, behavior.RequestSpec{Type: typ, Audience: message.Audience{target}, Payload: raw})
+		disposition := "accepted"
+		if typ == agentloop.TypeInspect {
+			disposition = "observed"
+		}
+		body, _ := json.Marshal(map[string]any{"status": "completed", "disposition": disposition})
+		return testPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "call-result", Kind: message.KindResponse, Payload: body})}, nil
+	}
 	if target != actor.SystemActorID || typ != message.TypeSystemLogQuery {
 		return nil, fmt.Errorf("unexpected call %s %s", target, typ)
 	}
 	turns := make([]logQueryTurn, 0)
 	for i := len(s.events) - 1; i >= 0; i-- {
 		event := s.events[i]
-		if event.Type != recoveryEventType {
+		if event.Type != agentloop.TypeReport {
 			continue
 		}
 		turns = append(turns, logQueryTurn{Messages: []logMessage{{Seq: int64(i + 1), Sender: message.Sender{ID: s.self}, MessageType: event.Type, PayloadText: string(event.Payload)}}})
 	}
-	payload, _ := json.Marshal(logQueryResponse{Turns: turns, HeadSeq: int64(len(s.events))})
+	responsePayload, _ := json.Marshal(logQueryResponse{Turns: turns, HeadSeq: int64(len(s.events))})
 	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(payload, &fields)
+	_ = json.Unmarshal(responsePayload, &fields)
 	fields["status"] = json.RawMessage(`"completed"`)
-	payload, _ = json.Marshal(fields)
-	return testPending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "system-result", Kind: message.KindResponse, Payload: payload})}, nil
+	responsePayload, _ = json.Marshal(fields)
+	return testPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "system-result", Kind: message.KindResponse, Payload: responsePayload})}, nil
 }
 
 func testRequest(id, typ string, body any) actorbase.Msg {
 	return testRequestFrom(id, typ, "c", "human:alice:1", body)
 }
 func testRequestFrom(id, typ, channelID, sender string, body any) actorbase.Msg {
-	if typ == agentproto.TypeAsk {
-		raw, _ := json.Marshal(body)
-		var fields map[string]any
-		_ = json.Unmarshal(raw, &fields)
-		if _, ok := fields["view_id"]; !ok && fields["related_work_id"] == nil {
-			key, _ := fields["submission_key"].(string)
-			if key == "" {
-				key = id
-			}
-			fields["view_id"] = "view:" + key
-		}
-		body = fields
-	}
 	raw, _ := json.Marshal(body)
-	wrapped, _ := json.Marshal(map[string]any{"body": json.RawMessage(raw)})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), ChannelID: channel.ID(channelID), Sender: message.Sender{ID: actor.ActorID(sender)}, Kind: message.KindRequest, Type: typ, Payload: wrapped})
+	var fields map[string]any
+	_ = json.Unmarshal(raw, &fields)
+	session, _ := fields["session_id"].(string)
+	delete(fields, "session_id")
+	if typ == agentproto.TypeAsk && session == "" && fields["related_work_id"] == nil {
+		key, _ := fields["submission_key"].(string)
+		if key == "" {
+			key = id
+		}
+		session = "view:" + key
+	}
+	raw, _ = json.Marshal(fields)
+	return actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Session: session}, message.Envelope{ID: message.ID(id), ChannelID: channel.ID(channelID), Sender: message.Sender{ID: actor.ActorID(sender)}, Kind: message.KindRequest, Type: typ, Payload: raw})
 }
 
 func TestOneLooperQueuesSecondWorkUntilFirstCloses(t *testing.T) {
@@ -260,9 +276,12 @@ func TestAskCarriesCallerOriginAndAttachmentsIntoLooperInput(t *testing.T) {
 	if err := json.Unmarshal(sys.posts[0].Payload, &start); err != nil || len(start.Inputs) != 1 {
 		t.Fatalf("start=%+v err=%v", start, err)
 	}
-	in := start.Inputs[0]
+	if start.Inputs[0].ID != "q" {
+		t.Fatalf("start did not reference the ask ledger row: %+v", start.Inputs)
+	}
+	in := c.data.Works[c.data.Order[0]].Inputs[0].Input
 	if in.CallerChannel != "calling" || in.CallerActor != "human:alice:1" || in.Origin == nil || in.Origin.Session != "browser" || len(in.Attachments) != 1 {
-		t.Fatalf("input lost request context: %+v", in)
+		t.Fatalf("accepted work lost request context: %+v", in)
 	}
 }
 
@@ -306,14 +325,14 @@ func TestWaitWorkStopsOnlyAfterItsLastCallerLeaves(t *testing.T) {
 	}
 }
 
-func TestUnconsumedInputFailsWithoutRedispatch(t *testing.T) {
+func TestMinimalTerminalReportIncludesAllAssignedInputs(t *testing.T) {
 	sys, c, w := controlFixture(t)
 	w.Inputs = append(w.Inputs, inputRecord{Input: agentloop.Input{ID: "late", Seq: 2, Text: "late"}, Disposition: "assigned"})
 	w.AssignedThrough = 2
 	count := len(sys.posts)
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{ViewID: w.ViewID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
-	if w.Outcome != agentproto.OutcomeFailed || w.ExecutionState != "unconsumed_input" || len(sys.posts) != count {
-		t.Fatal("unconsumed input was replayed or hidden")
+	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: w.SessionID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
+	if w.Outcome != agentproto.OutcomeCompleted || w.Inputs[1].Disposition != "included" || len(sys.posts) != count {
+		t.Fatal("minimal boundary did not settle the assigned input prefix")
 	}
 }
 
@@ -328,8 +347,8 @@ func TestOversizedWorkInputIsRejectedBeforeDurableAcceptance(t *testing.T) {
 
 func testReport(id, looper string, body any) actorbase.Msg {
 	raw, _ := json.Marshal(body)
-	wrapped, _ := json.Marshal(map[string]any{"body": json.RawMessage(raw)})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), ChannelID: "c", Sender: message.Sender{ID: actor.ActorID(looper)}, Kind: message.KindRequest, Type: agentloop.TypeReport, Payload: wrapped})
+	wrapped := raw
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), ChannelID: "c", Sender: message.Sender{ID: actor.ActorID(looper)}, Kind: message.KindRequest, Type: agentloop.TypeReport, Payload: wrapped})
 }
 
 func TestIndependentWorksCanCloseOutOfOrder(t *testing.T) {
@@ -352,18 +371,18 @@ func TestIndependentWorksCanCloseOutOfOrder(t *testing.T) {
 		}
 		starts = append(starts, req)
 	}
-	if starts[0].WorkID == starts[1].WorkID || starts[0].AssignmentID == starts[1].AssignmentID {
+	if starts[0].TurnID == starts[1].TurnID {
 		t.Fatal("work/assignment identity reused")
 	}
-	second := starts[1]
-	c.handleReport(sys, testReport("r2", "tool:loop-a:9", agentloop.ReportRequest{WorkID: second.WorkID, AssignmentID: second.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"short done"}`), ExecutionState: "confirmed"}))
+	second := c.data.Works[c.data.Order[1]]
+	c.handleReport(sys, testReport("r2", "tool:loop-a:9", agentloop.ReportRequest{SessionID: second.SessionID, TurnID: second.AssignmentID, State: "completed"}))
 	if _, ok := sys.replies["q2"]; !ok {
 		t.Fatal("second work did not answer while first remained open")
 	}
 	if _, ok := sys.replies["q1"]; ok {
 		t.Fatal("first work answered before its report")
 	}
-	if c.data.Works[string(starts[0].WorkID)].State != agentproto.WorkOpen {
+	if c.data.Works[c.data.Order[0]].State != agentproto.WorkOpen {
 		t.Fatal("closing w2 changed w1")
 	}
 }
@@ -381,7 +400,7 @@ func TestTargetedInterruptDoesNotFreezeSibling(t *testing.T) {
 	c.handleReport(sys, testReport("accepted-2", "tool:loop-a:9", agentloop.ReportRequest{WorkID: second.ID, AssignmentID: second.AssignmentID, State: "accepted", ExecutionState: "confirmed_running"}))
 	before := len(sys.posts)
 	c.handleInterrupt(sys, testRequest("stop", agentproto.TypeInterrupt, map[string]any{"work_id": first.ID}))
-	if first.Stage != "stopping" || second.Stage != "thinking" {
+	if first.Stage != "stopping" || second.Stage != "dispatching" {
 		t.Fatalf("first=%s second=%s", first.Stage, second.Stage)
 	}
 	if len(sys.posts) != before+1 || sys.posts[len(sys.posts)-1].Type != agentloop.TypeStop {
@@ -434,7 +453,7 @@ func TestAgentWideInterruptDoesNotDispatchAnotherWorkMidBatch(t *testing.T) {
 	}
 }
 
-func TestReceiptIsIdempotentAndRestartMarksUnknownInsteadOfReplaying(t *testing.T) {
+func TestReceiptIsIdempotentAndRestartReattachesSameTurn(t *testing.T) {
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
@@ -452,15 +471,15 @@ func TestReceiptIsIdempotentAndRestartMarksUnknownInsteadOfReplaying(t *testing.
 	postCount := len(sys.posts)
 	restarted.reconcileAfterRestart(sys)
 	w := restarted.data.Works[restarted.data.Order[0]]
-	if w.State != agentproto.WorkClosed || w.Outcome != agentproto.OutcomeFailed || w.ExecutionState != "execution_unknown_after_restart" {
+	if w.State != agentproto.WorkOpen || w.AssignmentID == "" {
 		t.Fatalf("recovered work=%+v", w)
 	}
-	if len(sys.posts) != postCount {
-		t.Fatal("an already-dispatched assignment was blindly replayed")
+	if len(sys.posts) != postCount+1 {
+		t.Fatal("restart did not reattach the existing turn")
 	}
 }
 
-func TestQueuedContinuationClosesUnknownWithoutReplay(t *testing.T) {
+func TestQueuedContinuationSurvivesRestartForLedgerReplay(t *testing.T) {
 	sys := newTestSys(newTestState())
 	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	w := &workRecord{
@@ -470,7 +489,6 @@ func TestQueuedContinuationClosesUnknownWithoutReplay(t *testing.T) {
 			{Input: agentloop.Input{ID: "i-1", Seq: 1, Text: "first"}, Disposition: "included"},
 			{Input: agentloop.Input{ID: "i-2", Seq: 2, Text: "second"}, Disposition: "accepted"},
 		},
-		Context: []json.RawMessage{json.RawMessage(`{"role":"user","content":"first"}`), json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"done"}]}`)},
 	}
 	c.data.Works[string(w.ID)] = w
 	c.data.Order = []string{string(w.ID)}
@@ -485,7 +503,7 @@ func TestQueuedContinuationClosesUnknownWithoutReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	recovered := restarted.data.Works[string(w.ID)]
-	if recovered.State != agentproto.WorkClosed || recovered.ExecutionState != "execution_unknown_after_restart" || len(sys.posts) != 0 {
+	if recovered.State != agentproto.WorkOpen || recovered.Stage != "queued" {
 		t.Fatalf("unexpected replay: %+v", recovered)
 	}
 
@@ -494,28 +512,26 @@ func TestQueuedContinuationClosesUnknownWithoutReplay(t *testing.T) {
 func TestRelatedWorkContinuesExistingView(t *testing.T) {
 	sys := newTestSys(newTestState())
 	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	prior := []json.RawMessage{json.RawMessage(`{"role":"user","content":"root"}`), json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"checkpoint"}]}`)}
-	source := &workRecord{ID: "w-source", ViewID: "view:source", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkClosed, Outcome: agentproto.OutcomeCompleted, Context: prior, CreatedAt: 1, UpdatedAt: 1}
-	c.sessions = map[string]*session{"view:source": {ID: "view:source", Scope: "c", History: prior}}
+	source := &workRecord{ID: "w-source", SessionID: "view:source", BoundaryID: "boundary-source", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkClosed, Outcome: agentproto.OutcomeCompleted, CreatedAt: 1, UpdatedAt: 1}
+	c.sessions = map[string]*session{"view:source": {ID: "view:source", Scope: "c"}}
 	c.sessionOrder = []string{"view:source"}
 	c.data.Works[string(source.ID)] = source
 	c.data.Order = []string{string(source.ID)}
-	c.handleAsk(sys, testRequest("branch", agentproto.TypeAsk, map[string]any{
+	branch := testRequest("branch", agentproto.TypeAsk, map[string]any{
 		"text": "try another approach", "delivery": "receipt", "submission_key": "branch-1", "related_work_id": source.ID,
-	}))
+	})
+	branch = actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Session: "view:branch"}, branch.Envelope)
+	c.handleAsk(sys, branch)
 	if sys.fails["branch"] != "" || len(sys.posts) != 1 {
 		t.Fatalf("failure=%q posts=%d", sys.fails["branch"], len(sys.posts))
 	}
 	var start agentloop.StartRequest
-	if err := json.Unmarshal(sys.posts[0].Payload, &start); err != nil || len(start.Prior) != len(prior) {
+	if err := json.Unmarshal(sys.posts[0].Payload, &start); err != nil || start.Open == nil || start.Open.Base == nil || start.Open.Base.Session != source.SessionID || start.Open.Base.At != source.BoundaryID {
 		t.Fatalf("start=%+v err=%v", start, err)
 	}
-	branched := c.data.Works[string(start.WorkID)]
-	if branched.RelatedWorkID != source.ID || branched.ViewID != source.ViewID {
+	branched := c.requestWork("branch")
+	if branched.RelatedWorkID != source.ID || branched.SessionID != "view:branch" {
 		t.Fatalf("branch=%+v", branched)
-	}
-	if len(cloneRecoveryWork(source).Context) != len(prior) {
-		t.Fatal("closed checkpoint was dropped from recovery snapshot")
 	}
 }
 
@@ -527,5 +543,31 @@ func TestRelatedWorkWithoutCheckpointIsRejectedHonestly(t *testing.T) {
 	c.handleAsk(sys, testRequest("branch", agentproto.TypeAsk, map[string]any{"text": "branch", "related_work_id": source.ID}))
 	if sys.fails["branch"] != "context_unavailable" {
 		t.Fatalf("failure=%q", sys.fails["branch"])
+	}
+}
+
+func TestAskAgainstArchivedSessionForksAndAssignsFreshSession(t *testing.T) {
+	sys := newTestSys(newTestState())
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c.sessions = map[string]*session{"s-old": {ID: "s-old", Scope: "c", Archived: true, Opened: true, LastBoundary: "report-old", ForkPoint: "report-old", Merge: "auto"}}
+	c.sessionOrder = []string{"s-old"}
+	request := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Session: "s-old"}, message.Envelope{ID: "reply-old", ChannelID: "c", Sender: message.Sender{ID: "human:alice:1"}, Kind: message.KindRequest, Type: agentproto.TypeAsk, Payload: json.RawMessage(`{"text":"continue","delivery":"receipt","submission_key":"reply-old"}`)})
+
+	c.handleAsk(sys, request)
+
+	assigned := sys.assigned[request.ID]
+	if assigned == "" || assigned == "s-old" {
+		t.Fatalf("assigned session=%q", assigned)
+	}
+	w := c.requestWork(string(request.ID))
+	if w == nil || w.SessionID != assigned {
+		t.Fatalf("work=%+v assigned=%q", w, assigned)
+	}
+	if len(sys.posts) != 1 {
+		t.Fatalf("start calls=%d", len(sys.posts))
+	}
+	var start agentloop.StartRequest
+	if err := json.Unmarshal(sys.posts[0].Payload, &start); err != nil || start.Open == nil || start.Open.Base == nil || start.Open.Base.Session != "s-old" || start.Open.Base.At != "report-old" {
+		t.Fatalf("start=%+v err=%v", start, err)
 	}
 }

@@ -72,6 +72,22 @@ func fixedClock(ms int64) func() time.Time {
 	return func() time.Time { return time.UnixMilli(ms) }
 }
 
+func behaviorTestPayload(body string) json.RawMessage {
+	raw, err := harness.WrapPayload(harness.Context{}, json.RawMessage(body))
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func behaviorTestBody(raw json.RawMessage) json.RawMessage {
+	_, body, err := harness.UnwrapPayload(raw)
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
 func testSender() message.Sender {
 	return message.Sender{Kind: actor.Kind("agent"), ID: actor.ActorID("caller-1")}
 }
@@ -85,7 +101,7 @@ func newRequest(id message.ID, expiresAt *int64) *message.Envelope {
 		Sender:     testSender(),
 		Kind:       message.KindRequest,
 		Type:       "ask",
-		Payload:    json.RawMessage(`{"body":{}}`),
+		Payload:    behaviorTestPayload(`{"body":{}}`),
 		Visibility: message.Visibility("channel"),
 		Audience:   message.Audience{actor.ActorID("svc")},
 		ExpiresAt:  expiresAt,
@@ -100,7 +116,7 @@ func responseFor(req *message.Envelope, status string) *message.Envelope {
 		Sender:    message.Sender{Kind: actor.Kind("agent"), ID: actor.ActorID("svc")},
 		Kind:      message.KindResponse,
 		Type:      req.Type,
-		Payload:   payload,
+		Payload:   behaviorTestPayload(string(payload)),
 		ParentID:  req.ID,
 	}
 }

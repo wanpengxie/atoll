@@ -39,7 +39,7 @@ func TestEmitSystemEventSealsEnvelopeAndChecksAccepted(t *testing.T) {
 		captured.Kind != message.KindEvent || captured.Type != "test.event" ||
 		captured.Visibility != message.VisibilitySystem ||
 		captured.Audience == nil || len(captured.Audience) != 0 ||
-		string(captured.Payload) != `{"x":1}` {
+		string(captured.Payload) != `{"_context":{},"body":{"x":1}}` {
 		t.Fatalf("captured=%+v", captured)
 	}
 	wire, _ := json.Marshal(captured)

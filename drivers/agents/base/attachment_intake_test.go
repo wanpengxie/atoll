@@ -57,9 +57,9 @@ func runAskIntake(t *testing.T, payload string) (*captureRuntime, <-chan string)
 			timer.Stop()
 		}
 	})
-	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "ask", Sender: message.Sender{ID: "human:root:1"}, Kind: message.KindRequest,
-		Type: TypeAsk, Payload: json.RawMessage(`{"body":` + payload + `}`),
+		Type: TypeAsk, Payload: json.RawMessage(payload),
 	})
 	l.handleIntake(msg)
 	return rt, sys.failures

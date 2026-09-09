@@ -428,13 +428,13 @@ func assertCoderunnerCalls(t *testing.T, api *apiClient, rootRequestID, senderID
 				t.Fatalf("wrong coderunner child request=%v", envelope)
 			}
 			payload, _ := envelope["payload"].(map[string]any)
-			context, hasContext := payload["_context"].(map[string]any)
+			context, _ := payload["_context"].(map[string]any)
+			caller, hasCaller := context["caller"].(map[string]any)
 			if forwarded {
-				caller, _ := context["caller"].(map[string]any)
-				if !hasContext || caller["actor"] != effectiveActor {
+				if !hasCaller || caller["actor"] != effectiveActor {
 					t.Fatalf("forwarded caller=%v want=%s envelope=%v", caller, effectiveActor, envelope)
 				}
-			} else if hasContext {
+			} else if hasCaller {
 				t.Fatalf("fixed mode unexpectedly forwarded caller: %v", envelope)
 			}
 			seen[fmt.Sprint(envelope["id"])] = true
@@ -514,7 +514,7 @@ func countTerminals(t *testing.T, api *apiClient, id string) int {
 			if envelope == nil || envelope["kind"] != "response" || envelope["parent_id"] != id {
 				continue
 			}
-			body, _ := envelope["payload"].(map[string]any)
+			body := envelopeBody(envelope)
 			if body["status"] == "completed" || body["status"] == "failed" {
 				count++
 			}

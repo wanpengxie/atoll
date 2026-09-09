@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // NormalizePayload ensures a raw JSON payload is a valid non-nil object.
@@ -33,6 +34,9 @@ func CloneRawJSON(raw json.RawMessage) json.RawMessage {
 // ResponseFailureReason extracts the failure reason from a response
 // payload, if any.
 func ResponseFailureReason(raw json.RawMessage) string {
+	if _, body, err := harness.UnwrapPayload(raw); err == nil {
+		raw = body
+	}
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return ""
@@ -91,6 +95,9 @@ func ResultFromResponse(toolName string, env message.Envelope) (ResultValue, boo
 // payloadValue decodes a raw JSON payload to a Go value (empty/null → {},
 // non-JSON → raw text, object/scalar passthrough).
 func payloadValue(raw json.RawMessage) any {
+	if _, body, err := harness.UnwrapPayload(raw); err == nil {
+		raw = body
+	}
 	text := strings.TrimSpace(string(raw))
 	if text == "" || text == "null" {
 		return map[string]any{}

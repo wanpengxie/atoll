@@ -96,6 +96,7 @@ var actorErrorClasses = map[string]failureClass{
 	"empty_input":          {PayloadInvalid, hintFixPayload, false},
 	"invalid_input":        {PayloadInvalid, hintFixPayload, false},
 	"output_limit":         {PayloadInvalid, hintFixPayload, false},
+	"context_invalid":      {PayloadInvalid, hintContextLimit, false},
 
 	// The subject named does not exist.
 	"not_found":            {NotFound, hintNotFound, false},
@@ -103,6 +104,7 @@ var actorErrorClasses = map[string]failureClass{
 	"model_not_found":      {NotFound, hintNotFound, false},
 	"work_not_found":       {NotFound, hintWorkNotFound, false},
 	"assignment_not_found": {NotFound, hintWorkNotFound, false},
+	"session_not_found":    {NotFound, hintNotFound, false},
 
 	// A waiting task that somebody dropped before it ran. Nothing is wrong and
 	// nothing is retryable by itself: the work was withdrawn, so a caller that
@@ -139,6 +141,7 @@ var actorErrorClasses = map[string]failureClass{
 	"operation_mismatch":     {Conflict, hintStaleWork, false},
 	"stale_assignment":       {Conflict, hintStaleWork, false},
 	"work_closed":            {Conflict, hintWorkClosed, false},
+	"session_archived":       {Conflict, hintWorkClosed, false},
 	"path_outside_workspace": {PayloadInvalid, hintFixPayload, false},
 	"context_limit":          {PayloadInvalid, hintContextLimit, false},
 
@@ -173,6 +176,8 @@ var actorErrorClasses = map[string]failureClass{
 	// real damage, so it is called out separately from a plain failure.
 	"result_unknown":     {ResultUnknown, hintResultUnkown, false},
 	"ledger_unavailable": {ResultUnknown, hintLedger, false},
+	"context_failed":     {ResultUnknown, hintLedger, false},
+	"merge_failed":       {ResultUnknown, hintLedger, false},
 
 	// Downstream reported its own trouble; the detail is the useful part.
 	"mcp_tool_error":     {InternalError, hintInternal, false},

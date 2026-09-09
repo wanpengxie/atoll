@@ -30,9 +30,6 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 		t.Fatal(err)
 	}
 	manifest := native.Manifest()
-	if len(config.Words) != len(manifest.Words) {
-		t.Fatal("recipe has stale native word set")
-	}
 	for name, word := range manifest.Words {
 		var want, got any
 		if err := json.Unmarshal(word.InputSchema, &want); err != nil {
@@ -44,6 +41,9 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 		if !reflect.DeepEqual(want, got) || config.Words[name].Target != "native-agent" {
 			t.Fatalf("stale native schema/target: %s", name)
 		}
+	}
+	for _, name := range []string{"agent.main.merge", "agent.main.merge_all", "agent.main.track"} {
+		if config.Words[name].Target != "agent-main" { t.Fatalf("main word %s is not routed to agent-main", name) }
 	}
 	var template struct {
 		Body struct {

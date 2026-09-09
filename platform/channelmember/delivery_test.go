@@ -24,7 +24,7 @@ func (*deliveryPending) Progress() <-chan actorbase.Msg {
 	return ch
 }
 func (p *deliveryPending) Wait(context.Context, time.Duration) (actorbase.Msg, error) {
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Payload: []byte(`{"status":"completed","answer":42}`)}), p.err
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Payload: []byte(`{"status":"completed","answer":42}`)}), p.err
 }
 func (p *deliveryPending) Cancel() error { p.cancelled = true; return nil }
 

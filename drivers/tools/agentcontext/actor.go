@@ -86,7 +86,7 @@ func proc(cfg Config, deps registry.Deps) actorbase.Proc {
 				raw, _ := json.Marshal(buildUserMessage(in, deps, time.Now().UnixMilli()))
 				messages = append(messages, raw)
 			}
-			if contextSize(messages) > agentloop.MaxHistoryBytes {
+			if contextSize(messages) > maxContextBytes {
 				_, _ = sys.Fail(msg, "context_limit", "Pi context exceeds the phase-one recovery limit")
 				continue
 			}
@@ -109,6 +109,8 @@ func proc(cfg Config, deps registry.Deps) actorbase.Proc {
 		}
 	}
 }
+
+const maxContextBytes = 4 << 20
 
 func contextSize(messages []json.RawMessage) int {
 	total := 0

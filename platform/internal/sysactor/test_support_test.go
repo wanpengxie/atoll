@@ -2,7 +2,6 @@ package sysactor
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -25,12 +24,9 @@ func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
 }
 
 func requestMsg(id message.ID, typ string, payload []byte) actorbase.Msg {
-	wrapped, _ := json.Marshal(struct {
-		Body json.RawMessage `json:"body"`
-	}{Body: payload})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: id, ChannelID: "ch", Kind: message.KindRequest, Type: typ,
 		Sender:   message.Sender{Kind: actor.KindAgent, ID: "agent:caller:1"},
-		Audience: message.Audience{actor.SystemActorID}, Payload: wrapped,
+		Audience: message.Audience{actor.SystemActorID}, Payload: payload,
 	})
 }

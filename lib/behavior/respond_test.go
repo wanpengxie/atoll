@@ -76,7 +76,7 @@ func TestRespond_FinalSuccess(t *testing.T) {
 	var p struct {
 		Status string `json:"status"`
 	}
-	if e := json.Unmarshal(term.Payload, &p); e != nil {
+	if e := json.Unmarshal(behaviorTestBody(term.Payload), &p); e != nil {
 		t.Fatalf("payload unmarshal: %v", e)
 	}
 	if p.Status != "completed" {
@@ -100,7 +100,7 @@ func TestFailCarriesApplicationFieldsWithoutReplacingCoreFields(t *testing.T) {
 		Detail    string   `json:"detail"`
 		Missing   []string `json:"missing"`
 	}
-	if err := json.Unmarshal(w.last().Payload, &payload); err != nil {
+	if err := json.Unmarshal(behaviorTestBody(w.last().Payload), &payload); err != nil {
 		t.Fatal(err)
 	}
 	if payload.Status != message.StatusFailed || payload.ErrorCode != "dependency_missing" || payload.Detail != "not present" || len(payload.Missing) != 1 {
@@ -121,7 +121,7 @@ func TestRespond_EmptyStatusDefaultsCompleted(t *testing.T) {
 	var p struct {
 		Status string `json:"status"`
 	}
-	_ = json.Unmarshal(w.last().Payload, &p)
+	_ = json.Unmarshal(behaviorTestBody(w.last().Payload), &p)
 	if p.Status != "completed" {
 		t.Fatalf("empty status must default to completed, got %q", p.Status)
 	}

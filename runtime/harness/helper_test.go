@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,14 @@ func validEvent(id message.ID, sender actor.ActorID) *message.Envelope {
 		Audience:      message.Audience{actor.ActorID("someone")},
 		CorrelationID: id,
 	}
+}
+
+func testPayload(body string) json.RawMessage {
+	raw, err := WrapPayload(Context{}, json.RawMessage(body))
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 // runStep constructs a single step via its constructor and runs it once.

@@ -6,7 +6,6 @@
     "declarations": [
       {
         "config": {
-          "context_actor": "agent-context",
           "host_actor": "host",
           "llm_actor": "pi-llm",
           "loopers": [
@@ -17,31 +16,82 @@
           "max_open_works": 32,
           "max_operation_keys": 256,
           "max_turns": 12,
-          "model": "deepseek/deepseek-v4-pro",
+          "default_model": "deepseek/deepseek-v4-pro",
           "tool_image_max_bytes": 3145728,
           "tool_result_max_bytes": 51200,
           "tool_result_max_lines": 2000,
           "tools": [
-            {"name": "read", "actor": "pi-workspace", "word": "workspace.read"},
-            {"name": "write", "actor": "pi-workspace", "word": "workspace.write"},
-            {"name": "edit", "actor": "pi-workspace", "word": "workspace.edit"},
-            {"name": "bash", "actor": "pi-workspace", "word": "workspace.bash"},
-            {"name": "grep", "actor": "pi-workspace", "word": "workspace.grep"},
-            {"name": "find", "actor": "pi-workspace", "word": "workspace.find"},
-            {"name": "ls", "actor": "pi-workspace", "word": "workspace.ls"},
-            {"name": "channel_call", "actor": "host", "word": "channel.call"},
-            {"name": "channel_post", "actor": "host", "word": "channel.post"},
-            {"name": "channel_emit", "actor": "host", "word": "channel.emit"}
+            {
+              "name": "read",
+              "actor": "pi-workspace",
+              "word": "workspace.read"
+            },
+            {
+              "name": "write",
+              "actor": "pi-workspace",
+              "word": "workspace.write"
+            },
+            {
+              "name": "edit",
+              "actor": "pi-workspace",
+              "word": "workspace.edit"
+            },
+            {
+              "name": "bash",
+              "actor": "pi-workspace",
+              "word": "workspace.bash"
+            },
+            {
+              "name": "grep",
+              "actor": "pi-workspace",
+              "word": "workspace.grep"
+            },
+            {
+              "name": "find",
+              "actor": "pi-workspace",
+              "word": "workspace.find"
+            },
+            {
+              "name": "ls",
+              "actor": "pi-workspace",
+              "word": "workspace.ls"
+            },
+            {
+              "name": "channel_call",
+              "actor": "host",
+              "word": "channel.call"
+            },
+            {
+              "name": "channel_post",
+              "actor": "host",
+              "word": "channel.post"
+            },
+            {
+              "name": "channel_emit",
+              "actor": "host",
+              "word": "channel.emit"
+            }
           ],
           "workspace_actor": "pi-workspace"
         },
         "decl_id": "native-agent"
       },
       {
-        "decl_id": "agent-looper"
+        "decl_id": "agent-looper",
+        "config": {
+          "llm_actor": "pi-llm",
+          "workspace_actor": "pi-workspace",
+          "host_actor": "host",
+          "max_assignments": 32
+        }
       },
       {
-        "decl_id": "agent-context"
+        "decl_id": "agent-main",
+        "config": {
+          "llm_actor": "pi-llm",
+          "model": "deepseek/deepseek-v4-pro",
+          "session": "main"
+        }
       },
       {
         "decl_id": "pi-llm"
@@ -56,7 +106,9 @@
       },
       {
         "decl_id": "native-agent-handle",
-        "bindings": {"host": "parent_channel_id"}
+        "bindings": {
+          "host": "parent_channel_id"
+        }
       }
     ],
     "profile": {

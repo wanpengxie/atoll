@@ -371,7 +371,7 @@ func assertActorSubcallCompleted(t *testing.T, api *apiClient, senderID, targetI
 				continue
 			}
 			if requestID != "" && envelope["kind"] == "response" && envelope["parent_id"] == requestID {
-				payload, _ := envelope["payload"].(map[string]any)
+				payload := envelopeBody(envelope)
 				if payload["status"] != "completed" || payload["text"] != wantText {
 					t.Fatalf("script MCP subcall terminal=%v", envelope)
 				}

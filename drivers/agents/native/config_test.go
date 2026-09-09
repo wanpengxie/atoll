@@ -21,14 +21,14 @@ func TestToolsOmittedAndExplicitlyEmptyRemainDistinct(t *testing.T) {
 	if err != nil || omitted.ToolsConfigured {
 		t.Fatalf("omitted tools config=%+v err=%v", omitted, err)
 	}
-	empty, err := ParseConfig(json.RawMessage(`{"loopers":["l"],"context_actor":"c","llm_actor":"m","max_open_works":1,"max_assignments_per_looper":1,"max_inputs_per_work":1,"max_operation_keys":1,"max_turns":1,"tools":[]}`))
+	empty, err := ParseConfig(json.RawMessage(`{"loopers":["l"],"llm_actor":"m","max_open_works":1,"max_assignments_per_looper":1,"max_inputs_per_work":1,"max_operation_keys":1,"max_turns":1,"tools":[]}`))
 	if err != nil || !empty.ToolsConfigured || len(empty.Tools) != 0 {
 		t.Fatalf("empty tools config=%+v err=%v", empty, err)
 	}
 }
 
 func TestToolAllowlistValidation(t *testing.T) {
-	base := `{"loopers":["l"],"context_actor":"c","llm_actor":"m","max_open_works":1,"max_assignments_per_looper":1,"max_inputs_per_work":1,"max_operation_keys":1,"max_turns":1,"tools":%s}`
+	base := `{"loopers":["l"],"llm_actor":"m","max_open_works":1,"max_assignments_per_looper":1,"max_inputs_per_work":1,"max_operation_keys":1,"max_turns":1,"tools":%s}`
 	for _, tools := range []string{
 		`null`,
 		`[{"name":"bad name","actor":"a","word":"x.run"}]`,
@@ -44,7 +44,6 @@ func TestToolAllowlistValidation(t *testing.T) {
 func TestConfigRejectsUnboundedWorkCollections(t *testing.T) {
 	base := map[string]any{
 		"loopers":                    []string{"loop"},
-		"context_actor":              "context",
 		"llm_actor":                  "llm",
 		"max_open_works":             1,
 		"max_assignments_per_looper": 1,
@@ -71,7 +70,7 @@ func TestConfigRejectsUnboundedWorkCollections(t *testing.T) {
 func TestConfigRejectsDuplicateLooperLane(t *testing.T) {
 	raw := json.RawMessage(`{
 		"loopers":["loop","loop"],
-		"context_actor":"context",
+
 		"llm_actor":"llm",
 		"max_open_works":1,
 		"max_assignments_per_looper":1,
@@ -87,7 +86,7 @@ func TestConfigRejectsDuplicateLooperLane(t *testing.T) {
 func TestConfigAcceptsBodySideHostHandleAndRejectsWhitespace(t *testing.T) {
 	raw := json.RawMessage(`{
 		"loopers":["loop"],
-		"context_actor":"context",
+
 		"llm_actor":"llm",
 		"host_actor":"host",
 		"max_open_works":1,
@@ -102,7 +101,7 @@ func TestConfigAcceptsBodySideHostHandleAndRejectsWhitespace(t *testing.T) {
 	}
 	raw = json.RawMessage(`{
 		"loopers":["loop"],
-		"context_actor":"context",
+
 		"llm_actor":"llm",
 		"host_actor":" host ",
 		"max_open_works":1,

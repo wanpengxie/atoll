@@ -134,8 +134,8 @@ func (s fakeState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 var _ actorbase.Sys = (*fakeSys)(nil)
 
 func requestMsg(id, typ string, payload any) actorbase.Msg {
-	raw, _ := json.Marshal(map[string]any{"body": payload})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	raw, _ := json.Marshal(payload)
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:      message.ID(id),
 		Kind:    message.KindRequest,
 		Type:    typ,
@@ -197,7 +197,7 @@ func TestRun_LoopEndsByPropagatingRecvError(t *testing.T) {
 
 func eventMsg(id, typ string, payload any) actorbase.Msg {
 	raw, _ := json.Marshal(payload)
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:      message.ID(id),
 		Kind:    message.KindEvent,
 		Type:    typ,

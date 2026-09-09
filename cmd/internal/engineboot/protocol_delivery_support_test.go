@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func newProtocolDeliveryRig(t *testing.T) (*Engine, string, channelhost.Bundle, actor.ActorID) {
@@ -29,6 +30,7 @@ func newProtocolDeliveryRig(t *testing.T) (*Engine, string, channelhost.Bundle, 
 
 func createdChannelID(t *testing.T, raw []byte) channel.ID {
 	t.Helper()
+	_, raw, _ = harness.UnwrapPayload(raw)
 	var terminal map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &terminal); err != nil || len(terminal) != 2 {
 		t.Fatalf("system channel-create terminal=%s err=%v", raw, err)

@@ -60,7 +60,7 @@ func (a *assignment) acceptInput(req agentloop.InputRequest) (agentloop.ControlR
 	}
 	combined := append(append([]agentloop.Input(nil), a.inputs...), inputs...)
 	raw, _ := json.Marshal(combined)
-	if len(raw) > agentloop.MaxHistoryBytes {
+	if len(raw) > agentloop.MaxControlBytes {
 		return decision, errors.New("execution input byte limit exceeded")
 	}
 	a.inputs = combined

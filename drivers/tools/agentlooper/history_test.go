@@ -40,7 +40,7 @@ func TestAssistantBatchRejectsAmbiguousIdentityNotBadArguments(t *testing.T) {
 		}
 	}
 	calls, _, err := assistantParts(json.RawMessage(`{"role":"assistant","content":[{"type":"toolCall","id":"x","name":"read","arguments":[]}]}`))
-	if err != nil || len(calls) != 1 || validArguments(calls[0].Arguments) {
+	if err != nil || len(calls) != 1 || string(calls[0].Arguments) != "[]" {
 		t.Fatalf("bad arguments must remain pairable: %v %v", calls, err)
 	}
 }

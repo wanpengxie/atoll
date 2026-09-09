@@ -24,8 +24,8 @@ import (
 	"github.com/google/uuid"
 )
 
-const Version = "pi-0.85.1-atoll-v7"
-const BundleSHA256 = "44bc11f2de52ac461acf765779717793bf5c844559101647513f329887e45c28"
+const Version = "pi-0.85.1-atoll-v8"
+const BundleSHA256 = "041367f893bc6a54083c78c090d23f5a78d19fb768fa81870b4ccc5a4dafb3bf"
 const maxBridgeFrameBytes = 24 << 20
 
 //go:embed bridge.mjs

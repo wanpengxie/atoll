@@ -39,4 +39,6 @@ type Caps struct {
 	Schedule schedule.ScheduleHandle
 	// Lifecycle is the closed end-self capability welded to this incarnation.
 	Lifecycle LifecycleHandle
+	// View is the read-only channel ledger capability.
+	View LedgerView
 }

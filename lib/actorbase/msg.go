@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -50,7 +49,7 @@ type Msg struct {
 
 	ctx    context.Context
 	origin MsgOrigin
-	caller *harness.Caller
+	app    harness.Context
 }
 
 // MsgOrigin names WHICH ledger authorises a write against this Msg. It is the
@@ -116,11 +115,14 @@ func (m Msg) Ctx() context.Context { return m.ctx }
 func (m Msg) Cause() message.Cause { return message.From(m.Envelope) }
 
 func (m Msg) Caller() (harness.Caller, bool) {
-	if m.caller == nil {
+	if m.app.Caller == nil {
 		return harness.Caller{}, false
 	}
-	return *m.caller, true
+	return *m.app.Caller, true
 }
+
+// Context returns the immutable application context carried by the ledger row.
+func (m Msg) Context() harness.Context { return m.app }
 
 // EffectiveCaller is the only caller-attribution rule used by receivers.
 func EffectiveCaller(m Msg) harness.Caller {
@@ -151,42 +153,32 @@ func NewMsg(origin MsgOrigin, ctx context.Context, env message.Envelope) Msg {
 		panic("actorbase: NewMsg origin must be OriginMailbox or OriginLog (the zero value is illegal)")
 	}
 	msg := Msg{Envelope: env, ctx: ctx, origin: origin}
-	if env.Kind == message.KindRequest {
-		// Clear first: an invalid envelope must never leak its undecoded payload
-		// to a receiver as an accidental legacy protocol.
-		msg.Payload = nil
-		var wrapped struct {
-			Context json.RawMessage `json:"_context"`
-			Body    json.RawMessage `json:"body"`
-		}
-		dec := json.NewDecoder(bytes.NewReader(env.Payload))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&wrapped); err != nil {
-			panic("actorbase: invalid request payload envelope: " + err.Error())
-		}
-		var trailing any
-		if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
-			if err == nil {
-				panic("actorbase: invalid request payload envelope: multiple JSON values")
-			}
-			panic("actorbase: invalid request payload envelope: " + err.Error())
-		}
-		if len(wrapped.Body) == 0 {
-			panic("actorbase: invalid request payload envelope: body field required")
-		}
-		msg.Payload = append(json.RawMessage(nil), wrapped.Body...)
-		if len(wrapped.Context) != 0 {
-			// _context 若在场，只有一形 {caller:{channel,actor}}：显式 null、空对象、
-			// caller 为 null / 缺 channel / 缺 actor 一律 fail-loud，恒不静默退化为
-			// "无 context" 或零值 caller。
-			caller, err := decodeRequestContext(wrapped.Context)
-			if err != nil {
-				panic("actorbase: invalid request payload envelope: " + err.Error())
-			}
-			msg.caller = &caller
-		}
+	msg.Payload = nil
+	app, body, err := harness.UnwrapPayload(env.Payload)
+	if err != nil {
+		panic("actorbase: invalid payload envelope: " + err.Error())
 	}
+	msg.app = app
+	msg.Payload = body
 	return msg
+}
+
+// NewBodyMsg is for adapters and tests that synthesize an actor-visible body
+// without first writing a ledger envelope. Real ledger delivery uses NewMsg
+// and remains strict about the canonical {_context,body} shape.
+func NewBodyMsg(origin MsgOrigin, ctx context.Context, env message.Envelope) Msg {
+	return NewBodyMsgContext(origin, ctx, harness.Context{}, env)
+}
+
+// NewBodyMsgContext is the context-carrying form used by adapters and tests
+// which synthesize a delivered body without first appending it to the ledger.
+func NewBodyMsgContext(origin MsgOrigin, ctx context.Context, app harness.Context, env message.Envelope) Msg {
+	wrapped, err := harness.WrapPayload(app, env.Payload)
+	if err != nil {
+		panic("actorbase: invalid synthetic body: " + err.Error())
+	}
+	env.Payload = wrapped
+	return NewMsg(origin, ctx, env)
 }
 
 // decodeRequestContext decodes the request payload's `_context` value into

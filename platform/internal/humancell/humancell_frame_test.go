@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -107,6 +108,17 @@ func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
 }
 
 func newDeps(self actor.ActorID, req *message.Envelope, open bool) Deps {
+	if req != nil {
+		copy := *req
+		if _, _, err := harness.UnwrapPayload(copy.Payload); err != nil {
+			body := copy.Payload
+			if len(body) == 0 {
+				body = json.RawMessage(`{}`)
+			}
+			copy.Payload, _ = harness.WrapPayload(harness.Context{}, body)
+		}
+		req = &copy
+	}
 	return Deps{
 		Self:       self,
 		Requests:   &fakeReq{req: req},

@@ -129,7 +129,7 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 	}
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
-		Type: "test.observe.progress", Payload: json.RawMessage(`{"body":{}}`), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
+		Type: "test.observe.progress", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
 		Cause: message.Root(),
 	})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 					Status string `json:"status"`
 					Step   int    `json:"step"`
 				}
-				_ = json.Unmarshal(env.Payload, &payload)
+				_ = json.Unmarshal(canonicalTestBody(env.Payload), &payload)
 				ledgerStatuses = append(ledgerStatuses, payload.Status)
 				if payload.Step != 0 {
 					ledgerSteps = append(ledgerSteps, payload.Step)
@@ -167,7 +167,7 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 			}
 			if env.Kind == message.KindResponse && env.ParentID == request.ID {
 				var payload map[string]any
-				if json.Unmarshal(env.Payload, &payload) == nil && message.IsFinalStatus(fmt.Sprint(payload["status"])) {
+				if json.Unmarshal(canonicalTestBody(env.Payload), &payload) == nil && message.IsFinalStatus(fmt.Sprint(payload["status"])) {
 					parentFinal = payload
 				}
 			}

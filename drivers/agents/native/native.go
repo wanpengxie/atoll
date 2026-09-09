@@ -10,13 +10,17 @@ import (
 	"strings"
 	"time"
 
+	agentbase "github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
+	llmproto "github.com/wanpengxie/atoll/drivers/tools/pillm/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -31,6 +35,7 @@ type controller struct {
 	sessions     map[string]*session
 	sessionOrder []string
 	nextSession  int
+	selection    *runtimeproto.TurnOptions
 }
 
 func run(sys actorbase.Sys, cfg Config) error {
@@ -63,10 +68,18 @@ func run(sys actorbase.Sys, cfg Config) error {
 			c.editControl(sys, msg)
 		case controlDoneType:
 			c.controlDone(sys, msg)
+		case startDoneType:
+			c.startDone(sys, msg)
 		case pulseType:
 			c.pulse(sys, msg)
 		case agentproto.TypeInterrupt:
 			c.handleInterrupt(sys, msg)
+		case agentproto.TypeSessionList, agentproto.TypeSessionGet, agentproto.TypeSessionRename, agentproto.TypeSessionArchive, agentproto.TypeSessionReset, agentproto.TypeSessionSync:
+			c.handleSession(sys, msg)
+		case agentbase.TypeOptions:
+			c.handleOptions(sys, msg)
+		case agentbase.TypeSelect:
+			c.handleSelect(sys, msg)
 		case agentloop.TypeReport:
 			c.handleReport(sys, msg)
 		case waitClosedType:
@@ -77,44 +90,26 @@ func run(sys actorbase.Sys, cfg Config) error {
 	}
 }
 
-const recoveryEventType = "agent.work.snapshot"
 const waitClosedType = "agent.internal.wait_closed"
+const startDoneType = "agent.internal.start_done"
 
-type recoveryRecord struct {
-	Version int         `json:"version"`
-	Work    *workRecord `json:"work"`
+type startDone struct {
+	Session     string `json:"session_id"`
+	Turn        string `json:"turn_id"`
+	Looper      string `json:"looper"`
+	Disposition string `json:"disposition,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
-// commit appends the Controller decision to the Channel ledger before it is
-// allowed to drive another Actor. actor_state is only a same-incarnation cache:
-// its authority includes the live incarnation and therefore cannot be the
-// restart source of truth.
+// Controller bookkeeping is a cache. Conversation truth remains in loop.*,
+// llm.generate, session.* and report rows; this snapshot only preserves work
+// receipts and delivery waiters across a Controller restart.
 func (c *controller) commit(sys actorbase.Sys, cause message.Cause, w *workRecord) error {
-	record := recoveryRecord{Version: 1, Work: cloneRecoveryWork(w)}
-	spec, err := behavior.EventSpecJSON(cause, recoveryEventType, record)
-	if err != nil {
-		return err
-	}
-	if len(spec.Payload) > maxRecoveryRecordBytes {
-		return fmt.Errorf("work recovery snapshot exceeds %d bytes", maxRecoveryRecordBytes)
-	}
-	if _, err := sys.Emit(spec); err != nil {
-		return fmt.Errorf("append work decision: %w", err)
-	}
-	_ = c.persist(sys)
-	return nil
+	return c.persist(sys)
 }
 
 func cloneRecoveryWork(w *workRecord) *workRecord {
-	out := cloneWork(w)
-	// Context is needed for a known, not-yet-dispatched continuation and for an
-	// explicit future branch from a completed checkpoint. An in-flight
-	// assignment is never replayed, while a fresh unbranched work can rebuild
-	// its first context from Inputs.
-	if !(out.State == agentproto.WorkClosed || (out.Stage == "queued" && out.Continuation)) {
-		out.Context = nil
-	}
-	return out
+	return cloneWork(w)
 }
 
 func cloneWork(w *workRecord) *workRecord {
@@ -135,75 +130,245 @@ type logQueryTurn struct {
 	Messages []logMessage `json:"messages"`
 }
 type logMessage struct {
-	Seq         int64          `json:"seq"`
-	Sender      message.Sender `json:"sender"`
-	MessageType string         `json:"message_type"`
-	PayloadText string         `json:"payload_text"`
-	NextOffset  *int           `json:"next_offset,omitempty"`
-	Truncated   bool           `json:"truncated"`
+	Seq         int64            `json:"seq"`
+	ID          message.ID       `json:"id"`
+	Sender      message.Sender   `json:"sender"`
+	Audience    message.Audience `json:"audience"`
+	Kind        message.Kind     `json:"kind"`
+	MessageType string           `json:"message_type"`
+	ParentID    message.ID       `json:"parent_id"`
+	Terminal    bool             `json:"terminal"`
+	TSReceived  int64            `json:"ts_received"`
+	PayloadText string           `json:"payload_text"`
+	NextOffset  *int             `json:"next_offset,omitempty"`
+	Truncated   bool             `json:"truncated"`
 }
 
 func (c *controller) recoverLedger(sys actorbase.Sys) error {
-	seen := map[string]bool{}
+	out, err := sys.State().Get(stateKey)
+	if err != nil {
+		return fmt.Errorf("recover controller snapshot: %w", err)
+	}
+	if out.Accepted() && out.Found && len(out.Value) > 0 {
+		if err := json.Unmarshal(out.Value, &c.data); err != nil {
+			return fmt.Errorf("recover controller snapshot: %w", err)
+		}
+		if err := validateSnapshot(c.data); err != nil {
+			return fmt.Errorf("recover controller snapshot: %w", err)
+		}
+	}
+	c.rebuildSessions()
+	if err := c.recoverSessionProjection(sys); err != nil {
+		return err
+	}
+	return c.recoverReports(sys)
+}
+
+// recoverSessionProjection rebuilds the Controller's disposable routing table
+// from ledger facts. It deliberately does not invent work receipts or reassign
+// a holder when actor State has been lost.
+func (c *controller) recoverSessionProjection(sys actorbase.Sys) error {
+	for _, s := range c.sessions {
+		s.Holder, s.Base, s.Opened, s.Archived = "", nil, false, false
+		s.Merge, s.Merged, s.Skipped, s.Synced, s.LastBoundary, s.ForkPoint = "", nil, nil, "", "", ""
+	}
 	before, head := int64(0), int64(0)
+	var items []logMessage
 	for {
-		req := map[string]any{"view": "raw", "message_type": recoveryEventType, "limit": 20}
+		req := map[string]any{"view": "raw", "limit": 20}
 		if before > 0 {
 			req["before_seq"] = before
 		}
 		if head > 0 {
 			req["head_seq"] = head
 		}
-		response, err := callSystemQuery(sys, req)
+		page, err := callSystemQuery(sys, req)
 		if err != nil {
-			return fmt.Errorf("recover work ledger: %w", err)
+			return fmt.Errorf("recover session projection: %w", err)
 		}
 		if head == 0 {
-			head = response.HeadSeq
+			head = page.HeadSeq
 		}
-		for _, turn := range response.Turns {
-			for _, item := range turn.Messages {
-				if item.MessageType != recoveryEventType || !sameSeat(item.Sender.ID.String(), sys.Self().String()) {
-					continue
-				}
-				text := item.PayloadText
-				if item.Truncated {
-					text, err = readLogMessage(sys, item.Seq, head)
-					if err != nil {
-						return err
-					}
-				}
-				var record recoveryRecord
-				if json.Unmarshal([]byte(text), &record) != nil || record.Version != 1 || record.Work == nil || record.Work.ID == "" {
-					return fmt.Errorf("recover work ledger: invalid snapshot at seq %d", item.Seq)
-				}
-				id := string(record.Work.ID)
-				if seen[id] {
-					continue
-				}
-				seen[id] = true
-				c.data.Works[id] = record.Work
-			}
+		for _, turn := range page.Turns {
+			items = append(items, turn.Messages...)
 		}
-		if !response.HasMore {
+		if !page.HasMore {
 			break
 		}
-		if response.NextBeforeSeq <= 0 || response.NextBeforeSeq == before {
-			return errors.New("recover work ledger: pagination made no progress")
+		if page.NextBeforeSeq <= 0 || page.NextBeforeSeq == before {
+			return errors.New("recover session projection: pagination made no progress")
 		}
-		before = response.NextBeforeSeq
+		before = page.NextBeforeSeq
 	}
-	for id := range c.data.Works {
-		c.data.Order = append(c.data.Order, id)
-	}
-	sort.Slice(c.data.Order, func(i, j int) bool {
-		left, right := c.data.Works[c.data.Order[i]], c.data.Works[c.data.Order[j]]
-		if left.CreatedAt == right.CreatedAt {
-			return left.ID < right.ID
+	sort.Slice(items, func(i, j int) bool { return items[i].Seq < items[j].Seq })
+	turnSession := map[string]string{}
+	closedTurns := map[string]bool{}
+	for _, item := range items {
+		text := item.PayloadText
+		if item.Truncated {
+			var err error
+			text, err = readLogMessage(sys, item.Seq, head)
+			if err != nil {
+				return err
+			}
 		}
-		return left.CreatedAt < right.CreatedAt
-	})
-	return c.recoverReports(sys)
+		app, body, err := harness.UnwrapPayload(json.RawMessage(text))
+		if err != nil || app.Session == "" {
+			continue
+		}
+		if app.Session == "main" {
+			switch item.MessageType {
+			case "session.track":
+				var x struct {
+					From  string `json:"from_session"`
+					Merge string `json:"merge"`
+				}
+				if json.Unmarshal(body, &x) == nil && x.From != "" {
+					s := c.ensureProjectedSession(x.From)
+					s.Merge = x.Merge
+				}
+			case "session.merge":
+				var x struct {
+					From     string   `json:"from_session"`
+					Decision string   `json:"decision"`
+					Refs     []string `json:"refs"`
+				}
+				if json.Unmarshal(body, &x) == nil && x.From != "" {
+					s := c.ensureProjectedSession(x.From)
+					if x.Decision == "skipped" {
+						s.Skipped = appendUnique(s.Skipped, x.Refs...)
+					} else if x.Decision == "merged" {
+						s.Merged = appendUnique(s.Merged, x.Refs...)
+					}
+				}
+			}
+			continue
+		}
+		s := c.sessions[app.Session]
+		if s == nil {
+			s = &session{ID: app.Session, LastUsed: nowMillis()}
+			if app.Caller != nil {
+				s.Scope = string(app.Caller.Channel)
+			}
+			c.sessions[s.ID] = s
+			c.sessionOrder = append(c.sessionOrder, s.ID)
+		}
+		if item.TSReceived > s.LastUsed {
+			s.LastUsed = item.TSReceived
+		}
+		switch item.MessageType {
+		case agentloop.TypeStart:
+			if len(item.Audience) == 0 || !sameSeat(string(sys.Self()), item.Sender.ID.String()) {
+				continue
+			}
+			var start agentloop.StartRequest
+			if json.Unmarshal(body, &start) == nil {
+				turnSession[start.TurnID] = s.ID
+				s.Execution = start.TurnID
+				s.Archived = false
+			}
+			s.Holder = item.Audience[0].String()
+		case agentloop.TypeInput, agentloop.TypeReset, agentloop.TypeRename:
+			if len(item.Audience) > 0 && sameSeat(string(sys.Self()), item.Sender.ID.String()) {
+				s.Holder = item.Audience[0].String()
+				s.Archived = false
+			}
+		case agentloop.TypeStop:
+			var stop agentloop.StopRequest
+			_ = json.Unmarshal(body, &stop)
+			if len(item.Audience) > 0 && sameSeat(string(sys.Self()), item.Sender.ID.String()) {
+				s.Holder = item.Audience[0].String()
+				s.Archived = stop.Archive
+			}
+		case agentloop.TypeSessionOpened:
+			var opened agentloop.Opened
+			if json.Unmarshal(body, &opened) == nil {
+				s.Opened = true
+				s.Base = opened.Base
+				if s.ForkPoint == "" {
+					s.ForkPoint = string(item.ID)
+				}
+			}
+		case agentloop.TypeReport:
+			var report agentloop.ReportRequest
+			if json.Unmarshal(body, &report) == nil && terminalTurnStateNative(report.State) && turnSession[report.TurnID] == s.ID && targetMatches(s.Holder, item.Sender.ID.String()) && !closedTurns[report.TurnID] {
+				closedTurns[report.TurnID] = true
+				s.LastBoundary = string(item.ID)
+				s.ForkPoint = string(item.ID)
+				if s.Execution == report.TurnID {
+					s.Execution = ""
+				}
+			}
+		case agentloop.TypeSessionSync:
+			var synced agentloop.Synced
+			if json.Unmarshal(body, &synced) == nil {
+				s.Synced = synced.From.Through
+			}
+		case agentloop.TypeSync:
+			if len(item.Audience) > 0 && sameSeat(string(sys.Self()), item.Sender.ID.String()) {
+				s.Holder = item.Audience[0].String()
+				s.Archived = false
+			}
+		}
+	}
+	for _, s := range c.sessions {
+		if s.Merge == "" {
+			s.Merge = "auto"
+		}
+	}
+	return nil
+}
+
+func (c *controller) ensureProjectedSession(id string) *session {
+	if s := c.sessions[id]; s != nil {
+		return s
+	}
+	s := &session{ID: id, LastUsed: nowMillis()}
+	c.sessions[id] = s
+	c.sessionOrder = append(c.sessionOrder, id)
+	return s
+}
+
+func appendUnique(dst []string, values ...string) []string {
+	seen := make(map[string]bool, len(dst))
+	for _, value := range dst {
+		seen[value] = true
+	}
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			dst = append(dst, value)
+			seen[value] = true
+		}
+	}
+	return dst
+}
+
+func (c *controller) rebuildSessions() {
+	c.sessions = map[string]*session{}
+	c.sessionOrder = nil
+	for _, id := range c.data.Order {
+		w := c.data.Works[id]
+		if w == nil || w.SessionID == "" {
+			continue
+		}
+		s := c.sessions[w.SessionID]
+		if s == nil {
+			s = &session{ID: w.SessionID, Scope: workScopeKey(w.Owner), LastUsed: w.UpdatedAt, Opened: w.AssignmentID != "" || w.BoundaryID != ""}
+			c.sessions[w.SessionID] = s
+			c.sessionOrder = append(c.sessionOrder, w.SessionID)
+		}
+		if w.UpdatedAt > s.LastUsed {
+			s.LastUsed = w.UpdatedAt
+		}
+		if w.State != agentproto.WorkOpen {
+			continue
+		}
+		if w.AssignmentID != "" && w.Looper != "" {
+			s.Execution, s.Owner, s.Holder, s.Opened = w.AssignmentID, w.ID, w.Looper, true
+		} else {
+			s.Buffer = append(s.Buffer, w.ID)
+		}
+	}
 }
 
 // recoverReports closes the crash window where a Looper durably posted its
@@ -247,17 +412,24 @@ func (c *controller) recoverReports(sys actorbase.Sys) error {
 					continue
 				}
 				var report agentloop.ReportRequest
-				if json.Unmarshal(wrapped.Body, &report) != nil || report.WorkID == "" || seen[string(report.WorkID)] {
+				if json.Unmarshal(wrapped.Body, &report) != nil || report.TurnID == "" || seen[report.TurnID] {
 					continue
 				}
-				w := c.data.Works[string(report.WorkID)]
-				if w == nil || w.State != agentproto.WorkOpen || w.AssignmentID != report.AssignmentID || !targetMatches(w.Looper, item.Sender.ID.String()) {
+				var w *workRecord
+				for _, candidate := range c.data.Works {
+					if candidate.AssignmentID == report.TurnID {
+						w = candidate
+						break
+					}
+				}
+				if w == nil || w.State != agentproto.WorkOpen || !targetMatches(w.Looper, item.Sender.ID.String()) {
 					continue
 				}
-				seen[string(report.WorkID)] = true
+				seen[report.TurnID] = true
 				if report.State == "accepted" {
 					continue
 				}
+				w.BoundaryID = string(item.ID)
 				if err := c.adoptRecoveredReport(sys, w, report); err != nil {
 					return err
 				}
@@ -274,29 +446,18 @@ func (c *controller) recoverReports(sys actorbase.Sys) error {
 }
 
 func (c *controller) adoptRecoveredReport(sys actorbase.Sys, w *workRecord, req agentloop.ReportRequest) error {
-	if req.ConsumedThrough < 0 || req.ConsumedThrough > w.AssignedThrough {
-		return errors.New("recover looper reports: input fence violation")
-	}
 	for i := range w.Inputs {
-		if w.Inputs[i].Seq <= req.ConsumedThrough {
+		if w.Inputs[i].Disposition == "assigned" {
 			w.Inputs[i].Disposition = "included"
 		}
 	}
-	if len(req.History) > 0 {
-		for _, item := range req.History {
-			if !json.Valid(item) {
-				return errors.New("recover looper reports: invalid history")
-			}
-		}
-		if historySize(req.History) > agentloop.MaxHistoryBytes {
-			return errors.New("recover looper reports: history exceeds recovery limit")
-		}
-		w.Context = append([]json.RawMessage(nil), req.History...)
-	}
 	switch req.State {
 	case "completed":
+		if len(req.Result) == 0 {
+			req.Result = c.sessionResult(sys, req.SessionID, req.TurnID, message.ID(w.BoundaryID))
+		}
 		if len(req.Result) == 0 || !json.Valid(req.Result) {
-			return errors.New("recover looper reports: completed report has invalid result")
+			req.Result = mustJSON(map[string]any{"text": "", "message": map[string]any{"role": "assistant", "content": []any{}}})
 		}
 		pending := false
 		for _, input := range w.Inputs {
@@ -311,8 +472,14 @@ func (c *controller) adoptRecoveredReport(sys actorbase.Sys, w *workRecord, req 
 		}
 	case "cancelled":
 		w.State, w.Stage, w.Outcome, w.ExecutionState = agentproto.WorkClosed, "", agentproto.OutcomeCancelled, req.ExecutionState
-	case "failed":
+	case "failed", "timeout", "execution_unknown":
 		w.State, w.Stage, w.Outcome, w.ExecutionState = agentproto.WorkClosed, "", agentproto.OutcomeFailed, req.ExecutionState
+		if req.State == "timeout" {
+			req.ErrorCode = "timeout"
+		}
+		if req.State == "execution_unknown" {
+			req.ErrorCode = "execution_unknown"
+		}
 		w.Result = mustJSON(map[string]any{"error_code": req.ErrorCode, "detail": req.Detail})
 	default:
 		return errors.New("recover looper reports: invalid terminal state")
@@ -401,19 +568,130 @@ func (c *controller) reconcileAfterRestart(sys actorbase.Sys) error {
 		if w.State != agentproto.WorkOpen {
 			continue
 		}
-		{
-			w.State, w.Stage, w.Outcome = agentproto.WorkClosed, "", agentproto.OutcomeFailed
-			w.ExecutionState = "execution_unknown_after_restart"
-			w.Continuation = false
-			w.Result = mustJSON(map[string]any{"error_code": "execution_unknown", "detail": "previous incarnation ended; no model or tool request was replayed"})
-			w.UpdatedAt = nowMillis()
-			if err := c.commit(sys, message.Root(), w); err != nil {
-				return err
-			}
-			c.emit(sys, message.Root(), "agent.work.recovery_required", publicWork(w))
+		if w.AssignmentID == "" || w.Looper == "" {
+			continue
+		}
+		if err := c.postExistingStart(sys, w); err != nil {
+			return fmt.Errorf("reattach session %s: %w", w.SessionID, err)
 		}
 	}
+	c.scheduleSessions(sys, message.Root())
 	return nil
+}
+
+func (c *controller) postExistingStart(sys actorbase.Sys, w *workRecord) error {
+	inputs := make([]agentloop.Input, 0, len(w.Inputs))
+	for _, input := range w.Inputs {
+		if input.Disposition == "assigned" {
+			inputs = append(inputs, input.Input)
+		}
+	}
+	tools := c.toolBindings()
+	selection := c.selected(sys)
+	cause := message.Anchored(message.ID(w.SourceRequest), message.ID(w.SourceRequest))
+	request := agentloop.StartRequest{
+		WorkID: w.ID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, SessionID: w.SessionID,
+		ToolTimeoutMS: c.cfg.ToolTimeoutMS, ExecutionTimeoutMS: c.cfg.ExecutionTimeoutMS, ControllerActor: string(sys.Self()), Inputs: inputs, Prompt: c.cfg.Prompt, LLMActor: c.cfg.LLMActor,
+		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: selection.Model, Effort: selection.Effort, MaxTurns: c.cfg.MaxTurns, Tools: &tools,
+		ToolResultMaxLines: c.cfg.ToolResultMaxLines, ToolResultMaxBytes: c.cfg.ToolResultMaxBytes, ToolImageMaxBytes: c.cfg.ToolImageMaxBytes,
+		ContextWindow: c.cfg.Compact.ContextWindow, ReserveTokens: c.cfg.Compact.ReserveTokens, KeepRecentTokens: c.cfg.Compact.KeepRecentTokens, CompactModel: c.cfg.Compact.Model,
+	}
+	pending, err := sys.Call(cause, actorID(w.Looper), agentloop.TypeStart, request)
+	if err == nil {
+		go awaitStart(sys, cause, w.SessionID, w.AssignmentID, w.Looper, pending)
+	}
+	return err
+}
+
+func awaitStart(sys actorbase.Sys, cause message.Cause, session, turn, looper string, pending actorbase.Pending) {
+	ctx, cancel := context.WithTimeout(sys.Life(), 15*time.Second)
+	defer cancel()
+	done := startDone{Session: session, Turn: turn, Looper: looper}
+	response, err := pending.Wait(ctx, 0)
+	if err != nil {
+		_ = pending.Cancel()
+		done.Error = err.Error()
+	} else {
+		var body struct {
+			Status      string `json:"status"`
+			Disposition string `json:"disposition"`
+			ErrorCode   string `json:"error_code"`
+		}
+		if json.Unmarshal(response.Payload, &body) != nil || (body.Status != "" && body.Status != "completed") {
+			done.Error = body.ErrorCode
+			if done.Error == "" {
+				done.Error = "start_rejected"
+			}
+		} else {
+			done.Disposition = body.Disposition
+		}
+	}
+	_, _ = sys.Post(behavior.RequestSpec{Cause: cause, Type: startDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(done)})
+}
+
+func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
+	if msg.Sender.ID != sys.Self() {
+		_, _ = sys.Fail(msg, "permission_denied", "start completion is Controller-internal")
+		return
+	}
+	var done startDone
+	if actorbase.DecodeStrict(msg.Payload, &done) != nil || done.Session == "" || done.Turn == "" {
+		_, _ = sys.Fail(msg, "invalid_args", "session_id and turn_id are required")
+		return
+	}
+	s := c.sessions[done.Session]
+	if s == nil || s.Execution != done.Turn || !targetMatches(s.Holder, done.Looper) {
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "stale"})
+		return
+	}
+	w := c.data.Works[string(s.Owner)]
+	if w == nil || w.State != agentproto.WorkOpen || w.AssignmentID != done.Turn {
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "stale"})
+		return
+	}
+	if done.Error == "" && (done.Disposition == "accepted" || done.Disposition == "already_accepted" || done.Disposition == "already_finished") {
+		w.Stage, w.ExecutionState, w.UpdatedAt = "thinking", "confirmed_running", nowMillis()
+		_ = c.commit(sys, msg.Cause(), w)
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "adopted"})
+		return
+	}
+	for i := range w.Inputs {
+		if w.Inputs[i].Disposition == "assigned" {
+			w.Inputs[i].Disposition = "accepted"
+		}
+	}
+	w.AssignmentID, w.Looper, w.AssignedThrough = "", "", 0
+	w.Stage, w.ExecutionState, w.UpdatedAt = "queued", "waiting_capacity", nowMillis()
+	s.Execution, s.Owner, s.Holder = "", "", ""
+	if s.ForkPoint == "" {
+		s.Opened = false
+	}
+	s.Buffer = append([]agentproto.WorkID{w.ID}, s.Buffer...)
+	_ = c.commit(sys, msg.Cause(), w)
+	_, _ = sys.Reply(msg, map[string]any{"disposition": "rerouted"})
+	c.scheduleQueued(sys, msg.Cause())
+}
+
+func (c *controller) toolBindings() []agentloop.ToolBinding {
+	if c.cfg.ToolsConfigured {
+		bindings := make([]agentloop.ToolBinding, len(c.cfg.Tools))
+		for i, tool := range c.cfg.Tools {
+			bindings[i] = agentloop.ToolBinding{Name: tool.Name, Actor: tool.Actor, Word: tool.Word}
+		}
+		return bindings
+	}
+	var bindings []agentloop.ToolBinding
+	if c.cfg.WorkspaceActor != "" {
+		for _, item := range []struct{ name, word string }{{"read", "workspace.read"}, {"write", "workspace.write"}, {"edit", "workspace.edit"}, {"bash", "workspace.bash"}} {
+			bindings = append(bindings, agentloop.ToolBinding{Name: item.name, Actor: c.cfg.WorkspaceActor, Word: item.word})
+		}
+	}
+	if c.cfg.HostActor != "" {
+		for _, item := range []struct{ name, word string }{{"channel_call", "channel.call"}, {"channel_post", "channel.post"}, {"channel_emit", "channel.emit"}} {
+			bindings = append(bindings, agentloop.ToolBinding{Name: item.name, Actor: c.cfg.HostActor, Word: item.word})
+		}
+	}
+	return bindings
 }
 
 func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
@@ -444,7 +722,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		SubmissionHash: submissionHash(req), RelatedWorkID: req.RelatedWorkID, Delivery: req.Delivery,
 		State: agentproto.WorkOpen, Stage: "queued", ExecutionState: "not_started", CreatedAt: now, UpdatedAt: now}
 	w.Inputs = []inputRecord{{Input: agentloop.Input{
-		ID: newInputID(), Seq: 1, Text: req.Text,
+		ID: string(msg.ID), Seq: 1, Text: req.Text,
 		Attachments:   append([]json.RawMessage(nil), req.Attachments...),
 		CallerChannel: caller.Channel, CallerActor: caller.Actor, Origin: req.Origin,
 	}, Disposition: "accepted"}}
@@ -452,7 +730,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "limit_exceeded", "the work input exceeds the phase-one recovery limit")
 		return
 	}
-	s, sessionErr := c.sessionForAsk(msg, req)
+	s, sessionErr := c.sessionForAsk(sys, msg, req)
 	if sessionErr != nil {
 		_, _ = sys.Fail(msg, sessionErr.Error(), "cannot select conversation")
 		return
@@ -471,7 +749,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "capacity", "session waiting input bytes exceeded")
 		return
 	}
-	w.ViewID = s.ID
+	w.SessionID = s.ID
 	c.data.Works[string(w.ID)] = w
 	c.data.Order = append(c.data.Order, string(w.ID))
 	if err := c.commit(sys, msg.Cause(), w); err != nil {
@@ -549,7 +827,7 @@ func (c *controller) answerAsk(sys actorbase.Sys, msg actorbase.Msg, w *workReco
 		_, _ = sys.Reply(msg, resultPayload(w))
 		return
 	}
-	_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted", "work_id": w.ID, "view_id": w.ViewID, "work_state": w.State,
+	_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted", "work_id": w.ID, "session_id": w.SessionID, "work_state": w.State,
 		"guidance": "Keep work_id as the stable address. Poll agent.result for completion or use an actor-authored targeted control from next.",
 		"next":     nextFor(w)})
 }
@@ -598,7 +876,22 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 	if w.State != agentproto.WorkOpen || len(c.cfg.Loopers) == 0 {
 		return false
 	}
-	looper, ok := c.freeLooper()
+	s := c.sessions[w.SessionID]
+	looper := ""
+	if s != nil {
+		looper = s.Holder
+	}
+	ok := looper != ""
+	if ok && c.looperLoad(looper) >= c.looperLimit() {
+		if w.ExecutionState != "waiting_capacity" {
+			w.ExecutionState, w.UpdatedAt = "waiting_capacity", nowMillis()
+			_ = c.commit(sys, cause, w)
+		}
+		return false
+	}
+	if !ok {
+		looper, ok = c.freeLooper()
+	}
 	if !ok {
 		if w.ExecutionState != "waiting_capacity" {
 			old := w.ExecutionState
@@ -610,6 +903,9 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 		return false
 	}
 	old := cloneWork(w)
+	if s != nil && s.Holder == "" {
+		s.Holder = looper
+	}
 	w.AssignmentID, w.Looper = newAssignmentID(), looper
 	w.AssignedThrough = 0
 	w.Stage, w.ExecutionState, w.UpdatedAt = "dispatching", "start_requested", nowMillis()
@@ -631,19 +927,38 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 			inputs = append(inputs, w.Inputs[i].Input)
 		}
 	}
-	var tools *[]agentloop.ToolBinding
-	if c.cfg.ToolsConfigured {
-		bindings := make([]agentloop.ToolBinding, len(c.cfg.Tools))
-		for i, tool := range c.cfg.Tools {
-			bindings[i] = agentloop.ToolBinding{Name: tool.Name, Actor: tool.Actor, Word: tool.Word}
-		}
-		tools = &bindings
+	tools := c.toolBindings()
+	selection := c.selected(sys)
+	startCause := message.Anchored(message.ID(w.SourceRequest), message.ID(w.SourceRequest))
+	var open *agentloop.OpenRequest
+	if s != nil && !s.Opened {
+		open = &agentloop.OpenRequest{Base: s.Base}
 	}
-	_, err := sys.Post(behavior.RequestSpec{Cause: cause, Type: agentloop.TypeStart, Audience: message.Audience{actorID(looper)}, Payload: mustJSON(agentloop.StartRequest{
-		WorkID: w.ID, AssignmentID: w.AssignmentID, ViewID: w.ViewID, ContextVersion: w.ContextVersion, ToolTimeoutMS: c.cfg.ToolTimeoutMS, ExecutionTimeoutMS: c.cfg.ExecutionTimeoutMS, ControllerActor: string(sys.Self()), Inputs: inputs, Prior: append([]json.RawMessage(nil), w.Context...), ContextActor: c.cfg.ContextActor, LLMActor: c.cfg.LLMActor,
-		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: c.cfg.Model, MaxTurns: c.cfg.MaxTurns, Tools: tools,
-		ToolResultMaxLines: c.cfg.ToolResultMaxLines, ToolResultMaxBytes: c.cfg.ToolResultMaxBytes, ToolImageMaxBytes: c.cfg.ToolImageMaxBytes})})
+	request := agentloop.StartRequest{
+		WorkID: w.ID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, SessionID: w.SessionID, Open: open, ToolTimeoutMS: c.cfg.ToolTimeoutMS, ExecutionTimeoutMS: c.cfg.ExecutionTimeoutMS, ControllerActor: string(sys.Self()), Inputs: inputs, Prompt: c.cfg.Prompt, LLMActor: c.cfg.LLMActor,
+		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: selection.Model, Effort: selection.Effort, MaxTurns: c.cfg.MaxTurns, Tools: &tools,
+		ToolResultMaxLines: c.cfg.ToolResultMaxLines, ToolResultMaxBytes: c.cfg.ToolResultMaxBytes, ToolImageMaxBytes: c.cfg.ToolImageMaxBytes,
+		ContextWindow: c.cfg.Compact.ContextWindow, ReserveTokens: c.cfg.Compact.ReserveTokens, KeepRecentTokens: c.cfg.Compact.KeepRecentTokens, CompactModel: c.cfg.Compact.Model}
+	pending, err := sys.Call(startCause, actorID(looper), agentloop.TypeStart, request)
 	if err != nil {
+		if s != nil {
+			// A stale holder is discovered only when the next instruction is
+			// routed. Keep the work queued and let the next scheduling pass
+			// resolve a current Looper for the same declaration.
+			s.Holder = ""
+			if s.ForkPoint == "" {
+				s.Opened = false
+			}
+			for i := range w.Inputs {
+				if w.Inputs[i].Disposition == "assigned" {
+					w.Inputs[i].Disposition = "accepted"
+				}
+			}
+			w.AssignmentID, w.Looper, w.AssignedThrough = "", "", 0
+			w.Stage, w.ExecutionState, w.UpdatedAt = "queued", "waiting_capacity", nowMillis()
+			_ = c.commit(sys, cause, w)
+			return false
+		}
 		w.AssignmentID, w.Looper = "", ""
 		w.State, w.Outcome = agentproto.WorkClosed, agentproto.OutcomeFailed
 		w.Stage, w.ExecutionState, w.UpdatedAt = "", "dispatch_failed", nowMillis()
@@ -653,10 +968,31 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 		c.finishWaiters(sys, w)
 		return true
 	}
-	// A successful Post proves only that the request entered the channel. The
-	// looper reports "accepted" separately; until then status remains honest.
+	if s != nil {
+		s.Opened = true
+	}
+	go awaitStart(sys, startCause, w.SessionID, w.AssignmentID, looper, pending)
+	// The accepted response to loop.start is ledger truth used by attach;
+	// Controller does not mirror it into a session fact.
 	c.emit(sys, cause, "agent.work.dispatched", publicWork(w))
 	return true
+}
+
+func (c *controller) looperLimit() int {
+	if c.cfg.MaxAssignmentsPerLooper > 0 {
+		return c.cfg.MaxAssignmentsPerLooper
+	}
+	return 1
+}
+
+func (c *controller) looperLoad(looper string) int {
+	count := 0
+	for _, work := range c.data.Works {
+		if work.State == agentproto.WorkOpen && work.AssignmentID != "" && work.Looper == looper {
+			count++
+		}
+	}
+	return count
 }
 
 func (c *controller) owned(msg actorbase.Msg, id agentproto.WorkID) (*workRecord, bool) {
@@ -750,8 +1086,8 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 			}
 		}
 		var selected []*session
-		if req.WorkID != "" || req.ViewID != "" {
-			s, err := c.selectSession(msg, req.ViewID, req.WorkID, "")
+		if req.WorkID != "" || req.SessionID != "" {
+			s, err := c.selectSession(msg, req.SessionID, req.WorkID, "")
 			if err != nil {
 				_, _ = sys.Fail(msg, err.Error(), "cannot select interrupt session")
 				return
@@ -775,7 +1111,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 		if req.OperationKey != "" && c.cfg.MaxOperationKeys > 0 {
 			for _, v := range selected {
 				for _, w := range c.data.Works {
-					if w.ViewID == v.ID && len(w.Operations) >= c.cfg.MaxOperationKeys {
+					if w.SessionID == v.ID && len(w.Operations) >= c.cfg.MaxOperationKeys {
 						_, _ = sys.Fail(msg, "limit_exceeded", "max_operation_keys reached")
 						return
 					}
@@ -785,16 +1121,16 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 		results := []map[string]any{}
 		for _, s := range selected {
 			if s.Control != nil {
-				results = append(results, map[string]any{"view_id": s.ID, "disposition": "busy"})
+				results = append(results, map[string]any{"session_id": s.ID, "disposition": "busy"})
 				continue
 			}
 			if req.WorkID != "" && req.WorkID != s.Owner {
 				w := c.data.Works[string(req.WorkID)]
 				err := c.stop(sys, msg, w, false)
 				if err != nil {
-					results = append(results, map[string]any{"view_id": s.ID, "disposition": "failed", "detail": err.Error()})
+					results = append(results, map[string]any{"session_id": s.ID, "disposition": "failed", "detail": err.Error()})
 				} else {
-					results = append(results, map[string]any{"view_id": s.ID, "disposition": "stop_requested"})
+					results = append(results, map[string]any{"session_id": s.ID, "disposition": "stop_requested"})
 				}
 				continue
 			}
@@ -802,11 +1138,11 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 			s.RestoreInterrupt = false
 			if w := c.data.Works[string(s.Owner)]; w != nil && s.Execution != "" {
 				if err := c.stop(sys, msg, w, false); err != nil {
-					results = append(results, map[string]any{"view_id": s.ID, "disposition": "failed", "detail": err.Error()})
+					results = append(results, map[string]any{"session_id": s.ID, "disposition": "failed", "detail": err.Error()})
 					continue
 				}
 			}
-			if req.WorkID == "" && req.ViewID == "" {
+			if req.WorkID == "" && req.SessionID == "" {
 				for _, id := range append([]agentproto.WorkID(nil), s.Buffer...) {
 					if w := c.data.Works[string(id)]; w != nil {
 						_ = c.stop(sys, msg, w, false)
@@ -814,10 +1150,10 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 				}
 				s.Buffer = nil
 			}
-			results = append(results, map[string]any{"view_id": s.ID, "disposition": "stop_requested"})
+			results = append(results, map[string]any{"session_id": s.ID, "disposition": "stop_requested"})
 		}
 		scope := "view"
-		if req.WorkID == "" && req.ViewID == "" {
+		if req.WorkID == "" && req.SessionID == "" {
 			scope = "agent"
 		}
 		stopped := 0
@@ -830,7 +1166,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 		if req.OperationKey != "" {
 			for _, w := range c.data.Works {
 				for _, s := range selected {
-					if w.ViewID == s.ID {
+					if w.SessionID == s.ID {
 						if w.Operations == nil {
 							w.Operations = map[string]operationRecord{}
 						}
@@ -927,7 +1263,7 @@ func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, s
 		}
 		c.emit(sys, msg.Cause(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
 		c.finishWaiters(sys, w)
-		if s := c.sessions[w.ViewID]; s != nil {
+		if s := c.sessions[w.SessionID]; s != nil {
 			removeQueue(s, w.ID)
 		}
 		if schedule {
@@ -940,7 +1276,7 @@ func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, s
 		*w = old
 		return err
 	}
-	_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, ViewID: w.ViewID, AssignmentID: w.AssignmentID, Reason: "agent.interrupt"})})
+	_, _ = sys.Post(behavior.RequestSpec{Cause: message.Anchored(msg.ID, msg.ID), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, SessionID: w.SessionID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, Reason: "agent.interrupt"})})
 	c.emit(sys, msg.Cause(), "agent.work.stop_requested", publicWork(w))
 	return nil
 }
@@ -951,21 +1287,37 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
 		return
 	}
-	w := c.data.Works[string(req.WorkID)]
-	s := c.sessions[req.ViewID]
-	if s == nil && w != nil {
-		s = c.sessions[w.ViewID]
+	if req.AssignmentID == "" {
+		req.AssignmentID = req.TurnID
 	}
-	if s != nil && s.Execution == req.AssignmentID {
+	if req.TurnID == "" {
+		req.TurnID = req.AssignmentID
+	}
+	w := c.data.Works[string(req.WorkID)]
+	if w == nil {
+		for _, candidate := range c.data.Works {
+			if candidate.AssignmentID == req.AssignmentID {
+				w = candidate
+				req.WorkID = candidate.ID
+				break
+			}
+		}
+	}
+	s := c.sessions[req.SessionID]
+	if s == nil && w != nil {
+		s = c.sessions[w.SessionID]
+	}
+	if s == nil || !targetMatches(s.Holder, msg.Sender.ID.String()) {
+		_, _ = sys.Fail(msg, "stale_assignment", "report sender is not the ledger-projected session holder")
+		return
+	}
+	if s.Execution == req.AssignmentID {
 		current := c.data.Works[string(s.Owner)]
-		if current == nil || !targetMatches(current.Looper, msg.Sender.ID.String()) || req.ContextVersion != s.Version {
+		if current == nil || !targetMatches(current.Looper, msg.Sender.ID.String()) {
 			_, _ = sys.Fail(msg, "stale_assignment", "report session identity or version mismatch")
 			return
 		}
-		for _, decision := range req.Controls {
-			c.settleControl(sys, s, decision, false)
-		}
-		if s.Control != nil && req.State != "accepted" && req.State != "processing" {
+		if s.Control != nil {
 			c.settleControl(sys, s, agentloop.ControlResult{ControlID: s.Control.ID, Disposition: "target_gone"}, false)
 		}
 		w = c.data.Works[string(s.Owner)]
@@ -974,66 +1326,23 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "stale_assignment", "report does not belong to the current assignment")
 		return
 	}
-	if req.State == "processing" {
-		w.UpdatedAt = nowMillis()
-		for _, waiting := range c.wait[w.ID] {
-			if waiting.Ctx().Err() == nil {
-				_, _ = sys.Progress(waiting, "processing", map[string]any{"work_id": w.ID, "view_id": w.ViewID, "assignment_id": w.AssignmentID, "stage": "executing"})
-			}
-		}
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "observed"})
+	if req.State != "completed" && req.State != "failed" && req.State != "cancelled" && req.State != "timeout" && req.State != "execution_unknown" {
+		_, _ = sys.Fail(msg, "invalid_args", "invalid terminal report state")
 		return
 	}
-	if req.State != "accepted" && req.State != "completed" && req.State != "failed" && req.State != "cancelled" {
-		_, _ = sys.Fail(msg, "invalid_args", "report.state must be accepted, completed, failed, or cancelled")
-		return
-	}
-	if req.ConsumedThrough < 0 || req.ConsumedThrough > w.AssignedThrough {
-		_, _ = sys.Fail(msg, "invalid_args", "report consumed_through exceeds the current assignment input fence")
-		return
-	}
-	for _, item := range req.History {
-		if !json.Valid(item) {
-			_, _ = sys.Fail(msg, "invalid_args", "report history contains invalid JSON")
-			return
-		}
-	}
-	if historySize(req.History) > agentloop.MaxHistoryBytes {
-		_, _ = sys.Fail(msg, "invalid_args", "report history exceeds the recovery limit")
-		return
+	if req.State == "completed" && len(req.Result) == 0 {
+		req.Result = c.sessionResult(sys, req.SessionID, req.TurnID, msg.ID)
 	}
 	if req.State == "completed" && (len(req.Result) == 0 || !json.Valid(req.Result)) {
-		_, _ = sys.Fail(msg, "invalid_args", "completed report requires a valid JSON result")
-		return
+		req.Result = mustJSON(map[string]any{"text": "", "message": map[string]any{"role": "assistant", "content": []any{}}})
 	}
 	old := cloneWork(w)
-	if req.State == "accepted" {
-		if w.Stage == "stopping" {
-			_, _ = sys.Reply(msg, map[string]any{"disposition": "acknowledged", "work_id": w.ID, "stop_pending": true})
-			return
-		}
-		w.Looper = msg.Sender.ID.String()
-		w.Stage, w.ExecutionState, w.UpdatedAt = "thinking", "confirmed_running", nowMillis()
-		if err := c.commit(sys, msg.Cause(), w); err != nil {
-			*w = *old
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
-			return
-		}
-		c.emit(sys, msg.Cause(), "agent.work.assignment_accepted", publicWork(w))
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "adopted", "work_id": w.ID, "state": w.State})
-		return
-	}
 	for i := range w.Inputs {
-		if w.Inputs[i].Seq <= req.ConsumedThrough {
+		if w.Inputs[i].Disposition == "assigned" {
 			w.Inputs[i].Disposition = "included"
 		}
 	}
-	if len(req.History) > 0 {
-		w.Context = append([]json.RawMessage(nil), req.History...)
-	}
-	if s != nil && s.Execution == req.AssignmentID && req.State != "accepted" {
-		s.History = append([]json.RawMessage(nil), req.History...)
-		s.Version++
+	if s.Execution == req.AssignmentID {
 		s.Execution = ""
 		s.Owner = ""
 		s.LastUsed = nowMillis()
@@ -1048,7 +1357,7 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 			if len(w.Inputs) > 0 {
 				text += "\n" + w.Inputs[len(w.Inputs)-1].Text
 			}
-			w.Inputs = []inputRecord{{Input: agentloop.Input{ID: newInputID(), Seq: 1, Text: text, CallerActor: w.Owner.Actor, CallerChannel: w.Owner.Channel}, Disposition: "accepted"}}
+			w.Inputs = []inputRecord{{Input: agentloop.Input{ID: w.SourceRequest, Seq: 1, Text: text, CallerActor: w.Owner.Actor, CallerChannel: w.Owner.Channel}, Disposition: "accepted"}}
 
 			s.Buffer = append([]agentproto.WorkID{w.ID}, s.Buffer...)
 			_ = c.commit(sys, msg.Cause(), w)
@@ -1088,9 +1397,18 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 		w.Result = append(json.RawMessage(nil), req.Result...)
 	} else {
 		w.State, w.Stage, w.Outcome, w.ExecutionState = agentproto.WorkClosed, "", agentproto.OutcomeFailed, req.ExecutionState
+		if req.State == "timeout" {
+			req.ErrorCode = "timeout"
+		}
+		if req.State == "execution_unknown" {
+			req.ErrorCode = "execution_unknown"
+		}
 		w.Result = mustJSON(map[string]any{"error_code": req.ErrorCode, "detail": req.Detail})
 	}
 	w.UpdatedAt = nowMillis()
+	w.BoundaryID = string(msg.ID)
+	s.LastBoundary = string(msg.ID)
+	s.ForkPoint = string(msg.ID)
 	if err := c.commit(sys, msg.Cause(), w); err != nil {
 		*w = *old
 		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
@@ -1102,8 +1420,183 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 	c.scheduleQueued(sys, msg.Cause())
 }
 
+func terminalTurnStateNative(state string) bool {
+	switch state {
+	case "completed", "failed", "cancelled", "timeout", "execution_unknown":
+		return true
+	}
+	return false
+}
+
+func (c *controller) sessionResult(sys actorbase.Sys, session, turn string, upto message.ID) json.RawMessage {
+	rows, head, err := nativeSessionRows(sys, session)
+	if err != nil {
+		return nil
+	}
+	limit, start := int64(^uint64(0)>>1), int64(0)
+	for _, row := range rows {
+		if row.ID == upto {
+			limit = row.Seq
+		}
+		if row.Kind == message.KindRequest && row.MessageType == agentloop.TypeStart {
+			body := nativeRowBody(sys, row, head)
+			var req agentloop.StartRequest
+			if json.Unmarshal(body, &req) == nil && req.TurnID == turn {
+				start = row.Seq
+			}
+		}
+	}
+	requests := map[message.ID]bool{}
+	for _, row := range rows {
+		if row.Seq < start || row.Seq > limit || row.Kind != message.KindRequest || row.MessageType != llmproto.TypeGenerate {
+			continue
+		}
+		var req llmproto.GenerateRequest
+		_ = json.Unmarshal(nativeRowBody(sys, row, head), &req)
+		requests[row.ID] = req.Purpose != "compact"
+	}
+	var latest logMessage
+	var latestGenerated struct {
+		Message  json.RawMessage `json:"message"`
+		Provider string          `json:"provider"`
+		Model    string          `json:"model"`
+		Usage    json.RawMessage `json:"usage"`
+	}
+	total := map[string]float64{}
+	for _, row := range rows {
+		if row.Seq < start || row.Seq > limit || row.Kind != message.KindResponse || row.MessageType != llmproto.TypeGenerate || !requests[row.ParentID] {
+			continue
+		}
+		var generated struct {
+			Message  json.RawMessage `json:"message"`
+			Provider string          `json:"provider"`
+			Model    string          `json:"model"`
+			Usage    json.RawMessage `json:"usage"`
+		}
+		if json.Unmarshal(nativeRowBody(sys, row, head), &generated) != nil || len(generated.Message) == 0 {
+			continue
+		}
+		if len(generated.Usage) > 0 {
+			accumulateUsage(total, generated.Usage)
+		}
+		if row.Seq > latest.Seq {
+			latest, latestGenerated = row, generated
+		}
+	}
+	if latest.Seq == 0 {
+		return nil
+	}
+	_, answer, _ := assistantPartsNative(latestGenerated.Message)
+	result := map[string]any{"text": answer, "message": latestGenerated.Message, "provider": latestGenerated.Provider, "model": latestGenerated.Model}
+	if len(latestGenerated.Usage) > 0 {
+		result["usage"] = latestGenerated.Usage
+	}
+	if len(total) > 0 {
+		usageTotal, cost := map[string]any{}, map[string]float64{}
+		for key, value := range total {
+			if strings.HasPrefix(key, "cost.") {
+				cost[strings.TrimPrefix(key, "cost.")] = value
+			} else {
+				usageTotal[key] = value
+			}
+		}
+		if len(cost) > 0 {
+			usageTotal["cost"] = cost
+		}
+		result["usage_total"] = usageTotal
+	}
+	return mustJSON(result)
+}
+
+func nativeSessionRows(sys actorbase.Sys, session string) ([]logMessage, int64, error) {
+	var rows []logMessage
+	before, head := int64(0), int64(0)
+	for {
+		req := map[string]any{"view": "raw", "session_id": session, "limit": 20}
+		if before > 0 {
+			req["before_seq"] = before
+		}
+		if head > 0 {
+			req["head_seq"] = head
+		}
+		page, err := callSystemQuery(sys, req)
+		if err != nil {
+			return nil, head, err
+		}
+		if head == 0 {
+			head = page.HeadSeq
+		}
+		for _, turn := range page.Turns {
+			rows = append(rows, turn.Messages...)
+		}
+		if !page.HasMore {
+			break
+		}
+		if page.NextBeforeSeq <= 0 || page.NextBeforeSeq == before {
+			return nil, head, errors.New("session result pagination made no progress")
+		}
+		before = page.NextBeforeSeq
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Seq < rows[j].Seq })
+	return rows, head, nil
+}
+
+func nativeRowBody(sys actorbase.Sys, row logMessage, head int64) json.RawMessage {
+	text := row.PayloadText
+	if row.Truncated {
+		text, _ = readLogMessage(sys, row.Seq, head)
+	}
+	_, body, _ := harness.UnwrapPayload(json.RawMessage(text))
+	return body
+}
+
+func accumulateUsage(total map[string]float64, raw json.RawMessage) {
+	var usage map[string]any
+	if json.Unmarshal(raw, &usage) != nil {
+		return
+	}
+	for _, key := range []string{"input", "output", "cache_read", "cache_write", "total", "context_tokens"} {
+		if n, ok := usage[key].(float64); ok {
+			total[key] += n
+		}
+	}
+	if cost, ok := usage["cost"].(map[string]any); ok {
+		for key, value := range cost {
+			if n, ok := value.(float64); ok {
+				total["cost."+key] += n
+			}
+		}
+	}
+}
+
+func assistantPartsNative(raw json.RawMessage) ([]json.RawMessage, string, error) {
+	var m struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return nil, "", errors.New("invalid assistant")
+	}
+	var text string
+	for _, b := range m.Content {
+		var p struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(b, &p)
+		if p.Type == "text" {
+			text += p.Text
+		}
+	}
+	return m.Content, text, nil
+}
+
 func resultPayload(w *workRecord) agentproto.ResultResponse {
-	response := agentproto.ResultResponse{WorkID: w.ID, ViewID: w.ViewID, State: w.State, Outcome: w.Outcome, Result: append(json.RawMessage(nil), w.Result...), Next: nextFor(w)}
+	response := agentproto.ResultResponse{WorkID: w.ID, SessionID: w.SessionID, State: w.State, Outcome: w.Outcome, Result: append(json.RawMessage(nil), w.Result...), Next: nextFor(w)}
+	var resultFields map[string]json.RawMessage
+	if json.Unmarshal(w.Result, &resultFields) == nil {
+		response.Usage = append(json.RawMessage(nil), resultFields["usage"]...)
+		response.UsageTotal = append(json.RawMessage(nil), resultFields["usage_total"]...)
+	}
 	if w.State == agentproto.WorkOpen {
 		response.Guidance = "This work is still open; no result is implied. Call agent.result again later, inspect agent.status, or use the targeted interrupt action."
 	} else {
@@ -1138,14 +1631,6 @@ func (c *controller) finishWaiters(sys actorbase.Sys, w *workRecord) {
 func ptrWork(w agentproto.Work) *agentproto.Work { return &w }
 func mustJSON(v any) json.RawMessage             { raw, _ := json.Marshal(v); return raw }
 func actorID(s string) actor.ActorID             { return actor.ActorID(s) }
-
-func historySize(history []json.RawMessage) int {
-	total := 0
-	for _, item := range history {
-		total += len(item)
-	}
-	return total
-}
 
 func inputRecordsSize(inputs []inputRecord) int {
 	raw, _ := json.Marshal(inputs)

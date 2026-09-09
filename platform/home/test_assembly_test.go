@@ -65,6 +65,29 @@ func completeHomeTestConfig(cfg Config) Config {
 	return cfg
 }
 
+func canonicalTestPayload(value any) json.RawMessage {
+	raw, _ := json.Marshal(value)
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) == nil {
+		if len(object["_context"]) > 0 && len(object["body"]) > 0 {
+			return raw
+		}
+		if len(object) == 1 && len(object["body"]) > 0 {
+			raw = object["body"]
+		}
+	}
+	wrapped, _ := harness.WrapPayload(harness.Context{}, raw)
+	return wrapped
+}
+
+func canonicalTestBody(raw json.RawMessage) json.RawMessage {
+	_, body, err := harness.UnwrapPayload(raw)
+	if err != nil {
+		return raw
+	}
+	return body
+}
+
 // introduceHumanForTest and removeActorForTest drive the same frame executor as
 // the channel system actor, without exposing a second production mutation face.
 func introduceHumanForTest(h *Home, ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {

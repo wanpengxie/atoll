@@ -372,8 +372,8 @@ func command(id, action string, args map[string]any) actorbase.Msg {
 	if args != nil {
 		payload["args"] = args
 	}
-	body, _ := json.Marshal(map[string]any{"body": payload})
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	body, _ := json.Marshal(payload)
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID:         message.ID(id),
 		ChannelID:  testChannelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
@@ -513,7 +513,7 @@ func TestKindGuardDropsNonRequest(t *testing.T) {
 
 	ev := command("ev-1", "snapshot", nil)
 	evEnv := message.Envelope{ID: ev.ID, Kind: message.KindEvent, Type: ev.Type, Payload: ev.Payload}
-	sys.push(actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), evEnv))
+	sys.push(actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), evEnv))
 
 	// Give any erroneous async path a moment, then assert nothing was recorded.
 	time.Sleep(30 * time.Millisecond)

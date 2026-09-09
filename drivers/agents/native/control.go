@@ -29,7 +29,7 @@ type pendingControl struct {
 	Request   agentloop.InputRequest
 }
 type controlDone struct {
-	Session   string                  `json:"view_id"`
+	Session   string                  `json:"session_id"`
 	Execution string                  `json:"assignment_id"`
 	ID        string                  `json:"control_id"`
 	Decision  agentloop.ControlResult `json:"decision"`
@@ -42,7 +42,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
 		return
 	}
-	s, err := c.selectSession(msg, req.ViewID, req.WorkID, req.Target)
+	s, err := c.selectSession(msg, req.SessionID, req.WorkID, req.Target)
 	if err != nil {
 		_, _ = sys.Fail(msg, err.Error(), "cannot select control session")
 		return
@@ -123,8 +123,8 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		caller := actorbase.EffectiveCaller(msg)
 		now := nowMillis()
-		w := &workRecord{ID: newWorkID(), ViewID: s.ID, Owner: caller, SourceRequest: string(msg.ID), State: agentproto.WorkOpen, Stage: "control_pending", Delivery: agentproto.DeliveryReceipt, CreatedAt: now, UpdatedAt: now,
-			Inputs: []inputRecord{{Input: agentloop.Input{ID: newInputID(), Seq: 1, Text: req.Text, CallerActor: caller.Actor, CallerChannel: caller.Channel}, Disposition: "accepted"}}}
+		w := &workRecord{ID: newWorkID(), SessionID: s.ID, Owner: caller, SourceRequest: string(msg.ID), State: agentproto.WorkOpen, Stage: "control_pending", Delivery: agentproto.DeliveryReceipt, CreatedAt: now, UpdatedAt: now,
+			Inputs: []inputRecord{{Input: agentloop.Input{ID: string(msg.ID), Seq: 1, Text: req.Text, CallerActor: caller.Actor, CallerChannel: caller.Channel}, Disposition: "accepted"}}}
 		c.data.Works[string(w.ID)] = w
 		c.data.Order = append(c.data.Order, string(w.ID))
 		pc.Targets = []agentproto.WorkID{w.ID}
@@ -148,7 +148,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		for _, id := range pc.Targets {
 			c.data.Works[string(id)].Stage = "queued"
 		}
-		response := mustJSON(map[string]any{"disposition": "queued_first", "view_id": s.ID})
+		response := mustJSON(map[string]any{"disposition": "queued_first", "session_id": s.ID})
 		for _, id := range pc.Targets {
 			w := c.data.Works[string(id)]
 			if pc.Key != "" {
@@ -183,7 +183,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "limit_exceeded", "execution input limit reached")
 		return
 	}
-	pc.Request = agentloop.InputRequest{WorkID: owner.ID, AssignmentID: s.Execution, ViewID: s.ID, ControlID: pc.ID, Inputs: inputs}
+	pc.Request = agentloop.InputRequest{WorkID: owner.ID, AssignmentID: s.Execution, SessionID: s.ID, ControlID: pc.ID, Inputs: inputs}
 	s.Control = pc
 	for _, id := range pc.Targets {
 		_ = c.commit(sys, msg.Cause(), c.data.Works[string(id)])
@@ -206,7 +206,7 @@ func deliverControl(sys actorbase.Sys, sessionID, looper string, pc *pendingCont
 		unknown = true
 		inspectCtx, inspectCancel := context.WithTimeout(sys.Life(), 5*time.Second)
 		defer inspectCancel()
-		query, queryErr := controlCall(inspectCtx, sys, pc.Message.Cause(), looper, agentloop.TypeInspect, agentloop.InspectRequest{WorkID: pc.Request.WorkID, AssignmentID: pc.Execution, ViewID: sessionID})
+		query, queryErr := controlCall(inspectCtx, sys, pc.Message.Cause(), looper, agentloop.TypeInspect, agentloop.InspectRequest{WorkID: pc.Request.WorkID, AssignmentID: pc.Execution, SessionID: sessionID})
 		if queryErr == nil {
 			var result struct {
 				Controls []agentloop.ControlResult `json:"controls"`
@@ -307,7 +307,6 @@ func (c *controller) settleControl(sys actorbase.Sys, s *session, d agentloop.Co
 		}
 		tail.AssignmentID = owner.AssignmentID
 		tail.Looper = owner.Looper
-		tail.ContextVersion = owner.ContextVersion
 		tail.Stage = owner.Stage
 		tail.ExecutionState = owner.ExecutionState
 		s.Owner = tail.ID
@@ -338,9 +337,9 @@ func (c *controller) settleControl(sys actorbase.Sys, s *session, d agentloop.Co
 			}
 		}
 	}
-	response := mustJSON(map[string]any{"disposition": d.Disposition, "control_id": pc.ID, "view_id": s.ID, "work_id": pc.Targets[len(pc.Targets)-1], "included": false})
+	response := mustJSON(map[string]any{"disposition": d.Disposition, "control_id": pc.ID, "session_id": s.ID, "work_id": pc.Targets[len(pc.Targets)-1], "included": false})
 	if unknown {
-		response = mustJSON(map[string]any{"disposition": "control_unknown", "control_id": pc.ID, "view_id": s.ID})
+		response = mustJSON(map[string]any{"disposition": "control_unknown", "control_id": pc.ID, "session_id": s.ID})
 	}
 	for _, id := range pc.Targets {
 		w := c.data.Works[string(id)]
@@ -375,7 +374,6 @@ func (c *controller) controlDone(sys actorbase.Sys, msg actorbase.Msg) {
 }
 
 type editRequest struct {
-	ViewID     string            `json:"view_id,omitempty"`
 	WorkID     agentproto.WorkID `json:"work_id,omitempty"`
 	Target     string            `json:"target,omitempty"`
 	OldText    string            `json:"old_text,omitempty"`
@@ -392,13 +390,13 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(msg.Payload, &fields)
 	for key, value := range fields {
-		allowed := key == "view_id" || key == "work_id" || (msg.Type == agentproto.TypeReplace && (key == "target" || key == "old_text" || key == "new_text")) || (msg.Type == agentproto.TypeHold && (key == "target" || key == "duration_ms"))
+		allowed := key == "work_id" || (msg.Type == agentproto.TypeReplace && (key == "target" || key == "old_text" || key == "new_text")) || (msg.Type == agentproto.TypeHold && (key == "target" || key == "duration_ms"))
 		if !allowed || string(value) == "null" {
 			_, _ = sys.Fail(msg, "invalid_args", "field is not valid for this control")
 			return
 		}
 	}
-	s, err := c.selectSession(msg, req.ViewID, req.WorkID, req.Target)
+	s, err := c.selectSession(msg, "", req.WorkID, req.Target)
 	if err != nil {
 		_, _ = sys.Fail(msg, err.Error(), "cannot select session")
 		return
@@ -414,7 +412,7 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		updated.ID = newWorkID()
 		updated.Owner = actorbase.EffectiveCaller(msg)
 		updated.SourceRequest = string(msg.ID)
-		updated.Inputs[0].ID = newInputID()
+		updated.Inputs[0].ID = string(msg.ID)
 		updated.Inputs[0].Text = req.NewText
 		updated.Inputs[0].CallerActor = updated.Owner.Actor
 		updated.Inputs[0].CallerChannel = updated.Owner.Channel
@@ -462,10 +460,10 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 			s.Rebuffer = true
 			_ = c.stop(sys, msg, w, false)
 		}
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "held", "view_id": s.ID})
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "held", "session_id": s.ID})
 	case agentproto.TypeUnhold:
 		if s.Freeze != "hold" {
-			_, _ = sys.Reply(msg, map[string]any{"disposition": "released", "view_id": s.ID})
+			_, _ = sys.Reply(msg, map[string]any{"disposition": "released", "session_id": s.ID})
 			return
 		}
 		if s.RestoreInterrupt {
@@ -474,7 +472,7 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 			s.Freeze = ""
 		}
 		s.RestoreInterrupt = false
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "released", "view_id": s.ID})
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "released", "session_id": s.ID})
 	}
 	c.scheduleQueued(sys, msg.Cause())
 }

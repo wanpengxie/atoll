@@ -13,16 +13,16 @@ func TestParseFinalStatus(t *testing.T) {
 		raw       []byte
 		wantFinal bool
 	}{
-		{[]byte(`{"status":"completed"}`), true},
-		{[]byte(`{"status":"failed"}`), true},
-		{[]byte(`{"status":"processing"}`), false},
+		{behaviorTestPayload(`{"status":"completed"}`), true},
+		{behaviorTestPayload(`{"status":"failed"}`), true},
+		{behaviorTestPayload(`{"status":"processing"}`), false},
 		{nil, false},
 		// Edge coverage folded in from the deleted ParseResponseStatus/
 		// isFinalResponse helpers (期12 S6 拆删的等价覆盖).
 		{[]byte(`not-json`), false},
 		{[]byte(`{bad`), false},
-		{[]byte(`{"foo":"bar"}`), false},
-		{[]byte(`{"status":" completed "}`), true},
+		{behaviorTestPayload(`{"foo":"bar"}`), false},
+		{behaviorTestPayload(`{"status":" completed "}`), true},
 	}
 	for _, tt := range tests {
 		status, final := ParseFinalStatus(tt.raw)

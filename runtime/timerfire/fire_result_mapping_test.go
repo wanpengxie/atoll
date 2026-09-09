@@ -120,7 +120,7 @@ func fireMapEnvelope(timerID, typ string) *message.Envelope {
 		TS:            fireMapNowMs - 1_000,
 		Kind:          message.KindEvent,
 		Type:          typ,
-		Payload:       []byte(`{}`),
+		Payload:       []byte(`{"_context":{},"body":{}}`),
 		Audience:      message.Audience{fireMapAuthor},
 		CorrelationID: id,
 	}

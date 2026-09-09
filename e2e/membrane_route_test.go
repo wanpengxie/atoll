@@ -107,7 +107,7 @@ func svcactorOriginMatches(envelope map[string]any, channelID string) bool {
 }
 
 func responseStatus(envelope map[string]any) string {
-	payload, _ := envelope["payload"].(map[string]any)
+	payload := envelopeBody(envelope)
 	status, _ := payload["status"].(string)
 	return status
 }

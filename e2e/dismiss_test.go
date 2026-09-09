@@ -66,7 +66,7 @@ func TestDismissIsAnsweredByTheHolder(t *testing.T) {
 			if envelope == nil || envelope["kind"] != "response" || envelope["parent_id"] != waiting {
 				continue
 			}
-			body, _ := envelope["payload"].(map[string]any)
+			body := envelopeBody(envelope)
 			if body["status"] != "failed" {
 				continue
 			}

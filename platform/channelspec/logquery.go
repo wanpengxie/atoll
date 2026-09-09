@@ -23,6 +23,7 @@ type LogQueryRequest struct {
 	Participant string `json:"participant,omitempty"`
 	SenderKind  string `json:"sender_kind,omitempty"`
 	MessageType string `json:"message_type,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
 	FromTS      int64  `json:"from_ts,omitempty"`
 	ToTS        int64  `json:"to_ts,omitempty"`
 	BeforeSeq   int64  `json:"before_seq,omitempty"`
@@ -49,8 +50,8 @@ func (q LogQueryRequest) Validate() error {
 	if q.ToTS > 0 && q.FromTS >= q.ToTS {
 		return fmt.Errorf("from_ts must be less than to_ts (exclusive)")
 	}
-	if utf8.RuneCountInString(q.Text) > 256 || len(q.Sender) > 256 || len(q.Participant) > 256 || len(q.MessageType) > 256 {
-		return fmt.Errorf("text is at most 256 characters; sender, participant and message_type at most 256 bytes")
+	if utf8.RuneCountInString(q.Text) > 256 || len(q.Sender) > 256 || len(q.Participant) > 256 || len(q.MessageType) > 256 || len(q.SessionID) > 256 {
+		return fmt.Errorf("text is at most 256 characters; sender, participant, message_type and session_id at most 256 bytes")
 	}
 	if q.SenderKind != "" {
 		if _, ok := actor.ParseKind(q.SenderKind); !ok {
@@ -60,7 +61,7 @@ func (q LogQueryRequest) Validate() error {
 	if q.Text != "" && strings.TrimSpace(q.Text) == "" {
 		return fmt.Errorf("text cannot be whitespace only")
 	}
-	hasFilter := strings.TrimSpace(q.Text) != "" || q.Sender != "" || q.Participant != "" || q.SenderKind != "" || q.MessageType != "" || q.FromTS > 0 || q.ToTS > 0
+	hasFilter := strings.TrimSpace(q.Text) != "" || q.Sender != "" || q.Participant != "" || q.SenderKind != "" || q.MessageType != "" || q.SessionID != "" || q.FromTS > 0 || q.ToTS > 0
 	if q.AroundSeq > 0 {
 		if hasFilter || q.ReadID != "" || q.RelatedTo != "" || q.ReadSeq != 0 || q.Offset != 0 || q.GroupBy != "" || q.Limit != 0 {
 			return fmt.Errorf("around_seq accepts only radius (default 3, max 10), head_seq and before_seq/after_seq continuation cursors; omit filters")

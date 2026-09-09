@@ -162,7 +162,7 @@ func verifyActorTimeoutWithoutExpires(t *testing.T, c *client, transportName str
 	if envelope.ExpiresAt != nil {
 		t.Fatal("test fixture unexpectedly set expires_at")
 	}
-	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), envelope))
+	a.call(sys, actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), envelope))
 	if sys.failCode != "mcp_timeout" || sys.failText == "" {
 		t.Fatalf("actor timeout terminal: code=%q detail=%q", sys.failCode, sys.failText)
 	}
@@ -173,7 +173,7 @@ func verifyActorTimeoutWithoutExpires(t *testing.T, c *client, transportName str
 	envelope.ID = "after-timeout"
 	envelope.Type = "fixture.echo"
 	envelope.Payload = json.RawMessage(`{"text":"actor-still-usable"}`)
-	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), envelope))
+	a.call(sys, actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), envelope))
 	if sys.failCode != "" || sys.reply["text"] != "actor-still-usable" {
 		t.Fatalf("actor call after timeout: reply=%v fail=%s %s", sys.reply, sys.failCode, sys.failText)
 	}

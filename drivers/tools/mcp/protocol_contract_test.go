@@ -221,8 +221,8 @@ func TestCallIsNotGatedByAStaleLastError(t *testing.T) {
 	a.setLastError(errors.New("dial tcp: connection refused"))
 
 	sys := &terminalRecorder{}
-	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "c1", Kind: message.KindRequest, Type: "fixture.echo", Payload: json.RawMessage(`{"body":{}}`),
+	a.call(sys, actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "c1", Kind: message.KindRequest, Type: "fixture.echo", Payload: json.RawMessage(`{}`),
 	}))
 
 	if sys.failCode != "" {
@@ -246,8 +246,8 @@ func TestActorMapsInputRequiredToCompletedReply(t *testing.T) {
 		snapshot: snapshot{tools: map[string]string{"fixture.interactive": "interactive"}},
 	}
 	sys := &terminalRecorder{}
-	a.call(sys, actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
-		ID: "input-required", Kind: message.KindRequest, Type: "fixture.interactive", Payload: json.RawMessage(`{"body":{}}`),
+	a.call(sys, actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		ID: "input-required", Kind: message.KindRequest, Type: "fixture.interactive", Payload: json.RawMessage(`{}`),
 	}))
 	if sys.failCode != "" {
 		t.Fatalf("input_required was failed: %s %s", sys.failCode, sys.failText)

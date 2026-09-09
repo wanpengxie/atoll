@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -25,7 +26,10 @@ type projectedLogRow struct {
 
 func logFields(row storespec.StoredRow) map[string]json.RawMessage {
 	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(row.Envelope.Payload, &fields)
+	_, body, err := harness.UnwrapPayload(row.Envelope.Payload)
+	if err == nil {
+		_ = json.Unmarshal(body, &fields)
+	}
 	return fields
 }
 func logString(fields map[string]json.RawMessage, key string) string {
@@ -34,10 +38,6 @@ func logString(fields map[string]json.RawMessage, key string) string {
 	return value
 }
 func logBody(fields map[string]json.RawMessage) map[string]json.RawMessage {
-	var body map[string]json.RawMessage
-	if json.Unmarshal(fields["body"], &body) == nil && body != nil {
-		return body
-	}
 	return fields
 }
 func logResponseState(row storespec.StoredRow) string {

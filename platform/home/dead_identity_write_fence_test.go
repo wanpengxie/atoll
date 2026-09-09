@@ -2,7 +2,6 @@ package home
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -70,7 +69,7 @@ func TestEndedIdentityPenIsRefusedOnTheMessageWritePath(t *testing.T) {
 		return &message.Envelope{
 			ID: message.ID(id), TS: time.Now().UnixMilli(),
 			Kind: message.KindEvent, Type: writeFenceType,
-			Payload:  json.RawMessage(`{}`),
+			Payload:  canonicalTestPayload(map[string]any{}),
 			Audience: message.Audience{author},
 			// Self-rooted: the harness now refuses an empty correlation, so a
 			// hand-built envelope must spell the root the builder would have.

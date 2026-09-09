@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // exec.go is the七工具 execution face (期10 S5): the SAME out-station account
@@ -261,7 +262,12 @@ func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestS
 		rv := TerminalFailureToActorCLI(spec.ToolName, spec.HandlerActorID, spec.EnvelopeType, reason, nil)
 		return nil, &rv
 	}
-	return finalEnv.Payload, nil
+	_, body, err := harness.UnwrapPayload(finalEnv.Payload)
+	if err != nil {
+		rv := NewError(spec.ToolName, InternalError, "invalid response payload envelope", "Inspect adapter logs and retry", nil)
+		return nil, &rv
+	}
+	return body, nil
 }
 
 // ackResult renders the immediate ack with the standard collect-it guidance.

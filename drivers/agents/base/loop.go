@@ -1879,7 +1879,12 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 }
 
 func usageValue(usage runtimeproto.TurnUsage) map[string]any {
-	return map[string]any{"context_tokens": usage.ContextTokens, "context_window": usage.ContextWindow, "model": usage.Model, "effort": usage.Effort}
+	return map[string]any{
+		"model": usage.Model, "provider": usage.Provider, "effort": usage.Effort,
+		"input": usage.Input, "output": usage.Output, "cache_read": usage.CacheRead, "cache_write": usage.CacheWrite, "total": usage.Total,
+		"context_tokens": usage.ContextTokens, "context_window": usage.ContextWindow,
+		"cost": map[string]any{"input": usage.Cost.Input, "output": usage.Cost.Output, "cache_read": usage.Cost.CacheRead, "cache_write": usage.Cost.CacheWrite, "total": usage.Cost.Total},
+	}
 }
 
 func (l *agentLoop) onProviderLost(e runtimeEvent) {

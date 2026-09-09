@@ -22,7 +22,7 @@ import (
 )
 
 type piLoopSys struct {
-	actorbase.Sys
+	looperTestBase
 	bridge       *pibridge.Bridge
 	cwd          string
 	llmCall      int
@@ -38,7 +38,7 @@ func completedPending(value json.RawMessage) actorbase.Pending {
 	_ = json.Unmarshal(value, &fields)
 	fields["status"] = json.RawMessage(`"completed"`)
 	payload, _ := json.Marshal(fields)
-	return immediatePending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "pi-response", Kind: message.KindResponse, Payload: payload})}
+	return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "pi-response", Kind: message.KindResponse, Payload: payload})}
 }
 
 func (s *piLoopSys) Call(_ message.Cause, _ actor.ActorID, typ string, value any) (actorbase.Pending, error) {
@@ -57,6 +57,7 @@ func (s *piLoopSys) Call(_ message.Cause, _ actor.ActorID, typ string, value any
 		var req llmproto.GenerateRequest
 		raw, _ := json.Marshal(value)
 		_ = json.Unmarshal(raw, &req)
+		messages := testContextMessages("session:test")
 		if s.llmCall == 1 {
 			name, args := s.toolName, s.toolArgs
 			if name == "" {
@@ -65,11 +66,12 @@ func (s *piLoopSys) Call(_ message.Cause, _ actor.ActorID, typ string, value any
 			}
 			req.Options, _ = json.Marshal(map[string]any{"faux_tool_call": map[string]any{"id": "tc-pi", "name": name, "arguments": args}})
 		} else {
-			messages, _ := json.Marshal(req.Messages)
-			s.sawImage = strings.Contains(string(messages), `"type":"image"`) && strings.Contains(string(messages), `"mimeType":"`+s.expectedMime+`"`)
+			encoded, _ := json.Marshal(messages)
+			s.sawImage = strings.Contains(string(encoded), `"type":"image"`) && strings.Contains(string(encoded), `"mimeType":"`+s.expectedMime+`"`)
 			req.Options = json.RawMessage(`{"faux_response":"finished after tool result"}`)
 		}
-		result, err := s.bridge.Call(ctx, llmproto.TypeGenerate, req, s.cwd, nil)
+		args := map[string]any{"provider": req.Provider, "model": req.Model, "messages": messages, "tools": req.Tools, "options": req.Options, "system_prompt": req.SystemPrompt}
+		result, err := s.bridge.Call(ctx, llmproto.TypeGenerate, args, s.cwd, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -113,9 +115,10 @@ func TestPNGAndJPEGPassThroughWorkspaceLooperAndFauxProvider(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { bridge.Close(); cancelLife() })
+			_, _ = sharedLooperResources.Delete("ctx/session:test")
 			sys := &piLoopSys{bridge: bridge, cwd: cwd, toolName: "read", toolArgs: map[string]any{"path": fixture.name}, expectedMime: fixture.mime}
 			bindings := []agentloop.ToolBinding{{Name: "read", Actor: "workspace", Word: workspaceproto.TypeRead}}
-			a := &assignment{start: agentloop.StartRequest{WorkID: "w-image", AssignmentID: "a-image", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", Tools: &bindings, Model: "faux/faux-1", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "read image"}}}
+			a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-image", AssignmentID: "a-image", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", Tools: &bindings, Model: "faux/faux-1", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "read image"}}}
 			(&looper{}).drive(context.Background(), sys, a)
 			if sys.llmCall != 2 || !sys.sawImage || len(sys.posts) != 1 {
 				t.Fatalf("llm=%d saw_image=%v reports=%d", sys.llmCall, sys.sawImage, len(sys.posts))
@@ -125,7 +128,7 @@ func TestPNGAndJPEGPassThroughWorkspaceLooperAndFauxProvider(t *testing.T) {
 }
 
 type bridgeStoreSys struct {
-	actorbase.Sys
+	looperTestBase
 	bridge *pibridge.Bridge
 	cwd    string
 	calls  int
@@ -142,7 +145,7 @@ func (s *bridgeStoreSys) Call(_ message.Cause, _ actor.ActorID, typ string, valu
 	return completedPending(raw), nil
 }
 
-func TestLongCustomResultIsSavedByteForByteThroughWorkspaceWrite(t *testing.T) {
+func TestLongCustomResultIsRenderedWithoutSideEffects(t *testing.T) {
 	cwd := t.TempDir()
 	life, cancelLife := context.WithCancel(context.Background())
 	bridge, err := pibridge.Start(life, "node", cwd, nil)
@@ -156,31 +159,8 @@ func TestLongCustomResultIsSavedByteForByteThroughWorkspaceWrite(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": full}}})
 	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "workspace", ToolResultMaxLines: 2000, ToolResultMaxBytes: 256}, cause: message.Root()}
 	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
-	var message struct {
-		Details struct {
-			Atoll struct {
-				Path string `json:"path"`
-			} `json:"atoll_output"`
-		} `json:"details"`
-	}
-	if err := json.Unmarshal(result, &message); err != nil || message.Details.Atoll.Path == "" {
-		t.Fatalf("result=%s err=%v", result, err)
-	}
-	saved, err := os.ReadFile(filepath.Join(cwd, message.Details.Atoll.Path))
-	if err != nil || string(saved) != full || sys.calls != 1 {
-		t.Fatalf("saved bytes=%d calls=%d err=%v", len(saved), sys.calls, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	read, err := bridge.Call(ctx, workspaceproto.TypeRead, workspaceproto.ReadRequest{Path: message.Details.Atoll.Path}, cwd, nil)
-	var readResult struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	_ = json.Unmarshal(read, &readResult)
-	if err != nil || len(readResult.Content) != 1 || !strings.HasPrefix(readResult.Content[0].Text, full) {
-		t.Fatalf("reference read=%s err=%v", read, err)
+	if !strings.Contains(string(result), "Output truncated to configured limit") || strings.Contains(string(result), `"path"`) || sys.calls != 0 {
+		t.Fatalf("result=%s calls=%d", result, sys.calls)
 	}
 }
 
@@ -200,11 +180,12 @@ func TestLooperRunsActualPinnedPiProviderAndWorkspaceTool(t *testing.T) {
 	t.Cleanup(func() { bridge.Close(); cancelLife() })
 
 	sys := &piLoopSys{bridge: bridge, cwd: cwd}
+	_, _ = sharedLooperResources.Delete("ctx/session:test")
 	l := &looper{cfg: Config{MaxAssignments: 1}, active: map[string]*assignment{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a := &assignment{
-		start: agentloop.StartRequest{WorkID: "w-pi", AssignmentID: "a-pi", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", Model: "faux/faux-1", MaxTurns: 4},
+		start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-pi", AssignmentID: "a-pi", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", Model: "faux/faux-1", MaxTurns: 4},
 		cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-pi", Seq: 1, Text: "write result.txt"}},
 	}
 	l.active["w-pi"] = a
@@ -218,7 +199,7 @@ func TestLooperRunsActualPinnedPiProviderAndWorkspaceTool(t *testing.T) {
 		t.Fatalf("llm calls=%d reports=%d", sys.llmCall, len(sys.posts))
 	}
 	var report agentloop.ReportRequest
-	if err := json.Unmarshal(sys.posts[0].Payload, &report); err != nil || report.State != "completed" || !contains(string(report.Result), "finished after tool result") || len(report.History) != 4 {
+	if err := json.Unmarshal(sys.posts[0].Payload, &report); err != nil || report.State != "completed" || !contains(string(mustRaw(testContextMessages("session:test"))), "finished after tool result") || len(testContextMessages("session:test")) != 4 {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }

@@ -2,7 +2,6 @@ package home
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -21,7 +20,7 @@ func (f *logFixture) payload(kind message.Kind, typ string, value any, parent me
 	row.Envelope.ParentID = parent
 	row.IsTerminal = terminal
 	row.Envelope.Visibility = visibility
-	row.Envelope.Payload, _ = json.Marshal(value)
+	row.Envelope.Payload = canonicalTestPayload(value)
 	result, err := f.store.Log.Append(context.Background(), &row.Envelope, terminal, storespec.AppendMetadata{})
 	if err != nil {
 		f.t.Fatal(err)

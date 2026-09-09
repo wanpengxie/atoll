@@ -44,6 +44,7 @@ type messageFrame struct {
 }
 type resultUsage struct {
 	InputTokens         int64             `json:"input_tokens"`
+	OutputTokens        int64             `json:"output_tokens"`
 	CacheCreationTokens int64             `json:"cache_creation_input_tokens"`
 	CacheReadTokens     int64             `json:"cache_read_input_tokens"`
 	Iterations          []resultIteration `json:"iterations"`
@@ -62,6 +63,7 @@ type resultFrame struct {
 	UserMessageUUID string      `json:"user_message_uuid"`
 	NumTurns        int         `json:"num_turns"`
 	Usage           resultUsage `json:"usage"`
+	TotalCostUSD    float64     `json:"total_cost_usd"`
 }
 
 type statusFrame struct {
@@ -479,6 +481,13 @@ func (w *worker) finishResult(c *connection, target driverproto.WorkerTurnTarget
 	}
 	turn := w.turn
 	usage := w.currentUsageLocked()
+	usage.Provider = "anthropic"
+	usage.Input = frame.Usage.InputTokens
+	usage.Output = frame.Usage.OutputTokens
+	usage.CacheRead = frame.Usage.CacheReadTokens
+	usage.CacheWrite = frame.Usage.CacheCreationTokens
+	usage.Total = usage.Input + usage.Output + usage.CacheRead + usage.CacheWrite
+	usage.Cost.Total = frame.TotalCostUSD
 	switch turn.kind {
 	case driverproto.TurnChat:
 		// The top-level result usage is billed work accumulated across every

@@ -83,7 +83,7 @@ func SeatDef(hub *Hub, host channel.ID, cfg SeatConfig, unavailable ...func(cont
 						return
 					}
 				}
-				response, err := hub.Deliver(msg.Ctx(), pair, Request{Envelope: wireEnvelope(msg.Envelope), Await: msg.Kind == message.KindRequest, OnProgress: progressRelay(sys, msg)})
+				response, err := hub.Deliver(msg.Ctx(), pair, Request{Envelope: wireEnvelope(msg.Envelope, msg.Context()), Await: msg.Kind == message.KindRequest, OnProgress: progressRelay(sys, msg)})
 				if msg.Kind == message.KindRequest {
 					relay(sys, msg, response, err)
 				}
@@ -179,7 +179,7 @@ func HandleDef(hub *Hub, body channel.ID, cfg HandleConfig, members Members) act
 				if msg.Type == HandleEmit {
 					env.Kind = message.KindEvent
 				}
-				response, err := hub.Drive(msg.Ctx(), pair, Request{Envelope: wireEnvelope(env), Await: msg.Type == HandleCall, OnProgress: progressRelay(sys, msg)})
+				response, err := hub.Drive(msg.Ctx(), pair, Request{Envelope: wireEnvelope(env, msg.Context()), Await: msg.Type == HandleCall, OnProgress: progressRelay(sys, msg)})
 				relay(sys, msg, response, err)
 			})
 		}, nil
@@ -219,17 +219,18 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 	if req.Type == "" {
 		return Response{}, fmt.Errorf("%w: message type required", errInvalidRequest)
 	}
-	if req.Kind == message.KindRequest {
-		var wrapped struct {
-			Body json.RawMessage `json:"body"`
+	app, body, unwrapErr := harness.UnwrapPayload(req.Payload)
+	if unwrapErr != nil {
+		return Response{}, fmt.Errorf("%w: %v", errInvalidRequest, unwrapErr)
+	}
+	req.Payload = body
+	if app.Session != "" {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(req.Payload, &fields); err != nil || fields == nil {
+			return Response{}, fmt.Errorf("%w: body must be an object", errInvalidRequest)
 		}
-		if err := actorbase.DecodeStrict(req.Payload, &wrapped); err != nil {
-			return Response{}, fmt.Errorf("%w: %v", errInvalidRequest, err)
-		}
-		if len(wrapped.Body) == 0 {
-			return Response{}, fmt.Errorf("%w: request body required", errInvalidRequest)
-		}
-		req.Payload = wrapped.Body
+		fields["session"], _ = json.Marshal(app.Session)
+		req.Payload, _ = json.Marshal(fields)
 	}
 	spec := behavior.RequestSpec{Cause: message.Root(), Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility, ExpiresAt: req.ExpiresAt}
 	var id message.ID
@@ -290,12 +291,12 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 // Msg exposes an already-unwrapped application payload. Reconstitute the
 // ordinary request envelope at the seam; foreign caller attribution never
 // crosses as local authority. The receiving organ unwraps before its own Call.
-func wireEnvelope(env message.Envelope) message.Envelope {
-	if env.Kind == message.KindRequest {
-		env.Payload, _ = json.Marshal(struct {
-			Body json.RawMessage `json:"body"`
-		}{env.Payload})
+func wireEnvelope(env message.Envelope, contexts ...harness.Context) message.Envelope {
+	app := harness.Context{}
+	if len(contexts) > 0 {
+		app = contexts[0]
 	}
+	env.Payload, _ = harness.WrapPayload(app, env.Payload)
 	return env
 }
 func progressRelay(sys actorbase.Sys, msg actorbase.Msg) func(Progress) {

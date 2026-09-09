@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // execute_test drives the meta-tools against a fake Exec double. The
@@ -516,7 +517,8 @@ func TestExecuteListActors_RendersCatalog(t *testing.T) {
 				{"actor_id": "tool:xhs", "kind": "tool", "present": true},
 			},
 		})
-		return &message.Envelope{Kind: message.KindResponse, Payload: body}, true, nil
+		wrapped, _ := harness.WrapPayload(harness.Context{}, body)
+		return &message.Envelope{Kind: message.KindResponse, Payload: wrapped}, true, nil
 	}
 	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
 	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())

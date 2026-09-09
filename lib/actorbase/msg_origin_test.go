@@ -19,7 +19,7 @@ import (
 // request recovered by id, with no delivery and no ledger entry behind it.
 func logMsg(t *testing.T, env *message.Envelope) Msg {
 	t.Helper()
-	return NewMsg(OriginLog, context.Background(), *env)
+	return NewBodyMsg(OriginLog, context.Background(), *env)
 }
 
 // A Msg with the zero origin never comes into existence through NewMsg: the
@@ -35,7 +35,7 @@ func TestNewMsgRejectsTheZeroOrigin(t *testing.T) {
 			t.Fatal("NewMsg accepted the zero origin; it must fail loud")
 		}
 	}()
-	NewMsg(OriginUnset, context.Background(), message.Envelope{ID: "r-1"})
+	NewBodyMsg(OriginUnset, context.Background(), message.Envelope{ID: "r-1"})
 }
 
 // A Msg that never went through NewMsg (a zero-value discard that escaped into
@@ -158,7 +158,7 @@ func TestTerminalWriteClosesTheLedgerEntryWhateverTheOrigin(t *testing.T) {
 			if !ok {
 				t.Fatal("expected ctxFor to resolve the admitted entry")
 			}
-			delivered := NewMsg(OriginMailbox, ctx, *env)
+			delivered := NewBodyMsg(OriginMailbox, ctx, *env)
 			if e.serve.len() != 1 {
 				t.Fatalf("serve ledger len = %d, want 1", e.serve.len())
 			}
@@ -263,7 +263,7 @@ func TestReplyMarshalsThePayloadExactlyOnce(t *testing.T) {
 	fromRawMessage := write(t, json.RawMessage(raw))
 
 	var got map[string]any
-	if err := json.Unmarshal(fromValue, &got); err != nil {
+	if err := json.Unmarshal(actorTestBody(fromValue), &got); err != nil {
 		t.Fatalf("the written payload is not a JSON object (base64?): %v — %s", err, fromValue)
 	}
 	if got["decision"] != "approve" {
@@ -290,7 +290,7 @@ func TestProgressNeverClosesTheLedgerEntry(t *testing.T) {
 	}
 	ctx, _ := e.serve.ctxFor(env.ID)
 
-	if _, err := e.Progress(NewMsg(OriginMailbox, ctx, *env), message.StatusProcessing, map[string]string{"step": "1"}); err != nil {
+	if _, err := e.Progress(NewBodyMsg(OriginMailbox, ctx, *env), message.StatusProcessing, map[string]string{"step": "1"}); err != nil {
 		t.Fatalf("Progress = %v, want nil", err)
 	}
 	if e.serve.len() != 1 {
@@ -352,7 +352,7 @@ func TestRecvOnlyEverProducesMailboxOrigin(t *testing.T) {
 
 	// The same holds for the no-closure-obligation kinds, which take the other
 	// arm of projectWork.
-	if err := e.Receive(context.Background(), &message.Envelope{ID: "e-1", Kind: message.KindEvent, Type: "tick"}); err != nil {
+	if err := e.Receive(context.Background(), &message.Envelope{ID: "e-1", Kind: message.KindEvent, Type: "tick", Payload: json.RawMessage(`{"_context":{},"body":{}}`)}); err != nil {
 		t.Fatalf("Receive(event): %v", err)
 	}
 	msg, err = e.Recv()
@@ -397,11 +397,11 @@ func TestFailDerivesTheTerminalReasonFromWhoIsWriting(t *testing.T) {
 		}
 		ctx, _ := e.serve.ctxFor(env.ID)
 
-		if _, err := e.Fail(NewMsg(OriginMailbox, ctx, *env), "tool_unavailable", "the door is shut"); err != nil {
+		if _, err := e.Fail(NewBodyMsg(OriginMailbox, ctx, *env), "tool_unavailable", "the door is shut"); err != nil {
 			t.Fatalf("Fail = %v", err)
 		}
 		var got failurePayload
-		if err := json.Unmarshal(pen.last().Payload, &got); err != nil {
+		if err := json.Unmarshal(actorTestBody(pen.last().Payload), &got); err != nil {
 			t.Fatalf("payload unmarshal: %v", err)
 		}
 		if got.Status != string(message.StatusFailed) {
@@ -420,7 +420,7 @@ func TestFailDerivesTheTerminalReasonFromWhoIsWriting(t *testing.T) {
 		// a concept on this arm at all. behavior.Fail's payload is the
 		// {error_code, detail} shape and must stay exactly that.
 		var keys map[string]json.RawMessage
-		if err := json.Unmarshal(pen.last().Payload, &keys); err != nil {
+		if err := json.Unmarshal(actorTestBody(pen.last().Payload), &keys); err != nil {
 			t.Fatalf("payload key unmarshal: %v", err)
 		}
 		if _, present := keys["cancelled"]; present {
@@ -445,7 +445,7 @@ func TestFailDerivesTheTerminalReasonFromWhoIsWriting(t *testing.T) {
 			t.Fatalf("Fail = %v", err)
 		}
 		var got failurePayload
-		if err := json.Unmarshal(pen.last().Payload, &got); err != nil {
+		if err := json.Unmarshal(actorTestBody(pen.last().Payload), &got); err != nil {
 			t.Fatalf("payload unmarshal: %v", err)
 		}
 		if got.Status != string(message.StatusFailed) {

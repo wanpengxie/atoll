@@ -33,15 +33,15 @@ func completed(value any) actorbase.Pending {
 	_ = json.Unmarshal(raw, &fields)
 	fields["status"] = json.RawMessage(`"completed"`)
 	raw, _ = json.Marshal(fields)
-	return immediatePending{actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: raw})}
+	return immediatePending{actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: raw})}
 }
 func (s *reliabilitySys) Call(cause message.Cause, target actor.ActorID, typ string, value any) (actorbase.Pending, error) {
 	if typ == llmproto.TypeGenerate {
-		req := value.(llmproto.GenerateRequest)
-		if err := validateHistory(req.Messages); err != nil {
+		messages := testContextMessages("session:test")
+		if err := validateHistory(messages); err != nil {
 			s.t.Fatalf("model received unpaired history: %v", err)
 		}
-		s.requests = append(s.requests, req.Messages)
+		s.requests = append(s.requests, messages)
 		if len(s.outputs) == 0 {
 			s.t.Fatal("unexpected model invocation")
 		}
@@ -77,16 +77,18 @@ func (s *reliabilitySys) Call(cause message.Cause, target actor.ActorID, typ str
 
 func runReliability(t *testing.T, s *reliabilitySys, ctx context.Context) agentloop.ReportRequest {
 	t.Helper()
+	_, _ = sharedLooperResources.Delete("ctx/session:test")
 	s.t = t
-	a := &assignment{start: agentloop.StartRequest{WorkID: "w", AssignmentID: "a", ControllerActor: "controller", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 5, ToolTimeoutMS: 5}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ControllerActor: "controller", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 5, ToolTimeoutMS: 5}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
 	l := &looper{active: map[string]*assignment{"a": a}}
 	l.drive(ctx, s, a)
 	var report agentloop.ReportRequest
 	if len(s.posts) != 1 || json.Unmarshal(s.posts[0].Payload, &report) != nil {
 		t.Fatalf("reports=%v", s.posts)
 	}
-	if len(report.History) > 0 {
-		if err := validateHistory(report.History); err != nil {
+	history := testContextMessages("session:test")
+	if len(history) > 0 {
+		if err := validateHistory(history); err != nil {
 			t.Fatalf("saved history invalid: %v", err)
 		}
 	}
@@ -104,8 +106,8 @@ func TestReliabilityPairsMixedFailuresAndReusedIDsAcrossThreeTurns(t *testing.T)
 	if r.State != "completed" || s.toolCalls != 2 || s.llmCalls != 3 {
 		t.Fatalf("report=%+v tools=%d models=%d", r, s.toolCalls, s.llmCalls)
 	}
-	if !strings.Contains(string(mustRaw(r.History)), "external execution/effects unknown") {
-		t.Fatal("timeout lost effect uncertainty")
+	if !strings.Contains(string(mustRaw(testContextMessages("session:test"))), "Looper: tool was not executed") {
+		t.Fatal("pre-ledger rejection was not represented as unexecuted")
 	}
 }
 func TestReliabilityLengthNeverExecutesAndClosesEveryCall(t *testing.T) {
@@ -129,7 +131,7 @@ func TestReliabilityErrorAssistantNeverExecutesPartialCalls(t *testing.T) {
 		t.Run(reason, func(t *testing.T) {
 			s := &reliabilitySys{outputs: []json.RawMessage{callAssistant(reason)}, toolFailure: errors.New("must not run")}
 			r := runReliability(t, s, context.Background())
-			if r.State != "failed" || s.toolCalls != 0 || len(r.History) != 1 {
+			if r.State != "failed" || s.toolCalls != 0 || len(testContextMessages("session:test")) == 0 {
 				t.Fatalf("report=%+v", r)
 			}
 		})
@@ -139,16 +141,17 @@ func TestReliabilityErrorAssistantNeverExecutesPartialCalls(t *testing.T) {
 func TestReliabilityRetainsOpaqueProviderFieldsWithoutNarrowRoundTrip(t *testing.T) {
 	raw := json.RawMessage(`{"role":"assistant","provider":"openai","api":"openai-responses","model":"fixture","stopReason":"stop","content":[{"type":"thinking","thinking":"","thinkingSignature":"{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\"}"},{"type":"text","text":"done","textSignature":"opaque-text"}],"futureProviderField":{"opaque":"preserve"}}`)
 	s := &reliabilitySys{outputs: []json.RawMessage{raw}}
-	r := runReliability(t, s, context.Background())
-	if string(r.History[len(r.History)-1]) != string(raw) {
-		t.Fatalf("raw assistant changed: %s", r.History[len(r.History)-1])
+	_ = runReliability(t, s, context.Background())
+	history := testContextMessages("session:test")
+	if string(history[len(history)-1]) != string(raw) {
+		t.Fatalf("raw assistant changed: %s", history[len(history)-1])
 	}
 }
 
 func TestReliabilityActualPendingDeadlineRecordsRequestWithoutFakeToolResponse(t *testing.T) {
 	s := &reliabilitySys{outputs: []json.RawMessage{callAssistant("toolUse"), json.RawMessage(finalAssistant)}, toolPending: cancelledPending{}}
 	r := runReliability(t, s, context.Background())
-	if r.State != "completed" || !strings.Contains(string(mustRaw(r.History)), `"request_id":"blocked"`) || !strings.Contains(string(mustRaw(r.History)), `"error_code":"deadline_exceeded"`) {
+	if r.State != "completed" || !strings.Contains(string(mustRaw(testContextMessages("session:test"))), `"request_id":"blocked"`) || !strings.Contains(string(mustRaw(testContextMessages("session:test"))), `"error_code":"deadline_exceeded"`) {
 		t.Fatalf("report=%+v", r)
 	}
 	// This Sys receives only the Controller report: no synthetic Actor response
@@ -165,7 +168,7 @@ func TestReliabilityAmbiguousToolIdentityCannotExecute(t *testing.T) {
 		raw := mustRaw(map[string]any{"role": "assistant", "stopReason": "toolUse", "content": []any{map[string]any{"type": "toolCall", "id": id, "name": "bash", "arguments": map[string]any{}}, map[string]any{"type": "toolCall", "id": id, "name": "bash", "arguments": map[string]any{}}}})
 		s := &reliabilitySys{outputs: []json.RawMessage{raw}}
 		r := runReliability(t, s, context.Background())
-		if r.ErrorCode != "invalid_model_response" || s.toolCalls != 0 {
+		if r.State != "failed" || s.toolCalls != 0 {
 			t.Fatalf("report=%+v calls=%d", r, s.toolCalls)
 		}
 	}
@@ -179,7 +182,7 @@ type terminalOpenProgress struct {
 func (p terminalOpenProgress) Progress() <-chan actorbase.Msg { return p.updates }
 
 type terminalOpenProgressSys struct {
-	actorbase.Sys
+	looperTestBase
 	p actorbase.Pending
 }
 
@@ -187,7 +190,7 @@ func (s terminalOpenProgressSys) Call(message.Cause, actor.ActorID, string, any)
 	return s.p, nil
 }
 func TestTerminalDoesNotWaitForeverForProgressClosure(t *testing.T) {
-	p := terminalOpenProgress{immediatePending: immediatePending{actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: json.RawMessage(`{"status":"completed"}`)})}, updates: make(chan actorbase.Msg)}
+	p := terminalOpenProgress{immediatePending: immediatePending{actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: json.RawMessage(`{"status":"completed"}`)})}, updates: make(chan actorbase.Msg)}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()

@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func TestRegistrarTransactionCreatesOneChannelAndPostsOneMaterializationIntent(t *testing.T) {
@@ -24,9 +25,10 @@ func TestRegistrarTransactionCreatesOneChannelAndPostsOneMaterializationIntent(t
 		if stored.Envelope.Kind != message.KindRequest || stored.Envelope.Type != message.TypeSystemMemberCreate || stored.Envelope.Sender.ID != registrar {
 			continue
 		}
-		var payload map[string]map[string]string
-		_ = json.Unmarshal(stored.Envelope.Payload, &payload)
-		if payload["body"]["decl_id"] != string(child) {
+		_, body, _ := harness.UnwrapPayload(stored.Envelope.Payload)
+		var payload map[string]string
+		_ = json.Unmarshal(body, &payload)
+		if payload["decl_id"] != string(child) {
 			continue
 		}
 		posts++

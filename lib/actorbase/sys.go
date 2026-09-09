@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -119,6 +120,8 @@ type Sys interface {
 
 	// --- Access arm -------------------------------------------------
 	Resource() ResourceHandle
+	// View returns the read-only channel ledger capability.
+	View() actorcaps.LedgerView
 
 	// --- Schedule arm ---------------------------------------------------
 	// After arms a self-targeted timer, in the storage home the caller names.

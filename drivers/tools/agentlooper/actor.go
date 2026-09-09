@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/google/uuid"
-	contextproto "github.com/wanpengxie/atoll/drivers/tools/agentcontext/api"
+	agentbase "github.com/wanpengxie/atoll/drivers/agents/base"
+	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	llmproto "github.com/wanpengxie/atoll/drivers/tools/pillm/api"
 	workspaceproto "github.com/wanpengxie/atoll/drivers/tools/piworkspace/api"
@@ -25,6 +25,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const Class = "agent-looper"
@@ -48,14 +49,17 @@ type resolvedTool struct {
 
 type Config struct {
 	ControllerActor string `json:"controller_actor,omitempty"`
+	LLMActor        string `json:"llm_actor,omitempty"`
+	WorkspaceActor  string `json:"workspace_actor,omitempty"`
+	HostActor       string `json:"host_actor,omitempty"`
 	MaxAssignments  int    `json:"max_assignments,omitempty"`
 }
 
 func defaultConfig() json.RawMessage {
-	return json.RawMessage(`{"controller_actor":"native-agent","max_assignments":32}`)
+	return json.RawMessage(`{"controller_actor":"native-agent","llm_actor":"pi-llm","workspace_actor":"pi-workspace","max_assignments":32}`)
 }
 func parseConfig(raw json.RawMessage) (Config, error) {
-	cfg := Config{ControllerActor: "native-agent", MaxAssignments: 32}
+	cfg := Config{ControllerActor: "native-agent", LLMActor: "pi-llm", WorkspaceActor: "pi-workspace", MaxAssignments: 32}
 	if len(raw) > 0 {
 		if err := actorbase.DecodeStrict(raw, &cfg); err != nil {
 			return Config{}, err
@@ -67,10 +71,13 @@ func parseConfig(raw json.RawMessage) (Config, error) {
 	if strings.TrimSpace(cfg.ControllerActor) == "" {
 		return Config{}, errors.New("agent-looper config: controller_actor is required")
 	}
+	if strings.TrimSpace(cfg.LLMActor) == "" {
+		return Config{}, errors.New("agent-looper config: llm_actor is required")
+	}
 	return cfg, nil
 }
 func init() {
-	registry.Register(Class, registry.ClassDecl{Kind: actor.KindTool, Placement: channelspec.PlacementDaemon, Manifest: manifest(), New: construct, DefaultConfig: defaultConfig, ValidateConfig: func(raw json.RawMessage) error { _, err := parseConfig(raw); return err }, ConfigSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"controller_actor":{"type":"string","minLength":1},"max_assignments":{"type":"integer","minimum":1,"maximum":10000}}}`)})
+	registry.Register(Class, registry.ClassDecl{Kind: actor.KindTool, Placement: channelspec.PlacementDaemon, Manifest: manifest(), New: construct, DefaultConfig: defaultConfig, ValidateConfig: func(raw json.RawMessage) error { _, err := parseConfig(raw); return err }, ConfigSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"controller_actor":{"type":"string","minLength":1},"llm_actor":{"type":"string","minLength":1},"workspace_actor":{"type":"string"},"host_actor":{"type":"string"},"max_assignments":{"type":"integer","minimum":1,"maximum":10000}}}`)})
 }
 func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
 	cfg, err := parseConfig(spec.Config)
@@ -84,6 +91,9 @@ func manifest() introspect.Manifest {
 		agentloop.TypeStart:   {Description: "Accept one of a bounded set of independently-lived Agent episode assignments from the configured Controller and return before its LLM/tool loop completes.", InputSchema: json.RawMessage(agentloop.StartInputSchema), OutputSchema: json.RawMessage(agentloop.AckOutputSchema), ErrorCodes: []string{"invalid_args", "permission_denied", "capacity", "assignment_conflict"}},
 		agentloop.TypeInput:   {Description: "Deliver one already accepted input from the configured Controller to the matching assignment; it is adopted only at a later safe context boundary.", InputSchema: json.RawMessage(agentloop.InputInputSchema), OutputSchema: json.RawMessage(agentloop.AckOutputSchema), ErrorCodes: []string{"invalid_args", "permission_denied", "assignment_not_found", "operation_mismatch"}},
 		agentloop.TypeStop:    {Description: "Stop only the matching assignment; a stale assignment id cannot cancel its successor.", InputSchema: json.RawMessage(agentloop.StopInputSchema), OutputSchema: json.RawMessage(agentloop.AckOutputSchema), ErrorCodes: []string{"invalid_args", "permission_denied", "assignment_not_found", "operation_mismatch"}},
+		agentloop.TypeReset:   {Description: "Reset an idle session context.", InputSchema: json.RawMessage(`{"type":"object","required":["session_id"],"properties":{"session_id":{"type":"string"}},"additionalProperties":false}`)},
+		agentloop.TypeSync:    {Description: "Append a closed source session snapshot to an idle session.", InputSchema: json.RawMessage(`{"type":"object","required":["session_id","from"],"properties":{"session_id":{"type":"string"},"from":{"type":"object"}},"additionalProperties":false}`)},
+		agentloop.TypeRename:  {Description: "Rename a session.", InputSchema: json.RawMessage(`{"type":"object","required":["session_id","name"],"properties":{"session_id":{"type":"string"},"name":{"type":"string"}},"additionalProperties":false}`)},
 		agentloop.TypeInspect: {Description: "Inspect process-local assignment activity. Controller work state remains the external authority.", InputSchema: json.RawMessage(agentloop.InspectInputSchema), OutputSchema: json.RawMessage(agentloop.InspectOutputSchema), ErrorCodes: []string{"invalid_args", "permission_denied", "assignment_not_found"}},
 	}}
 }
@@ -99,6 +109,13 @@ type assignment struct {
 	closed   bool
 	consumed int
 	controls []agentloop.ControlResult
+	version  message.ID
+	acks     []pendingInputAck
+	archive  bool
+}
+type pendingInputAck struct {
+	msg      actorbase.Msg
+	decision agentloop.ControlResult
 }
 type looper struct {
 	cfg           Config
@@ -106,12 +123,18 @@ type looper struct {
 	active        map[string]*assignment
 	finished      map[string]*assignment
 	finishedOrder []string
+	closedTurns   map[string]bool
 	wg            sync.WaitGroup
 }
 
 func proc(cfg Config) actorbase.Proc {
 	return func(sys actorbase.Sys) error {
-		l := &looper{cfg: cfg, active: map[string]*assignment{}}
+		l := &looper{cfg: cfg, active: map[string]*assignment{}, closedTurns: map[string]bool{}}
+		// A replacement incarnation has no process-local assignment table. Find
+		// sessions whose last Controller command still names this Looper and
+		// close every accepted turn the predecessor left open before receiving
+		// new work.
+		l.attachOwned(sys)
 		defer l.wg.Wait()
 		for {
 			msg, err := sys.Recv()
@@ -128,11 +151,23 @@ func proc(cfg Config) actorbase.Proc {
 			}
 			switch msg.Type {
 			case agentloop.TypeStart:
+				l.attach(sys, msg)
 				l.start(sys, msg)
 			case agentloop.TypeInput:
+				l.attach(sys, msg)
 				l.input(sys, msg)
 			case agentloop.TypeStop:
+				l.attach(sys, msg)
 				l.stop(sys, msg)
+			case agentloop.TypeReset:
+				l.attach(sys, msg)
+				l.reset(sys, msg)
+			case agentloop.TypeSync:
+				l.attach(sys, msg)
+				l.syncSession(sys, msg)
+			case agentloop.TypeRename:
+				l.attach(sys, msg)
+				l.rename(sys, msg)
 			case agentloop.TypeInspect:
 				l.inspect(sys, msg)
 			default:
@@ -140,6 +175,308 @@ func proc(cfg Config) actorbase.Proc {
 			}
 		}
 	}
+}
+
+func (l *looper) activeSession(session string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, a := range l.active {
+		if a.start.SessionID == session {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *looper) attach(sys actorbase.Sys, trigger actorbase.Msg) {
+	session := trigger.Context().Session
+	if session == "" {
+		return
+	}
+	l.attachSession(trigger.Ctx(), sys, message.Anchored(trigger.ID, trigger.ID), session)
+}
+
+func (l *looper) attachSession(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string) {
+	rows, err := readSessionRows(ctx, sys, cause, session)
+	if err != nil {
+		return
+	}
+	turns := sessionTurnStates(rows)
+	for turn, state := range turns {
+		if state.closed {
+			l.mu.Lock()
+			if l.closedTurns == nil {
+				l.closedTurns = map[string]bool{}
+			}
+			l.closedTurns[turn] = true
+			l.mu.Unlock()
+			continue
+		}
+		if !state.accepted || l.hasActiveTurn(turn) {
+			continue
+		}
+		if _, err := sys.Post(behavior.RequestSpec{Cause: message.Anchored(state.start.ID, state.start.ID), Type: agentloop.TypeReport, Audience: message.Audience{state.start.Sender}, Payload: mustJSON(agentloop.ReportRequest{SessionID: session, TurnID: turn, State: "execution_unknown"})}); err == nil {
+			l.mu.Lock()
+			if l.closedTurns == nil {
+				l.closedTurns = map[string]bool{}
+			}
+			l.closedTurns[turn] = true
+			l.mu.Unlock()
+		}
+	}
+}
+
+type ledgerTurnState struct {
+	start            ledgerRow
+	accepted, closed bool
+	boundary         ledgerRow
+}
+
+// sessionTurnStates evaluates holder and report validity at each row, rather
+// than comparing old reports with the session's final holder.
+func sessionTurnStates(rows []ledgerRow) map[string]*ledgerTurnState {
+	turns := map[string]*ledgerTurnState{}
+	startTurn := map[message.ID]string{}
+	controller, holder := controllerSeat(rows), ""
+	for _, row := range rows {
+		if row.Kind == message.KindRequest && isLoopCommand(row.Type) && len(row.Audience) > 0 {
+			if controller != "" && sameActorSeat(controller, row.Sender.String()) {
+				holder = row.Audience[0].String()
+			}
+		}
+		if row.Kind == message.KindRequest && row.Type == agentloop.TypeStart {
+			var start agentloop.StartRequest
+			if json.Unmarshal(row.Body, &start) == nil && start.TurnID != "" {
+				state := turns[start.TurnID]
+				if state == nil {
+					state = &ledgerTurnState{}
+					turns[start.TurnID] = state
+				}
+				if state.start.ID == "" {
+					state.start = row
+				}
+				startTurn[row.ID] = start.TurnID
+			}
+		}
+		if row.Kind == message.KindResponse {
+			turn := startTurn[row.Parent]
+			state := turns[turn]
+			if state != nil {
+				var ack struct {
+					Disposition string `json:"disposition"`
+				}
+				_ = json.Unmarshal(row.Body, &ack)
+				if ack.Disposition == "accepted" || ack.Disposition == "already_accepted" {
+					state.accepted = true
+				}
+			}
+		}
+		if row.Kind == message.KindRequest && row.Type == agentloop.TypeReport && row.Sender.String() == holder {
+			var report agentloop.ReportRequest
+			if json.Unmarshal(row.Body, &report) == nil && terminalTurnState(report.State) {
+				if state := turns[report.TurnID]; state != nil {
+					if !state.closed {
+						state.boundary = row
+					}
+					state.closed = true
+				}
+			}
+		}
+	}
+	return turns
+}
+
+func (l *looper) attachOwned(sys actorbase.Sys) {
+	rows, err := readLedgerRows(sys.Life(), sys, message.Root(), "")
+	if err != nil {
+		return
+	}
+	last := map[string]ledgerRow{}
+	for _, row := range rows {
+		if row.Session == "" || row.Kind != message.KindRequest || !isLoopCommand(row.Type) || len(row.Audience) == 0 || !targetMatches(l.cfg.ControllerActor, row.Sender.String()) {
+			continue
+		}
+		last[row.Session] = row
+	}
+	for session, row := range last {
+		if row.Audience[0] == sys.Self() {
+			l.attachSession(sys.Life(), sys, message.Anchored(row.ID, row.ID), session)
+		}
+	}
+}
+
+// sessionHolder is the single ledger projection used by attach and replay.
+// The first start identifies the Controller seat; later incarnations with the
+// same kind/declaration remain that Controller, while unrelated senders cannot
+// steal ownership by writing a loop-shaped request.
+func sessionHolder(rows []ledgerRow) string {
+	controller := controllerSeat(rows)
+	holder := ""
+	for _, row := range rows {
+		if row.Kind != message.KindRequest || !isLoopCommand(row.Type) || len(row.Audience) == 0 {
+			continue
+		}
+		if controller != "" && sameActorSeat(controller, row.Sender.String()) {
+			holder = row.Audience[0].String()
+		}
+	}
+	return holder
+}
+
+func controllerSeat(rows []ledgerRow) string {
+	starts := map[message.ID]actor.ActorID{}
+	for _, row := range rows {
+		if row.Kind == message.KindRequest && row.Type == agentloop.TypeStart {
+			starts[row.ID] = row.Sender
+			continue
+		}
+		if row.Kind != message.KindResponse {
+			continue
+		}
+		sender := starts[row.Parent]
+		if sender == "" {
+			continue
+		}
+		var ack struct {
+			Disposition string `json:"disposition"`
+		}
+		_ = json.Unmarshal(row.Body, &ack)
+		if ack.Disposition == "accepted" || ack.Disposition == "already_accepted" {
+			return sender.String()
+		}
+	}
+	return ""
+}
+
+func sameActorSeat(left, right string) bool {
+	a, b := strings.Split(left, ":"), strings.Split(right, ":")
+	return len(a) == 3 && len(b) == 3 && a[0] == b[0] && a[1] == b[1]
+}
+
+func isLoopCommand(typ string) bool {
+	switch typ {
+	case agentloop.TypeStart, agentloop.TypeInput, agentloop.TypeStop, agentloop.TypeReset, agentloop.TypeSync, agentloop.TypeRename:
+		return true
+	}
+	return false
+}
+func terminalTurnState(state string) bool {
+	switch state {
+	case "completed", "failed", "cancelled", "timeout", "execution_unknown":
+		return true
+	}
+	return false
+}
+func (l *looper) hasActiveTurn(turn string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.active[turn] != nil
+}
+
+func (l *looper) reset(sys actorbase.Sys, msg actorbase.Msg) {
+	var req agentloop.ResetRequest
+	if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.SessionID == "" || req.SessionID != msg.Context().Session {
+		_, _ = sys.Fail(msg, "invalid_args", "session_id must match message context")
+		return
+	}
+	if l.activeSession(req.SessionID) {
+		_, _ = sys.Fail(msg, "busy", "session has an active turn")
+		return
+	}
+	spec, _ := behavior.EventSpecJSON(message.Anchored(msg.ID, msg.ID), agentloop.TypeSessionReset, req)
+	id, err := sys.Emit(spec)
+	if err != nil {
+		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		return
+	}
+	_, err = agentbase.WriteContext(sys, req.SessionID, agentbase.ContextObject{Messages: []json.RawMessage{}, Version: id})
+	if err != nil {
+		_, _ = sys.Fail(msg, "context_failed", err.Error())
+		return
+	}
+	_, _ = sys.Reply(msg, map[string]any{"disposition": "reset", "session_id": req.SessionID})
+}
+
+func (l *looper) rename(sys actorbase.Sys, msg actorbase.Msg) {
+	var req agentloop.RenameRequest
+	if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.SessionID == "" || req.SessionID != msg.Context().Session || strings.TrimSpace(req.Name) == "" {
+		_, _ = sys.Fail(msg, "invalid_args", "session_id and name are required")
+		return
+	}
+	spec, _ := behavior.EventSpecJSON(message.Anchored(msg.ID, msg.ID), agentloop.TypeSessionRename, req)
+	if _, err := sys.Emit(spec); err != nil {
+		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		return
+	}
+	_, _ = sys.Reply(msg, map[string]any{"disposition": "renamed", "session_id": req.SessionID, "name": req.Name})
+}
+
+func (l *looper) syncSession(sys actorbase.Sys, msg actorbase.Msg) {
+	var req agentloop.SyncRequest
+	if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.SessionID == "" || req.From.Session == "" || req.From.Through == "" || req.SessionID != msg.Context().Session {
+		_, _ = sys.Fail(msg, "invalid_args", "session_id and a closed from range are required")
+		return
+	}
+	if l.activeSession(req.SessionID) {
+		_, _ = sys.Fail(msg, "busy", "session has an active turn")
+		return
+	}
+	valid, err := validSessionBoundary(msg.Ctx(), sys, message.Anchored(msg.ID, msg.ID), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.Through})
+	if err != nil || !valid {
+		_, _ = sys.Fail(msg, "invalid_args", "source through is not a boundary")
+		return
+	}
+	target, found, err := agentbase.LoadContext(sys, req.SessionID)
+	if err != nil || !found {
+		target, _, err = recoverSessionContext(msg.Ctx(), sys, message.Anchored(msg.ID, msg.ID), req.SessionID)
+	}
+	if err != nil {
+		_, _ = sys.Fail(msg, "context_failed", err.Error())
+		return
+	}
+	source, err := materializeSession(msg.Ctx(), sys, message.Anchored(msg.ID, msg.ID), req.From.Session, message.ID(req.From.Through), nil)
+	if err != nil {
+		_, _ = sys.Fail(msg, "invalid_args", "source boundary is unavailable")
+		return
+	}
+	delta := source.Messages
+	if req.From.After != "" {
+		valid, err = validSessionBoundary(msg.Ctx(), sys, message.Anchored(msg.ID, msg.ID), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.After})
+		if err != nil || !valid {
+			_, _ = sys.Fail(msg, "invalid_args", "source after is not a boundary")
+			return
+		}
+		previous, err := materializeSession(msg.Ctx(), sys, message.Anchored(msg.ID, msg.ID), req.From.Session, message.ID(req.From.After), nil)
+		if err != nil || len(previous.Messages) > len(source.Messages) || !messagePrefix(previous.Messages, source.Messages) {
+			_, _ = sys.Fail(msg, "invalid_args", "source range does not extend its after boundary")
+			return
+		}
+		delta = source.Messages[len(previous.Messages):]
+	}
+	target.Messages = append(target.Messages, delta...)
+	row := agentloop.Synced{SessionID: req.SessionID, Context: target.Messages, TokensBefore: agentbase.ContextTokens(target.Messages)}
+	row.From.Session, row.From.After, row.From.Through = req.From.Session, req.From.After, req.From.Through
+	spec, _ := behavior.EventSpecJSON(message.Anchored(msg.ID, msg.ID), agentloop.TypeSessionSync, row)
+	id, err := sys.Emit(spec)
+	if err != nil {
+		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		return
+	}
+	target.Version = id
+	if _, err = agentbase.WriteContext(sys, req.SessionID, target); err != nil {
+		_, _ = sys.Fail(msg, "context_failed", err.Error())
+		return
+	}
+	_, _ = sys.Reply(msg, map[string]any{"disposition": "synced", "session_id": req.SessionID, "through": req.From.Through})
+}
+
+func messagePrefix(prefix, whole []json.RawMessage) bool {
+	for i := range prefix {
+		if string(prefix[i]) != string(whole[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
@@ -152,8 +489,34 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
 		return
 	}
-	if req.WorkID == "" || req.AssignmentID == "" || req.ControllerActor == "" || req.ContextActor == "" || req.LLMActor == "" || len(req.Inputs) == 0 {
-		_, _ = sys.Fail(msg, "invalid_args", "work_id, assignment_id, controller_actor, context_actor, llm_actor, and inputs are required")
+	req.ControllerActor = msg.Sender.ID.String()
+	req.LLMActor = l.cfg.LLMActor
+	req.WorkspaceActor = l.cfg.WorkspaceActor
+	req.HostActor = l.cfg.HostActor
+	if req.TurnID == "" {
+		req.TurnID = req.AssignmentID
+	}
+	if req.AssignmentID == "" {
+		req.AssignmentID = req.TurnID
+	}
+	if req.SessionID == "" {
+		req.SessionID = msg.Context().Session
+	}
+	if req.SessionID == "" || req.TurnID == "" || req.ControllerActor == "" || req.LLMActor == "" || len(req.Inputs) == 0 {
+		_, _ = sys.Fail(msg, "invalid_args", "session_id, turn_id, controller_actor, llm_actor, and inputs are required")
+		return
+	}
+	if msg.Context().Session != req.SessionID {
+		_, _ = sys.Fail(msg, "operation_mismatch", "loop.start session differs from _context.session")
+		return
+	}
+	// attach runs before this handler and records both existing and newly
+	// repaired boundaries in the process-local fast path.
+	l.mu.Lock()
+	alreadyClosed := l.closedTurns[req.TurnID]
+	l.mu.Unlock()
+	if alreadyClosed {
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "already_finished", "session_id": req.SessionID, "turn_id": req.TurnID})
 		return
 	}
 	if req.ControllerActor != msg.Sender.ID.String() {
@@ -200,16 +563,77 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		duration = time.Duration(req.ExecutionTimeoutMS) * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(sys.Life(), duration)
-	a := &assignment{start: req, cause: msg.Cause(), cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted"}
+	object, exists, loadErr := agentbase.LoadContext(sys, req.SessionID)
+	if loadErr != nil && !errors.Is(loadErr, actorbase.ErrUnsupported) {
+		l.mu.Unlock()
+		cancel()
+		_, _ = sys.Fail(msg, "context_invalid", loadErr.Error())
+		return
+	}
+	if !exists {
+		if recovered, opened, err := recoverSessionContext(msg.Ctx(), sys, msg.Cause(), req.SessionID); err == nil && opened {
+			object, exists = recovered, true
+		}
+	}
+	if !exists && req.Open != nil && req.Open.Base != nil {
+		valid, boundaryErr := validSessionBoundary(msg.Ctx(), sys, message.Anchored(msg.ID, msg.ID), *req.Open.Base)
+		if boundaryErr != nil || !valid {
+			l.mu.Unlock()
+			cancel()
+			_, _ = sys.Fail(msg, "invalid_args", "open base is not a boundary")
+			return
+		}
+		baseObject, found, err := agentbase.LoadContext(sys, req.Open.Base.Session)
+		if err == nil && (!found || (req.Open.Base.At != "" && string(baseObject.Version) != req.Open.Base.At)) {
+			baseObject, err = materializeSession(msg.Ctx(), sys, msg.Cause(), req.Open.Base.Session, message.ID(req.Open.Base.At), nil)
+			found = err == nil
+		}
+		if err != nil || !found {
+			l.mu.Unlock()
+			cancel()
+			_, _ = sys.Fail(msg, "invalid_args", "open base is not an available boundary")
+			return
+		}
+		object = baseObject
+	}
+	turnCause := message.Anchored(msg.ID, msg.ID)
+	a := &assignment{start: req, cause: turnCause, cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted", history: append([]json.RawMessage(nil), object.Messages...), version: object.Version}
 	l.active[req.AssignmentID] = a
 	l.wg.Add(1)
 	l.mu.Unlock()
-	_, _ = sys.Reply(msg, map[string]any{"disposition": "accepted", "work_id": req.WorkID, "assignment_id": req.AssignmentID})
-	l.report(sys, a, "accepted", 0, nil, "", "", "confirmed_running")
+	if !exists {
+		opened, _ := behavior.EventSpecJSON(turnCause, agentloop.TypeSessionOpened, agentloop.Opened{SessionID: req.SessionID, Base: func() *agentloop.BoundaryRef {
+			if req.Open != nil {
+				return req.Open.Base
+			}
+			return nil
+		}()})
+		if _, err := sys.Emit(opened); err != nil {
+			l.mu.Lock()
+			delete(l.active, req.AssignmentID)
+			l.mu.Unlock()
+			cancel()
+			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+			return
+		}
+	}
+	if _, err := sys.Reply(msg, map[string]any{"disposition": "accepted", "session_id": req.SessionID, "turn_id": req.TurnID}); err != nil {
+		l.mu.Lock()
+		delete(l.active, req.AssignmentID)
+		l.mu.Unlock()
+		cancel()
+		return
+	}
 	go func() {
 		defer l.wg.Done()
 		defer cancel()
 		l.drive(ctx, sys, a)
+		a.mu.Lock()
+		archive := a.archive
+		a.mu.Unlock()
+		if archive {
+			_ = agentbase.DeleteContext(sys, a.start.SessionID)
+		}
 		l.mu.Lock()
 		if l.active[req.AssignmentID] == a {
 			delete(l.active, req.AssignmentID)
@@ -235,7 +659,19 @@ func (l *looper) input(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "assignment_not_found", "no active assignment for work")
 		return
 	}
-	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.ViewID != req.ViewID {
+	a.mu.Lock()
+	var nextSeq int64
+	for _, input := range a.inputs {
+		if input.Seq > nextSeq {
+			nextSeq = input.Seq
+		}
+	}
+	for i := range req.Inputs {
+		nextSeq++
+		req.Inputs[i].Seq = nextSeq
+	}
+	a.mu.Unlock()
+	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.SessionID != req.SessionID {
 		_, _ = sys.Fail(msg, "operation_mismatch", "input targets a stale assignment")
 		return
 	}
@@ -244,7 +680,14 @@ func (l *looper) input(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "operation_conflict", err.Error())
 		return
 	}
-	_, _ = sys.Reply(msg, decision)
+	a.mu.Lock()
+	if decision.Disposition == "accepted" {
+		a.acks = append(a.acks, pendingInputAck{msg: msg, decision: decision})
+	}
+	a.mu.Unlock()
+	if decision.Disposition != "accepted" {
+		_, _ = sys.Reply(msg, decision)
+	}
 }
 
 func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
@@ -257,6 +700,32 @@ func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "invalid_args", err.Error())
 		return
 	}
+	if req.Archive && req.AssignmentID == "" && req.TurnID == "" {
+		l.mu.Lock()
+		var found *assignment
+		for _, candidate := range l.active {
+			if candidate.start.SessionID == req.SessionID {
+				found = candidate
+				break
+			}
+		}
+		l.mu.Unlock()
+		if found == nil {
+			_ = agentbase.DeleteContext(sys, req.SessionID)
+			_, _ = sys.Reply(msg, map[string]any{"disposition": "archived", "session_id": req.SessionID})
+			return
+		}
+		found.mu.Lock()
+		found.archive = true
+		found.closed = true
+		found.cancel()
+		found.mu.Unlock()
+		_, _ = sys.Reply(msg, map[string]any{"disposition": "archive_pending", "session_id": req.SessionID})
+		return
+	}
+	if req.AssignmentID == "" {
+		req.AssignmentID = req.TurnID
+	}
 	l.mu.Lock()
 	a := l.active[req.AssignmentID]
 	l.mu.Unlock()
@@ -264,11 +733,14 @@ func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "already_stopped", "work_id": req.WorkID})
 		return
 	}
-	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.ViewID != req.ViewID {
+	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.SessionID != req.SessionID {
 		_, _ = sys.Fail(msg, "operation_mismatch", "stop targets a stale assignment")
 		return
 	}
 	a.mu.Lock()
+	if req.Archive {
+		a.archive = true
+	}
 	a.closed = true
 	a.cancel()
 	a.mu.Unlock()
@@ -294,7 +766,7 @@ func (l *looper) inspect(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "assignment_not_found", "no active assignment for work")
 		return
 	}
-	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.ViewID != req.ViewID {
+	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.SessionID != req.SessionID {
 		_, _ = sys.Fail(msg, "operation_mismatch", "inspect targets a different session or incarnation")
 		return
 	}
@@ -326,28 +798,6 @@ func targetMatches(configured, actual string) bool {
 }
 
 func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
-	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
-	heartbeatDone := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatCtx.Done():
-				return
-			case <-ticker.C:
-				a.mu.Lock()
-				closed := a.closed
-				a.mu.Unlock()
-				if closed {
-					return
-				}
-				_, _ = sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(agentloop.ReportRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, ViewID: a.start.ViewID, ContextVersion: a.start.ContextVersion, State: "processing"})})
-			}
-		}
-	}()
-	defer func() { stopHeartbeat(); <-heartbeatDone }()
 	a.mu.Lock()
 	inputs := append([]agentloop.Input(nil), a.inputs...)
 	a.phase = "context"
@@ -358,17 +808,20 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 			through = in.Seq
 		}
 	}
-	contextRaw, err := call(ctx, sys, a.cause, actor.ActorID(a.start.ContextActor), contextproto.TypeBuild, contextproto.BuildRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, Inputs: inputs, Prior: a.start.Prior})
-	if err != nil {
-		l.report(sys, a, "failed", 0, nil, "context_failed", err.Error(), stateForError(err))
-		return
+	history := append([]json.RawMessage(nil), a.history...)
+	for i, in := range inputs {
+		if in.Text == "" {
+			hydrated, err := hydrateInput(ctx, sys, a.cause, in.ID, in.Seq)
+			if err != nil {
+				l.report(sys, a, "failed", through, nil, "input_unavailable", err.Error(), "confirmed")
+				return
+			}
+			in = hydrated
+			inputs[i] = in
+		}
+		history = append(history, inputMessage(in))
+		a.version = message.ID(in.ID)
 	}
-	var artifact contextproto.Artifact
-	if err := json.Unmarshal(contextRaw, &artifact); err != nil {
-		l.report(sys, a, "failed", 0, nil, "context_invalid", err.Error(), "confirmed")
-		return
-	}
-	history := append([]json.RawMessage(nil), artifact.Messages...)
 	if err := validateHistory(history); err != nil {
 		l.report(sys, a, "failed", 0, nil, "context_invalid", err.Error(), "confirmed")
 		return
@@ -392,23 +845,42 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		definitions = append(definitions, tool.Definition)
 		targets[tool.Name] = tool
 	}
+	overflowRetried := false
 	for turn := 0; turn < turns; turn++ {
 		if ctx.Err() != nil {
-			l.report(sys, a, "cancelled", through, nil, "cancelled", ctx.Err().Error(), "confirmed_stopped")
+			state, code := "cancelled", "cancelled"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				state, code = "timeout", "timeout"
+			}
+			l.report(sys, a, state, through, nil, code, ctx.Err().Error(), "confirmed_stopped")
 			return
 		}
 		pending := a.pendingInputs()
 		if len(pending) > 0 {
-			built, buildErr := call(ctx, sys, a.cause, actor.ActorID(a.start.ContextActor), contextproto.TypeBuild, contextproto.BuildRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, Inputs: pending, Prior: history})
-			var next contextproto.Artifact
-			if buildErr != nil || json.Unmarshal(built, &next) != nil {
-				l.report(sys, a, "failed", through, nil, "context_failed", "cannot build accepted control input", "confirmed")
-				return
+			for i, in := range pending {
+				if in.Text == "" {
+					hydrated, err := hydrateInput(ctx, sys, a.cause, in.ID, in.Seq)
+					if err != nil {
+						l.report(sys, a, "failed", through, nil, "input_unavailable", err.Error(), "confirmed")
+						return
+					}
+					in = hydrated
+					pending[i] = in
+				}
+				history = append(history, inputMessage(in))
+				a.version = message.ID(in.ID)
 			}
-			history = append([]json.RawMessage(nil), next.Messages...)
 			a.mu.Lock()
 			a.consumed += len(pending)
+			acks := append([]pendingInputAck(nil), a.acks...)
+			a.acks = nil
 			a.mu.Unlock()
+			for _, ack := range acks {
+				if _, err := sys.Reply(ack.msg, ack.decision); err != nil {
+					l.report(sys, a, "failed", through, nil, "ledger_unavailable", "input acceptance could not be recorded: "+err.Error(), "confirmed")
+					return
+				}
+			}
 			for _, in := range pending {
 				if in.Seq > through {
 					through = in.Seq
@@ -423,7 +895,22 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		a.mu.Lock()
 		a.phase = "thinking"
 		a.mu.Unlock()
-		raw, err := call(ctx, sys, a.cause, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: artifact.SystemPrompt, Messages: history, Tools: definitions})
+		ref, writeErr := agentbase.WriteContext(sys, a.start.SessionID, agentbase.ContextObject{Messages: history, Version: a.version})
+		if writeErr != nil {
+			l.report(sys, a, "failed", through, nil, "context_failed", writeErr.Error(), "confirmed")
+			return
+		}
+		history, ref, writeErr = l.compactIfNeeded(ctx, sys, a, history, ref, false)
+		if writeErr != nil {
+			l.report(sys, a, "failed", through, nil, "context_limit", writeErr.Error(), "confirmed")
+			return
+		}
+		a.setHistory(history)
+		options := json.RawMessage(nil)
+		if a.start.Effort != "" {
+			options = mustRaw(map[string]any{"thinkingLevel": a.start.Effort})
+		}
+		generatedMsg, err := callMessage(ctx, sys, a.cause, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: a.start.Prompt, Context: ref, Tools: definitions, Options: options})
 		if err != nil {
 			state := "confirmed"
 			kind := "llm_failed"
@@ -440,6 +927,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 			l.report(sys, a, "failed", through, nil, kind, err.Error(), state)
 			return
 		}
+		raw := generatedMsg.Payload
 		var generated llmproto.GenerateResponse
 		if err := json.Unmarshal(raw, &generated); err != nil {
 			l.report(sys, a, "failed", through, nil, "llm_invalid", err.Error(), "confirmed")
@@ -451,40 +939,66 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 			return
 		}
 		reason := stopReason(generated.Message)
+		if generated.ErrorCode == "context_overflow" || generated.ErrorCode == "length_recoverable" {
+			if overflowRetried {
+				l.report(sys, a, "failed", through, nil, "context_limit", "model context overflowed again after compaction", "confirmed")
+				return
+			}
+			history, ref, err = l.compactIfNeeded(ctx, sys, a, history, ref, true)
+			if err != nil {
+				l.report(sys, a, "failed", through, nil, "context_limit", err.Error(), "confirmed")
+				return
+			}
+			a.setHistory(history)
+			overflowRetried = true
+			turn--
+			continue
+		}
+		history = append(history, generated.Message)
+		a.version = generatedMsg.ID
+		a.setHistory(history)
 		if reason == "error" || reason == "aborted" {
+			for _, tc := range calls {
+				history = append(history, toolResult(tc, true, "Looper: tool was not executed because the assistant response did not complete successfully"))
+			}
+			a.setHistory(history)
+			_, _ = agentbase.WriteContext(sys, a.start.SessionID, agentbase.ContextObject{Messages: history, Version: a.version})
 			l.report(sys, a, "failed", through, nil, "provider_error", "provider did not deliver a complete successful assistant", "confirmed")
 			return
 		}
-		history = append(history, generated.Message)
-		a.setHistory(history)
 		if len(calls) == 0 {
 			if !a.seal() {
 				continue
 			}
 			resultText, truncated := boundedResultText(text)
-			result, _ := json.Marshal(map[string]any{"text": resultText, "text_truncated": truncated, "message": generated.Message, "context_artifact_id": artifact.ArtifactID, "provider": generated.Provider, "model": generated.Model})
+			result, _ := json.Marshal(map[string]any{"text": resultText, "text_truncated": truncated, "message": generated.Message, "provider": generated.Provider, "model": generated.Model})
+			if _, err := agentbase.WriteContext(sys, a.start.SessionID, agentbase.ContextObject{Messages: history, Version: a.version}); err != nil {
+				l.report(sys, a, "failed", through, nil, "context_failed", err.Error(), "confirmed")
+				return
+			}
 			l.report(sys, a, "completed", through, result, "", "", "confirmed")
 			return
 		}
 		a.mu.Lock()
 		a.phase = "acting"
 		a.mu.Unlock()
+		stopBatch := false
 		for _, tc := range calls {
+			if stopBatch {
+				history = append(history, toolResult(tc, true, "Looper: tool was not executed"))
+				continue
+			}
 			if reason == "length" {
-				history = append(history, toolResult(tc, true, "Looper: model output truncated; this tool call was not executed"))
+				history = append(history, toolResult(tc, true, "Looper: tool was not executed"))
 				continue
 			}
 			if ctx.Err() != nil {
-				history = append(history, toolResult(tc, true, "Looper: execution cancelled before this tool was dispatched"))
-				continue
-			}
-			if !validArguments(tc.Arguments) {
-				history = append(history, toolResult(tc, true, "Looper: invalid_args; arguments must be an object; tool was not executed"))
+				history = append(history, toolResult(tc, true, "Looper: tool was not executed"))
 				continue
 			}
 			tool, ok := targets[tc.Name]
 			if !ok {
-				history = append(history, toolResult(tc, true, "unknown tool "+tc.Name))
+				history = append(history, toolResult(tc, true, "Looper: tool was not executed"))
 				a.setHistory(history)
 				continue
 			}
@@ -493,7 +1007,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 				toolTimeout = time.Duration(a.start.ToolTimeoutMS) * time.Millisecond
 			}
 			toolCtx, cancelTool := context.WithTimeout(ctx, toolTimeout)
-			toolRaw, callErr := call(toolCtx, sys, a.cause, actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
+			toolMsg, callErr := callMessage(toolCtx, sys, generatedMsg.Cause(), actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
 			cancelTool()
 			if callErr != nil {
 				detail := callErr.Error()
@@ -507,21 +1021,29 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 					_ = json.Unmarshal(result, &fields)
 					fields["details"] = mustRaw(map[string]any{"source": "looper_wait", "request_id": failure.RequestID, "error_code": failure.Code, "external_effects_unknown": errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded)})
 					result = mustRaw(fields)
+					if failure.Response.ID != "" {
+						result = toolResultFailure(tc, failure.Response.Payload)
+						a.version = failure.Response.ID
+					}
+				} else {
+					result = toolResult(tc, true, "Looper: tool was not executed")
+					stopBatch = true
 				}
 				history = append(history, result)
 				a.setHistory(history)
 				continue
 			}
-			history = append(history, l.toolResult(ctx, sys, a, tc, tool, toolRaw))
+			a.version = toolMsg.ID
+			history = append(history, l.toolResult(ctx, sys, a, tc, tool, toolMsg.Payload))
 			a.setHistory(history)
 		}
 		a.setHistory(history)
 		if ctx.Err() != nil {
-			l.report(sys, a, "cancelled", through, nil, "cancelled", "local execution stopped; dispatched tool effects may be unknown", "confirmed_stopped")
-			return
-		}
-		if historySize(history) > agentloop.MaxHistoryBytes {
-			l.report(sys, a, "failed", through, nil, "context_limit", "history limit exceeded after closing tool batch", "confirmed")
+			state, code := "cancelled", "cancelled"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				state, code = "timeout", "timeout"
+			}
+			l.report(sys, a, state, through, nil, code, "local execution stopped; dispatched tool effects may be unknown", "confirmed_stopped")
 			return
 		}
 	}
@@ -544,6 +1066,46 @@ type toolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+}
+
+func inputMessage(in agentloop.Input) json.RawMessage {
+	content := []map[string]any{{"type": "text", "text": in.Text}}
+	for _, attachment := range in.Attachments {
+		content = append(content, map[string]any{"type": "attachment", "value": attachment})
+	}
+	return mustJSON(map[string]any{"role": "user", "content": content, "source_message_id": in.ID})
+}
+
+func hydrateInput(ctx context.Context, sys actorbase.Sys, cause message.Cause, id string, seq int64) (agentloop.Input, error) {
+	raw, err := call(ctx, sys, cause, actor.SystemActorID, message.TypeSystemLogQuery, map[string]any{"view": "raw", "read_id": id})
+	if err != nil {
+		return agentloop.Input{}, err
+	}
+	var response channelspec.LogQueryResponse
+	if err := json.Unmarshal(raw, &response); err != nil || response.Message == nil {
+		return agentloop.Input{}, errors.New("input ledger row not found")
+	}
+	payloadText := response.Message.PayloadText
+	if response.Message.Truncated {
+		payloadText, err = readLedgerPayload(ctx, sys, cause, response.Message.Seq, response.HeadSeq)
+		if err != nil {
+			return agentloop.Input{}, err
+		}
+	}
+	payload := json.RawMessage(payloadText)
+	_, body, err := harness.UnwrapPayload(payload)
+	if err != nil {
+		return agentloop.Input{}, fmt.Errorf("input payload: %w", err)
+	}
+	var ask struct {
+		Text        string             `json:"text"`
+		Attachments []json.RawMessage  `json:"attachments"`
+		Origin      *agentproto.Origin `json:"origin"`
+	}
+	if err := json.Unmarshal(body, &ask); err != nil || strings.TrimSpace(ask.Text) == "" {
+		return agentloop.Input{}, errors.New("input row has no user text")
+	}
+	return agentloop.Input{ID: id, Seq: seq, Text: ask.Text, Attachments: ask.Attachments, Origin: ask.Origin}, nil
 }
 
 func assistantParts(raw json.RawMessage) ([]toolCall, string, error) {
@@ -580,7 +1142,7 @@ func assistantParts(raw json.RawMessage) ([]toolCall, string, error) {
 	return calls, text, nil
 }
 func toolResult(tc toolCall, isErr bool, text string) json.RawMessage {
-	raw, _ := json.Marshal(map[string]any{"role": "toolResult", "toolCallId": tc.ID, "toolName": tc.Name, "content": []map[string]any{{"type": "text", "text": text}}, "isError": isErr, "timestamp": time.Now().UnixMilli()})
+	raw, _ := json.Marshal(map[string]any{"role": "toolResult", "toolCallId": tc.ID, "toolName": tc.Name, "content": []map[string]any{{"type": "text", "text": text}}, "isError": isErr})
 	return raw
 }
 func toolResultRaw(tc toolCall, raw json.RawMessage) json.RawMessage {
@@ -593,7 +1155,7 @@ func toolResultRaw(tc toolCall, raw json.RawMessage) json.RawMessage {
 	if json.Unmarshal(raw, &result) != nil || len(result.Content) == 0 {
 		return toolResult(tc, false, string(raw))
 	}
-	message := map[string]any{"role": "toolResult", "toolCallId": tc.ID, "toolName": tc.Name, "content": result.Content, "isError": false, "timestamp": time.Now().UnixMilli()}
+	message := map[string]any{"role": "toolResult", "toolCallId": tc.ID, "toolName": tc.Name, "content": result.Content, "isError": false}
 	if len(result.Details) > 0 && string(result.Details) != "null" {
 		message["details"] = result.Details
 	}
@@ -606,8 +1168,31 @@ func toolResultRaw(tc toolCall, raw json.RawMessage) json.RawMessage {
 	out, _ := json.Marshal(message)
 	return out
 }
+func toolResultFailure(tc toolCall, raw json.RawMessage) json.RawMessage {
+	var failure struct {
+		ErrorCode string `json:"error_code"`
+		Detail    string `json:"detail"`
+		Reason    string `json:"reason"`
+	}
+	_ = json.Unmarshal(raw, &failure)
+	text := failure.ErrorCode
+	if failure.Detail != "" {
+		if text != "" {
+			text += ": "
+		}
+		text += failure.Detail
+	}
+	if text == "" {
+		text = string(raw)
+	}
+	result := toolResult(tc, true, text)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(result, &fields)
+	fields["details"] = mustRaw(map[string]any{"error_code": failure.ErrorCode, "reason": failure.Reason})
+	return mustRaw(fields)
+}
 
-func (l *looper) toolResult(ctx context.Context, sys actorbase.Sys, a *assignment, tc toolCall, tool resolvedTool, raw json.RawMessage) json.RawMessage {
+func (l *looper) toolResult(_ context.Context, _ actorbase.Sys, a *assignment, tc toolCall, tool resolvedTool, raw json.RawMessage) json.RawMessage {
 	maxLines, maxBytes, maxImage := a.start.ToolResultMaxLines, a.start.ToolResultMaxBytes, a.start.ToolImageMaxBytes
 	if maxLines <= 0 {
 		maxLines = defaultToolResultMaxLines
@@ -677,21 +1262,13 @@ func (l *looper) toolResult(ctx context.Context, sys actorbase.Sys, a *assignmen
 		}
 		return out
 	}
-	if a.start.WorkspaceActor == "" {
-		return toolResult(tc, true, fmt.Sprintf("tool output exceeds %d lines or %d bytes and no workspace output store is configured", maxLines, maxBytes))
-	}
-	path := ".atoll/tool-results/" + uuid.NewString() + ".txt"
-	_, err := call(ctx, sys, a.cause, actor.ActorID(a.start.WorkspaceActor), workspaceproto.TypeWrite, workspaceproto.WriteRequest{Path: path, Content: full})
-	if err != nil {
-		return toolResult(tc, true, "tool output exceeded the configured limit and the complete output could not be saved: "+err.Error())
-	}
 	noticePrefix := " "
 	excerptLines := maxLines
 	if maxLines > 1 {
 		noticePrefix = "\n"
 		excerptLines--
 	}
-	notice := fmt.Sprintf("%s[Output truncated; complete output saved to %s]", noticePrefix, path)
+	notice := noticePrefix + "[Output truncated to configured limit]"
 	excerptBytes := maxBytes - len(notice)
 	if excerptLines < 1 {
 		excerptLines = 1
@@ -722,8 +1299,8 @@ func (l *looper) toolResult(ctx context.Context, sys actorbase.Sys, a *assignmen
 			details = map[string]any{"tool_details": result.Details}
 		}
 	}
-	details["atoll_output"] = map[string]any{"truncated": true, "path": path, "workspace_actor": a.start.WorkspaceActor, "retained": map[bool]string{true: "tail", false: "head"}[tail]}
-	message := map[string]any{"role": "toolResult", "toolCallId": tc.ID, "toolName": tc.Name, "content": content, "details": details, "isError": result.IsError, "timestamp": time.Now().UnixMilli()}
+	details["atoll_output"] = map[string]any{"truncated": true, "retained": map[bool]string{true: "tail", false: "head"}[tail]}
+	message := map[string]any{"role": "toolResult", "toolCallId": tc.ID, "toolName": tc.Name, "content": content, "details": details, "isError": result.IsError}
 	if len(result.Usage) > 0 && string(result.Usage) != "null" {
 		message["usage"] = result.Usage
 	}
@@ -957,12 +1534,19 @@ func parseModel(value string) llmproto.ModelRef {
 	return llmproto.ModelRef{Model: value}
 }
 func call(ctx context.Context, sys actorbase.Sys, cause message.Cause, target actor.ActorID, typ string, payload any) (json.RawMessage, error) {
-	if err := ctx.Err(); err != nil {
+	msg, err := callMessage(ctx, sys, cause, target, typ, payload)
+	if err != nil {
 		return nil, err
+	}
+	return append(json.RawMessage(nil), msg.Payload...), nil
+}
+func callMessage(ctx context.Context, sys actorbase.Sys, cause message.Cause, target actor.ActorID, typ string, payload any) (actorbase.Msg, error) {
+	if err := ctx.Err(); err != nil {
+		return actorbase.Msg{}, err
 	}
 	pd, err := sys.Call(cause, target, typ, payload)
 	if err != nil {
-		return nil, err
+		return actorbase.Msg{}, err
 	}
 	progressDone := make(chan struct{})
 	drainCtx, stopDrain := context.WithCancel(ctx)
@@ -992,7 +1576,7 @@ func call(ctx context.Context, sys actorbase.Sys, cause message.Cause, target ac
 		if errors.Is(err, context.DeadlineExceeded) {
 			code = "deadline_exceeded"
 		}
-		return nil, &callFailure{Code: code, Detail: err.Error(), RequestID: string(pd.RequestID()), cause: err}
+		return actorbase.Msg{}, &callFailure{Code: code, Detail: err.Error(), RequestID: string(pd.RequestID()), cause: err}
 	}
 	<-progressDone
 	var state struct {
@@ -1003,23 +1587,25 @@ func call(ctx context.Context, sys actorbase.Sys, cause message.Cause, target ac
 		if state.ErrorCode == "" {
 			state.ErrorCode = "call_failed"
 		}
-		return nil, &callFailure{Code: state.ErrorCode, Detail: state.Detail, RequestID: string(pd.RequestID())}
+		return actorbase.Msg{}, &callFailure{Code: state.ErrorCode, Detail: state.Detail, RequestID: string(pd.RequestID()), Response: msg}
 	}
-	return append(json.RawMessage(nil), msg.Payload...), nil
+	return msg, nil
 }
-func (l *looper) report(sys actorbase.Sys, a *assignment, state string, through int64, result json.RawMessage, code, detail, execution string) {
+func (l *looper) report(sys actorbase.Sys, a *assignment, state string, _ int64, _ json.RawMessage, _, _, _ string) {
 	a.mu.Lock()
 	a.phase = state
 	if state != "accepted" {
 		a.closed = true
 	}
-	history := append([]json.RawMessage(nil), a.history...)
-	controls := append([]agentloop.ControlResult(nil), a.controls...)
+	acks := append([]pendingInputAck(nil), a.acks...)
+	if state != "accepted" {
+		a.acks = nil
+	}
 	a.mu.Unlock()
-	if historySize(history) > agentloop.MaxHistoryBytes {
-		history = nil
-		if state == "completed" {
-			state, result, code, detail = "failed", nil, "context_limit", "Pi history exceeded the phase-one recovery limit"
+	if state != "accepted" {
+		for _, ack := range acks {
+			ack.decision.Disposition = "target_gone"
+			_, _ = sys.Reply(ack.msg, ack.decision)
 		}
 	}
 	// A terminal report releases the lane before it is published. The
@@ -1042,20 +1628,96 @@ func (l *looper) report(sys actorbase.Sys, a *assignment, state string, through 
 		}
 		l.mu.Unlock()
 	}
-	payload := agentloop.ReportRequest{WorkID: a.start.WorkID, AssignmentID: a.start.AssignmentID, ViewID: a.start.ViewID, ContextVersion: a.start.ContextVersion, Controls: controls, State: state, ConsumedThrough: through, Result: result, ErrorCode: code, Detail: detail, ExecutionState: execution, History: history}
+	turn := a.start.TurnID
+	if turn == "" {
+		turn = a.start.AssignmentID
+	}
+	payload := agentloop.ReportRequest{TurnID: turn, SessionID: a.start.SessionID, State: state}
 	_, _ = sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(payload)})
 }
 
-func historySize(history []json.RawMessage) int {
-	total := 0
-	for _, item := range history {
-		total += len(item)
+func (l *looper) compactIfNeeded(ctx context.Context, sys actorbase.Sys, a *assignment, history []json.RawMessage, ref agentbase.ContextRef, force bool) ([]json.RawMessage, agentbase.ContextRef, error) {
+	window := a.start.ContextWindow
+	if window <= 0 {
+		window = 128000
 	}
-	return total
+	reserve := a.start.ReserveTokens
+	if reserve <= 0 {
+		reserve = 16384
+	}
+	before := agentbase.ContextTokens(history)
+	if !force && before <= window-reserve {
+		return history, ref, nil
+	}
+	keep := a.start.KeepRecentTokens
+	if keep <= 0 {
+		keep = 20000
+	}
+	cut, bytesKept := len(history), 0
+	for i := len(history) - 1; i >= 0; i-- {
+		bytesKept += len(history[i])
+		if bytesKept > keep*4 {
+			break
+		}
+		if modelMessageRole(history[i]) == "user" || modelMessageRole(history[i]) == "assistant" {
+			cut = i
+		}
+	}
+	if cut <= 0 || cut >= len(history) {
+		return nil, ref, errors.New("context exceeds the model window and has no safe compaction cut")
+	}
+	model := a.start.CompactModel
+	if model == "" {
+		model = a.start.Model
+	}
+	summaryMsg, err := callMessage(ctx, sys, a.cause, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{
+		ModelRef: parseModel(model), Purpose: "compact", Context: ref,
+		Options: func() json.RawMessage {
+			if a.start.Effort == "" {
+				return nil
+			}
+			return mustRaw(map[string]any{"thinkingLevel": a.start.Effort})
+		}(),
+		SystemPrompt: "Summarize the conversation before the recent messages. Preserve Goal, Constraints, Progress, Key Decisions, Next Steps, and Critical Context. Return a concise assistant summary without tool calls.",
+	})
+	if err != nil {
+		return nil, ref, fmt.Errorf("compact context: %w", err)
+	}
+	var generated llmproto.GenerateResponse
+	if json.Unmarshal(summaryMsg.Payload, &generated) != nil || len(generated.Message) == 0 || stopReason(generated.Message) == "error" {
+		return nil, ref, errors.New("compact context: summarizer returned no usable assistant")
+	}
+	compacted := append([]json.RawMessage{generated.Message}, cloneMessages(history[cut:])...)
+	if err := validateHistory(compacted); err != nil {
+		return nil, ref, fmt.Errorf("compact context: %w", err)
+	}
+	row := agentloop.Compact{SessionID: a.start.SessionID, Context: compacted, TokensBefore: before, Size: agentloop.ContextSize{Before: before, After: agentbase.ContextTokens(compacted)}}
+	spec, err := behavior.EventSpecJSON(message.Anchored(summaryMsg.ID, summaryMsg.ID), agentloop.TypeSessionCompact, row)
+	if err != nil {
+		return nil, ref, err
+	}
+	id, err := sys.Emit(spec)
+	if err != nil {
+		return nil, ref, err
+	}
+	newRef, err := agentbase.WriteContext(sys, a.start.SessionID, agentbase.ContextObject{Messages: compacted, Version: id})
+	if err != nil {
+		return nil, ref, err
+	}
+	a.version = id
+	return compacted, newRef, nil
+}
+
+func modelMessageRole(raw json.RawMessage) string {
+	var message struct {
+		Role string `json:"role"`
+	}
+	_ = json.Unmarshal(raw, &message)
+	return message.Role
 }
 
 func (l *looper) reportRejected(sys actorbase.Sys, msg actorbase.Msg, req agentloop.StartRequest, code, detail string) {
-	payload := agentloop.ReportRequest{WorkID: req.WorkID, AssignmentID: req.AssignmentID, State: "failed", ErrorCode: code, Detail: detail, ExecutionState: "not_started"}
+	payload := agentloop.ReportRequest{SessionID: req.SessionID, TurnID: req.TurnID, WorkID: req.WorkID, AssignmentID: req.AssignmentID, State: "failed", ErrorCode: code, Detail: detail, ExecutionState: "not_started"}
 	_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeReport, Audience: message.Audience{msg.Sender.ID}, Payload: mustJSON(payload)})
 }
 func (a *assignment) setHistory(history []json.RawMessage) {

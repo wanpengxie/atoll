@@ -60,7 +60,7 @@ func TestSlidingDeadlineRestartsOnProgressAndClosesOnSilence(t *testing.T) {
 		ErrorCode string `json:"error_code"`
 		Detail    string `json:"detail"`
 	}
-	_ = json.Unmarshal(pen.last().Payload, &payload)
+	_ = json.Unmarshal(actorTestBody(pen.last().Payload), &payload)
 	if payload.ErrorCode != string(message.TerminalUnansweredTimeout) {
 		t.Fatalf("error_code = %q", payload.ErrorCode)
 	}

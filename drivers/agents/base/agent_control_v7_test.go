@@ -168,10 +168,10 @@ func newV7Loop(t *testing.T, capabilities map[string]bool) (*agentLoop, *v7Sys, 
 }
 
 func v7Request(id, typ, sender, payload string) actorbase.Msg {
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: actor.ActorID(sender)}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{"body":` + payload + `}`)})
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: actor.ActorID(sender)}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(payload)})
 }
 func v7Event(id, typ, payload string) actorbase.Msg {
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "agent:test:1"}, Kind: message.KindEvent, Type: typ, Payload: json.RawMessage(payload)})
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "agent:test:1"}, Kind: message.KindEvent, Type: typ, Payload: json.RawMessage(payload)})
 }
 func v7Activate(t *testing.T, l *agentLoop, id string) {
 	t.Helper()

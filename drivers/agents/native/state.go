@@ -28,8 +28,7 @@ type operationRecord struct {
 }
 
 type workRecord struct {
-	ViewID          string                     `json:"view_id,omitempty"`
-	ContextVersion  int64                      `json:"context_version,omitempty"`
+	SessionID       string                     `json:"session_id,omitempty"`
 	Resumed         bool                       `json:"resumed,omitempty"`
 	ID              agentproto.WorkID          `json:"work_id"`
 	Owner           harness.Caller             `json:"owner"`
@@ -46,7 +45,7 @@ type workRecord struct {
 	AssignedThrough int64                      `json:"assigned_through,omitempty"`
 	Looper          string                     `json:"looper,omitempty"`
 	ExecutionState  string                     `json:"execution_state,omitempty"`
-	Context         []json.RawMessage          `json:"context,omitempty"`
+	BoundaryID      string                     `json:"boundary_id,omitempty"`
 	Continuation    bool                       `json:"continuation,omitempty"`
 	Operations      map[string]operationRecord `json:"operations,omitempty"`
 	Result          json.RawMessage            `json:"result,omitempty"`
@@ -133,7 +132,7 @@ func (s *snapshot) visible(c harness.Caller) []*workRecord {
 }
 
 func publicWork(w *workRecord) agentproto.Work {
-	return agentproto.Work{WorkID: w.ID, ViewID: w.ViewID, TurnID: w.AssignmentID, State: w.State, Stage: w.Stage, Outcome: w.Outcome,
+	return agentproto.Work{WorkID: w.ID, SessionID: w.SessionID, TurnID: w.AssignmentID, State: w.State, Stage: w.Stage, Outcome: w.Outcome,
 		SourceRequest: w.SourceRequest, SubmissionKey: w.SubmissionKey, RelatedWorkID: w.RelatedWorkID, ExecutionState: w.ExecutionState,
 		CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt}
 }

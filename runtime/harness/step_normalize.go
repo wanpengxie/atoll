@@ -65,7 +65,7 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 	// substitutes `{}` when the caller omits payload so every appended row
 	// carries a valid JSON value.
 	if len(env.Payload) == 0 {
-		env.Payload = json.RawMessage("{}")
+		env.Payload = json.RawMessage(`{"_context":{},"body":{}}`)
 	}
 
 	// kind=response (provisional + final) has no independent expires_at

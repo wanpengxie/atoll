@@ -35,7 +35,7 @@ func TestDecodeSteerSeparatesDestinationWorkFromBufferedTarget(t *testing.T) {
 	if err != nil || got.WorkID != "w1" || got.Target != "request-7" {
 		t.Fatalf("steer = %+v, %v", got, err)
 	}
-	for _, raw := range []string{`{"target":"request-7"}`, `{"all":true,"work_id":"w1"}`, `{"view_id":"view:v","text":"x"}`} {
+	for _, raw := range []string{`{"target":"request-7"}`, `{"all":true,"work_id":"w1"}`, `{"text":"x"}`} {
 		if _, err := DecodeSteer([]byte(raw)); err != nil {
 			t.Fatal(err)
 		}

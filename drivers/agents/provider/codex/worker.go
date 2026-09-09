@@ -423,6 +423,7 @@ func (w *worker) afterNewResponse(attempt driverproto.AttemptToken, target drive
 
 func (w *worker) currentUsageLocked() driverproto.TurnUsage {
 	usage := w.usage
+	usage.Provider = "openai"
 	usage.Model, usage.Effort = w.options.Model, w.options.Effort
 	// An option we set on turn/start IS the actual value; when unset, the turn
 	// ran on the session defaults codex reported at thread/start|resume.

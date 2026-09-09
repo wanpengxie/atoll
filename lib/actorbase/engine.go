@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -47,6 +48,7 @@ type engine struct {
 	state     accessdoor.AccessHandle
 	sched     schedule.ScheduleHandle
 	lifecycle actorcaps.LifecycleHandle
+	view      actorcaps.LedgerView
 	hooks     Hooks
 	def       Def
 	clockFn   func() time.Time
@@ -71,6 +73,7 @@ type engine struct {
 	// Worker-confined completion candidate. Raw Proc completes it by reaching
 	// the next Recv (or returning nil); Serve settles it at handler return.
 	pendingTimer message.ID
+	contexts     sync.Map // message.ID -> harness.Context
 }
 
 // occupantState is the occupant arc (spec §1.4's Draining note): Starting →
@@ -105,6 +108,7 @@ func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
 		state:     caps.State,
 		sched:     caps.Schedule,
 		lifecycle: caps.Lifecycle,
+		view:      caps.View,
 		hooks:     hooks,
 		def:       def,
 		clockFn:   time.Now,
@@ -286,6 +290,9 @@ func (e *engine) CancelRequest(id message.ID) {
 // carries (spec §5 red line: "msgCtx 唯一权威=引擎入站账"); it is accepted
 // only to satisfy actorrt.Actor's signature.
 func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
+	if app, _, err := harness.UnwrapPayload(env.Payload); err == nil {
+		e.contexts.Store(env.ID, app)
+	}
 	switch env.Kind {
 	case message.KindResponse:
 		if !e.call.match(env) {
@@ -411,7 +418,73 @@ func (e *engine) closureFault(id message.ID, err error) {
 // alias the delivered Msg's own envelope.
 func envelopeFromMsg(m Msg) *message.Envelope {
 	env := m.Envelope
+	wrapped, err := harness.WrapPayload(m.app, env.Payload)
+	if err != nil {
+		panic("actorbase: rewrap message payload: " + err.Error())
+	}
+	env.Payload = wrapped
 	return &env
+}
+
+func (e *engine) AssignSession(msg Msg, session string) error {
+	if strings.TrimSpace(session) == "" || strings.TrimSpace(session) != session || session == "new" {
+		return errors.New("actorbase: session must be a concrete non-blank id")
+	}
+	app := msg.app
+	app.Session = session
+	e.contexts.Store(msg.ID, app)
+	return nil
+}
+
+// AssignSession invokes the framework session assignment capability without
+// widening every test double and remote Sys implementation. All production
+// actorbase engines implement it; a foreign implementation fails explicitly.
+func AssignSession(sys Sys, msg Msg, session string) error {
+	assigner, ok := sys.(interface {
+		AssignSession(Msg, string) error
+	})
+	if !ok {
+		return ErrUnsupported
+	}
+	return assigner.AssignSession(msg, session)
+}
+
+func (e *engine) contextForParent(parent message.ID) harness.Context {
+	if parent == "" {
+		return harness.Context{}
+	}
+	if value, ok := e.contexts.Load(parent); ok {
+		return value.(harness.Context)
+	}
+	return harness.Context{}
+}
+
+func applyRootSession(app harness.Context, body json.RawMessage, root bool) (harness.Context, json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		return app, body, nil
+	}
+	raw, ok := fields["session"]
+	if !ok {
+		return app, body, nil
+	}
+	var requested string
+	if json.Unmarshal(raw, &requested) != nil || strings.TrimSpace(requested) == "" || strings.TrimSpace(requested) != requested {
+		return harness.Context{}, nil, errors.New("actorbase: standard session parameter must be a non-blank string")
+	}
+	if app.Session != "" && requested != app.Session {
+		return harness.Context{}, nil, errors.New("actorbase: standard session parameter conflicts with _context.session")
+	}
+	if requested == "new" {
+		if !root {
+			return harness.Context{}, nil, errors.New("actorbase: session=new is only valid on a root request")
+		}
+		requested = "s-" + uuid.NewString()
+	}
+	app.Session = requested
+	delete(fields, "session")
+	clean, err := json.Marshal(fields)
+	return app, clean, err
 }
 
 // terminalGate answers "may a terminal be written against this Msg, and who
@@ -652,7 +725,20 @@ func (e *engine) Emit(spec behavior.EventSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	return e.writeUnregistered(env, spec.ClientFingerprint)
+	app := e.contextForParent(env.ParentID)
+	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
+	if err != nil {
+		return "", err
+	}
+	env.Payload, err = harness.WrapPayload(app, env.Payload)
+	if err != nil {
+		return "", err
+	}
+	id, err := e.writeUnregistered(env, spec.ClientFingerprint)
+	if err == nil {
+		e.contexts.Store(id, app)
+	}
+	return id, err
 }
 
 // Post writes a kind=request and stops there — no out-station entry, no
@@ -680,15 +766,24 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 		return "", err
 	}
 	spec.Audience = audience
-	spec.Payload, err = encodeRequestPayload(nil, spec.Payload)
-	if err != nil {
-		return "", err
-	}
 	env, err := behavior.BuildRequest(e.clockFn, spec)
 	if err != nil {
 		return "", err
 	}
-	return e.writeUnregistered(env, spec.ClientFingerprint)
+	app := e.contextForParent(env.ParentID)
+	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
+	if err != nil {
+		return "", err
+	}
+	env.Payload, err = encodeRequestPayload(app, env.Payload)
+	if err != nil {
+		return "", err
+	}
+	id, err := e.writeUnregistered(env, spec.ClientFingerprint)
+	if err == nil {
+		e.contexts.Store(id, app)
+	}
+	return id, err
 }
 
 // --- Sys: request write + caller closure ---------------------------------
@@ -759,11 +854,20 @@ func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (mess
 			spec.ExpiresAt = &t
 		}
 	}
-	spec.Payload, err = encodeRequestPayload(caller, spec.Payload)
+	env, err := behavior.BuildRequest(e.clockFn, spec)
 	if err != nil {
 		return "", err
 	}
-	env, err := behavior.BuildRequest(e.clockFn, spec)
+	app := e.contextForParent(env.ParentID)
+	if caller != nil {
+		copy := *caller
+		app.Caller = &copy
+	}
+	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
+	if err != nil {
+		return "", err
+	}
+	env.Payload, err = encodeRequestPayload(app, env.Payload)
 	if err != nil {
 		return "", err
 	}
@@ -780,6 +884,7 @@ func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (mess
 	if env.ExpiresAt != nil {
 		e.call.arm(env.ID, deadlineSpan(env))
 	}
+	e.contexts.Store(out.MessageID, app)
 	return out.MessageID, nil
 }
 
@@ -996,7 +1101,8 @@ func (s stateAdapter) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 func (e *engine) State() StateHandle {
 	return stateAdapter{h: e.state, ctx: e.life, validate: e.validateStatePut}
 }
-func (e *engine) Resource() ResourceHandle { return resourceAdapter{h: e.access, ctx: e.life} }
+func (e *engine) Resource() ResourceHandle   { return resourceAdapter{h: e.access, ctx: e.life} }
+func (e *engine) View() actorcaps.LedgerView { return e.view }
 
 // --- Sys: Schedule arm -----------------------------------------------------
 
@@ -1041,11 +1147,15 @@ func (e *engine) After(d time.Duration, msgType string, payload any, home schedu
 	if err != nil {
 		return "", err
 	}
+	raw, err = harness.WrapPayload(harness.Context{}, json.RawMessage(normaliseTimerPayload(raw)))
+	if err != nil {
+		return "", err
+	}
 	return e.sched.Schedule(e.lifeCtx, schedule.ScheduleReq{
 		Home:    home,
 		FireAt:  e.clockFn().Add(d).UnixMilli(),
 		Type:    msgType,
-		Payload: normaliseTimerPayload(raw),
+		Payload: raw,
 	})
 }
 

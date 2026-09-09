@@ -477,8 +477,9 @@ func (c *wsClient) awaitEnvelope(match func(map[string]any) bool, timeout time.D
 		select {
 		case item := <-c.feed:
 			envelope, _ := item["envelope"].(map[string]any)
-			if envelope != nil && match(envelope) {
-				return envelope
+			projected := projectEnvelopeBody(envelope)
+			if projected != nil && match(projected) {
+				return projected
 			}
 		case <-c.done:
 			c.t.Fatal("websocket closed while awaiting feed")
@@ -486,6 +487,33 @@ func (c *wsClient) awaitEnvelope(match func(map[string]any) bool, timeout time.D
 			c.t.Fatalf("no matching feed envelope within %s", timeout)
 		}
 	}
+}
+
+// projectEnvelopeBody keeps e2e assertions focused on the public message body
+// while the raw feed continues to expose the canonical {_context, body}
+// envelope for tests that audit propagation itself.
+func projectEnvelopeBody(envelope map[string]any) map[string]any {
+	if envelope == nil {
+		return nil
+	}
+	payload, _ := envelope["payload"].(map[string]any)
+	body, canonical := payload["body"].(map[string]any)
+	if !canonical {
+		return envelope
+	}
+	projected := make(map[string]any, len(envelope)+1)
+	for key, value := range envelope {
+		projected[key] = value
+	}
+	projected["payload"] = body
+	projected["_context"] = payload["_context"]
+	return projected
+}
+
+func envelopeBody(envelope map[string]any) map[string]any {
+	projected := projectEnvelopeBody(envelope)
+	body, _ := projected["payload"].(map[string]any)
+	return body
 }
 
 var wireRef int

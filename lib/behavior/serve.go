@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // serve.go is the SERVE face of the behaviour base: the response-envelope
@@ -79,6 +80,14 @@ func BuildResponseFromRequest(
 		return nil, fmt.Errorf("behavior: response build: nil request in hand")
 	}
 	merged, err := MergeResponsePayload(spec.Payload, spec.Status, spec.Reason)
+	if err != nil {
+		return nil, err
+	}
+	app, _, err := harness.UnwrapPayload(request.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("behavior: response request payload: %w", err)
+	}
+	merged, err = harness.WrapPayload(app, merged)
 	if err != nil {
 		return nil, err
 	}

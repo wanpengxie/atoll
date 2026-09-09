@@ -282,7 +282,7 @@ func (s *forkSys) Call(cause message.Cause, target actor.ActorID, word string, p
 	s.mu.Lock()
 	s.cause, s.target, s.word, s.payload = cause, target, word, payload
 	s.mu.Unlock()
-	terminal := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ParentID: "member-create", Payload: json.RawMessage(`{"status":"completed","member":"agent:clone-source:2"}`)})
+	terminal := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ParentID: "member-create", Payload: json.RawMessage(`{"status":"completed","member":"agent:clone-source:2"}`)})
 	return forkPending{terminal: terminal}, nil
 }
 func (s *forkSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
@@ -319,7 +319,7 @@ func (*turnControlSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { ret
 func (*turnControlSys) Self() actor.ActorID                                { return "agent:test" }
 
 func baseRequest(id, typ string) actorbase.Msg {
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "caller"}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{"body":{}}`)})
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: message.ID(id), Sender: message.Sender{ID: "caller"}, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{}`)})
 }
 
 func TestTurnEndedCarriesUsageOnlyInTerminalReply(t *testing.T) {

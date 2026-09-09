@@ -147,7 +147,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 	req := &message.Envelope{
 		ID: "req1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: callerID}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{toolID}, Payload: json.RawMessage(`{"body":{}}`),
+		Audience: message.Audience{toolID}, Payload: testPayload(`{"body":{}}`),
 		CorrelationID: "req1",
 	}
 	if res, err := c.write(ctxCallerKind(callerID, actor.KindAgent), req); err != nil || !res.Accepted() {
@@ -159,7 +159,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ID: "resp1", TS: fixedNowMs, ChannelID: testChannelID,
 		Sender: message.Sender{ID: toolID}, Kind: message.KindResponse, Type: "xhs.publish",
 		ParentID: "req1", Audience: message.Audience{callerID},
-		Payload: json.RawMessage(`{"status":"completed"}`), CorrelationID: "req1",
+		Payload: testPayload(`{"status":"completed"}`), CorrelationID: "req1",
 	}
 	res, err := c.write(ctxCallerKind(toolID, actor.KindTool), resp)
 	if err != nil || !res.Accepted() {
@@ -179,7 +179,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ID: "resp2", TS: fixedNowMs, ChannelID: testChannelID,
 		Sender: message.Sender{ID: toolID}, Kind: message.KindResponse, Type: "xhs.publish",
 		ParentID: "req1", Audience: message.Audience{callerID},
-		Payload: json.RawMessage(`{"status":"failed","reason":"receiver_internal_error"}`),
+		Payload:       testPayload(`{"status":"failed","reason":"receiver_internal_error"}`),
 		CorrelationID: "req1",
 	}
 	res2, err := c.write(ctxCallerKind(toolID, actor.KindTool), resp2)

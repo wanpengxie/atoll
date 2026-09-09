@@ -105,7 +105,7 @@ func (s *materializeSys) Recv() (actorbase.Msg, error) {
 func (s *materializeSys) Call(_ message.Cause, _ actor.ActorID, _ string, _ any) (actorbase.Pending, error) {
 	s.calls++
 	env := message.Envelope{Payload: json.RawMessage(`{"status":"completed","class":"echo","interfaces":["actor"],"capabilities":{},"words":{"echo.say":{"description":"live echo"},"echo.alt":{"description":"live alternate"}}}`)}
-	return svcPending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
+	return svcPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
 }
 
 func (s *svcSys) Reply(_ actorbase.Msg, value any) (message.ID, error) {
@@ -131,7 +131,7 @@ func (s *svcSys) CallFor(_ message.Cause, caller harness.Caller, target actor.Ac
 		return nil, s.callErr
 	}
 	env := message.Envelope{ID: "terminal", ParentID: "local-request", Payload: json.RawMessage(`{"status":"completed","value":{"ok":true}}`)}
-	return svcPending{msg: actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
+	return svcPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), env)}, nil
 }
 
 func serviceDeps(self channel.ID) Deps {
@@ -441,9 +441,9 @@ func TestServiceSetPublishesTableAndCardOnlyAfterOneSuccessfulWrite(t *testing.T
 	state.putErr = errors.New("disk full")
 	s := &service{deps: serviceDeps("target"), table: cloneTable(oldTable), card: cloneCard(oldCard)}
 	sys := &svcSys{state: state}
-	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "set", ChannelID: "target", Kind: message.KindRequest, Type: "svcactor.set",
-		Sender: message.Sender{ID: "agent:owner:1"}, Payload: json.RawMessage(`{"body":{"svc_agent":null,"endpoints":{}}}`),
+		Sender: message.Sender{ID: "agent:owner:1"}, Payload: json.RawMessage(`{"svc_agent":null,"endpoints":{}}`),
 	})
 	s.handleMailbox(sys, msg)
 	if sys.fail != "internal_error" || state.puts != 1 || string(state.values[ServiceStateKey]) != string(before) {
@@ -482,9 +482,9 @@ func TestServiceSetPublishesTableAndCardOnlyAfterOneSuccessfulWrite(t *testing.T
 func TestC0ServiceTableIsEmptyAndImmutable(t *testing.T) {
 	s := &service{deps: serviceDeps("c0"), table: emptyTable()}
 	request := func(word string, payload string) actorbase.Msg {
-		return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+		return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 			ID: message.ID(word), ChannelID: "c0", Kind: message.KindRequest, Type: word,
-			Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:steward:1"}, Payload: json.RawMessage(`{"body":` + payload + `}`),
+			Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:steward:1"}, Payload: json.RawMessage(payload),
 		})
 	}
 	getSys := &svcSys{}
@@ -503,9 +503,9 @@ func TestC0ServiceTableIsEmptyAndImmutable(t *testing.T) {
 func TestServiceMailboxRejectsUnknownFieldsImmediately(t *testing.T) {
 	s := &service{deps: serviceDeps("target"), table: emptyTable(), card: channel.Card{Words: map[string]json.RawMessage{}}}
 	sys := &svcSys{}
-	msg := actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
+	msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "get", ChannelID: "target", Kind: message.KindRequest, Type: "svcactor.get",
-		Sender: message.Sender{ID: "agent:member:1"}, Payload: json.RawMessage(`{"body":{"extra":true}}`),
+		Sender: message.Sender{ID: "agent:member:1"}, Payload: json.RawMessage(`{"extra":true}`),
 	})
 	s.handleMailbox(sys, msg)
 	if sys.reply != nil || sys.fail != "invalid_args" {
@@ -582,7 +582,7 @@ func (p blockedPending) Wait(ctx context.Context, _ time.Duration) (actorbase.Ms
 		return actorbase.Msg{}, ctx.Err()
 	}
 	env := message.Envelope{Payload: json.RawMessage(`{"status":"completed","ok":true}`)}
-	return actorbase.NewMsg(actorbase.OriginMailbox, context.Background(), env), nil
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), env), nil
 }
 func (blockedPending) Cancel() error { return nil }
 

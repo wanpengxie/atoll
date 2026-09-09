@@ -58,6 +58,7 @@ func TestBuiltEnvelopesCarryTheCausesDerivation(t *testing.T) {
 	// A response's cause is never in doubt, and it goes through the same
 	// derivation rather than a second copy of it.
 	child.Sender.ID = "agent:demo:1"
+	child.Payload = behaviorTestPayload(`{}`)
 	answer, err := BuildResponseFromRequest(child, causeClock(), ResponseSpec{Status: message.StatusCompleted})
 	if err != nil {
 		t.Fatalf("BuildResponseFromRequest: %v", err)

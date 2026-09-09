@@ -58,7 +58,7 @@ func (s *schedulerTestSys) Fail(msg actorbase.Msg, code, _ string, _ ...map[stri
 }
 
 func schedulerMsg(ctx context.Context, id message.ID, typ string) actorbase.Msg {
-	return actorbase.NewMsg(actorbase.OriginMailbox, ctx, message.Envelope{ID: id, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{"body":{}}`)})
+	return actorbase.NewBodyMsg(actorbase.OriginMailbox, ctx, message.Envelope{ID: id, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{}`)})
 }
 
 func TestSchedulerOverlapsReadsAndKeepsWritesFIFO(t *testing.T) {

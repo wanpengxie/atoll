@@ -1,21 +1,24 @@
 package native
 
 import (
+	"context"
 	"encoding/json"
+	"testing"
+	"time"
+
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"testing"
-	"time"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func controlFixture(t *testing.T) (*testSys, *controller, *workRecord) {
 	t.Helper()
 	sys := newTestSys(newTestState())
 	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 32, MaxTurns: 4, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxAssignmentsPerLooper: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "first", "view_id": "view:v", "delivery": "receipt", "submission_key": "one"}))
+	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "first", "session_id": "session:v", "delivery": "receipt", "submission_key": "one"}))
 	w := c.data.Works[c.data.Order[0]]
-	c.handleReport(sys, testReport("accepted", "tool:loop-a:9", agentloop.ReportRequest{ViewID: w.ViewID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "accepted"}))
+	w.Stage, w.ExecutionState = "thinking", "confirmed_running"
 	return sys, c, w
 }
 func drainControl(t *testing.T, sys *testSys) {
@@ -38,7 +41,7 @@ func admitControl(t *testing.T, sys *testSys, c *controller, s *session) agentlo
 }
 func TestSteerTransfersOwnerOnceAndReportBeforeAck(t *testing.T) {
 	sys, c, old := controlFixture(t)
-	s := c.sessions[old.ViewID]
+	s := c.sessions[old.SessionID]
 	execution := s.Execution
 	c.steer(sys, testRequest("steer", agentproto.TypeSteer, map[string]any{"work_id": old.ID, "text": "second", "expected_turn_id": execution, "operation_key": "op"}))
 	if s.Owner != old.ID || sys.replies["steer"] != nil {
@@ -47,7 +50,8 @@ func TestSteerTransfersOwnerOnceAndReportBeforeAck(t *testing.T) {
 	drainControl(t, sys)
 	pc := s.Control
 	d := agentloop.ControlResult{ControlID: pc.ID, Disposition: "accepted", Inputs: pc.Request.Inputs}
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{ViewID: s.ID, WorkID: old.ID, AssignmentID: execution, Controls: []agentloop.ControlResult{d}, State: "completed", ConsumedThrough: 2, Result: json.RawMessage(`{"text":"done"}`)}))
+	c.settleControl(sys, s, d, false)
+	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, TurnID: execution, State: "completed"}))
 	next := c.data.Works[string(pc.Targets[0])]
 	if old.State != agentproto.WorkClosed || next.Outcome != agentproto.OutcomeCompleted || next.AssignmentID != execution || s.Control != nil {
 		t.Fatalf("ownership old=%+v new=%+v", old, next)
@@ -63,12 +67,12 @@ func TestSteerTransfersOwnerOnceAndReportBeforeAck(t *testing.T) {
 }
 func TestSteerRejectionRestoresOriginalQueueOrder(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
+	s := c.sessions[w.SessionID]
 	for _, id := range []string{"a", "b", "c"} {
-		c.handleAsk(sys, testRequest(id, agentproto.TypeAsk, map[string]any{"text": id, "view_id": s.ID, "delivery": "receipt", "submission_key": id}))
+		c.handleAsk(sys, testRequest(id, agentproto.TypeAsk, map[string]any{"text": id, "session_id": s.ID, "delivery": "receipt", "submission_key": id}))
 	}
 	original := append([]agentproto.WorkID(nil), s.Buffer...)
-	c.steer(sys, testRequest("all", agentproto.TypeSteer, map[string]any{"view_id": s.ID, "all": true}))
+	c.steer(sys, testRequest("all", agentproto.TypeSteer, map[string]any{"session_id": s.ID, "all": true}))
 	drainControl(t, sys)
 	c.settleControl(sys, s, agentloop.ControlResult{ControlID: s.Control.ID, Disposition: "target_gone"}, false)
 	if string(mustJSON(original)) != string(mustJSON(s.Buffer)) {
@@ -77,11 +81,11 @@ func TestSteerRejectionRestoresOriginalQueueOrder(t *testing.T) {
 }
 func TestSteerAllOnlyIncludesCallerAndView(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
-	c.handleAsk(sys, testRequest("a", agentproto.TypeAsk, map[string]any{"text": "alice", "view_id": s.ID}))
-	c.handleAsk(sys, testRequestFrom("b", agentproto.TypeAsk, "c", "human:bob:1", map[string]any{"text": "bob", "view_id": s.ID}))
-	c.handleAsk(sys, testRequest("other", agentproto.TypeAsk, map[string]any{"text": "other", "view_id": "view:other"}))
-	c.steer(sys, testRequest("all", agentproto.TypeSteer, map[string]any{"view_id": s.ID, "all": true}))
+	s := c.sessions[w.SessionID]
+	c.handleAsk(sys, testRequest("a", agentproto.TypeAsk, map[string]any{"text": "alice", "session_id": s.ID}))
+	c.handleAsk(sys, testRequestFrom("b", agentproto.TypeAsk, "c", "human:bob:1", map[string]any{"text": "bob", "session_id": s.ID}))
+	c.handleAsk(sys, testRequest("other", agentproto.TypeAsk, map[string]any{"text": "other", "session_id": "view:other"}))
+	c.steer(sys, testRequest("all", agentproto.TypeSteer, map[string]any{"session_id": s.ID, "all": true}))
 	drainControl(t, sys)
 	if len(s.Control.Targets) != 1 || c.data.Works[string(s.Control.Targets[0])].SourceRequest != "a" || len(s.Buffer) != 1 {
 		t.Fatal("steer swept other caller or view")
@@ -90,8 +94,8 @@ func TestSteerAllOnlyIncludesCallerAndView(t *testing.T) {
 }
 func TestViewControlsFreezeCASAndReplacementIdentity(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
-	c.handleAsk(sys, testRequest("queued", agentproto.TypeAsk, map[string]any{"text": "old", "view_id": s.ID}))
+	s := c.sessions[w.SessionID]
+	c.handleAsk(sys, testRequest("queued", agentproto.TypeAsk, map[string]any{"text": "old", "session_id": s.ID}))
 	c.editControl(sys, testRequestFrom("edit", agentproto.TypeReplace, "c", "human:bob:1", map[string]any{"target": "queued", "old_text": "old", "new_text": "new"}))
 	replacement := c.data.Works[string(s.Buffer[0])]
 	if replacement.Owner.Actor != "human:bob:1" || replacement.Inputs[0].CallerActor != replacement.Owner.Actor || c.requestWork("queued").State != agentproto.WorkClosed {
@@ -102,29 +106,29 @@ func TestViewControlsFreezeCASAndReplacementIdentity(t *testing.T) {
 		t.Fatal("CAS missing")
 	}
 	s.Freeze = "interrupt"
-	c.editControl(sys, testRequest("unhold", agentproto.TypeUnhold, map[string]any{"view_id": s.ID}))
+	c.editControl(sys, testRequest("unhold", agentproto.TypeUnhold, map[string]any{"session_id": s.ID}))
 	if s.Freeze != "interrupt" {
 		t.Fatal("unhold cleared interrupt")
 	}
-	c.editControl(sys, testRequest("hold", agentproto.TypeHold, map[string]any{"view_id": s.ID}))
-	c.editControl(sys, testRequest("release", agentproto.TypeUnhold, map[string]any{"view_id": s.ID}))
+	c.editControl(sys, testRequest("hold", agentproto.TypeHold, map[string]any{"session_id": s.ID}))
+	c.editControl(sys, testRequest("release", agentproto.TypeUnhold, map[string]any{"session_id": s.ID}))
 	if s.Freeze != "interrupt" {
 		t.Fatal("prior interrupt not restored")
 	}
-	c.handleAsk(sys, testRequest("resume", agentproto.TypeAsk, map[string]any{"text": "continue", "view_id": s.ID}))
+	c.handleAsk(sys, testRequest("resume", agentproto.TypeAsk, map[string]any{"text": "continue", "session_id": s.ID}))
 	if s.Freeze != "" {
 		t.Fatal("ask did not release freeze")
 	}
 }
 func TestHoldOwnerRequeuesOnlyAfterExecutionStops(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
+	s := c.sessions[w.SessionID]
 	execution := s.Execution
 	c.editControl(sys, testRequest("hold", agentproto.TypeHold, map[string]any{"target": "q"}))
 	if len(s.Buffer) != 0 || !s.Rebuffer || w.Stage != "stopping" {
 		t.Fatal("owner requeued before stopping")
 	}
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{ViewID: s.ID, WorkID: w.ID, AssignmentID: execution, State: "cancelled", ConsumedThrough: 1, History: []json.RawMessage{json.RawMessage(`{"role":"user","content":"first"}`)}}))
+	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, WorkID: w.ID, AssignmentID: execution, State: "cancelled", ConsumedThrough: 1, History: []json.RawMessage{json.RawMessage(`{"role":"user","content":"first"}`)}}))
 	if len(s.Buffer) != 1 || s.Execution != "" || !w.Resumed || s.Freeze != "hold" {
 		t.Fatal("hold did not preserve frozen editable owner")
 	}
@@ -135,15 +139,15 @@ func TestHoldOwnerRequeuesOnlyAfterExecutionStops(t *testing.T) {
 }
 func TestControlScopeConflictAndQueuedInterruptIsolation(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
-	c.handleAsk(sys, testRequest("queued", agentproto.TypeAsk, map[string]any{"text": "later", "view_id": s.ID}))
+	s := c.sessions[w.SessionID]
+	c.handleAsk(sys, testRequest("queued", agentproto.TypeAsk, map[string]any{"text": "later", "session_id": s.ID}))
 	queued := c.requestWork("queued")
-	c.handleAsk(sys, testRequest("other", agentproto.TypeAsk, map[string]any{"text": "other", "view_id": "view:other"}))
+	c.handleAsk(sys, testRequest("other", agentproto.TypeAsk, map[string]any{"text": "other", "session_id": "view:other"}))
 	c.editControl(sys, testRequest("ambiguous", agentproto.TypeHold, map[string]any{}))
 	if sys.fails["ambiguous"] != "scope_required" {
 		t.Fatal("ambiguous scope guessed")
 	}
-	c.steer(sys, testRequest("missing", agentproto.TypeSteer, map[string]any{"view_id": s.ID, "target": "missing"}))
+	c.steer(sys, testRequest("missing", agentproto.TypeSteer, map[string]any{"session_id": s.ID, "target": "missing"}))
 	if sys.fails["missing"] != "work_not_found" {
 		t.Fatal("view hid invalid target")
 	}
@@ -151,8 +155,8 @@ func TestControlScopeConflictAndQueuedInterruptIsolation(t *testing.T) {
 	if queued.State != agentproto.WorkClosed || w.Stage == "stopping" || s.Freeze != "" {
 		t.Fatal("queued cancellation stopped executing owner")
 	}
-	c.editControl(sys, testRequestFrom("foreign", agentproto.TypeHold, "elsewhere", "human:alice:1", map[string]any{"view_id": s.ID}))
-	if sys.fails["foreign"] != "view_not_found" {
+	c.editControl(sys, testRequestFrom("foreign", agentproto.TypeHold, "elsewhere", "human:alice:1", map[string]any{"session_id": s.ID}))
+	if sys.fails["foreign"] != "session_not_found" {
 		t.Fatal("cross-channel control allowed")
 	}
 }
@@ -160,7 +164,7 @@ func TestSteerLimitsSurviveOwnerTransfer(t *testing.T) {
 	sys, c, w := controlFixture(t)
 	c.cfg.MaxInputsPerWork = 2
 	c.cfg.MaxOperationKeys = 1
-	s := c.sessions[w.ViewID]
+	s := c.sessions[w.SessionID]
 	c.steer(sys, testRequest("steer", agentproto.TypeSteer, map[string]any{"work_id": w.ID, "text": "second", "operation_key": "op"}))
 	admitControl(t, sys, c, s)
 	c.steer(sys, testRequest("extra", agentproto.TypeSteer, map[string]any{"work_id": s.Owner, "text": "third"}))
@@ -176,7 +180,7 @@ func TestSteerLimitsSurviveOwnerTransfer(t *testing.T) {
 func TestMissingViewDoesNotCreateIndependentSession(t *testing.T) {
 	sys, c, _ := controlFixture(t)
 	msg := testRequest("unscoped", agentproto.TypeAsk, map[string]any{"text": "new"})
-	msg.Payload = json.RawMessage(`{"text":"new"}`)
+	msg = actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{}, msg.Envelope)
 	before := len(c.sessions)
 	c.handleAsk(sys, msg)
 	if sys.fails["unscoped"] != "scope_required" || len(c.sessions) != before {
@@ -185,11 +189,11 @@ func TestMissingViewDoesNotCreateIndependentSession(t *testing.T) {
 }
 func TestIdleTargetSteerUnfreezesAndPreservesOperationReceipt(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
+	s := c.sessions[w.SessionID]
 	c.cfg.MaxAssignmentsPerLooper = 1
-	c.handleAsk(sys, testRequest("later", agentproto.TypeAsk, map[string]any{"text": "later", "view_id": s.ID, "delivery": "receipt", "submission_key": "later"}))
+	c.handleAsk(sys, testRequest("later", agentproto.TypeAsk, map[string]any{"text": "later", "session_id": s.ID, "delivery": "receipt", "submission_key": "later"}))
 	s.Freeze = "hold"
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{ViewID: s.ID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
+	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
 	body := map[string]any{"target": "later", "operation_key": "prioritize"}
 	c.steer(sys, testRequest("pick", agentproto.TypeSteer, body))
 	if s.Execution == "" || s.Freeze != "" || sys.replies["pick"] == nil {
@@ -203,11 +207,11 @@ func TestIdleTargetSteerUnfreezesAndPreservesOperationReceipt(t *testing.T) {
 }
 func TestPendingControlDoesNotBlockAnotherView(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
-	c.steer(sys, testRequest("steer", agentproto.TypeSteer, map[string]any{"view_id": s.ID, "text": "wait"}))
+	s := c.sessions[w.SessionID]
+	c.steer(sys, testRequest("steer", agentproto.TypeSteer, map[string]any{"session_id": s.ID, "text": "wait"}))
 	drainControl(t, sys)
 	for _, id := range []string{"b", "c", "d"} {
-		c.handleAsk(sys, testRequest(id, agentproto.TypeAsk, map[string]any{"view_id": "view:" + id, "text": id, "delivery": "receipt", "submission_key": id}))
+		c.handleAsk(sys, testRequest(id, agentproto.TypeAsk, map[string]any{"session_id": "view:" + id, "text": id, "delivery": "receipt", "submission_key": id}))
 	}
 	for _, id := range []string{"b", "c", "d"} {
 		if c.sessions["view:"+id].Execution == "" {
@@ -218,8 +222,8 @@ func TestPendingControlDoesNotBlockAnotherView(t *testing.T) {
 }
 func TestUnknownControlIsNotAutomaticallyRequeued(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
-	c.handleAsk(sys, testRequest("waiting", agentproto.TypeAsk, map[string]any{"view_id": s.ID, "text": "later"}))
+	s := c.sessions[w.SessionID]
+	c.handleAsk(sys, testRequest("waiting", agentproto.TypeAsk, map[string]any{"session_id": s.ID, "text": "later"}))
 	c.steer(sys, testRequest("target", agentproto.TypeSteer, map[string]any{"target": "waiting"}))
 	drainControl(t, sys)
 	c.settleControl(sys, s, agentloop.ControlResult{ControlID: s.Control.ID}, true)
@@ -230,9 +234,9 @@ func TestUnknownControlIsNotAutomaticallyRequeued(t *testing.T) {
 
 func TestAgentInterruptCancelsAllBufferedWorksWithoutSkipping(t *testing.T) {
 	sys, c, w := controlFixture(t)
-	s := c.sessions[w.ViewID]
+	s := c.sessions[w.SessionID]
 	for _, id := range []string{"a", "b", "c", "d"} {
-		c.handleAsk(sys, testRequest(id, agentproto.TypeAsk, map[string]any{"text": id, "view_id": s.ID, "delivery": "receipt", "submission_key": id}))
+		c.handleAsk(sys, testRequest(id, agentproto.TypeAsk, map[string]any{"text": id, "session_id": s.ID, "delivery": "receipt", "submission_key": id}))
 	}
 	c.handleInterrupt(sys, testRequest("all", agentproto.TypeInterrupt, map[string]any{}))
 	for _, id := range []string{"a", "b", "c", "d"} {

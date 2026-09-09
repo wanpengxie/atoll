@@ -73,7 +73,7 @@ func TestMaterialise_WritesPerRequest(t *testing.T) {
 			Status string `json:"status"`
 			Reason string `json:"reason"`
 		}
-		_ = json.Unmarshal(term.Payload, &p)
+		_ = json.Unmarshal(behaviorTestBody(term.Payload), &p)
 		if p.Status != "failed" || p.Reason != string(message.TerminalReceiverUnavailable) {
 			t.Fatalf("terminal payload = %+v, want failed/receiver_unavailable", p)
 		}

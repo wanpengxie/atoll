@@ -44,19 +44,12 @@ func DecodeStrictEmpty(raw json.RawMessage, out any) error {
 	return DecodeStrict(raw, out)
 }
 
-func encodeRequestPayload(caller *harness.Caller, args any) (json.RawMessage, error) {
+func encodeRequestPayload(ctx harness.Context, args any) (json.RawMessage, error) {
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
 	}
-	wrapped := struct {
-		Context *harness.Context `json:"_context,omitempty"`
-		Body    json.RawMessage  `json:"body"`
-	}{Body: raw}
-	if caller != nil {
-		wrapped.Context = &harness.Context{Caller: *caller}
-	}
-	return json.Marshal(wrapped)
+	return harness.WrapPayload(ctx, raw)
 }
 
 type TargetResolveError struct {

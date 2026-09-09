@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -136,10 +137,12 @@ func queryLogPage(ctx context.Context, reader storespec.VisibleExchangeQuery, q 
 // returned for context, and is not claimed to satisfy the filters itself.
 func logQueryMatches(row storespec.StoredRow, text, needle string, q channelspec.LogQueryRequest) bool {
 	e := row.Envelope
+	app, _, _ := harness.UnwrapPayload(e.Payload)
 	return (q.Sender == "" || string(e.Sender.ID) == q.Sender) &&
 		(q.Participant == "" || string(e.Sender.ID) == q.Participant || slices.Contains(e.Audience, actor.ActorID(q.Participant))) &&
 		(q.SenderKind == "" || string(e.Sender.Kind) == q.SenderKind) &&
 		(q.MessageType == "" || e.Type == q.MessageType) &&
+		(q.SessionID == "" || app.Session == q.SessionID) &&
 		(q.FromTS == 0 || e.TSReceived >= q.FromTS) &&
 		(q.ToTS == 0 || e.TSReceived < q.ToTS) &&
 		(needle == "" || strings.Contains(strings.ToLower(text), needle))
