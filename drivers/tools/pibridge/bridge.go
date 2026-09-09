@@ -24,23 +24,26 @@ import (
 	"github.com/google/uuid"
 )
 
-const Version = "pi-0.85.1-atoll-v6"
-const BundleSHA256 = "40be48a7a6c52d922434b71314dd1a864b56bc98f6c9be00698d7683fdc89dbf"
+const Version = "pi-0.85.1-atoll-v7"
+const BundleSHA256 = "44bc11f2de52ac461acf765779717793bf5c844559101647513f329887e45c28"
 const maxBridgeFrameBytes = 24 << 20
 
 //go:embed bridge.mjs
 var source []byte
 
 type frame struct {
-	ID       string          `json:"id,omitempty"`
-	Kind     string          `json:"kind"`
-	Code     string          `json:"code,omitempty"`
-	Detail   string          `json:"detail,omitempty"`
-	Value    json.RawMessage `json:"value,omitempty"`
-	Event    json.RawMessage `json:"event,omitempty"`
-	Protocol int             `json:"protocol,omitempty"`
-	Node     string          `json:"node,omitempty"`
-	Pi       string          `json:"pi,omitempty"`
+	Status       int             `json:"status,omitempty"`
+	ProviderCode string          `json:"provider_code,omitempty"`
+	RetryAfterMS int64           `json:"retry_after_ms,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	Kind         string          `json:"kind"`
+	Code         string          `json:"code,omitempty"`
+	Detail       string          `json:"detail,omitempty"`
+	Value        json.RawMessage `json:"value,omitempty"`
+	Event        json.RawMessage `json:"event,omitempty"`
+	Protocol     int             `json:"protocol,omitempty"`
+	Node         string          `json:"node,omitempty"`
+	Pi           string          `json:"pi,omitempty"`
 }
 
 type call struct {
@@ -354,7 +357,7 @@ func (b *Bridge) Call(ctx context.Context, op string, args any, cwd string, prog
 				if f.Code == "cancelled" {
 					return nil, context.Canceled
 				}
-				return nil, &Error{Code: f.Code, Detail: f.Detail}
+				return nil, &Error{Code: f.Code, Detail: f.Detail, Status: f.Status, ProviderCode: f.ProviderCode, RetryAfterMS: f.RetryAfterMS}
 			}
 		case <-ctx.Done():
 			_ = b.write(map[string]any{"id": id, "kind": "cancel"})
@@ -371,7 +374,12 @@ func (b *Bridge) terminalError() error {
 	return b.err
 }
 
-type Error struct{ Code, Detail string }
+type Error struct {
+	Code, Detail string
+	Status       int
+	ProviderCode string
+	RetryAfterMS int64
+}
 
 func (e *Error) Error() string {
 	if e.Detail == "" {

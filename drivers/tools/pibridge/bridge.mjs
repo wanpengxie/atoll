@@ -47984,10 +47984,10 @@ var require_oauth2common = __commonJS({
     };
     exports.OAuthClientAuthHandler = OAuthClientAuthHandler;
     function getErrorFromOAuthErrorResponse(resp, err2) {
-      const errorCode = resp.error;
+      const errorCode2 = resp.error;
       const errorDescription = resp.error_description;
       const errorUri = resp.error_uri;
-      let message = `Error code ${errorCode}`;
+      let message = `Error code ${errorCode2}`;
       if (typeof errorDescription !== "undefined") {
         message += `: ${errorDescription}`;
       }
@@ -52488,14 +52488,14 @@ var require_receiver = __commonJS({
        * @return {(Error|RangeError)} The error
        * @private
        */
-      createError(ErrorCtor, message, prefix, statusCode, errorCode) {
+      createError(ErrorCtor, message, prefix, statusCode, errorCode2) {
         this._loop = false;
         this._errored = true;
         const err2 = new ErrorCtor(
           prefix ? `Invalid WebSocket frame: ${message}` : message
         );
         Error.captureStackTrace(err2, this.createError);
-        err2.code = errorCode;
+        err2.code = errorCode2;
         err2[kStatusCode] = statusCode;
         return err2;
       }
@@ -116348,13 +116348,57 @@ function codingTools(cwd) {
 function send(frame) {
   process.stdout.write(JSON.stringify(frame) + "\n");
 }
+var BridgeValidationError = class extends Error {
+};
+async function errorCode(response) {
+  const reader = response.clone().body?.getReader();
+  if (!reader) return void 0;
+  const chunks = [];
+  let length = 0;
+  try {
+    for (; ; ) {
+      const part = await reader.read();
+      if (part.done) break;
+      length += part.value.byteLength;
+      if (length > 65536) {
+        void reader.cancel();
+        return void 0;
+      }
+      chunks.push(part.value);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const value2 = body?.error?.code ?? body?.error?.type ?? body?.code;
+    return typeof value2 === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(value2) ? value2 : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function failure(id, op, error) {
   const e2 = error instanceof Error ? error : new Error(String(error));
   let code = op.startsWith("workspace.") ? "tool_failed" : "provider_error";
   if (e2.name === "AbortError") code = "cancelled";
   else if (e2.message.startsWith("unknown or ambiguous model")) code = "model_not_found";
   else if (e2.message.startsWith("Validation failed for tool")) code = "invalid_args";
-  send({ id, kind: "error", code, detail: e2.message });
+  if (op === "llm.generate") {
+    const info = error;
+    const status = Number.isInteger(info?.status) ? info.status : void 0;
+    if (code === "provider_error") {
+      code = status === 429 ? "rate_limited" : status === 401 ? "auth" : status === 403 ? "permission" : status === 404 ? "model_not_found" : status === 400 || status === 422 ? "invalid_args" : status === 408 || status === 409 || status && status >= 500 ? "transient_provider" : "unknown_provider_error";
+      if (info?.code === "transport_error") code = "transport_error";
+      if (info?.code === "cancelled") code = "cancelled";
+    }
+    if (error instanceof BridgeValidationError) code = "invalid_args";
+    const providerCode = typeof info?.code === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(info.code) ? info.code : void 0;
+    send({
+      id,
+      kind: "error",
+      code,
+      status,
+      provider_code: providerCode,
+      retry_after_ms: info?.retryAfterMS,
+      detail: error instanceof BridgeValidationError ? error.message : `Provider request failed (${code}); raw provider text is not exposed`
+    });
+  } else send({ id, kind: "error", code, detail: e2.message });
 }
 function resolveModel(provider, modelId) {
   let p = typeof provider === "string" ? provider : "";
@@ -116372,11 +116416,11 @@ async function generate2(id, args, controller) {
   if (!model) throw new Error(`unknown or ambiguous model ${args.provider || ""}/${args.model || ""}`);
   const images = (args.messages || []).flatMap((message2) => Array.isArray(message2?.content) ? message2.content : []).filter((block) => block?.type === "image");
   if (images.length > 0 && (!model.input?.includes("image") || args.options?.faux_supports_images === false)) {
-    throw new Error(`model ${model.provider}/${model.id} does not support image input`);
+    throw new BridgeValidationError("model does not support image input");
   }
   for (const image of images) {
     if (typeof image.data !== "string" || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data) || Buffer.from(image.data, "base64").byteLength > 10 * 1024 * 1024 || typeof image.mimeType !== "string" || !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(image.mimeType)) {
-      throw new Error("tool image is invalid, unsupported, or exceeds the 10 MiB decoded limit");
+      throw new BridgeValidationError("tool image is invalid, unsupported, or exceeds the 10 MiB decoded limit");
     }
   }
   if (model.provider === "faux") {
@@ -116391,19 +116435,43 @@ async function generate2(id, args, controller) {
     }
   }
   const context = { systemPrompt: args.system_prompt || "", messages: args.messages || [], tools: args.tools || [] };
-  const options = { ...args.options || {}, signal: controller.signal };
+  const options = { ...args.options || {}, signal: controller.signal, maxRetries: 0 };
+  let failureInfo;
+  if (["anthropic-messages", "openai-completions", "openai-responses"].includes(model.api)) {
+    options.fetch = async (...params) => {
+      try {
+        const response = await fetch(...params);
+        if (!response.ok) {
+          const milliseconds = response.headers.get("retry-after-ms");
+          const after = response.headers.get("retry-after");
+          let delay = milliseconds ? Number(milliseconds) : after ? Number.isFinite(Number(after)) ? Number(after) * 1e3 : Date.parse(after) - Date.now() : void 0;
+          if (delay !== void 0 && (!Number.isFinite(delay) || delay < 0)) delay = void 0;
+          failureInfo = { status: response.status, retryAfterMS: delay === void 0 ? void 0 : Math.ceil(delay), code: await errorCode(response) };
+        }
+        return response;
+      } catch (error) {
+        failureInfo = { code: controller.signal.aborted ? "cancelled" : "transport_error" };
+        throw error;
+      }
+    };
+  }
   if (typeof args.api_key === "string" && args.api_key) options.apiKey = args.api_key;
   delete options.faux_response;
   delete options.faux_tool_call;
   delete options.faux_supports_images;
   const stream11 = models.streamSimple(model, context, options);
-  const events = [];
-  for await (const event of stream11) {
-    events.push(event);
-    send({ id, kind: "progress", event });
+  send({ id, kind: "progress", event: { phase: "provider_wait" } });
+  for await (const _event of stream11) {
   }
   const message = await stream11.result();
-  send({ id, kind: "result", value: { provider: model.provider, model: model.id, message, events } });
+  if (message.stopReason === "error" || message.stopReason === "aborted") {
+    throw Object.assign(
+      new Error("provider did not deliver a successful assistant"),
+      failureInfo || {},
+      message.stopReason === "aborted" ? { code: "cancelled" } : {}
+    );
+  }
+  send({ id, kind: "result", value: { provider: model.provider, model: model.id, message } });
 }
 function executionEnv(cwd) {
   let env = envs.get(cwd);

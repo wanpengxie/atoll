@@ -22,6 +22,7 @@ type GenerateRequest struct {
 }
 
 type GenerateResponse struct {
+	Attempts int               `json:"attempts,omitempty"`
 	Message  json.RawMessage   `json:"message"`
 	Events   []json.RawMessage `json:"events,omitempty"`
 	Provider string            `json:"provider"`

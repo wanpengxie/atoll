@@ -8,9 +8,9 @@ by `bridge.go`. Actor startup never runs npm and never downloads `latest`.
 - packages: `@earendil-works/pi-ai` and `@earendil-works/pi-agent-core` 0.85.1
 - package lock: the `package-lock.json` at that commit
 - bundler: esbuild 0.28.1
-- output SHA-256: `40be48a7a6c52d922434b71314dd1a864b56bc98f6c9be00698d7683fdc89dbf`
+- output SHA-256: `44bc11f2de52ac461acf765779717793bf5c844559101647513f329887e45c28`
 - runtime prerequisite: Node.js >= 22.19.0; startup verifies the version
-- Atoll bridge revision: v6 (grep/find/ls and conditional PowerShell tools, image-input validation, plus the v5 provider/runtime policies and fixtures)
+- Atoll bridge revision: v7 (v6 tools retained; bounded provider error metadata, SDK retries disabled, final-only model content without accumulated token events)
 - upstream license: MIT; see `PI_LICENSE.txt`
 
 The auditable source boundary is `bridge.ts`. From a clean pinned Pi checkout
@@ -34,5 +34,13 @@ root also bundles its session, UI, and extension entry points, which are not
 part of this bridge.
 
 Then compare the digest and run `go test ./drivers/tools/pibridge -count=1`.
+
+Offline converter contracts can be run with
+`node --test drivers/tools/pibridge/provider_contract.test.mjs` from the Atoll
+repository with the pinned sibling Pi checkout built. These use `onPayload`
+capture before any network request. HTTP error capture uses the pinned
+Anthropic/OpenAI adapters' per-request fetch; Google adapters reject custom
+fetch and currently return conservative unknown errors if Pi erases their
+structured status. Unknown errors are not retried by string matching.
 Changing the source commit, dependency graph, bridge protocol, or bundle
 requires a new `Version` in `bridge.go` and a new recorded digest.
