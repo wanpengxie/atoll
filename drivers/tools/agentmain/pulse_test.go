@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -48,12 +49,20 @@ func (s *pulseTestSys) After(d time.Duration, typ string, _ any, home schedule.T
 	}
 	return schedule.TimerID(fmt.Sprintf("pulse-%d", s.arms)), nil
 }
-func (s *pulseTestSys) Call(_ message.Cause, target actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
-	if target != actor.SystemActorID || typ != message.TypeSystemLogQuery {
-		return nil, fmt.Errorf("unexpected call %s", typ)
-	}
-	s.scans++
-	return pulsePending{}, nil
+
+type mainTestView struct {
+	actorcaps.LedgerView
+	read func(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error)
+}
+
+func (v mainTestView) Read(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+	return v.read(ctx, q)
+}
+func (s *pulseTestSys) View() actorcaps.LedgerView {
+	return mainTestView{read: func(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		s.scans++
+		return actorcaps.LedgerSnapshot{}, nil
+	}}
 }
 
 type pulseResource struct{ actorbase.ResourceHandle }
@@ -62,11 +71,6 @@ func (pulseResource) Read(resource.ResourceID) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{Found: true, Value: []byte(`{"messages":[]}`)}, nil
 }
 
-type pulsePending struct{ actorbase.Pending }
-
-func (pulsePending) Wait(context.Context, time.Duration) (actorbase.Msg, error) {
-	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: []byte(`{"status":"completed","turns":[]}`)}), nil
-}
 func mainPulseEvent(sender actor.ActorID, typ string) actorbase.Msg {
 	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{
 		ID: "timer-event", Kind: message.KindEvent, Type: typ, Sender: message.Sender{ID: sender}, Payload: []byte(`{}`),

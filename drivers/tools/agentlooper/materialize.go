@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 
 	agentbase "github.com/wanpengxie/atoll/drivers/agents/base"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
@@ -13,6 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
@@ -65,35 +65,39 @@ func validSessionBoundary(ctx context.Context, sys actorbase.Sys, cause message.
 	return false, nil
 }
 
-func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string, upto message.ID, seen map[string]bool) (agentbase.ContextObject, error) {
+func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string, upto message.ID) (agentbase.ContextObject, error) {
 	ctx, cancel := newHistoryContext(ctx)
 	defer cancel()
-	if seen == nil {
-		seen = map[string]bool{}
+	if _, err := readLedgerRows(ctx, sys, cause, ""); err != nil {
+		return agentbase.ContextObject{}, err
 	}
-	key := session + "\x00" + string(upto)
-	if seen[key] {
-		return agentbase.ContextObject{}, errors.New("session base cycle")
-	}
-	seen[key] = true
-	defer delete(seen, key)
-	rows, err := readSessionRows(ctx, sys, cause, session)
+	budget := ctx.Value(historyBudgetKey{}).(*historyBudget)
+	expanded, err := sys.View().BuildSession(ctx, *budget.snapshot, session, upto)
 	if err != nil {
 		return agentbase.ContextObject{}, err
 	}
-	if upto != "" {
-		limit := -1
-		for i, r := range rows {
-			if r.ID == upto {
-				limit = i
-				break
-			}
-		}
-		if limit < 0 {
-			return agentbase.ContextObject{}, errors.New("session boundary not found")
-		}
-		rows = rows[:limit+1]
+	rows, err := decodeLedgerRows(expanded, "")
+	if err != nil {
+		return agentbase.ContextObject{}, err
 	}
+	object := agentbase.ContextObject{Messages: []json.RawMessage{}}
+	// View supplies a flat chain: ancestor prefixes, then the requested session.
+	// Render each segment independently so turn IDs and boundaries stay local.
+	for i := 0; i < len(rows); {
+		end := i + 1
+		for end < len(rows) && rows[end].Session == rows[i].Session {
+			end++
+		}
+		object, err = materializeRows(ctx, sys, rows[i:end], object)
+		if err != nil {
+			return agentbase.ContextObject{}, err
+		}
+		i = end
+	}
+	return object, nil
+}
+
+func materializeRows(ctx context.Context, sys actorbase.Sys, rows []ledgerRow, object agentbase.ContextObject) (agentbase.ContextObject, error) {
 	for _, state := range sessionTurnStates(rows) {
 		if state.accepted && !state.closed {
 			return agentbase.ContextObject{}, errors.New("session has an accepted turn without a valid terminal boundary")
@@ -115,7 +119,6 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 			visited[parent] = true
 		}
 	}
-	var object agentbase.ContextObject
 	startIndex := 0
 	for i, r := range rows {
 		switch r.Type {
@@ -144,17 +147,6 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 	if startIndex == 0 {
 		for _, r := range rows {
 			if r.Type == agentloop.TypeSessionOpened {
-				var opened agentloop.Opened
-				if json.Unmarshal(r.Body, &opened) != nil {
-					return object, errors.New("invalid session opening")
-				}
-				if opened.Base != nil {
-					base, err := materializeSession(ctx, sys, cause, opened.Base.Session, message.ID(opened.Base.At), seen)
-					if err != nil {
-						return object, err
-					}
-					object = base
-				}
 				object.Version = r.ID
 				break
 			}
@@ -221,7 +213,7 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 		if err := ctx.Err(); err != nil {
 			return object, err
 		}
-		if session == "main" && r.Type == "session.merge" {
+		if r.Session == "main" && r.Type == "session.merge" {
 			var merge struct {
 				Decision string          `json:"decision"`
 				Summary  json.RawMessage `json:"summary"`
@@ -402,7 +394,7 @@ func sessionContext(ctx context.Context, sys actorbase.Sys, cause message.Cause,
 	if !opened {
 		return agentbase.ContextObject{Messages: []json.RawMessage{}}, false, nil
 	}
-	object, err := materializeSession(ctx, sys, cause, session, "", nil)
+	object, err := materializeSession(ctx, sys, cause, session, "")
 	return object, true, err
 }
 
@@ -417,132 +409,35 @@ func readLedgerRows(ctx context.Context, sys actorbase.Sys, cause message.Cause,
 	if rows, ok := budget.cache[session]; ok {
 		return rows, nil
 	}
-	var out []ledgerRow
-	seen := map[message.ID]bool{}
-	before, head := int64(0), budget.head
-	for {
-		// The log API scans at most 512 exchanges per call (including nonmatches).
-		// Reserve that amount so a sparse session cannot scan unbounded history.
-		if maxSessionHistoryMessages-budget.scanned < 512 || budget.rows >= maxSessionHistoryMessages-1 {
-			return nil, historyLimitError()
-		}
-		req := map[string]any{"view": "raw", "limit": min(20, (maxSessionHistoryMessages-budget.rows)/2)}
-		if session != "" {
-			req["session_id"] = session
-		}
-		if before > 0 {
-			req["before_seq"] = before
-		}
-		if head > 0 {
-			req["head_seq"] = head
-		}
-		raw, err := callHistory(ctx, sys, cause, req)
+	if budget.snapshot == nil {
+		snapshot, err := sys.View().Read(ctx, actorcaps.LedgerRead{})
 		if err != nil {
 			return nil, err
 		}
-		var response struct {
-			Turns []struct {
-				Messages []struct {
-					Seq         int64            `json:"seq"`
-					ID          message.ID       `json:"id"`
-					Sender      message.Sender   `json:"sender"`
-					Audience    message.Audience `json:"audience"`
-					Kind        message.Kind     `json:"kind"`
-					MessageType string           `json:"message_type"`
-					ParentID    message.ID       `json:"parent_id"`
-					Terminal    bool             `json:"terminal"`
-					PayloadText string           `json:"payload_text"`
-					Truncated   bool             `json:"truncated"`
-				} `json:"messages"`
-			} `json:"turns"`
-			HeadSeq       int64 `json:"head_seq"`
-			NextBeforeSeq int64 `json:"next_before_seq"`
-			HasMore       bool  `json:"has_more"`
-			Scanned       int   `json:"scanned"`
-		}
-		if json.Unmarshal(raw, &response) != nil {
-			return nil, errors.New("invalid log query response")
-		}
-		if !budget.headSet {
-			budget.head, budget.headSet = response.HeadSeq, true
-		}
-		head = budget.head
-		if response.HeadSeq != head {
-			return nil, errors.New("session history snapshot changed")
-		}
-		budget.scanned += max(response.Scanned, len(response.Turns))
-		if budget.scanned > maxSessionHistoryMessages {
-			return nil, historyLimitError()
-		}
-		for _, turn := range response.Turns {
-			for _, m := range turn.Messages {
-				budget.rows++
-				if budget.rows > maxSessionHistoryMessages {
-					return nil, historyLimitError()
-				}
-				if seen[m.ID] {
-					continue
-				}
-				seen[m.ID] = true
-				payload := m.PayloadText
-				if m.Truncated {
-					payload, err = readLedgerPayload(ctx, sys, cause, m.Seq, head)
-					if err != nil {
-						return nil, err
-					}
-				}
-				app, body, err := harness.UnwrapPayload(json.RawMessage(payload))
-				if err != nil {
-					return nil, fmt.Errorf("invalid session history row %s: %w", m.ID, err)
-				}
-				if session != "" && app.Session != session {
-					continue
-				}
-				out = append(out, ledgerRow{Seq: m.Seq, ID: m.ID, Session: app.Session, Parent: m.ParentID, Sender: m.Sender.ID, Audience: m.Audience, Kind: m.Kind, Type: m.MessageType, Terminal: m.Terminal, Body: body})
-			}
-		}
-		if !response.HasMore {
-			sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
-			budget.cache[session] = out
-			return out, nil
-		}
-		if response.NextBeforeSeq <= 0 || (before > 0 && response.NextBeforeSeq >= before) {
-			return nil, errors.New("session query made no progress")
-		}
-		before = response.NextBeforeSeq
+		budget.snapshot = &snapshot
 	}
+	out, err := decodeLedgerRows(budget.snapshot.Rows, session)
+	if err != nil {
+		return nil, err
+	}
+	budget.cache[session] = out
+	return out, nil
 }
 
-func readLedgerPayload(ctx context.Context, sys actorbase.Sys, cause message.Cause, seq, head int64) (string, error) {
-	ctx, cancel := newHistoryContext(ctx)
-	defer cancel()
-	var payload string
-	offset := 0
-	for {
-		raw, err := callHistory(ctx, sys, cause, map[string]any{
-			"view": "raw", "read_seq": seq, "head_seq": head, "offset": offset,
-		})
+func decodeLedgerRows(rows []actorcaps.LedgerRow, session string) ([]ledgerRow, error) {
+	var out []ledgerRow
+	for _, r := range rows {
+		m := r.Envelope
+		app, body, err := harness.UnwrapPayload(m.Payload)
 		if err != nil {
-			return "", err
+			return nil, fmt.Errorf("invalid session history row %s: %w", m.ID, err)
 		}
-		var response struct {
-			Message *struct {
-				PayloadText string `json:"payload_text"`
-				NextOffset  *int   `json:"next_offset"`
-			} `json:"message"`
+		if session != "" && app.Session != session {
+			continue
 		}
-		if json.Unmarshal(raw, &response) != nil || response.Message == nil {
-			return "", errors.New("session row chunk missing")
-		}
-		payload += response.Message.PayloadText
-		if response.Message.NextOffset == nil {
-			return payload, nil
-		}
-		if *response.Message.NextOffset <= offset {
-			return "", errors.New("session row chunk read made no progress")
-		}
-		offset = *response.Message.NextOffset
+		out = append(out, ledgerRow{Seq: r.Seq, ID: m.ID, Session: app.Session, Parent: m.ParentID, Sender: m.Sender.ID, Audience: m.Audience, Kind: m.Kind, Type: m.Type, Terminal: r.IsTerminal, Body: body})
 	}
+	return out, nil
 }
 
 func inputFromBody(id string, seq int64, body json.RawMessage) (agentloop.Input, error) {

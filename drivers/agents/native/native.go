@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -106,19 +107,10 @@ func cloneWork(w *workRecord) *workRecord {
 	raw, _ := json.Marshal(w)
 	var out workRecord
 	_ = json.Unmarshal(raw, &out)
+	out.SourceCause = w.SourceCause
 	return &out
 }
 
-type logQueryResponse struct {
-	Turns         []logQueryTurn `json:"turns"`
-	HeadSeq       int64          `json:"head_seq"`
-	NextBeforeSeq int64          `json:"next_before_seq"`
-	HasMore       bool           `json:"has_more"`
-	Message       *logMessage    `json:"message,omitempty"`
-}
-type logQueryTurn struct {
-	Messages []logMessage `json:"messages"`
-}
 type logMessage struct {
 	Seq         int64            `json:"seq"`
 	ID          message.ID       `json:"id"`
@@ -130,8 +122,6 @@ type logMessage struct {
 	Terminal    bool             `json:"terminal"`
 	TSReceived  int64            `json:"ts_received"`
 	PayloadText string           `json:"payload_text"`
-	NextOffset  *int             `json:"next_offset,omitempty"`
-	Truncated   bool             `json:"truncated"`
 }
 
 // refreshSessionRelations projects session relationships and historical boundaries.
@@ -281,63 +271,6 @@ func appendUnique(dst []string, values ...string) []string {
 		}
 	}
 	return dst
-}
-
-func callSystemQuery(sys actorbase.Sys, payload any) (logQueryResponse, error) {
-	return callSystemQueryContext(sys, sys.Life(), payload)
-}
-
-func callSystemQueryContext(sys actorbase.Sys, ctx context.Context, payload any) (logQueryResponse, error) {
-	if err := ctx.Err(); err != nil {
-		return logQueryResponse{}, err
-	}
-	pending, err := sys.Call(message.Root(), actor.SystemActorID, message.TypeSystemLogQuery, payload)
-	if err != nil {
-		return logQueryResponse{}, err
-	}
-	terminal, err := pending.Wait(ctx, 0)
-	if err != nil {
-		if sys.Life().Err() != nil {
-			return logQueryResponse{}, err
-		}
-		_ = pending.Cancel()
-		return logQueryResponse{}, err
-	}
-	var status struct {
-		Status string `json:"status"`
-		message.Failure
-	}
-	if json.Unmarshal(terminal.Payload, &status) != nil || status.Status != "completed" {
-		return logQueryResponse{}, fmt.Errorf("%s: %s", status.ErrorCode, status.Detail)
-	}
-	var response logQueryResponse
-	if err := json.Unmarshal(terminal.Payload, &response); err != nil {
-		return logQueryResponse{}, err
-	}
-	return response, nil
-}
-
-func readLogMessage(sys actorbase.Sys, seq, head int64) (string, error) {
-	var text strings.Builder
-	offset := 0
-	for part := 0; part < 10000; part++ {
-		response, err := callSystemQuery(sys, map[string]any{"view": "raw", "read_seq": seq, "head_seq": head, "offset": offset})
-		if err != nil {
-			return "", err
-		}
-		if response.Message == nil {
-			return "", errors.New("read session ledger: read returned no message")
-		}
-		text.WriteString(response.Message.PayloadText)
-		if response.Message.NextOffset == nil {
-			return text.String(), nil
-		}
-		if *response.Message.NextOffset <= offset {
-			return "", errors.New("read session ledger: read made no progress")
-		}
-		offset = *response.Message.NextOffset
-	}
-	return "", errors.New("read session ledger: message part limit exceeded")
 }
 
 func sameSeat(left, right string) bool {
@@ -495,7 +428,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "limit_exceeded", "the work input exceeds the input size limit")
 		return
 	}
-	s, sessionErr := c.sessionForAsk(sys, msg, req)
+	s, sessionErr := c.sessionForAsk(sys, &msg, req)
 	if sessionErr != nil {
 		_, _ = sys.Fail(msg, sessionErr.Error(), "cannot select conversation")
 		return
@@ -515,6 +448,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	w.SessionID = s.ID
+	w.SourceCause = msg.Cause()
 	c.data.Works[string(w.ID)] = w
 	c.data.Order = append(c.data.Order, string(w.ID))
 	c.emit(sys, msg.Cause(), "agent.work.accepted", map[string]any{"work": publicWork(w), "owner": caller, "input_id": w.Inputs[0].ID})
@@ -678,7 +612,7 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 	}
 	tools := c.toolBindings()
 	selection := c.selected(sys)
-	startCause := message.Anchored(message.ID(w.SourceRequest), message.ID(w.SourceRequest))
+	startCause := w.SourceCause
 	var open *agentloop.OpenRequest
 	if s != nil && !s.Opened {
 		open = &agentloop.OpenRequest{Base: s.Base}
@@ -1000,7 +934,7 @@ func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, s
 		return nil
 	}
 	w.Stage, w.ExecutionState, w.UpdatedAt = "stopping", "stop_requested", nowMillis()
-	_, _ = sys.Post(behavior.RequestSpec{Cause: message.Anchored(msg.ID, msg.ID), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, SessionID: w.SessionID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, Reason: "agent.interrupt"})})
+	_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, SessionID: w.SessionID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, Reason: "agent.interrupt"})})
 	c.emit(sys, msg.Cause(), "agent.work.stop_requested", publicWork(w))
 	return nil
 }
@@ -1239,44 +1173,15 @@ func (c *controller) sessionResult(sys actorbase.Sys, session, turn string, upto
 }
 
 func nativeSessionRows(sys actorbase.Sys, session string) ([]logMessage, int64, error) {
-	var rows []logMessage
-	before, head := int64(0), int64(0)
-	for {
-		req := map[string]any{"view": "raw", "session_id": session, "limit": 20}
-		if before > 0 {
-			req["before_seq"] = before
-		}
-		if head > 0 {
-			req["head_seq"] = head
-		}
-		page, err := callSystemQuery(sys, req)
-		if err != nil {
-			return nil, head, err
-		}
-		if head == 0 {
-			head = page.HeadSeq
-		}
-		for _, turn := range page.Turns {
-			rows = append(rows, turn.Messages...)
-		}
-		if !page.HasMore {
-			break
-		}
-		if page.NextBeforeSeq <= 0 || page.NextBeforeSeq == before {
-			return nil, head, errors.New("session result pagination made no progress")
-		}
-		before = page.NextBeforeSeq
+	snapshot, err := sys.View().Read(sys.Life(), actorcaps.LedgerRead{Session: session})
+	if err != nil {
+		return nil, 0, err
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Seq < rows[j].Seq })
-	return rows, head, nil
+	return nativeLedgerRows(snapshot.Rows), snapshot.HeadSeq, nil
 }
 
-func nativeRowBody(sys actorbase.Sys, row logMessage, head int64) json.RawMessage {
-	text := row.PayloadText
-	if row.Truncated {
-		text, _ = readLogMessage(sys, row.Seq, head)
-	}
-	_, body, _ := harness.UnwrapPayload(json.RawMessage(text))
+func nativeRowBody(_ actorbase.Sys, row logMessage, _ int64) json.RawMessage {
+	_, body, _ := harness.UnwrapPayload(json.RawMessage(row.PayloadText))
 	return body
 }
 
@@ -1352,6 +1257,8 @@ func nextAction(word, label string, payload any) agentproto.NextAction {
 }
 
 func (c *controller) finishWaiters(sys actorbase.Sys, w *workRecord) {
+	// Completed receipts keep result data, not the originating request scope.
+	w.SourceCause = message.Cause{}
 	held := c.wait[w.ID]
 	delete(c.wait, w.ID)
 	for _, msg := range held {

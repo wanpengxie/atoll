@@ -8,15 +8,14 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/access"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
 var errMainRead = errors.New("injected main read failure")
@@ -26,6 +25,9 @@ type mainFailureResource struct {
 	outcome           accessdoor.Outcome
 	readErr, writeErr error
 	writes            int
+	deletes           int
+	deleteErr         error
+	failWrites        int
 }
 
 func (r *mainFailureResource) Read(resource.ResourceID) (accessdoor.Outcome, error) {
@@ -33,17 +35,26 @@ func (r *mainFailureResource) Read(resource.ResourceID) (accessdoor.Outcome, err
 }
 func (r *mainFailureResource) Write(_ resource.ResourceID, value []byte) (accessdoor.Outcome, error) {
 	r.writes++
-	if r.writeErr != nil {
+	if r.writeErr != nil && (r.failWrites == 0 || r.writes <= r.failWrites) {
 		return accessdoor.Outcome{}, r.writeErr
 	}
 	r.outcome = accessdoor.Outcome{Found: true, Value: append([]byte(nil), value...)}
 	return accessdoor.Outcome{}, nil
 }
 
+func (r *mainFailureResource) Delete(resource.ResourceID) (accessdoor.Outcome, error) {
+	r.deletes++
+	if r.deleteErr != nil {
+		return accessdoor.Outcome{}, r.deleteErr
+	}
+	r.outcome = accessdoor.Outcome{}
+	return accessdoor.Outcome{}, nil
+}
+
 type mainFailureSys struct {
 	pulseTestSys
 	res      mainFailureResource
-	query    func(map[string]any) (actorbase.Pending, error)
+	query    func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error)
 	emitted  []behavior.EventSpec
 	emitErr  error
 	failures []map[string]any
@@ -51,15 +62,14 @@ type mainFailureSys struct {
 }
 
 func (s *mainFailureSys) Resource() actorbase.ResourceHandle { return &s.res }
-func (s *mainFailureSys) Call(_ message.Cause, target actor.ActorID, typ string, payload any) (actorbase.Pending, error) {
-	if target != actor.SystemActorID || typ != message.TypeSystemLogQuery {
-		return nil, fmt.Errorf("unexpected call: %s", typ)
-	}
-	s.scans++
-	if s.query != nil {
-		return s.query(payload.(map[string]any))
-	}
-	return pulsePending{}, nil
+func (s *mainFailureSys) View() actorcaps.LedgerView {
+	return mainTestView{read: func(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		s.scans++
+		if s.query == nil {
+			return actorcaps.LedgerSnapshot{}, nil
+		}
+		return s.query(q)
+	}}
 }
 func (s *mainFailureSys) Emit(spec behavior.EventSpec) (message.ID, error) {
 	s.emitted = append(s.emitted, spec)
@@ -80,37 +90,28 @@ func (s *mainFailureSys) Fail(_ actorbase.Msg, code, detail string, fields ...ma
 	return "failure", nil
 }
 
-type mainFailurePending struct {
-	actorbase.Pending
-	body json.RawMessage
-	err  error
-}
-
-func (p mainFailurePending) Wait(context.Context, time.Duration) (actorbase.Msg, error) {
-	return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: p.body}), p.err
-}
-func failedMainQuery(mode string) (actorbase.Pending, error) {
+func failedMainQuery(mode string) (actorcaps.LedgerSnapshot, error) {
 	switch mode {
-	case "call":
-		return nil, errMainRead
-	case "wait":
-		return mainFailurePending{err: errMainRead}, nil
-	case "response":
-		return mainFailurePending{body: json.RawMessage(`{"status":"failed","error_code":"ledger_unavailable","detail":"injected"}`)}, nil
+	case "deadline":
+		return actorcaps.LedgerSnapshot{}, context.DeadlineExceeded
+	case "limit":
+		return actorcaps.LedgerSnapshot{}, actorcaps.ErrLedgerLimit
 	default:
-		return mainFailurePending{body: json.RawMessage(`{"status":"completed","turns":false}`)}, nil
+		return actorcaps.LedgerSnapshot{}, errMainRead
 	}
 }
-func mainQueryRows(items ...row) actorbase.Pending {
-	var messages []map[string]any
+func mainQueryRows(items ...row) actorcaps.LedgerSnapshot {
+	var out actorcaps.LedgerSnapshot
 	for _, r := range items {
-		messages = append(messages, map[string]any{"seq": r.Seq, "id": r.ID, "parent_id": r.Parent, "kind": r.Kind, "message_type": r.Type, "sender": message.Sender{ID: r.Sender}, "audience": r.To, "payload_text": string(mainTestBody(map[string]any{"_context": map[string]any{}, "body": r.Body}))})
+		raw := mainTestBody(map[string]any{"_context": map[string]any{}, "body": r.Body})
+		out.Rows = append(out.Rows, actorcaps.LedgerRow{Seq: r.Seq, Envelope: message.Envelope{ID: r.ID, ParentID: r.Parent, Kind: r.Kind, Type: r.Type, Sender: message.Sender{ID: r.Sender}, Audience: r.To, Payload: raw}})
+		out.HeadSeq = max(out.HeadSeq, r.Seq)
 	}
-	return mainFailurePending{body: mainTestBody(map[string]any{"status": "completed", "turns": []any{map[string]any{"messages": messages}}})}
+	return out
 }
 
 func TestMainInitializationReadFailuresDoNotWriteOrStart(t *testing.T) {
-	for _, mode := range []string{"resource", "denied", "invalid_context", "call", "wait", "response", "malformed"} {
+	for _, mode := range []string{"resource", "denied", "invalid_context", "storage", "deadline", "limit"} {
 		t.Run(mode, func(t *testing.T) {
 			s := &mainFailureSys{}
 			switch mode {
@@ -121,7 +122,7 @@ func TestMainInitializationReadFailuresDoNotWriteOrStart(t *testing.T) {
 			case "invalid_context":
 				s.res.outcome = accessdoor.Outcome{Found: true, Value: []byte(`{`)}
 			default:
-				s.query = func(map[string]any) (actorbase.Pending, error) { return failedMainQuery(mode) }
+				s.query = func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) { return failedMainQuery(mode) }
 			}
 			if err := proc(Config{Session: "main"})(s); err == nil || errors.Is(err, io.EOF) {
 				t.Fatalf("startup error=%v", err)
@@ -149,6 +150,9 @@ func TestMainInitializationMissingAndFailedWrites(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 			wantWrites := 1
+			if mode == "context_failure" {
+				wantWrites = 3
+			}
 			if mode == "opened_failure" {
 				wantWrites = 0
 			}
@@ -160,12 +164,12 @@ func TestMainInitializationMissingAndFailedWrites(t *testing.T) {
 }
 
 func TestMergeMainReadFailurePreventsAllWrites(t *testing.T) {
-	for _, mode := range []string{"call", "wait", "response", "malformed"} {
+	for _, mode := range []string{"storage", "deadline", "limit"} {
 		t.Run(mode, func(t *testing.T) {
 			s := &mainFailureSys{}
-			s.query = func(req map[string]any) (actorbase.Pending, error) {
-				if req["session_id"] == "branch" {
-					return pulsePending{}, nil
+			s.query = func(req actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+				if req.Session == "branch" {
+					return actorcaps.LedgerSnapshot{}, nil
 				}
 				return failedMainQuery(mode)
 			}
@@ -180,7 +184,9 @@ func TestMergeMainReadFailurePreventsAllWrites(t *testing.T) {
 func TestMergeFailureDoesNotStopActorOrTimer(t *testing.T) {
 	s := &mainFailureSys{}
 	s.res.outcome = accessdoor.Outcome{Found: true, Value: []byte(`{"messages":[]}`)}
-	s.query = func(map[string]any) (actorbase.Pending, error) { return nil, errMainRead }
+	s.query = func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		return actorcaps.LedgerSnapshot{}, errMainRead
+	}
 	for _, typ := range []string{"agent.main.merge_all", "agent.main.merge", "agent.main.track"} {
 		s.inbox = append(s.inbox, actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindRequest, Type: typ, Payload: []byte(`{"from_session":"branch","merge":"manual"}`)}))
 	}
@@ -204,12 +210,12 @@ func TestMergeFailureDoesNotStopActorOrTimer(t *testing.T) {
 
 func TestMergeAllReportsBranchFailure(t *testing.T) {
 	s := &mainFailureSys{}
-	s.query = func(req map[string]any) (actorbase.Pending, error) {
-		switch req["session_id"] {
+	s.query = func(req actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		switch req.Session {
 		case "main":
 			return mainQueryRows(row{Seq: 1, ID: "track", Type: "session.track", Body: mainTestBody(map[string]any{"from_session": "branch", "merge": "manual"})}), nil
 		case "branch":
-			return nil, errMainRead
+			return actorcaps.LedgerSnapshot{}, errMainRead
 		default:
 			return mainQueryRows(
 				row{Seq: 2, ID: "start", Kind: message.KindRequest, Type: "loop.start", Sender: "agent:controller:1", To: message.Audience{"tool:loop:1"}, Body: mainTestBody(map[string]any{"session_id": "branch"})},
@@ -227,7 +233,7 @@ func TestMergeAllReportsBranchFailure(t *testing.T) {
 func TestMainInitializationRebuildsExistingHistoryWithoutReopening(t *testing.T) {
 	s := &mainFailureSys{}
 	summary := mainTestBody(map[string]any{"role": "assistant", "content": "existing summary"})
-	s.query = func(map[string]any) (actorbase.Pending, error) {
+	s.query = func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
 		return mainQueryRows(
 			row{Seq: 1, ID: "opened", Type: "session.opened", Body: mainTestBody(map[string]any{"session_id": "main"})},
 			row{Seq: 2, ID: "merged", Type: "session.merge", Body: mainTestBody(map[string]any{"decision": "merged", "summary": summary})},
@@ -249,17 +255,14 @@ func TestMainInitializationRebuildsExistingHistoryWithoutReopening(t *testing.T)
 }
 
 func TestMainInitializationIncompleteHistoryDoesNotWrite(t *testing.T) {
-	for _, mode := range []string{"later_page", "invalid_row"} {
+	for _, mode := range []string{"view_limit", "invalid_row"} {
 		t.Run(mode, func(t *testing.T) {
 			s := &mainFailureSys{}
-			s.query = func(req map[string]any) (actorbase.Pending, error) {
+			s.query = func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
 				if mode == "invalid_row" {
-					return mainFailurePending{body: json.RawMessage(`{"status":"completed","turns":[{"messages":[{"id":"bad","payload_text":"{}"}]}]}`)}, nil
+					return actorcaps.LedgerSnapshot{Rows: []actorcaps.LedgerRow{{Envelope: message.Envelope{ID: "bad", Payload: []byte(`{}`)}}}}, nil
 				}
-				if req["before_seq"] != nil {
-					return nil, errMainRead
-				}
-				return mainFailurePending{body: json.RawMessage(`{"status":"completed","turns":[],"has_more":true,"head_seq":100,"next_before_seq":50}`)}, nil
+				return actorcaps.LedgerSnapshot{}, actorcaps.ErrLedgerLimit
 			}
 			if err := ensureMain(s, Config{Session: "main"}); err == nil {
 				t.Fatal("accepted incomplete history")

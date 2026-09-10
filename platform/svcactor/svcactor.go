@@ -403,7 +403,12 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	// it as Request.Deadline); it crosses the membrane as this local request's
 	// own ExpiresAt so the receiver's window is the caller's, not this
 	// engine's default. Absent → the default.
-	spec := behavior.RequestSpec{Cause: message.Root(), Type: req.Type, Payload: json.RawMessage(req.Payload), Audience: message.Audience{target}}
+	root, body, err := actorbase.PrepareRoot(harness.Context{Caller: &from}, json.RawMessage(req.Payload))
+	if err != nil {
+		return gateFailure(channel.GateChannelUnavailable, err.Error())
+	}
+	app, _ := root.Context()
+	spec := behavior.RequestSpec{Cause: root, Type: req.Type, Payload: body, Audience: message.Audience{target}}
 	if req.Deadline > 0 {
 		deadline := req.Deadline
 		spec.ExpiresAt = &deadline
@@ -421,7 +426,7 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	defer stopPendingCancel()
 	// The local request this frame became is a root here, so its correlation is
 	// its own id; the audit note hangs from it.
-	if err := s.deps.Audit(ctx, message.Anchored(localRequestID, localRequestID), map[string]any{"from": req.From, "type": req.Type, "local_request_id": localRequestID}); err != nil {
+	if err := s.deps.Audit(ctx, message.Anchored(localRequestID, localRequestID).WithContext(app), map[string]any{"from": req.From, "type": req.Type, "local_request_id": localRequestID}); err != nil {
 		s.deps.Logger.Warn("svcactor.audit_failed", "request_id", localRequestID, "err", err)
 	}
 	progressDone := make(chan struct{})

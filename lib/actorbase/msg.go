@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -112,7 +113,7 @@ func (m Msg) Ctx() context.Context { return m.ctx }
 // answering verbs (Reply/Fail/Progress) take the Msg itself and derive this
 // internally; the originating verbs take it explicitly, because they are the
 // ones that also have a legitimate other answer (message.Root()).
-func (m Msg) Cause() message.Cause { return message.From(m.Envelope) }
+func (m Msg) Cause() message.Cause { return message.From(m.Envelope).WithContext(m.app) }
 
 func (m Msg) Caller() (harness.Caller, bool) {
 	if m.app.Caller == nil {
@@ -122,7 +123,18 @@ func (m Msg) Caller() (harness.Caller, bool) {
 }
 
 // Context returns the immutable application context carried by the ledger row.
-func (m Msg) Context() harness.Context { return m.app }
+func (m Msg) Context() harness.Context { return m.app.Clone() }
+
+// WithSession returns a request value with an explicitly selected session.
+// It changes neither the original message nor any actor-global state.
+func (m Msg) WithSession(session string) (Msg, error) {
+	if strings.TrimSpace(session) == "" || strings.TrimSpace(session) != session || session == "new" {
+		return Msg{}, errors.New("actorbase: session must be a concrete non-blank id")
+	}
+	m.app = m.app.Clone()
+	m.app.Session = session
+	return m, nil
+}
 
 // EffectiveCaller is the only caller-attribution rule used by receivers.
 func EffectiveCaller(m Msg) harness.Caller {

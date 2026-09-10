@@ -3,114 +3,38 @@ package native
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"testing"
-
-	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
-	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-type relationQuerySys struct {
+type relationViewSys struct {
 	*testSys
-	calls int
-	query func(map[string]any) logQueryResponse
+	view actorcaps.LedgerView
 }
 
-func (s *relationQuerySys) Call(_ message.Cause, target actor.ActorID, word string, body any) (actorbase.Pending, error) {
-	if target != actor.SystemActorID || word != message.TypeSystemLogQuery {
-		return nil, fmt.Errorf("unexpected call %s %s", target, word)
-	}
-	s.calls++
-	response := s.query(body.(map[string]any))
-	raw := mustJSON(response)
-	// The response status is outside the projection payload fields.
-	raw = append([]byte(`{"status":"completed",`), raw[1:]...)
-	return testPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Payload: raw})}, nil
-}
+func (s relationViewSys) View() actorcaps.LedgerView { return s.view }
 
-func TestRelationHistoryHasHardMessageLimit(t *testing.T) {
-	for _, total := range []int{1000, 1_000_000} {
-		t.Run(fmt.Sprint(total), func(t *testing.T) {
-			read := 0
-			sys := &relationQuerySys{testSys: newTestSys(newTestState())}
-			sys.query = func(q map[string]any) logQueryResponse {
-				limit := q["limit"].(int)
-				page := logQueryResponse{HeadSeq: int64(total)}
-				for i := 0; i < limit && read < total; i++ {
-					page.Turns = append(page.Turns, logQueryTurn{Messages: []logMessage{
-						{Seq: int64(total - read), MessageType: "unrelated", PayloadText: `{}`},
-						{Seq: int64(total - read - 1), MessageType: "unrelated", PayloadText: `{}`},
-					}})
-					read += 2
-				}
-				page.NextBeforeSeq, page.HasMore = int64(total-read), read < total
-				return page
+func TestRelationHistoryUsesBoundedViewAndPreservesProjectionOnFailure(t *testing.T) {
+	for _, failure := range []error{nil, actorcaps.ErrLedgerLimit, context.DeadlineExceeded, errors.New("storage unavailable")} {
+		calls := 0
+		sys := relationViewSys{testSys: newTestSys(newTestState()), view: nativeTestView{read: func(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+			calls++
+			if q.MaxRows != 1000 || q.MaxBytes != 4<<20 || q.Session != "" {
+				t.Fatalf("unbounded request: %+v", q)
 			}
-			branch := &session{ID: "branch", Holder: "old-holder", Merge: "manual", Execution: "current-turn"}
-			c := &controller{sessions: map[string]*session{"branch": branch}}
-			err := c.refreshSessionRelations(sys)
-			if total == 1000 {
-				if err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if !errors.Is(err, errRelationHistoryLimit) {
-					t.Fatalf("million-row history was not rejected: %v", err)
-				}
-				if branch.Holder != "old-holder" || branch.Merge != "manual" || branch.Execution != "current-turn" {
-					t.Fatalf("incomplete history replaced the existing projection: %+v", branch)
-				}
+			if _, ok := ctx.Deadline(); !ok {
+				t.Fatal("missing deadline")
 			}
-			if read != maxRelationHistoryMessages || sys.calls != 25 {
-				t.Fatalf("unbounded read: messages=%d queries=%d", read, sys.calls)
-			}
-		})
-	}
-}
-
-func TestRelationHistoryBudgetsIncludeEmptyPagesAndFullReads(t *testing.T) {
-	for _, mode := range []string{"empty-pages", "full-read", "bytes", "irrelevant-body"} {
-		t.Run(mode, func(t *testing.T) {
-			sys := &relationQuerySys{testSys: newTestSys(newTestState())}
-			sys.query = func(q map[string]any) logQueryResponse {
-				switch mode {
-				case "empty-pages":
-					return logQueryResponse{HeadSeq: 1_000_000, HasMore: true, NextBeforeSeq: int64(1_000_000 - sys.calls)}
-				case "bytes":
-					return logQueryResponse{Turns: []logQueryTurn{{Messages: []logMessage{{PayloadText: strings.Repeat("x", maxRelationHistoryBytes+1)}}}}}
-				default:
-					if sys.calls == 1 {
-						word := agentloop.TypeStart
-						if mode == "irrelevant-body" {
-							word = "llm.generate"
-						}
-						return logQueryResponse{HeadSeq: 1, Turns: []logQueryTurn{{Messages: []logMessage{{Seq: 1, MessageType: word, Truncated: true, PayloadText: "{"}}}}}
-					}
-					offset := q["offset"].(int) + 1
-					return logQueryResponse{Message: &logMessage{PayloadText: "x", NextOffset: &offset}}
-				}
-			}
-			_, _, err := readRelationHistory(sys)
-			if mode == "irrelevant-body" {
-				if err != nil || sys.calls != 1 {
-					t.Fatalf("expanded an unrelated body: calls=%d err=%v", sys.calls, err)
-				}
-			} else if !errors.Is(err, errRelationHistoryLimit) || sys.calls > maxRelationHistoryQueries {
-				t.Fatalf("budget bypassed: calls=%d err=%v", sys.calls, err)
-			}
-		})
-	}
-}
-
-func TestRelationQueryDeadlineStopsBeforeAnotherCall(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	sys := &relationQuerySys{testSys: newTestSys(newTestState())}
-	_, err := callSystemQueryContext(sys, ctx, map[string]any{})
-	if !errors.Is(err, context.Canceled) || sys.calls != 0 {
-		t.Fatalf("expired budget still queried history: calls=%d err=%v", sys.calls, err)
+			return actorcaps.LedgerSnapshot{}, failure
+		}}}
+		branch := &session{ID: "branch", Holder: "old-holder", Merge: "manual", Execution: "current-turn"}
+		c := &controller{sessions: map[string]*session{"branch": branch}}
+		err := c.refreshSessionRelations(sys)
+		if !errors.Is(err, failure) || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+		if failure != nil && (branch.Holder != "old-holder" || branch.Merge != "manual" || branch.Execution != "current-turn") {
+			t.Fatalf("partial projection applied: %+v", branch)
+		}
 	}
 }

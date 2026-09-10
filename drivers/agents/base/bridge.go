@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/protocol/access"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
@@ -41,7 +40,7 @@ func (b *metatoolBridge) Invoke(ctx context.Context, scope effectcap.Scope, in r
 		if tool.Spec.Name != in.Name {
 			continue
 		}
-		rv := tool.Execute(ctx, in.Params, b.exec, metatool.RuntimeContext{Trigger: metatool.Trigger{Envelope: message.Envelope{ID: message.ID(snapshot.ParentID)}, CorrelationID: message.ID(snapshot.CorrelationID)}})
+		rv := tool.Execute(ctx, in.Params, b.exec, metatool.RuntimeContext{Trigger: metatool.Trigger{Cause: snapshot.Cause}})
 		raw, err := json.Marshal(rv.Value)
 		if err != nil {
 			return runtimeproto.ToolResult{Text: err.Error(), IsError: true}

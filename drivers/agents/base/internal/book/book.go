@@ -5,6 +5,7 @@ package book
 import (
 	"github.com/wanpengxie/atoll/drivers/agents/effectcap"
 	"github.com/wanpengxie/atoll/drivers/agents/runtimeproto"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 type RequestID string
@@ -19,6 +20,7 @@ const (
 )
 
 type Request struct {
+	Cause         message.Cause
 	ID            RequestID
 	Input         runtimeproto.Input
 	Scope         effectcap.Scope

@@ -111,15 +111,10 @@ func progressResp(parentID message.ID, seq int) *message.Envelope {
 
 func defaultRC() metatool.RuntimeContext {
 	return metatool.RuntimeContext{
-		Trigger: metatool.Trigger{
-			Envelope: message.Envelope{
-				ID:      "trigger-1",
-				Kind:    message.KindRequest,
-				Type:    "agent.turn",
-				Payload: json.RawMessage(`{"body":null}`),
-			},
-			CorrelationID: "trigger-1",
-		},
+		Trigger: metatool.Trigger{Cause: message.From(message.Envelope{
+			ID: "trigger-1", Kind: message.KindRequest, Type: "agent.turn",
+			Payload: json.RawMessage(`{"_context":{},"body":{}}`),
+		})},
 	}
 }
 

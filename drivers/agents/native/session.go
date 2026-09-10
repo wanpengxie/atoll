@@ -44,7 +44,7 @@ type session struct {
 	ForkPoint        string
 }
 
-func (c *controller) sessionForAsk(sys actorbase.Sys, msg actorbase.Msg, req agentproto.AskRequest) (*session, error) {
+func (c *controller) sessionForAsk(sys actorbase.Sys, msg *actorbase.Msg, req agentproto.AskRequest) (*session, error) {
 	if c.sessions == nil {
 		c.sessions = map[string]*session{}
 	}
@@ -89,9 +89,11 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg actorbase.Msg, req age
 			base = &agentloop.BoundaryRef{Session: s.ID, At: s.ForkPoint}
 		}
 		id = "s-" + uuid.NewString()
-		if err := actorbase.AssignSession(sys, msg, id); err != nil {
+		updated, err := msg.WithSession(id)
+		if err != nil {
 			return nil, errors.New("session_assignment_failed")
 		}
+		*msg = updated
 	}
 
 	if len(c.sessions) >= maxSessions {

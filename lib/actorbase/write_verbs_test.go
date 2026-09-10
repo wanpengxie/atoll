@@ -197,7 +197,7 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 		Payload:    json.RawMessage(`{"text":"hi"}`),
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{actor.ActorID("agent:worker")},
-		Cause:      message.Anchored("req-parent", "corr-1"),
+		Cause:      message.Anchored("req-parent", "corr-1").WithContext(message.Context{}),
 	}); err != nil {
 		t.Fatalf("Emit = %v", err)
 	}
@@ -222,7 +222,7 @@ func TestEmitAndPostCarryTheWholeSpecToTruth(t *testing.T) {
 		Payload:    json.RawMessage(`{"amount":10}`),
 		Audience:   message.Audience{actor.ActorID("agent:worker")},
 		Visibility: message.VisibilityPublic,
-		Cause:      message.Anchored("ev-parent", "corr-2"),
+		Cause:      message.Anchored("ev-parent", "corr-2").WithContext(message.Context{}),
 		ExpiresAt:  &deadline,
 	}); err != nil {
 		t.Fatalf("Post = %v", err)

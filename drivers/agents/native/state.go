@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
@@ -25,6 +26,7 @@ type operationRecord struct {
 }
 
 type workRecord struct {
+	SourceCause     message.Cause              `json:"-"`
 	SessionID       string                     `json:"session_id,omitempty"`
 	Resumed         bool                       `json:"resumed,omitempty"`
 	ID              agentproto.WorkID          `json:"work_id"`

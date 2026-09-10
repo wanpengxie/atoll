@@ -3,11 +3,16 @@
 // snapshot and a revocable admission token, not an authorization system.
 package effectcap
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/wanpengxie/atoll/protocol/message"
+)
 
 // Snapshot is the immutable channel causality captured when a Scope is
 // minted. The concrete ID representation stays outside the Runtime contract.
 type Snapshot struct {
+	Cause         message.Cause
 	ParentID      string
 	CorrelationID string
 }
@@ -34,7 +39,8 @@ type row struct {
 func NewVault() *Vault { return &Vault{rows: make(map[uint64]row)} }
 
 // Mint returns a fresh open Scope. Mint after Seal returns the zero Scope.
-func (v *Vault) Mint(parentID, correlationID string) Scope {
+func (v *Vault) Mint(cause message.Cause) Scope {
+	parentID, correlationID := cause.Resolve("")
 	if v == nil {
 		return Scope{}
 	}
@@ -44,7 +50,7 @@ func (v *Vault) Mint(parentID, correlationID string) Scope {
 		return Scope{}
 	}
 	v.next++
-	v.rows[v.next] = row{open: true, snapshot: Snapshot{ParentID: parentID, CorrelationID: correlationID}}
+	v.rows[v.next] = row{open: true, snapshot: Snapshot{ParentID: string(parentID), CorrelationID: string(correlationID), Cause: cause}}
 	return Scope{vault: v, id: v.next}
 }
 

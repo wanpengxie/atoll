@@ -47,22 +47,20 @@ func MetaTools() []MetaTool {
 	}
 }
 
-// Trigger carries the envelope + correlation id that triggered the
-// current turn.
+// Trigger carries the originating request's cause and application context.
 type Trigger struct {
-	Envelope      message.Envelope
-	CorrelationID message.ID
+	Cause message.Cause
 }
 
-// RuntimeContext is the per-turn context passed into every meta tool
-// Execute function. A zero Trigger (empty envelope id) marks an
-// invocation outside a live turn.
+// RuntimeContext is the per-turn context passed into every meta tool.
+// An unstated or root Cause marks an invocation outside a live turn.
 type RuntimeContext struct {
 	Trigger Trigger
 }
 
-// InTurn reports whether this context belongs to a live turn.
-func (rc RuntimeContext) InTurn() bool { return rc.Trigger.Envelope.ID != "" }
+func (rc RuntimeContext) InTurn() bool {
+	return rc.Trigger.Cause.Stated() && !rc.Trigger.Cause.IsRoot()
+}
 
 // payloadHint builds the recovery hint for a payload_invalid error.
 // Tool names (list_actors, describe_type) live here in metatool, not in a

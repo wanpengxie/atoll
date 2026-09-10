@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
@@ -60,7 +61,6 @@ type testSys struct {
 	posts          []behavior.RequestSpec
 	events         []behavior.EventSpec
 	controlResults chan behavior.RequestSpec
-	assigned       map[message.ID]string
 	ledger         []logMessage
 }
 
@@ -76,15 +76,12 @@ func (p testPending) Wait(context.Context, time.Duration) (actorbase.Msg, error)
 func (p testPending) Cancel() error                                              { return nil }
 
 func newTestSys(state *testState) *testSys {
-	return &testSys{controlResults: make(chan behavior.RequestSpec, 16), state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}, assigned: map[message.ID]string{}}
+	return &testSys{controlResults: make(chan behavior.RequestSpec, 16), state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}}
 }
 func (s *testSys) State() actorbase.StateHandle { return s.state }
 func (s *testSys) Self() actor.ActorID          { return s.self }
 func (s *testSys) Life() context.Context        { return context.Background() }
-func (s *testSys) AssignSession(msg actorbase.Msg, session string) error {
-	s.assigned[msg.ID] = session
-	return nil
-}
+
 func (s *testSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
 	s.replies[msg.ID] = v
 	return "reply", nil
@@ -131,26 +128,35 @@ func (s *testSys) Call(_ message.Cause, target actor.ActorID, typ string, payloa
 		}
 		return testPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "call-result", Kind: message.KindResponse, Payload: body})}, nil
 	}
-	if target != actor.SystemActorID || typ != message.TypeSystemLogQuery {
-		return nil, fmt.Errorf("unexpected call %s %s", target, typ)
-	}
-	turns := make([]logQueryTurn, 0)
-	for i := len(s.ledger) - 1; i >= 0; i-- {
-		turns = append(turns, logQueryTurn{Messages: []logMessage{s.ledger[i]}})
-	}
-	for i := len(s.events) - 1; i >= 0; i-- {
-		event := s.events[i]
-		if event.Type != agentloop.TypeReport {
-			continue
+	return nil, fmt.Errorf("unexpected call %s %s", target, typ)
+}
+
+type nativeTestView struct {
+	actorcaps.LedgerView
+	read func(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error)
+}
+
+func (v nativeTestView) Read(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+	return v.read(ctx, q)
+}
+func (s *testSys) View() actorcaps.LedgerView {
+	return nativeTestView{read: func(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		if err := ctx.Err(); err != nil {
+			return actorcaps.LedgerSnapshot{}, err
 		}
-		turns = append(turns, logQueryTurn{Messages: []logMessage{{Seq: int64(i + 1), Sender: message.Sender{ID: s.self}, MessageType: event.Type, PayloadText: string(event.Payload)}}})
-	}
-	responsePayload, _ := json.Marshal(logQueryResponse{Turns: turns, HeadSeq: int64(len(s.events) + len(s.ledger))})
-	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(responsePayload, &fields)
-	fields["status"] = json.RawMessage(`"completed"`)
-	responsePayload, _ = json.Marshal(fields)
-	return testPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "system-result", Kind: message.KindResponse, Payload: responsePayload})}, nil
+		out := actorcaps.LedgerSnapshot{HeadSeq: int64(len(s.ledger))}
+		for _, r := range s.ledger {
+			app, _, err := harness.UnwrapPayload(json.RawMessage(r.PayloadText))
+			if err != nil {
+				return actorcaps.LedgerSnapshot{}, err
+			}
+			if q.Session != "" && q.Session != app.Session {
+				continue
+			}
+			out.Rows = append(out.Rows, actorcaps.LedgerRow{Seq: r.Seq, IsTerminal: r.Terminal, Envelope: message.Envelope{ID: r.ID, Sender: r.Sender, Audience: r.Audience, Kind: r.Kind, Type: r.MessageType, ParentID: r.ParentID, TSReceived: r.TSReceived, Payload: json.RawMessage(r.PayloadText)}})
+		}
+		return out, nil
+	}}
 }
 
 func testRequest(id, typ string, body any) actorbase.Msg {
@@ -562,12 +568,19 @@ func TestAskAgainstArchivedSessionForksAndAssignsFreshSession(t *testing.T) {
 
 	c.handleAsk(sys, request)
 
-	assigned := sys.assigned[request.ID]
+	w := c.requestWork(string(request.ID))
+	if w == nil {
+		t.Fatal("request did not create work")
+	}
+	app, err := w.SourceCause.Context()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assigned := app.Session
 	if assigned == "" || assigned == "s-old" {
 		t.Fatalf("assigned session=%q", assigned)
 	}
-	w := c.requestWork(string(request.ID))
-	if w == nil || w.SessionID != assigned {
+	if w.SessionID != assigned {
 		t.Fatalf("work=%+v assigned=%q", w, assigned)
 	}
 	if len(sys.posts) != 1 {
@@ -576,5 +589,14 @@ func TestAskAgainstArchivedSessionForksAndAssignsFreshSession(t *testing.T) {
 	var start agentloop.StartRequest
 	if err := json.Unmarshal(sys.posts[0].Payload, &start); err != nil || start.Open == nil || start.Open.Base == nil || start.Open.Base.Session != "s-old" || start.Open.Base.At != "report-old" {
 		t.Fatalf("start=%+v err=%v", start, err)
+	}
+}
+
+func TestClosedWorkReleasesRequestScope(t *testing.T) {
+	c := &controller{}
+	w := &workRecord{State: agentproto.WorkClosed, SourceCause: message.Anchored("ask", "tree").WithContext(harness.Context{Session: "S"})}
+	c.finishWaiters(nil, w)
+	if w.SourceCause.Stated() {
+		t.Fatal("completed receipt retained request scope")
 	}
 }

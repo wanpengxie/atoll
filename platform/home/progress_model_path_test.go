@@ -36,7 +36,7 @@ func (r progressPathResolver) BuildClass(_ channel.ID, _ actor.ActorID, class st
 						return err
 					}
 					rv := metatool.ExecuteCallActor(msg.Ctx(), json.RawMessage(`{"actor_id":"progress-target","type":"progress.work","payload":{},"wait":true}`), base.ExecFace(sys, time.Second), metatool.RuntimeContext{
-						Trigger: metatool.Trigger{Envelope: msg.Envelope, CorrelationID: msg.CorrelationID},
+						Trigger: metatool.Trigger{Cause: msg.Cause()},
 					})
 					_, _ = sys.Reply(msg, rv.Value)
 				}
@@ -129,7 +129,7 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 	}
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
-		Type: "test.observe.progress", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
+		Type: "test.observe.progress", Payload: json.RawMessage(`{"_context":{"session":"progress-S","caller":{"channel":"progress-model-channel","actor":"human:alice:1"}},"body":{}}`), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
 		Cause: message.Root(),
 	})
 	if err != nil {
@@ -152,6 +152,12 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 		for _, row := range rows {
 			env := row.Envelope
 			if env.Kind == message.KindRequest && env.Sender.ID == model && env.Type == "progress.work" {
+				var carried struct {
+					Context message.Context `json:"_context"`
+				}
+				if err := json.Unmarshal(env.Payload, &carried); err != nil || carried.Context.Session != "progress-S" || carried.Context.Caller == nil || carried.Context.Caller.Actor != "human:alice:1" {
+					t.Fatalf("tool call lost request context: %s %v", env.Payload, err)
+				}
 				modelCall = env.ID
 			}
 			if modelCall != "" && env.Kind == message.KindResponse && env.ParentID == modelCall {

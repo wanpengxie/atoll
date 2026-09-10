@@ -120,7 +120,7 @@ func (c *controller) postSessionCommand(sys actorbase.Sys, msg actorbase.Msg, s 
 			}
 		}
 		tried[target] = true
-		_, err := sys.Post(behavior.RequestSpec{Cause: message.Anchored(msg.ID, msg.ID), Type: typ, Audience: message.Audience{actorID(target)}, Payload: mustJSON(payload)})
+		_, err := sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: typ, Audience: message.Audience{actorID(target)}, Payload: mustJSON(payload)})
 		if err == nil {
 			s.Holder = target
 			return nil

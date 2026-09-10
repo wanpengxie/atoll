@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -76,7 +77,10 @@ func manifest() introspect.Manifest {
 func proc(cfg Config) actorbase.Proc {
 	return func(sys actorbase.Sys) error {
 		if err := ensureMain(sys, cfg); err != nil {
-			return fmt.Errorf("initialize main %s: %w", cfg.Session, err)
+			if !errors.Is(err, errMainContextWrite) {
+				return fmt.Errorf("initialize main %s: %w", cfg.Session, err)
+			}
+			slog.Warn("agent-main context initialization failed", "actor", sys.Self(), "session", cfg.Session, "error", err)
 		}
 		if _, err := sys.After(10*time.Second, pulse, map[string]any{}, schedule.TimerHomeMemory); err != nil {
 			return err
@@ -122,6 +126,23 @@ func ensureMain(sys actorbase.Sys, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	object, opened, err := materializeMain(ledger)
+	if err != nil {
+		return err
+	}
+	if !opened {
+		id, err := emitMain(sys, "session.opened", map[string]any{"session_id": cfg.Session, "base": nil}, cfg)
+		if err != nil {
+			return err
+		}
+		object.Version = id
+	}
+	return writeMainContext(sys, cfg, object)
+}
+
+// materializeMain uses the ledger already read through View. A failed KV delete
+// cannot make the old cache authoritative for the next merge or compaction.
+func materializeMain(ledger []row) (agentbase.ContextObject, bool, error) {
 	object := agentbase.ContextObject{Messages: []json.RawMessage{}}
 	opened := false
 	for _, item := range ledger {
@@ -133,7 +154,7 @@ func ensureMain(sys actorbase.Sys, cfg Config) error {
 				Context []json.RawMessage `json:"context"`
 			}
 			if err := json.Unmarshal(item.Body, &compact); err != nil {
-				return fmt.Errorf("invalid main compact %s: %w", item.ID, err)
+				return object, opened, fmt.Errorf("invalid main compact %s: %w", item.ID, err)
 			}
 			object.Messages = compact.Context
 			object.Version = item.ID
@@ -146,7 +167,7 @@ func ensureMain(sys actorbase.Sys, cfg Config) error {
 				Summary  json.RawMessage `json:"summary"`
 			}
 			if err := json.Unmarshal(item.Body, &merge); err != nil {
-				return fmt.Errorf("invalid main merge %s: %w", item.ID, err)
+				return object, opened, fmt.Errorf("invalid main merge %s: %w", item.ID, err)
 			}
 			if merge.Decision == "merged" && len(merge.Summary) > 0 {
 				object.Messages = append(object.Messages, merge.Summary)
@@ -154,16 +175,27 @@ func ensureMain(sys actorbase.Sys, cfg Config) error {
 			}
 		}
 	}
-	if !opened {
-		id, err := emitMain(sys, "session.opened", map[string]any{"session_id": cfg.Session, "base": nil}, cfg)
-		if err != nil {
-			return err
-		}
-		object.Version = id
-	}
-	_, err = agentbase.WriteContext(sys, cfg.Session, object)
-	return err
+	return object, opened, nil
 }
+
+var errMainContextWrite = errors.New("main context write failed")
+
+// Retrying this exact KV value does not repeat the committed merge/compact.
+func writeMainContext(sys actorbase.Sys, cfg Config, object agentbase.ContextObject) error {
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err = agentbase.WriteContext(sys, cfg.Session, object); err == nil {
+			return nil
+		}
+		slog.Warn("agent-main context write failed", "actor", sys.Self(), "session", cfg.Session, "attempt", attempt, "error", err)
+	}
+	if deleteErr := agentbase.DeleteContext(sys, cfg.Session); deleteErr != nil {
+		slog.Error("agent-main context deletion failed", "actor", sys.Self(), "session", cfg.Session, "error", deleteErr)
+		return fmt.Errorf("%w after 3 attempts: %v; delete failed: %v", errMainContextWrite, err, deleteErr)
+	}
+	return fmt.Errorf("%w after 3 attempts: %v; cache deleted", errMainContextWrite, err)
+}
+
 func emitMain(sys actorbase.Sys, typ string, value map[string]any, cfg Config) (message.ID, error) {
 	value["session"] = cfg.Session
 	spec, e := behavior.EventSpecJSON(message.Root(), typ, value)
@@ -256,126 +288,24 @@ type row struct {
 }
 
 func rows(sys actorbase.Sys, session string) ([]row, error) {
-	return queryRows(sys, map[string]any{"session_id": session})
+	return queryRows(sys, session)
 }
 
-func queryRows(sys actorbase.Sys, filter map[string]any) ([]row, error) {
+func queryRows(sys actorbase.Sys, session string) ([]row, error) {
+	snapshot, err := sys.View().Read(sys.Life(), actorcaps.LedgerRead{Session: session})
+	if err != nil {
+		return nil, err
+	}
 	var out []row
-	before, head := int64(0), int64(0)
-	seen := map[message.ID]bool{}
-	for {
-		req := map[string]any{"view": "raw", "limit": 20}
-		for key, value := range filter {
-			req[key] = value
-		}
-		if before > 0 {
-			req["before_seq"] = before
-		} else if len(filter) == 0 {
-			req["before_seq"] = int64(^uint64(0) >> 1)
-		}
-		if head > 0 {
-			req["head_seq"] = head
-		}
-		pd, err := sys.Call(message.Root(), actor.SystemActorID, message.TypeSystemLogQuery, req)
+	for _, r := range snapshot.Rows {
+		m := r.Envelope
+		_, body, err := harness.UnwrapPayload(m.Payload)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("invalid ledger row %s: %w", m.ID, err)
 		}
-		msg, err := pd.Wait(sys.Life(), 0)
-		if err != nil {
-			return nil, err
-		}
-		var result struct {
-			Status    string `json:"status"`
-			ErrorCode string `json:"error_code"`
-			Detail    string `json:"detail"`
-			Turns     []struct {
-				Messages []struct {
-					Seq         int64            `json:"seq"`
-					ID          message.ID       `json:"id"`
-					Kind        message.Kind     `json:"kind"`
-					MessageType string           `json:"message_type"`
-					ParentID    message.ID       `json:"parent_id"`
-					PayloadText string           `json:"payload_text"`
-					Truncated   bool             `json:"truncated"`
-					Sender      message.Sender   `json:"sender"`
-					Audience    message.Audience `json:"audience"`
-				} `json:"messages"`
-			} `json:"turns"`
-			HeadSeq       int64 `json:"head_seq"`
-			NextBeforeSeq int64 `json:"next_before_seq"`
-			HasMore       bool  `json:"has_more"`
-		}
-		if json.Unmarshal(msg.Payload, &result) != nil || (result.Status != "" && result.Status != "completed") {
-			if result.ErrorCode != "" {
-				return nil, fmt.Errorf("%s: %s", result.ErrorCode, result.Detail)
-			}
-			return nil, errors.New("invalid log query")
-		}
-		if head == 0 {
-			head = result.HeadSeq
-		}
-		for _, turn := range result.Turns {
-			for _, item := range turn.Messages {
-				if seen[item.ID] {
-					continue
-				}
-				seen[item.ID] = true
-				payload := item.PayloadText
-				if item.Truncated {
-					payload, err = readPayload(sys, item.Seq, head)
-					if err != nil {
-						return nil, err
-					}
-				}
-				_, body, unwrapErr := harness.UnwrapPayload(json.RawMessage(payload))
-				if unwrapErr != nil {
-					return nil, fmt.Errorf("invalid log row %s: %w", item.ID, unwrapErr)
-				}
-				out = append(out, row{Seq: item.Seq, ID: item.ID, Parent: item.ParentID, Kind: item.Kind, Type: item.MessageType, Body: body, Sender: item.Sender.ID, To: item.Audience})
-			}
-		}
-		if !result.HasMore {
-			sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
-			return out, nil
-		}
-		if result.NextBeforeSeq <= 0 || result.NextBeforeSeq == before {
-			return nil, errors.New("log query made no progress")
-		}
-		before = result.NextBeforeSeq
+		out = append(out, row{Seq: r.Seq, ID: m.ID, Parent: m.ParentID, Kind: m.Kind, Type: m.Type, Body: body, Sender: m.Sender.ID, To: m.Audience})
 	}
-}
-
-func readPayload(sys actorbase.Sys, seq, head int64) (string, error) {
-	var text strings.Builder
-	offset := 0
-	for part := 0; part < 10000; part++ {
-		pd, err := sys.Call(message.Root(), actor.SystemActorID, message.TypeSystemLogQuery, map[string]any{"view": "raw", "read_seq": seq, "head_seq": head, "offset": offset})
-		if err != nil {
-			return "", err
-		}
-		msg, err := pd.Wait(sys.Life(), 0)
-		if err != nil {
-			return "", err
-		}
-		var result struct {
-			Message *struct {
-				PayloadText string `json:"payload_text"`
-				NextOffset  *int   `json:"next_offset"`
-			} `json:"message"`
-		}
-		if json.Unmarshal(msg.Payload, &result) != nil || result.Message == nil {
-			return "", errors.New("log row chunk missing")
-		}
-		text.WriteString(result.Message.PayloadText)
-		if result.Message.NextOffset == nil {
-			return text.String(), nil
-		}
-		if *result.Message.NextOffset <= offset {
-			return "", errors.New("log row chunk read made no progress")
-		}
-		offset = *result.Message.NextOffset
-	}
-	return "", errors.New("log row chunk limit exceeded")
+	return out, nil
 }
 
 func relations(sys actorbase.Sys, cfg Config) (map[string]string, map[string]bool, error) {
@@ -398,7 +328,7 @@ func relations(sys actorbase.Sys, cfg Config) (map[string]string, map[string]boo
 		}
 	}
 	archived := map[string]bool{}
-	commands, err := queryRows(sys, map[string]any{})
+	commands, err := queryRows(sys, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -542,6 +472,10 @@ func mergeBranch(sys actorbase.Sys, cfg Config, branch, mode string) (bool, erro
 	if e != nil {
 		return false, e
 	}
+	object, _, e := materializeMain(main)
+	if e != nil {
+		return false, e
+	}
 	merged := map[string]bool{}
 	policy := "auto"
 	var parent message.ID
@@ -586,7 +520,7 @@ func mergeBranch(sys actorbase.Sys, cfg Config, branch, mode string) (bool, erro
 		}
 	}
 	if len(refs) == 0 {
-		return false, nil
+		return false, writeMainContext(sys, cfg, object)
 	}
 	if policy == "never" {
 		_, e := emitMain(sys, "session.merge", map[string]any{"session_id": cfg.Session, "parent": parent, "from_session": branch, "boundaries": refs, "decision": "skipped", "summary": nil, "refs": refs, "mode": mode}, cfg)
@@ -612,10 +546,6 @@ func mergeBranch(sys actorbase.Sys, cfg Config, branch, mode string) (bool, erro
 	if e != nil {
 		return false, e
 	}
-	object, found, e := agentbase.LoadContext(sys, cfg.Session)
-	if e != nil || !found {
-		return false, errors.New("main context is unavailable")
-	}
 	before, e := countObject(sys, cfg, object.Messages)
 	if e != nil {
 		return false, e
@@ -631,7 +561,7 @@ func mergeBranch(sys actorbase.Sys, cfg Config, branch, mode string) (bool, erro
 	}
 	object.Messages = candidate
 	object.Version = id
-	_, e = agentbase.WriteContext(sys, cfg.Session, object)
+	e = writeMainContext(sys, cfg, object)
 	if e == nil {
 		e = compactMain(sys, cfg)
 	}
@@ -684,9 +614,19 @@ func summarize(sys actorbase.Sys, cfg Config, branch string, texts []string) (js
 }
 
 func compactMain(sys actorbase.Sys, cfg Config) error {
-	object, found, err := agentbase.LoadContext(sys, cfg.Session)
-	if err != nil || !found || len(object.Messages) < 2 {
+	mainRows, err := rows(sys, cfg.Session)
+	if err != nil {
 		return err
+	}
+	object, _, err := materializeMain(mainRows)
+	if err != nil {
+		return err
+	}
+	if err := writeMainContext(sys, cfg, object); err != nil {
+		return err
+	}
+	if len(object.Messages) < 2 {
+		return nil
 	}
 	pd, err := sys.Call(message.Root(), actor.ActorID(cfg.LLMActor), llmproto.TypeCount, llmproto.CountRequest{RootSession: cfg.Session, Context: agentbase.ContextRef{Resource: mustContextResource(cfg.Session), Version: object.Version}})
 	if err != nil {
@@ -732,10 +672,6 @@ func compactMain(sys actorbase.Sys, cfg Config) error {
 		return errors.New("invalid main compact summary")
 	}
 	compacted := append([]json.RawMessage{generated.Message}, object.Messages[cut:]...)
-	mainRows, err := rows(sys, cfg.Session)
-	if err != nil {
-		return err
-	}
 	refSet := map[string]bool{}
 	for _, item := range mainRows {
 		if item.Type != "session.merge" && item.Type != "session.compact" {
@@ -762,8 +698,7 @@ func compactMain(sys actorbase.Sys, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	_, err = agentbase.WriteContext(sys, cfg.Session, agentbase.ContextObject{Messages: compacted, Version: id})
-	return err
+	return writeMainContext(sys, cfg, agentbase.ContextObject{Messages: compacted, Version: id})
 }
 
 func mustContextResource(session string) resource.ResourceID {

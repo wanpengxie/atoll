@@ -16,13 +16,14 @@ Unclosed accepted turns, missing required inputs, malformed snapshots, invalid
 tool pairing, parent/base cycles and reused historical turn IDs cause rejection.
 Main merge summaries and explicit fork boundaries remain part of context.
 
-All session and recursive-base reads for a command share one ledger head, a
-4,096-message budget and a request-local cache. Resulting model context is also
-limited to 4,096 messages. Sparse scans additionally have a 4,096-exchange budget
-(reserving the log API's maximum 512-exchange page before each call). Full-text
-continuations share a 512-query, 16 MiB response and 10-second budget. A read may
-fail conservatively before exhausting its message budget. A partial read is
-never treated as complete history.
+All ledger reads use `sys.View()`, not `system.log.query`. View returns complete
+structured envelopes at one fixed head, within 4,096 scanned messages (including
+unrelated rows), 16 MiB of payload and 10 seconds. Ancestor expansion belongs to
+View's snapshot `Session` builder; Looper renders the returned ancestor chain.
+All session/base reads for a command share that snapshot. Each input insertion
+batch shares a fresh snapshot so later steering inputs can be read without
+rescanning once per input. Model context is also limited to 4,096 messages.
+A partial or failed read is never treated as complete history.
 
 When a new start cannot establish consistent context within these limits it
 returns `session_context_unavailable`, with advice to open a new session. It

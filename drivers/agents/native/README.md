@@ -4,16 +4,14 @@ The Controller starts with an empty in-memory work table and waiter map. It
 projects branch/main relationships from the ledger, arms its periodic timer,
 and receives messages. Startup does not contact a Looper or replay old work.
 
-Each relation projection reads at most 1,000 historical message rows, counting
-unrelated messages and responses too. Full-body reads are restricted to relation
-messages. The whole read also has a shared 128-query, 4 MiB returned-text and
-5-second budget. Reaching a limit before completing history aborts the read;
-message/query/byte limits report `relation_history_limit_exceeded`. It never
-commits a partial projection. Startup fails on that error; session queries keep
+Each relation projection uses `sys.View().Read` with a 1,000-message scan limit,
+4 MiB payload limit and 5-second deadline. View owns storage pagination and
+returns complete structured envelopes at one fixed head. Unrelated messages and
+responses count too. Limits report `ledger_read_limit_exceeded`; no partial
+projection is committed. Startup fails on that error; session queries preserve
 the previous projection and return the error. Relation checkpoints are not yet
-implemented, so a history beyond this bound cannot be fully projected at startup.
-The cap is not a promise that SQLite examines exactly 1,000 physical rows: the
-log API batches and prefetches exchanges, but Controller pagination is bounded.
+implemented, so history beyond this bound cannot be fully projected at startup.
+Controller does not use `system.log.query` or rebuild truncated log text.
 
 The relation projection retains session holders, fork boundaries, archive facts,
 merge policy, merged/skipped boundaries and sync progress. Historical starts and

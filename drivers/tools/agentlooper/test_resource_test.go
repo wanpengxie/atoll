@@ -3,6 +3,7 @@ package agentlooper
 import (
 	"context"
 	"encoding/json"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"sync"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -82,4 +83,10 @@ func (*looperTestResource) CreateFileDecided(resource.ResourceID, bool) (accessd
 }
 func (*looperTestResource) CreateDirectory(resource.ResourceID) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{}, nil
+}
+
+func (looperTestBase) View() actorcaps.LedgerView {
+	return looperTestView{read: func(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		return actorcaps.LedgerSnapshot{}, nil
+	}}
 }

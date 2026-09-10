@@ -1,5 +1,10 @@
 package message
 
+import (
+	"encoding/json"
+	"errors"
+)
+
 // Cause lives with the envelope, not with the builders, because it IS a
 // property of the message: parent_id and correlation_id are envelope fields,
 // and this is the one value they are both derived from. Every layer that hands
@@ -7,8 +12,8 @@ package message
 // needs to name a cause, and the message is the only place all of them can see.
 
 // Cause answers the one question every envelope must answer before it can be
-// built: why does this message exist. The ledger has exactly two answers and
-// this type has exactly two constructors, so there is no third.
+// built: why does this message exist. A message either starts a tree or
+// continues one. The request context travels with this value.
 //
 //	Root()      an errand that starts here — a person spoke, a frame crossed
 //	            the membrane, a clock went off. Parent is empty and correlation
@@ -40,6 +45,8 @@ type Cause struct {
 	parent      ID
 	correlation ID
 	stated      bool
+	app         Context
+	appKnown    bool
 }
 
 // CorrelationID derives which errand a message belongs to: the tree its cause
@@ -56,26 +63,39 @@ func CorrelationID(chain, rootID ID) ID {
 // Root is the cause of a message that begins an errand rather than continuing
 // one. Correlation is the message's own id, which does not exist until the
 // builder mints it, so Root carries none and the builder fills it in.
-func Root() Cause { return Cause{stated: true} }
+func Root() Cause { return Cause{stated: true, appKnown: true} }
 
 // From is the cause of a message written because of env.
 func From(env Envelope) Cause {
-	return Cause{
-		parent:      env.ID,
-		correlation: CorrelationID(env.CorrelationID, env.ID),
-		stated:      true,
+	cause := Cause{parent: env.ID, correlation: CorrelationID(env.CorrelationID, env.ID), stated: true}
+	var payload struct {
+		Context *Context `json:"_context"`
 	}
+	if json.Unmarshal(env.Payload, &payload) == nil && payload.Context != nil {
+		cause = cause.WithContext(*payload.Context)
+	}
+	return cause
 }
 
-// Anchored rebuilds the cause of work that outlives the message that started
-// it. An agent turn interrupted by a restart holds its trigger's id and
-// correlation on disk, not the envelope — the envelope is gone, the errand is
-// not, and the work resuming still belongs to it.
-//
-// This is the ONLY way to make a Cause without an envelope in hand, and it is
-// for restore paths alone. Both halves must come from one message that really
-// was on this ledger; inventing a pair here re-opens exactly the two-field
-// disagreement this type exists to close.
+// WithContext captures a value copy of the originating request's metadata.
+// Relay code with only IDs must explicitly supply its in-hand request scope.
+func (c Cause) WithContext(app Context) Cause {
+	c.app, c.appKnown = app.Clone(), true
+	return c
+}
+
+// Context rejects a bare ID-only cause instead of silently losing its session.
+func (c Cause) Context() (Context, error) {
+	if !c.appKnown {
+		return Context{}, errors.New("message cause has no application context; pass the originating request scope")
+	}
+	return c.app.Clone(), nil
+}
+
+// Anchored names a previously written message when a relay has its IDs but
+// no delivered envelope. Both IDs must refer to that same message. It carries
+// no context: the holder must attach its in-hand request scope with WithContext
+// before using an actorbase write verb. It never looks up or restores a request.
 func Anchored(parent, correlation ID) Cause {
 	if parent == "" {
 		return Cause{}

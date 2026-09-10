@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -25,7 +26,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const Class = "agent-looper"
@@ -306,7 +306,7 @@ func (l *looper) reset(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "busy", "session has an active turn")
 		return
 	}
-	spec, _ := behavior.EventSpecJSON(message.Anchored(msg.ID, msg.ID), agentloop.TypeSessionReset, req)
+	spec, _ := behavior.EventSpecJSON(msg.Cause(), agentloop.TypeSessionReset, req)
 	id, err := sys.Emit(spec)
 	if err != nil {
 		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
@@ -326,7 +326,7 @@ func (l *looper) rename(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "invalid_args", "session_id and name are required")
 		return
 	}
-	spec, _ := behavior.EventSpecJSON(message.Anchored(msg.ID, msg.ID), agentloop.TypeSessionRename, req)
+	spec, _ := behavior.EventSpecJSON(msg.Cause(), agentloop.TypeSessionRename, req)
 	if _, err := sys.Emit(spec); err != nil {
 		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
 		return
@@ -346,29 +346,29 @@ func (l *looper) syncSession(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	historyCtx, historyCancel := newHistoryContext(msg.Ctx())
 	defer historyCancel()
-	valid, err := validSessionBoundary(historyCtx, sys, message.Anchored(msg.ID, msg.ID), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.Through})
+	valid, err := validSessionBoundary(historyCtx, sys, msg.Cause(), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.Through})
 	if err != nil || !valid {
 		_, _ = sys.Fail(msg, "invalid_args", "source through is not a boundary")
 		return
 	}
-	target, _, err := sessionContext(historyCtx, sys, message.Anchored(msg.ID, msg.ID), req.SessionID)
+	target, _, err := sessionContext(historyCtx, sys, msg.Cause(), req.SessionID)
 	if err != nil {
 		failSessionContext(sys, msg, err)
 		return
 	}
-	source, err := materializeSession(historyCtx, sys, message.Anchored(msg.ID, msg.ID), req.From.Session, message.ID(req.From.Through), nil)
+	source, err := materializeSession(historyCtx, sys, msg.Cause(), req.From.Session, message.ID(req.From.Through))
 	if err != nil {
 		failSessionContext(sys, msg, err)
 		return
 	}
 	delta := source.Messages
 	if req.From.After != "" {
-		valid, err = validSessionBoundary(historyCtx, sys, message.Anchored(msg.ID, msg.ID), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.After})
+		valid, err = validSessionBoundary(historyCtx, sys, msg.Cause(), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.After})
 		if err != nil || !valid {
 			_, _ = sys.Fail(msg, "invalid_args", "source after is not a boundary")
 			return
 		}
-		previous, err := materializeSession(historyCtx, sys, message.Anchored(msg.ID, msg.ID), req.From.Session, message.ID(req.From.After), nil)
+		previous, err := materializeSession(historyCtx, sys, msg.Cause(), req.From.Session, message.ID(req.From.After))
 		if err != nil || len(previous.Messages) > len(source.Messages) || !messagePrefix(previous.Messages, source.Messages) {
 			_, _ = sys.Fail(msg, "invalid_args", "source range does not extend its after boundary")
 			return
@@ -382,7 +382,7 @@ func (l *looper) syncSession(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	row := agentloop.Synced{SessionID: req.SessionID, Context: target.Messages, TokensBefore: agentbase.ContextTokens(target.Messages)}
 	row.From.Session, row.From.After, row.From.Through = req.From.Session, req.From.After, req.From.Through
-	spec, _ := behavior.EventSpecJSON(message.Anchored(msg.ID, msg.ID), agentloop.TypeSessionSync, row)
+	spec, _ := behavior.EventSpecJSON(msg.Cause(), agentloop.TypeSessionSync, row)
 	id, err := sys.Emit(spec)
 	if err != nil {
 		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
@@ -509,7 +509,7 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 			historyErr = errors.New("open base is not a committed boundary")
 		}
 		if historyErr == nil {
-			object, historyErr = materializeSession(historyCtx, sys, msg.Cause(), req.Open.Base.Session, message.ID(req.Open.Base.At), nil)
+			object, historyErr = materializeSession(historyCtx, sys, msg.Cause(), req.Open.Base.Session, message.ID(req.Open.Base.At))
 		}
 	}
 	if historyErr == nil && !exists && req.Open == nil {
@@ -524,7 +524,7 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		failSessionContext(sys, msg, historyErr)
 		return
 	}
-	turnCause := message.Anchored(msg.ID, msg.ID)
+	turnCause := msg.Cause()
 	a := &assignment{start: req, cause: turnCause, cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted", history: append([]json.RawMessage(nil), object.Messages...), version: object.Version}
 	l.active[req.AssignmentID] = a
 	l.mu.Unlock()
@@ -737,16 +737,12 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		}
 	}
 	history := append([]json.RawMessage(nil), a.history...)
-	for i, in := range inputs {
-		if in.Text == "" {
-			hydrated, err := hydrateInput(ctx, sys, a.cause, in.ID, in.Seq)
-			if err != nil {
-				l.report(sys, a, "failed", through, nil, "input_unavailable", err.Error(), "confirmed")
-				return
-			}
-			in = hydrated
-			inputs[i] = in
-		}
+	inputs, err := hydrateInputs(ctx, sys, a.cause, inputs)
+	if err != nil {
+		l.report(sys, a, "failed", through, nil, "input_unavailable", err.Error(), "confirmed")
+		return
+	}
+	for _, in := range inputs {
 		history = append(history, inputMessage(in))
 		a.version = message.ID(in.ID)
 	}
@@ -785,16 +781,12 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		}
 		pending := a.pendingInputs()
 		if len(pending) > 0 {
-			for i, in := range pending {
-				if in.Text == "" {
-					hydrated, err := hydrateInput(ctx, sys, a.cause, in.ID, in.Seq)
-					if err != nil {
-						l.report(sys, a, "failed", through, nil, "input_unavailable", err.Error(), "confirmed")
-						return
-					}
-					in = hydrated
-					pending[i] = in
-				}
+			pending, err = hydrateInputs(ctx, sys, a.cause, pending)
+			if err != nil {
+				l.report(sys, a, "failed", through, nil, "input_unavailable", err.Error(), "confirmed")
+				return
+			}
+			for _, in := range pending {
 				history = append(history, inputMessage(in))
 				a.version = message.ID(in.ID)
 			}
@@ -1004,26 +996,37 @@ func inputMessage(in agentloop.Input) json.RawMessage {
 	return mustJSON(map[string]any{"role": "user", "content": content, "source_message_id": in.ID})
 }
 
+func hydrateInputs(ctx context.Context, sys actorbase.Sys, cause message.Cause, inputs []agentloop.Input) ([]agentloop.Input, error) {
+	ctx, cancel := newHistoryContext(ctx)
+	defer cancel()
+	out := append([]agentloop.Input(nil), inputs...)
+	for i, in := range out {
+		if in.Text != "" {
+			continue
+		}
+		hydrated, err := hydrateInput(ctx, sys, cause, in.ID, in.Seq)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = hydrated
+	}
+	return out, nil
+}
+
 func hydrateInput(ctx context.Context, sys actorbase.Sys, cause message.Cause, id string, seq int64) (agentloop.Input, error) {
-	raw, err := call(ctx, sys, cause, actor.SystemActorID, message.TypeSystemLogQuery, map[string]any{"view": "raw", "read_id": id})
+	rows, err := readLedgerRows(ctx, sys, cause, "")
 	if err != nil {
 		return agentloop.Input{}, err
 	}
-	var response channelspec.LogQueryResponse
-	if err := json.Unmarshal(raw, &response); err != nil || response.Message == nil {
-		return agentloop.Input{}, errors.New("input ledger row not found")
-	}
-	payloadText := response.Message.PayloadText
-	if response.Message.Truncated {
-		payloadText, err = readLedgerPayload(ctx, sys, cause, response.Message.Seq, response.HeadSeq)
-		if err != nil {
-			return agentloop.Input{}, err
+	var body json.RawMessage
+	for _, row := range rows {
+		if string(row.ID) == id {
+			body = row.Body
+			break
 		}
 	}
-	payload := json.RawMessage(payloadText)
-	_, body, err := harness.UnwrapPayload(payload)
-	if err != nil {
-		return agentloop.Input{}, fmt.Errorf("input payload: %w", err)
+	if body == nil {
+		return agentloop.Input{}, errors.New("input ledger row not found")
 	}
 	var ask struct {
 		Text        string             `json:"text"`
@@ -1566,7 +1569,9 @@ func (l *looper) report(sys actorbase.Sys, a *assignment, state string, _ int64,
 		turn = a.start.AssignmentID
 	}
 	payload := agentloop.ReportRequest{TurnID: turn, SessionID: a.start.SessionID, State: state}
-	_, _ = sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(payload)})
+	if _, err := sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(payload)}); err != nil {
+		slog.Error("agent-looper report append failed", "actor", sys.Self(), "controller", a.start.ControllerActor, "session", a.start.SessionID, "turn", turn, "state", state, "error", err)
+	}
 }
 
 func (l *looper) compactIfNeeded(ctx context.Context, sys actorbase.Sys, a *assignment, history []json.RawMessage, ref agentbase.ContextRef, force bool) ([]json.RawMessage, agentbase.ContextRef, error) {
@@ -1625,7 +1630,7 @@ func (l *looper) compactIfNeeded(ctx context.Context, sys actorbase.Sys, a *assi
 		return nil, ref, fmt.Errorf("compact context: %w", err)
 	}
 	row := agentloop.Compact{SessionID: a.start.SessionID, Context: compacted, TokensBefore: before, Size: agentloop.ContextSize{Before: before, After: agentbase.ContextTokens(compacted)}}
-	spec, err := behavior.EventSpecJSON(message.Anchored(summaryMsg.ID, summaryMsg.ID), agentloop.TypeSessionCompact, row)
+	spec, err := behavior.EventSpecJSON(summaryMsg.Cause(), agentloop.TypeSessionCompact, row)
 	if err != nil {
 		return nil, ref, err
 	}

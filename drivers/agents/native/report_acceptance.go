@@ -25,13 +25,7 @@ func reportAcceptance(sys actorbase.Sys, rows []logMessage, head int64) (map[mes
 			continue
 		}
 		text := row.PayloadText
-		if row.Truncated {
-			var err error
-			text, err = readLogMessage(sys, row.Seq, head)
-			if err != nil {
-				return nil, err
-			}
-		}
+
 		app, body, err := harness.UnwrapPayload(json.RawMessage(text))
 		if err != nil {
 			return nil, err

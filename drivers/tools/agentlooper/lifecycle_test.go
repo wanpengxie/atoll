@@ -15,8 +15,10 @@ import (
 	llmproto "github.com/wanpengxie/atoll/drivers/tools/pillm/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
@@ -28,7 +30,7 @@ type historyTestSys struct {
 	inbox        []actorbase.Msg
 	code, detail string
 	replies      int
-	query        func(map[string]any) map[string]any
+	readErr      error
 }
 
 func (*historyTestSys) Resource() actorbase.ResourceHandle { panic("must not trust context KV") }
@@ -54,30 +56,42 @@ func (s *historyTestSys) Post(behavior.RequestSpec) (message.ID, error) {
 	return "post", nil
 }
 func (s *historyTestSys) Call(_ message.Cause, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
-	if target != actor.SystemActorID || word != message.TypeSystemLogQuery {
-		return nil, fmt.Errorf("unexpected call %s %s", target, word)
+	return nil, fmt.Errorf("unexpected call %s %s", target, word)
+}
+
+type looperTestView struct {
+	actorcaps.LedgerView
+	read  func(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error)
+	build func(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error)
+}
+
+// Tests compose the real platform projection with a controlled ledger reader.
+// The Looper receives only the LedgerView interface, just as in production.
+func (v looperTestView) BuildSession(ctx context.Context, snapshot actorcaps.LedgerSnapshot, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
+	if v.build != nil {
+		return v.build(ctx, snapshot, session, upto)
 	}
-	s.queries++
-	req := payload.(map[string]any)
-	var result map[string]any
-	if s.query != nil {
-		result = s.query(req)
-	} else {
-		var turns []any
-		for _, row := range s.rows {
-			if session, _ := req["session_id"].(string); session != row.Session {
-				continue
-			}
-			raw, _ := harness.WrapPayload(harness.Context{Session: row.Session}, row.Body)
-			turns = append(turns, map[string]any{"messages": []any{map[string]any{
-				"seq": row.Seq, "id": row.ID, "sender": message.Sender{ID: row.Sender}, "audience": row.Audience,
-				"kind": row.Kind, "message_type": row.Type, "parent_id": row.Parent, "payload_text": string(raw),
-			}}})
+	return (home.View{}).BuildSession(ctx, snapshot, session, upto)
+}
+func (v looperTestView) Read(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+	return v.read(ctx, q)
+}
+func (s *historyTestSys) View() actorcaps.LedgerView {
+	return looperTestView{read: func(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		s.queries++
+		if s.readErr != nil {
+			return actorcaps.LedgerSnapshot{}, s.readErr
 		}
-		result = map[string]any{"head_seq": 100, "turns": turns}
-	}
-	result["status"] = "completed"
-	return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Payload: mustJSON(result)})}, nil
+		if err := ctx.Err(); err != nil {
+			return actorcaps.LedgerSnapshot{}, err
+		}
+		out := actorcaps.LedgerSnapshot{HeadSeq: 100}
+		for _, r := range s.rows {
+			raw, _ := harness.WrapPayload(harness.Context{Session: r.Session}, r.Body)
+			out.Rows = append(out.Rows, actorcaps.LedgerRow{Seq: r.Seq, IsTerminal: r.Terminal, Envelope: message.Envelope{ID: r.ID, Sender: message.Sender{ID: r.Sender}, Audience: r.Audience, Kind: r.Kind, Type: r.Type, ParentID: r.Parent, Payload: raw}})
+		}
+		return out, nil
+	}}
 }
 
 func closedHistory() []ledgerRow {
@@ -147,55 +161,22 @@ func TestClosedHistoryIsReadOnceAndMissingInputsAreRejected(t *testing.T) {
 	}
 }
 
-func TestHistoryBudgetIncludesSparseScansAndRecursiveBases(t *testing.T) {
-	sys := &historyTestSys{}
-	sys.query = func(map[string]any) map[string]any {
-		return map[string]any{"head_seq": 1_000_000, "has_more": true, "next_before_seq": 1_000_000 - sys.queries*512, "scanned": 512}
-	}
-	if _, err := readSessionRows(context.Background(), sys, message.Root(), "sparse"); err == nil || sys.queries != 8 {
-		t.Fatalf("sparse history scan was unbounded: calls=%d err=%v", sys.queries, err)
-	}
-	ctx, cancel := newHistoryContext(context.Background())
-	defer cancel()
-	budget := ctx.Value(historyBudgetKey{}).(*historyBudget)
-	budget.rows = maxSessionHistoryMessages
-	budget.cache["branch"] = []ledgerRow{{ID: "fork", Session: "branch", Type: agentloop.TypeSessionOpened, Body: mustJSON(agentloop.Opened{Base: &agentloop.BoundaryRef{Session: "base"}})}}
-	sys = &historyTestSys{}
-	if _, err := materializeSession(ctx, sys, message.Root(), "branch", "", nil); err == nil || sys.queries != 0 {
-		t.Fatalf("recursive base escaped the shared message limit: queries=%d err=%v", sys.queries, err)
+func TestHistoryViewFailureRejectsStart(t *testing.T) {
+	for _, err := range []error{actorcaps.ErrLedgerLimit, context.DeadlineExceeded, errors.New("storage unavailable")} {
+		sys := &historyTestSys{readErr: err}
+		l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{}}
+		l.start(sys, internalRequest("start", agentloop.TypeStart, agentloop.StartRequest{SessionID: "s", TurnID: "new", Inputs: []agentloop.Input{{ID: "in", Text: "work"}}}))
+		if sys.code != sessionContextUnavailable || sys.replies != 0 || sys.posts != 0 || len(l.active) != 0 {
+			t.Fatalf("read failure accepted: %+v", sys)
+		}
 	}
 }
 
-func TestHistoryMessageLimit4096(t *testing.T) {
-	for _, total := range []int{4096, 1_000_000} {
-		t.Run(fmt.Sprint(total), func(t *testing.T) {
-			read := 0
-			sys := &historyTestSys{}
-			payload, _ := harness.WrapPayload(harness.Context{Session: "s"}, json.RawMessage(`{}`))
-			sys.query = func(req map[string]any) map[string]any {
-				var turns []any
-				for i := 0; i < req["limit"].(int) && read < total; i++ {
-					var rows []any
-					for j := 0; j < 2; j++ {
-						read++
-						rows = append(rows, map[string]any{"seq": total - read + 1, "id": fmt.Sprint(read), "payload_text": string(payload)})
-					}
-					turns = append(turns, map[string]any{"messages": rows})
-				}
-				return map[string]any{"head_seq": total, "turns": turns, "scanned": len(turns), "has_more": read < total, "next_before_seq": total - read + 1}
-			}
-			rows, err := readSessionRows(context.Background(), sys, message.Root(), "s")
-			if read != maxSessionHistoryMessages {
-				t.Fatalf("history limit bypassed: read=%d err=%v", read, err)
-			}
-			if total == maxSessionHistoryMessages {
-				if err != nil || len(rows) != total {
-					t.Fatalf("complete bounded history rejected: rows=%d err=%v", len(rows), err)
-				}
-			} else if err == nil || rows != nil {
-				t.Fatal("partial history was returned as complete")
-			}
-		})
+func TestAncestorContextUsesOneViewSnapshot(t *testing.T) {
+	sys := &historyTestSys{rows: append(closedHistory(), ledgerRow{Seq: 8, ID: "fork", Session: "branch", Type: agentloop.TypeSessionOpened, Body: mustJSON(agentloop.Opened{Base: &agentloop.BoundaryRef{Session: "s", At: "report"}})})}
+	object, err := materializeSession(context.Background(), sys, message.Root(), "branch", "")
+	if err != nil || len(object.Messages) != 2 || sys.queries != 1 {
+		t.Fatalf("object=%+v err=%v reads=%d", object, err, sys.queries)
 	}
 }
 
@@ -217,7 +198,7 @@ func TestContextSnapshotLimitAndMainHistory(t *testing.T) {
 		{Seq: 1, ID: "main-open", Session: "main", Kind: message.KindEvent, Type: agentloop.TypeSessionOpened, Body: mustJSON(map[string]any{})},
 		{Seq: 2, ID: "merge", Session: "main", Kind: message.KindEvent, Type: "session.merge", Body: mustJSON(map[string]any{"decision": "merged", "summary": map[string]any{"role": "user", "content": "main summary"}})},
 	}}
-	object, err := materializeSession(context.Background(), sys, message.Root(), "main", "merge", nil)
+	object, err := materializeSession(context.Background(), sys, message.Root(), "main", "merge")
 	if err != nil || len(object.Messages) != 1 || !strings.Contains(string(object.Messages[0]), "main summary") {
 		t.Fatalf("main base lost its merged history: object=%+v err=%v", object, err)
 	}
@@ -255,5 +236,48 @@ func TestLooperExitDoesNotCancelRemoteCallsOrSendReport(t *testing.T) {
 	(&looper{}).report(sys, &assignment{}, "cancelled", 0, nil, "", "", "")
 	if p.cancelled || sys.posts != 0 || sys.replies != 0 {
 		t.Fatalf("exit affected remote work: cancelled=%v posts=%d replies=%d", p.cancelled, sys.posts, sys.replies)
+	}
+}
+
+func TestInputBatchSharesSnapshotButNextBatchSeesNewRows(t *testing.T) {
+	sys := &historyTestSys{rows: []ledgerRow{
+		{Seq: 1, ID: "one", Session: "s", Body: mustJSON(map[string]any{"text": "first"})},
+		{Seq: 2, ID: "two", Session: "s", Body: mustJSON(map[string]any{"text": "second"})},
+	}}
+	inputs, err := hydrateInputs(context.Background(), sys, message.Root(), []agentloop.Input{{ID: "one"}, {ID: "two"}})
+	if err != nil || len(inputs) != 2 || inputs[0].Text != "first" || inputs[1].Text != "second" || sys.queries != 1 {
+		t.Fatalf("inputs=%v reads=%d err=%v", inputs, sys.queries, err)
+	}
+	sys.rows = append(sys.rows, ledgerRow{Seq: 3, ID: "three", Session: "s", Body: mustJSON(map[string]any{"text": "third"})})
+	inputs, err = hydrateInputs(context.Background(), sys, message.Root(), []agentloop.Input{{ID: "three"}})
+	if err != nil || inputs[0].Text != "third" || sys.queries != 2 {
+		t.Fatalf("stale insertion snapshot: inputs=%v reads=%d err=%v", inputs, sys.queries, err)
+	}
+}
+
+type projectionTestSys struct {
+	*historyTestSys
+	view actorcaps.LedgerView
+}
+
+func (s projectionTestSys) View() actorcaps.LedgerView { return s.view }
+
+func TestMaterializeDelegatesSessionExpansionToView(t *testing.T) {
+	sys := &historyTestSys{rows: closedHistory()}
+	denied := errors.New("platform session projection rejected")
+	calls := 0
+	view := looperTestView{
+		read: sys.View().Read,
+		build: func(ctx context.Context, snapshot actorcaps.LedgerSnapshot, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
+			calls++
+			if len(snapshot.Rows) != len(sys.rows) || session != "s" || upto != "report" {
+				t.Fatalf("wrong projection input: rows=%d session=%s upto=%s", len(snapshot.Rows), session, upto)
+			}
+			return nil, denied
+		},
+	}
+	_, err := materializeSession(t.Context(), projectionTestSys{sys, view}, message.Root(), "s", "report")
+	if !errors.Is(err, denied) || calls != 1 || sys.queries != 1 {
+		t.Fatalf("View bypassed or re-read: err=%v build=%d reads=%d", err, calls, sys.queries)
 	}
 }

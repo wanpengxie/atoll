@@ -7,23 +7,15 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 const PayloadContextKey = "_context"
 
 // Caller identifies the concrete member for whom a framework-authored request
 // was written.
-type Caller struct {
-	Channel channel.ID    `json:"channel"`
-	Actor   actor.ActorID `json:"actor"`
-}
-
-type Context struct {
-	Caller  *Caller `json:"caller,omitempty"`
-	Session string  `json:"session,omitempty"`
-}
+type Caller = message.Caller
+type Context = message.Context
 
 // Payload is the canonical payload envelope for every message kind. Context is
 // always present on the ledger, even when it has no fields; actors only see

@@ -73,7 +73,6 @@ type engine struct {
 	// Worker-confined completion candidate. Raw Proc completes it by reaching
 	// the next Recv (or returning nil); Serve settles it at handler return.
 	pendingTimer message.ID
-	contexts     sync.Map // message.ID -> harness.Context
 }
 
 // occupantState is the occupant arc (spec §1.4's Draining note): Starting →
@@ -290,9 +289,6 @@ func (e *engine) CancelRequest(id message.ID) {
 // carries (spec §5 red line: "msgCtx 唯一权威=引擎入站账"); it is accepted
 // only to satisfy actorrt.Actor's signature.
 func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
-	if app, _, err := harness.UnwrapPayload(env.Payload); err == nil {
-		e.contexts.Store(env.ID, app)
-	}
 	switch env.Kind {
 	case message.KindResponse:
 		if !e.call.match(env) {
@@ -426,37 +422,15 @@ func envelopeFromMsg(m Msg) *message.Envelope {
 	return &env
 }
 
-func (e *engine) AssignSession(msg Msg, session string) error {
-	if strings.TrimSpace(session) == "" || strings.TrimSpace(session) != session || session == "new" {
-		return errors.New("actorbase: session must be a concrete non-blank id")
+// PrepareRoot resolves standard root parameters before dispatch. A relay can
+// carry the returned Cause's context into its audit message, including a newly
+// allocated session, without recovering metadata from the engine by request ID.
+func PrepareRoot(app harness.Context, body json.RawMessage) (message.Cause, json.RawMessage, error) {
+	app, body, err := applyRootSession(app, body, true)
+	if err != nil {
+		return message.Cause{}, nil, err
 	}
-	app := msg.app
-	app.Session = session
-	e.contexts.Store(msg.ID, app)
-	return nil
-}
-
-// AssignSession invokes the framework session assignment capability without
-// widening every test double and remote Sys implementation. All production
-// actorbase engines implement it; a foreign implementation fails explicitly.
-func AssignSession(sys Sys, msg Msg, session string) error {
-	assigner, ok := sys.(interface {
-		AssignSession(Msg, string) error
-	})
-	if !ok {
-		return ErrUnsupported
-	}
-	return assigner.AssignSession(msg, session)
-}
-
-func (e *engine) contextForParent(parent message.ID) harness.Context {
-	if parent == "" {
-		return harness.Context{}
-	}
-	if value, ok := e.contexts.Load(parent); ok {
-		return value.(harness.Context)
-	}
-	return harness.Context{}
+	return message.Root().WithContext(app), body, nil
 }
 
 func applyRootSession(app harness.Context, body json.RawMessage, root bool) (harness.Context, json.RawMessage, error) {
@@ -725,7 +699,10 @@ func (e *engine) Emit(spec behavior.EventSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	app := e.contextForParent(env.ParentID)
+	app, err := spec.Cause.Context()
+	if err != nil {
+		return "", err
+	}
 	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
 	if err != nil {
 		return "", err
@@ -735,9 +712,6 @@ func (e *engine) Emit(spec behavior.EventSpec) (message.ID, error) {
 		return "", err
 	}
 	id, err := e.writeUnregistered(env, spec.ClientFingerprint)
-	if err == nil {
-		e.contexts.Store(id, app)
-	}
 	return id, err
 }
 
@@ -770,7 +744,10 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	app := e.contextForParent(env.ParentID)
+	app, err := spec.Cause.Context()
+	if err != nil {
+		return "", err
+	}
 	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
 	if err != nil {
 		return "", err
@@ -780,9 +757,6 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 		return "", err
 	}
 	id, err := e.writeUnregistered(env, spec.ClientFingerprint)
-	if err == nil {
-		e.contexts.Store(id, app)
-	}
 	return id, err
 }
 
@@ -858,7 +832,10 @@ func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (mess
 	if err != nil {
 		return "", err
 	}
-	app := e.contextForParent(env.ParentID)
+	app, err := spec.Cause.Context()
+	if err != nil {
+		return "", err
+	}
 	if caller != nil {
 		copy := *caller
 		app.Caller = &copy
@@ -884,7 +861,6 @@ func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (mess
 	if env.ExpiresAt != nil {
 		e.call.arm(env.ID, deadlineSpan(env))
 	}
-	e.contexts.Store(out.MessageID, app)
 	return out.MessageID, nil
 }
 

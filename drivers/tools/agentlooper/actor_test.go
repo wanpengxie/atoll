@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
@@ -109,11 +110,14 @@ type multiAssignmentSys struct {
 	mu   sync.Mutex
 }
 
+func (s *multiAssignmentSys) View() actorcaps.LedgerView {
+	return (&historyTestSys{rows: []ledgerRow{
+		{Seq: 1, ID: "i-1", Session: "session:one", Body: mustJSON(map[string]any{"text": "one"})},
+		{Seq: 2, ID: "i-2", Session: "session:two", Body: mustJSON(map[string]any{"text": "two"})},
+	}}).View()
+}
 func (s *multiAssignmentSys) Life() context.Context { return s.life }
 func (s *multiAssignmentSys) Call(_ message.Cause, _ actor.ActorID, word string, payload any) (actorbase.Pending, error) {
-	if word == message.TypeSystemLogQuery && payload.(map[string]any)["session_id"] != nil {
-		return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Payload: json.RawMessage(`{"status":"completed","head_seq":1,"turns":[],"has_more":false}`)})}, nil
-	}
 	return cancelledPending{}, nil
 }
 func (s *multiAssignmentSys) Emit(behavior.EventSpec) (message.ID, error) { return "opened", nil }

@@ -123,7 +123,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		caller := actorbase.EffectiveCaller(msg)
 		now := nowMillis()
-		w := &workRecord{ID: newWorkID(), SessionID: s.ID, Owner: caller, SourceRequest: string(msg.ID), State: agentproto.WorkOpen, Stage: "control_pending", Delivery: agentproto.DeliveryReceipt, CreatedAt: now, UpdatedAt: now,
+		w := &workRecord{ID: newWorkID(), SessionID: s.ID, Owner: caller, SourceRequest: string(msg.ID), SourceCause: msg.Cause(), State: agentproto.WorkOpen, Stage: "control_pending", Delivery: agentproto.DeliveryReceipt, CreatedAt: now, UpdatedAt: now,
 			Inputs: []inputRecord{{Input: agentloop.Input{ID: string(msg.ID), Seq: 1, Text: req.Text, CallerActor: caller.Actor, CallerChannel: caller.Channel}, Disposition: "accepted"}}}
 		c.data.Works[string(w.ID)] = w
 		c.data.Order = append(c.data.Order, string(w.ID))
@@ -393,6 +393,7 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		updated.ID = newWorkID()
 		updated.Owner = actorbase.EffectiveCaller(msg)
 		updated.SourceRequest = string(msg.ID)
+		updated.SourceCause = msg.Cause()
 		updated.Inputs[0].ID = string(msg.ID)
 		updated.Inputs[0].Text = req.NewText
 		updated.Inputs[0].CallerActor = updated.Owner.Actor

@@ -126,7 +126,7 @@ func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.R
 		// trigger's errand. This used to be two hand-copied fields here — the
 		// one place in the tree that remembered to copy them; everywhere else
 		// silently claimed to be a root. It is one required input now.
-		Cause:     message.From(rc.Trigger.Envelope),
+		Cause:     rc.Trigger.Cause,
 		ExpiresAt: expiresAt,
 	}, deadline
 }
