@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
@@ -26,11 +27,14 @@ type operationRecord struct {
 }
 
 type workRecord struct {
-	SourceCause     message.Cause              `json:"-"`
-	SourceContext   harness.Context            `json:"-"`
-	SessionID       string                     `json:"session_id,omitempty"`
-	Resumed         bool                       `json:"resumed,omitempty"`
-	ID              agentproto.WorkID          `json:"work_id"`
+	SourceCause   message.Cause     `json:"-"`
+	SourceContext harness.Context   `json:"-"`
+	SessionID     string            `json:"session_id,omitempty"`
+	Resumed       bool              `json:"resumed,omitempty"`
+	ID            agentproto.WorkID `json:"work_id"`
+	// Submitter is the authenticated envelope sender and owns isolation and
+	// control checks. Owner is application attribution only.
+	Submitter       actor.ActorID              `json:"-"`
 	Owner           harness.Caller             `json:"owner"`
 	SourceRequest   string                     `json:"source_request_id"`
 	SubmissionKey   string                     `json:"submission_key,omitempty"`
@@ -82,21 +86,21 @@ func requestHash(value any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func operationIndexKey(c harness.Caller, key string) string {
-	return string(c.Channel) + "\x00" + string(c.Actor) + "\x00" + key
+func operationIndexKey(sender actor.ActorID, key string) string {
+	return string(sender) + "\x00" + key
 }
 
-func submissionIndexKey(c harness.Caller, key string) string {
-	return string(c.Channel) + "\x00" + string(c.Actor) + "\x00" + key
+func submissionIndexKey(sender actor.ActorID, key string) string {
+	return string(sender) + "\x00" + key
 }
 
-func (s *workTable) findSubmission(c harness.Caller, key string) *workRecord {
+func (s *workTable) findSubmission(sender actor.ActorID, key string) *workRecord {
 	if key == "" {
 		return nil
 	}
-	want := submissionIndexKey(c, key)
+	want := submissionIndexKey(sender, key)
 	for _, w := range s.Works {
-		if submissionIndexKey(w.Owner, w.SubmissionKey) == want {
+		if submissionIndexKey(w.Submitter, w.SubmissionKey) == want {
 			return w
 		}
 	}

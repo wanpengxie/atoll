@@ -219,7 +219,7 @@ func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause, ap
 		batch := []*workRecord{first}
 		for _, id := range s.Buffer[1:] {
 			w := c.data.Works[string(id)]
-			if w == nil || w.State != agentproto.WorkOpen || w.Owner != first.Owner || w.Resumed || first.Resumed || len(batch) >= batchMaxCount {
+			if w == nil || w.State != agentproto.WorkOpen || w.Submitter != first.Submitter || w.Resumed || first.Resumed || len(batch) >= batchMaxCount {
 				break
 			}
 			combined := 0

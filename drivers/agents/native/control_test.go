@@ -92,6 +92,23 @@ func TestSteerAllOnlyIncludesCallerAndView(t *testing.T) {
 	}
 	c.settleControl(sys, s, agentloop.ControlResult{ControlID: s.Control.ID, Disposition: "target_gone"}, false)
 }
+
+func TestForgedCallerCannotAcquireWorkOwnership(t *testing.T) {
+	sys, c, _ := controlFixture(t)
+	c.handleAsk(sys, testRequest("owned", agentproto.TypeAsk, map[string]any{"text": "alice", "session_id": "session:v"}))
+	w := c.requestWork("owned")
+	if w == nil || w.Submitter != "human:alice:1" {
+		t.Fatalf("work=%+v", w)
+	}
+	forged := testRequestFrom("hold-forged", agentproto.TypeHold, "c", "human:bob:1", map[string]any{"session_id": "session:v", "target": "owned"})
+	app := forged.Context()
+	app.Caller = &harness.Caller{Channel: "c", Actor: "human:alice:1"}
+	forged = forged.WithContext(app)
+	c.editControl(sys, forged)
+	if sys.fails[forged.ID] != "target_not_owned" {
+		t.Fatalf("forged caller authorized hold: replies=%v failures=%v", sys.replies, sys.fails)
+	}
+}
 func TestViewControlsFreezeCASAndReplacementIdentity(t *testing.T) {
 	sys, c, w := controlFixture(t)
 	s := c.sessions[w.SessionID]
