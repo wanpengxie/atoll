@@ -120,7 +120,7 @@ func TestCommandRequestsFormSingleItemBatches(t *testing.T) {
 	}
 }
 
-func TestBatchingKeepsEffectiveCallersSeparate(t *testing.T) {
+func TestBatchingKeepsAttributedCallersSeparate(t *testing.T) {
 	rt := &captureRuntime{}
 	vault := effectcap.NewVault()
 	l := &agentLoop{

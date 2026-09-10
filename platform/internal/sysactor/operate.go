@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -44,12 +43,12 @@ const (
 )
 
 // OperateRequest is the decoded delivery an OperateExecutor acts on. Initiator
-// is the immediate, target-channel actor that wrote the request; Caller is the
-// effective origin the gate authorised. They are identical for a local call.
-// Across a peer membrane Initiator is the target's svcactor while Caller names
-// the remote actor and channel carried in the trusted request context. Keeping
-// both prevents a remote provenance identity from being mistaken for a member
-// of the target roster. The raw payload remains the executor's concern.
+// is the authenticated, target-channel actor that wrote the request and is the
+// sole identity used by this gate for authorization. Caller is business
+// attribution: it is identical to Initiator for a local call; across a peer
+// membrane it may name the remote actor carried by the trusted local svcactor.
+// Keeping both prevents remote provenance from being mistaken for local roster
+// authority. The raw payload remains the executor's concern.
 type OperateRequest struct {
 	ChannelID channel.ID
 	Initiator actor.ActorID
@@ -95,16 +94,16 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	if s.operate == nil {
 		return
 	}
-	caller := actorbase.EffectiveCaller(msg)
-	authed, err := s.callerIsAuthorized(msg, caller)
+	caller := authenticatedAttribution(msg)
+	authed, err := s.senderIsAuthorized(msg)
 	if err != nil {
 		_, _ = sys.Fail(msg, "internal_error", err.Error())
 		return
 	}
 	if !authed {
 		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
-			"sender", string(caller.Actor), "code", unauthorizedSenderCode)
-		_, _ = sys.Fail(msg, unauthorizedSenderCode, fmt.Sprintf("%q is not an active member of this channel, so it may not use the channel control words; check the roster with system.member.list", caller.Actor))
+			"sender", string(msg.Sender.ID), "code", unauthorizedSenderCode)
+		_, _ = sys.Fail(msg, unauthorizedSenderCode, fmt.Sprintf("%q is not an active member of this channel, so it may not use the channel control words; check the roster with system.member.list", msg.Sender.ID))
 		return
 	}
 	req := OperateRequest{ChannelID: msg.ChannelID, Initiator: msg.Sender.ID, Caller: caller, Anchor: string(msg.ID), Cause: msg.Cause(), Payload: msg.Payload}
@@ -127,21 +126,15 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	_, _ = sys.Reply(msg, result)
 }
 
-// senderIsActiveMember is the gate's permission predicate (NP-2=a) over the
+// senderIsAuthorized is the gate's permission predicate (NP-2=a) over the
 // unified active-identity authority. Physical identity storage is unobservable
 // here. An authority error is surfaced (internal_error), not silently read as
 // unauthorized. The
 // window between this check and the value commit is the system's standard
 // in-flight tolerance (same doctrine as message delivery vs incarnation).
-func (s *SystemActor) callerIsAuthorized(msg actorbase.Msg, caller harness.Caller) (bool, error) {
-	if caller.Channel == channelspec.C0ChannelID {
-		return true, nil
-	}
-	if caller.Channel != msg.ChannelID {
-		return false, nil
-	}
+func (s *SystemActor) senderIsAuthorized(msg actorbase.Msg) (bool, error) {
 	if s.authority == nil {
 		return false, nil
 	}
-	return s.authority.IsActive(msg.Ctx(), caller.Actor)
+	return s.authority.IsActive(msg.Ctx(), msg.Sender.ID)
 }

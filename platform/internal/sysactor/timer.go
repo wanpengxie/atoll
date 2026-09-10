@@ -110,14 +110,13 @@ func (s *SystemActor) handleTimer(sys actorbase.Sys, msg actorbase.Msg) {
 	if s.timers == nil {
 		return
 	}
-	caller := actorbase.EffectiveCaller(msg)
-	authed, err := s.callerIsAuthorized(msg, caller)
+	authed, err := s.senderIsAuthorized(msg)
 	if err != nil {
 		_, _ = sys.Fail(msg, "internal_error", err.Error())
 		return
 	}
 	if !authed {
-		_, _ = sys.Fail(msg, unauthorizedSenderCode, fmt.Sprintf("%q is not an active member of this channel, so it may not use the timer words; check the roster with system.member.list", caller.Actor))
+		_, _ = sys.Fail(msg, unauthorizedSenderCode, fmt.Sprintf("%q is not an active member of this channel, so it may not use the timer words; check the roster with system.member.list", msg.Sender.ID))
 		return
 	}
 	switch msg.Type {
@@ -131,7 +130,7 @@ func (s *SystemActor) handleTimer(sys actorbase.Sys, msg actorbase.Msg) {
 }
 
 // timerSubject decides WHOSE alarm this is. The default is msg.Sender.ID — the
-// harness-welded LOCAL identity, deliberately not EffectiveCaller: a
+// harness-welded LOCAL identity, deliberately not caller attribution: a
 // cross-membrane request's effective caller lives in another channel and has no
 // coordinate here to mint against (the same Initiator/Caller split the membrane
 // control path already draws).

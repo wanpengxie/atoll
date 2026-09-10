@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Peer is the gate's one injected external dependency. The caller channel is
@@ -21,8 +22,27 @@ import (
 // optional ordered progress sink.
 type Peer func(context.Context, channel.Request, func(channel.Progress)) (channel.Result, error)
 
+// authenticatedAttribution converts the authenticated immediate sender into
+// business attribution. Only the channel's fixed service proxy may carry a
+// caller from a previously authenticated peer frame. Context.Caller supplied
+// by an ordinary actor is untrusted application data and is ignored here.
+func authenticatedAttribution(msg actorbase.Msg) harness.Caller {
+	if isServiceProxy(msg.Sender) {
+		return actorbase.AttributedCaller(msg)
+	}
+	return harness.Caller{Channel: msg.ChannelID, Actor: msg.Sender.ID}
+}
+
+func isServiceProxy(sender message.Sender) bool {
+	if sender.Kind != actor.KindPeer {
+		return false
+	}
+	parts := strings.Split(string(sender.ID), ":")
+	return len(parts) == 3 && parts[0] == string(actor.KindPeer) && parts[1] == lagoon.SvcActorSeed
+}
+
 func (s *SystemActor) routeSpace(sys actorbase.Sys, msg actorbase.Msg) {
-	caller := actorbase.EffectiveCaller(msg)
+	caller := authenticatedAttribution(msg)
 	go func() {
 		payload := json.RawMessage(msg.Payload)
 		if msg.Type == message.TypeSystemChannelCreate {

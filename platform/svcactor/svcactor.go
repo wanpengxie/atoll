@@ -151,14 +151,13 @@ func (s *service) serve(sys actorbase.Sys) error {
 }
 
 func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
-	caller := actorbase.EffectiveCaller(msg)
-	if caller.Channel != s.deps.Self {
-		_, _ = sys.Fail(msg, "permission_denied", fmt.Sprintf("the service actor mailbox only answers members of its own channel %q, and this arrived from %q. To reach this channel from outside, send through its peer instead", s.deps.Self, caller.Channel))
+	if msg.ChannelID != s.deps.Self {
+		_, _ = sys.Fail(msg, "permission_denied", fmt.Sprintf("the service actor mailbox only answers members of its own channel %q, and this arrived from %q. To reach this channel from outside, send through its peer instead", s.deps.Self, msg.ChannelID))
 		return
 	}
-	active, err := s.deps.Members.IsActive(msg.Ctx(), caller.Actor)
+	active, err := s.deps.Members.IsActive(msg.Ctx(), msg.Sender.ID)
 	if err != nil || !active {
-		_, _ = sys.Fail(msg, "permission_denied", fmt.Sprintf("%q is not an active member of this channel; check the roster with system.member.list", caller.Actor))
+		_, _ = sys.Fail(msg, "permission_denied", fmt.Sprintf("%q is not an active member of this channel; check the roster with system.member.list", msg.Sender.ID))
 		return
 	}
 	switch msg.Type {

@@ -148,7 +148,7 @@ func serviceDeps(self channel.ID) Deps {
 	}
 }
 
-func TestDispatchPreservesBodyAndEffectiveCaller(t *testing.T) {
+func TestDispatchPreservesBodyAndAttributedCaller(t *testing.T) {
 	deps := serviceDeps("target")
 	s := &service{deps: deps, table: ServiceTable{Endpoints: map[string]actor.ActorID{"work": "tool:worker:1"}}}
 	sys := &svcSys{}
@@ -509,6 +509,23 @@ func TestServiceMailboxRejectsUnknownFieldsImmediately(t *testing.T) {
 	})
 	s.handleMailbox(sys, msg)
 	if sys.reply != nil || sys.fail != "invalid_args" {
+		t.Fatalf("reply=%#v fail=%q", sys.reply, sys.fail)
+	}
+}
+
+func TestServiceMailboxCallerMetadataCannotAuthorizeSender(t *testing.T) {
+	deps := serviceDeps("target")
+	deps.Members.IsActive = func(_ context.Context, id actor.ActorID) (bool, error) {
+		return id == "agent:member:1", nil
+	}
+	s := &service{deps: deps, table: emptyTable(), card: channel.Card{Words: map[string]json.RawMessage{}}}
+	sys := &svcSys{}
+	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &harness.Caller{Channel: "target", Actor: "agent:member:1"}}, message.Envelope{
+		ID: "get", ChannelID: "target", Kind: message.KindRequest, Type: "svcactor.get",
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:intruder:1"}, Payload: json.RawMessage(`{}`),
+	})
+	s.handleMailbox(sys, msg)
+	if sys.reply != nil || sys.fail != "permission_denied" {
 		t.Fatalf("reply=%#v fail=%q", sys.reply, sys.fail)
 	}
 }

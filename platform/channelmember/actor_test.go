@@ -16,10 +16,15 @@ import (
 type memberStub struct {
 	active bool
 	decl   string
+	actor  actor.ActorID
 }
 
 func (m memberStub) MemberOfDeclaration(string) (actor.ActorID, error) { return "tool:target:1", nil }
-func (m memberStub) ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error) {
+
+func (m memberStub) ActorFacts(_ context.Context, id actor.ActorID) (channelspec.ActorFacts, bool, error) {
+	if m.actor != "" && id != m.actor {
+		return channelspec.ActorFacts{}, false, nil
+	}
 	return channelspec.ActorFacts{Active: m.active, SourceDeclID: m.decl}, true, nil
 }
 
@@ -81,24 +86,25 @@ func TestHandleProcFailsWhenPortOccupied(t *testing.T) {
 	}
 }
 
-func TestHandleChecksEffectiveMembershipBeforeDrivers(t *testing.T) {
+func TestHandleChecksAuthenticatedSenderBeforeDrivers(t *testing.T) {
 	for _, tc := range []struct {
-		name, payload string
-		members       memberStub
-		drivers       []string
-		want          string
+		name, payload, sender string
+		members               memberStub
+		drivers               []string
+		want                  string
 	}{
-		{"foreign", `{"body":{"type":"echo","payload":{},"audience":["tool:x:1"]},"_context":{"caller":{"channel":"foreign","actor":"tool:driver:1"}}}`, memberStub{true, "driver"}, nil, "forbidden"},
-		{"inactive", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{false, "driver"}, nil, "forbidden"},
-		{"wrong declaration", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{true, "other"}, []string{"driver"}, "forbidden"},
-		{"allowed but disconnected", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, memberStub{true, "driver"}, []string{"driver"}, "channel_unavailable"},
+		{"caller metadata does not override sender", `{"body":{"type":"echo","payload":{},"audience":["tool:x:1"]},"_context":{"caller":{"channel":"foreign","actor":"tool:other:1"}}}`, "tool:driver:1", memberStub{active: true, decl: "driver", actor: "tool:driver:1"}, []string{"driver"}, "channel_unavailable"},
+		{"forged allowed caller does not admit sender", `{"body":{"type":"echo","payload":{},"audience":["tool:x:1"]},"_context":{"caller":{"channel":"body","actor":"tool:driver:1"}}}`, "tool:intruder:1", memberStub{active: true, decl: "driver", actor: "tool:driver:1"}, []string{"driver"}, "forbidden"},
+		{"inactive", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, "tool:driver:1", memberStub{active: false, decl: "driver"}, nil, "forbidden"},
+		{"wrong declaration", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, "tool:driver:1", memberStub{active: true, decl: "other"}, []string{"driver"}, "forbidden"},
+		{"allowed but disconnected", `{"_context":{},"body":{"type":"echo","payload":{},"audience":["tool:x:1"]}}`, "tool:driver:1", memberStub{active: true, decl: "driver"}, []string{"driver"}, "channel_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app, body, err := harness.UnwrapPayload(json.RawMessage(tc.payload))
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), app, message.Envelope{ID: "request", ChannelID: "body", Sender: message.Sender{Kind: actor.KindTool, ID: "tool:driver:1"}, Kind: message.KindRequest, Type: HandleCall, Payload: body})
+			m := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), app, message.Envelope{ID: "request", ChannelID: "body", Sender: message.Sender{Kind: actor.KindTool, ID: actor.ActorID(tc.sender)}, Kind: message.KindRequest, Type: HandleCall, Payload: body})
 			sys := &testSys{msgs: []actorbase.Msg{m}}
 			def := HandleDef(NewHub(), "body", HandleConfig{Host: "host", Words: map[string]Word{}, Drivers: tc.drivers}, tc.members)
 			proc, err := def.New()

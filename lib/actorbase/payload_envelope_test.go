@@ -110,7 +110,7 @@ func TestEmitUsesCanonicalPayloadEnvelope(t *testing.T) {
 	}
 }
 
-func TestEffectiveCallerPrefersContextAndFallsBackToEnvelope(t *testing.T) {
+func TestAttributedCallerPrefersContextAndFallsBackToEnvelope(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		payload json.RawMessage
@@ -124,8 +124,8 @@ func TestEffectiveCallerPrefersContextAndFallsBackToEnvelope(t *testing.T) {
 				ChannelID: "local", Kind: message.KindRequest,
 				Sender: message.Sender{ID: "agent:sender:1"}, Payload: test.payload,
 			})
-			if got := EffectiveCaller(msg); got != test.want {
-				t.Fatalf("EffectiveCaller=%+v want %+v", got, test.want)
+			if got := AttributedCaller(msg); got != test.want {
+				t.Fatalf("AttributedCaller=%+v want %+v", got, test.want)
 			}
 		})
 	}

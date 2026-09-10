@@ -3,7 +3,7 @@
 // platform-internal capabilities rather than inserted as a roster member.
 //
 // The door owns membrane operations and log queries. For space-level system
-// requests it preserves EffectiveCaller: a non-c0 door sends a peer frame to
+// requests it preserves authenticated caller attribution: a non-c0 door sends a peer frame to
 // c0, while the c0 door calls the fixed registrar target. It maps peer progress
 // and terminal results back to the original local request and emits the closed
 // system events for successful membership changes and inbound frames.

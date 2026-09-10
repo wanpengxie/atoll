@@ -404,7 +404,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
-	caller := actorbase.EffectiveCaller(msg)
+	caller := actorbase.AttributedCaller(msg)
 	if existing := c.data.findSubmission(caller, req.SubmissionKey); existing != nil {
 		if existing.SubmissionHash != submissionHash(req) {
 			_, _ = fail(sys, msg, "submission_conflict", "submission_key already names different input")
@@ -702,7 +702,7 @@ func (c *controller) handleStatus(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
-	caller := actorbase.EffectiveCaller(msg)
+	caller := actorbase.AttributedCaller(msg)
 	if req.WorkID != "" {
 		w, ok := c.workByID(req.WorkID)
 		if !ok {
@@ -777,7 +777,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if len(c.sessions) > 0 {
-		opKey := operationIndexKey(actorbase.EffectiveCaller(msg), req.OperationKey)
+		opKey := operationIndexKey(actorbase.AttributedCaller(msg), req.OperationKey)
 		opHash := requestHash(req)
 		if req.OperationKey != "" {
 			for _, w := range c.data.Works {
@@ -905,7 +905,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = fail(sys, msg, "work_not_found", "no visible work has that id")
 		return
 	}
-	opKey := operationIndexKey(actorbase.EffectiveCaller(msg), req.OperationKey)
+	opKey := operationIndexKey(actorbase.AttributedCaller(msg), req.OperationKey)
 	opHash := requestHash(struct {
 		WorkID agentproto.WorkID `json:"work_id"`
 	}{req.WorkID})

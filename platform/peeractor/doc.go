@@ -1,6 +1,7 @@
 // Package peeractor implements a channel-local member representing one remote
 // channel. It turns local requests into protocol/channel peer frames, using
-// EffectiveCaller as the frame origin, and forwards them through the channel's
+// authenticated local sender (or a caller attribution supplied by the trusted
+// local service proxy) as the frame origin, and forwards them through the channel's
 // service port without exposing transport details to ordinary actors. Its
 // dynamic actor.describe projection performs one peer Describe operation and
 // exposes the returned Card words; it never calls actor.describe across the

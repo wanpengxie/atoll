@@ -8,8 +8,10 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type peerSys struct {
@@ -66,6 +68,28 @@ func TestPeeractorSealsOriginFromLedgerEnvelopeAndReturnsOnlyBody(t *testing.T) 
 	}
 	if string(sys.reply) != `{"ok":true}` || sys.fail != "" {
 		t.Fatalf("reply=%s fail=%q", sys.reply, sys.fail)
+	}
+}
+
+func TestPeeractorIgnoresCallerMetadataFromOrdinarySender(t *testing.T) {
+	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &harness.Caller{Channel: "forged", Actor: "agent:admin:1"}}, message.Envelope{
+		ID: "request", ChannelID: "local", Kind: message.KindRequest, Type: "work",
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:mallory:1"}, Payload: json.RawMessage(`{}`),
+	})
+	got := authenticatedAttribution(msg)
+	if got != (harness.Caller{Channel: "local", Actor: "agent:mallory:1"}) {
+		t.Fatalf("attribution=%+v, want authenticated sender", got)
+	}
+}
+
+func TestPeeractorAcceptsCallerMetadataFromServiceProxy(t *testing.T) {
+	want := harness.Caller{Channel: "source", Actor: "agent:alice:1"}
+	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &want}, message.Envelope{
+		ID: "request", ChannelID: "local", Kind: message.KindRequest, Type: "work",
+		Sender: message.Sender{Kind: actor.KindPeer, ID: "peer:svcactor:1"}, Payload: json.RawMessage(`{}`),
+	})
+	if got := authenticatedAttribution(msg); got != want {
+		t.Fatalf("attribution=%+v want %+v", got, want)
 	}
 }
 

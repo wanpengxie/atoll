@@ -125,8 +125,11 @@ func (m Msg) WithContext(app harness.Context) Msg {
 	return m
 }
 
-// EffectiveCaller is the only caller-attribution rule used by receivers.
-func EffectiveCaller(m Msg) harness.Caller {
+// AttributedCaller returns the application-level caller attribution carried by
+// m, falling back to the immediate sender when none was supplied. The result is
+// business data, not an authenticated identity, and MUST NOT be used for
+// admission or authorization decisions.
+func AttributedCaller(m Msg) harness.Caller {
 	if caller, ok := m.Caller(); ok {
 		return caller
 	}

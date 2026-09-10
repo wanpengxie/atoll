@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
+
+const serviceProxySeed = "svcactor"
 
 type Seam func(context.Context, channel.ID, channel.ID, channel.Request, func(channel.Progress)) (channel.Result, error)
 type Describe func(context.Context, channel.ID, channel.ID, channel.Describe) (channel.Card, error)
@@ -20,6 +25,19 @@ type Deps struct {
 	Target   channel.ID
 	Seam     Seam
 	Describe Describe
+}
+
+// authenticatedAttribution accepts delegated caller attribution only from the
+// fixed local service proxy. Every other request is attributed to its actual
+// envelope sender, regardless of Context.Caller.
+func authenticatedAttribution(msg actorbase.Msg) harness.Caller {
+	if msg.Sender.Kind == actor.KindPeer {
+		parts := strings.Split(string(msg.Sender.ID), ":")
+		if len(parts) == 3 && parts[0] == string(actor.KindPeer) && parts[1] == serviceProxySeed {
+			return actorbase.AttributedCaller(msg)
+		}
+	}
+	return harness.Caller{Channel: msg.ChannelID, Actor: msg.Sender.ID}
 }
 
 func ValidateConfig(raw json.RawMessage) (channel.ID, error) {
@@ -78,7 +96,7 @@ func serve(sys actorbase.Sys, deps Deps) error {
 }
 
 func handle(sys actorbase.Sys, deps Deps, msg actorbase.Msg) {
-	caller := actorbase.EffectiveCaller(msg)
+	caller := authenticatedAttribution(msg)
 	request := channel.Request{
 		From: channel.From{Channel: caller.Channel, Actor: string(caller.Actor), RequestID: string(msg.ID)},
 		Type: msg.Type, Payload: append(json.RawMessage(nil), msg.Payload...),

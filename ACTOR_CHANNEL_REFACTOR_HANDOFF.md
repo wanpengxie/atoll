@@ -5,7 +5,7 @@ Scope: message-plane refactoring on top of `0a4cc9fe` (batch A). No access-plane
 ## Implemented
 
 - Separate seat `{body}` and handle `{host, words, drivers?}` configurations. `words` carries schema and an internal declaration target; the seat exposes only the public word projection.
-- Body target resolution reuses Home's `MemberOfDeclaration`. Handle drivers must have a body-local EffectiveCaller and active membership before declaration restrictions are applied.
+- Body target resolution reuses Home's `MemberOfDeclaration`. Handle driver admission uses the authenticated envelope Sender; caller attribution is business metadata only.
 - Call/Post/Emit carry ordinary message envelope fields, including audience, visibility and request deadline. Local endpoint control distinguishes Call from Post. Replies/progress/cancellation use the ordinary pending request lifecycle.
 - H-side actions use S's own identity. The existing full-spec `CallSpecFor` API is supplied S itself, not a foreign caller, to preserve deadline and visibility without adding a Sys/runtime method.
 - Events cross into A; unknown request words are refused before entering A. Transport remains the in-process Hub, not a deployed cross-process seam.
@@ -20,7 +20,7 @@ Scope: message-plane refactoring on top of `0a4cc9fe` (batch A). No access-plane
 - Tests cover class-independent same-ID admission, absent bodies, alias refusal, implementation-config retarget refusal, membership without a connected Handle, and explicit parent binding leaving another Handle untouched.
 
 - `go test ./... -timeout 180s` passed during this change.
-- Targeted Home/channelmember race tests passed: bidirectional request/progress, incoming event identity, undeclared-word refusal, EffectiveCaller restrictions, local call authority, targeted Post/Emit, declaration projection, and concurrent relationship uniqueness.
+- Targeted Home/channelmember race tests passed: bidirectional request/progress, incoming event identity, undeclared-word refusal, Sender restrictions, local call authority, targeted Post/Emit, declaration projection, and concurrent relationship uniqueness.
 - Relevant Home/lagoon/engineboot/channelmember package regression passed after receipt and configuration updates.
 - `git diff 6518628c -- runtime` is empty; the pre-existing uncommitted runtime reversal is preserved.
 

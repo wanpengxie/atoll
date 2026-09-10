@@ -538,7 +538,7 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	}
 	id := book.RequestID(msg.ID)
 	corr := message.CorrelationID(msg.CorrelationID, msg.ID)
-	caller := actorbase.EffectiveCaller(msg)
+	caller := actorbase.AttributedCaller(msg)
 	input := runtimeproto.Input{SourceID: string(msg.ID), Type: msg.Type, Sender: string(msg.Sender.ID), Caller: caller, Payload: append(json.RawMessage(nil), msg.Payload...), Text: messageText(msg.Payload)}
 	var replacement replacePayload
 	if msg.Type == TypeReplace {

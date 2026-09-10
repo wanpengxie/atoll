@@ -426,7 +426,7 @@ func TestRegistrarParameterlessWordsAcceptEmptyOrNullAndRejectFields(t *testing.
 	}
 }
 
-func TestEffectiveAgentAttributionIsResolvedByRegistrar(t *testing.T) {
+func TestTrustedAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	dbPath := t.TempDir() + "/registry.db"
 	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
@@ -471,5 +471,42 @@ func TestEffectiveAgentAttributionIsResolvedByRegistrar(t *testing.T) {
 	var principal regspec.PrincipalRow
 	if err := reply.DecodeValue(&principal); err != nil || principal.ID != "root" {
 		t.Fatalf("receiver attribution principal=%+v err=%v", principal, err)
+	}
+}
+
+func TestRegistrarCallerMetadataRequiresTrustedRelay(t *testing.T) {
+	r := &Registrar{}
+	claimed := harness.Caller{Channel: "source", Actor: "agent:alice:1"}
+	tests := []struct {
+		name   string
+		sender message.Sender
+		want   harness.Caller
+	}{
+		{
+			name:   "ordinary actor cannot assert caller",
+			sender: message.Sender{Kind: actor.KindAgent, ID: "agent:mallory:1"},
+			want:   harness.Caller{Channel: channelspec.C0ChannelID, Actor: "agent:mallory:1"},
+		},
+		{
+			name:   "service proxy relays authenticated caller",
+			sender: message.Sender{Kind: actor.KindPeer, ID: "peer:svcactor:1"},
+			want:   claimed,
+		},
+		{
+			name:   "system door relays authenticated caller",
+			sender: message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+			want:   claimed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &claimed}, message.Envelope{
+				ID: "request", ChannelID: channelspec.C0ChannelID, Kind: message.KindRequest,
+				Sender: test.sender, Payload: json.RawMessage(`{}`),
+			})
+			if got := r.authenticatedAttribution(msg); got != test.want {
+				t.Fatalf("attribution=%+v want %+v", got, test.want)
+			}
+		})
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type Registrar struct {
@@ -264,7 +265,7 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, string(CodeInvalidArgs), "unknown registrar word")
 		return
 	}
-	caller := actorbase.EffectiveCaller(msg)
+	caller := r.authenticatedAttribution(msg)
 	principal := r.resolvePrincipal(msg.Ctx(), caller.Channel, caller.Actor, sys, msg)
 	if principal == "" {
 		return
@@ -297,6 +298,22 @@ func (r *Registrar) handle(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	_, _ = sys.Reply(msg, Reply{Value: rawValue})
+}
+
+// authenticatedAttribution is business attribution rooted in the envelope
+// sender. Only the fixed system door and service proxy may relay attribution
+// established at an earlier authenticated boundary. Caller metadata by itself
+// never grants a principal or any registrar permission.
+func (r *Registrar) authenticatedAttribution(msg actorbase.Msg) harness.Caller {
+	trustedRelay := msg.Sender.ID == actor.SystemActorID
+	if msg.Sender.Kind == actor.KindPeer {
+		parts := strings.Split(string(msg.Sender.ID), ":")
+		trustedRelay = len(parts) == 3 && parts[0] == string(actor.KindPeer) && parts[1] == SvcActorSeed
+	}
+	if trustedRelay {
+		return actorbase.AttributedCaller(msg)
+	}
+	return harness.Caller{Channel: msg.ChannelID, Actor: msg.Sender.ID}
 }
 
 func (r *Registrar) resolvePrincipal(ctx context.Context, source channel.ID, sender actor.ActorID, sys actorbase.Sys, msg actorbase.Msg) string {

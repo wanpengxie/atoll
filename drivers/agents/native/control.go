@@ -53,7 +53,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = fail(sys, msg, err.Error(), "cannot select control session")
 		return
 	}
-	key := operationIndexKey(actorbase.EffectiveCaller(msg), req.OperationKey)
+	key := operationIndexKey(actorbase.AttributedCaller(msg), req.OperationKey)
 	hash := requestHash(req)
 	if req.OperationKey != "" {
 		for _, w := range c.data.Works {
@@ -111,7 +111,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		pc.Targets = []agentproto.WorkID{w.ID}
 	} else if req.All {
-		caller := actorbase.EffectiveCaller(msg)
+		caller := actorbase.AttributedCaller(msg)
 		for _, id := range s.Buffer {
 			w := c.data.Works[string(id)]
 			if w != nil && w.Owner == caller {
@@ -127,7 +127,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = fail(sys, msg, "capacity", "max_open_works reached")
 			return
 		}
-		caller := actorbase.EffectiveCaller(msg)
+		caller := actorbase.AttributedCaller(msg)
 		now := nowMillis()
 		w := &workRecord{ID: newWorkID(), SessionID: s.ID, Owner: caller, SourceRequest: string(msg.ID), SourceCause: msg.Cause(), State: agentproto.WorkOpen, Stage: "control_pending", Delivery: agentproto.DeliveryReceipt, CreatedAt: now, UpdatedAt: now,
 			Inputs: []inputRecord{{Input: agentloop.Input{ID: string(msg.ID), Seq: 1, Text: req.Text, CallerActor: caller.Actor, CallerChannel: caller.Channel}, Disposition: "accepted"}}, SourceContext: msg.Context(),
@@ -403,7 +403,7 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		updated := cloneWork(w)
 		updated.ID = newWorkID()
-		updated.Owner = actorbase.EffectiveCaller(msg)
+		updated.Owner = actorbase.AttributedCaller(msg)
 		updated.SourceRequest = string(msg.ID)
 		updated.SourceCause = msg.Cause()
 		updated.SourceContext = msg.Context()
@@ -436,7 +436,7 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 				_, _ = fail(sys, msg, "cas_mismatch", "target is not waiting or current owner")
 				return
 			}
-			if w.Owner != actorbase.EffectiveCaller(msg) {
+			if w.Owner != actorbase.AttributedCaller(msg) {
 				_, _ = fail(sys, msg, "target_not_owned", "hold target belongs to another sender")
 				return
 			}

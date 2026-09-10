@@ -136,12 +136,15 @@ func HandleDef(hub *Hub, body channel.ID, cfg HandleConfig, members Members) act
 					_, _ = sys.Fail(msg, "type_unsupported", "unknown handle word")
 					return
 				}
-				caller := actorbase.EffectiveCaller(msg)
-				if caller.Channel != body {
+				// Driver admission is an authority decision, so it is based only on
+				// the harness-authenticated envelope sender. Context.Caller is
+				// application attribution (like Context.Session) and must never grant
+				// membership or declaration authority.
+				if msg.ChannelID != body {
 					_, _ = sys.Fail(msg, "forbidden", "driver must be a body channel member")
 					return
 				}
-				facts, found, err := members.ActorFacts(msg.Ctx(), caller.Actor)
+				facts, found, err := members.ActorFacts(msg.Ctx(), msg.Sender.ID)
 				if err != nil {
 					relay(sys, msg, Response{}, err)
 					return

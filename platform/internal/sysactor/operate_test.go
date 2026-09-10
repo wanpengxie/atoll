@@ -123,7 +123,7 @@ func TestOperate_MemberAllowed(t *testing.T) {
 
 func TestOperate_RemoteCallerKeepsLocalInitiator(t *testing.T) {
 	ex := &stubExecutor{result: map[string]string{"ok": "true"}}
-	s := New(Deps{Authority: memberRegistry{}, Operate: ex})
+	s := New(Deps{Authority: memberRegistry{active: map[actor.ActorID]bool{"peer:svcactor:2": true}}, Operate: ex})
 	sys := &failSys{}
 	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &harness.Caller{Channel: "c0", Actor: "agent:steward:1"}}, message.Envelope{
 		ID: "op-remote", ChannelID: "target", Kind: message.KindRequest, Type: TypeMemberCreate,
@@ -140,6 +140,37 @@ func TestOperate_RemoteCallerKeepsLocalInitiator(t *testing.T) {
 	}
 	if ex.last.Caller.Channel != "c0" || ex.last.Caller.Actor != "agent:steward:1" {
 		t.Fatalf("caller=%+v, want remote provenance", ex.last.Caller)
+	}
+}
+
+func TestOperate_CallerMetadataCannotAuthorizeInactiveSender(t *testing.T) {
+	ex := &stubExecutor{}
+	s := New(Deps{Authority: memberRegistry{active: map[actor.ActorID]bool{"agent:steward:1": true}}, Operate: ex})
+	sys := &failSys{}
+	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &harness.Caller{Channel: "c0", Actor: "agent:steward:1"}}, message.Envelope{
+		ID: "op-forged", ChannelID: "target", Kind: message.KindRequest, Type: TypeMemberCreate,
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:mallory:2"}, Audience: message.Audience{actor.SystemActorID}, Payload: json.RawMessage(`{}`),
+	})
+	s.handle(sys, msg)
+	if ex.created != 0 || len(sys.fails) != 1 || sys.fails[0].code != unauthorizedSenderCode {
+		t.Fatalf("created=%d fails=%+v", ex.created, sys.fails)
+	}
+}
+
+func TestOperate_CallerMetadataCannotChangeActiveSenderAttribution(t *testing.T) {
+	ex := &stubExecutor{result: map[string]string{"ok": "true"}}
+	s := New(Deps{Authority: memberRegistry{active: map[actor.ActorID]bool{"agent:mallory:2": true}}, Operate: ex})
+	sys := &failSys{}
+	msg := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Caller: &harness.Caller{Channel: "c0", Actor: "agent:steward:1"}}, message.Envelope{
+		ID: "op-forged-attribution", ChannelID: "target", Kind: message.KindRequest, Type: TypeMemberCreate,
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:mallory:2"}, Audience: message.Audience{actor.SystemActorID}, Payload: json.RawMessage(`{}`),
+	})
+	s.handle(sys, msg)
+	if ex.created != 1 || len(sys.fails) != 0 {
+		t.Fatalf("created=%d fails=%+v", ex.created, sys.fails)
+	}
+	if ex.last.Caller != (harness.Caller{Channel: "target", Actor: "agent:mallory:2"}) {
+		t.Fatalf("caller=%+v, want authenticated sender attribution", ex.last.Caller)
 	}
 }
 
