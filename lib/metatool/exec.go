@@ -258,15 +258,12 @@ func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestS
 			"Inspect adapter logs and retry", nil)
 		return nil, &rv
 	}
-	if reason := ResponseFailureReason(finalEnv.Payload); reason != "" {
-		rv := TerminalFailureToActorCLI(spec.ToolName, spec.HandlerActorID, spec.EnvelopeType, reason, nil)
+	rv, failed := ResultFromResponse(spec.ToolName, *finalEnv)
+	if failed {
+		rv = NormalizeCallActorResult(rv, spec.HandlerActorID, spec.EnvelopeType)
 		return nil, &rv
 	}
-	_, body, err := harness.UnwrapPayload(finalEnv.Payload)
-	if err != nil {
-		rv := NewError(spec.ToolName, InternalError, "invalid response payload envelope", "Inspect adapter logs and retry", nil)
-		return nil, &rv
-	}
+	_, body, _ := harness.UnwrapPayload(finalEnv.Payload) // validated above
 	return body, nil
 }
 

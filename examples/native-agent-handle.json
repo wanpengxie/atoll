@@ -9,7 +9,7 @@
     "host": "c0",
     "words": {
       "agent.ask": {
-        "description": "Submit work in _context.session. Use the standard session=new parameter to fork a new branch. Receipt mode requires submission_key.",
+        "description": "Submit work in _context.session. Use this Controller's session=new parameter to fork a new branch. Receipt mode requires submission_key.",
         "schema": {
           "type": "object",
           "required": [
@@ -54,6 +54,10 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 256
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "allOf": [
@@ -94,6 +98,10 @@
             },
             "work_id": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "type": "object"
@@ -113,6 +121,10 @@
             "operation_key": {
               "type": "string",
               "maxLength": 256
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -183,6 +195,10 @@
             },
             "work_id": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -206,6 +222,10 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 256
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -225,6 +245,10 @@
             },
             "through": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -244,6 +268,10 @@
             },
             "through": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -263,6 +291,10 @@
             },
             "through": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -282,6 +314,10 @@
             },
             "through": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -301,6 +337,10 @@
             },
             "through": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -320,6 +360,10 @@
             },
             "through": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -340,6 +384,10 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 100
+                },
+                "session": {
+                  "type": "string",
+                  "minLength": 1
                 }
               },
               "additionalProperties": false
@@ -354,6 +402,10 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 256
+                },
+                "session": {
+                  "type": "string",
+                  "minLength": 1
                 }
               },
               "additionalProperties": false
@@ -368,6 +420,10 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 256
+                },
+                "session": {
+                  "type": "string",
+                  "minLength": 1
                 }
               },
               "additionalProperties": false
@@ -401,6 +457,10 @@
                 },
                 "expected_turn_id": {
                   "type": "string"
+                },
+                "session": {
+                  "type": "string",
+                  "minLength": 1
                 }
               },
               "additionalProperties": false
@@ -421,6 +481,10 @@
                   "maxLength": 256
                 },
                 "target": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "session": {
                   "type": "string",
                   "minLength": 1
                 }
@@ -444,6 +508,10 @@
                 },
                 "all": {
                   "const": true
+                },
+                "session": {
+                  "type": "string",
+                  "minLength": 1
                 }
               },
               "additionalProperties": false
@@ -459,6 +527,10 @@
           "properties": {
             "work_id": {
               "type": "string"
+            },
+            "session": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "type": "object"

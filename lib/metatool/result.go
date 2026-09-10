@@ -16,6 +16,7 @@ const (
 	Timeout          ErrorCode = "timeout"
 	ResultUnknown    ErrorCode = "result_unknown"
 	InternalError    ErrorCode = "internal_error"
+	ActorError       ErrorCode = "actor_error"
 )
 
 // NewError builds an error ResultValue in the actor-CLI shape.
@@ -50,18 +51,22 @@ func PayloadInvalidError(toolName, msg, hint string) ResultValue {
 // TerminalFailureToActorCLI maps a terminal failure reason to the
 // actor-CLI closed error set.
 func TerminalFailureToActorCLI(toolName, actorID, typeName, reason string, detail any) ResultValue {
-	// The actor's own verdict wins when it gave one. `reason` distinguishes
-	// only how the request ended (the receiver answered / went silent / timed
-	// out); error_code says WHAT was wrong, which is the half an agent can act
-	// on. Reading it first is what turns "internal error, inspect logs" into
-	// "this argument is wrong" or "this will never be permitted".
-	if failure := failureDetailOf(detail); failure.Code != "" {
-		if class, known := classifyActorError(failure.Code); known {
-			message := fmt.Sprintf("Actor %q refused %q: %s", actorID, typeName, failure.Code)
-			if failure.Detail != "" {
-				message = fmt.Sprintf("Actor %q refused %q (%s): %s", actorID, typeName, failure.Code, failure.Detail)
+	// Business error codes and recovery decisions belong to the answering actor.
+	// Preserve them without a central registry or an inferred retry policy.
+	if payload, ok := detail.(map[string]any); ok {
+		if code, ok := payload["error_code"].(string); ok && strings.TrimSpace(code) != "" {
+			text := fmt.Sprintf("Actor %q failed %q (%s)", actorID, typeName, code)
+			if explanation, ok := payload["detail"].(string); ok && explanation != "" {
+				text += ": " + explanation
 			}
-			return newClassifiedError(toolName, class, message, detail)
+			hint, _ := payload["recovery_hint"].(string)
+			rv := NewError(toolName, ActorError, text, hint, payload)
+			out := rv.Value["error"].(map[string]any)
+			out["actor_code"] = code
+			if retryable, ok := payload["retryable"].(bool); ok {
+				out["retryable"] = retryable
+			}
+			return rv
 		}
 	}
 	switch reason {

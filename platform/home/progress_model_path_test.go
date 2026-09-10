@@ -130,8 +130,8 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 	}
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
-		Type: "test.observe.progress", Payload: json.RawMessage(`{"_context":{"session":"progress-S","caller":{"channel":"progress-model-channel","actor":"human:alice:1"}},"body":{}}`), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
-		Cause: message.Root(), Context: harness.Context{},
+		Type: "test.observe.progress", Payload: json.RawMessage(`{}`), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
+		Cause: message.Root(), Context: harness.Context{Session: "progress-S", Caller: &harness.Caller{Channel: "progress-model-channel", Actor: "human:alice:1"}},
 	})
 	if err != nil {
 		t.Fatal(err)

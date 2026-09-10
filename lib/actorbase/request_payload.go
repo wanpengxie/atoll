@@ -8,7 +8,6 @@ import (
 	"io"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // DecodeStrict decodes a standard protocol body. Standard bodies are JSON
@@ -42,14 +41,6 @@ func DecodeStrictEmpty(raw json.RawMessage, out any) error {
 		raw = json.RawMessage(`{}`)
 	}
 	return DecodeStrict(raw, out)
-}
-
-func encodeRequestPayload(ctx harness.Context, args any) (json.RawMessage, error) {
-	raw, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	return harness.WrapPayload(ctx, raw)
 }
 
 type TargetResolveError struct {

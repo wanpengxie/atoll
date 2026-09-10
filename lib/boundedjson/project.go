@@ -28,7 +28,8 @@ type Metadata struct {
 
 // Project returns valid JSON no larger than budget. JSON already within the
 // budget is returned byte-for-byte; projected JSON is deterministic.
-func Project(raw []byte, budget int) (json.RawMessage, Metadata, error) {
+// priority optionally ranks object keys (lower first); nil uses size and name.
+func Project(raw []byte, budget int, priority func(string) int) (json.RawMessage, Metadata, error) {
 	meta := Metadata{OriginalBytes: len(raw), SHA256: digest(raw)}
 	if budget <= 0 {
 		return nil, meta, errors.New("boundedjson: positive budget required")
@@ -48,7 +49,7 @@ func Project(raw []byte, budget int) (json.RawMessage, Metadata, error) {
 	}
 	meta.Projected = true
 
-	projected := projectValue(value, budget)
+	projected := projectValue(value, budget, priority)
 	encoded, err := json.Marshal(projected)
 	if err != nil {
 		return nil, meta, err
@@ -59,7 +60,7 @@ func Project(raw []byte, budget int) (json.RawMessage, Metadata, error) {
 	return minimalProjection(meta, budget)
 }
 
-func projectValue(value any, budget int) any {
+func projectValue(value any, budget int, priority func(string) int) any {
 	encoded, err := json.Marshal(value)
 	if err == nil && len(encoded) <= budget {
 		return value
@@ -71,9 +72,9 @@ func projectValue(value any, budget int) any {
 	case string:
 		return summarizeString(node, encoded, budget)
 	case []any:
-		return summarizeArray(node, encoded, budget)
+		return summarizeArray(node, encoded, budget, priority)
 	case map[string]any:
-		return projectObject(node, encoded, budget)
+		return projectObject(node, encoded, budget, priority)
 	default:
 		return cutScalar(encoded, budget)
 	}
@@ -85,7 +86,7 @@ type objectEntry struct {
 	size  int
 }
 
-func projectObject(node map[string]any, encoded []byte, budget int) any {
+func projectObject(node map[string]any, encoded []byte, budget int, priority func(string) int) any {
 	if budget < containerOverhead {
 		return cutContainer("object", len(node), "original_keys", encoded, budget)
 	}
@@ -99,8 +100,8 @@ func projectObject(node map[string]any, encoded []byte, budget int) any {
 		entries = append(entries, objectEntry{key: key, value: value, size: len(keyBytes) + 1 + len(valueBytes) + 1})
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		if entryPriority(entries[i].key) != entryPriority(entries[j].key) {
-			return entryPriority(entries[i].key) < entryPriority(entries[j].key)
+		if priority != nil && priority(entries[i].key) != priority(entries[j].key) {
+			return priority(entries[i].key) < priority(entries[j].key)
 		}
 		if entries[i].size != entries[j].size {
 			return entries[i].size < entries[j].size
@@ -144,7 +145,7 @@ func projectObject(node map[string]any, encoded []byte, budget int) any {
 			break
 		}
 		valueBudget := max(64, available/remainingSlots-entryKeyCost(entry.key))
-		candidate := projectValue(entry.value, valueBudget)
+		candidate := projectValue(entry.value, valueBudget, priority)
 		cost := entryCost(entry.key, candidate)
 		if used+cost+reserve > budget {
 			continue
@@ -165,17 +166,6 @@ func projectObject(node map[string]any, encoded []byte, budget int) any {
 		return fitted
 	}
 	return cutContainer("object", len(node), "original_keys", encoded, budget)
-}
-
-func entryPriority(key string) int {
-	switch key {
-	case "status", "reason", "error_code", "detail":
-		return 0
-	case "turn_id", "kind", "phase", "outcome", "tool_call_id", "tool":
-		return 1
-	default:
-		return 2
-	}
 }
 
 func fitObject(out map[string]any, markerKey string, budget int) (map[string]any, bool) {
@@ -221,7 +211,7 @@ func summarizeString(node string, encoded []byte, budget int) any {
 	return fitCut(marker, encoded, budget)
 }
 
-func summarizeArray(node []any, encoded []byte, budget int) any {
+func summarizeArray(node []any, encoded []byte, budget int, priority func(string) int) any {
 	marker := map[string]any{
 		"type": "array", "original_bytes": len(encoded), "original_items": len(node),
 		"sha256": digest(encoded),
@@ -232,11 +222,11 @@ func summarizeArray(node []any, encoded []byte, budget int) any {
 		tailCount := min(2, max(0, len(node)-headCount))
 		head := make([]any, 0, headCount)
 		for i := 0; i < headCount; i++ {
-			head = append(head, projectValue(node[i], itemBudget))
+			head = append(head, projectValue(node[i], itemBudget, priority))
 		}
 		tail := make([]any, 0, tailCount)
 		for i := len(node) - tailCount; i < len(node); i++ {
-			tail = append(tail, projectValue(node[i], itemBudget))
+			tail = append(tail, projectValue(node[i], itemBudget, priority))
 		}
 		marker["head"], marker["tail"] = head, tail
 		marker["omitted_items"] = max(0, len(node)-headCount-tailCount)

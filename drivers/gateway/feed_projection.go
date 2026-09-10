@@ -41,7 +41,7 @@ func buildBoundedFeed(ref string, ch channel.ID, seq int64, source string, gener
 	if err := json.Unmarshal(envelope, &env); err != nil {
 		return boundedFeedResult{}, errors.New("gateway: oversized feed row is not a message envelope")
 	}
-	projected, _, err := boundedjson.Project(env.Payload, feedPayloadProjectionBytes)
+	projected, _, err := boundedjson.Project(env.Payload, feedPayloadProjectionBytes, feedFieldPriority)
 	if err != nil {
 		return boundedFeedResult{}, err
 	}
@@ -70,4 +70,15 @@ func feedFrameWithinLimit(ref string, ch channel.ID, seq int64, source string, g
 		return subjectgate.Frame{}, nil, false
 	}
 	return frame, encoded, true
+}
+
+func feedFieldPriority(key string) int {
+	switch key {
+	case "status", "reason", "error_code", "detail":
+		return 0
+	case "turn_id", "kind", "phase", "outcome", "tool_call_id", "tool":
+		return 1
+	default:
+		return 2
+	}
 }

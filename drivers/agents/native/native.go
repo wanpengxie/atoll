@@ -86,7 +86,7 @@ func run(sys actorbase.Sys, cfg Config) error {
 		case waitClosedType:
 			c.handleWaitClosed(sys, msg)
 		default:
-			_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("native Agent does not answer %q", msg.Type))
+			_, _ = fail(sys, msg, "type_unsupported", fmt.Sprintf("native Agent does not answer %q", msg.Type))
 		}
 	}
 }
@@ -321,12 +321,12 @@ func awaitStart(sys actorbase.Sys, cause message.Cause, app harness.Context, ses
 
 func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
 	if msg.Sender.ID != sys.Self() {
-		_, _ = sys.Fail(msg, "permission_denied", "start completion is Controller-internal")
+		_, _ = fail(sys, msg, "permission_denied", "start completion is Controller-internal")
 		return
 	}
 	var done startDone
 	if actorbase.DecodeStrict(msg.Payload, &done) != nil || done.Session == "" || done.Turn == "" {
-		_, _ = sys.Fail(msg, "invalid_args", "session_id and turn_id are required")
+		_, _ = fail(sys, msg, "invalid_args", "session_id and turn_id are required")
 		return
 	}
 	s := c.sessions[done.Session]
@@ -394,17 +394,25 @@ func (c *controller) toolBindings() []agentloop.ToolBinding {
 }
 
 func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
+	var accepted bool
+	msg, accepted = sessionInput(sys, msg)
+	if !accepted {
+		return
+	}
 	req, err := agentproto.DecodeAsk(msg.Payload)
 	if err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	caller := actorbase.EffectiveCaller(msg)
 	if existing := c.data.findSubmission(caller, req.SubmissionKey); existing != nil {
 		if existing.SubmissionHash != submissionHash(req) {
-			_, _ = sys.Fail(msg, "submission_conflict", "submission_key already names different input")
+			_, _ = fail(sys, msg, "submission_conflict", "submission_key already names different input")
 			return
 		}
+		app := msg.Context()
+		app.Session = existing.SessionID
+		msg = msg.WithContext(app)
 		if req.Delivery == agentproto.DeliveryWait && existing.State == agentproto.WorkOpen {
 			c.attachWaiter(sys, msg, existing)
 		} else {
@@ -413,7 +421,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if c.data.openCount() >= c.cfg.MaxOpenWorks {
-		_, _ = sys.Fail(msg, "capacity", "the Agent has reached max_open_works")
+		_, _ = fail(sys, msg, "capacity", "the Agent has reached max_open_works")
 		return
 	}
 	now := nowMillis()
@@ -426,16 +434,16 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		CallerChannel: caller.Channel, CallerActor: caller.Actor, Origin: req.Origin,
 	}, Disposition: "accepted"}}
 	if inputRecordsSize(w.Inputs) > maxWorkInputBytes {
-		_, _ = sys.Fail(msg, "limit_exceeded", "the work input exceeds the input size limit")
+		_, _ = fail(sys, msg, "limit_exceeded", "the work input exceeds the input size limit")
 		return
 	}
 	s, sessionErr := c.sessionForAsk(sys, &msg, req)
 	if sessionErr != nil {
-		_, _ = sys.Fail(msg, sessionErr.Error(), "cannot select conversation")
+		_, _ = fail(sys, msg, sessionErr.Error(), "cannot select conversation")
 		return
 	}
 	if len(s.Buffer) >= maxSessionQueue {
-		_, _ = sys.Fail(msg, "capacity", "session waiting queue full")
+		_, _ = fail(sys, msg, "capacity", "session waiting queue full")
 		return
 	}
 	var waitingBytes int
@@ -445,7 +453,7 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 	}
 	if waitingBytes+inputRecordsSize(w.Inputs) > maxWorkInputBytes {
-		_, _ = sys.Fail(msg, "capacity", "session waiting input bytes exceeded")
+		_, _ = fail(sys, msg, "capacity", "session waiting input bytes exceeded")
 		return
 	}
 	w.SessionID = s.ID
@@ -482,7 +490,7 @@ func (c *controller) attachWaiter(sys actorbase.Sys, msg actorbase.Msg, w *workR
 
 func (c *controller) handleWaitClosed(sys actorbase.Sys, msg actorbase.Msg) {
 	if msg.Sender.ID != sys.Self() {
-		_, _ = sys.Fail(msg, "permission_denied", "wait lifecycle reports are Controller-internal")
+		_, _ = fail(sys, msg, "permission_denied", "wait lifecycle reports are Controller-internal")
 		return
 	}
 	var req struct {
@@ -490,7 +498,7 @@ func (c *controller) handleWaitClosed(sys actorbase.Sys, msg actorbase.Msg) {
 		RequestID message.ID        `json:"request_id"`
 	}
 	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil || req.WorkID == "" || req.RequestID == "" {
-		_, _ = sys.Fail(msg, "invalid_args", "work_id and request_id are required")
+		_, _ = fail(sys, msg, "invalid_args", "work_id and request_id are required")
 		return
 	}
 	held := c.wait[req.WorkID]
@@ -509,7 +517,7 @@ func (c *controller) handleWaitClosed(sys actorbase.Sys, msg actorbase.Msg) {
 	stopped := false
 	if len(held) != len(remaining) && len(remaining) == 0 && w != nil && w.Delivery == agentproto.DeliveryWait && w.State == agentproto.WorkOpen {
 		if err := c.stop(sys, msg, w, true); err != nil {
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
 		}
 		stopped = true
@@ -684,16 +692,21 @@ func (c *controller) workByID(id agentproto.WorkID) (*workRecord, bool) {
 }
 
 func (c *controller) handleStatus(sys actorbase.Sys, msg actorbase.Msg) {
+	var accepted bool
+	msg, accepted = sessionInput(sys, msg)
+	if !accepted {
+		return
+	}
 	req, err := agentproto.DecodeStatus(msg.Payload)
 	if err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	caller := actorbase.EffectiveCaller(msg)
 	if req.WorkID != "" {
 		w, ok := c.workByID(req.WorkID)
 		if !ok {
-			_, _ = sys.Fail(msg, "work_not_found", "no visible work has that id")
+			_, _ = fail(sys, msg, "work_not_found", "no visible work has that id")
 			return
 		}
 		_, _ = sys.Reply(msg, statusPayload(w))
@@ -702,7 +715,7 @@ func (c *controller) handleStatus(sys actorbase.Sys, msg actorbase.Msg) {
 	if req.SubmissionKey != "" {
 		w := c.data.findSubmission(caller, req.SubmissionKey)
 		if w == nil {
-			_, _ = sys.Fail(msg, "work_not_found", "no visible work has that submission_key")
+			_, _ = fail(sys, msg, "work_not_found", "no visible work has that submission_key")
 			return
 		}
 		_, _ = sys.Reply(msg, statusPayload(w))
@@ -711,7 +724,7 @@ func (c *controller) handleStatus(sys actorbase.Sys, msg actorbase.Msg) {
 	visible := c.data.orderedWorks()
 	start, err := decodeCursor(req.Cursor, visible)
 	if err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	end := start + req.Limit
@@ -734,23 +747,33 @@ func (c *controller) handleStatus(sys actorbase.Sys, msg actorbase.Msg) {
 }
 
 func (c *controller) handleResult(sys actorbase.Sys, msg actorbase.Msg) {
+	var accepted bool
+	msg, accepted = sessionInput(sys, msg)
+	if !accepted {
+		return
+	}
 	req, err := agentproto.DecodeResult(msg.Payload)
 	if err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	w, ok := c.workByID(req.WorkID)
 	if !ok {
-		_, _ = sys.Fail(msg, "work_not_found", "no visible work has that id")
+		_, _ = fail(sys, msg, "work_not_found", "no visible work has that id")
 		return
 	}
 	_, _ = sys.Reply(msg, resultPayload(w))
 }
 
 func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
+	var accepted bool
+	msg, accepted = sessionInput(sys, msg)
+	if !accepted {
+		return
+	}
 	req, err := agentproto.DecodeInterrupt(msg.Payload)
 	if err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	if len(c.sessions) > 0 {
@@ -760,7 +783,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 			for _, w := range c.data.Works {
 				if prior, ok := w.Operations[opKey]; ok {
 					if prior.Kind != agentproto.TypeInterrupt || prior.Hash != opHash {
-						_, _ = sys.Fail(msg, "operation_conflict", "operation_key already names different control")
+						_, _ = fail(sys, msg, "operation_conflict", "operation_key already names different control")
 						return
 					}
 					_, _ = sys.Reply(msg, json.RawMessage(prior.Response))
@@ -772,7 +795,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 		if req.WorkID != "" || req.SessionID != "" {
 			s, err := c.selectSession(msg, req.SessionID, req.WorkID, "")
 			if err != nil {
-				_, _ = sys.Fail(msg, err.Error(), "cannot select interrupt session")
+				_, _ = fail(sys, msg, err.Error(), "cannot select interrupt session")
 				return
 			}
 			selected = []*session{s}
@@ -792,7 +815,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 			for _, v := range selected {
 				for _, w := range c.data.Works {
 					if w.SessionID == v.ID && len(w.Operations) >= c.cfg.MaxOperationKeys {
-						_, _ = sys.Fail(msg, "limit_exceeded", "max_operation_keys reached")
+						_, _ = fail(sys, msg, "limit_exceeded", "max_operation_keys reached")
 						return
 					}
 				}
@@ -860,14 +883,14 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	if req.WorkID == "" {
 		if req.OperationKey != "" {
-			_, _ = sys.Fail(msg, "unsupported_scope", "Agent-wide interrupt does not support operation_key; address one work")
+			_, _ = fail(sys, msg, "unsupported_scope", "Agent-wide interrupt does not support operation_key; address one work")
 			return
 		}
 		count := 0
 		for _, w := range c.data.Works {
 			if w.State == agentproto.WorkOpen {
 				if err := c.stop(sys, msg, w, false); err != nil {
-					_, _ = sys.Fail(msg, "ledger_unavailable", "interrupt partially applied before the ledger failed: "+err.Error())
+					_, _ = fail(sys, msg, "ledger_unavailable", "interrupt partially applied before the ledger failed: "+err.Error())
 					return
 				}
 				count++
@@ -879,7 +902,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	w, ok := c.workByID(req.WorkID)
 	if !ok {
-		_, _ = sys.Fail(msg, "work_not_found", "no visible work has that id")
+		_, _ = fail(sys, msg, "work_not_found", "no visible work has that id")
 		return
 	}
 	opKey := operationIndexKey(actorbase.EffectiveCaller(msg), req.OperationKey)
@@ -889,7 +912,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 	if req.OperationKey != "" && w.Operations != nil {
 		if prior, found := w.Operations[opKey]; found {
 			if prior.Kind != agentproto.TypeInterrupt || prior.Hash != opHash {
-				_, _ = sys.Fail(msg, "operation_conflict", "operation_key already names a different control")
+				_, _ = fail(sys, msg, "operation_conflict", "operation_key already names a different control")
 				return
 			}
 			_, _ = sys.Reply(msg, json.RawMessage(prior.Response))
@@ -901,11 +924,11 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if req.OperationKey != "" && c.cfg.MaxOperationKeys > 0 && len(w.Operations) >= c.cfg.MaxOperationKeys {
-		_, _ = sys.Fail(msg, "limit_exceeded", "the work has reached max_operation_keys")
+		_, _ = fail(sys, msg, "limit_exceeded", "the work has reached max_operation_keys")
 		return
 	}
 	if err := c.stop(sys, msg, w, true); err != nil {
-		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 		return
 	}
 	response := mustJSON(map[string]any{"work_id": w.ID, "disposition": "stop_requested", "execution_state": w.ExecutionState})
@@ -944,7 +967,7 @@ func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, s
 func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 	var req agentloop.ReportRequest
 	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	if req.AssignmentID == "" {
@@ -967,11 +990,11 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 	// Reports can only settle assignments issued by this Controller process.
 	// Do not consult history or touch a control slot for an unmatched old report.
 	if w == nil || w.State != agentproto.WorkOpen || req.AssignmentID == "" || req.AssignmentID != w.AssignmentID || !targetMatches(w.Looper, msg.Sender.ID.String()) {
-		_, _ = sys.Fail(msg, "stale_assignment", "report does not belong to a current assignment")
+		_, _ = fail(sys, msg, "stale_assignment", "report does not belong to a current assignment")
 		return
 	}
 	if req.SessionID != "" && req.SessionID != w.SessionID {
-		_, _ = sys.Fail(msg, "stale_assignment", "report session does not match the current assignment")
+		_, _ = fail(sys, msg, "stale_assignment", "report session does not match the current assignment")
 		return
 	}
 	s := c.sessions[req.SessionID]
@@ -979,22 +1002,22 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 		s = c.sessions[w.SessionID]
 	}
 	if s == nil || !targetMatches(s.Holder, msg.Sender.ID.String()) {
-		_, _ = sys.Fail(msg, "stale_assignment", "report sender is not the ledger-projected session holder")
+		_, _ = fail(sys, msg, "stale_assignment", "report sender is not the ledger-projected session holder")
 		return
 	}
 	accepted, err := reportHasAcceptedStart(sys, s.ID, msg.ID)
 	if err != nil {
-		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 		return
 	}
 	if !accepted {
-		_, _ = sys.Fail(msg, "turn_not_accepted", "report has no preceding accepted loop.start")
+		_, _ = fail(sys, msg, "turn_not_accepted", "report has no preceding accepted loop.start")
 		return
 	}
 	if s.Execution == req.AssignmentID {
 		current := c.data.Works[string(s.Owner)]
 		if current == nil || !targetMatches(current.Looper, msg.Sender.ID.String()) {
-			_, _ = sys.Fail(msg, "stale_assignment", "report session identity or version mismatch")
+			_, _ = fail(sys, msg, "stale_assignment", "report session identity or version mismatch")
 			return
 		}
 		if s.Control != nil {
@@ -1003,11 +1026,11 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 		w = c.data.Works[string(s.Owner)]
 	}
 	if w == nil || req.AssignmentID != w.AssignmentID || !targetMatches(w.Looper, msg.Sender.ID.String()) {
-		_, _ = sys.Fail(msg, "stale_assignment", "report does not belong to the current assignment")
+		_, _ = fail(sys, msg, "stale_assignment", "report does not belong to the current assignment")
 		return
 	}
 	if req.State != "completed" && req.State != "failed" && req.State != "cancelled" && req.State != "timeout" && req.State != "execution_unknown" {
-		_, _ = sys.Fail(msg, "invalid_args", "invalid terminal report state")
+		_, _ = fail(sys, msg, "invalid_args", "invalid terminal report state")
 		return
 	}
 	if req.State == "completed" && len(req.Result) == 0 {

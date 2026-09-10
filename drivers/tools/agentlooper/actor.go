@@ -158,7 +158,7 @@ func proc(cfg Config) actorbase.Proc {
 			case agentloop.TypeInspect:
 				l.inspect(sys, msg)
 			default:
-				_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("Agent looper does not answer %q", msg.Type))
+				_, _ = fail(sys, msg, "type_unsupported", fmt.Sprintf("Agent looper does not answer %q", msg.Type))
 			}
 		}
 	}
@@ -301,22 +301,22 @@ func terminalTurnState(state string) bool {
 func (l *looper) reset(sys actorbase.Sys, msg actorbase.Msg) {
 	var req agentloop.ResetRequest
 	if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.SessionID == "" || req.SessionID != msg.Context().Session {
-		_, _ = sys.Fail(msg, "invalid_args", "session_id must match message context")
+		_, _ = fail(sys, msg, "invalid_args", "session_id must match message context")
 		return
 	}
 	if l.activeSession(req.SessionID) {
-		_, _ = sys.Fail(msg, "busy", "session has an active turn")
+		_, _ = fail(sys, msg, "busy", "session has an active turn")
 		return
 	}
 	spec, _ := behavior.EventSpecJSON(msg.Cause(), msg.Context(), agentloop.TypeSessionReset, req)
 	id, err := sys.Emit(spec)
 	if err != nil {
-		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 		return
 	}
 	_, err = agentbase.WriteContext(sys, req.SessionID, agentbase.ContextObject{Messages: []json.RawMessage{}, Version: id})
 	if err != nil {
-		_, _ = sys.Fail(msg, "context_failed", err.Error())
+		_, _ = fail(sys, msg, "context_failed", err.Error())
 		return
 	}
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "reset", "session_id": req.SessionID})
@@ -325,12 +325,12 @@ func (l *looper) reset(sys actorbase.Sys, msg actorbase.Msg) {
 func (l *looper) rename(sys actorbase.Sys, msg actorbase.Msg) {
 	var req agentloop.RenameRequest
 	if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.SessionID == "" || req.SessionID != msg.Context().Session || strings.TrimSpace(req.Name) == "" {
-		_, _ = sys.Fail(msg, "invalid_args", "session_id and name are required")
+		_, _ = fail(sys, msg, "invalid_args", "session_id and name are required")
 		return
 	}
 	spec, _ := behavior.EventSpecJSON(msg.Cause(), msg.Context(), agentloop.TypeSessionRename, req)
 	if _, err := sys.Emit(spec); err != nil {
-		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 		return
 	}
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "renamed", "session_id": req.SessionID, "name": req.Name})
@@ -339,18 +339,18 @@ func (l *looper) rename(sys actorbase.Sys, msg actorbase.Msg) {
 func (l *looper) syncSession(sys actorbase.Sys, msg actorbase.Msg) {
 	var req agentloop.SyncRequest
 	if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.SessionID == "" || req.From.Session == "" || req.From.Through == "" || req.SessionID != msg.Context().Session {
-		_, _ = sys.Fail(msg, "invalid_args", "session_id and a closed from range are required")
+		_, _ = fail(sys, msg, "invalid_args", "session_id and a closed from range are required")
 		return
 	}
 	if l.activeSession(req.SessionID) {
-		_, _ = sys.Fail(msg, "busy", "session has an active turn")
+		_, _ = fail(sys, msg, "busy", "session has an active turn")
 		return
 	}
 	historyCtx, historyCancel := newHistoryContext(msg.Ctx())
 	defer historyCancel()
 	valid, err := validSessionBoundary(historyCtx, sys, msg.Cause(), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.Through})
 	if err != nil || !valid {
-		_, _ = sys.Fail(msg, "invalid_args", "source through is not a boundary")
+		_, _ = fail(sys, msg, "invalid_args", "source through is not a boundary")
 		return
 	}
 	target, _, err := sessionContext(historyCtx, sys, msg.Cause(), req.SessionID)
@@ -367,12 +367,12 @@ func (l *looper) syncSession(sys actorbase.Sys, msg actorbase.Msg) {
 	if req.From.After != "" {
 		valid, err = validSessionBoundary(historyCtx, sys, msg.Cause(), agentloop.BoundaryRef{Session: req.From.Session, At: req.From.After})
 		if err != nil || !valid {
-			_, _ = sys.Fail(msg, "invalid_args", "source after is not a boundary")
+			_, _ = fail(sys, msg, "invalid_args", "source after is not a boundary")
 			return
 		}
 		previous, err := materializeSession(historyCtx, sys, msg.Cause(), req.From.Session, message.ID(req.From.After))
 		if err != nil || len(previous.Messages) > len(source.Messages) || !messagePrefix(previous.Messages, source.Messages) {
-			_, _ = sys.Fail(msg, "invalid_args", "source range does not extend its after boundary")
+			_, _ = fail(sys, msg, "invalid_args", "source range does not extend its after boundary")
 			return
 		}
 		delta = source.Messages[len(previous.Messages):]
@@ -387,12 +387,12 @@ func (l *looper) syncSession(sys actorbase.Sys, msg actorbase.Msg) {
 	spec, _ := behavior.EventSpecJSON(msg.Cause(), msg.Context(), agentloop.TypeSessionSync, row)
 	id, err := sys.Emit(spec)
 	if err != nil {
-		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 		return
 	}
 	target.Version = id
 	if _, err = agentbase.WriteContext(sys, req.SessionID, target); err != nil {
-		_, _ = sys.Fail(msg, "context_failed", err.Error())
+		_, _ = fail(sys, msg, "context_failed", err.Error())
 		return
 	}
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "synced", "session_id": req.SessionID, "through": req.From.Through})
@@ -409,12 +409,12 @@ func messagePrefix(prefix, whole []json.RawMessage) bool {
 
 func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 	if !l.authorized(msg) {
-		_, _ = sys.Fail(msg, "permission_denied", "only the configured Agent Controller may start an assignment")
+		_, _ = fail(sys, msg, "permission_denied", "only the configured Agent Controller may start an assignment")
 		return
 	}
 	var req agentloop.StartRequest
 	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	req.ControllerActor = msg.Sender.ID.String()
@@ -431,15 +431,15 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		req.SessionID = msg.Context().Session
 	}
 	if req.SessionID == "" || req.TurnID == "" || req.ControllerActor == "" || req.LLMActor == "" || len(req.Inputs) == 0 {
-		_, _ = sys.Fail(msg, "invalid_args", "session_id, turn_id, controller_actor, llm_actor, and inputs are required")
+		_, _ = fail(sys, msg, "invalid_args", "session_id, turn_id, controller_actor, llm_actor, and inputs are required")
 		return
 	}
 	if msg.Context().Session != req.SessionID {
-		_, _ = sys.Fail(msg, "operation_mismatch", "loop.start session differs from _context.session")
+		_, _ = fail(sys, msg, "operation_mismatch", "loop.start session differs from _context.session")
 		return
 	}
 	if req.ControllerActor != msg.Sender.ID.String() {
-		_, _ = sys.Fail(msg, "invalid_args", "controller_actor must be the actual request sender")
+		_, _ = fail(sys, msg, "invalid_args", "controller_actor must be the actual request sender")
 		return
 	}
 	l.mu.Lock()
@@ -451,7 +451,7 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		same := string(mustJSON(old.start)) == string(mustJSON(req))
 		l.mu.Unlock()
 		if !same {
-			_, _ = sys.Fail(msg, "assignment_conflict", "assignment id reused with different request")
+			_, _ = fail(sys, msg, "assignment_conflict", "assignment id reused with different request")
 			return
 		}
 		old.mu.Lock()
@@ -468,18 +468,18 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 	for _, running := range l.active {
 		if running.start.SessionID == req.SessionID {
 			l.mu.Unlock()
-			_, _ = sys.Fail(msg, "busy", "session already has an active turn")
+			_, _ = fail(sys, msg, "busy", "session already has an active turn")
 			return
 		}
 	}
 	if len(l.active) >= l.cfg.MaxAssignments {
 		l.mu.Unlock()
-		_, _ = sys.Fail(msg, "capacity", "looper has reached max_assignments")
+		_, _ = fail(sys, msg, "capacity", "looper has reached max_assignments")
 		return
 	}
 	if req.ToolTimeoutMS < 0 || req.ExecutionTimeoutMS < 0 {
 		l.mu.Unlock()
-		_, _ = sys.Fail(msg, "invalid_args", "timeouts must be positive when configured")
+		_, _ = fail(sys, msg, "invalid_args", "timeouts must be positive when configured")
 		return
 	}
 	duration := 30 * time.Minute
@@ -542,7 +542,7 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 			delete(l.active, req.AssignmentID)
 			l.mu.Unlock()
 			cancel()
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
 		}
 	}
@@ -574,19 +574,19 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 
 func (l *looper) input(sys actorbase.Sys, msg actorbase.Msg) {
 	if !l.authorized(msg) {
-		_, _ = sys.Fail(msg, "permission_denied", "only the configured Agent Controller may deliver input")
+		_, _ = fail(sys, msg, "permission_denied", "only the configured Agent Controller may deliver input")
 		return
 	}
 	var req agentloop.InputRequest
 	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	l.mu.Lock()
 	a := l.active[req.AssignmentID]
 	l.mu.Unlock()
 	if a == nil {
-		_, _ = sys.Fail(msg, "assignment_not_found", "no active assignment for work")
+		_, _ = fail(sys, msg, "assignment_not_found", "no active assignment for work")
 		return
 	}
 	a.mu.Lock()
@@ -602,12 +602,12 @@ func (l *looper) input(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	a.mu.Unlock()
 	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.SessionID != req.SessionID {
-		_, _ = sys.Fail(msg, "operation_mismatch", "input targets a stale assignment")
+		_, _ = fail(sys, msg, "operation_mismatch", "input targets a stale assignment")
 		return
 	}
 	decision, err := a.acceptInput(req)
 	if err != nil {
-		_, _ = sys.Fail(msg, "operation_conflict", err.Error())
+		_, _ = fail(sys, msg, "operation_conflict", err.Error())
 		return
 	}
 	a.mu.Lock()
@@ -622,12 +622,12 @@ func (l *looper) input(sys actorbase.Sys, msg actorbase.Msg) {
 
 func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
 	if !l.authorized(msg) {
-		_, _ = sys.Fail(msg, "permission_denied", "only the configured Agent Controller may stop an assignment")
+		_, _ = fail(sys, msg, "permission_denied", "only the configured Agent Controller may stop an assignment")
 		return
 	}
 	var req agentloop.StopRequest
 	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	if req.Archive && req.AssignmentID == "" && req.TurnID == "" {
@@ -664,7 +664,7 @@ func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.SessionID != req.SessionID {
-		_, _ = sys.Fail(msg, "operation_mismatch", "stop targets a stale assignment")
+		_, _ = fail(sys, msg, "operation_mismatch", "stop targets a stale assignment")
 		return
 	}
 	a.mu.Lock()
@@ -678,12 +678,12 @@ func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
 }
 func (l *looper) inspect(sys actorbase.Sys, msg actorbase.Msg) {
 	if !l.authorized(msg) {
-		_, _ = sys.Fail(msg, "permission_denied", "only the configured Agent Controller may inspect an assignment")
+		_, _ = fail(sys, msg, "permission_denied", "only the configured Agent Controller may inspect an assignment")
 		return
 	}
 	var req agentloop.InspectRequest
 	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	l.mu.Lock()
@@ -693,11 +693,11 @@ func (l *looper) inspect(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	l.mu.Unlock()
 	if a == nil {
-		_, _ = sys.Fail(msg, "assignment_not_found", "no active assignment for work")
+		_, _ = fail(sys, msg, "assignment_not_found", "no active assignment for work")
 		return
 	}
 	if a.start.ControllerActor != msg.Sender.ID.String() || a.start.SessionID != req.SessionID {
-		_, _ = sys.Fail(msg, "operation_mismatch", "inspect targets a different session or incarnation")
+		_, _ = fail(sys, msg, "operation_mismatch", "inspect targets a different session or incarnation")
 		return
 	}
 	a.mu.Lock()

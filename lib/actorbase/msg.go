@@ -1,14 +1,8 @@
 package actorbase
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"strings"
 
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
@@ -16,17 +10,16 @@ import (
 // Msg is the substrate's in-hand projection of one delivered envelope — pure,
 // immutable data with zero-effect methods (spec §1.2: "Msg=纯不可变数据零效果
 // 方法,泄漏 msg=泄漏只读数据;全系统唯一有效果的把手=sys"). It embeds the
-// envelope VERBATIM — the occupant reads the same truth row the feed/tail
-// read path already serves in full — plus the one thing an envelope itself
-// does not carry: the ctx this particular delivery is scoped to.
+// envelope fields, with Payload projected to its application body. Context()
+// exposes the separately carried metadata; Ctx() is this delivery's Go scope.
 //
 // The embedding replaced two hand-copied 12-field projection tables (purity
 // 手动档, owner 2026-07-13): the original NewMsg mirror silently dropped
 // TSReceived (an unrecorded transcription miss, not curation — the field was
 // always occupant-visible through the read path), and the reverse projection
 // hand-assigned every field to route around the envelope-literal fence.
-// Embedding makes the "1:1 projection" claim a structural fact: a future
-// envelope field rides along automatically, in both directions.
+// Other envelope fields ride along automatically in both directions; the
+// response path rewraps the body and application Context before building a reply.
 //
 // Two面 notes the embedding creates:
 //   - TSReceived is now visible on Msg: it is the engine's truth-commit
@@ -125,15 +118,11 @@ func (m Msg) Caller() (harness.Caller, bool) {
 // Context returns the immutable application context carried by the ledger row.
 func (m Msg) Context() harness.Context { return m.app.Clone() }
 
-// WithSession returns a request value with an explicitly selected session.
-// It changes neither the original message nor any actor-global state.
-func (m Msg) WithSession(session string) (Msg, error) {
-	if strings.TrimSpace(session) == "" || strings.TrimSpace(session) != session || session == "new" {
-		return Msg{}, errors.New("actorbase: session must be a concrete non-blank id")
-	}
-	m.app = m.app.Clone()
-	m.app.Session = session
-	return m, nil
+// WithContext returns a message value carrying an independent copy of app.
+// Application metadata does not change the message's cause or delivery scope.
+func (m Msg) WithContext(app harness.Context) Msg {
+	m.app = app.Clone()
+	return m
 }
 
 // EffectiveCaller is the only caller-attribution rule used by receivers.
@@ -191,36 +180,4 @@ func NewBodyMsgContext(origin MsgOrigin, ctx context.Context, app harness.Contex
 	}
 	env.Payload = wrapped
 	return NewMsg(origin, ctx, env)
-}
-
-// decodeRequestContext decodes the request payload's `_context` value into
-// its one legal shape {caller:{channel,actor}}. Every level is checked for
-// presence AND non-emptiness: `null` at any level, `{}`, and a caller missing
-// channel or actor are all rejected — the engine (encodeRequestPayload) never
-// writes those, so seeing one means the payload is not canonical.
-func decodeRequestContext(raw json.RawMessage) (harness.Caller, error) {
-	var outer struct {
-		Caller json.RawMessage `json:"caller"`
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&outer); err != nil {
-		return harness.Caller{}, errors.New("_context: " + err.Error())
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || len(outer.Caller) == 0 {
-		return harness.Caller{}, errors.New("_context must be {caller:{channel,actor}}")
-	}
-	var callerRaw struct {
-		Channel *string `json:"channel"`
-		Actor   *string `json:"actor"`
-	}
-	dec = json.NewDecoder(bytes.NewReader(outer.Caller))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&callerRaw); err != nil {
-		return harness.Caller{}, errors.New("_context.caller: " + err.Error())
-	}
-	if callerRaw.Channel == nil || *callerRaw.Channel == "" || callerRaw.Actor == nil || *callerRaw.Actor == "" {
-		return harness.Caller{}, errors.New("_context.caller requires non-empty channel and actor")
-	}
-	return harness.Caller{Channel: channel.ID(*callerRaw.Channel), Actor: actor.ActorID(*callerRaw.Actor)}, nil
 }

@@ -38,14 +38,19 @@ type controlDone struct {
 }
 
 func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
+	var accepted bool
+	msg, accepted = sessionInput(sys, msg)
+	if !accepted {
+		return
+	}
 	req, err := agentproto.DecodeSteer(msg.Payload)
 	if err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	s, err := c.selectSession(msg, req.SessionID, req.WorkID, req.Target)
 	if err != nil {
-		_, _ = sys.Fail(msg, err.Error(), "cannot select control session")
+		_, _ = fail(sys, msg, err.Error(), "cannot select control session")
 		return
 	}
 	key := operationIndexKey(actorbase.EffectiveCaller(msg), req.OperationKey)
@@ -54,7 +59,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		for _, w := range c.data.Works {
 			if prior, ok := w.Operations[key]; ok {
 				if prior.Kind != agentproto.TypeSteer || prior.Hash != hash {
-					_, _ = sys.Fail(msg, "operation_conflict", "operation payload changed")
+					_, _ = fail(sys, msg, "operation_conflict", "operation payload changed")
 					return
 				}
 				_, _ = sys.Reply(msg, json.RawMessage(prior.Response))
@@ -63,7 +68,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		if s.Control != nil && s.Control.Key == key {
 			if s.Control.Hash != hash {
-				_, _ = sys.Fail(msg, "operation_conflict", "operation payload changed")
+				_, _ = fail(sys, msg, "operation_conflict", "operation payload changed")
 				return
 			}
 			_, _ = sys.Reply(msg, map[string]any{"disposition": "control_pending", "control_id": s.Control.ID})
@@ -71,26 +76,26 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 	}
 	if s.Control != nil {
-		_, _ = sys.Fail(msg, "busy", "session control slot occupied")
+		_, _ = fail(sys, msg, "busy", "session control slot occupied")
 		return
 	}
 	if req.ExpectedTurnID != "" && req.ExpectedTurnID != s.Execution {
-		_, _ = sys.Fail(msg, "cas_mismatch", "execution changed")
+		_, _ = fail(sys, msg, "cas_mismatch", "execution changed")
 		return
 	}
 	if req.WorkID != "" {
 		if w := c.data.Works[string(req.WorkID)]; w.State == agentproto.WorkClosed {
-			_, _ = sys.Fail(msg, "work_closed", "the selected work is closed")
+			_, _ = fail(sys, msg, "work_closed", "the selected work is closed")
 			return
 		}
 	}
 	if owner := c.data.Works[string(s.Owner)]; owner != nil {
 		if req.OperationKey != "" && c.cfg.MaxOperationKeys > 0 && len(owner.Operations) >= c.cfg.MaxOperationKeys {
-			_, _ = sys.Fail(msg, "limit_exceeded", "max_operation_keys reached")
+			_, _ = fail(sys, msg, "limit_exceeded", "max_operation_keys reached")
 			return
 		}
 		if c.cfg.MaxInputsPerWork > 0 && len(owner.Inputs) >= c.cfg.MaxInputsPerWork {
-			_, _ = sys.Fail(msg, "limit_exceeded", "max_inputs_per_work reached")
+			_, _ = fail(sys, msg, "limit_exceeded", "max_inputs_per_work reached")
 			return
 		}
 	}
@@ -101,7 +106,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 	if req.Target != "" {
 		w := c.requestWork(req.Target)
 		if w == nil || w.State != agentproto.WorkOpen || queueIndex(s, w.ID) < 0 {
-			_, _ = sys.Fail(msg, "cas_mismatch", "target is not waiting")
+			_, _ = fail(sys, msg, "cas_mismatch", "target is not waiting")
 			return
 		}
 		pc.Targets = []agentproto.WorkID{w.ID}
@@ -115,11 +120,11 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 	} else {
 		if s.Execution == "" {
-			_, _ = sys.Fail(msg, "target_gone", "no active execution for text steer")
+			_, _ = fail(sys, msg, "target_gone", "no active execution for text steer")
 			return
 		}
 		if c.data.openCount() >= c.cfg.MaxOpenWorks {
-			_, _ = sys.Fail(msg, "capacity", "max_open_works reached")
+			_, _ = fail(sys, msg, "capacity", "max_open_works reached")
 			return
 		}
 		caller := actorbase.EffectiveCaller(msg)
@@ -167,7 +172,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 	owner := c.data.Works[string(s.Owner)]
 	if owner == nil || owner.Stage == "stopping" {
 		c.restoreControl(s, pc)
-		_, _ = sys.Fail(msg, "busy", "execution stopping")
+		_, _ = fail(sys, msg, "busy", "execution stopping")
 		return
 	}
 	seq := owner.AssignedThrough
@@ -181,7 +186,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	if (c.cfg.MaxInputsPerWork > 0 && len(owner.Inputs)+len(inputs) > c.cfg.MaxInputsPerWork) || inputRecordsSize(owner.Inputs)+len(mustJSON(inputs)) > maxWorkInputBytes {
 		c.restoreControl(s, pc)
-		_, _ = sys.Fail(msg, "limit_exceeded", "execution input limit reached")
+		_, _ = fail(sys, msg, "limit_exceeded", "execution input limit reached")
 		return
 	}
 	pc.Request = agentloop.InputRequest{WorkID: owner.ID, AssignmentID: s.Execution, SessionID: s.ID, ControlID: pc.ID, Inputs: inputs}
@@ -340,7 +345,7 @@ func (c *controller) settleControl(sys actorbase.Sys, s *session, d agentloop.Co
 
 func (c *controller) controlDone(sys actorbase.Sys, msg actorbase.Msg) {
 	if msg.Sender.ID != sys.Self() {
-		_, _ = sys.Fail(msg, "permission_denied", "internal message")
+		_, _ = fail(sys, msg, "permission_denied", "internal message")
 		return
 	}
 	var d controlDone
@@ -365,9 +370,14 @@ type editRequest struct {
 }
 
 func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
+	var accepted bool
+	msg, accepted = sessionInput(sys, msg)
+	if !accepted {
+		return
+	}
 	var req editRequest
 	if err := actorbase.DecodeStrictEmpty(msg.Payload, &req); err != nil {
-		_, _ = sys.Fail(msg, "invalid_args", err.Error())
+		_, _ = fail(sys, msg, "invalid_args", err.Error())
 		return
 	}
 	var fields map[string]json.RawMessage
@@ -375,20 +385,20 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 	for key, value := range fields {
 		allowed := key == "work_id" || (msg.Type == agentproto.TypeReplace && (key == "target" || key == "old_text" || key == "new_text")) || (msg.Type == agentproto.TypeHold && (key == "target" || key == "duration_ms"))
 		if !allowed || string(value) == "null" {
-			_, _ = sys.Fail(msg, "invalid_args", "field is not valid for this control")
+			_, _ = fail(sys, msg, "invalid_args", "field is not valid for this control")
 			return
 		}
 	}
 	s, err := c.selectSession(msg, "", req.WorkID, req.Target)
 	if err != nil {
-		_, _ = sys.Fail(msg, err.Error(), "cannot select session")
+		_, _ = fail(sys, msg, err.Error(), "cannot select session")
 		return
 	}
 	w := c.requestWork(req.Target)
 	switch msg.Type {
 	case agentproto.TypeReplace:
 		if w == nil || queueIndex(s, w.ID) < 0 || len(w.Inputs) != 1 || w.Inputs[0].Text != req.OldText || strings.TrimSpace(req.NewText) == "" {
-			_, _ = sys.Fail(msg, "cas_mismatch", "replace requires a matching waiting request and old_text")
+			_, _ = fail(sys, msg, "cas_mismatch", "replace requires a matching waiting request and old_text")
 			return
 		}
 		updated := cloneWork(w)
@@ -416,22 +426,22 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		duration := 30 * time.Minute
 		if req.DurationMS != nil {
 			if *req.DurationMS < 1 || *req.DurationMS > duration.Milliseconds() {
-				_, _ = sys.Fail(msg, "invalid_args", "duration_ms must be 1..1800000")
+				_, _ = fail(sys, msg, "invalid_args", "duration_ms must be 1..1800000")
 				return
 			}
 			duration = time.Duration(*req.DurationMS) * time.Millisecond
 		}
 		if req.Target != "" {
 			if w == nil || (queueIndex(s, w.ID) < 0 && w.ID != s.Owner) {
-				_, _ = sys.Fail(msg, "cas_mismatch", "target is not waiting or current owner")
+				_, _ = fail(sys, msg, "cas_mismatch", "target is not waiting or current owner")
 				return
 			}
 			if w.Owner != actorbase.EffectiveCaller(msg) {
-				_, _ = sys.Fail(msg, "target_not_owned", "hold target belongs to another sender")
+				_, _ = fail(sys, msg, "target_not_owned", "hold target belongs to another sender")
 				return
 			}
 			if w.ID == s.Owner && (s.Control != nil || w.Stage == "dispatching" || w.Stage == "stopping") {
-				_, _ = sys.Fail(msg, "busy", "execution control occupied")
+				_, _ = fail(sys, msg, "busy", "execution control occupied")
 				return
 			}
 		}

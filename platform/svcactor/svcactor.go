@@ -403,10 +403,8 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	// it as Request.Deadline); it crosses the membrane as this local request's
 	// own ExpiresAt so the receiver's window is the caller's, not this
 	// engine's default. Absent → the default.
-	app, body, err := actorbase.PrepareRoot(harness.Context{Caller: &from}, json.RawMessage(req.Payload))
-	if err != nil {
-		return gateFailure(channel.GateChannelUnavailable, err.Error())
-	}
+	app := harness.Context{Caller: &from}
+	body := json.RawMessage(req.Payload)
 
 	spec := behavior.RequestSpec{Cause: message.Root(), Context: app, Type: req.Type, Payload: body, Audience: message.Audience{target}}
 	if req.Deadline > 0 {

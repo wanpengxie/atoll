@@ -151,12 +151,12 @@ func (c *controller) selected(sys actorbase.Sys) runtimeproto.TurnOptions {
 func (c *controller) handleOptions(sys actorbase.Sys, msg actorbase.Msg) {
 	var empty struct{}
 	if actorbase.DecodeStrict(msg.Payload, &empty) != nil {
-		_, _ = sys.Fail(msg, "invalid_args", "agent.options payload must be empty")
+		_, _ = fail(sys, msg, "invalid_args", "agent.options payload must be empty")
 		return
 	}
 	models, err := c.modelCatalog(sys)
 	if err != nil {
-		_, _ = sys.Fail(msg, "provider_failed", err.Error())
+		_, _ = fail(sys, msg, "provider_failed", err.Error())
 		return
 	}
 	current := c.loadSelection(sys, models)
@@ -174,22 +174,22 @@ func (c *controller) handleOptions(sys actorbase.Sys, msg actorbase.Msg) {
 func (c *controller) handleSelect(sys actorbase.Sys, msg actorbase.Msg) {
 	var req runtimeproto.TurnOptions
 	if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.Model == "" {
-		_, _ = sys.Fail(msg, "invalid_args", "model is required")
+		_, _ = fail(sys, msg, "invalid_args", "model is required")
 		return
 	}
 	models, err := c.modelCatalog(sys)
 	if err != nil {
-		_, _ = sys.Fail(msg, "provider_failed", err.Error())
+		_, _ = fail(sys, msg, "provider_failed", err.Error())
 		return
 	}
 	if !acceptsSelection(models, req) {
-		_, _ = sys.Fail(msg, "invalid_args", "model/effort is not offered by agent.options")
+		_, _ = fail(sys, msg, "invalid_args", "model/effort is not offered by agent.options")
 		return
 	}
 	raw, _ := json.Marshal(req)
 	out, err := sys.State().Put(resource.ResourceID(agentbase.SelectionKey), raw)
 	if err != nil || !out.Accepted() {
-		_, _ = sys.Fail(msg, "ledger_unavailable", "selection could not be persisted")
+		_, _ = fail(sys, msg, "ledger_unavailable", "selection could not be persisted")
 		return
 	}
 	c.selection = &req

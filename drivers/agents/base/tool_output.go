@@ -42,7 +42,7 @@ func (l *agentLoop) prepareToolOutput(raw json.RawMessage) any {
 }
 
 func prepareOversizedToolOutput(resources actorbase.ResourceHandle, deviceName, workspace string, raw json.RawMessage, projectionBudget int) (any, error) {
-	projection, meta, projectionErr := boundedjson.Project(raw, projectionBudget)
+	projection, meta, projectionErr := boundedjson.Project(raw, projectionBudget, toolOutputFieldPriority)
 	if projectionErr != nil {
 		projection = json.RawMessage(`{"$atoll_cut":{"type":"json","reason":"projection_failed"}}`)
 	}
@@ -109,4 +109,15 @@ func writeToolOutputFile(resources actorbase.ResourceHandle, deviceName, workspa
 
 func toolOutputAddress(deviceName, channelName, relative string) (resource.ResourceID, error) {
 	return accessdoor.FormatFileAddress(deviceName, channelName, relative)
+}
+
+func toolOutputFieldPriority(key string) int {
+	switch key {
+	case "status", "reason", "error_code", "detail":
+		return 0
+	case "turn_id", "kind", "phase", "outcome", "tool_call_id", "tool":
+		return 1
+	default:
+		return 2
+	}
 }

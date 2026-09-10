@@ -1,6 +1,7 @@
 package behavior
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -80,5 +81,32 @@ func TestBuildEvent(t *testing.T) {
 	// than silently rooted.
 	if _, err := BuildEvent(builderClock, EventSpec{Type: "agent.text"}); err == nil {
 		t.Fatal("missing cause: want error")
+	}
+}
+
+func TestBuildersProduceCanonicalContextAndBody(t *testing.T) {
+	app := harness.Context{Session: "context", Caller: &harness.Caller{Channel: "c", Actor: "human:a:1"}}
+	body := []byte(`{"session":"application-value"}`)
+	request, err := BuildRequest(builderClock, RequestSpec{Cause: message.Root(), Context: app, Type: "do", Audience: message.Audience{"tool:t"}, Payload: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := BuildEvent(builderClock, EventSpec{Cause: message.Root(), Context: app, Type: "event", Payload: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := BuildResponseFromRequest(request, builderClock, ResponseSpec{Status: message.StatusCompleted, Payload: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, env := range []*message.Envelope{request, event, response} {
+		got, raw, err := harness.UnwrapPayload(env.Payload)
+		if err != nil || got.Session != app.Session || got.Caller == nil || *got.Caller != *app.Caller {
+			t.Fatalf("context lost: %+v %v", got, err)
+		}
+		var value map[string]any
+		if json.Unmarshal(raw, &value) != nil || value["session"] != "application-value" {
+			t.Fatalf("body changed or wrapped twice: %s", raw)
+		}
 	}
 }

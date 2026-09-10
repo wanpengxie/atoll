@@ -1,7 +1,9 @@
 package native
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,8 +52,17 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg *actorbase.Msg, req ag
 		c.sessions = map[string]*session{}
 	}
 	id := msg.Context().Session
+	if id != "" && req.SessionID != "" && id != req.SessionID {
+		return nil, errors.New("invalid_args")
+	}
 	if id == "" {
 		id = req.SessionID
+	}
+	if id == "new" {
+		id = "s-" + uuid.NewString()
+	}
+	if id != "" && strings.TrimSpace(id) != id {
+		return nil, errors.New("invalid_args")
 	}
 	var base *agentloop.BoundaryRef
 	if req.RelatedWorkID != "" {
@@ -69,6 +80,9 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg *actorbase.Msg, req ag
 	}
 	if s := c.sessions[id]; s != nil {
 		if !s.Archived {
+			app := msg.Context()
+			app.Session = id
+			*msg = msg.WithContext(app)
 			return s, nil
 		}
 		// An archived branch is immutable routing truth. Refresh its ledger
@@ -90,16 +104,14 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg *actorbase.Msg, req ag
 			base = &agentloop.BoundaryRef{Session: s.ID, At: s.ForkPoint}
 		}
 		id = "s-" + uuid.NewString()
-		updated, err := msg.WithSession(id)
-		if err != nil {
-			return nil, errors.New("session_assignment_failed")
-		}
-		*msg = updated
 	}
 
 	if len(c.sessions) >= maxSessions {
 		return nil, errors.New("session_capacity")
 	}
+	app := msg.Context()
+	app.Session = id
+	*msg = msg.WithContext(app)
 	s := &session{ID: id, LastUsed: nowMillis(), Base: base, Merge: "auto"}
 	c.sessions[s.ID] = s
 	c.sessionOrder = append(c.sessionOrder, s.ID)
@@ -242,4 +254,32 @@ func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause, ap
 		}
 		c.nextSession = (i + 1) % len(c.sessionOrder)
 	}
+}
+
+// sessionInput interprets the Controller's public session selector. Transport and
+// actorbase preserve the body; only this receiving business actor consumes it.
+func sessionInput(sys actorbase.Sys, msg actorbase.Msg) (actorbase.Msg, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(msg.Payload, &fields) != nil {
+		return msg, true // the word decoder reports malformed input
+	}
+	raw, present := fields["session"]
+	if !present {
+		return msg, true
+	}
+	var id string
+	if json.Unmarshal(raw, &id) != nil || id == "" || strings.TrimSpace(id) != id || (id == "new" && msg.Type != agentproto.TypeAsk) {
+		_, _ = fail(sys, msg, "invalid_args", "session must be a concrete id, or new on agent.ask")
+		return msg, false
+	}
+	app := msg.Context()
+	if app.Session != "" && app.Session != id {
+		_, _ = fail(sys, msg, "invalid_args", "session conflicts with message context")
+		return msg, false
+	}
+	app.Session = id
+	msg = msg.WithContext(app)
+	delete(fields, "session")
+	msg.Payload, _ = json.Marshal(fields)
+	return msg, true
 }

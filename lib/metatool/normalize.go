@@ -15,8 +15,8 @@ func NormalizePayload(raw json.RawMessage) (json.RawMessage, error) {
 	if text == "" || text == "null" {
 		return CloneRawJSON(json.RawMessage(`{}`)), nil
 	}
-	if !json.Valid([]byte(text)) {
-		return nil, fmt.Errorf("channel tool payload is not valid JSON: %q", text)
+	if !json.Valid([]byte(text)) || text[0] != '{' {
+		return nil, fmt.Errorf("channel tool payload must be a JSON object: %q", text)
 	}
 	return CloneRawJSON(json.RawMessage(text)), nil
 }
@@ -31,18 +31,10 @@ func CloneRawJSON(raw json.RawMessage) json.RawMessage {
 	return out
 }
 
-// ResponseFailureReason extracts the failure reason from a response
-// payload, if any.
-func ResponseFailureReason(raw json.RawMessage) string {
-	if _, body, err := harness.UnwrapPayload(raw); err == nil {
-		raw = body
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return ""
-	}
-	if status := StringValue(obj["status"]); strings.EqualFold(status, message.StatusFailed) {
-		if reason := StringValue(obj["reason"]); reason != "" {
+// ResponseFailureReason reads a decoded response body, never a ledger payload.
+func ResponseFailureReason(body map[string]any) string {
+	if status := StringValue(body["status"]); strings.EqualFold(status, message.StatusFailed) {
+		if reason := StringValue(body["reason"]); reason != "" {
 			return reason
 		}
 		return message.StatusFailed
@@ -74,40 +66,16 @@ func ResultFromResponse(toolName string, env message.Envelope) (ResultValue, boo
 			IsError: true,
 		}, true
 	}
-	value := payloadValue(env.Payload)
-	if reason := ResponseFailureReason(env.Payload); reason != "" {
-		return ResultValue{
-			Name: toolName,
-			Value: map[string]any{
-				"error":   reason,
-				"payload": value,
-			},
-			IsError: true,
-		}, true
+	_, body, err := harness.UnwrapPayload(env.Payload)
+	if err != nil {
+		return NewError(toolName, InternalError, "invalid response payload envelope: "+err.Error(), "Inspect the responding adapter's payload format", nil), true
 	}
-	// Success: value may be a map or a scalar; wrap in map for consistency.
-	if m, ok := value.(map[string]any); ok {
-		return ResultValue{Name: toolName, Value: m}, false
+	var value map[string]any
+	if err := json.Unmarshal(body, &value); err != nil {
+		return NewError(toolName, InternalError, "invalid response body: "+err.Error(), "Inspect the responding adapter's payload format", nil), true
 	}
-	return ResultValue{Name: toolName, Value: map[string]any{"result": value}}, false
-}
-
-// payloadValue decodes a raw JSON payload to a Go value (empty/null → {},
-// non-JSON → raw text, object/scalar passthrough).
-func payloadValue(raw json.RawMessage) any {
-	if _, body, err := harness.UnwrapPayload(raw); err == nil {
-		raw = body
+	if reason := ResponseFailureReason(value); reason != "" {
+		return ResultValue{Name: toolName, Value: map[string]any{"error": reason, "payload": value}, IsError: true}, true
 	}
-	text := strings.TrimSpace(string(raw))
-	if text == "" || text == "null" {
-		return map[string]any{}
-	}
-	var value any
-	if err := json.Unmarshal([]byte(text), &value); err != nil {
-		return text
-	}
-	if value == nil {
-		return map[string]any{}
-	}
-	return value
+	return ResultValue{Name: toolName, Value: value}, false
 }

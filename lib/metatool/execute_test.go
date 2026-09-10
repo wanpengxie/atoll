@@ -100,13 +100,13 @@ func finalResp(parentID message.ID, payload map[string]any) *message.Envelope {
 		ID:       message.ID("resp-" + string(parentID)),
 		Kind:     message.KindResponse,
 		ParentID: parentID,
-		Payload:  body,
+		Payload:  wrappedTestBody(body),
 	}
 }
 
 func progressResp(parentID message.ID, seq int) *message.Envelope {
 	body, _ := json.Marshal(map[string]any{"status": "processing", "step": seq})
-	return &message.Envelope{Kind: message.KindResponse, ParentID: parentID, Payload: body}
+	return &message.Envelope{Kind: message.KindResponse, ParentID: parentID, Payload: wrappedTestBody(body)}
 }
 
 func defaultRC() metatool.RuntimeContext {
@@ -566,7 +566,7 @@ func TestExecuteListActors_ActorFailureMapsTerminalReason(t *testing.T) {
 			"status": "failed",
 			"reason": string(message.TerminalReceiverUnavailable),
 		})
-		return &message.Envelope{Kind: message.KindResponse, Payload: body}, true, nil
+		return &message.Envelope{Kind: message.KindResponse, Payload: wrappedTestBody(body)}, true, nil
 	}
 	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
 	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
@@ -580,4 +580,27 @@ func containsStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func wrappedTestBody(body []byte) []byte {
+	raw, err := harness.WrapPayload(harness.Context{}, body)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func TestSyncRawPreservesActorFailureDetails(t *testing.T) {
+	x := newExec(&fakeJobs{}, func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return finalResp("q", map[string]any{"status": "failed", "reason": "receiver_internal_error", "error_code": "actor_specific", "detail": "specific reason", "recovery_hint": "actor guidance", "retryable": false}), true, nil
+	})
+	_, failure := x.CallSyncRaw(context.Background(), defaultRC(), metatool.RequestSpec{ToolName: "describe_actor", HandlerActorID: "tool:a:1", EnvelopeType: "actor.describe"})
+	if failure == nil {
+		t.Fatal("lost actor failure")
+	}
+	assertIsError(t, *failure, "actor_error")
+	out := failure.Value["error"].(map[string]any)
+	if out["actor_code"] != "actor_specific" || out["recovery_hint"] != "actor guidance" || out["retryable"] != false {
+		t.Fatalf("lost actor details: %+v", out)
+	}
 }

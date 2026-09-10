@@ -21,7 +21,7 @@ type looperLifeSys struct {
 func (s looperLifeSys) Life() context.Context { return s.life }
 
 func failSessionContext(sys actorbase.Sys, msg actorbase.Msg, err error) {
-	_, _ = sys.Fail(msg, sessionContextUnavailable,
+	_, _ = fail(sys, msg, sessionContextUnavailable,
 		"Cannot establish consistent session context within the 4096-message history limit; open a new session. "+err.Error())
 }
 

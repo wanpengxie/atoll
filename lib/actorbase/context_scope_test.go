@@ -125,12 +125,11 @@ func TestIDOnlyCauseCarriesExplicitContext(t *testing.T) {
 	}
 }
 
-func TestSessionAssignmentIsAnImmutableRequestValue(t *testing.T) {
+func TestContextAssignmentIsAnImmutableRequestValue(t *testing.T) {
 	original := NewBodyMsgContext(OriginMailbox, t.Context(), harness.Context{Session: "old", Caller: &harness.Caller{Channel: "c", Actor: "human:a:1"}}, message.Envelope{ID: "ask", Payload: []byte(`{}`)})
-	next, err := original.WithSession("new-session")
-	if err != nil {
-		t.Fatal(err)
-	}
+	contextCopy := original.Context()
+	contextCopy.Session = "new-session"
+	next := original.WithContext(contextCopy)
 	cause := next.Cause()
 	if cause != original.Cause() {
 		t.Fatal("changing session changed message causality")
@@ -143,29 +142,33 @@ func TestSessionAssignmentIsAnImmutableRequestValue(t *testing.T) {
 	}
 }
 
-func TestPreparedRootKeepsAllocatedSessionThroughAudit(t *testing.T) {
-	e, pen := contextEngine(t)
-	app, body, err := PrepareRoot(harness.Context{Caller: &harness.Caller{Channel: "c", Actor: "human:a:1"}}, []byte(`{"session":"new","text":"hello"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if app.Session == "" || app.Session == "new" {
-		t.Fatalf("context=%+v err=%v", app, err)
-	}
-	id, err := e.Post(behavior.RequestSpec{Cause: message.Root(), Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: body, Context: app})
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestApp, _, err := harness.UnwrapPayload(pen.last().Payload)
-	if err != nil || !reflect.DeepEqual(requestApp, app) {
-		t.Fatalf("request context changed: %+v %v", requestApp, err)
-	}
-	_, err = e.Emit(behavior.EventSpec{Cause: message.Anchored(id, id), Type: "audit", Payload: []byte(`{}`), Context: app})
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditApp, _, err := harness.UnwrapPayload(pen.last().Payload)
-	if err != nil || !reflect.DeepEqual(auditApp, app) {
-		t.Fatalf("audit context changed: %+v %v", auditApp, err)
+// A body field named session is opaque to the generic sender, including new.
+func TestSendingDoesNotInterpretSessionInBody(t *testing.T) {
+	for _, verb := range []string{"post", "emit", "call"} {
+		t.Run(verb, func(t *testing.T) {
+			e, pen := contextEngine(t)
+			app := harness.Context{Session: "existing"}
+			body := json.RawMessage(`{"session":"new","text":"hello"}`)
+			var err error
+			switch verb {
+			case "post":
+				_, err = e.Post(behavior.RequestSpec{Cause: message.Root(), Context: app, Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: body})
+			case "emit":
+				_, err = e.Emit(behavior.EventSpec{Cause: message.Root(), Context: app, Type: "event", Payload: body})
+			case "call":
+				_, err = e.Call(message.Root(), app, "tool:worker:1", "work", body)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, raw, err := harness.UnwrapPayload(pen.last().Payload)
+			var value map[string]any
+			if err != nil {
+				t.Fatal(err)
+			}
+			if json.Unmarshal(raw, &value) != nil || value["session"] != "new" || got.Session != "existing" {
+				t.Fatalf("sender changed application data: %+v %s", got, raw)
+			}
+		})
 	}
 }

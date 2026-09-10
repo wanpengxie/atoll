@@ -224,24 +224,12 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 		return Response{}, fmt.Errorf("%w: %v", errInvalidRequest, unwrapErr)
 	}
 	req.Payload = body
-	if app.Session != "" {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(req.Payload, &fields); err != nil || fields == nil {
-			return Response{}, fmt.Errorf("%w: body must be an object", errInvalidRequest)
-		}
-		fields["session"], _ = json.Marshal(app.Session)
-		req.Payload, _ = json.Marshal(fields)
-	}
 	// This boundary owns the local caller; foreign caller metadata is not inherited.
 	app.Caller = nil
 	if req.Kind == message.KindRequest && req.Await {
 		app.Caller = &harness.Caller{Channel: local, Actor: sys.Self()}
 	}
-	app, body, err := actorbase.PrepareRoot(app, req.Payload)
-	if err != nil {
-		return Response{}, err
-	}
-	req.Payload = body
+	var err error
 
 	spec := behavior.RequestSpec{Cause: message.Root(), Context: app, Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility, ExpiresAt: req.ExpiresAt}
 	var id message.ID

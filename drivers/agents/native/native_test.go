@@ -597,3 +597,40 @@ func TestClosedWorkReleasesRequestScope(t *testing.T) {
 		t.Fatal("completed receipt retained request scope")
 	}
 }
+
+func TestControllerOwnsNewSessionAndRetryKeepsIt(t *testing.T) {
+	sys := newTestSys(newTestState())
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	for _, id := range []message.ID{"new-ask", "retry"} {
+		request := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{}, message.Envelope{ID: id, ChannelID: "c", Sender: message.Sender{ID: "human:alice:1"}, Kind: message.KindRequest, Type: agentproto.TypeAsk, Payload: json.RawMessage(`{"session":"new","text":"hello","delivery":"receipt","submission_key":"same"}`)})
+		c.handleAsk(sys, request)
+		if sys.fails[id] != "" {
+			t.Fatalf("ask rejected: %s", sys.fails[id])
+		}
+	}
+	if len(c.data.Order) != 1 || len(c.sessions) != 1 || len(sys.posts) != 1 {
+		t.Fatalf("new session retry duplicated work: %+v", c.data.Order)
+	}
+	w := c.data.Works[c.data.Order[0]]
+	if !strings.HasPrefix(w.SessionID, "s-") || w.SourceContext.Session != w.SessionID {
+		t.Fatalf("assigned context: %+v", w)
+	}
+	for _, id := range []message.ID{"new-ask", "retry"} {
+		reply, ok := sys.replies[id].(map[string]any)
+		if !ok || reply["session_id"] != w.SessionID {
+			t.Fatalf("reply=%+v", sys.replies[id])
+		}
+	}
+}
+func TestControllerRejectsConflictingSessionSelector(t *testing.T) {
+	sys := newTestSys(newTestState())
+	request := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Session: "existing"}, message.Envelope{ID: "conflict", Type: agentproto.TypeAsk, Payload: json.RawMessage(`{"session":"new","text":"hello"}`)})
+	c := &controller{}
+	c.handleAsk(sys, request)
+	if sys.fails[request.ID] != "invalid_args" {
+		t.Fatalf("conflict=%s", sys.fails[request.ID])
+	}
+	if len(c.sessions) != 0 {
+		t.Fatal("created a session before validating the selector")
+	}
+}

@@ -12,13 +12,18 @@ import (
 )
 
 func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
+	var accepted bool
+	msg, accepted = sessionInput(sys, msg)
+	if !accepted {
+		return
+	}
 	if msg.Type == agentproto.TypeSessionList || msg.Type == agentproto.TypeSessionGet {
 		if err := c.refreshSessionRelations(sys); err != nil {
 			code := "ledger_unavailable"
 			if errors.Is(err, errRelationHistoryLimit) {
 				code = errRelationHistoryLimit.Error()
 			}
-			_, _ = sys.Fail(msg, code, err.Error())
+			_, _ = fail(sys, msg, code, err.Error())
 			return
 		}
 		if msg.Type == agentproto.TypeSessionList {
@@ -34,12 +39,12 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	id := msg.Context().Session
 	if id == "" {
-		_, _ = sys.Fail(msg, "scope_required", "_context.session is required")
+		_, _ = fail(sys, msg, "scope_required", "_context.session is required")
 		return
 	}
 	s := c.sessions[id]
 	if s == nil {
-		_, _ = sys.Fail(msg, "session_not_found", "session does not exist")
+		_, _ = fail(sys, msg, "session_not_found", "session does not exist")
 		return
 	}
 	if msg.Type == agentproto.TypeSessionGet {
@@ -47,7 +52,7 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if s.Archived {
-		_, _ = sys.Fail(msg, "session_archived", "session is archived")
+		_, _ = fail(sys, msg, "session_archived", "session is archived")
 		return
 	}
 	switch msg.Type {
@@ -56,18 +61,18 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 		err := c.postSessionCommand(sys, msg, s, agentloop.TypeStop, agentloop.StopRequest{SessionID: id, TurnID: s.Execution, AssignmentID: s.Execution, Archive: true, Reason: "archive"})
 		if err != nil {
 			s.Archived = false
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
 		}
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "archived", "session_id": id})
 	case agentproto.TypeSessionReset:
 		if s.Execution != "" {
-			_, _ = sys.Fail(msg, "busy", "session has active turn")
+			_, _ = fail(sys, msg, "busy", "session has active turn")
 			return
 		}
 		err := c.postSessionCommand(sys, msg, s, agentloop.TypeReset, agentloop.ResetRequest{SessionID: id})
 		if err != nil {
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
 		}
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "reset_requested", "session_id": id})
@@ -76,18 +81,18 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 			Name string `json:"name"`
 		}
 		if actorbase.DecodeStrict(msg.Payload, &req) != nil || strings.TrimSpace(req.Name) == "" {
-			_, _ = sys.Fail(msg, "invalid_args", "name required")
+			_, _ = fail(sys, msg, "invalid_args", "name required")
 			return
 		}
 		err := c.postSessionCommand(sys, msg, s, agentloop.TypeRename, agentloop.RenameRequest{SessionID: id, Name: req.Name})
 		if err != nil {
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
 		}
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "rename_requested", "session_id": id, "name": req.Name})
 	case agentproto.TypeSessionSync:
 		if s.Execution != "" {
-			_, _ = sys.Fail(msg, "busy", "session has active turn")
+			_, _ = fail(sys, msg, "busy", "session has active turn")
 			return
 		}
 		var req struct {
@@ -96,12 +101,12 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 			Through     string `json:"through"`
 		}
 		if actorbase.DecodeStrict(msg.Payload, &req) != nil || req.FromSession == "" {
-			_, _ = sys.Fail(msg, "invalid_args", "from_session required")
+			_, _ = fail(sys, msg, "invalid_args", "from_session required")
 			return
 		}
 		err := c.postSessionCommand(sys, msg, s, agentloop.TypeSync, agentloop.SyncRequest{SessionID: id, From: agentloop.SyncRange{Session: req.FromSession, After: req.After, Through: req.Through}})
 		if err != nil {
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
 		}
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "sync_requested", "session_id": id})

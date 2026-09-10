@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -422,41 +421,6 @@ func envelopeFromMsg(m Msg) *message.Envelope {
 	return &env
 }
 
-// PrepareRoot resolves standard root parameters before dispatch. A relay can
-// carry the returned context into its audit message, including a newly
-// allocated session, without recovering metadata from the engine by request ID.
-func PrepareRoot(app harness.Context, body json.RawMessage) (harness.Context, json.RawMessage, error) {
-	return applyRootSession(app.Clone(), body, true)
-}
-
-func applyRootSession(app harness.Context, body json.RawMessage, root bool) (harness.Context, json.RawMessage, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
-		return app, body, nil
-	}
-	raw, ok := fields["session"]
-	if !ok {
-		return app, body, nil
-	}
-	var requested string
-	if json.Unmarshal(raw, &requested) != nil || strings.TrimSpace(requested) == "" || strings.TrimSpace(requested) != requested {
-		return harness.Context{}, nil, errors.New("actorbase: standard session parameter must be a non-blank string")
-	}
-	if app.Session != "" && requested != app.Session {
-		return harness.Context{}, nil, errors.New("actorbase: standard session parameter conflicts with _context.session")
-	}
-	if requested == "new" {
-		if !root {
-			return harness.Context{}, nil, errors.New("actorbase: session=new is only valid on a root request")
-		}
-		requested = "s-" + uuid.NewString()
-	}
-	app.Session = requested
-	delete(fields, "session")
-	clean, err := json.Marshal(fields)
-	return app, clean, err
-}
-
 // terminalGate answers "may a terminal be written against this Msg, and who
 // says so" — the ONE place the two authorities are named (spec §3.2).
 //
@@ -695,15 +659,6 @@ func (e *engine) Emit(spec behavior.EventSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	app := spec.Context.Clone()
-	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
-	if err != nil {
-		return "", err
-	}
-	env.Payload, err = harness.WrapPayload(app, env.Payload)
-	if err != nil {
-		return "", err
-	}
 	id, err := e.writeUnregistered(env, spec.ClientFingerprint)
 	return id, err
 }
@@ -734,15 +689,6 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 	}
 	spec.Audience = audience
 	env, err := behavior.BuildRequest(e.clockFn, spec)
-	if err != nil {
-		return "", err
-	}
-	app := spec.Context.Clone()
-	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
-	if err != nil {
-		return "", err
-	}
-	env.Payload, err = encodeRequestPayload(app, env.Payload)
 	if err != nil {
 		return "", err
 	}
@@ -818,20 +764,12 @@ func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (mess
 			spec.ExpiresAt = &t
 		}
 	}
-	env, err := behavior.BuildRequest(e.clockFn, spec)
-	if err != nil {
-		return "", err
-	}
-	app := spec.Context.Clone()
+	spec.Context = spec.Context.Clone()
 	if caller != nil {
 		copy := *caller
-		app.Caller = &copy
+		spec.Context.Caller = &copy
 	}
-	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
-	if err != nil {
-		return "", err
-	}
-	env.Payload, err = encodeRequestPayload(app, env.Payload)
+	env, err := behavior.BuildRequest(e.clockFn, spec)
 	if err != nil {
 		return "", err
 	}

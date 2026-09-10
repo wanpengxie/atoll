@@ -213,6 +213,10 @@ func BuildEvent(
 	if !spec.Cause.Stated() {
 		return nil, fmt.Errorf("behavior: BuildEvent cause required: say message.From(<the message this event reports on>), or message.Root() when nothing on this ledger caused it")
 	}
+	payload, err := harness.WrapPayload(spec.Context, spec.Payload)
+	if err != nil {
+		return nil, err
+	}
 	id := spec.ID
 	if id == "" {
 		id = message.ID(uuid.NewString())
@@ -223,7 +227,7 @@ func BuildEvent(
 		TS:            clock().UnixMilli(),
 		Kind:          message.KindEvent,
 		Type:          spec.Type,
-		Payload:       spec.Payload,
+		Payload:       payload,
 		Visibility:    spec.Visibility,
 		Audience:      spec.Audience,
 		ParentID:      parentID,

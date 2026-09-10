@@ -51,7 +51,8 @@ type RequestSpec struct {
 }
 
 // BuildRequest assembles a kind=request envelope — the ONE home for request
-// construction defaults, mirroring serve's BuildResponseFromRequest. Bindings
+// construction defaults and canonical {_context,body} payload, mirroring
+// serve's BuildResponseFromRequest. Bindings
 // stamp transport-edge fields (TSReceived) after build; this builder never
 // writes.
 //
@@ -71,6 +72,10 @@ func BuildRequest(
 	if !spec.Cause.Stated() {
 		return nil, fmt.Errorf("behavior: BuildRequest cause required: say message.From(<the message this is written to serve>), or message.Root() when this errand starts here")
 	}
+	payload, err := harness.WrapPayload(spec.Context, spec.Payload)
+	if err != nil {
+		return nil, err
+	}
 	id := spec.ID
 	if id == "" {
 		id = message.ID(uuid.NewString())
@@ -82,7 +87,7 @@ func BuildRequest(
 		Kind:          message.KindRequest,
 		Type:          strings.TrimSpace(spec.Type),
 		Audience:      spec.Audience,
-		Payload:       spec.Payload,
+		Payload:       payload,
 		Visibility:    spec.Visibility,
 		ParentID:      parentID,
 		CorrelationID: correlationID,
@@ -90,7 +95,7 @@ func BuildRequest(
 	}, nil
 }
 
-// ParseFinalStatus extracts payload.status (defensively: empty/malformed
+// ParseFinalStatus extracts payload.body.status (defensively: empty/malformed
 // payloads read as "") and reports whether it is a Layer 1 final
 // (completed/failed). 期12 S6 inlined the former ParseResponseStatus helper —
 // the ledger_call consumer is this function's only remaining caller chain.

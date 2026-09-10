@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func TestNormalizePayloadEmpty(t *testing.T) {
@@ -96,7 +97,9 @@ func TestCloneRawJSONEmpty(t *testing.T) {
 
 func TestResponseFailureReasonStatusFailed(t *testing.T) {
 	raw := json.RawMessage(`{"status":"failed","reason":"something_broke"}`)
-	reason := ResponseFailureReason(raw)
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+	reason := ResponseFailureReason(body)
 	if reason != "something_broke" {
 		t.Fatalf("expected something_broke, got %q", reason)
 	}
@@ -104,7 +107,9 @@ func TestResponseFailureReasonStatusFailed(t *testing.T) {
 
 func TestResponseFailureReasonStatusFailedNoReason(t *testing.T) {
 	raw := json.RawMessage(`{"status":"failed"}`)
-	reason := ResponseFailureReason(raw)
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+	reason := ResponseFailureReason(body)
 	if reason != "failed" {
 		t.Fatalf("expected failed, got %q", reason)
 	}
@@ -112,7 +117,9 @@ func TestResponseFailureReasonStatusFailedNoReason(t *testing.T) {
 
 func TestResponseFailureReasonSuccess(t *testing.T) {
 	raw := json.RawMessage(`{"status":"completed","data":"ok"}`)
-	reason := ResponseFailureReason(raw)
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+	reason := ResponseFailureReason(body)
 	if reason != "" {
 		t.Fatalf("expected empty reason for success, got %q", reason)
 	}
@@ -120,7 +127,9 @@ func TestResponseFailureReasonSuccess(t *testing.T) {
 
 func TestResponseFailureReasonInvalidJSON(t *testing.T) {
 	raw := json.RawMessage(`not json`)
-	reason := ResponseFailureReason(raw)
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+	reason := ResponseFailureReason(body)
 	if reason != "" {
 		t.Fatalf("expected empty reason for invalid JSON, got %q", reason)
 	}
@@ -152,7 +161,7 @@ func TestResultFromResponseSuccess(t *testing.T) {
 	env := message.Envelope{
 		ID:      "resp-1",
 		Kind:    message.KindResponse,
-		Payload: payload,
+		Payload: mustResponsePayload(t, payload),
 	}
 	rv, isFailure := ResultFromResponse("call_actor", env)
 	if isFailure {
@@ -174,7 +183,7 @@ func TestResultFromResponseFailure(t *testing.T) {
 	env := message.Envelope{
 		ID:      "resp-fail",
 		Kind:    message.KindResponse,
-		Payload: payload,
+		Payload: mustResponsePayload(t, payload),
 	}
 	rv, isFailure := ResultFromResponse("call_actor", env)
 	if !isFailure {
@@ -199,5 +208,29 @@ func TestResultFromResponseNonResponse(t *testing.T) {
 	}
 	if !rv.IsError {
 		t.Fatal("expected IsError=true for non-response envelope")
+	}
+}
+
+func mustResponsePayload(t *testing.T, body []byte) []byte {
+	t.Helper()
+	raw, err := harness.WrapPayload(harness.Context{}, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+func TestResultRejectsMalformedLedgerPayload(t *testing.T) {
+	for _, raw := range []string{`{"status":"completed"}`, `{"_context":null,"body":{"status":"failed"}}`, `"text"`, `not json`} {
+		rv, failed := ResultFromResponse("call_actor", message.Envelope{Kind: message.KindResponse, Payload: []byte(raw)})
+		if !failed || !rv.IsError || errObj(t, rv)["code"] != string(InternalError) {
+			t.Fatalf("accepted malformed response: %s %+v", raw, rv)
+		}
+	}
+}
+func TestNormalizePayloadRejectsNonObjects(t *testing.T) {
+	for _, raw := range []string{`[]`, `123`, `"text"`, `true`} {
+		if _, err := NormalizePayload([]byte(raw)); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
 	}
 }

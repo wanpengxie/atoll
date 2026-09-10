@@ -22,19 +22,19 @@ func Manifest() introspect.Manifest {
 		workapi.CapabilityBranchFromWork:     false,
 	})
 	ask := m.Words[workapi.TypeAsk]
-	ask.Description = "Submit work in _context.session. Use the standard session=new parameter to fork a new branch. Receipt mode requires submission_key. Work addresses, deduplication and controls belong to the current Controller process; after restart submit a new request."
+	ask.Description = "Submit work in _context.session. Use this Controller's session=new parameter to fork a new branch. Receipt mode requires submission_key. Work addresses, deduplication and controls belong to the current Controller process; after restart submit a new request."
 	ask.ErrorCodes = append(ask.ErrorCodes, "scope_required", "session_not_found", "relation_history_limit_exceeded")
 	ask.Examples = []json.RawMessage{json.RawMessage(`{"text":"explain the failure"}`)}
 	m.Words[workapi.TypeAsk] = ask
 	steer := m.Words[workapi.TypeSteer]
 	steer.InputSchema = json.RawMessage(workapi.SteerInputSchema)
-	steer.Description = "Steer text or waiting target into one view's execution; all gathers only the caller's waiting requests in that view. Acceptance is confirmed by the execution; included=false is not model consumption. expected_turn_id is a compare-and-swap guard."
+	steer.Description = "Steer text or waiting target into one session's execution; all gathers only the caller's waiting requests in that session. Acceptance is confirmed by the execution; included=false is not model consumption. expected_turn_id is a compare-and-swap guard."
 	steer.ErrorCodes = append(steer.ErrorCodes, "scope_required", "session_not_found", "busy", "cas_mismatch", "target_gone")
 	m.Words[workapi.TypeSteer] = steer
 	for word, description := range map[string]string{
 		workapi.TypeReplace: "Replace a waiting target using old_text CAS; the replacement retains its sender identity and queue position.",
-		workapi.TypeHold:    "Freeze one view for up to 30 minutes. Holding its current owner first interrupts and then requeues it for editing; effects are not rolled back.",
-		workapi.TypeUnhold:  "Release a view's hold, restoring any prior interrupt freeze.",
+		workapi.TypeHold:    "Freeze one session for up to 30 minutes. Holding its current owner first interrupts and then requeues it for editing; effects are not rolled back.",
+		workapi.TypeUnhold:  "Release a session's hold, restoring any prior interrupt freeze.",
 	} {
 		schema := `{"type":"object","properties":{"work_id":{"type":"string"},"target":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"duration_ms":{"type":"integer","minimum":1,"maximum":1800000}},"additionalProperties":false}`
 		var shape map[string]any
@@ -61,6 +61,15 @@ func Manifest() introspect.Manifest {
 	m.Capabilities["session_control"] = true
 	m.Words[agentbase.TypeOptions] = introspect.WordSpec{Description: "Return the provider-discovered model catalog after configured model patterns are applied.", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object"}`), ErrorCodes: []string{"invalid_args", "provider_failed"}}
 	m.Words[agentbase.TypeSelect] = introspect.WordSpec{Description: "Persist this Agent's model and thinking selection.", InputSchema: json.RawMessage(`{"type":"object","required":["model"],"properties":{"model":{"type":"string","minLength":1},"effort":{"type":"string"}},"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object"}`), ErrorCodes: []string{"invalid_args", "provider_failed", "ledger_unavailable"}}
+	for _, word := range []string{workapi.TypeAsk, workapi.TypeStatus, workapi.TypeResult, workapi.TypeSteer, workapi.TypeReplace, workapi.TypeHold, workapi.TypeUnhold, workapi.TypeInterrupt, workapi.TypeSessionList, workapi.TypeSessionGet, workapi.TypeSessionRename, workapi.TypeSessionArchive, workapi.TypeSessionReset, workapi.TypeSessionSync} {
+		spec := m.Words[word]
+		var shape map[string]any
+		if json.Unmarshal(spec.InputSchema, &shape) == nil {
+			addSessionSelector(shape)
+			spec.InputSchema, _ = json.Marshal(shape)
+			m.Words[word] = spec
+		}
+	}
 	return m
 
 }
@@ -81,4 +90,21 @@ func New(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, er
 	return platform.ActorDecl{ID: spec.ID, Kind: actor.KindAgent, Factory: platform.ActorFactory{Proc: actorbase.Def{
 		Manifest: Manifest(), New: func() (actorbase.Proc, error) { return func(sys actorbase.Sys) error { return run(sys, cfg) }, nil },
 	}}}, nil
+}
+
+func addSessionSelector(shape map[string]any) {
+	if variants, ok := shape["oneOf"].([]any); ok {
+		for _, variant := range variants {
+			if object, ok := variant.(map[string]any); ok {
+				addSessionSelector(object)
+			}
+		}
+		return
+	}
+	props, _ := shape["properties"].(map[string]any)
+	if props == nil {
+		props = map[string]any{}
+		shape["properties"] = props
+	}
+	props["session"] = map[string]any{"type": "string", "minLength": 1}
 }
