@@ -46,8 +46,9 @@ const (
 	CapabilityBranchFromWork = "branch_from_work"
 )
 
-// WorkID identifies one accepted Agent commitment. It is stable across actor
-// incarnations and opaque to callers; it is not a request id or a turn id.
+// WorkID identifies one accepted Agent commitment. It is stable within the
+// current Controller incarnation and opaque to callers; it is not a request id
+// or a turn id, and it is not restored after that Controller restarts.
 type WorkID string
 
 func (id WorkID) String() string { return string(id) }

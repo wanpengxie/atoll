@@ -13,10 +13,21 @@ import (
 )
 
 func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
+	if msg.Type == agentproto.TypeSessionList && actorbase.DecodeStrict(msg.Payload, &struct{}{}) != nil {
+		_, _ = fail(sys, msg, "invalid_args", "agent.session.list accepts no parameters")
+		return
+	}
 	var accepted bool
 	msg, accepted = sessionInput(sys, msg)
 	if !accepted {
 		return
+	}
+	switch msg.Type {
+	case agentproto.TypeSessionGet, agentproto.TypeSessionArchive, agentproto.TypeSessionReset:
+		if actorbase.DecodeStrict(msg.Payload, &struct{}{}) != nil {
+			_, _ = fail(sys, msg, "invalid_args", msg.Type+" accepts no parameters other than session")
+			return
+		}
 	}
 	if msg.Type == agentproto.TypeSessionList || msg.Type == agentproto.TypeSessionGet {
 		if err := c.refreshSessionRelations(sys); err != nil {
