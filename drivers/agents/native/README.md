@@ -1,52 +1,54 @@
-# Native work-view controls
+# Native Controller lifecycle
 
-The Controller accepts work in an explicitly selected `view_id`. This identity
-is supplied by the caller/organization layer; the Controller does not invent a
-new independent session when the field is absent. `related_work_id` continues
-that visible work's existing live view. Main/fork/merge/compact organization is
-outside this implementation.
+The Controller starts with an empty in-memory work table and waiter map. It
+projects branch/main relationships from the ledger, arms its periodic timer,
+and receives messages. Startup does not contact a Looper or replay old work.
 
-```json
-{"text":"Investigate the build failure","view_id":"view:build","delivery":"receipt","submission_key":"build-1"}
-```
+Each relation projection reads at most 1,000 historical message rows, counting
+unrelated messages and responses too. Full-body reads are restricted to relation
+messages. The whole read also has a shared 128-query, 4 MiB returned-text and
+5-second budget. Reaching a limit before completing history aborts the read;
+message/query/byte limits report `relation_history_limit_exceeded`. It never
+commits a partial projection. Startup fails on that error; session queries keep
+the previous projection and return the error. Relation checkpoints are not yet
+implemented, so a history beyond this bound cannot be fully projected at startup.
+The cap is not a promise that SQLite examines exactly 1,000 physical rows: the
+log API batches and prefetches exchanges, but Controller pagination is bounded.
 
-A normal ask queues in that view. Different views share bounded Looper capacity
-with round-robin scheduling. Same-sender buffered inputs may be batched, within
-input and byte limits. Work IDs are stable result addresses; assignment IDs
-identify executions and remain unchanged when steer transfers the owner.
+The relation projection retains session holders, fork boundaries, archive facts,
+merge policy, merged/skipped boundaries and sync progress. Historical starts and
+reports never populate or clear the current `Execution`, `Owner`, `Buffer`,
+pending control or hold state. Session list/get refresh this projection without
+reconstructing work or changing current execution.
 
-- `agent.steer`: `text`, waiting request `target`, or `all: true`. `view_id` or
-  `work_id` locates the view; a target also resolves it. Ambiguous scope fails.
-  `all` gathers only the effective caller's waiting inputs in that view.
-  `expected_turn_id` checks text steering against the expected execution.
-- `agent.replace`: waiting `target`, `old_text`, `new_text`. CAS preserves queue
-  position; replacement input records the replacing caller's identity.
-- `agent.hold`: view/work/target, optional `duration_ms` (1–1800000; default
-  1800000). A current-owner target interrupts and requeues only after its
-  execution stops. The resumed input identifies prior potentially unknown
-  effects. Holding someone else's target fails.
-- `agent.unhold`: releases a hold and preserves an earlier interrupt freeze.
-  An ordinary ask explicitly releases the view's freeze.
-- `agent.interrupt`: a work target stops only that work; a view target interrupts
-  that view. The empty compatibility form stops visible open works across views
-  and returns per-view results. Busy control slots are not forcibly reassigned.
+Work receipts, submission/operation deduplication, queues, results and request
+associations last only for the current Controller process. There is no work
+State snapshot, migration, report recovery, reattachment or queue replay.
+Existing legacy snapshots are ignored. Model/thinking selection remains a
+separate persistent user setting.
 
-Looper admission and model consumption are distinct. A control response is
-produced only after the Looper's admission decision; a final report carries the
-same decisions to reconcile responses delivered out of order. Unknown admission
-is not automatically requeued. Controls and finalization share an execution
-lock; accepted pending input prevents normal completion until consumed at a
-legal model boundary. Tool results close their assistant batch before a steer
-input is appended. Cancellation and deadlines do not restart an episode or
-replay tools.
+After a restart, lookup of an old work returns `work_not_found`; an unmatched
+report returns `stale_assignment` before any history lookup or control-slot
+mutation. Callers submit new requests. The Controller neither settles old
+requests nor stops or probes their Loopers; runtime owns request lifecycle.
+Exiting start/input waiters do not cancel remote requests when Controller life
+ends, and failed control delivery does not trigger `loop.inspect`.
 
-Views hold runtime control state only. On Controller restart, old open work is
-closed with `execution_unknown`; no model or tool is replayed. These controls do
-not implement durable View history or the main supervisor.
+New requests route commands directly. Work is submitted in `_context.session`;
+`related_work_id` can reference a work still known to this process. Current
+queues, capacity scheduling, steering, ownership transfer, hold/unhold,
+replacement, explicit interrupt and report acceptance continue to operate in
+memory. A terminal report must match a current assignment and have a preceding
+accepted start in the ledger.
 
-Validation: native/workapi/agentlooper package tests cover ownership handoff,
-report-before-ack, queue restoration, CAS, hold/rebuffer, scope isolation,
-operation limits and duplicate controls. Looper tests exercise concurrent
-seal/admission and injection during model/tool calls, with history pairing
-checked at every subsequent model request. The Handle example exports the same
-schemas as `native.Manifest()`.
+The timer continues normal queue/hold/waiter maintenance. Automatic idle archive
+requires a completed assignment handled by this process and no remaining local
+work. A historical session with no local execution is not evidence that its
+independent Looper is idle, so the timer does not stop it. Explicit session
+commands still route normally when requested.
+
+`lifecycle_test.go` covers startup with legacy State, unmatched reports,
+relationship reads, historical-holder isolation, normal idle archive, control
+failure without probing, and process exit without remote cancellation. Existing
+native tests cover new work, capacity, steering, report-before-ack, ownership,
+control rollback and request completion.

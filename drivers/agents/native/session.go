@@ -19,9 +19,10 @@ const (
 )
 
 // Sessions are normal-incarnation conversation state, never restart jobs.
+// A controller instance owns one session namespace: session IDs address its
+// shared main and branches, rather than partitioning them by caller.
 type session struct {
 	ID               string
-	Scope            string
 	Buffer           []agentproto.WorkID
 	Execution        string
 	Owner            agentproto.WorkID
@@ -47,14 +48,13 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg actorbase.Msg, req age
 	if c.sessions == nil {
 		c.sessions = map[string]*session{}
 	}
-	scope := workScopeKey(actorbase.EffectiveCaller(msg))
 	id := msg.Context().Session
 	if id == "" {
 		id = req.SessionID
 	}
 	var base *agentloop.BoundaryRef
 	if req.RelatedWorkID != "" {
-		w, ok := c.owned(msg, req.RelatedWorkID)
+		w, ok := c.workByID(req.RelatedWorkID)
 		if !ok {
 			return nil, errors.New("work_not_found")
 		}
@@ -67,9 +67,6 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg actorbase.Msg, req age
 		return nil, errors.New("scope_required")
 	}
 	if s := c.sessions[id]; s != nil {
-		if s.Scope != scope {
-			return nil, errors.New("session_not_found")
-		}
 		if !s.Archived {
 			return s, nil
 		}
@@ -77,7 +74,10 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg actorbase.Msg, req age
 		// projection so the fork is pinned to a concrete boundary, then assign
 		// the root request a fresh session before any response is written.
 		if s.ForkPoint == "" {
-			if err := c.recoverSessionProjection(sys); err != nil {
+			if err := c.refreshSessionRelations(sys); err != nil {
+				if errors.Is(err, errRelationHistoryLimit) {
+					return nil, errRelationHistoryLimit
+				}
 				return nil, errors.New("ledger_unavailable")
 			}
 			s = c.sessions[id]
@@ -97,14 +97,13 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg actorbase.Msg, req age
 	if len(c.sessions) >= maxSessions {
 		return nil, errors.New("session_capacity")
 	}
-	s := &session{ID: id, Scope: scope, LastUsed: nowMillis(), Base: base, Merge: "auto"}
+	s := &session{ID: id, LastUsed: nowMillis(), Base: base, Merge: "auto"}
 	c.sessions[s.ID] = s
 	c.sessionOrder = append(c.sessionOrder, s.ID)
 	return s, nil
 }
 
 func (c *controller) selectSession(msg actorbase.Msg, id string, work agentproto.WorkID, target string) (*session, error) {
-	scope := workScopeKey(actorbase.EffectiveCaller(msg))
 	if contextual := msg.Context().Session; contextual != "" {
 		if id != "" && id != contextual {
 			return nil, errors.New("invalid_args")
@@ -122,7 +121,7 @@ func (c *controller) selectSession(msg actorbase.Msg, id string, work agentproto
 		if selector.request {
 			w = c.requestWork(selector.value)
 		}
-		if w == nil || workScopeKey(w.Owner) != scope {
+		if w == nil {
 			return nil, errors.New("work_not_found")
 		}
 		if id != "" && id != w.SessionID {
@@ -133,19 +132,17 @@ func (c *controller) selectSession(msg actorbase.Msg, id string, work agentproto
 
 	if id != "" {
 		s := c.sessions[id]
-		if s == nil || s.Scope != scope {
+		if s == nil {
 			return nil, errors.New("session_not_found")
 		}
 		return s, nil
 	}
 	var selected *session
 	for _, s := range c.sessions {
-		if s.Scope == scope {
-			if selected != nil {
-				return nil, errors.New("scope_required")
-			}
-			selected = s
+		if selected != nil {
+			return nil, errors.New("scope_required")
 		}
+		selected = s
 	}
 	if selected == nil {
 		return nil, errors.New("session_not_found")
@@ -185,7 +182,6 @@ func (c *controller) closeLinked(sys actorbase.Sys, cause message.Cause, w *work
 	w.AssignmentID = ""
 	w.Looper = ""
 	w.UpdatedAt = nowMillis()
-	_ = c.commit(sys, cause, w)
 	c.finishWaiters(sys, w)
 }
 

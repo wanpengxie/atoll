@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 
 	agentbase "github.com/wanpengxie/atoll/drivers/agents/base"
@@ -29,6 +30,8 @@ type ledgerRow struct {
 }
 
 func validSessionBoundary(ctx context.Context, sys actorbase.Sys, cause message.Cause, ref agentloop.BoundaryRef) (bool, error) {
+	ctx, cancel := newHistoryContext(ctx)
+	defer cancel()
 	if ref.Session == "" {
 		return false, nil
 	}
@@ -63,6 +66,8 @@ func validSessionBoundary(ctx context.Context, sys actorbase.Sys, cause message.
 }
 
 func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string, upto message.ID, seen map[string]bool) (agentbase.ContextObject, error) {
+	ctx, cancel := newHistoryContext(ctx)
+	defer cancel()
 	if seen == nil {
 		seen = map[string]bool{}
 	}
@@ -89,6 +94,11 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 		}
 		rows = rows[:limit+1]
 	}
+	for _, state := range sessionTurnStates(rows) {
+		if state.accepted && !state.closed {
+			return agentbase.ContextObject{}, errors.New("session has an accepted turn without a valid terminal boundary")
+		}
+	}
 	if len(rows) == 0 {
 		return agentbase.ContextObject{Messages: []json.RawMessage{}}, nil
 	}
@@ -96,24 +106,35 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 	for _, r := range rows {
 		byID[r.ID] = r
 	}
+	for _, row := range rows {
+		visited := map[message.ID]bool{}
+		for parent := row.ID; parent != ""; parent = byID[parent].Parent {
+			if visited[parent] {
+				return agentbase.ContextObject{}, errors.New("session history parent cycle")
+			}
+			visited[parent] = true
+		}
+	}
 	var object agentbase.ContextObject
 	startIndex := 0
 	for i, r := range rows {
 		switch r.Type {
 		case agentloop.TypeSessionCompact:
 			var x agentloop.Compact
-			if json.Unmarshal(r.Body, &x) == nil {
-				object.Messages = cloneMessages(x.Context)
-				object.Version = r.ID
-				startIndex = i + 1
+			if json.Unmarshal(r.Body, &x) != nil || x.Context == nil {
+				return object, errors.New("invalid session snapshot")
 			}
+			object.Messages = cloneMessages(x.Context)
+			object.Version = r.ID
+			startIndex = i + 1
 		case agentloop.TypeSessionSync:
 			var x agentloop.Synced
-			if json.Unmarshal(r.Body, &x) == nil {
-				object.Messages = cloneMessages(x.Context)
-				object.Version = r.ID
-				startIndex = i + 1
+			if json.Unmarshal(r.Body, &x) != nil || x.Context == nil {
+				return object, errors.New("invalid session snapshot")
 			}
+			object.Messages = cloneMessages(x.Context)
+			object.Version = r.ID
+			startIndex = i + 1
 		case agentloop.TypeSessionReset:
 			object.Messages = []json.RawMessage{}
 			object.Version = r.ID
@@ -124,13 +145,17 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 		for _, r := range rows {
 			if r.Type == agentloop.TypeSessionOpened {
 				var opened agentloop.Opened
-				if json.Unmarshal(r.Body, &opened) == nil && opened.Base != nil {
+				if json.Unmarshal(r.Body, &opened) != nil {
+					return object, errors.New("invalid session opening")
+				}
+				if opened.Base != nil {
 					base, err := materializeSession(ctx, sys, cause, opened.Base.Session, message.ID(opened.Base.At), seen)
 					if err != nil {
 						return object, err
 					}
 					object = base
 				}
+				object.Version = r.ID
 				break
 			}
 		}
@@ -167,7 +192,12 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 				return t
 			}
 			p := r.Parent
+			visited := map[message.ID]bool{}
 			for p != "" {
+				if visited[p] {
+					break
+				}
+				visited[p] = true
 				if p == t.start.ID {
 					return t
 				}
@@ -188,6 +218,26 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 	}
 	for i := startIndex; i < len(rows); i++ {
 		r := rows[i]
+		if err := ctx.Err(); err != nil {
+			return object, err
+		}
+		if session == "main" && r.Type == "session.merge" {
+			var merge struct {
+				Decision string          `json:"decision"`
+				Summary  json.RawMessage `json:"summary"`
+			}
+			if json.Unmarshal(r.Body, &merge) != nil {
+				return object, errors.New("invalid main merge")
+			}
+			if merge.Decision == "merged" {
+				if len(merge.Summary) == 0 || string(merge.Summary) == "null" {
+					return object, errors.New("main merge summary missing")
+				}
+				object.Messages = append(object.Messages, merge.Summary)
+				object.Version = r.ID
+			}
+			continue
+		}
 		t := turnFor(r)
 		if t == nil || t.boundary == 0 || r.Seq > t.boundary {
 			continue
@@ -197,13 +247,14 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 			for _, id := range t.req.Inputs {
 				inputRow, ok := byID[message.ID(id.ID)]
 				if !ok {
-					continue
+					return object, errors.New("committed turn input is missing")
 				}
 				in, err := inputFromBody(id.ID, id.Seq, inputRow.Body)
-				if err == nil {
-					object.Messages = append(object.Messages, inputMessage(in))
-					object.Version = inputRow.ID
+				if err != nil {
+					return object, err
 				}
+				object.Messages = append(object.Messages, inputMessage(in))
+				object.Version = inputRow.ID
 			}
 		case r.Type == agentloop.TypeInput && r.Kind == message.KindResponse:
 			var ack struct {
@@ -225,11 +276,11 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 			for _, in := range inputs {
 				inputRow, ok := byID[message.ID(in.ID)]
 				if !ok {
-					continue
+					return object, errors.New("committed steering input is missing")
 				}
 				hydrated, err := inputFromBody(in.ID, in.Seq, inputRow.Body)
 				if err != nil {
-					continue
+					return object, err
 				}
 				object.Messages = append(object.Messages, inputMessage(hydrated))
 				object.Version = inputRow.ID
@@ -245,11 +296,22 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 				continue
 			}
 			var generated llmproto.GenerateResponse
-			if json.Unmarshal(response.Body, &generated) != nil || len(generated.Message) == 0 {
-				continue
+			if json.Unmarshal(response.Body, &generated) != nil {
+				return object, errors.New("invalid generation history")
 			}
 			if generated.ErrorCode == "context_overflow" || generated.ErrorCode == "length_recoverable" {
 				continue
+			}
+			if len(generated.Message) == 0 {
+				var status struct {
+					Status string `json:"status"`
+				}
+				_ = json.Unmarshal(response.Body, &status)
+				if status.Status == "failed" || status.Status == "cancelled" {
+					object.Messages = append(object.Messages, mustJSON(map[string]any{"role": "assistant", "content": []any{}, "stopReason": "aborted", "errorMessage": "generation failed"}))
+					continue
+				}
+				return object, errors.New("generation history has no assistant message")
 			}
 			object.Messages = append(object.Messages, generated.Message)
 			object.Version = response.ID
@@ -312,17 +374,27 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 			}
 		}
 	}
+	if err := validateSessionContext(object); err != nil {
+		return object, err
+	}
 	return object, nil
 }
 
-func recoverSessionContext(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string) (agentbase.ContextObject, bool, error) {
+func sessionContext(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string) (agentbase.ContextObject, bool, error) {
+	ctx, cancel := newHistoryContext(ctx)
+	defer cancel()
 	rows, err := readSessionRows(ctx, sys, cause, session)
 	if err != nil {
 		return agentbase.ContextObject{}, false, err
 	}
+	for _, state := range sessionTurnStates(rows) {
+		if state.accepted && !state.closed {
+			return agentbase.ContextObject{}, false, errors.New("session has an accepted turn without a valid terminal boundary")
+		}
+	}
 	opened := false
 	for _, row := range rows {
-		if row.Type == agentloop.TypeSessionOpened {
+		if row.Type == agentloop.TypeSessionOpened || row.Type == agentloop.TypeSessionReset || row.Type == agentloop.TypeSessionCompact || row.Type == agentloop.TypeSessionSync {
 			opened = true
 			break
 		}
@@ -339,11 +411,22 @@ func readSessionRows(ctx context.Context, sys actorbase.Sys, cause message.Cause
 }
 
 func readLedgerRows(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string) ([]ledgerRow, error) {
+	ctx, cancel := newHistoryContext(ctx)
+	defer cancel()
+	budget := ctx.Value(historyBudgetKey{}).(*historyBudget)
+	if rows, ok := budget.cache[session]; ok {
+		return rows, nil
+	}
 	var out []ledgerRow
 	seen := map[message.ID]bool{}
-	before, head := int64(0), int64(0)
-	for page := 0; page < 1000; page++ {
-		req := map[string]any{"view": "raw", "limit": 20}
+	before, head := int64(0), budget.head
+	for {
+		// The log API scans at most 512 exchanges per call (including nonmatches).
+		// Reserve that amount so a sparse session cannot scan unbounded history.
+		if maxSessionHistoryMessages-budget.scanned < 512 || budget.rows >= maxSessionHistoryMessages-1 {
+			return nil, historyLimitError()
+		}
+		req := map[string]any{"view": "raw", "limit": min(20, (maxSessionHistoryMessages-budget.rows)/2)}
 		if session != "" {
 			req["session_id"] = session
 		}
@@ -353,7 +436,7 @@ func readLedgerRows(ctx context.Context, sys actorbase.Sys, cause message.Cause,
 		if head > 0 {
 			req["head_seq"] = head
 		}
-		raw, err := call(ctx, sys, cause, actor.SystemActorID, message.TypeSystemLogQuery, req)
+		raw, err := callHistory(ctx, sys, cause, req)
 		if err != nil {
 			return nil, err
 		}
@@ -375,15 +458,28 @@ func readLedgerRows(ctx context.Context, sys actorbase.Sys, cause message.Cause,
 			HeadSeq       int64 `json:"head_seq"`
 			NextBeforeSeq int64 `json:"next_before_seq"`
 			HasMore       bool  `json:"has_more"`
+			Scanned       int   `json:"scanned"`
 		}
 		if json.Unmarshal(raw, &response) != nil {
 			return nil, errors.New("invalid log query response")
 		}
-		if head == 0 {
-			head = response.HeadSeq
+		if !budget.headSet {
+			budget.head, budget.headSet = response.HeadSeq, true
+		}
+		head = budget.head
+		if response.HeadSeq != head {
+			return nil, errors.New("session history snapshot changed")
+		}
+		budget.scanned += max(response.Scanned, len(response.Turns))
+		if budget.scanned > maxSessionHistoryMessages {
+			return nil, historyLimitError()
 		}
 		for _, turn := range response.Turns {
 			for _, m := range turn.Messages {
+				budget.rows++
+				if budget.rows > maxSessionHistoryMessages {
+					return nil, historyLimitError()
+				}
 				if seen[m.ID] {
 					continue
 				}
@@ -397,6 +493,9 @@ func readLedgerRows(ctx context.Context, sys actorbase.Sys, cause message.Cause,
 				}
 				app, body, err := harness.UnwrapPayload(json.RawMessage(payload))
 				if err != nil {
+					return nil, fmt.Errorf("invalid session history row %s: %w", m.ID, err)
+				}
+				if session != "" && app.Session != session {
 					continue
 				}
 				out = append(out, ledgerRow{Seq: m.Seq, ID: m.ID, Session: app.Session, Parent: m.ParentID, Sender: m.Sender.ID, Audience: m.Audience, Kind: m.Kind, Type: m.MessageType, Terminal: m.Terminal, Body: body})
@@ -404,21 +503,23 @@ func readLedgerRows(ctx context.Context, sys actorbase.Sys, cause message.Cause,
 		}
 		if !response.HasMore {
 			sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+			budget.cache[session] = out
 			return out, nil
 		}
-		if response.NextBeforeSeq <= 0 || response.NextBeforeSeq == before {
+		if response.NextBeforeSeq <= 0 || (before > 0 && response.NextBeforeSeq >= before) {
 			return nil, errors.New("session query made no progress")
 		}
 		before = response.NextBeforeSeq
 	}
-	return nil, errors.New("session query page limit exceeded")
 }
 
 func readLedgerPayload(ctx context.Context, sys actorbase.Sys, cause message.Cause, seq, head int64) (string, error) {
+	ctx, cancel := newHistoryContext(ctx)
+	defer cancel()
 	var payload string
 	offset := 0
-	for part := 0; part < 10000; part++ {
-		raw, err := call(ctx, sys, cause, actor.SystemActorID, message.TypeSystemLogQuery, map[string]any{
+	for {
+		raw, err := callHistory(ctx, sys, cause, map[string]any{
 			"view": "raw", "read_seq": seq, "head_seq": head, "offset": offset,
 		})
 		if err != nil {
@@ -442,7 +543,6 @@ func readLedgerPayload(ctx context.Context, sys actorbase.Sys, cause message.Cau
 		}
 		offset = *response.Message.NextOffset
 	}
-	return "", errors.New("session row chunk limit exceeded")
 }
 
 func inputFromBody(id string, seq int64, body json.RawMessage) (agentloop.Input, error) {

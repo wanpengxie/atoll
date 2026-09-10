@@ -61,6 +61,7 @@ type testSys struct {
 	events         []behavior.EventSpec
 	controlResults chan behavior.RequestSpec
 	assigned       map[message.ID]string
+	ledger         []logMessage
 }
 
 type testPending struct{ msg actorbase.Msg }
@@ -121,12 +122,22 @@ func (s *testSys) Call(_ message.Cause, target actor.ActorID, typ string, payloa
 			disposition = "observed"
 		}
 		body, _ := json.Marshal(map[string]any{"status": "completed", "disposition": disposition})
+		if typ == agentloop.TypeStart {
+			var start agentloop.StartRequest
+			_ = json.Unmarshal(raw, &start)
+			id := message.ID(fmt.Sprintf("start-%d", len(s.ledger)+1))
+			s.appendLedger(logMessage{ID: id, Kind: message.KindRequest, MessageType: typ, Sender: message.Sender{ID: s.self}, Audience: message.Audience{target}, PayloadText: string(raw)}, start.SessionID)
+			s.appendLedger(logMessage{ID: id + "-ack", ParentID: id, Kind: message.KindResponse, MessageType: typ, Sender: message.Sender{ID: target}, PayloadText: string(body)}, start.SessionID)
+		}
 		return testPending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "call-result", Kind: message.KindResponse, Payload: body})}, nil
 	}
 	if target != actor.SystemActorID || typ != message.TypeSystemLogQuery {
 		return nil, fmt.Errorf("unexpected call %s %s", target, typ)
 	}
 	turns := make([]logQueryTurn, 0)
+	for i := len(s.ledger) - 1; i >= 0; i-- {
+		turns = append(turns, logQueryTurn{Messages: []logMessage{s.ledger[i]}})
+	}
 	for i := len(s.events) - 1; i >= 0; i-- {
 		event := s.events[i]
 		if event.Type != agentloop.TypeReport {
@@ -134,7 +145,7 @@ func (s *testSys) Call(_ message.Cause, target actor.ActorID, typ string, payloa
 		}
 		turns = append(turns, logQueryTurn{Messages: []logMessage{{Seq: int64(i + 1), Sender: message.Sender{ID: s.self}, MessageType: event.Type, PayloadText: string(event.Payload)}}})
 	}
-	responsePayload, _ := json.Marshal(logQueryResponse{Turns: turns, HeadSeq: int64(len(s.events))})
+	responsePayload, _ := json.Marshal(logQueryResponse{Turns: turns, HeadSeq: int64(len(s.events) + len(s.ledger))})
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(responsePayload, &fields)
 	fields["status"] = json.RawMessage(`"completed"`)
@@ -166,7 +177,7 @@ func TestOneLooperQueuesSecondWorkUntilFirstCloses(t *testing.T) {
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequest("q1", agentproto.TypeAsk, map[string]any{"text": "one", "delivery": "receipt", "submission_key": "one"}))
 	c.handleAsk(sys, testRequest("q2", agentproto.TypeAsk, map[string]any{"text": "two", "delivery": "receipt", "submission_key": "two"}))
 	if len(sys.posts) != 1 {
@@ -176,7 +187,7 @@ func TestOneLooperQueuesSecondWorkUntilFirstCloses(t *testing.T) {
 	if second.Stage != "queued" || second.ExecutionState != "waiting_capacity" || second.AssignmentID != "" {
 		t.Fatalf("queued second=%+v", second)
 	}
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{WorkID: first.ID, AssignmentID: first.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`), ExecutionState: "confirmed"}))
+	deliverTestReport(c, sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{WorkID: first.ID, AssignmentID: first.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`), ExecutionState: "confirmed"}))
 	if len(sys.posts) != 2 || second.AssignmentID == "" || second.Stage != "dispatching" {
 		t.Fatalf("second was not scheduled after release: posts=%d work=%+v", len(sys.posts), second)
 	}
@@ -186,7 +197,7 @@ func TestOneLooperDispatchesSeveralIndependentLoopsWithinItsBound(t *testing.T) 
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxAssignmentsPerLooper: 3, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	for i, key := range []string{"one", "two", "three", "four"} {
 		c.handleAsk(sys, testRequest(fmt.Sprintf("q%d", i), agentproto.TypeAsk, map[string]any{"text": key, "delivery": "receipt", "submission_key": key}))
 	}
@@ -205,26 +216,65 @@ func TestOneLooperDispatchesSeveralIndependentLoopsWithinItsBound(t *testing.T) 
 	}
 }
 
-func TestWorkControlIsSharedInsideCallingChannelButIsolatedAcrossChannels(t *testing.T) {
+func TestWorkControlIsSharedInsideAgentInstance(t *testing.T) {
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequestFrom("q", agentproto.TypeAsk, "shared", "human:alice:1", map[string]any{"text": "one", "delivery": "receipt", "submission_key": "one"}))
 	w := c.data.Works[c.data.Order[0]]
-	c.handleStatus(sys, testRequestFrom("same-channel", agentproto.TypeStatus, "shared", "human:bob:2", map[string]any{"work_id": w.ID}))
-	if sys.fails["same-channel"] != "" || sys.replies["same-channel"] == nil {
-		t.Fatal("a second member of the calling Channel cannot inspect its Channel work")
+	c.handleStatus(sys, testRequestFrom("other-channel", agentproto.TypeStatus, "elsewhere", "human:bob:2", map[string]any{"work_id": w.ID}))
+	if sys.fails["other-channel"] != "" || sys.replies["other-channel"] == nil {
+		t.Fatal("another reported caller channel could not inspect instance work")
 	}
-	c.handleStatus(sys, testRequestFrom("other-channel", agentproto.TypeStatus, "other", "human:alice:3", map[string]any{"work_id": w.ID}))
-	if sys.fails["other-channel"] != "work_not_found" {
-		t.Fatalf("cross-channel visibility failure=%q", sys.fails["other-channel"])
+	c.handleStatus(sys, testRequestFrom("unknown-work", agentproto.TypeStatus, "shared", "human:alice:3", map[string]any{"work_id": "no-such-work"}))
+	if sys.fails["unknown-work"] != "work_not_found" {
+		t.Fatalf("unknown work failure=%q", sys.fails["unknown-work"])
+	}
+}
+
+func TestSessionIsSharedAcrossReportedCallerChannels(t *testing.T) {
+	state := newTestState()
+	sys := newTestSys(state)
+	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c.handleAsk(sys, testRequestFrom("q", agentproto.TypeAsk, "shared", "human:alice:1", map[string]any{"text": "one", "session_id": "s-1"}))
+	if c.sessions["s-1"] == nil {
+		t.Fatal("ask did not open the named session")
+	}
+	c.handleSession(sys, testRequestFrom("get-other-channel", agentproto.TypeSessionGet, "elsewhere", "human:bob:2", map[string]any{"session_id": "s-1"}))
+	if sys.fails["get-other-channel"] != "" || sys.replies["get-other-channel"] == nil {
+		t.Fatalf("a caller reported from another channel could not read the session: %q", sys.fails["get-other-channel"])
+	}
+	c.handleAsk(sys, testRequestFrom("continue", agentproto.TypeAsk, "elsewhere", "human:bob:2", map[string]any{"text": "two", "session_id": "s-1"}))
+	if sys.fails["continue"] != "" {
+		t.Fatalf("continuing the named session failed: %q", sys.fails["continue"])
+	}
+	if len(c.sessions) != 1 {
+		t.Fatalf("continuing an existing name opened a second session: %d", len(c.sessions))
+	}
+	c.handleSession(sys, testRequestFrom("get-missing", agentproto.TypeSessionGet, "shared", "human:alice:1", map[string]any{"session_id": "s-missing"}))
+	if sys.fails["get-missing"] != "session_not_found" {
+		t.Fatalf("unknown session failure=%q", sys.fails["get-missing"])
+	}
+}
+
+func TestSessionContextAndExplicitIDMustAgree(t *testing.T) {
+	c := &controller{data: newWorkTable(), sessions: map[string]*session{"s-1": {ID: "s-1"}, "s-2": {ID: "s-2"}}}
+	c.data.Works["w-2"] = &workRecord{ID: "w-2", SessionID: "s-2"}
+	msg := testRequest("context", agentproto.TypeSteer, map[string]any{"session_id": "s-1"})
+
+	if _, err := c.selectSession(msg, "s-2", "", ""); err == nil || err.Error() != "invalid_args" {
+		t.Fatalf("context/explicit session mismatch error=%v", err)
+	}
+	if _, err := c.selectSession(msg, "", "w-2", ""); err == nil || err.Error() != "invalid_args" {
+		t.Fatalf("context/work session mismatch error=%v", err)
 	}
 }
 
 func TestStatusCursorIsStableWhenNewerWorkArrives(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	owner := harness.Caller{Channel: "c", Actor: "human:alice:1"}
 	for i, id := range []agentproto.WorkID{"w-1", "w-2", "w-3"} {
 		w := &workRecord{ID: id, Owner: owner, State: agentproto.WorkClosed, CreatedAt: int64(i + 1)}
@@ -248,7 +298,7 @@ func TestStatusCursorIsStableWhenNewerWorkArrives(t *testing.T) {
 
 func TestStatusReconcilesAcceptedInputDisposition(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "one", "delivery": "receipt", "submission_key": "one"}))
 	w := c.data.Works[c.data.Order[0]]
 	c.handleStatus(sys, testRequest("assigned", agentproto.TypeStatus, map[string]any{"work_id": w.ID}))
@@ -256,7 +306,7 @@ func TestStatusReconcilesAcceptedInputDisposition(t *testing.T) {
 	if len(assigned.Work.Inputs) != 1 || assigned.Work.Inputs[0].Disposition != "assigned" {
 		t.Fatalf("assigned status=%+v", assigned.Work)
 	}
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`), ExecutionState: "confirmed"}))
+	deliverTestReport(c, sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`), ExecutionState: "confirmed"}))
 	c.handleStatus(sys, testRequest("included", agentproto.TypeStatus, map[string]any{"work_id": w.ID}))
 	included := sys.replies["included"].(agentproto.StatusResponse)
 	if len(included.Work.Inputs) != 1 || included.Work.Inputs[0].Disposition != "included" {
@@ -266,7 +316,7 @@ func TestStatusReconcilesAcceptedInputDisposition(t *testing.T) {
 
 func TestAskCarriesCallerOriginAndAttachmentsIntoLooperInput(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	attachment := map[string]any{"address": "daemon://local-device/c0.agent/uploads/report.md", "name": "report.md", "media_type": "text/markdown"}
 	c.handleAsk(sys, testRequestFrom("q", agentproto.TypeAsk, "calling", "human:alice:1", map[string]any{"text": "read", "delivery": "receipt", "submission_key": "one", "origin": map[string]string{"session": "browser", "label": "Mac"}, "attachments": []any{attachment}}))
 	if len(sys.posts) != 1 {
@@ -289,12 +339,12 @@ func TestDuplicateWaitersShareOneWorkAndBothReceiveResult(t *testing.T) {
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	body := map[string]any{"text": "one", "submission_key": "same"}
 	c.handleAsk(sys, testRequest("q1", agentproto.TypeAsk, body))
 	c.handleAsk(sys, testRequest("q2", agentproto.TypeAsk, body))
 	w := c.data.Works[c.data.Order[0]]
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`), ExecutionState: "confirmed"}))
+	deliverTestReport(c, sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`), ExecutionState: "confirmed"}))
 	if len(c.data.Works) != 1 || sys.replies["q1"] == nil || sys.replies["q2"] == nil {
 		t.Fatalf("works=%d q1=%v q2=%v", len(c.data.Works), sys.replies["q1"], sys.replies["q2"])
 	}
@@ -302,7 +352,7 @@ func TestDuplicateWaitersShareOneWorkAndBothReceiveResult(t *testing.T) {
 
 func TestWaitWorkStopsOnlyAfterItsLastCallerLeaves(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	body := map[string]any{"text": "one", "submission_key": "same"}
 	c.handleAsk(sys, testRequest("q1", agentproto.TypeAsk, body))
 	c.handleAsk(sys, testRequest("q2", agentproto.TypeAsk, body))
@@ -330,7 +380,7 @@ func TestMinimalTerminalReportIncludesAllAssignedInputs(t *testing.T) {
 	w.Inputs = append(w.Inputs, inputRecord{Input: agentloop.Input{ID: "late", Seq: 2, Text: "late"}, Disposition: "assigned"})
 	w.AssignedThrough = 2
 	count := len(sys.posts)
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: w.SessionID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
+	deliverTestReport(c, sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: w.SessionID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
 	if w.Outcome != agentproto.OutcomeCompleted || w.Inputs[1].Disposition != "included" || len(sys.posts) != count {
 		t.Fatal("minimal boundary did not settle the assigned input prefix")
 	}
@@ -338,7 +388,7 @@ func TestMinimalTerminalReportIncludesAllAssignedInputs(t *testing.T) {
 
 func TestOversizedWorkInputIsRejectedBeforeDurableAcceptance(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequest("large", agentproto.TypeAsk, map[string]any{"text": strings.Repeat("x", maxWorkInputBytes)}))
 	if sys.fails["large"] != "limit_exceeded" || len(c.data.Works) != 0 || len(sys.events) != 0 {
 		t.Fatalf("failure=%q works=%d events=%d", sys.fails["large"], len(c.data.Works), len(sys.events))
@@ -355,7 +405,7 @@ func TestIndependentWorksCanCloseOutOfOrder(t *testing.T) {
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxAssignmentsPerLooper: 2, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	one := testRequest("q1", agentproto.TypeAsk, map[string]any{"text": "long"})
 	two := testRequest("q2", agentproto.TypeAsk, map[string]any{"text": "short"})
 	c.handleAsk(sys, one)
@@ -375,7 +425,7 @@ func TestIndependentWorksCanCloseOutOfOrder(t *testing.T) {
 		t.Fatal("work/assignment identity reused")
 	}
 	second := c.data.Works[c.data.Order[1]]
-	c.handleReport(sys, testReport("r2", "tool:loop-a:9", agentloop.ReportRequest{SessionID: second.SessionID, TurnID: second.AssignmentID, State: "completed"}))
+	deliverTestReport(c, sys, testReport("r2", "tool:loop-a:9", agentloop.ReportRequest{SessionID: second.SessionID, TurnID: second.AssignmentID, State: "completed"}))
 	if _, ok := sys.replies["q2"]; !ok {
 		t.Fatal("second work did not answer while first remained open")
 	}
@@ -391,13 +441,13 @@ func TestTargetedInterruptDoesNotFreezeSibling(t *testing.T) {
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxAssignmentsPerLooper: 2, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequest("q1", agentproto.TypeAsk, map[string]any{"text": "one", "delivery": "receipt", "submission_key": "one"}))
 	c.handleAsk(sys, testRequest("q2", agentproto.TypeAsk, map[string]any{"text": "two", "delivery": "receipt", "submission_key": "two"}))
 	first := c.data.Works[c.data.Order[0]]
 	second := c.data.Works[c.data.Order[1]]
-	c.handleReport(sys, testReport("accepted-1", "tool:loop-a:9", agentloop.ReportRequest{WorkID: first.ID, AssignmentID: first.AssignmentID, State: "accepted", ExecutionState: "confirmed_running"}))
-	c.handleReport(sys, testReport("accepted-2", "tool:loop-a:9", agentloop.ReportRequest{WorkID: second.ID, AssignmentID: second.AssignmentID, State: "accepted", ExecutionState: "confirmed_running"}))
+	deliverTestReport(c, sys, testReport("accepted-1", "tool:loop-a:9", agentloop.ReportRequest{WorkID: first.ID, AssignmentID: first.AssignmentID, State: "accepted", ExecutionState: "confirmed_running"}))
+	deliverTestReport(c, sys, testReport("accepted-2", "tool:loop-a:9", agentloop.ReportRequest{WorkID: second.ID, AssignmentID: second.AssignmentID, State: "accepted", ExecutionState: "confirmed_running"}))
 	before := len(sys.posts)
 	c.handleInterrupt(sys, testRequest("stop", agentproto.TypeInterrupt, map[string]any{"work_id": first.ID}))
 	if first.Stage != "stopping" || second.Stage != "dispatching" {
@@ -410,7 +460,7 @@ func TestTargetedInterruptDoesNotFreezeSibling(t *testing.T) {
 
 func TestTargetedInterruptOperationKeyDoesNotPostStopTwice(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "one", "delivery": "receipt", "submission_key": "one"}))
 	w := c.data.Works[c.data.Order[0]]
 	body := map[string]any{"work_id": w.ID, "operation_key": "stop-1"}
@@ -433,7 +483,7 @@ func TestTargetedInterruptOperationKeyDoesNotPostStopTwice(t *testing.T) {
 
 func TestAgentWideInterruptDoesNotDispatchAnotherWorkMidBatch(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequest("q1", agentproto.TypeAsk, map[string]any{"text": "one", "delivery": "receipt", "submission_key": "one"}))
 	c.handleAsk(sys, testRequest("q2", agentproto.TypeAsk, map[string]any{"text": "two", "delivery": "receipt", "submission_key": "two"}))
 	c.handleInterrupt(sys, testRequest("stop-all", agentproto.TypeInterrupt, map[string]any{}))
@@ -453,67 +503,24 @@ func TestAgentWideInterruptDoesNotDispatchAnotherWorkMidBatch(t *testing.T) {
 	}
 }
 
-func TestReceiptIsIdempotentAndRestartReattachesSameTurn(t *testing.T) {
+func TestReceiptIsIdempotentWithinControllerProcess(t *testing.T) {
 	state := newTestState()
 	sys := newTestSys(state)
 	cfg := Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}
-	c := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	body := map[string]any{"text": "do it", "delivery": "receipt", "submission_key": "stable"}
 	c.handleAsk(sys, testRequest("q1", agentproto.TypeAsk, body))
 	c.handleAsk(sys, testRequest("q2", agentproto.TypeAsk, body))
 	if len(c.data.Works) != 1 {
 		t.Fatalf("duplicate receipt created %d works", len(c.data.Works))
 	}
-	restarted := &controller{cfg: cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	if err := restarted.recoverLedger(sys); err != nil {
-		t.Fatal(err)
-	}
-	postCount := len(sys.posts)
-	restarted.reconcileAfterRestart(sys)
-	w := restarted.data.Works[restarted.data.Order[0]]
-	if w.State != agentproto.WorkOpen || w.AssignmentID == "" {
-		t.Fatalf("recovered work=%+v", w)
-	}
-	if len(sys.posts) != postCount+1 {
-		t.Fatal("restart did not reattach the existing turn")
-	}
-}
-
-func TestQueuedContinuationSurvivesRestartForLedgerReplay(t *testing.T) {
-	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	w := &workRecord{
-		ID: "w-cont", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkOpen,
-		Stage: "queued", ExecutionState: "not_started", Continuation: true, CreatedAt: 1, UpdatedAt: 1,
-		Inputs: []inputRecord{
-			{Input: agentloop.Input{ID: "i-1", Seq: 1, Text: "first"}, Disposition: "included"},
-			{Input: agentloop.Input{ID: "i-2", Seq: 2, Text: "second"}, Disposition: "accepted"},
-		},
-	}
-	c.data.Works[string(w.ID)] = w
-	c.data.Order = []string{string(w.ID)}
-	if err := c.commit(sys, message.Root(), w); err != nil {
-		t.Fatal(err)
-	}
-	restarted := &controller{cfg: c.cfg, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	if err := restarted.recoverLedger(sys); err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.reconcileAfterRestart(sys); err != nil {
-		t.Fatal(err)
-	}
-	recovered := restarted.data.Works[string(w.ID)]
-	if recovered.State != agentproto.WorkOpen || recovered.Stage != "queued" {
-		t.Fatalf("unexpected replay: %+v", recovered)
-	}
-
 }
 
 func TestRelatedWorkContinuesExistingView(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	source := &workRecord{ID: "w-source", SessionID: "view:source", BoundaryID: "boundary-source", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkClosed, Outcome: agentproto.OutcomeCompleted, CreatedAt: 1, UpdatedAt: 1}
-	c.sessions = map[string]*session{"view:source": {ID: "view:source", Scope: "c"}}
+	c.sessions = map[string]*session{"view:source": {ID: "view:source"}}
 	c.sessionOrder = []string{"view:source"}
 	c.data.Works[string(source.ID)] = source
 	c.data.Order = []string{string(source.ID)}
@@ -537,7 +544,7 @@ func TestRelatedWorkContinuesExistingView(t *testing.T) {
 
 func TestRelatedWorkWithoutCheckpointIsRejectedHonestly(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{MaxOpenWorks: 8}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{MaxOpenWorks: 8}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	source := &workRecord{ID: "w-source", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkOpen}
 	c.data.Works[string(source.ID)] = source
 	c.handleAsk(sys, testRequest("branch", agentproto.TypeAsk, map[string]any{"text": "branch", "related_work_id": source.ID}))
@@ -548,8 +555,8 @@ func TestRelatedWorkWithoutCheckpointIsRejectedHonestly(t *testing.T) {
 
 func TestAskAgainstArchivedSessionForksAndAssignsFreshSession(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxTurns: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	c.sessions = map[string]*session{"s-old": {ID: "s-old", Scope: "c", Archived: true, Opened: true, LastBoundary: "report-old", ForkPoint: "report-old", Merge: "auto"}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c.sessions = map[string]*session{"s-old": {ID: "s-old", Archived: true, Opened: true, LastBoundary: "report-old", ForkPoint: "report-old", Merge: "auto"}}
 	c.sessionOrder = []string{"s-old"}
 	request := actorbase.NewBodyMsgContext(actorbase.OriginMailbox, context.Background(), harness.Context{Session: "s-old"}, message.Envelope{ID: "reply-old", ChannelID: "c", Sender: message.Sender{ID: "human:alice:1"}, Kind: message.KindRequest, Type: agentproto.TypeAsk, Payload: json.RawMessage(`{"text":"continue","delivery":"receipt","submission_key":"reply-old"}`)})
 

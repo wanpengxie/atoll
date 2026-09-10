@@ -15,7 +15,7 @@ import (
 func controlFixture(t *testing.T) (*testSys, *controller, *workRecord) {
 	t.Helper()
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 32, MaxTurns: 4, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxAssignmentsPerLooper: 4}, data: newSnapshot(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 32, MaxTurns: 4, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxAssignmentsPerLooper: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "first", "session_id": "session:v", "delivery": "receipt", "submission_key": "one"}))
 	w := c.data.Works[c.data.Order[0]]
 	w.Stage, w.ExecutionState = "thinking", "confirmed_running"
@@ -51,7 +51,7 @@ func TestSteerTransfersOwnerOnceAndReportBeforeAck(t *testing.T) {
 	pc := s.Control
 	d := agentloop.ControlResult{ControlID: pc.ID, Disposition: "accepted", Inputs: pc.Request.Inputs}
 	c.settleControl(sys, s, d, false)
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, TurnID: execution, State: "completed"}))
+	deliverTestReport(c, sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, TurnID: execution, State: "completed"}))
 	next := c.data.Works[string(pc.Targets[0])]
 	if old.State != agentproto.WorkClosed || next.Outcome != agentproto.OutcomeCompleted || next.AssignmentID != execution || s.Control != nil {
 		t.Fatalf("ownership old=%+v new=%+v", old, next)
@@ -128,7 +128,7 @@ func TestHoldOwnerRequeuesOnlyAfterExecutionStops(t *testing.T) {
 	if len(s.Buffer) != 0 || !s.Rebuffer || w.Stage != "stopping" {
 		t.Fatal("owner requeued before stopping")
 	}
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, WorkID: w.ID, AssignmentID: execution, State: "cancelled", ConsumedThrough: 1, History: []json.RawMessage{json.RawMessage(`{"role":"user","content":"first"}`)}}))
+	deliverTestReport(c, sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, WorkID: w.ID, AssignmentID: execution, State: "cancelled", ConsumedThrough: 1, History: []json.RawMessage{json.RawMessage(`{"role":"user","content":"first"}`)}}))
 	if len(s.Buffer) != 1 || s.Execution != "" || !w.Resumed || s.Freeze != "hold" {
 		t.Fatal("hold did not preserve frozen editable owner")
 	}
@@ -137,7 +137,7 @@ func TestHoldOwnerRequeuesOnlyAfterExecutionStops(t *testing.T) {
 		t.Fatal("stopped owner not editable")
 	}
 }
-func TestControlScopeConflictAndQueuedInterruptIsolation(t *testing.T) {
+func TestControlAmbiguousSessionAndQueuedInterruptIsolation(t *testing.T) {
 	sys, c, w := controlFixture(t)
 	s := c.sessions[w.SessionID]
 	c.handleAsk(sys, testRequest("queued", agentproto.TypeAsk, map[string]any{"text": "later", "session_id": s.ID}))
@@ -155,9 +155,9 @@ func TestControlScopeConflictAndQueuedInterruptIsolation(t *testing.T) {
 	if queued.State != agentproto.WorkClosed || w.Stage == "stopping" || s.Freeze != "" {
 		t.Fatal("queued cancellation stopped executing owner")
 	}
-	c.editControl(sys, testRequestFrom("foreign", agentproto.TypeHold, "elsewhere", "human:alice:1", map[string]any{"session_id": s.ID}))
+	c.editControl(sys, testRequestFrom("foreign", agentproto.TypeHold, "elsewhere", "human:alice:1", map[string]any{"session_id": "s-missing"}))
 	if sys.fails["foreign"] != "session_not_found" {
-		t.Fatal("cross-channel control allowed")
+		t.Fatal("control on a session that does not exist was allowed")
 	}
 }
 func TestSteerLimitsSurviveOwnerTransfer(t *testing.T) {
@@ -193,7 +193,7 @@ func TestIdleTargetSteerUnfreezesAndPreservesOperationReceipt(t *testing.T) {
 	c.cfg.MaxAssignmentsPerLooper = 1
 	c.handleAsk(sys, testRequest("later", agentproto.TypeAsk, map[string]any{"text": "later", "session_id": s.ID, "delivery": "receipt", "submission_key": "later"}))
 	s.Freeze = "hold"
-	c.handleReport(sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
+	deliverTestReport(c, sys, testReport("done", "tool:loop-a:9", agentloop.ReportRequest{SessionID: s.ID, WorkID: w.ID, AssignmentID: w.AssignmentID, State: "completed", ConsumedThrough: 1, Result: json.RawMessage(`{"text":"done"}`)}))
 	body := map[string]any{"target": "later", "operation_key": "prioritize"}
 	c.steer(sys, testRequest("pick", agentproto.TypeSteer, body))
 	if s.Execution == "" || s.Freeze != "" || sys.replies["pick"] == nil {

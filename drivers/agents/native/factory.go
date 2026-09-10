@@ -22,8 +22,8 @@ func Manifest() introspect.Manifest {
 		workapi.CapabilityBranchFromWork:     false,
 	})
 	ask := m.Words[workapi.TypeAsk]
-	ask.Description = "Submit work in _context.session. Use the standard session=new parameter to fork a new branch. Receipt mode requires submission_key."
-	ask.ErrorCodes = append(ask.ErrorCodes, "scope_required", "session_not_found")
+	ask.Description = "Submit work in _context.session. Use the standard session=new parameter to fork a new branch. Receipt mode requires submission_key. Work addresses, deduplication and controls belong to the current Controller process; after restart submit a new request."
+	ask.ErrorCodes = append(ask.ErrorCodes, "scope_required", "session_not_found", "relation_history_limit_exceeded")
 	ask.Examples = []json.RawMessage{json.RawMessage(`{"text":"explain the failure"}`)}
 	m.Words[workapi.TypeAsk] = ask
 	steer := m.Words[workapi.TypeSteer]
@@ -56,7 +56,7 @@ func Manifest() introspect.Manifest {
 		m.Words[word] = introspect.WordSpec{Description: description, InputSchema: json.RawMessage(schema), OutputSchema: json.RawMessage(workapi.ControlOutputSchema), ErrorCodes: []string{"invalid_args", "scope_required", "session_not_found", "work_not_found", "cas_mismatch", "target_not_owned", "busy"}}
 	}
 	for _, word := range []string{workapi.TypeSessionList, workapi.TypeSessionGet, workapi.TypeSessionRename, workapi.TypeSessionArchive, workapi.TypeSessionReset, workapi.TypeSessionSync} {
-		m.Words[word] = introspect.WordSpec{Description: "Read or change session lifecycle state.", InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"from_session":{"type":"string"},"through":{"type":"string"}},"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object"}`), ErrorCodes: []string{"scope_required", "session_not_found", "session_archived", "busy", "ledger_unavailable"}}
+		m.Words[word] = introspect.WordSpec{Description: "Read or change session lifecycle state.", InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"from_session":{"type":"string"},"through":{"type":"string"}},"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object"}`), ErrorCodes: []string{"scope_required", "session_not_found", "session_archived", "busy", "ledger_unavailable", "relation_history_limit_exceeded"}}
 	}
 	m.Capabilities["session_control"] = true
 	m.Words[agentbase.TypeOptions] = introspect.WordSpec{Description: "Return the provider-discovered model catalog after configured model patterns are applied.", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object"}`), ErrorCodes: []string{"invalid_args", "provider_failed"}}

@@ -110,9 +110,13 @@ type multiAssignmentSys struct {
 }
 
 func (s *multiAssignmentSys) Life() context.Context { return s.life }
-func (s *multiAssignmentSys) Call(message.Cause, actor.ActorID, string, any) (actorbase.Pending, error) {
+func (s *multiAssignmentSys) Call(_ message.Cause, _ actor.ActorID, word string, payload any) (actorbase.Pending, error) {
+	if word == message.TypeSystemLogQuery && payload.(map[string]any)["session_id"] != nil {
+		return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Payload: json.RawMessage(`{"status":"completed","head_seq":1,"turns":[],"has_more":false}`)})}, nil
+	}
 	return cancelledPending{}, nil
 }
+func (s *multiAssignmentSys) Emit(behavior.EventSpec) (message.ID, error) { return "opened", nil }
 func (s *multiAssignmentSys) Reply(actorbase.Msg, any) (message.ID, error) {
 	return "reply", nil
 }
@@ -141,12 +145,10 @@ func internalRequest(id, typ string, body any) actorbase.Msg {
 func TestOneLooperRunsSeveralLoopsAndStopsOnlyTheAddressedOne(t *testing.T) {
 	life, cancelLife := context.WithCancel(context.Background())
 	sys := &multiAssignmentSys{life: life}
-	_, _ = sharedLooperResources.Create("ctx/session:one", []byte(`{"messages":[],"version":"seed"}`))
-	_, _ = sharedLooperResources.Create("ctx/session:two", []byte(`{"messages":[],"version":"seed"}`))
 	l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{}}
 	for index, workID := range []agentloop.StartRequest{
-		{SessionID: "session:one", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "one"}}},
-		{SessionID: "session:two", WorkID: "w-2", AssignmentID: "a-2", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-2", Seq: 1, Text: "two"}}},
+		{Open: &agentloop.OpenRequest{}, SessionID: "session:one", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "one"}}},
+		{Open: &agentloop.OpenRequest{}, SessionID: "session:two", WorkID: "w-2", AssignmentID: "a-2", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-2", Seq: 1, Text: "two"}}},
 	} {
 		l.start(sys, internalRequest(fmt.Sprintf("start-%d", index), agentloop.TypeStart, workID))
 	}

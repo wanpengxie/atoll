@@ -18,7 +18,7 @@ func Manifest(class string, capabilities map[string]bool) introspect.Manifest {
 		Capabilities: caps,
 		Words: map[string]introspect.WordSpec{
 			TypeAsk: {
-				Description:  "Create one addressable Agent work. Use delivery=wait for a foreground answer; use delivery=receipt plus a stable submission_key for independent lifetime and recovery. related_work_id starts an explicit branch from that visible work's latest durable context checkpoint; it does not merge results back automatically. The response supplies work_id and executable next requests.",
+				Description:  "Create one addressable Agent work. Use delivery=wait for a foreground answer; use delivery=receipt plus a stable submission_key to decouple the reply from execution. Work addresses and deduplication last only for the current Controller process; after restart submit a new request. related_work_id starts an explicit branch from that visible work's latest durable context checkpoint; it does not merge results back automatically. The response supplies work_id and executable next requests.",
 				InputSchema:  json.RawMessage(AskInputSchema),
 				OutputSchema: json.RawMessage(AskOutputSchema),
 				ErrorCodes:   []string{"invalid_args", "capacity", "limit_exceeded", "submission_conflict", "work_not_found", "context_unavailable", "ledger_unavailable"},
@@ -28,7 +28,7 @@ func Manifest(class string, capabilities map[string]bool) introspect.Manifest {
 				},
 			},
 			TypeStatus: {
-				Description:  "Inspect or page caller-visible works without driving, retrying, or changing them. Selected status exposes each input's accepted/assigned/included disposition without repeating its body. Use submission_key to recover a lost cross-channel receipt; follow the opaque stable next_cursor and actor-authored next[].",
+				Description:  "Inspect or page works in this Agent instance without driving, retrying, or changing them. Selected status exposes each input's accepted/assigned/included disposition without repeating its body. Use submission_key to look up a lost receipt for the same caller within the current Controller process; follow the opaque stable next_cursor and actor-authored next[].",
 				InputSchema:  json.RawMessage(StatusInputSchema),
 				OutputSchema: json.RawMessage(StatusOutputSchema),
 				ErrorCodes:   []string{"invalid_args", "work_not_found", "permission_denied"},
@@ -38,7 +38,7 @@ func Manifest(class string, capabilities map[string]bool) introspect.Manifest {
 				},
 			},
 			TypeResult: {
-				Description:  "Read one durable work result. state=open is not a successful empty result: follow the returned agent.result request later, or use the returned targeted interrupt request.",
+				Description:  "Read one work result held by the current Controller process. state=open is not a successful empty result: follow the returned agent.result request later, or use the returned targeted interrupt request.",
 				InputSchema:  json.RawMessage(ResultInputSchema),
 				OutputSchema: json.RawMessage(ResultOutputSchema),
 				ErrorCodes:   []string{"invalid_args", "work_not_found", "permission_denied"},
@@ -54,7 +54,7 @@ func Manifest(class string, capabilities map[string]bool) introspect.Manifest {
 				},
 			},
 			TypeInterrupt: {
-				Description:  "Request stop for one work. The empty form stops caller-visible open work Agent-wide; never use it as a fallback after a targeted failure. operation_key is supported only with work_id.",
+				Description:  "Request stop for one work. The empty form stops open work Agent-wide; never use it as a fallback after a targeted failure. operation_key is supported only with work_id.",
 				InputSchema:  json.RawMessage(InterruptInputSchema),
 				OutputSchema: json.RawMessage(ControlOutputSchema),
 				ErrorCodes:   []string{"invalid_args", "unsupported_scope", "work_not_found", "operation_conflict", "limit_exceeded", "ledger_unavailable"},

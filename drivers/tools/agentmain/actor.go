@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -74,12 +75,25 @@ func manifest() introspect.Manifest {
 
 func proc(cfg Config) actorbase.Proc {
 	return func(sys actorbase.Sys) error {
-		ensureMain(sys, cfg)
-		_, _ = sys.After(10*time.Second, pulse, map[string]any{}, schedule.TimerHomeMemory)
+		if err := ensureMain(sys, cfg); err != nil {
+			return fmt.Errorf("initialize main %s: %w", cfg.Session, err)
+		}
+		if _, err := sys.After(10*time.Second, pulse, map[string]any{}, schedule.TimerHomeMemory); err != nil {
+			return err
+		}
 		for {
 			msg, e := sys.Recv()
 			if e != nil {
 				return e
+			}
+			if msg.Kind == message.KindEvent && msg.Type == pulse && msg.Sender.ID == sys.Self() {
+				if err := autoMerge(sys, msg, cfg); err != nil {
+					slog.Warn("agent-main auto merge failed", "actor", sys.Self(), "session", cfg.Session, "error", err)
+				}
+				if _, err := sys.After(10*time.Second, pulse, map[string]any{}, schedule.TimerHomeMemory); err != nil {
+					return err
+				}
+				continue
 			}
 			if msg.Kind != message.KindRequest {
 				continue
@@ -91,10 +105,6 @@ func proc(cfg Config) actorbase.Proc {
 				mergeOne(sys, msg, cfg)
 			case "agent.main.merge_all":
 				mergeAll(sys, msg, cfg)
-			case pulse:
-				autoMerge(sys, msg, cfg)
-				_, _ = sys.Reply(msg, map[string]any{"disposition": "scanned"})
-				_, _ = sys.After(10*time.Second, pulse, map[string]any{}, schedule.TimerHomeMemory)
 			default:
 				_, _ = sys.Fail(msg, "type_unsupported", "unknown agent-main word")
 			}
@@ -102,11 +112,16 @@ func proc(cfg Config) actorbase.Proc {
 	}
 }
 
-func ensureMain(sys actorbase.Sys, cfg Config) {
-	if _, found, _ := agentbase.LoadContext(sys, cfg.Session); found {
-		return
+func ensureMain(sys actorbase.Sys, cfg Config) error {
+	if _, found, err := agentbase.LoadContext(sys, cfg.Session); err != nil {
+		return err
+	} else if found {
+		return nil
 	}
-	ledger, _ := rows(sys, cfg.Session)
+	ledger, err := rows(sys, cfg.Session)
+	if err != nil {
+		return err
+	}
 	object := agentbase.ContextObject{Messages: []json.RawMessage{}}
 	opened := false
 	for _, item := range ledger {
@@ -117,10 +132,11 @@ func ensureMain(sys actorbase.Sys, cfg Config) {
 			var compact struct {
 				Context []json.RawMessage `json:"context"`
 			}
-			if json.Unmarshal(item.Body, &compact) == nil {
-				object.Messages = compact.Context
-				object.Version = item.ID
+			if err := json.Unmarshal(item.Body, &compact); err != nil {
+				return fmt.Errorf("invalid main compact %s: %w", item.ID, err)
 			}
+			object.Messages = compact.Context
+			object.Version = item.ID
 		case "session.reset":
 			object.Messages = []json.RawMessage{}
 			object.Version = item.ID
@@ -129,7 +145,10 @@ func ensureMain(sys actorbase.Sys, cfg Config) {
 				Decision string          `json:"decision"`
 				Summary  json.RawMessage `json:"summary"`
 			}
-			if json.Unmarshal(item.Body, &merge) == nil && merge.Decision == "merged" && len(merge.Summary) > 0 {
+			if err := json.Unmarshal(item.Body, &merge); err != nil {
+				return fmt.Errorf("invalid main merge %s: %w", item.ID, err)
+			}
+			if merge.Decision == "merged" && len(merge.Summary) > 0 {
 				object.Messages = append(object.Messages, merge.Summary)
 				object.Version = item.ID
 			}
@@ -137,11 +156,13 @@ func ensureMain(sys actorbase.Sys, cfg Config) {
 	}
 	if !opened {
 		id, err := emitMain(sys, "session.opened", map[string]any{"session_id": cfg.Session, "base": nil}, cfg)
-		if err == nil {
-			object.Version = id
+		if err != nil {
+			return err
 		}
+		object.Version = id
 	}
-	_, _ = agentbase.WriteContext(sys, cfg.Session, object)
+	_, err = agentbase.WriteContext(sys, cfg.Session, object)
+	return err
 }
 func emitMain(sys actorbase.Sys, typ string, value map[string]any, cfg Config) (message.ID, error) {
 	value["session"] = cfg.Session
@@ -183,25 +204,44 @@ func mergeOne(sys actorbase.Sys, msg actorbase.Msg, cfg Config) {
 	_, _ = sys.Reply(msg, map[string]any{"disposition": map[bool]string{true: "merged", false: "already_up_to_date"}[merged], "session": req.Session})
 }
 func mergeAll(sys actorbase.Sys, msg actorbase.Msg, cfg Config) {
-	branches, archived, _ := relations(sys, cfg)
+	branches, archived, err := relations(sys, cfg)
+	if err != nil {
+		_, _ = sys.Fail(msg, "merge_failed", err.Error(), map[string]any{"count": 0})
+		return
+	}
 	n := 0
+	var pending []string
 	for b, p := range branches {
 		if p == "manual" && archived[b] {
-			ok, _ := mergeBranch(sys, cfg, b, "manual")
-			if ok {
-				n++
-			}
+			pending = append(pending, b)
+		}
+	}
+	sort.Strings(pending)
+	for _, b := range pending {
+		ok, err := mergeBranch(sys, cfg, b, "manual")
+		if err != nil {
+			_, _ = sys.Fail(msg, "merge_failed", err.Error(), map[string]any{"count": n, "from_session": b})
+			return
+		}
+		if ok {
+			n++
 		}
 	}
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "merged", "count": n})
 }
-func autoMerge(sys actorbase.Sys, _ actorbase.Msg, cfg Config) {
-	branches, archived, _ := relations(sys, cfg)
+func autoMerge(sys actorbase.Sys, _ actorbase.Msg, cfg Config) error {
+	branches, archived, err := relations(sys, cfg)
+	if err != nil {
+		return err
+	}
 	for b := range archived {
 		if branches[b] == "auto" || branches[b] == "" {
-			_, _ = mergeBranch(sys, cfg, b, "auto")
+			if _, err := mergeBranch(sys, cfg, b, "auto"); err != nil {
+				return fmt.Errorf("merge branch %s: %w", b, err)
+			}
 		}
 	}
+	return nil
 }
 
 type row struct {
@@ -288,9 +328,10 @@ func queryRows(sys actorbase.Sys, filter map[string]any) ([]row, error) {
 					}
 				}
 				_, body, unwrapErr := harness.UnwrapPayload(json.RawMessage(payload))
-				if unwrapErr == nil {
-					out = append(out, row{Seq: item.Seq, ID: item.ID, Parent: item.ParentID, Kind: item.Kind, Type: item.MessageType, Body: body, Sender: item.Sender.ID, To: item.Audience})
+				if unwrapErr != nil {
+					return nil, fmt.Errorf("invalid log row %s: %w", item.ID, unwrapErr)
 				}
+				out = append(out, row{Seq: item.Seq, ID: item.ID, Parent: item.ParentID, Kind: item.Kind, Type: item.MessageType, Body: body, Sender: item.Sender.ID, To: item.Audience})
 			}
 		}
 		if !result.HasMore {
@@ -412,6 +453,8 @@ func closedBoundaries(items []row) []row {
 	}
 	turns := map[string]bool{}
 	started := map[string]bool{}
+	startTurns := map[message.ID]string{}
+	accepted := map[string]bool{}
 	var boundaries []row
 	for _, item := range items {
 		if item.Kind == message.KindRequest && (item.Type == "loop.start" || item.Type == "loop.input" || item.Type == "loop.stop" || item.Type == "loop.reset" || item.Type == "loop.sync" || item.Type == "loop.rename") && len(item.To) > 0 {
@@ -424,7 +467,16 @@ func closedBoundaries(items []row) []row {
 					_ = json.Unmarshal(item.Body, &start)
 					if start.Turn != "" {
 						started[start.Turn] = true
+						startTurns[item.ID] = start.Turn
 					}
+				}
+			}
+		}
+		if item.Kind == message.KindResponse {
+			var ack struct{ Status, Disposition string }
+			if json.Unmarshal(item.Body, &ack) == nil && (ack.Status == "" || ack.Status == "completed") && (ack.Disposition == "accepted" || ack.Disposition == "already_accepted") {
+				if turn := startTurns[item.Parent]; turn != "" {
+					accepted[turn] = true
 				}
 			}
 		}
@@ -437,7 +489,7 @@ func closedBoundaries(items []row) []row {
 		}
 		_ = json.Unmarshal(item.Body, &report)
 		terminal := report.State == "completed" || report.State == "failed" || report.State == "cancelled" || report.State == "timeout" || report.State == "execution_unknown"
-		if report.Turn != "" && started[report.Turn] && terminal && !turns[report.Turn] {
+		if report.Turn != "" && started[report.Turn] && accepted[report.Turn] && terminal && !turns[report.Turn] {
 			turns[report.Turn] = true
 			boundaries = append(boundaries, item)
 		}
@@ -486,7 +538,10 @@ func mergeBranch(sys actorbase.Sys, cfg Config, branch, mode string) (bool, erro
 	if e != nil {
 		return false, e
 	}
-	main, _ := rows(sys, cfg.Session)
+	main, e := rows(sys, cfg.Session)
+	if e != nil {
+		return false, e
+	}
 	merged := map[string]bool{}
 	policy := "auto"
 	var parent message.ID

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"time"
 
@@ -13,8 +12,6 @@ import (
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
-
-const snapshotVersion = 1
 
 type inputRecord struct {
 	agentloop.Input
@@ -46,22 +43,22 @@ type workRecord struct {
 	Looper          string                     `json:"looper,omitempty"`
 	ExecutionState  string                     `json:"execution_state,omitempty"`
 	BoundaryID      string                     `json:"boundary_id,omitempty"`
-	Continuation    bool                       `json:"continuation,omitempty"`
 	Operations      map[string]operationRecord `json:"operations,omitempty"`
 	Result          json.RawMessage            `json:"result,omitempty"`
 	CreatedAt       int64                      `json:"created_at"`
 	UpdatedAt       int64                      `json:"updated_at"`
 }
 
-type snapshot struct {
-	Version    int                    `json:"version"`
-	Works      map[string]*workRecord `json:"works"`
-	Order      []string               `json:"order"`
-	NextLooper int                    `json:"next_looper"`
+// workTable belongs to this process only. Work receipts, queues, operations and
+// waiter associations are never persisted or reconstructed after restart.
+type workTable struct {
+	Works      map[string]*workRecord
+	Order      []string
+	NextLooper int
 }
 
-func newSnapshot() snapshot {
-	return snapshot{Version: snapshotVersion, Works: map[string]*workRecord{}}
+func newWorkTable() workTable {
+	return workTable{Works: map[string]*workRecord{}}
 }
 
 func newWorkID() agentproto.WorkID { return agentproto.WorkID("w-" + uuid.NewString()) }
@@ -86,12 +83,11 @@ func operationIndexKey(c harness.Caller, key string) string {
 	return string(c.Channel) + "\x00" + string(c.Actor) + "\x00" + key
 }
 
-func workScopeKey(c harness.Caller) string { return string(c.Channel) }
 func submissionIndexKey(c harness.Caller, key string) string {
 	return string(c.Channel) + "\x00" + string(c.Actor) + "\x00" + key
 }
 
-func (s *snapshot) findSubmission(c harness.Caller, key string) *workRecord {
+func (s *workTable) findSubmission(c harness.Caller, key string) *workRecord {
 	if key == "" {
 		return nil
 	}
@@ -104,7 +100,7 @@ func (s *snapshot) findSubmission(c harness.Caller, key string) *workRecord {
 	return nil
 }
 
-func (s *snapshot) openCount() int {
+func (s *workTable) openCount() int {
 	n := 0
 	for _, w := range s.Works {
 		if w.State == agentproto.WorkOpen {
@@ -114,11 +110,10 @@ func (s *snapshot) openCount() int {
 	return n
 }
 
-func (s *snapshot) visible(c harness.Caller) []*workRecord {
+func (s *workTable) orderedWorks() []*workRecord {
 	out := make([]*workRecord, 0)
 	for _, id := range s.Order {
-		w := s.Works[id]
-		if w != nil && workScopeKey(w.Owner) == workScopeKey(c) {
+		if w := s.Works[id]; w != nil {
 			out = append(out, w)
 		}
 	}
@@ -147,18 +142,3 @@ func detailedWork(w *workRecord) agentproto.Work {
 }
 
 func nowMillis() int64 { return time.Now().UnixMilli() }
-
-func validateSnapshot(s snapshot) error {
-	if s.Version != snapshotVersion {
-		return fmt.Errorf("unsupported snapshot version %d", s.Version)
-	}
-	if s.Works == nil {
-		return fmt.Errorf("snapshot works missing")
-	}
-	for id, w := range s.Works {
-		if w == nil || string(w.ID) != id {
-			return fmt.Errorf("invalid work entry %q", id)
-		}
-	}
-	return nil
-}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
@@ -63,7 +64,13 @@ func LoadContext(sys actorbase.Sys, session string) (ContextObject, bool, error)
 	if err != nil {
 		return ContextObject{}, false, err
 	}
-	if !out.Accepted() || !out.Found {
+	if out.RejectReason == access.ResourceNotFound {
+		return ContextObject{}, false, nil
+	}
+	if !out.Accepted() {
+		return ContextObject{}, false, fmt.Errorf("context read rejected: %s", out.RejectReason)
+	}
+	if !out.Found {
 		return ContextObject{}, false, nil
 	}
 	var object ContextObject

@@ -1,6 +1,7 @@
 package agentlooper
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 
@@ -22,6 +23,8 @@ func testContextMessages(session string) []json.RawMessage {
 }
 
 type looperTestBase struct{ actorbase.Sys }
+
+func (looperTestBase) Life() context.Context { return context.Background() }
 
 func (looperTestBase) Resource() actorbase.ResourceHandle { return sharedLooperResources }
 

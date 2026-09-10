@@ -157,7 +157,6 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 				}
 				w.Operations[pc.Key] = operationRecord{Kind: agentproto.TypeSteer, Hash: pc.Hash, Response: response}
 			}
-			_ = c.commit(sys, msg.Cause(), w)
 		}
 		_, _ = sys.Reply(msg, json.RawMessage(response))
 		c.scheduleQueued(sys, msg.Cause())
@@ -185,9 +184,6 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	pc.Request = agentloop.InputRequest{WorkID: owner.ID, AssignmentID: s.Execution, SessionID: s.ID, ControlID: pc.ID, Inputs: inputs}
 	s.Control = pc
-	for _, id := range pc.Targets {
-		_ = c.commit(sys, msg.Cause(), c.data.Works[string(id)])
-	}
 	go deliverControl(sys, s.ID, owner.Looper, pc)
 }
 
@@ -201,26 +197,12 @@ func deliverControl(sys actorbase.Sys, sessionID, looper string, pc *pendingCont
 		err = json.Unmarshal(raw, &decision)
 	}
 	if err != nil {
-		// Absence of an ack is not rejection. Inspect the same execution; do
-		// not resend a new control or put the input back on a runnable queue.
+		// An absent acknowledgement is unknown admission. Report that result;
+		// do not inspect another actor or replay the control to reconstruct it.
 		unknown = true
-		inspectCtx, inspectCancel := context.WithTimeout(sys.Life(), 5*time.Second)
-		defer inspectCancel()
-		query, queryErr := controlCall(inspectCtx, sys, pc.Message.Cause(), looper, agentloop.TypeInspect, agentloop.InspectRequest{WorkID: pc.Request.WorkID, AssignmentID: pc.Execution, SessionID: sessionID})
-		if queryErr == nil {
-			var result struct {
-				Controls []agentloop.ControlResult `json:"controls"`
-			}
-			if json.Unmarshal(query, &result) == nil {
-				for _, d := range result.Controls {
-					if d.ControlID == pc.ID {
-						decision = d
-						unknown = false
-						break
-					}
-				}
-			}
-		}
+	}
+	if sys.Life().Err() != nil {
+		return
 	}
 	_, _ = sys.Post(behavior.RequestSpec{Cause: pc.Message.Cause(), Type: controlDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(controlDone{Session: sessionID, Execution: pc.Execution, ID: pc.ID, Decision: decision, Unknown: unknown})})
 }
@@ -247,7 +229,7 @@ func controlCall(ctx context.Context, sys actorbase.Sys, cause message.Cause, ta
 		}
 	}()
 	response, err := p.Wait(ctx, 0)
-	if err != nil {
+	if err != nil && sys.Life().Err() == nil {
 		_ = p.Cancel()
 	}
 	stopProgress()
@@ -349,7 +331,6 @@ func (c *controller) settleControl(sys actorbase.Sys, s *session, d agentloop.Co
 			}
 			w.Operations[pc.Key] = operationRecord{Kind: agentproto.TypeSteer, Hash: pc.Hash, Response: response}
 		}
-		_ = c.commit(sys, pc.Message.Cause(), w)
 	}
 	s.Control = nil
 	_, _ = sys.Reply(pc.Message, json.RawMessage(response))
@@ -426,7 +407,6 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		c.data.Order = append(c.data.Order, string(updated.ID))
 		s.Buffer[queueIndex(s, w.ID)] = updated.ID
 		c.closeLinked(sys, msg.Cause(), w, "replaced_by", updated)
-		_ = c.commit(sys, msg.Cause(), updated)
 		c.attachWaiter(sys, msg, updated)
 	case agentproto.TypeHold:
 		duration := 30 * time.Minute

@@ -13,8 +13,12 @@ import (
 
 func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 	if msg.Type == agentproto.TypeSessionList || msg.Type == agentproto.TypeSessionGet {
-		if err := c.recoverSessionProjection(sys); err != nil {
-			_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
+		if err := c.refreshSessionRelations(sys); err != nil {
+			code := "ledger_unavailable"
+			if errors.Is(err, errRelationHistoryLimit) {
+				code = errRelationHistoryLimit.Error()
+			}
+			_, _ = sys.Fail(msg, code, err.Error())
 			return
 		}
 		if msg.Type == agentproto.TypeSessionList {
