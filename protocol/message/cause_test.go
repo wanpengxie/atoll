@@ -111,3 +111,15 @@ func TestTheTwoNonsenseCombinationsCannotBeBuilt(t *testing.T) {
 		}
 	}
 }
+
+// Causality depends only on envelope IDs; payload metadata belongs to its own argument.
+func TestCauseDoesNotInterpretPayload(t *testing.T) {
+	env := Envelope{ID: "parent", CorrelationID: "tree"}
+	want := From(env)
+	for _, raw := range []string{`{"_context":{"session":"one"},"body":{}}`, `{"_context":{"session":"two","caller":{"channel":"c","actor":"human:a:1"}},"body":{}}`, `not-json`} {
+		env.Payload = []byte(raw)
+		if got := From(env); got != want {
+			t.Fatalf("payload changed causality: %q", raw)
+		}
+	}
+}

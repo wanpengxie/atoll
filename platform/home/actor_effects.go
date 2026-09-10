@@ -93,7 +93,7 @@ func (h *Home) announceEnded(
 }
 
 func (h *Home) writeNarration(ctx context.Context, cause message.Cause, typ string, payload map[string]any) {
-	if err := h.emitSystemEvent(ctx, cause, typ, payload); err != nil {
+	if err := h.emitSystemEvent(ctx, cause, harness.Context{}, typ, payload); err != nil {
 		h.logger.Warn("platform.narration.dropped",
 			"channel", h.channelID, "type", typ, "err", err)
 	}
@@ -114,6 +114,7 @@ func (e *systemEventWriteError) Error() string {
 func (h *Home) emitSystemEvent(
 	ctx context.Context,
 	cause message.Cause,
+	app harness.Context,
 	typ string,
 	payload map[string]any,
 ) error {
@@ -133,12 +134,12 @@ func (h *Home) emitSystemEvent(
 		Payload:    raw,
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{},
-		Cause:      cause,
+		Cause:      cause, Context: app,
 	})
 	if err != nil {
 		return fmt.Errorf("platform: build system event %q: %w", typ, err)
 	}
-	env.Payload, err = harness.WrapPayload(harness.Context{}, env.Payload)
+	env.Payload, err = harness.WrapPayload(app, env.Payload)
 	if err != nil {
 		return fmt.Errorf("platform: wrap system event %q: %w", typ, err)
 	}

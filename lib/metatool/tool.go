@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // ToolSpec is the protocol-layer definition of one meta tool: its name,
@@ -49,7 +50,8 @@ func MetaTools() []MetaTool {
 
 // Trigger carries the originating request's cause and application context.
 type Trigger struct {
-	Cause message.Cause
+	Cause   message.Cause
+	Context harness.Context
 }
 
 // RuntimeContext is the per-turn context passed into every meta tool.

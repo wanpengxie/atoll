@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -260,7 +261,7 @@ func TestAgentControl04ResumedRequestFormsSingleItemBatch(t *testing.T) {
 	l, _, rt := newV7Loop(t, nil)
 	for idx, id := range []book.RequestID{"r1", "r2", "r3"} {
 		row := &book.Request{ID: id, Sender: "caller", Input: runtimeproto.Input{SourceID: string(id), Text: string(id)}, Bytes: 2, Location: book.Buffered, Resumed: idx == 0}
-		row.Scope = l.vault.Mint(message.Anchored(message.ID(string(id)), message.ID(string(id))).WithContext(message.Context{}))
+		row.Scope = l.vault.Mint(message.Anchored(message.ID(string(id)), message.ID(string(id))), harness.Context{})
 		l.state.Requests[id] = row
 		l.state.Buffer = append(l.state.Buffer, id)
 		l.state.BufferBytes += row.Bytes
@@ -286,7 +287,7 @@ func TestAgentControl05FrozenGuardStopsStartNext(t *testing.T) {
 func TestAgentControl06UnholdIsIdempotentAndRestartsQueue(t *testing.T) {
 	l, sys, rt := newV7Loop(t, nil)
 	l.freeze("h", time.Minute)
-	row := &book.Request{ID: "r", Input: runtimeproto.Input{Text: "r"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("r"), message.ID("r")).WithContext(message.Context{}))}
+	row := &book.Request{ID: "r", Input: runtimeproto.Input{Text: "r"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("r"), message.ID("r")), harness.Context{})}
 	l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
 	l.handleIntake(v7Request("u1", TypeUnhold, "caller", `{}`))
 	l.handleIntake(v7Request("u2", TypeUnhold, "caller", `{}`))
@@ -362,7 +363,7 @@ func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
 		l, _, rt := newV7Loop(t, nil)
 		now := time.Unix(100, 0)
 		l.nowFn = func() time.Time { return now }
-		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")).WithContext(message.Context{}))}
+		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")), harness.Context{})}
 		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
 		l.freeze("h", time.Second)
 		now = now.Add(2 * time.Second)
@@ -375,7 +376,7 @@ func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
 		l, sys, rt := newV7Loop(t, nil)
 		now := time.Unix(100, 0)
 		l.nowFn = func() time.Time { return now }
-		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")).WithContext(message.Context{}))}
+		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")), harness.Context{})}
 		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
 		l.freeze("h", time.Second)
 		l.handleHoldExpired(json.RawMessage(`{"hold_id":"old"}`))
@@ -397,7 +398,7 @@ func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
 		now := time.Unix(100, 0)
 		l.nowFn = func() time.Time { return now }
 		sys.afterErr = true
-		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")).WithContext(message.Context{}))}
+		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")), harness.Context{})}
 		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
 		l.freeze("h", time.Second)
 		if !l.frozen(now) || len(sys.timers) != 0 {
@@ -426,7 +427,7 @@ func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
 func TestAgentControl13CapacityFailureStillUnfreezesAndAdvancesExistingQueue(t *testing.T) {
 	l, sys, rt := newV7Loop(t, nil)
 	l.def.cfg.BufferMaxCount = 1
-	row := &book.Request{ID: "stock", Input: runtimeproto.Input{Text: "stock"}, Bytes: 5, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("stock"), message.ID("stock")).WithContext(message.Context{}))}
+	row := &book.Request{ID: "stock", Input: runtimeproto.Input{Text: "stock"}, Bytes: 5, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("stock"), message.ID("stock")), harness.Context{})}
 	l.state.Requests[row.ID], l.state.Buffer, l.state.BufferBytes = row, []book.RequestID{row.ID}, row.Bytes
 	l.freeze("h", time.Minute)
 	l.handleIntake(v7Request("overflow", TypeAsk, "caller", `{"text":"overflow"}`))
@@ -447,7 +448,7 @@ func TestAgentControl14RequestCapacityGateExemptsControlAndReplace(t *testing.T)
 	}
 	l, sys, _ := newV7Loop(t, nil)
 	l.def.cfg.RequestMaxCount = 1
-	target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")).WithContext(message.Context{}))}
+	target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")), harness.Context{})}
 	l.state.Requests[target.ID], l.state.Buffer, l.state.BufferBytes = target, []book.RequestID{target.ID}, target.Bytes
 	l.handleIntake(v7Request("replacement", TypeReplace, "caller", `{"target":"target","old_text":"old","new_text":"new"}`))
 	if l.state.Requests["replacement"] == nil || len(sys.progresses("replacement")) != 1 {
@@ -710,7 +711,7 @@ func TestAgentControl25ReplaceFailuresAreAtomicAndSuccessNeedsNoFreeze(t *testin
 				l.def.cfg.BufferMaxBytes = test.maxBytes
 			}
 			before := &book.Request{ID: "before", Sender: "caller", Input: runtimeproto.Input{Text: "before"}, Bytes: 6, Location: book.Buffered}
-			target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: test.location, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")).WithContext(message.Context{}))}
+			target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: test.location, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")), harness.Context{})}
 			after := &book.Request{ID: "after", Sender: "caller", Input: runtimeproto.Input{Text: "after"}, Bytes: 5, Location: book.Buffered}
 			l.state.Requests[before.ID], l.state.Requests[target.ID], l.state.Requests[after.ID] = before, target, after
 			l.state.Buffer = []book.RequestID{before.ID, target.ID, after.ID}
@@ -728,7 +729,7 @@ func TestAgentControl25ReplaceFailuresAreAtomicAndSuccessNeedsNoFreeze(t *testin
 
 	l, sys, _ := newV7Loop(t, nil)
 	l.state.Turn = &book.Turn{Phase: book.TurnActive, ID: "busy"}
-	target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")).WithContext(message.Context{}))}
+	target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")), harness.Context{})}
 	after := &book.Request{ID: "after", Sender: "caller", Input: runtimeproto.Input{Text: "after"}, Bytes: 5, Location: book.Buffered}
 	l.state.Requests[target.ID], l.state.Requests[after.ID] = target, after
 	l.state.Buffer, l.state.BufferBytes = []book.RequestID{target.ID, after.ID}, target.Bytes+after.Bytes
@@ -741,7 +742,7 @@ func TestAgentControl25ReplaceFailuresAreAtomicAndSuccessNeedsNoFreeze(t *testin
 func TestAgentControl26ReplaceBuildsProviderInputAndResumedTemplate(t *testing.T) {
 	t.Run("plain text and attachments", func(t *testing.T) {
 		l, _, rt := newV7Loop(t, nil)
-		target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")).WithContext(message.Context{}))}
+		target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")), harness.Context{})}
 		l.state.Requests[target.ID], l.state.Buffer, l.state.BufferBytes = target, []book.RequestID{target.ID}, 3
 		l.handleIntake(v7Request("new", TypeReplace, "caller", `{"target":"target","old_text":"old","new_text":"new text","attachments":[{"address":"daemon://file","name":"f"}]}`))
 		input := rt.starts[0].Messages[0]
@@ -751,7 +752,7 @@ func TestAgentControl26ReplaceBuildsProviderInputAndResumedTemplate(t *testing.T
 	})
 	t.Run("resumed correction template", func(t *testing.T) {
 		l, _, rt := newV7Loop(t, nil)
-		target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Resumed: true, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")).WithContext(message.Context{}))}
+		target := &book.Request{ID: "target", Sender: "caller", Input: runtimeproto.Input{Text: "old"}, Bytes: 3, Location: book.Buffered, Resumed: true, Scope: l.vault.Mint(message.Anchored(message.ID("target"), message.ID("target")), harness.Context{})}
 		l.state.Requests[target.ID], l.state.Buffer, l.state.BufferBytes = target, []book.RequestID{target.ID}, 3
 		l.handleIntake(v7Request("new", TypeReplace, "caller", `{"target":"target","old_text":"old","new_text":"new"}`))
 		want := `用户明确将 "old" 修改为 "new"，请遵循更新之后的指令或信息，其余保持不变。`
@@ -895,7 +896,7 @@ func TestAgentControl36SteerTargetWithoutActiveTurnPromotesAndStarts(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			l, sys, rt := newV7Loop(t, map[string]bool{runtimeproto.CapabilitySteer: true})
 			for _, id := range test.ids {
-				row := &book.Request{ID: id, Sender: "caller", Input: runtimeproto.Input{SourceID: string(id), Text: string(id)}, Bytes: len(id), Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID(string(id)), message.ID(string(id))).WithContext(message.Context{}))}
+				row := &book.Request{ID: id, Sender: "caller", Input: runtimeproto.Input{SourceID: string(id), Text: string(id)}, Bytes: len(id), Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID(string(id)), message.ID(string(id))), harness.Context{})}
 				l.state.Requests[id] = row
 				l.state.Buffer = append(l.state.Buffer, id)
 				l.state.BufferBytes += row.Bytes

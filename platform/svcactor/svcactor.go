@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -47,7 +47,7 @@ type Members struct {
 // takes a cause like every other write: the arrival is reported ABOUT the local
 // request the frame was turned into, so it hangs from that request rather than
 // floating loose beside it.
-type Audit func(context.Context, message.Cause, map[string]any) error
+type Audit func(context.Context, message.Cause, harness.Context, map[string]any) error
 
 type Deps struct {
 	Port    *Port
@@ -116,7 +116,7 @@ func (s *service) serve(sys actorbase.Sys) error {
 		go func(table ServiceTable) {
 			defer startup.Done()
 			// Startup materialisation: nothing on this ledger asked for it.
-			card := s.buildCard(sys, message.Root(), table)
+			card := s.buildCard(sys, message.Root(), harness.Context{}, table)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if s.revision != 0 || sys.Life().Err() != nil {
@@ -186,7 +186,7 @@ func (s *service) handleMailbox(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = sys.Fail(msg, "invalid_args", err.Error())
 			return
 		}
-		card := s.buildCard(sys, msg.Cause(), table)
+		card := s.buildCard(sys, msg.Cause(), msg.Context(), table)
 		s.mu.Lock()
 		if err := writeService(sys.State(), table, card); err != nil {
 			s.mu.Unlock()
@@ -241,7 +241,7 @@ func fullActorID(id actor.ActorID) bool {
 // prompted the asking: rebuilding the card because someone reset the service
 // table continues that request's errand; materialising it at startup continues
 // nothing, so it says Root.
-func (s *service) buildCard(sys actorbase.Sys, cause message.Cause, table ServiceTable) channel.Card {
+func (s *service) buildCard(sys actorbase.Sys, cause message.Cause, app harness.Context, table ServiceTable) channel.Card {
 	card := skeletonCard(table)
 	words := card.Words
 	byReceiver := map[actor.ActorID][]string{}
@@ -249,7 +249,7 @@ func (s *service) buildCard(sys actorbase.Sys, cause message.Cause, table Servic
 		byReceiver[receiver] = append(byReceiver[receiver], word)
 	}
 	for receiver, names := range byReceiver {
-		pending, err := sys.Call(cause, receiver, introspect.QueryDescribe, map[string]any{})
+		pending, err := sys.Call(cause, app, receiver, introspect.QueryDescribe, map[string]any{})
 		if err != nil {
 			continue
 		}
@@ -403,12 +403,12 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	// it as Request.Deadline); it crosses the membrane as this local request's
 	// own ExpiresAt so the receiver's window is the caller's, not this
 	// engine's default. Absent → the default.
-	root, body, err := actorbase.PrepareRoot(harness.Context{Caller: &from}, json.RawMessage(req.Payload))
+	app, body, err := actorbase.PrepareRoot(harness.Context{Caller: &from}, json.RawMessage(req.Payload))
 	if err != nil {
 		return gateFailure(channel.GateChannelUnavailable, err.Error())
 	}
-	app, _ := root.Context()
-	spec := behavior.RequestSpec{Cause: root, Type: req.Type, Payload: body, Audience: message.Audience{target}}
+
+	spec := behavior.RequestSpec{Cause: message.Root(), Context: app, Type: req.Type, Payload: body, Audience: message.Audience{target}}
 	if req.Deadline > 0 {
 		deadline := req.Deadline
 		spec.ExpiresAt = &deadline
@@ -426,7 +426,7 @@ func (s *service) dispatch(ctx, life context.Context, sys actorbase.Sys, caller 
 	defer stopPendingCancel()
 	// The local request this frame became is a root here, so its correlation is
 	// its own id; the audit note hangs from it.
-	if err := s.deps.Audit(ctx, message.Anchored(localRequestID, localRequestID).WithContext(app), map[string]any{"from": req.From, "type": req.Type, "local_request_id": localRequestID}); err != nil {
+	if err := s.deps.Audit(ctx, message.Anchored(localRequestID, localRequestID), app, map[string]any{"from": req.From, "type": req.Type, "local_request_id": localRequestID}); err != nil {
 		s.deps.Logger.Warn("svcactor.audit_failed", "request_id", localRequestID, "err", err)
 	}
 	progressDone := make(chan struct{})

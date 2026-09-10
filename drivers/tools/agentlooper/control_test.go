@@ -3,14 +3,16 @@ package agentlooper
 import (
 	"context"
 	"encoding/json"
+	"sync"
+	"testing"
+
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	llmproto "github.com/wanpengxie/atoll/drivers/tools/pillm/api"
 	workspaceproto "github.com/wanpengxie/atoll/drivers/tools/piworkspace/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"sync"
-	"testing"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func TestSealAndSteerHaveOneLinearizationPoint(t *testing.T) {
@@ -61,7 +63,7 @@ type steeringSys struct {
 	injected bool
 }
 
-func (s *steeringSys) Call(c message.Cause, target actor.ActorID, typ string, v any) (actorbase.Pending, error) {
+func (s *steeringSys) Call(c message.Cause, app harness.Context, target actor.ActorID, typ string, v any) (actorbase.Pending, error) {
 	if typ == s.trigger && !s.injected {
 		s.injected = true
 		d, err := s.a.acceptInput(agentloop.InputRequest{ControlID: "steer", Inputs: []agentloop.Input{{ID: "next", Seq: 2, Text: "new constraint"}}})
@@ -72,7 +74,7 @@ func (s *steeringSys) Call(c message.Cause, target actor.ActorID, typ string, v 
 			s.t.Fatal("accepted input claimed consumed during wait")
 		}
 	}
-	return s.reliabilitySys.Call(c, target, typ, v)
+	return s.reliabilitySys.Call(c, app, target, typ, v)
 }
 func TestSteerDuringModelAndToolWaitStaysInSameExecution(t *testing.T) {
 	for _, trigger := range []string{llmproto.TypeGenerate, workspaceproto.TypeBash} {

@@ -211,7 +211,7 @@ func TestBuildEvent_FillsOwnFieldsAndLeavesPenInjectedZero(t *testing.T) {
 		Payload:    json.RawMessage(`{"hi":1}`),
 		Visibility: message.Visibility("channel"),
 		Audience:   message.Audience{actor.ActorID("a")},
-		Cause:      message.Root(),
+		Cause:      message.Root(), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatalf("BuildEvent err: %v", err)
@@ -240,7 +240,7 @@ func TestBuildEvent_FillsOwnFieldsAndLeavesPenInjectedZero(t *testing.T) {
 // BuildEvent rejects an empty event type.
 func TestBuildEvent_EmptyType(t *testing.T) {
 	// Cause is supplied so the only thing missing is the type this test names.
-	if _, err := BuildEvent(fixedClock(1), EventSpec{Cause: message.Root()}); err == nil {
+	if _, err := BuildEvent(fixedClock(1), EventSpec{Cause: message.Root(), Context: harness.Context{}}); err == nil {
 		t.Fatal("empty type must error")
 	}
 }
@@ -250,7 +250,7 @@ func TestBuildEvent_EmptyType(t *testing.T) {
 // payload that cannot be marshalled is an error, never a silently empty spec.
 func TestEventSpecJSON(t *testing.T) {
 	trigger := message.Envelope{ID: "req-1", CorrelationID: "errand-1"}
-	spec, err := EventSpecJSON(message.From(trigger), "agent.text", map[string]string{"text": "hi"}, actor.ActorID("a"))
+	spec, err := EventSpecJSON(message.From(trigger), harness.Context{}, "agent.text", map[string]string{"text": "hi"}, actor.ActorID("a"))
 	if err != nil {
 		t.Fatalf("EventSpecJSON err: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestEventSpecJSON(t *testing.T) {
 
 	// No audience at all stays nil rather than becoming an empty slice: an
 	// event addressed to nobody in particular is a real shape.
-	spec, err = EventSpecJSON(message.Root(), "agent.text", nil)
+	spec, err = EventSpecJSON(message.Root(), harness.Context{}, "agent.text", nil)
 	if err != nil {
 		t.Fatalf("EventSpecJSON(no audience) err: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestEventSpecJSON(t *testing.T) {
 		t.Fatalf("audience = %v, want nil", spec.Audience)
 	}
 
-	if _, err := EventSpecJSON(message.Root(), "agent.text", make(chan int)); err == nil {
+	if _, err := EventSpecJSON(message.Root(), harness.Context{}, "agent.text", make(chan int)); err == nil {
 		t.Fatal("an unmarshallable payload must error")
 	}
 }

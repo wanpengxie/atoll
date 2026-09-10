@@ -9,6 +9,7 @@ import (
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const (
@@ -176,7 +177,7 @@ func removeQueue(s *session, id agentproto.WorkID) {
 	}
 }
 
-func (c *controller) closeLinked(sys actorbase.Sys, cause message.Cause, w *workRecord, key string, to *workRecord) {
+func (c *controller) closeLinked(sys actorbase.Sys, cause message.Cause, app harness.Context, w *workRecord, key string, to *workRecord) {
 	w.State = agentproto.WorkClosed
 	w.Stage = ""
 	w.Outcome = agentproto.OutcomeAnswered
@@ -187,7 +188,7 @@ func (c *controller) closeLinked(sys actorbase.Sys, cause message.Cause, w *work
 	c.finishWaiters(sys, w)
 }
 
-func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause) {
+func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause, app harness.Context) {
 	start := c.nextSession
 	for offset := 0; offset < len(c.sessionOrder); offset++ {
 		if len(c.sessionOrder) == 0 {
@@ -229,7 +230,7 @@ func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause) {
 			}
 		}
 		owner.Inputs = inputs
-		if !c.dispatch(sys, owner, cause) {
+		if !c.dispatch(sys, owner, cause, app) {
 			return
 		}
 		s.Buffer = s.Buffer[len(batch):]
@@ -237,7 +238,7 @@ func (c *controller) scheduleSessions(sys actorbase.Sys, cause message.Cause) {
 		s.Owner = owner.ID
 		s.LastUsed = nowMillis()
 		for _, w := range batch[:len(batch)-1] {
-			c.closeLinked(sys, cause, w, "merged_into", owner)
+			c.closeLinked(sys, cause, app, w, "merged_into", owner)
 		}
 		c.nextSession = (i + 1) % len(c.sessionOrder)
 	}

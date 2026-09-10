@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
@@ -40,6 +39,8 @@ type RequestSpec struct {
 	// how "nobody said" became "there is none" on every request written to
 	// serve another one.
 	Cause message.Cause
+	// Context is the application metadata to carry with this message.
+	Context harness.Context
 	// ExpiresAt is the request's declared deadline — durable truth the
 	// substrate reaper enforces (a live caller's own timer merely races it).
 	ExpiresAt *int64

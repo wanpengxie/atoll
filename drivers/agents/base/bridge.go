@@ -40,7 +40,7 @@ func (b *metatoolBridge) Invoke(ctx context.Context, scope effectcap.Scope, in r
 		if tool.Spec.Name != in.Name {
 			continue
 		}
-		rv := tool.Execute(ctx, in.Params, b.exec, metatool.RuntimeContext{Trigger: metatool.Trigger{Cause: snapshot.Cause}})
+		rv := tool.Execute(ctx, in.Params, b.exec, metatool.RuntimeContext{Trigger: metatool.Trigger{Cause: snapshot.Cause, Context: snapshot.Context}})
 		raw, err := json.Marshal(rv.Value)
 		if err != nil {
 			return runtimeproto.ToolResult{Text: err.Error(), IsError: true}

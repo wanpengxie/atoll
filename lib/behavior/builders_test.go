@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func builderClock() time.Time { return time.UnixMilli(1_000) }
@@ -14,7 +15,7 @@ func TestBuildRequest(t *testing.T) {
 		Type:     "x.y",
 		Audience: message.Audience{"tool:t"},
 		Cause:    message.Anchored("p1", "p1"),
-		Payload:  []byte(`{"body":null}`),
+		Payload:  []byte(`{"body":null}`), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
@@ -34,10 +35,10 @@ func TestBuildRequest(t *testing.T) {
 
 	// Required fields enforced. Each case supplies every OTHER required field so
 	// the error it observes is the one it names.
-	if _, err := BuildRequest(builderClock, RequestSpec{Audience: message.Audience{"a"}, Cause: message.Root()}); err == nil {
+	if _, err := BuildRequest(builderClock, RequestSpec{Audience: message.Audience{"a"}, Cause: message.Root(), Context: harness.Context{}}); err == nil {
 		t.Fatal("missing type: want error")
 	}
-	if _, err := BuildRequest(builderClock, RequestSpec{Type: "x", Cause: message.Root()}); err == nil {
+	if _, err := BuildRequest(builderClock, RequestSpec{Type: "x", Cause: message.Root(), Context: harness.Context{}}); err == nil {
 		t.Fatal("missing audience: want error")
 	}
 	// A zero Cause is silence, not a root: the builder refuses it rather than
@@ -48,7 +49,7 @@ func TestBuildRequest(t *testing.T) {
 
 	// Caller id scheme override.
 	env, _ = BuildRequest(builderClock, RequestSpec{
-		Type: "x", Audience: message.Audience{"a"}, ID: "my-id", Cause: message.Root(), Payload: []byte(`{"body":null}`),
+		Type: "x", Audience: message.Audience{"a"}, ID: "my-id", Cause: message.Root(), Payload: []byte(`{"body":null}`), Context: harness.Context{},
 	})
 	if env.ID != "my-id" {
 		t.Fatalf("id override = %q", env.ID)
@@ -57,7 +58,7 @@ func TestBuildRequest(t *testing.T) {
 
 func TestBuildEvent(t *testing.T) {
 	env, err := BuildEvent(builderClock, EventSpec{
-		Type: "agent.text", Cause: message.Anchored("p1", "c1"),
+		Type: "agent.text", Cause: message.Anchored("p1", "c1"), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatalf("BuildEvent: %v", err)
@@ -72,7 +73,7 @@ func TestBuildEvent(t *testing.T) {
 	if env.ChannelID != "" {
 		t.Fatalf("event channel_id = %q, want empty (pen-injected)", env.ChannelID)
 	}
-	if _, err := BuildEvent(builderClock, EventSpec{Cause: message.Root()}); err == nil {
+	if _, err := BuildEvent(builderClock, EventSpec{Cause: message.Root(), Context: harness.Context{}}); err == nil {
 		t.Fatal("missing type: want error")
 	}
 	// Same law as a request's: an event with no stated cause is refused rather

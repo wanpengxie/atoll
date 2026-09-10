@@ -278,7 +278,7 @@ type forkSys struct {
 }
 
 func (*forkSys) Self() actor.ActorID { return "agent:clone-source:1" }
-func (s *forkSys) Call(cause message.Cause, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
+func (s *forkSys) Call(cause message.Cause, app harness.Context, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	s.mu.Lock()
 	s.cause, s.target, s.word, s.payload = cause, target, word, payload
 	s.mu.Unlock()

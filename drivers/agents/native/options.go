@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type catalogModel struct {
@@ -22,7 +23,7 @@ type catalogModel struct {
 }
 
 func (c *controller) modelCatalog(sys actorbase.Sys) ([]catalogModel, error) {
-	pending, err := sys.Call(message.Root(), actorID(c.cfg.LLMActor), llmproto.TypeModels, llmproto.ModelsRequest{})
+	pending, err := sys.Call(message.Root(), harness.Context{}, actorID(c.cfg.LLMActor), llmproto.TypeModels, llmproto.ModelsRequest{})
 	if err != nil {
 		return nil, err
 	}

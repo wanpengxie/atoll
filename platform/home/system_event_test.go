@@ -32,7 +32,7 @@ func TestEmitSystemEventSealsEnvelopeAndChecksAccepted(t *testing.T) {
 			return harness.WriteResult{MessageID: env.ID, Seq: 7}, nil
 		}),
 	}
-	if err := h.emitSystemEvent(context.Background(), message.Root(), "test.event", map[string]any{"x": 1}); err != nil {
+	if err := h.emitSystemEvent(context.Background(), message.Root(), harness.Context{}, "test.event", map[string]any{"x": 1}); err != nil {
 		t.Fatal(err)
 	}
 	if captured == nil || captured.ID == "" || captured.TS != 1234 ||
@@ -52,7 +52,7 @@ func TestEmitSystemEventSealsEnvelopeAndChecksAccepted(t *testing.T) {
 			RejectReason: harness.HarnessTypeUnknown, RejectDetail: "rejected",
 		}, nil
 	})
-	err := h.emitSystemEvent(context.Background(), message.Root(), "test.rejected", map[string]any{})
+	err := h.emitSystemEvent(context.Background(), message.Root(), harness.Context{}, "test.rejected", map[string]any{})
 	var rejected *systemEventWriteError
 	if !errors.As(err, &rejected) || rejected.Reason != harness.HarnessTypeUnknown {
 		t.Fatalf("reject err=%v", err)

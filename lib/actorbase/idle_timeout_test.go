@@ -32,7 +32,7 @@ func TestSlidingDeadlineRestartsOnProgressAndClosesOnSilence(t *testing.T) {
 	e.lifeCtx = context.Background()
 
 	expires := time.Now().Add(40 * time.Millisecond).UnixMilli()
-	id, err := e.Submit(behavior.RequestSpec{Type: "work", Audience: message.Audience{"actor:callee"}, Cause: message.Root(), ExpiresAt: &expires})
+	id, err := e.Submit(behavior.RequestSpec{Type: "work", Audience: message.Audience{"actor:callee"}, Cause: message.Root(), ExpiresAt: &expires, Context: harness.Context{}})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestAuthorTwoTerminalNamesSelfWhenRequestCopyHasNoSender(t *testing.T) {
 	e.pen = pen
 	e.call = newCallLedger(e.life, pen, e.clockFn, Hooks{}, func() actor.ActorID { return "tool:remote:1" }, nil)
 
-	id, err := e.Submit(behavior.RequestSpec{Type: "work", Audience: message.Audience{"actor:callee"}, Cause: message.Root()})
+	id, err := e.Submit(behavior.RequestSpec{Type: "work", Audience: message.Audience{"actor:callee"}, Cause: message.Root(), Context: harness.Context{}})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}

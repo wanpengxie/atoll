@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Any State access on these paths would reintroduce work snapshot recovery.
@@ -150,7 +151,7 @@ type failedControlSys struct {
 }
 
 func (s *failedControlSys) Life() context.Context { return s.ctx }
-func (s *failedControlSys) Call(_ message.Cause, _ actor.ActorID, word string, _ any) (actorbase.Pending, error) {
+func (s *failedControlSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, word string, _ any) (actorbase.Pending, error) {
 	s.calls = append(s.calls, word)
 	if s.pending != nil {
 		return s.pending, nil
@@ -174,7 +175,7 @@ func TestContextRefusalClosesCurrentWorkWithoutRetry(t *testing.T) {
 	done := startDone{Session: w.SessionID, Turn: w.AssignmentID, Looper: w.Looper, Error: "session_context_unavailable", Detail: "History exceeds 4096 messages; open a new session."}
 	msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "start-refusal", Sender: message.Sender{ID: sys.Self()}, Payload: mustJSON(done)})
 	c.startDone(sys, msg)
-	c.scheduleQueued(sys, message.Root())
+	c.scheduleQueued(sys, message.Root(), harness.Context{})
 	if w.State != agentproto.WorkClosed || w.Outcome != agentproto.OutcomeFailed || len(sys.posts) != 1 || c.sessions[w.SessionID].Execution != "" {
 		t.Fatalf("context refusal was retried: work=%+v posts=%v", w, sys.posts)
 	}
@@ -206,7 +207,7 @@ func TestControllerExitDoesNotCancelRemoteRequests(t *testing.T) {
 			pending := &cancelledLifePending{}
 			sys := &failedControlSys{testSys: newTestSys(newTestState()), ctx: ctx, pending: pending}
 			if word == agentloop.TypeStart {
-				awaitStart(sys, message.Root(), "branch", "turn", "loop-a", pending)
+				awaitStart(sys, message.Root(), harness.Context{}, "branch", "turn", "loop-a", pending)
 			} else {
 				deliverControl(sys, "branch", "loop-a", &pendingControl{ID: "control", Execution: "turn", Message: testRequest("steer", agentproto.TypeSteer, map[string]any{})})
 			}

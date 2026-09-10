@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const (
@@ -36,7 +37,7 @@ func (r progressPathResolver) BuildClass(_ channel.ID, _ actor.ActorID, class st
 						return err
 					}
 					rv := metatool.ExecuteCallActor(msg.Ctx(), json.RawMessage(`{"actor_id":"progress-target","type":"progress.work","payload":{},"wait":true}`), base.ExecFace(sys, time.Second), metatool.RuntimeContext{
-						Trigger: metatool.Trigger{Cause: msg.Cause()},
+						Trigger: metatool.Trigger{Cause: msg.Cause(), Context: msg.Context()},
 					})
 					_, _ = sys.Reply(msg, rv.Value)
 				}
@@ -130,7 +131,7 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
 		Type: "test.observe.progress", Payload: json.RawMessage(`{"_context":{"session":"progress-S","caller":{"channel":"progress-model-channel","actor":"human:alice:1"}},"body":{}}`), Audience: message.Audience{model}, Visibility: message.VisibilityPublic,
-		Cause: message.Root(),
+		Cause: message.Root(), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +154,7 @@ func TestRealJobTableKeepsChildProgressOutOfParentToolResult(t *testing.T) {
 			env := row.Envelope
 			if env.Kind == message.KindRequest && env.Sender.ID == model && env.Type == "progress.work" {
 				var carried struct {
-					Context message.Context `json:"_context"`
+					Context harness.Context `json:"_context"`
 				}
 				if err := json.Unmarshal(env.Payload, &carried); err != nil || carried.Context.Session != "progress-S" || carried.Context.Caller == nil || carried.Context.Caller.Actor != "human:alice:1" {
 					t.Fatalf("tool call lost request context: %s %v", env.Payload, err)

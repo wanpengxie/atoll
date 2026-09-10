@@ -114,7 +114,8 @@ func defaultRC() metatool.RuntimeContext {
 		Trigger: metatool.Trigger{Cause: message.From(message.Envelope{
 			ID: "trigger-1", Kind: message.KindRequest, Type: "agent.turn",
 			Payload: json.RawMessage(`{"_context":{},"body":{}}`),
-		})},
+		}), Context: harness.Context{},
+		},
 	}
 }
 

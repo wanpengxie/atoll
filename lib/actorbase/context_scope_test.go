@@ -28,20 +28,20 @@ func TestOutgoingVerbsCarryContextWithoutReceivingParent(t *testing.T) {
 		t.Run(verb, func(t *testing.T) {
 			e, pen := contextEngine(t)
 			// This engine has never received or indexed the parent. All information
-			// needed for the child must arrive through the in-hand request's Cause.
-			spec := behavior.RequestSpec{Cause: msg.Cause(), Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`)}
+			// needed for the child must arrive through separate Cause and Context values.
+			spec := behavior.RequestSpec{Cause: msg.Cause(), Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`), Context: msg.Context()}
 			var err error
 			switch verb {
 			case "emit":
-				_, err = e.Emit(behavior.EventSpec{Cause: msg.Cause(), Type: "progress", Payload: []byte(`{}`)})
+				_, err = e.Emit(behavior.EventSpec{Cause: msg.Cause(), Type: "progress", Payload: []byte(`{}`), Context: msg.Context()})
 			case "post":
 				_, err = e.Post(spec)
 			case "call":
-				_, err = e.Call(msg.Cause(), "tool:worker:1", "work", map[string]any{})
+				_, err = e.Call(msg.Cause(), msg.Context(), "tool:worker:1", "work", map[string]any{})
 			case "submit":
 				_, err = e.Submit(spec)
 			default:
-				_, err = e.CallFor(msg.Cause(), harness.Caller{Channel: "c", Actor: "agent:relay:1"}, "tool:worker:1", "work", map[string]any{})
+				_, err = e.CallFor(msg.Cause(), msg.Context(), harness.Caller{Channel: "c", Actor: "agent:relay:1"}, "tool:worker:1", "work", map[string]any{})
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -67,7 +67,7 @@ func TestResponseCanCauseToolCallAfterRequestScopeEnds(t *testing.T) {
 	cause := response.Cause()
 	cancel()
 	e, pen := contextEngine(t)
-	if _, err := e.Post(behavior.RequestSpec{Cause: cause, Type: "tool.run", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`)}); err != nil {
+	if _, err := e.Post(behavior.RequestSpec{Cause: cause, Type: "tool.run", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`), Context: response.Context()}); err != nil {
 		t.Fatal(err)
 	}
 	got, _, err := harness.UnwrapPayload(pen.last().Payload)
@@ -85,7 +85,7 @@ func TestParallelScopesDoNotShareOrMutateContext(t *testing.T) {
 			defer wg.Done()
 			id := message.ID(fmt.Sprintf("request-%d", i))
 			msg := NewBodyMsgContext(OriginMailbox, t.Context(), harness.Context{Session: string(id)}, message.Envelope{ID: id, Payload: []byte(`{}`)})
-			if _, err := e.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`)}); err != nil {
+			if _, err := e.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`), Context: msg.Context()}); err != nil {
 				t.Error(err)
 			}
 		}(i)
@@ -101,21 +101,26 @@ func TestParallelScopesDoNotShareOrMutateContext(t *testing.T) {
 	}
 }
 
-func TestIDOnlyCauseFailsBeforeWriting(t *testing.T) {
+func TestIDOnlyCauseCarriesExplicitContext(t *testing.T) {
+	app := harness.Context{Session: "explicit"}
 	for _, verb := range []string{"post", "emit", "call"} {
 		e, pen := contextEngine(t)
 		cause := message.Anchored("old-request", "tree")
 		var err error
 		switch verb {
 		case "post":
-			_, err = e.Post(behavior.RequestSpec{Cause: cause, Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`)})
+			_, err = e.Post(behavior.RequestSpec{Cause: cause, Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: []byte(`{}`), Context: app})
 		case "emit":
-			_, err = e.Emit(behavior.EventSpec{Cause: cause, Type: "event", Payload: []byte(`{}`)})
+			_, err = e.Emit(behavior.EventSpec{Cause: cause, Type: "event", Payload: []byte(`{}`), Context: app})
 		default:
-			_, err = e.Call(cause, "tool:worker:1", "work", map[string]any{})
+			_, err = e.Call(cause, app, "tool:worker:1", "work", map[string]any{})
 		}
-		if err == nil || pen.last() != nil {
-			t.Fatalf("%s silently wrote with lost context: %v", verb, err)
+		if err != nil || pen.last() == nil {
+			t.Fatalf("%s failed: %v", verb, err)
+		}
+		got, _, err := harness.UnwrapPayload(pen.last().Payload)
+		if err != nil || got.Session != app.Session {
+			t.Fatalf("%s lost explicit context: %+v %v", verb, got, err)
 		}
 	}
 }
@@ -127,25 +132,27 @@ func TestSessionAssignmentIsAnImmutableRequestValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	cause := next.Cause()
+	if cause != original.Cause() {
+		t.Fatal("changing session changed message causality")
+	}
 	exposed := next.Context()
 	exposed.Caller.Actor = "human:changed:1"
-	app, err := cause.Context()
-	if err != nil || app.Session != "new-session" || app.Caller.Actor != "human:a:1" || original.Context().Session != "old" {
-		t.Fatalf("mutated request scope: %+v %v", app, err)
+	app := next.Context()
+	if app.Session != "new-session" || app.Caller.Actor != "human:a:1" || original.Context().Session != "old" {
+		t.Fatalf("mutated request scope: %+v", app)
 	}
 }
 
 func TestPreparedRootKeepsAllocatedSessionThroughAudit(t *testing.T) {
 	e, pen := contextEngine(t)
-	root, body, err := PrepareRoot(harness.Context{Caller: &harness.Caller{Channel: "c", Actor: "human:a:1"}}, []byte(`{"session":"new","text":"hello"}`))
+	app, body, err := PrepareRoot(harness.Context{Caller: &harness.Caller{Channel: "c", Actor: "human:a:1"}}, []byte(`{"session":"new","text":"hello"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := root.Context()
-	if err != nil || app.Session == "" || app.Session == "new" {
+	if app.Session == "" || app.Session == "new" {
 		t.Fatalf("context=%+v err=%v", app, err)
 	}
-	id, err := e.Post(behavior.RequestSpec{Cause: root, Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: body})
+	id, err := e.Post(behavior.RequestSpec{Cause: message.Root(), Type: "work", Audience: message.Audience{"tool:worker:1"}, Payload: body, Context: app})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +160,7 @@ func TestPreparedRootKeepsAllocatedSessionThroughAudit(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(requestApp, app) {
 		t.Fatalf("request context changed: %+v %v", requestApp, err)
 	}
-	_, err = e.Emit(behavior.EventSpec{Cause: message.Anchored(id, id).WithContext(app), Type: "audit", Payload: []byte(`{}`)})
+	_, err = e.Emit(behavior.EventSpec{Cause: message.Anchored(id, id), Type: "audit", Payload: []byte(`{}`), Context: app})
 	if err != nil {
 		t.Fatal(err)
 	}

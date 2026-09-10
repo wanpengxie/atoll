@@ -423,14 +423,10 @@ func envelopeFromMsg(m Msg) *message.Envelope {
 }
 
 // PrepareRoot resolves standard root parameters before dispatch. A relay can
-// carry the returned Cause's context into its audit message, including a newly
+// carry the returned context into its audit message, including a newly
 // allocated session, without recovering metadata from the engine by request ID.
-func PrepareRoot(app harness.Context, body json.RawMessage) (message.Cause, json.RawMessage, error) {
-	app, body, err := applyRootSession(app, body, true)
-	if err != nil {
-		return message.Cause{}, nil, err
-	}
-	return message.Root().WithContext(app), body, nil
+func PrepareRoot(app harness.Context, body json.RawMessage) (harness.Context, json.RawMessage, error) {
+	return applyRootSession(app.Clone(), body, true)
 }
 
 func applyRootSession(app harness.Context, body json.RawMessage, root bool) (harness.Context, json.RawMessage, error) {
@@ -699,10 +695,7 @@ func (e *engine) Emit(spec behavior.EventSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	app, err := spec.Cause.Context()
-	if err != nil {
-		return "", err
-	}
+	app := spec.Context.Clone()
 	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
 	if err != nil {
 		return "", err
@@ -744,10 +737,7 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 	if err != nil {
 		return "", err
 	}
-	app, err := spec.Cause.Context()
-	if err != nil {
-		return "", err
-	}
+	app := spec.Context.Clone()
 	app, env.Payload, err = applyRootSession(app, env.Payload, env.ParentID == "")
 	if err != nil {
 		return "", err
@@ -762,7 +752,7 @@ func (e *engine) Post(spec behavior.RequestSpec) (message.ID, error) {
 
 // --- Sys: request write + caller closure ---------------------------------
 
-func (e *engine) Call(cause message.Cause, target actor.ActorID, msgType string, payload any) (Pending, error) {
+func (e *engine) Call(cause message.Cause, app harness.Context, target actor.ActorID, msgType string, payload any) (Pending, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -771,7 +761,7 @@ func (e *engine) Call(cause message.Cause, target actor.ActorID, msgType string,
 		Cause:    cause,
 		Type:     msgType,
 		Payload:  raw,
-		Audience: message.Audience{target},
+		Audience: message.Audience{target}, Context: app,
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -779,13 +769,13 @@ func (e *engine) Call(cause message.Cause, target actor.ActorID, msgType string,
 	return &pendingTicket{call: e.call, id: id}, nil
 }
 
-func (e *engine) CallFor(cause message.Cause, caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error) {
+func (e *engine) CallFor(cause message.Cause, app harness.Context, caller harness.Caller, target actor.ActorID, msgType string, args any) (Pending, error) {
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
 	}
 	id, err := e.submit(behavior.RequestSpec{
-		Cause: cause, Type: msgType, Payload: raw, Audience: message.Audience{target},
+		Cause: cause, Type: msgType, Payload: raw, Audience: message.Audience{target}, Context: app,
 	}, &caller)
 	if err != nil {
 		return nil, err
@@ -832,10 +822,7 @@ func (e *engine) submit(spec behavior.RequestSpec, caller *harness.Caller) (mess
 	if err != nil {
 		return "", err
 	}
-	app, err := spec.Cause.Context()
-	if err != nil {
-		return "", err
-	}
+	app := spec.Context.Clone()
 	if caller != nil {
 		copy := *caller
 		app.Caller = &copy

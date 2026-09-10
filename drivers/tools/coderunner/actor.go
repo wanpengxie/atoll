@@ -288,7 +288,7 @@ func resolveDirectoryDetailed(requires []string, catalog introspect.Catalog, dec
 }
 
 func callAndWait(sys actorbase.Sys, msg actorbase.Msg, target actor.ActorID, typ string, payload any) (actorbase.Msg, error) {
-	pending, err := sys.Call(msg.Cause(), target, typ, payload)
+	pending, err := sys.Call(msg.Cause(), msg.Context(), target, typ, payload)
 	if err != nil {
 		return actorbase.Msg{}, err
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type piLoopSys struct {
@@ -41,7 +42,7 @@ func completedPending(value json.RawMessage) actorbase.Pending {
 	return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "pi-response", Kind: message.KindResponse, Payload: payload})}
 }
 
-func (s *piLoopSys) Call(_ message.Cause, _ actor.ActorID, typ string, value any) (actorbase.Pending, error) {
+func (s *piLoopSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, typ string, value any) (actorbase.Pending, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	switch typ {
@@ -134,7 +135,7 @@ type bridgeStoreSys struct {
 	calls  int
 }
 
-func (s *bridgeStoreSys) Call(_ message.Cause, _ actor.ActorID, typ string, value any) (actorbase.Pending, error) {
+func (s *bridgeStoreSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, typ string, value any) (actorbase.Pending, error) {
 	s.calls++
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

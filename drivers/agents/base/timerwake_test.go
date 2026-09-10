@@ -203,7 +203,7 @@ func TestQueuedWorkIsControllableByAnyMemberNotOnlyItsSender(t *testing.T) {
 		relayed := &book.Request{
 			ID: "relayed", Sender: "agent:relay:1", Location: book.Buffered,
 			Input: runtimeproto.Input{Text: "old"}, Bytes: 3,
-			Scope: l.vault.Mint(message.Anchored(message.ID("relayed"), message.ID("relayed")).WithContext(message.Context{})),
+			Scope: l.vault.Mint(message.Anchored(message.ID("relayed"), message.ID("relayed")), harness.Context{}),
 		}
 		l.state.Requests[relayed.ID] = relayed
 		l.state.Buffer, l.state.BufferBytes = []book.RequestID{relayed.ID}, relayed.Bytes

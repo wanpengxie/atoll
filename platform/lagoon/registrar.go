@@ -739,7 +739,7 @@ func (r *Registrar) establishChannelEdges(sys actorbase.Sys, trigger actorbase.M
 	}
 	for _, st := range steps {
 		raw, _ := json.Marshal(map[string]any{"decl_id": st.decl})
-		id, err := sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: message.TypeSystemMemberCreate, Audience: message.Audience{st.target}, Payload: raw})
+		id, err := sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: message.TypeSystemMemberCreate, Audience: message.Audience{st.target}, Payload: raw, Context: trigger.Context()})
 		relation := ChannelRelation{Host: st.host, DeclID: st.decl, RequestID: id}
 		if err != nil {
 			relation.Error = err.Error()
@@ -1114,7 +1114,7 @@ func validateServiceProfile(profile regspec.ChannelProfile, kinds map[string]act
 // consequences of that word, not errands the registry started on its own.
 func (r *Registrar) postChannelEdges(sys actorbase.Sys, trigger actorbase.Msg, row regspec.ChannelRow, word string) {
 	raw, _ := json.Marshal(map[string]any{"decl_id": string(row.ID)})
-	_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw})
+	_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw, Context: trigger.Context()})
 	if row.Type == ChannelTypeActor {
 		raw, _ = json.Marshal(map[string]any{"decl_id": "seat:" + string(row.ID)})
 	}
@@ -1123,9 +1123,9 @@ func (r *Registrar) postChannelEdges(sys actorbase.Sys, trigger actorbase.Msg, r
 		if parent == "" {
 			return
 		}
-		_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.ActorID("peer:" + parent)}, Payload: raw})
+		_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.ActorID("peer:" + parent)}, Payload: raw, Context: trigger.Context()})
 	} else if row.Type == ChannelTypeActor {
-		_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw})
+		_, _ = sys.Post(behavior.RequestSpec{Cause: trigger.Cause(), Type: word, Audience: message.Audience{actor.SystemActorID}, Payload: raw, Context: trigger.Context()})
 	}
 }
 

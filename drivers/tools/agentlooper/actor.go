@@ -26,6 +26,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const Class = "agent-looper"
@@ -101,6 +102,7 @@ func manifest() introspect.Manifest {
 type assignment struct {
 	start    agentloop.StartRequest
 	cause    message.Cause
+	app      harness.Context
 	cancel   context.CancelFunc
 	mu       sync.Mutex
 	inputs   []agentloop.Input
@@ -306,7 +308,7 @@ func (l *looper) reset(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "busy", "session has an active turn")
 		return
 	}
-	spec, _ := behavior.EventSpecJSON(msg.Cause(), agentloop.TypeSessionReset, req)
+	spec, _ := behavior.EventSpecJSON(msg.Cause(), msg.Context(), agentloop.TypeSessionReset, req)
 	id, err := sys.Emit(spec)
 	if err != nil {
 		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
@@ -326,7 +328,7 @@ func (l *looper) rename(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "invalid_args", "session_id and name are required")
 		return
 	}
-	spec, _ := behavior.EventSpecJSON(msg.Cause(), agentloop.TypeSessionRename, req)
+	spec, _ := behavior.EventSpecJSON(msg.Cause(), msg.Context(), agentloop.TypeSessionRename, req)
 	if _, err := sys.Emit(spec); err != nil {
 		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
 		return
@@ -382,7 +384,7 @@ func (l *looper) syncSession(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	row := agentloop.Synced{SessionID: req.SessionID, Context: target.Messages, TokensBefore: agentbase.ContextTokens(target.Messages)}
 	row.From.Session, row.From.After, row.From.Through = req.From.Session, req.From.After, req.From.Through
-	spec, _ := behavior.EventSpecJSON(msg.Cause(), agentloop.TypeSessionSync, row)
+	spec, _ := behavior.EventSpecJSON(msg.Cause(), msg.Context(), agentloop.TypeSessionSync, row)
 	id, err := sys.Emit(spec)
 	if err != nil {
 		_, _ = sys.Fail(msg, "ledger_unavailable", err.Error())
@@ -525,11 +527,11 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	turnCause := msg.Cause()
-	a := &assignment{start: req, cause: turnCause, cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted", history: append([]json.RawMessage(nil), object.Messages...), version: object.Version}
+	a := &assignment{start: req, cause: turnCause, app: msg.Context(), cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted", history: append([]json.RawMessage(nil), object.Messages...), version: object.Version}
 	l.active[req.AssignmentID] = a
 	l.mu.Unlock()
 	if !exists {
-		opened, _ := behavior.EventSpecJSON(turnCause, agentloop.TypeSessionOpened, agentloop.Opened{SessionID: req.SessionID, Base: func() *agentloop.BoundaryRef {
+		opened, _ := behavior.EventSpecJSON(turnCause, msg.Context(), agentloop.TypeSessionOpened, agentloop.Opened{SessionID: req.SessionID, Base: func() *agentloop.BoundaryRef {
 			if req.Open != nil {
 				return req.Open.Base
 			}
@@ -830,7 +832,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		if a.start.Effort != "" {
 			options = mustRaw(map[string]any{"thinkingLevel": a.start.Effort})
 		}
-		generatedMsg, err := callMessage(ctx, sys, a.cause, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: a.start.Prompt, Context: ref, Tools: definitions, Options: options})
+		generatedMsg, err := callMessage(ctx, sys, a.cause, a.app, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: a.start.Prompt, Context: ref, Tools: definitions, Options: options})
 		if err != nil {
 			state := "confirmed"
 			kind := "llm_failed"
@@ -927,7 +929,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 				toolTimeout = time.Duration(a.start.ToolTimeoutMS) * time.Millisecond
 			}
 			toolCtx, cancelTool := context.WithTimeout(ctx, toolTimeout)
-			toolMsg, callErr := callMessage(toolCtx, sys, generatedMsg.Cause(), actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
+			toolMsg, callErr := callMessage(toolCtx, sys, generatedMsg.Cause(), generatedMsg.Context(), actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
 			cancelTool()
 			if callErr != nil {
 				detail := callErr.Error()
@@ -1330,7 +1332,7 @@ func resolveTools(ctx context.Context, sys actorbase.Sys, a *assignment) ([]reso
 		seen[binding.Name] = struct{}{}
 		describe, ok := manifests[binding.Actor]
 		if !ok {
-			raw, err := call(ctx, sys, a.cause, actor.ActorID(binding.Actor), introspect.QueryDescribe, introspect.DescribeRequest{})
+			raw, err := call(ctx, sys, a.cause, a.app, actor.ActorID(binding.Actor), introspect.QueryDescribe, introspect.DescribeRequest{})
 			if err != nil {
 				return nil, fmt.Errorf("describe tool actor %q: %w", binding.Actor, err)
 			}
@@ -1464,18 +1466,18 @@ func parseModel(value string) llmproto.ModelRef {
 	}
 	return llmproto.ModelRef{Model: value}
 }
-func call(ctx context.Context, sys actorbase.Sys, cause message.Cause, target actor.ActorID, typ string, payload any) (json.RawMessage, error) {
-	msg, err := callMessage(ctx, sys, cause, target, typ, payload)
+func call(ctx context.Context, sys actorbase.Sys, cause message.Cause, app harness.Context, target actor.ActorID, typ string, payload any) (json.RawMessage, error) {
+	msg, err := callMessage(ctx, sys, cause, app, target, typ, payload)
 	if err != nil {
 		return nil, err
 	}
 	return append(json.RawMessage(nil), msg.Payload...), nil
 }
-func callMessage(ctx context.Context, sys actorbase.Sys, cause message.Cause, target actor.ActorID, typ string, payload any) (actorbase.Msg, error) {
+func callMessage(ctx context.Context, sys actorbase.Sys, cause message.Cause, app harness.Context, target actor.ActorID, typ string, payload any) (actorbase.Msg, error) {
 	if err := ctx.Err(); err != nil {
 		return actorbase.Msg{}, err
 	}
-	pd, err := sys.Call(cause, target, typ, payload)
+	pd, err := sys.Call(cause, app, target, typ, payload)
 	if err != nil {
 		return actorbase.Msg{}, err
 	}
@@ -1569,7 +1571,7 @@ func (l *looper) report(sys actorbase.Sys, a *assignment, state string, _ int64,
 		turn = a.start.AssignmentID
 	}
 	payload := agentloop.ReportRequest{TurnID: turn, SessionID: a.start.SessionID, State: state}
-	if _, err := sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(payload)}); err != nil {
+	if _, err := sys.Post(behavior.RequestSpec{Cause: a.cause, Type: agentloop.TypeReport, Audience: message.Audience{actor.ActorID(a.start.ControllerActor)}, Payload: mustJSON(payload), Context: a.app}); err != nil {
 		slog.Error("agent-looper report append failed", "actor", sys.Self(), "controller", a.start.ControllerActor, "session", a.start.SessionID, "turn", turn, "state", state, "error", err)
 	}
 }
@@ -1608,7 +1610,7 @@ func (l *looper) compactIfNeeded(ctx context.Context, sys actorbase.Sys, a *assi
 	if model == "" {
 		model = a.start.Model
 	}
-	summaryMsg, err := callMessage(ctx, sys, a.cause, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{
+	summaryMsg, err := callMessage(ctx, sys, a.cause, a.app, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{
 		ModelRef: parseModel(model), Purpose: "compact", Context: ref,
 		Options: func() json.RawMessage {
 			if a.start.Effort == "" {
@@ -1630,7 +1632,7 @@ func (l *looper) compactIfNeeded(ctx context.Context, sys actorbase.Sys, a *assi
 		return nil, ref, fmt.Errorf("compact context: %w", err)
 	}
 	row := agentloop.Compact{SessionID: a.start.SessionID, Context: compacted, TokensBefore: before, Size: agentloop.ContextSize{Before: before, After: agentbase.ContextTokens(compacted)}}
-	spec, err := behavior.EventSpecJSON(summaryMsg.Cause(), agentloop.TypeSessionCompact, row)
+	spec, err := behavior.EventSpecJSON(summaryMsg.Cause(), summaryMsg.Context(), agentloop.TypeSessionCompact, row)
 	if err != nil {
 		return nil, ref, err
 	}

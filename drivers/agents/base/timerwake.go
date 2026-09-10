@@ -106,7 +106,7 @@ func (l *agentLoop) postTimerWake(msg actorbase.Msg) {
 		Type:      TypeTimerWake,
 		Payload:   raw,
 		Audience:  message.Audience{l.sys.Self()},
-		ExpiresAt: &expires,
+		ExpiresAt: &expires, Context: msg.Context(),
 	}); err != nil {
 		// Nothing here can be retried usefully: the fire is already truth, and
 		// a second Post would arm a second turn for the same alarm. Say it

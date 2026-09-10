@@ -108,6 +108,7 @@ func cloneWork(w *workRecord) *workRecord {
 	var out workRecord
 	_ = json.Unmarshal(raw, &out)
 	out.SourceCause = w.SourceCause
+	out.SourceContext = w.SourceContext.Clone()
 	return &out
 }
 
@@ -278,14 +279,14 @@ func sameSeat(left, right string) bool {
 	return len(a) == 3 && len(b) == 3 && a[0] == b[0] && a[1] == b[1]
 }
 
-func (c *controller) emit(sys actorbase.Sys, cause message.Cause, typ string, value any) {
-	spec, err := behavior.EventSpecJSON(cause, typ, value)
+func (c *controller) emit(sys actorbase.Sys, cause message.Cause, app harness.Context, typ string, value any) {
+	spec, err := behavior.EventSpecJSON(cause, app, typ, value)
 	if err == nil {
 		_, _ = sys.Emit(spec)
 	}
 }
 
-func awaitStart(sys actorbase.Sys, cause message.Cause, session, turn, looper string, pending actorbase.Pending) {
+func awaitStart(sys actorbase.Sys, cause message.Cause, app harness.Context, session, turn, looper string, pending actorbase.Pending) {
 	ctx, cancel := context.WithTimeout(sys.Life(), 15*time.Second)
 	defer cancel()
 	done := startDone{Session: session, Turn: turn, Looper: looper}
@@ -315,7 +316,7 @@ func awaitStart(sys actorbase.Sys, cause message.Cause, session, turn, looper st
 	if sys.Life().Err() != nil {
 		return
 	}
-	_, _ = sys.Post(behavior.RequestSpec{Cause: cause, Type: startDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(done)})
+	_, _ = sys.Post(behavior.RequestSpec{Cause: cause, Type: startDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(done), Context: app})
 }
 
 func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
@@ -348,10 +349,10 @@ func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
 		w.UpdatedAt = nowMillis()
 		w.Result = mustJSON(map[string]any{"error_code": done.Error, "detail": done.Detail, "guidance": "Open a new session; this session's context could not be established consistently."})
 		s.Execution, s.Owner = "", ""
-		c.emit(sys, msg.Cause(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
+		c.emit(sys, msg.Cause(), msg.Context(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
 		c.finishWaiters(sys, w)
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "rejected"})
-		c.scheduleQueued(sys, msg.Cause())
+		c.scheduleQueued(sys, msg.Cause(), msg.Context())
 		return
 	}
 	for i := range w.Inputs {
@@ -367,7 +368,7 @@ func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	s.Buffer = append([]agentproto.WorkID{w.ID}, s.Buffer...)
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "rerouted"})
-	c.scheduleQueued(sys, msg.Cause())
+	c.scheduleQueued(sys, msg.Cause(), msg.Context())
 }
 
 func (c *controller) toolBindings() []agentloop.ToolBinding {
@@ -449,9 +450,10 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	w.SessionID = s.ID
 	w.SourceCause = msg.Cause()
+	w.SourceContext = msg.Context()
 	c.data.Works[string(w.ID)] = w
 	c.data.Order = append(c.data.Order, string(w.ID))
-	c.emit(sys, msg.Cause(), "agent.work.accepted", map[string]any{"work": publicWork(w), "owner": caller, "input_id": w.Inputs[0].ID})
+	c.emit(sys, msg.Cause(), msg.Context(), "agent.work.accepted", map[string]any{"work": publicWork(w), "owner": caller, "input_id": w.Inputs[0].ID})
 	s.Buffer = append(s.Buffer, w.ID)
 	s.Freeze = ""
 	s.RestoreInterrupt = false
@@ -461,21 +463,21 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 	} else {
 		c.answerAsk(sys, msg, w)
 	}
-	c.scheduleQueued(sys, msg.Cause())
+	c.scheduleQueued(sys, msg.Cause(), msg.Context())
 }
 
 func (c *controller) attachWaiter(sys actorbase.Sys, msg actorbase.Msg, w *workRecord) {
 	c.wait[w.ID] = append(c.wait[w.ID], msg)
 	_, _ = sys.Progress(msg, w.Stage, map[string]any{"work_id": w.ID, "work_state": w.State, "stage": w.Stage, "execution_state": w.ExecutionState, "controls": []map[string]any{{"word": agentproto.TypeInterrupt, "label": "停止", "payload": map[string]any{"work_id": w.ID}}}})
-	go func(ctx context.Context, life context.Context, self actor.ActorID, cause message.Cause, workID agentproto.WorkID, requestID message.ID) {
+	go func(ctx context.Context, life context.Context, self actor.ActorID, cause message.Cause, app harness.Context, workID agentproto.WorkID, requestID message.ID) {
 		select {
 		case <-ctx.Done():
 			if life.Err() == nil {
-				_, _ = sys.Post(behavior.RequestSpec{Cause: cause, Type: waitClosedType, Audience: message.Audience{self}, Payload: mustJSON(map[string]any{"work_id": workID, "request_id": requestID})})
+				_, _ = sys.Post(behavior.RequestSpec{Cause: cause, Type: waitClosedType, Audience: message.Audience{self}, Payload: mustJSON(map[string]any{"work_id": workID, "request_id": requestID}), Context: app})
 			}
 		case <-life.Done():
 		}
-	}(msg.Ctx(), sys.Life(), sys.Self(), msg.Cause(), w.ID, msg.ID)
+	}(msg.Ctx(), sys.Life(), sys.Self(), msg.Cause(), msg.Context(), w.ID, msg.ID)
 }
 
 func (c *controller) handleWaitClosed(sys actorbase.Sys, msg actorbase.Msg) {
@@ -549,9 +551,9 @@ func (c *controller) freeLooper() (string, bool) {
 	return "", false
 }
 
-func (c *controller) scheduleQueued(sys actorbase.Sys, cause message.Cause) {
+func (c *controller) scheduleQueued(sys actorbase.Sys, cause message.Cause, app harness.Context) {
 	if len(c.sessions) > 0 {
-		c.scheduleSessions(sys, cause)
+		c.scheduleSessions(sys, cause, app)
 		return
 	}
 	for _, id := range c.data.Order {
@@ -559,13 +561,13 @@ func (c *controller) scheduleQueued(sys actorbase.Sys, cause message.Cause) {
 		if w == nil || w.State != agentproto.WorkOpen || w.Stage != "queued" || w.AssignmentID != "" {
 			continue
 		}
-		if !c.dispatch(sys, w, cause) {
+		if !c.dispatch(sys, w, cause, app) {
 			return
 		}
 	}
 }
 
-func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Cause) bool {
+func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Cause, app harness.Context) bool {
 	if w.State != agentproto.WorkOpen || len(c.cfg.Loopers) == 0 {
 		return false
 	}
@@ -622,7 +624,7 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: selection.Model, Effort: selection.Effort, MaxTurns: c.cfg.MaxTurns, Tools: &tools,
 		ToolResultMaxLines: c.cfg.ToolResultMaxLines, ToolResultMaxBytes: c.cfg.ToolResultMaxBytes, ToolImageMaxBytes: c.cfg.ToolImageMaxBytes,
 		ContextWindow: c.cfg.Compact.ContextWindow, ReserveTokens: c.cfg.Compact.ReserveTokens, KeepRecentTokens: c.cfg.Compact.KeepRecentTokens, CompactModel: c.cfg.Compact.Model}
-	pending, err := sys.Call(startCause, actorID(looper), agentloop.TypeStart, request)
+	pending, err := sys.Call(startCause, w.SourceContext, actorID(looper), agentloop.TypeStart, request)
 	if err != nil {
 		if s != nil {
 			// A stale holder is discovered only when the next instruction is
@@ -645,17 +647,17 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 		w.State, w.Outcome = agentproto.WorkClosed, agentproto.OutcomeFailed
 		w.Stage, w.ExecutionState, w.UpdatedAt = "", "dispatch_failed", nowMillis()
 		w.Result = mustJSON(map[string]any{"error_code": "dispatch_failed", "detail": err.Error()})
-		c.emit(sys, cause, "agent.work.dispatch_failed", map[string]any{"work_id": w.ID, "detail": err.Error()})
+		c.emit(sys, cause, app, "agent.work.dispatch_failed", map[string]any{"work_id": w.ID, "detail": err.Error()})
 		c.finishWaiters(sys, w)
 		return true
 	}
 	if s != nil {
 		s.Opened = true
 	}
-	go awaitStart(sys, startCause, w.SessionID, w.AssignmentID, looper, pending)
+	go awaitStart(sys, startCause, w.SourceContext, w.SessionID, w.AssignmentID, looper, pending)
 	// The accepted response to loop.start is ledger evidence for report validation;
 	// Controller does not mirror it into a session fact.
-	c.emit(sys, cause, "agent.work.dispatched", publicWork(w))
+	c.emit(sys, cause, app, "agent.work.dispatched", publicWork(w))
 	return true
 }
 
@@ -871,7 +873,7 @@ func (c *controller) handleInterrupt(sys actorbase.Sys, msg actorbase.Msg) {
 				count++
 			}
 		}
-		c.scheduleQueued(sys, msg.Cause())
+		c.scheduleQueued(sys, msg.Cause(), msg.Context())
 		_, _ = sys.Reply(msg, map[string]any{"scope": "agent", "stop_requested": count})
 		return
 	}
@@ -923,19 +925,19 @@ func (c *controller) stop(sys actorbase.Sys, msg actorbase.Msg, w *workRecord, s
 	if w.AssignmentID == "" {
 		w.State, w.Stage, w.Outcome, w.UpdatedAt = agentproto.WorkClosed, "", agentproto.OutcomeCancelled, nowMillis()
 		w.ExecutionState = "not_started"
-		c.emit(sys, msg.Cause(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
+		c.emit(sys, msg.Cause(), msg.Context(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
 		c.finishWaiters(sys, w)
 		if s := c.sessions[w.SessionID]; s != nil {
 			removeQueue(s, w.ID)
 		}
 		if schedule {
-			c.scheduleQueued(sys, msg.Cause())
+			c.scheduleQueued(sys, msg.Cause(), msg.Context())
 		}
 		return nil
 	}
 	w.Stage, w.ExecutionState, w.UpdatedAt = "stopping", "stop_requested", nowMillis()
-	_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, SessionID: w.SessionID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, Reason: "agent.interrupt"})})
-	c.emit(sys, msg.Cause(), "agent.work.stop_requested", publicWork(w))
+	_, _ = sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: agentloop.TypeStop, Audience: message.Audience{actorID(w.Looper)}, Payload: mustJSON(agentloop.StopRequest{WorkID: w.ID, SessionID: w.SessionID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, Reason: "agent.interrupt"}), Context: msg.Context()})
+	c.emit(sys, msg.Cause(), msg.Context(), "agent.work.stop_requested", publicWork(w))
 	return nil
 }
 
@@ -1038,7 +1040,7 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 
 			s.Buffer = append([]agentproto.WorkID{w.ID}, s.Buffer...)
 			_, _ = sys.Reply(msg, map[string]any{"disposition": "rebuffered"})
-			c.scheduleQueued(sys, msg.Cause())
+			c.scheduleQueued(sys, msg.Cause(), msg.Context())
 			return
 		}
 	}
@@ -1059,7 +1061,7 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 			w.UpdatedAt = nowMillis()
 			c.finishWaiters(sys, w)
 			_, _ = sys.Reply(msg, map[string]any{"disposition": "closed_unconsumed"})
-			c.scheduleQueued(sys, msg.Cause())
+			c.scheduleQueued(sys, msg.Cause(), msg.Context())
 			return
 		}
 		w.State, w.Stage, w.Outcome, w.ExecutionState = agentproto.WorkClosed, "", agentproto.OutcomeCompleted, "confirmed"
@@ -1078,10 +1080,10 @@ func (c *controller) handleReport(sys actorbase.Sys, msg actorbase.Msg) {
 	w.BoundaryID = string(msg.ID)
 	s.LastBoundary = string(msg.ID)
 	s.ForkPoint = string(msg.ID)
-	c.emit(sys, msg.Cause(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
+	c.emit(sys, msg.Cause(), msg.Context(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
 	c.finishWaiters(sys, w)
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "adopted", "work_id": w.ID, "state": w.State})
-	c.scheduleQueued(sys, msg.Cause())
+	c.scheduleQueued(sys, msg.Cause(), msg.Context())
 }
 
 func terminalTurnStateNative(state string) bool {
@@ -1259,6 +1261,7 @@ func nextAction(word, label string, payload any) agentproto.NextAction {
 func (c *controller) finishWaiters(sys actorbase.Sys, w *workRecord) {
 	// Completed receipts keep result data, not the originating request scope.
 	w.SourceCause = message.Cause{}
+	w.SourceContext = harness.Context{}
 	held := c.wait[w.ID]
 	delete(c.wait, w.ID)
 	for _, msg := range held {

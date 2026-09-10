@@ -7,15 +7,33 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 const PayloadContextKey = "_context"
 
 // Caller identifies the concrete member for whom a framework-authored request
 // was written.
-type Caller = message.Caller
-type Context = message.Context
+type Caller struct {
+	Channel channel.ID    `json:"channel"`
+	Actor   actor.ActorID `json:"actor"`
+}
+
+// Context is message metadata, separate from message causality and Go cancellation.
+// It travels with each request value and is never indexed by request ID.
+type Context struct {
+	Caller  *Caller `json:"caller,omitempty"`
+	Session string  `json:"session,omitempty"`
+}
+
+func (c Context) Clone() Context {
+	if c.Caller != nil {
+		caller := *c.Caller
+		c.Caller = &caller
+	}
+	return c
+}
 
 // Payload is the canonical payload envelope for every message kind. Context is
 // always present on the ledger, even when it has no fields; actors only see

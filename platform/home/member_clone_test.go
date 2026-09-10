@@ -136,7 +136,7 @@ func TestAgentForkTraversesAgentDoorAndStoreIntoRoster(t *testing.T) {
 	pen := h.minter.MintAuthority(basis.Run, basis.Kind)
 	req, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
 		Type: base.TypeFork, Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{parent},
-		Cause: message.Root(),
+		Cause: message.Root(), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatal(err)

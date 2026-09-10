@@ -198,7 +198,7 @@ func writeMainContext(sys actorbase.Sys, cfg Config, object agentbase.ContextObj
 
 func emitMain(sys actorbase.Sys, typ string, value map[string]any, cfg Config) (message.ID, error) {
 	value["session"] = cfg.Session
-	spec, e := behavior.EventSpecJSON(message.Root(), typ, value)
+	spec, e := behavior.EventSpecJSON(message.Root(), harness.Context{}, typ, value)
 	if e != nil {
 		return "", e
 	}
@@ -575,7 +575,7 @@ func countObject(sys actorbase.Sys, cfg Config, messages []json.RawMessage) (int
 		return 0, err
 	}
 	defer agentbase.DeleteContext(sys, temp)
-	pd, err := sys.Call(message.Root(), actor.ActorID(cfg.LLMActor), llmproto.TypeCount, llmproto.CountRequest{RootSession: cfg.Session, Context: ref})
+	pd, err := sys.Call(message.Root(), harness.Context{}, actor.ActorID(cfg.LLMActor), llmproto.TypeCount, llmproto.CountRequest{RootSession: cfg.Session, Context: ref})
 	if err != nil {
 		return 0, err
 	}
@@ -598,7 +598,7 @@ func summarize(sys actorbase.Sys, cfg Config, branch string, texts []string) (js
 		return nil, e
 	}
 	defer agentbase.DeleteContext(sys, session)
-	pd, e := sys.Call(message.Root(), actor.ActorID(cfg.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{RootSession: cfg.Session, ModelRef: parseModel(cfg.Model), Context: ref})
+	pd, e := sys.Call(message.Root(), harness.Context{}, actor.ActorID(cfg.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{RootSession: cfg.Session, ModelRef: parseModel(cfg.Model), Context: ref})
 	if e != nil {
 		return nil, e
 	}
@@ -628,7 +628,7 @@ func compactMain(sys actorbase.Sys, cfg Config) error {
 	if len(object.Messages) < 2 {
 		return nil
 	}
-	pd, err := sys.Call(message.Root(), actor.ActorID(cfg.LLMActor), llmproto.TypeCount, llmproto.CountRequest{RootSession: cfg.Session, Context: agentbase.ContextRef{Resource: mustContextResource(cfg.Session), Version: object.Version}})
+	pd, err := sys.Call(message.Root(), harness.Context{}, actor.ActorID(cfg.LLMActor), llmproto.TypeCount, llmproto.CountRequest{RootSession: cfg.Session, Context: agentbase.ContextRef{Resource: mustContextResource(cfg.Session), Version: object.Version}})
 	if err != nil {
 		return err
 	}
@@ -659,7 +659,7 @@ func compactMain(sys actorbase.Sys, cfg Config) error {
 		return err
 	}
 	defer agentbase.DeleteContext(sys, temp)
-	pd, err = sys.Call(message.Root(), actor.ActorID(cfg.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{RootSession: cfg.Session, ModelRef: parseModel(cfg.Model), Purpose: "compact", Context: ref, SystemPrompt: "Summarize this main context. Preserve goals, constraints, decisions, progress, unresolved risks and next steps."})
+	pd, err = sys.Call(message.Root(), harness.Context{}, actor.ActorID(cfg.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{RootSession: cfg.Session, ModelRef: parseModel(cfg.Model), Purpose: "compact", Context: ref, SystemPrompt: "Summarize this main context. Preserve goals, constraints, decisions, progress, unresolved risks and next steps."})
 	if err != nil {
 		return err
 	}

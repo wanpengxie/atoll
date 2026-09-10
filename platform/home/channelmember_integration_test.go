@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -104,11 +105,11 @@ func bodyAgentProc(sys actorbase.Sys) error {
 		if msg.Type == "body.block" {
 			_, _ = sys.Progress(msg, message.StatusProcessing, map[string]any{"phase": "started"})
 			<-msg.Ctx().Done()
-			_, _ = sys.Emit(behavior.EventSpec{Cause: message.Root(), Type: "body.cancelled", Payload: json.RawMessage(`{}`), Audience: message.Audience{sys.Self()}})
+			_, _ = sys.Emit(behavior.EventSpec{Cause: message.Root(), Type: "body.cancelled", Payload: json.RawMessage(`{}`), Audience: message.Audience{sys.Self()}, Context: harness.Context{}})
 			continue
 		}
 		_, _ = sys.Progress(msg, message.StatusProcessing, map[string]any{"phase": "body"})
-		pending, err := sys.Call(msg.Cause(), actor.ActorID(channelmember.HandleSeed), channelmember.HandleCall, map[string]any{
+		pending, err := sys.Call(msg.Cause(), msg.Context(), actor.ActorID(channelmember.HandleSeed), channelmember.HandleCall, map[string]any{
 			"audience": []string{"host-tool"}, "type": "host.echo", "payload": map[string]any{"value": "from-body"},
 		})
 		if err != nil {
@@ -152,7 +153,7 @@ func echoHostProc(sys actorbase.Sys) error {
 		if msg.Type == "host.block" {
 			_, _ = sys.Progress(msg, message.StatusProcessing, map[string]any{"phase": "started"})
 			<-msg.Ctx().Done()
-			_, _ = sys.Emit(behavior.EventSpec{Cause: message.Root(), Type: "host.cancelled", Payload: json.RawMessage(`{}`), Audience: message.Audience{sys.Self()}})
+			_, _ = sys.Emit(behavior.EventSpec{Cause: message.Root(), Type: "host.cancelled", Payload: json.RawMessage(`{}`), Audience: message.Audience{sys.Self()}, Context: harness.Context{}})
 			continue
 		}
 		var req struct {
@@ -230,7 +231,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 		t.Fatal(err)
 	}
 	pen := host.minter.MintAuthority(basis.Run, basis.Kind)
-	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: "body.roundtrip", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}, Cause: message.Root()})
+	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: "body.roundtrip", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}, Cause: message.Root(), Context: harness.Context{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +291,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 	}
 
 	t.Run("event reaches body with handle identity", func(t *testing.T) {
-		event, err := behavior.BuildEvent(time.Now, behavior.EventSpec{Cause: message.Root(), Type: "host.notice", Audience: message.Audience{seat}, Payload: canonicalTestPayload(map[string]any{"notice": "hello"})})
+		event, err := behavior.BuildEvent(time.Now, behavior.EventSpec{Cause: message.Root(), Type: "host.notice", Audience: message.Audience{seat}, Payload: canonicalTestPayload(map[string]any{"notice": "hello"}), Context: harness.Context{}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -317,7 +318,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 		t.Fatal("incoming event lost")
 	})
 	t.Run("undeclared request rejected before body", func(t *testing.T) {
-		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "private.operation", Audience: message.Audience{seat}, Payload: canonicalTestPayload(map[string]any{})})
+		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "private.operation", Audience: message.Audience{seat}, Payload: canonicalTestPayload(map[string]any{}), Context: harness.Context{}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -361,7 +362,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			{channelmember.HandleCall, `{"body":{"type":"system.member.list","audience":["system"],"payload":{}}}`, "system.member.list", actor.SystemActorID},
 			{channelmember.HandleEmit, `{"body":{"type":"body.notice","audience":["host-tool"],"payload":{"value":"hello"}}}`, "body.notice", actor.ActorID("host-tool")},
 		} {
-			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: op.word, Payload: canonicalTestPayload(json.RawMessage(op.payload)), Audience: message.Audience{handle}})
+			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: op.word, Payload: canonicalTestPayload(json.RawMessage(op.payload)), Audience: message.Audience{handle}, Context: harness.Context{}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -413,7 +414,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			t.Fatal(err)
 		}
 		defer endIdentityForFixture(t, body, duplicate.ActorID)
-		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "body.roundtrip", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}})
+		request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: "body.roundtrip", Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}, Context: harness.Context{}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -451,7 +452,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 				t.Fatal(err)
 			}
 			writer := direction.from.minter.MintAuthority(basis.Run, basis.Kind)
-			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: direction.word, Payload: canonicalTestPayload(json.RawMessage(direction.payload)), Audience: message.Audience{direction.target}})
+			request, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Cause: message.Root(), Type: direction.word, Payload: canonicalTestPayload(json.RawMessage(direction.payload)), Audience: message.Audience{direction.target}, Context: harness.Context{}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -482,7 +483,7 @@ func TestChannelSeatAndHandleCarryBothDirectionsWithSeatAuthority(t *testing.T) 
 			t.Fatal("cancel did not reach opposite callee")
 		})
 	}
-	describe, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: introspect.QueryDescribe, Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}, Cause: message.Root()})
+	describe, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{Type: introspect.QueryDescribe, Payload: canonicalTestPayload(map[string]any{}), Audience: message.Audience{seat}, Cause: message.Root(), Context: harness.Context{}})
 	if err != nil {
 		t.Fatal(err)
 	}

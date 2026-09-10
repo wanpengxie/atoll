@@ -55,7 +55,7 @@ func (s *historyTestSys) Post(behavior.RequestSpec) (message.ID, error) {
 	s.posts++
 	return "post", nil
 }
-func (s *historyTestSys) Call(_ message.Cause, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
+func (s *historyTestSys) Call(_ message.Cause, app harness.Context, target actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	return nil, fmt.Errorf("unexpected call %s %s", target, word)
 }
 
@@ -223,7 +223,7 @@ type exitCallSys struct {
 }
 
 func (s *exitCallSys) Life() context.Context { return s.life }
-func (s *exitCallSys) Call(message.Cause, actor.ActorID, string, any) (actorbase.Pending, error) {
+func (s *exitCallSys) Call(message.Cause, harness.Context, actor.ActorID, string, any) (actorbase.Pending, error) {
 	return s.p, nil
 }
 
@@ -232,7 +232,7 @@ func TestLooperExitDoesNotCancelRemoteCallsOrSendReport(t *testing.T) {
 	defer stop()
 	p := &exitPending{cancelLife: stop}
 	sys := &exitCallSys{historyTestSys: &historyTestSys{}, life: life, p: p}
-	_, _ = call(life, sys, message.Root(), "tool:remote:1", "execute", map[string]any{})
+	_, _ = call(life, sys, message.Root(), harness.Context{}, "tool:remote:1", "execute", map[string]any{})
 	(&looper{}).report(sys, &assignment{}, "cancelled", 0, nil, "", "", "")
 	if p.cancelled || sys.posts != 0 || sys.replies != 0 {
 		t.Fatalf("exit affected remote work: cancelled=%v posts=%d replies=%d", p.cancelled, sys.posts, sys.replies)

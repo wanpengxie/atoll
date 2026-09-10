@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const controlDoneType = "agent.internal.control_done"
@@ -124,7 +125,8 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 		caller := actorbase.EffectiveCaller(msg)
 		now := nowMillis()
 		w := &workRecord{ID: newWorkID(), SessionID: s.ID, Owner: caller, SourceRequest: string(msg.ID), SourceCause: msg.Cause(), State: agentproto.WorkOpen, Stage: "control_pending", Delivery: agentproto.DeliveryReceipt, CreatedAt: now, UpdatedAt: now,
-			Inputs: []inputRecord{{Input: agentloop.Input{ID: string(msg.ID), Seq: 1, Text: req.Text, CallerActor: caller.Actor, CallerChannel: caller.Channel}, Disposition: "accepted"}}}
+			Inputs: []inputRecord{{Input: agentloop.Input{ID: string(msg.ID), Seq: 1, Text: req.Text, CallerActor: caller.Actor, CallerChannel: caller.Channel}, Disposition: "accepted"}}, SourceContext: msg.Context(),
+		}
 		c.data.Works[string(w.ID)] = w
 		c.data.Order = append(c.data.Order, string(w.ID))
 		pc.Targets = []agentproto.WorkID{w.ID}
@@ -159,7 +161,7 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 			}
 		}
 		_, _ = sys.Reply(msg, json.RawMessage(response))
-		c.scheduleQueued(sys, msg.Cause())
+		c.scheduleQueued(sys, msg.Cause(), msg.Context())
 		return
 	}
 	owner := c.data.Works[string(s.Owner)]
@@ -191,7 +193,7 @@ func deliverControl(sys actorbase.Sys, sessionID, looper string, pc *pendingCont
 	ctx, cancel := context.WithTimeout(sys.Life(), 15*time.Second)
 	defer cancel()
 	decision := agentloop.ControlResult{ControlID: pc.ID}
-	raw, err := controlCall(ctx, sys, pc.Message.Cause(), looper, agentloop.TypeInput, pc.Request)
+	raw, err := controlCall(ctx, sys, pc.Message.Cause(), pc.Message.Context(), looper, agentloop.TypeInput, pc.Request)
 	unknown := false
 	if err == nil {
 		err = json.Unmarshal(raw, &decision)
@@ -204,11 +206,11 @@ func deliverControl(sys actorbase.Sys, sessionID, looper string, pc *pendingCont
 	if sys.Life().Err() != nil {
 		return
 	}
-	_, _ = sys.Post(behavior.RequestSpec{Cause: pc.Message.Cause(), Type: controlDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(controlDone{Session: sessionID, Execution: pc.Execution, ID: pc.ID, Decision: decision, Unknown: unknown})})
+	_, _ = sys.Post(behavior.RequestSpec{Cause: pc.Message.Cause(), Type: controlDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(controlDone{Session: sessionID, Execution: pc.Execution, ID: pc.ID, Decision: decision, Unknown: unknown}), Context: pc.Message.Context()})
 }
 
-func controlCall(ctx context.Context, sys actorbase.Sys, cause message.Cause, target, word string, payload any) (json.RawMessage, error) {
-	p, err := sys.Call(cause, actorID(target), word, payload)
+func controlCall(ctx context.Context, sys actorbase.Sys, cause message.Cause, app harness.Context, target, word string, payload any) (json.RawMessage, error) {
+	p, err := sys.Call(cause, app, actorID(target), word, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -292,9 +294,9 @@ func (c *controller) settleControl(sys actorbase.Sys, s *session, d agentloop.Co
 		tail.Stage = owner.Stage
 		tail.ExecutionState = owner.ExecutionState
 		s.Owner = tail.ID
-		c.closeLinked(sys, pc.Message.Cause(), owner, "preempted_by", tail)
+		c.closeLinked(sys, pc.Message.Cause(), pc.Message.Context(), owner, "preempted_by", tail)
 		for _, id := range pc.Targets[:len(pc.Targets)-1] {
-			c.closeLinked(sys, pc.Message.Cause(), c.data.Works[string(id)], "merged_into", tail)
+			c.closeLinked(sys, pc.Message.Cause(), pc.Message.Context(), c.data.Works[string(id)], "merged_into", tail)
 		}
 	} else if unknown {
 		s.Freeze = "interrupt"
@@ -394,6 +396,7 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		updated.Owner = actorbase.EffectiveCaller(msg)
 		updated.SourceRequest = string(msg.ID)
 		updated.SourceCause = msg.Cause()
+		updated.SourceContext = msg.Context()
 		updated.Inputs[0].ID = string(msg.ID)
 		updated.Inputs[0].Text = req.NewText
 		updated.Inputs[0].CallerActor = updated.Owner.Actor
@@ -407,7 +410,7 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		c.data.Works[string(updated.ID)] = updated
 		c.data.Order = append(c.data.Order, string(updated.ID))
 		s.Buffer[queueIndex(s, w.ID)] = updated.ID
-		c.closeLinked(sys, msg.Cause(), w, "replaced_by", updated)
+		c.closeLinked(sys, msg.Cause(), msg.Context(), w, "replaced_by", updated)
 		c.attachWaiter(sys, msg, updated)
 	case agentproto.TypeHold:
 		duration := 30 * time.Minute
@@ -455,5 +458,5 @@ func (c *controller) editControl(sys actorbase.Sys, msg actorbase.Msg) {
 		s.RestoreInterrupt = false
 		_, _ = sys.Reply(msg, map[string]any{"disposition": "released", "session_id": s.ID})
 	}
-	c.scheduleQueued(sys, msg.Cause())
+	c.scheduleQueued(sys, msg.Cause(), msg.Context())
 }

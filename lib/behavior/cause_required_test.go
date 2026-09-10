@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func causeClock() func() time.Time {
@@ -26,7 +27,7 @@ func TestABuilderRefusesAnEnvelopeThatWillNotSayWhyItExists(t *testing.T) {
 	// A broken anchor is silence too, not a root.
 	if _, err := BuildRequest(causeClock(), RequestSpec{
 		Type: "demo.word", Audience: message.Audience{"agent:demo:1"},
-		Cause: message.Anchored("", "some-errand"),
+		Cause: message.Anchored("", "some-errand"), Context: harness.Context{},
 	}); err == nil {
 		t.Fatal("BuildRequest accepted an anchor with no parent")
 	}
@@ -36,7 +37,7 @@ func TestABuilderRefusesAnEnvelopeThatWillNotSayWhyItExists(t *testing.T) {
 // caller filled in separately and could have disagreed on.
 func TestBuiltEnvelopesCarryTheCausesDerivation(t *testing.T) {
 	root, err := BuildRequest(causeClock(), RequestSpec{
-		Type: "demo.word", Audience: message.Audience{"agent:demo:1"}, Cause: message.Root(),
+		Type: "demo.word", Audience: message.Audience{"agent:demo:1"}, Cause: message.Root(), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatalf("BuildRequest(root): %v", err)
@@ -46,7 +47,7 @@ func TestBuiltEnvelopesCarryTheCausesDerivation(t *testing.T) {
 	}
 
 	child, err := BuildRequest(causeClock(), RequestSpec{
-		Type: "demo.word", Audience: message.Audience{"agent:demo:1"}, Cause: message.From(*root),
+		Type: "demo.word", Audience: message.Audience{"agent:demo:1"}, Cause: message.From(*root), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatalf("BuildRequest(child): %v", err)

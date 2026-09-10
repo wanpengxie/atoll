@@ -110,7 +110,7 @@ func (s *testSys) Emit(spec behavior.EventSpec) (message.ID, error) {
 	s.events = append(s.events, spec)
 	return "event", nil
 }
-func (s *testSys) Call(_ message.Cause, target actor.ActorID, typ string, payload any) (actorbase.Pending, error) {
+func (s *testSys) Call(_ message.Cause, app harness.Context, target actor.ActorID, typ string, payload any) (actorbase.Pending, error) {
 	if typ == agentloop.TypeStart || typ == agentloop.TypeInput || typ == agentloop.TypeInspect || typ == agentloop.TypeStop {
 		raw, _ := json.Marshal(payload)
 		s.posts = append(s.posts, behavior.RequestSpec{Type: typ, Audience: message.Audience{target}, Payload: raw})
@@ -572,10 +572,7 @@ func TestAskAgainstArchivedSessionForksAndAssignsFreshSession(t *testing.T) {
 	if w == nil {
 		t.Fatal("request did not create work")
 	}
-	app, err := w.SourceCause.Context()
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := w.SourceContext
 	assigned := app.Session
 	if assigned == "" || assigned == "s-old" {
 		t.Fatalf("assigned session=%q", assigned)
@@ -594,7 +591,7 @@ func TestAskAgainstArchivedSessionForksAndAssignsFreshSession(t *testing.T) {
 
 func TestClosedWorkReleasesRequestScope(t *testing.T) {
 	c := &controller{}
-	w := &workRecord{State: agentproto.WorkClosed, SourceCause: message.Anchored("ask", "tree").WithContext(harness.Context{Session: "S"})}
+	w := &workRecord{State: agentproto.WorkClosed, SourceCause: message.Anchored("ask", "tree"), SourceContext: harness.Context{Session: "S"}}
 	c.finishWaiters(nil, w)
 	if w.SourceCause.Stated() {
 		t.Fatal("completed receipt retained request scope")

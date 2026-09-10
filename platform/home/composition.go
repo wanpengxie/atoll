@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // CompositionResolver is the world-catalog half of actor construction. Home
@@ -44,8 +45,8 @@ func (v *compositionView) LookupByClass(
 ) (platform.ActorFactory, bool) {
 	if class == svcactor.Class {
 		if resolver, ok := v.resolver.(ServiceCompositionResolver); ok {
-			audit := func(ctx context.Context, cause message.Cause, payload map[string]any) error {
-				return v.h.emitSystemEvent(ctx, cause, message.TypeSystemChannelInbound, payload)
+			audit := func(ctx context.Context, cause message.Cause, app harness.Context, payload map[string]any) error {
+				return v.h.emitSystemEvent(ctx, cause, app, message.TypeSystemChannelInbound, payload)
 			}
 			members := svcactor.Members{
 				IsActive: v.h.actors.IsActive,

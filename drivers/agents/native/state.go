@@ -27,6 +27,7 @@ type operationRecord struct {
 
 type workRecord struct {
 	SourceCause     message.Cause              `json:"-"`
+	SourceContext   harness.Context            `json:"-"`
 	SessionID       string                     `json:"session_id,omitempty"`
 	Resumed         bool                       `json:"resumed,omitempty"`
 	ID              agentproto.WorkID          `json:"work_id"`

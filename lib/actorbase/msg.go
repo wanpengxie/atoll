@@ -113,7 +113,7 @@ func (m Msg) Ctx() context.Context { return m.ctx }
 // answering verbs (Reply/Fail/Progress) take the Msg itself and derive this
 // internally; the originating verbs take it explicitly, because they are the
 // ones that also have a legitimate other answer (message.Root()).
-func (m Msg) Cause() message.Cause { return message.From(m.Envelope).WithContext(m.app) }
+func (m Msg) Cause() message.Cause { return message.From(m.Envelope) }
 
 func (m Msg) Caller() (harness.Caller, bool) {
 	if m.app.Caller == nil {

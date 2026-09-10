@@ -367,7 +367,7 @@ func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[mess
 	// rather than hidden.
 	askAnswer := json.RawMessage(nil)
 	if p.Ask != "" {
-		pd, err := sys.Call(msg.Cause(), p.Ask, TypeSay, p.Note)
+		pd, err := sys.Call(msg.Cause(), msg.Context(), p.Ask, TypeSay, p.Note)
 		switch {
 		case errors.Is(err, actorbase.ErrSelfCall):
 			askAnswer = json.RawMessage(`"self-call refused (single-worker deadlock guard)"`)
@@ -413,7 +413,7 @@ func handleStart(sys actorbase.Sys, cfg Config, msg actorbase.Msg, held map[mess
 	_, _ = sys.Emit(behavior.EventSpec{
 		Type:    "echo.countdown_armed",
 		Payload: evp,
-		Cause:   msg.Cause(),
+		Cause:   msg.Cause(), Context: msg.Context(),
 	})
 
 	// ── Obs arm: push one opaque operational snapshot (kind/val are opaque

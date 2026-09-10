@@ -583,8 +583,8 @@ func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	if msg.Type == TypeReplace {
 		rowBytes = replacement.bytes
 	}
-	row := &book.Request{ID: id, Cause: msg.Cause(), Input: input, Bytes: rowBytes, Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(corr)}
-	row.Scope = l.vault.Mint(row.Cause)
+	row := &book.Request{ID: id, Cause: msg.Cause(), Input: input, Bytes: rowBytes, Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(corr), Context: msg.Context()}
+	row.Scope = l.vault.Mint(row.Cause, row.Context)
 	if msg.Type == TypeSteer {
 		var payload struct {
 			Expected string `json:"expected_turn_id"`
@@ -1046,7 +1046,7 @@ func (l *agentLoop) handleFork(msg actorbase.Msg) {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: "agent identity is malformed"})
 		return
 	}
-	pending, err := l.sys.Call(msg.Cause(), actor.SystemActorID, "system.member.create", map[string]any{"decl_id": parts[1]})
+	pending, err := l.sys.Call(msg.Cause(), msg.Context(), actor.SystemActorID, "system.member.create", map[string]any{"decl_id": parts[1]})
 	if err != nil {
 		l.exec.terminal(string(msg.ID), terminalCandidate{fail: true, code: "internal_error", detail: err.Error()})
 		return
@@ -1171,8 +1171,8 @@ func (l *agentLoop) handleOptions(msg actorbase.Msg) {
 		return
 	}
 	id := book.RequestID(msg.ID)
-	row := &book.Request{ID: id, Cause: msg.Cause(), Bytes: len(msg.Payload), Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(message.CorrelationID(msg.CorrelationID, msg.ID)), Location: book.ControlPending}
-	row.Scope = l.vault.Mint(row.Cause)
+	row := &book.Request{ID: id, Cause: msg.Cause(), Bytes: len(msg.Payload), Sender: string(msg.Sender.ID), ParentID: string(msg.ID), CorrelationID: string(message.CorrelationID(msg.CorrelationID, msg.ID)), Location: book.ControlPending, Context: msg.Context()}
+	row.Scope = l.vault.Mint(row.Cause, row.Context)
 	l.state.Requests[id] = row
 	l.watchClosure(id, msg.Ctx())
 	l.nextAction++
@@ -1848,7 +1848,7 @@ func (l *agentLoop) onTurnEnded(e runtimeEvent) {
 				if row := l.state.Requests[owner]; row != nil {
 					row.Location = book.Buffered
 					row.Resumed = true
-					row.Scope = l.vault.Mint(row.Cause)
+					row.Scope = l.vault.Mint(row.Cause, row.Context)
 					l.state.InsertAt(0, owner)
 					l.state.BufferBytes += row.Bytes
 					l.exec.progress(string(owner), message.StatusQueued, map[string]any{"resumed": true, "held_by": matchingAction.HolderID, "controls": l.queuedControls()})

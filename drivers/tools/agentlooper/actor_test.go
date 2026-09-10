@@ -59,7 +59,7 @@ type progressGatedSys struct {
 	pending *progressGatedPending
 }
 
-func (s *progressGatedSys) Call(message.Cause, actor.ActorID, string, any) (actorbase.Pending, error) {
+func (s *progressGatedSys) Call(message.Cause, harness.Context, actor.ActorID, string, any) (actorbase.Pending, error) {
 	return s.pending, nil
 }
 
@@ -72,7 +72,7 @@ func TestInternalCallDrainsProgressBeforeWaitingForTerminal(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := call(ctx, &progressGatedSys{pending: p}, message.Root(), "tool:x:1", "x", map[string]any{}); err != nil {
+	if _, err := call(ctx, &progressGatedSys{pending: p}, message.Root(), harness.Context{}, "tool:x:1", "x", map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -117,7 +117,7 @@ func (s *multiAssignmentSys) View() actorcaps.LedgerView {
 	}}).View()
 }
 func (s *multiAssignmentSys) Life() context.Context { return s.life }
-func (s *multiAssignmentSys) Call(_ message.Cause, _ actor.ActorID, word string, payload any) (actorbase.Pending, error) {
+func (s *multiAssignmentSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, word string, payload any) (actorbase.Pending, error) {
 	return cancelledPending{}, nil
 }
 func (s *multiAssignmentSys) Emit(behavior.EventSpec) (message.ID, error) { return "opened", nil }
@@ -244,7 +244,7 @@ type customToolSys struct {
 	toolCallName string
 }
 
-func (s *customToolSys) Call(_ message.Cause, target actor.ActorID, typ string, value any) (actorbase.Pending, error) {
+func (s *customToolSys) Call(_ message.Cause, app harness.Context, target actor.ActorID, typ string, value any) (actorbase.Pending, error) {
 	var body any
 	switch typ {
 	case contextproto.TypeBuild:
@@ -340,7 +340,7 @@ type refreshManifestSys struct {
 	calls int
 }
 
-func (s *refreshManifestSys) Call(_ message.Cause, _ actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
+func (s *refreshManifestSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
 	if typ != "actor.describe" {
 		return nil, fmt.Errorf("unexpected %s", typ)
 	}
@@ -385,7 +385,7 @@ type resultStoreSys struct {
 	err     error
 }
 
-func (s *resultStoreSys) Call(_ message.Cause, target actor.ActorID, word string, value any) (actorbase.Pending, error) {
+func (s *resultStoreSys) Call(_ message.Cause, app harness.Context, target actor.ActorID, word string, value any) (actorbase.Pending, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -475,7 +475,7 @@ type loopSys struct {
 	posts     []behavior.RequestSpec
 }
 
-func (s *loopSys) Call(_ message.Cause, _ actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
+func (s *loopSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
 	var body any
 	switch typ {
 	case contextproto.TypeBuild:

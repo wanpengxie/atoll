@@ -71,7 +71,7 @@ func closureCall(t *testing.T, h *Home, caller, receiver actor.ActorID) message.
 		Type:     closureRequestType,
 		Payload:  canonicalTestPayload(map[string]any{"unit": "work"}),
 		Audience: message.Audience{receiver},
-		Cause:    message.Root(),
+		Cause:    message.Root(), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatalf("build the request: %v", err)
@@ -299,7 +299,7 @@ func TestShutdownLeavesOpenUntilDeadlineThenReaperCloses(t *testing.T) {
 	env, err := behavior.BuildRequest(time.Now, behavior.RequestSpec{
 		Type: closureRequestType, Payload: canonicalTestPayload(map[string]any{"unit": "shutdown"}),
 		Audience: message.Audience{receiver}, ExpiresAt: &deadline,
-		Cause: message.Root(),
+		Cause: message.Root(), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatal(err)

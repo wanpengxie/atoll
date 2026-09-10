@@ -237,18 +237,18 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 	if req.Kind == message.KindRequest && req.Await {
 		app.Caller = &harness.Caller{Channel: local, Actor: sys.Self()}
 	}
-	root, body, err := actorbase.PrepareRoot(app, req.Payload)
+	app, body, err := actorbase.PrepareRoot(app, req.Payload)
 	if err != nil {
 		return Response{}, err
 	}
 	req.Payload = body
-	app, _ = root.Context()
-	spec := behavior.RequestSpec{Cause: root, Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility, ExpiresAt: req.ExpiresAt}
+
+	spec := behavior.RequestSpec{Cause: message.Root(), Context: app, Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility, ExpiresAt: req.ExpiresAt}
 	var id message.ID
 	var pending actorbase.Pending
 	switch {
 	case req.Kind == message.KindEvent:
-		id, err = sys.Emit(behavior.EventSpec{Cause: root, Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility})
+		id, err = sys.Emit(behavior.EventSpec{Cause: message.Root(), Context: app, Type: req.Type, Payload: req.Payload, Audience: req.Audience, Visibility: req.Visibility})
 	case req.Kind == message.KindRequest && !req.Await:
 		id, err = sys.Post(spec)
 	case req.Kind == message.KindRequest && len(req.Audience) == 1:
@@ -265,7 +265,7 @@ func actLocal(ctx context.Context, sys actorbase.Sys, local channel.ID, req Requ
 		return Response{}, err
 	}
 	if req.ID != "" {
-		audit, _ := behavior.EventSpecJSON(message.Anchored(id, id).WithContext(app), InboundEvent, map[string]any{"from": map[string]any{"channel": req.ChannelID, "actor": req.Sender.ID, "request": req.ID}, "type": req.Type, "local_request_id": id})
+		audit, _ := behavior.EventSpecJSON(message.Anchored(id, id), app, InboundEvent, map[string]any{"from": map[string]any{"channel": req.ChannelID, "actor": req.Sender.ID, "request": req.ID}, "type": req.Type, "local_request_id": id})
 		audit.Audience = message.Audience{sys.Self()}
 		if _, err = sys.Emit(audit); err != nil {
 			// The action is already committed. Failure of this auxiliary record

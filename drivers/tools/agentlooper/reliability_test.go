@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 type reliabilitySys struct {
@@ -35,7 +36,7 @@ func completed(value any) actorbase.Pending {
 	raw, _ = json.Marshal(fields)
 	return immediatePending{actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: raw})}
 }
-func (s *reliabilitySys) Call(cause message.Cause, target actor.ActorID, typ string, value any) (actorbase.Pending, error) {
+func (s *reliabilitySys) Call(cause message.Cause, app harness.Context, target actor.ActorID, typ string, value any) (actorbase.Pending, error) {
 	if typ == llmproto.TypeGenerate {
 		messages := testContextMessages("session:test")
 		if err := validateHistory(messages); err != nil {
@@ -72,7 +73,7 @@ func (s *reliabilitySys) Call(cause message.Cause, target actor.ActorID, typ str
 		}
 		return completed(contextproto.Artifact{Messages: history, SystemPrompt: "test"}), nil
 	}
-	return s.loopSys.Call(cause, target, typ, value)
+	return s.loopSys.Call(cause, app, target, typ, value)
 }
 
 func runReliability(t *testing.T, s *reliabilitySys, ctx context.Context) agentloop.ReportRequest {
@@ -186,7 +187,7 @@ type terminalOpenProgressSys struct {
 	p actorbase.Pending
 }
 
-func (s terminalOpenProgressSys) Call(message.Cause, actor.ActorID, string, any) (actorbase.Pending, error) {
+func (s terminalOpenProgressSys) Call(message.Cause, harness.Context, actor.ActorID, string, any) (actorbase.Pending, error) {
 	return s.p, nil
 }
 func TestTerminalDoesNotWaitForeverForProgressClosure(t *testing.T) {
@@ -194,7 +195,7 @@ func TestTerminalDoesNotWaitForeverForProgressClosure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
-	_, err := call(ctx, terminalOpenProgressSys{p: p}, message.Root(), "tool:fixture:1", "fixture", nil)
+	_, err := call(ctx, terminalOpenProgressSys{p: p}, message.Root(), harness.Context{}, "tool:fixture:1", "fixture", nil)
 	if err != nil || time.Since(start) > 500*time.Millisecond {
 		t.Fatalf("terminal blocked by progress closure: %v", err)
 	}

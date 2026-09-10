@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	_ "modernc.org/sqlite"
 )
 
@@ -50,7 +51,7 @@ func (s *cutSys) Fail(_ actorbase.Msg, code, _ string, _ ...map[string]any) (mes
 	s.code = code
 	return "fail", nil
 }
-func (s *cutSys) Call(message.Cause, actor.ActorID, string, any) (actorbase.Pending, error) {
+func (s *cutSys) Call(message.Cause, harness.Context, actor.ActorID, string, any) (actorbase.Pending, error) {
 	return nil, errors.New("simulated process cut before edge write")
 }
 func (s *cutSys) Post(behavior.RequestSpec) (message.ID, error) {

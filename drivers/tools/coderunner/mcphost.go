@@ -384,9 +384,9 @@ func (h *mcpHost) handleToolCall(m rpcMessage) {
 	var pd actorbase.Pending
 	var err error
 	if h.spec.forward {
-		pd, err = h.sys.CallFor(h.msg.Cause(), actorbase.EffectiveCaller(h.msg), binding.target, binding.word, input)
+		pd, err = h.sys.CallFor(h.msg.Cause(), h.msg.Context(), actorbase.EffectiveCaller(h.msg), binding.target, binding.word, input)
 	} else {
-		pd, err = h.sys.Call(h.msg.Cause(), binding.target, binding.word, input)
+		pd, err = h.sys.Call(h.msg.Cause(), h.msg.Context(), binding.target, binding.word, input)
 	}
 	if err != nil {
 		h.respondToolError(m.ID, "call_failed", err.Error())

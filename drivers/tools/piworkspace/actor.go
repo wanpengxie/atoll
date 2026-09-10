@@ -23,6 +23,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const Class = "pi-workspace"
@@ -365,7 +366,7 @@ func safeWorkspacePath(root, path string) error {
 	return nil
 }
 func emit(sys actorbase.Sys, typ string, value any) {
-	spec, err := behavior.EventSpecJSON(message.Root(), typ, value)
+	spec, err := behavior.EventSpecJSON(message.Root(), harness.Context{}, typ, value)
 	if err == nil {
 		_, _ = sys.Emit(spec)
 	}

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -190,6 +189,8 @@ type EventSpec struct {
 	// working on; a membership event is caused by the word that changed the
 	// membership. Only an event that genuinely begins something says Root().
 	Cause message.Cause
+	// Context is the application metadata to carry with this message.
+	Context harness.Context
 	// ClientFingerprint is shell-ingress persistence metadata and never a
 	// protocol envelope field.
 	ClientFingerprint string
@@ -247,7 +248,7 @@ func BuildEvent(
 // into a formatted error, which a caller mapping verdicts to protocol codes
 // cannot tell apart from any other failure — so the write, and the typed
 // carrier it must produce, live at the verb.
-func EventSpecJSON(cause message.Cause, eventType string, payload any, audience ...actor.ActorID) (EventSpec, error) {
+func EventSpecJSON(cause message.Cause, app harness.Context, eventType string, payload any, audience ...actor.ActorID) (EventSpec, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return EventSpec{}, fmt.Errorf("behavior: event payload marshal: %w", err)
@@ -256,5 +257,5 @@ func EventSpecJSON(cause message.Cause, eventType string, payload any, audience 
 	if len(audience) > 0 {
 		aud = message.Audience(audience)
 	}
-	return EventSpec{Cause: cause, Type: eventType, Payload: raw, Audience: aud}, nil
+	return EventSpec{Cause: cause, Type: eventType, Payload: raw, Audience: aud, Context: app}, nil
 }

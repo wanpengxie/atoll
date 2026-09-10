@@ -439,7 +439,7 @@ func TestEngine_CallWaitReceivesMatchedFinal(t *testing.T) {
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifeCtx = context.Background()
 
-	pending, err := e.Call(message.Root(), "actor:callee", "greet", map[string]string{"hi": "1"})
+	pending, err := e.Call(message.Root(), harness.Context{}, "actor:callee", "greet", map[string]string{"hi": "1"})
 	if err != nil {
 		t.Fatalf("unexpected Call error: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestEngine_JobTableAwaitSameAccountAsWait(t *testing.T) {
 	id, err := e.Submit(behavior.RequestSpec{
 		Type:     "greet",
 		Audience: message.Audience{"actor:callee"},
-		Cause:    message.Root(),
+		Cause:    message.Root(), Context: harness.Context{},
 	})
 	if err != nil {
 		t.Fatalf("unexpected Submit error: %v", err)
@@ -569,7 +569,7 @@ func TestEngine_CallTimeoutWritesUnansweredTimeoutAndClosesEntry(t *testing.T) {
 		Type:      "greet",
 		Audience:  message.Audience{"actor:callee"},
 		ExpiresAt: nil,
-		Cause:     message.Root(),
+		Cause:     message.Root(), Context: harness.Context{},
 	}
 	// Force a short deadline directly through submit's ExpiresAt resolution
 	// path (Hooks.TimeoutResolver) rather than sleeping out DefaultTimeout.
@@ -622,7 +622,7 @@ func TestEngine_PendingCancelSelfClosesAndSkipsCancellerWhenNil(t *testing.T) {
 	e := newTestEngine(t, pen, Hooks{}, 8, 8) // Hooks{} — Canceller nil, honest degrade
 	e.lifeCtx = context.Background()
 
-	pending, err := e.Call(message.Root(), "actor:callee", "greet", map[string]string{"hi": "1"})
+	pending, err := e.Call(message.Root(), harness.Context{}, "actor:callee", "greet", map[string]string{"hi": "1"})
 	if err != nil {
 		t.Fatalf("unexpected Call error: %v", err)
 	}
@@ -665,7 +665,7 @@ func TestEngine_PendingCancelInvokesCancellerHookWhenWired(t *testing.T) {
 	e := newTestEngine(t, pen, hooks, 8, 8)
 	e.lifeCtx = context.Background()
 
-	pending, err := e.Call(message.Root(), "actor:callee", "greet", map[string]string{"hi": "1"})
+	pending, err := e.Call(message.Root(), harness.Context{}, "actor:callee", "greet", map[string]string{"hi": "1"})
 	if err != nil {
 		t.Fatalf("unexpected Call error: %v", err)
 	}

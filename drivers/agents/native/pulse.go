@@ -51,7 +51,7 @@ func (c *controller) pulse(sys actorbase.Sys, msg actorbase.Msg) error {
 			}
 		}
 	}
-	c.scheduleQueued(sys, msg.Cause())
+	c.scheduleQueued(sys, msg.Cause(), msg.Context())
 	_, err := sys.After(10*time.Second, pulseType, map[string]any{}, schedule.TimerHomeMemory)
 	return err
 }

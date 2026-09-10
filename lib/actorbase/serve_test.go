@@ -89,11 +89,11 @@ func (f *fakeSys) Post(spec behavior.RequestSpec) (message.ID, error) {
 	panic("not implemented")
 }
 
-func (f *fakeSys) Call(cause message.Cause, target actor.ActorID, msgType string, payload any) (Pending, error) {
+func (f *fakeSys) Call(cause message.Cause, app harness.Context, target actor.ActorID, msgType string, payload any) (Pending, error) {
 	panic("not implemented")
 }
 
-func (f *fakeSys) CallFor(message.Cause, harness.Caller, actor.ActorID, string, any) (Pending, error) {
+func (f *fakeSys) CallFor(message.Cause, harness.Context, harness.Caller, actor.ActorID, string, any) (Pending, error) {
 	panic("not implemented")
 }
 func (f *fakeSys) CallSpecFor(caller harness.Caller, spec behavior.RequestSpec) (Pending, error) {
@@ -101,7 +101,7 @@ func (f *fakeSys) CallSpecFor(caller harness.Caller, spec behavior.RequestSpec) 
 	if len(spec.Audience) > 0 {
 		target = spec.Audience[0]
 	}
-	return f.CallFor(spec.Cause, caller, target, spec.Type, spec.Payload)
+	return f.CallFor(spec.Cause, spec.Context, caller, target, spec.Type, spec.Payload)
 }
 
 func (f *fakeSys) State() StateHandle { panic("not implemented") }

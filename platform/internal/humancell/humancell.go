@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
@@ -21,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -279,6 +279,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 	// client's word: an id this channel never saw is refused, not silently
 	// turned into a second root wearing a parent.
 	cause := message.Root()
+	app := harness.Context{}
 	if p.ParentID != "" {
 		parent, found, lookupErr := deps.Requests.FindByID(sys.Life(), message.ID(p.ParentID))
 		if lookupErr != nil {
@@ -288,6 +289,10 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 			return errFrame(f, subjectgate.CodeBadPayload, "parent_id "+p.ParentID+" is not a message in this channel, so there is no errand to continue; omit parent_id to start a new one")
 		}
 		cause = message.From(*parent)
+		app, _, err = harness.UnwrapPayload(parent.Payload)
+		if err != nil {
+			return errFrame(f, subjectgate.CodeBadPayload, "invalid parent context: "+err.Error())
+		}
 	}
 	var msgID message.ID
 	if kind == message.KindEvent {
@@ -298,7 +303,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 			Audience:          aud,
 			Visibility:        message.Visibility(p.Visibility),
 			Cause:             cause,
-			ClientFingerprint: fingerprint,
+			ClientFingerprint: fingerprint, Context: app,
 		})
 	} else {
 		// Post, not Call/Submit: the person is not waiting on this goroutine,
@@ -313,7 +318,7 @@ func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectg
 			Visibility:        message.Visibility(p.Visibility),
 			Cause:             cause,
 			ExpiresAt:         p.ExpiresAt,
-			ClientFingerprint: fingerprint,
+			ClientFingerprint: fingerprint, Context: app,
 		})
 	}
 	if err != nil {
