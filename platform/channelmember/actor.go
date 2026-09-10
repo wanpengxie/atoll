@@ -57,6 +57,10 @@ func SeatDef(hub *Hub, host channel.ID, cfg SeatConfig, unavailable ...func(cont
 		if hub == nil || !pair.valid() {
 			return nil, errors.New("invalid seat binding")
 		}
+		workers, backlog, err := forwardingLimits(cfg.MaxConcurrency, cfg.QueueCapacity)
+		if err != nil {
+			return nil, err
+		}
 		return func(sys actorbase.Sys) error {
 			releaseProjection, err := hub.WatchHandleBinding(pair, func(b HandleBinding) { projection.refresh(sys.Life(), b) })
 			if err != nil {
@@ -68,7 +72,7 @@ func SeatDef(hub *Hub, host channel.ID, cfg SeatConfig, unavailable ...func(cont
 				return err
 			}
 			defer release()
-			return serveConcurrent(sys, func(msg actorbase.Msg) {
+			return serveBuffered(sys, workers, backlog, func(msg actorbase.Msg) {
 				if msg.Type == InboundEvent && msg.Sender.ID == sys.Self() {
 					return
 				}
@@ -104,6 +108,10 @@ func HandleDef(hub *Hub, body channel.ID, cfg HandleConfig, members Members) act
 		if hub == nil || members == nil || !pair.valid() {
 			return nil, errors.New("invalid handle binding")
 		}
+		workers, backlog, err := forwardingLimits(cfg.MaxConcurrency, cfg.QueueCapacity)
+		if err != nil {
+			return nil, err
+		}
 		return func(sys actorbase.Sys) error {
 			release, err := hub.AttachHandle(pair, func(ctx context.Context, req Request) (Response, error) {
 				if req.Type == introspect.QueryDescribe {
@@ -127,7 +135,7 @@ func HandleDef(hub *Hub, body channel.ID, cfg HandleConfig, members Members) act
 				return err
 			}
 			defer release()
-			return serveConcurrent(sys, func(msg actorbase.Msg) {
+			return serveBuffered(sys, workers, backlog, func(msg actorbase.Msg) {
 				// Incoming events are notifications, never outbound drive instructions.
 				if msg.Kind != message.KindRequest {
 					return
@@ -188,9 +196,25 @@ func HandleDef(hub *Hub, body channel.ID, cfg HandleConfig, members Members) act
 		}, nil
 	}}
 }
-func serveConcurrent(sys actorbase.Sys, fn func(actorbase.Msg)) error {
+func serveBuffered(sys actorbase.Sys, workers, backlog int, fn func(actorbase.Msg)) error {
+	if workers <= 0 || backlog < 0 {
+		return errors.New("channelmember: invalid handler capacity")
+	}
+	queue := make(chan actorbase.Msg, backlog)
 	var wg sync.WaitGroup
-	defer wg.Wait()
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for msg := range queue {
+				fn(msg)
+			}
+		}()
+	}
+	defer func() {
+		close(queue)
+		wg.Wait()
+	}()
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
@@ -199,8 +223,15 @@ func serveConcurrent(sys actorbase.Sys, fn func(actorbase.Msg)) error {
 		if msg.Kind != message.KindRequest && msg.Kind != message.KindEvent {
 			continue
 		}
-		wg.Add(1)
-		go func() { defer wg.Done(); fn(msg) }()
+		select {
+		case queue <- msg:
+		default:
+			if msg.Kind == message.KindRequest {
+				_, _ = sys.Fail(msg, "capacity", "channel forwarding queue is full")
+			} else {
+				slog.Warn("channelmember.event_overloaded", "actor", sys.Self(), "message_id", msg.ID, "type", msg.Type)
+			}
+		}
 	}
 }
 

@@ -13,6 +13,66 @@ import (
 	"testing"
 )
 
+type bufferedServeSys struct {
+	actorbase.Sys
+	recv   chan actorbase.Msg
+	failed chan message.ID
+}
+
+func (s *bufferedServeSys) Self() actor.ActorID { return "tool:forwarder:1" }
+func (s *bufferedServeSys) Recv() (actorbase.Msg, error) {
+	msg, ok := <-s.recv
+	if !ok {
+		return actorbase.Msg{}, errors.New("stopped")
+	}
+	return msg, nil
+}
+func (s *bufferedServeSys) Fail(msg actorbase.Msg, _, _ string, _ ...map[string]any) (message.ID, error) {
+	s.failed <- msg.ID
+	return "failure", nil
+}
+
+func TestServeBufferedOwnsBoundedQueue(t *testing.T) {
+	sys := &bufferedServeSys{recv: make(chan actorbase.Msg), failed: make(chan message.ID, 1)}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	handled := make(chan message.ID, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveBuffered(sys, 1, 1, func(msg actorbase.Msg) {
+			if msg.ID == "one" {
+				close(started)
+				<-release
+			}
+			handled <- msg.ID
+		})
+	}()
+
+	request := func(id message.ID) actorbase.Msg {
+		return actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: id, Kind: message.KindRequest, Payload: json.RawMessage(`{}`)})
+	}
+	sys.recv <- request("one")
+	<-started
+	sys.recv <- request("two")
+	sys.recv <- request("three")
+	if id := <-sys.failed; id != "three" {
+		t.Fatalf("failed request = %q, want queue overflow request three", id)
+	}
+	close(sys.recv)
+	close(release)
+	if err := <-done; err == nil || err.Error() != "stopped" {
+		t.Fatalf("serve exit = %v, want stopped", err)
+	}
+	close(handled)
+	var got []message.ID
+	for id := range handled {
+		got = append(got, id)
+	}
+	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Fatalf("handled = %v, want [one two]", got)
+	}
+}
+
 type memberStub struct {
 	active bool
 	decl   string
