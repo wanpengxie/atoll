@@ -18,7 +18,6 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 type intakeFact struct{ msg actorbase.Msg }
@@ -27,6 +26,10 @@ type closureFact struct{ id book.RequestID }
 type receiptFact struct {
 	key      string
 	revision uint64
+}
+type holdExpiredFact struct {
+	holdID     book.RequestID
+	generation uint64
 }
 type baseFaultFact struct{ code, detail string }
 
@@ -284,7 +287,8 @@ type agentLoop struct {
 	freezeSource                              freezeSource
 	restoreInterrupt                          bool
 	restoreInterruptBy                        book.RequestID
-	holdTimer                                 schedule.TimerID
+	holdTimer                                 *time.Timer
+	holdGeneration                            uint64
 	steerBatches                              map[uint64]steerBatch
 	// selectSlot is agent.select's bypass lane (design §8): an exclusive
 	// 0-or-1 slot BESIDE the buffer — never in the wait queue, never counted
@@ -333,6 +337,7 @@ func (l *agentLoop) cleanup() {
 		for _, timer := range l.receiptTimers {
 			timer.Stop()
 		}
+		l.clearHoldTimer()
 		l.inbox.seal()
 	})
 }
@@ -396,6 +401,8 @@ func (l *agentLoop) handleFact(v any) {
 		if row, ok := l.receipts[x.key]; ok && row.revision == x.revision {
 			l.faultNow("receipt_timeout", x.key+" exceeded coarse receipt deadline")
 		}
+	case holdExpiredFact:
+		l.handleHoldExpired(x)
 	case runtimeEvent:
 		l.handleRuntimeEvent(x)
 	case baseFaultFact:
@@ -435,15 +442,7 @@ func (l *agentLoop) frozen(now time.Time) bool { return now.Before(l.frozenUntil
 
 func (l *agentLoop) handleIntake(msg actorbase.Msg) {
 	if msg.Kind == message.KindEvent {
-		// Fires are routed by WHICH timer rang, never by what it is called:
-		// system.timer.set lets a caller name any msg_type, so dispatching the
-		// hold timer by its type would let an alarm named agent.hold_expired
-		// walk into the loop's private hold branch (and be swallowed there
-		// instead of waking anyone).
-		switch {
-		case l.isOwnHoldFire(msg):
-			l.handleHoldExpired(msg.Payload)
-		case l.isTimerFire(msg):
+		if l.isTimerFire(msg) {
 			l.postTimerWake(msg)
 		}
 		return
@@ -969,9 +968,7 @@ func (l *agentLoop) freeze(holdID book.RequestID, duration time.Duration) {
 	l.frozenUntil = l.now().Add(duration)
 	l.heldBy = holdID
 	l.freezeSource = freezeSourceHold
-	if l.sys != nil {
-		l.holdTimer, _ = l.sys.After(duration, typeHoldExpired, map[string]any{"hold_id": string(holdID)}, schedule.TimerHomeMemory)
-	}
+	l.armHoldTimer(holdID, duration)
 }
 
 func (l *agentLoop) freezeInterrupt(holdID book.RequestID) {
@@ -1003,22 +1000,25 @@ func (l *agentLoop) releaseHold() {
 }
 
 func (l *agentLoop) clearHoldTimer() {
-	if l.holdTimer == "" {
-		return
-	}
-	timer := l.holdTimer
-	l.holdTimer = ""
-	if l.sys != nil {
-		_ = l.sys.CancelTimer(timer)
+	l.holdGeneration++
+	if l.holdTimer != nil {
+		l.holdTimer.Stop()
+		l.holdTimer = nil
 	}
 }
 
-func (l *agentLoop) handleHoldExpired(raw json.RawMessage) {
-	var payload struct {
-		HoldID string `json:"hold_id"`
-	}
-	_ = json.Unmarshal(raw, &payload)
-	if book.RequestID(payload.HoldID) != l.heldBy {
+func (l *agentLoop) armHoldTimer(holdID book.RequestID, duration time.Duration) {
+	l.holdGeneration++
+	generation := l.holdGeneration
+	l.holdTimer = time.AfterFunc(duration, func() {
+		if !l.inbox.push(holdExpiredFact{holdID: holdID, generation: generation}) {
+			l.inbox.latchFault("base_inbox_overflow", "hold expiry could not be admitted")
+		}
+	})
+}
+
+func (l *agentLoop) handleHoldExpired(fact holdExpiredFact) {
+	if fact.generation != l.holdGeneration || fact.holdID != l.heldBy {
 		return
 	}
 	now := l.now()
@@ -1026,9 +1026,8 @@ func (l *agentLoop) handleHoldExpired(raw json.RawMessage) {
 		l.releaseHold()
 		return
 	}
-	if l.sys != nil {
-		l.holdTimer, _ = l.sys.After(l.frozenUntil.Sub(now), typeHoldExpired, map[string]any{"hold_id": string(l.heldBy)}, schedule.TimerHomeMemory)
-	}
+	l.clearHoldTimer()
+	l.armHoldTimer(l.heldBy, l.frozenUntil.Sub(now))
 }
 
 func (l *agentLoop) handleFork(msg actorbase.Msg) {

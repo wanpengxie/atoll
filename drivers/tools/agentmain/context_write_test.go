@@ -102,7 +102,7 @@ func TestFailedWriteAndDeleteDoNotStopMain(t *testing.T) {
 	if err := proc(Config{Session: "main"})(s); !errors.Is(err, io.EOF) {
 		t.Fatalf("main exited on storage failure: %v", err)
 	}
-	if len(s.failures) != 1 || s.replies != 1 || s.arms != 3 || s.res.deletes != 1 {
+	if len(s.failures) != 1 || s.replies != 1 || s.arms != 0 || s.res.deletes != 1 {
 		t.Fatalf("main stopped serving: failures=%v replies=%d timers=%d deletes=%d", s.failures, s.replies, s.arms, s.res.deletes)
 	}
 }
@@ -114,7 +114,7 @@ func TestStartupContextWriteFailureKeepsMainReceiving(t *testing.T) {
 	if err := proc(Config{Session: "main"})(s); !errors.Is(err, io.EOF) {
 		t.Fatalf("startup KV failure stopped main: %v", err)
 	}
-	if s.res.writes != 3 || s.res.deletes != 1 || s.replies != 1 || s.arms != 3 {
+	if s.res.writes != 3 || s.res.deletes != 1 || s.replies != 1 || s.arms != 0 {
 		t.Fatalf("writes=%d deletes=%d replies=%d timers=%d", s.res.writes, s.res.deletes, s.replies, s.arms)
 	}
 }

@@ -21,7 +21,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
-	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const maxWorkInputBytes = 4 << 20
@@ -34,73 +33,126 @@ type controller struct {
 	sessionOrder []string
 	nextSession  int
 	selection    *runtimeproto.TurnOptions
+	inbox        chan controllerEvent
+	local        context.Context
 }
 
 func run(sys actorbase.Sys, cfg Config) error {
-	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
-	if err := c.refreshSessionRelations(sys); err != nil {
-		return err
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	return runWithTicks(sys, cfg, ticker.C)
+}
+
+const controllerInboxCapacity = 256
+
+type controllerEvent struct {
+	msg        *actorbase.Msg
+	err        error
+	start      *startDone
+	control    *controlDone
+	waitClosed *waitClosed
+}
+
+type waitClosed struct {
+	WorkID    agentproto.WorkID
+	RequestID message.ID
+}
+
+func (c *controller) publish(event controllerEvent) bool {
+	if c.inbox == nil || c.local == nil {
+		return false
 	}
-	if _, err := sys.After(10*time.Second, pulseType, map[string]any{}, schedule.TimerHomeMemory); err != nil {
-		return err
+	select {
+	case c.inbox <- event:
+		return true
+	case <-c.local.Done():
+		return false
 	}
+}
+
+func (c *controller) receive(sys actorbase.Sys) {
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
-			return err
+			c.publish(controllerEvent{err: err})
+			return
 		}
-		if msg.Kind == message.KindEvent && msg.Type == pulseType && msg.Sender.ID == sys.Self() {
-			if err := c.pulse(sys, msg); err != nil {
-				return err
-			}
-			continue
-		}
-		if msg.Kind != message.KindRequest {
-			continue
-		}
-		switch msg.Type {
-		case agentproto.TypeAsk:
-			c.handleAsk(sys, msg)
-		case agentproto.TypeStatus:
-			c.handleStatus(sys, msg)
-		case agentproto.TypeResult:
-			c.handleResult(sys, msg)
-		case agentproto.TypeSteer:
-			c.steer(sys, msg)
-		case agentproto.TypeReplace, agentproto.TypeHold, agentproto.TypeUnhold:
-			c.editControl(sys, msg)
-		case controlDoneType:
-			c.controlDone(sys, msg)
-		case startDoneType:
-			c.startDone(sys, msg)
-		case agentproto.TypeInterrupt:
-			c.handleInterrupt(sys, msg)
-		case agentproto.TypeSessionList, agentproto.TypeSessionGet, agentproto.TypeSessionRename, agentproto.TypeSessionArchive, agentproto.TypeSessionReset, agentproto.TypeSessionSync:
-			c.handleSession(sys, msg)
-		case agentbase.TypeOptions:
-			c.handleOptions(sys, msg)
-		case agentbase.TypeSelect:
-			c.handleSelect(sys, msg)
-		case agentloop.TypeReport:
-			c.handleReport(sys, msg)
-		case waitClosedType:
-			c.handleWaitClosed(sys, msg)
-		default:
-			_, _ = fail(sys, msg, "type_unsupported", fmt.Sprintf("native Agent does not answer %q", msg.Type))
+		if !c.publish(controllerEvent{msg: &msg}) {
+			return
 		}
 	}
 }
 
-const waitClosedType = "agent.internal.wait_closed"
-const startDoneType = "agent.internal.start_done"
+func runWithTicks(sys actorbase.Sys, cfg Config, ticks <-chan time.Time) error {
+	local, cancel := context.WithCancel(sys.Life())
+	defer cancel()
+	c := &controller{cfg: cfg, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}, inbox: make(chan controllerEvent, controllerInboxCapacity), local: local}
+	if err := c.refreshSessionRelations(sys); err != nil {
+		return err
+	}
+	go c.receive(sys)
+	for {
+		select {
+		case <-local.Done():
+			return local.Err()
+		case <-ticks:
+			c.pulse(sys, message.Root(), harness.Context{})
+		case event := <-c.inbox:
+			switch {
+			case event.err != nil:
+				return event.err
+			case event.start != nil:
+				c.startDone(sys, *event.start)
+			case event.control != nil:
+				c.controlDone(sys, *event.control)
+			case event.waitClosed != nil:
+				c.handleWaitClosed(sys, *event.waitClosed)
+			case event.msg != nil:
+				c.handleMessage(sys, *event.msg)
+			}
+		}
+	}
+}
+
+func (c *controller) handleMessage(sys actorbase.Sys, msg actorbase.Msg) {
+	if msg.Kind != message.KindRequest {
+		return
+	}
+	switch msg.Type {
+	case agentproto.TypeAsk:
+		c.handleAsk(sys, msg)
+	case agentproto.TypeStatus:
+		c.handleStatus(sys, msg)
+	case agentproto.TypeResult:
+		c.handleResult(sys, msg)
+	case agentproto.TypeSteer:
+		c.steer(sys, msg)
+	case agentproto.TypeReplace, agentproto.TypeHold, agentproto.TypeUnhold:
+		c.editControl(sys, msg)
+	case agentproto.TypeInterrupt:
+		c.handleInterrupt(sys, msg)
+	case agentproto.TypeSessionList, agentproto.TypeSessionGet, agentproto.TypeSessionRename, agentproto.TypeSessionArchive, agentproto.TypeSessionReset, agentproto.TypeSessionSync:
+		c.handleSession(sys, msg)
+	case agentbase.TypeOptions:
+		c.handleOptions(sys, msg)
+	case agentbase.TypeSelect:
+		c.handleSelect(sys, msg)
+	case agentloop.TypeReport:
+		c.handleReport(sys, msg)
+	default:
+		_, _ = fail(sys, msg, "type_unsupported", fmt.Sprintf("native Agent does not answer %q", msg.Type))
+	}
+}
 
 type startDone struct {
-	Session     string `json:"session_id"`
-	Turn        string `json:"turn_id"`
-	Looper      string `json:"looper"`
-	Disposition string `json:"disposition,omitempty"`
-	Error       string `json:"error,omitempty"`
-	Detail      string `json:"detail,omitempty"`
+	Session     string
+	Turn        string
+	Looper      string
+	Disposition string
+	Error       string
+	Detail      string
+	Cause       message.Cause
+	Context     harness.Context
 }
 
 func cloneWork(w *workRecord) *workRecord {
@@ -286,10 +338,10 @@ func (c *controller) emit(sys actorbase.Sys, cause message.Cause, app harness.Co
 	}
 }
 
-func awaitStart(sys actorbase.Sys, cause message.Cause, app harness.Context, session, turn, looper string, pending actorbase.Pending) {
+func (c *controller) awaitStart(sys actorbase.Sys, cause message.Cause, app harness.Context, session, turn, looper string, pending actorbase.Pending) {
 	ctx, cancel := context.WithTimeout(sys.Life(), 15*time.Second)
 	defer cancel()
-	done := startDone{Session: session, Turn: turn, Looper: looper}
+	done := startDone{Session: session, Turn: turn, Looper: looper, Cause: cause, Context: app.Clone()}
 	response, err := pending.Wait(ctx, 0)
 	if err != nil {
 		if sys.Life().Err() != nil {
@@ -316,32 +368,20 @@ func awaitStart(sys actorbase.Sys, cause message.Cause, app harness.Context, ses
 	if sys.Life().Err() != nil {
 		return
 	}
-	_, _ = sys.Post(behavior.RequestSpec{Cause: cause, Type: startDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(done), Context: app})
+	c.publish(controllerEvent{start: &done})
 }
 
-func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
-	if msg.Sender.ID != sys.Self() {
-		_, _ = fail(sys, msg, "permission_denied", "start completion is Controller-internal")
-		return
-	}
-	var done startDone
-	if actorbase.DecodeStrict(msg.Payload, &done) != nil || done.Session == "" || done.Turn == "" {
-		_, _ = fail(sys, msg, "invalid_args", "session_id and turn_id are required")
-		return
-	}
+func (c *controller) startDone(sys actorbase.Sys, done startDone) {
 	s := c.sessions[done.Session]
 	if s == nil || s.Execution != done.Turn || !targetMatches(s.Holder, done.Looper) {
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "stale"})
 		return
 	}
 	w := c.data.Works[string(s.Owner)]
 	if w == nil || w.State != agentproto.WorkOpen || w.AssignmentID != done.Turn {
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "stale"})
 		return
 	}
 	if done.Error == "" && (done.Disposition == "accepted" || done.Disposition == "already_accepted" || done.Disposition == "already_finished") {
 		w.Stage, w.ExecutionState, w.UpdatedAt = "thinking", "confirmed_running", nowMillis()
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "adopted"})
 		return
 	}
 	if done.Error == "session_context_unavailable" {
@@ -349,10 +389,9 @@ func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
 		w.UpdatedAt = nowMillis()
 		w.Result = mustJSON(map[string]any{"error_code": done.Error, "detail": done.Detail, "guidance": "Open a new session; this session's context could not be established consistently."})
 		s.Execution, s.Owner = "", ""
-		c.emit(sys, msg.Cause(), msg.Context(), "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
+		c.emit(sys, done.Cause, done.Context, "agent.work.closed", map[string]any{"work": publicWork(w), "result": json.RawMessage(w.Result)})
 		c.finishWaiters(sys, w)
-		_, _ = sys.Reply(msg, map[string]any{"disposition": "rejected"})
-		c.scheduleQueued(sys, msg.Cause(), msg.Context())
+		c.scheduleQueued(sys, done.Cause, done.Context)
 		return
 	}
 	for i := range w.Inputs {
@@ -367,8 +406,7 @@ func (c *controller) startDone(sys actorbase.Sys, msg actorbase.Msg) {
 		s.Opened = false
 	}
 	s.Buffer = append([]agentproto.WorkID{w.ID}, s.Buffer...)
-	_, _ = sys.Reply(msg, map[string]any{"disposition": "rerouted"})
-	c.scheduleQueued(sys, msg.Cause(), msg.Context())
+	c.scheduleQueued(sys, done.Cause, done.Context)
 }
 
 func (c *controller) toolBindings() []agentloop.ToolBinding {
@@ -477,35 +515,26 @@ func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 func (c *controller) attachWaiter(sys actorbase.Sys, msg actorbase.Msg, w *workRecord) {
 	c.wait[w.ID] = append(c.wait[w.ID], msg)
 	_, _ = sys.Progress(msg, w.Stage, map[string]any{"work_id": w.ID, "work_state": w.State, "stage": w.Stage, "execution_state": w.ExecutionState, "controls": []map[string]any{{"word": agentproto.TypeInterrupt, "label": "停止", "payload": map[string]any{"work_id": w.ID}}}})
-	go func(ctx context.Context, life context.Context, self actor.ActorID, cause message.Cause, app harness.Context, workID agentproto.WorkID, requestID message.ID) {
+	go func(ctx context.Context, life context.Context, workID agentproto.WorkID, requestID message.ID) {
 		select {
 		case <-ctx.Done():
 			if life.Err() == nil {
-				_, _ = sys.Post(behavior.RequestSpec{Cause: cause, Type: waitClosedType, Audience: message.Audience{self}, Payload: mustJSON(map[string]any{"work_id": workID, "request_id": requestID}), Context: app})
+				c.publish(controllerEvent{waitClosed: &waitClosed{WorkID: workID, RequestID: requestID}})
 			}
 		case <-life.Done():
 		}
-	}(msg.Ctx(), sys.Life(), sys.Self(), msg.Cause(), msg.Context(), w.ID, msg.ID)
+	}(msg.Ctx(), sys.Life(), w.ID, msg.ID)
 }
 
-func (c *controller) handleWaitClosed(sys actorbase.Sys, msg actorbase.Msg) {
-	if msg.Sender.ID != sys.Self() {
-		_, _ = fail(sys, msg, "permission_denied", "wait lifecycle reports are Controller-internal")
-		return
-	}
-	var req struct {
-		WorkID    agentproto.WorkID `json:"work_id"`
-		RequestID message.ID        `json:"request_id"`
-	}
-	if err := actorbase.DecodeStrict(msg.Payload, &req); err != nil || req.WorkID == "" || req.RequestID == "" {
-		_, _ = fail(sys, msg, "invalid_args", "work_id and request_id are required")
-		return
-	}
+func (c *controller) handleWaitClosed(sys actorbase.Sys, req waitClosed) {
 	held := c.wait[req.WorkID]
 	remaining := held[:0]
+	var departed actorbase.Msg
 	for _, waiter := range held {
 		if waiter.ID != req.RequestID {
 			remaining = append(remaining, waiter)
+		} else {
+			departed = waiter
 		}
 	}
 	if len(remaining) == 0 {
@@ -514,15 +543,9 @@ func (c *controller) handleWaitClosed(sys actorbase.Sys, msg actorbase.Msg) {
 		c.wait[req.WorkID] = remaining
 	}
 	w := c.data.Works[string(req.WorkID)]
-	stopped := false
 	if len(held) != len(remaining) && len(remaining) == 0 && w != nil && w.Delivery == agentproto.DeliveryWait && w.State == agentproto.WorkOpen {
-		if err := c.stop(sys, msg, w, true); err != nil {
-			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
-			return
-		}
-		stopped = true
+		_ = c.stop(sys, departed, w, true)
 	}
-	_, _ = sys.Reply(msg, map[string]any{"disposition": "observed", "work_id": req.WorkID, "remaining_waiters": len(remaining), "stop_requested": stopped})
 }
 
 func (c *controller) answerAsk(sys actorbase.Sys, msg actorbase.Msg, w *workRecord) {
@@ -662,7 +685,7 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 	if s != nil {
 		s.Opened = true
 	}
-	go awaitStart(sys, startCause, w.SourceContext, w.SessionID, w.AssignmentID, looper, pending)
+	go c.awaitStart(sys, startCause, w.SourceContext, w.SessionID, w.AssignmentID, looper, pending)
 	// The accepted response to loop.start is ledger evidence for report validation;
 	// Controller does not mirror it into a session fact.
 	c.emit(sys, cause, app, "agent.work.dispatched", publicWork(w))

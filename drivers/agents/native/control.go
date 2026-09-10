@@ -11,12 +11,9 @@ import (
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
-
-const controlDoneType = "agent.internal.control_done"
 
 type pendingControl struct {
 	ID        string
@@ -30,11 +27,11 @@ type pendingControl struct {
 	Request   agentloop.InputRequest
 }
 type controlDone struct {
-	Session   string                  `json:"session_id"`
-	Execution string                  `json:"assignment_id"`
-	ID        string                  `json:"control_id"`
-	Decision  agentloop.ControlResult `json:"decision"`
-	Unknown   bool                    `json:"unknown,omitempty"`
+	Session   string
+	Execution string
+	ID        string
+	Decision  agentloop.ControlResult
+	Unknown   bool
 }
 
 func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
@@ -190,10 +187,10 @@ func (c *controller) steer(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	pc.Request = agentloop.InputRequest{WorkID: owner.ID, AssignmentID: s.Execution, SessionID: s.ID, ControlID: pc.ID, Inputs: inputs}
 	s.Control = pc
-	go deliverControl(sys, s.ID, owner.Looper, pc)
+	go c.deliverControl(sys, s.ID, owner.Looper, pc)
 }
 
-func deliverControl(sys actorbase.Sys, sessionID, looper string, pc *pendingControl) {
+func (c *controller) deliverControl(sys actorbase.Sys, sessionID, looper string, pc *pendingControl) {
 	ctx, cancel := context.WithTimeout(sys.Life(), 15*time.Second)
 	defer cancel()
 	decision := agentloop.ControlResult{ControlID: pc.ID}
@@ -210,7 +207,8 @@ func deliverControl(sys actorbase.Sys, sessionID, looper string, pc *pendingCont
 	if sys.Life().Err() != nil {
 		return
 	}
-	_, _ = sys.Post(behavior.RequestSpec{Cause: pc.Message.Cause(), Type: controlDoneType, Audience: message.Audience{sys.Self()}, Payload: mustJSON(controlDone{Session: sessionID, Execution: pc.Execution, ID: pc.ID, Decision: decision, Unknown: unknown}), Context: pc.Message.Context()})
+	done := controlDone{Session: sessionID, Execution: pc.Execution, ID: pc.ID, Decision: decision, Unknown: unknown}
+	c.publish(controllerEvent{control: &done})
 }
 
 func controlCall(ctx context.Context, sys actorbase.Sys, cause message.Cause, app harness.Context, target, word string, payload any) (json.RawMessage, error) {
@@ -342,22 +340,13 @@ func (c *controller) settleControl(sys actorbase.Sys, s *session, d agentloop.Co
 	_, _ = sys.Reply(pc.Message, json.RawMessage(response))
 }
 
-func (c *controller) controlDone(sys actorbase.Sys, msg actorbase.Msg) {
-	if msg.Sender.ID != sys.Self() {
-		_, _ = fail(sys, msg, "permission_denied", "internal message")
-		return
-	}
-	var d controlDone
-	if actorbase.DecodeStrict(msg.Payload, &d) != nil {
-		return
-	}
+func (c *controller) controlDone(sys actorbase.Sys, d controlDone) {
 	s := c.sessions[d.Session]
 	if s == nil || s.Execution != d.Execution || s.Control == nil || s.Control.ID != d.ID {
 		return
 	}
 	d.Decision.ControlID = d.ID
 	c.settleControl(sys, s, d.Decision, d.Unknown)
-	_, _ = sys.Reply(msg, map[string]any{"disposition": "adopted"})
 }
 
 type editRequest struct {

@@ -62,14 +62,6 @@ func (l *agentLoop) isTimerFire(msg actorbase.Msg) bool {
 		strings.HasPrefix(string(msg.ID), timerFireIDPrefix)
 }
 
-// isOwnHoldFire recognises the loop's PRIVATE hold-expiry timer by the id it
-// armed, not by the type it chose. Type is caller-nameable through
-// system.timer.set; a timer id is not.
-func (l *agentLoop) isOwnHoldFire(msg actorbase.Msg) bool {
-	return l.holdTimer != "" && l.isTimerFire(msg) &&
-		string(msg.ID) == timerFireIDPrefix+string(l.holdTimer)
-}
-
 type timerWakePayload struct {
 	Text    string          `json:"text"`
 	TimerID string          `json:"timer_id"`

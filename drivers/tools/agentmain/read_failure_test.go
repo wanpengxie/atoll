@@ -195,7 +195,7 @@ func TestMergeFailureDoesNotStopActorOrTimer(t *testing.T) {
 	if err := proc(Config{Session: "main"})(s); !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
-	if len(s.failures) != 2 || s.replies != 1 || s.arms != 3 || len(s.emitted) != 1 || s.emitted[0].Type != "session.track" {
+	if len(s.failures) != 2 || s.replies != 1 || s.arms != 0 || len(s.emitted) != 1 || s.emitted[0].Type != "session.track" {
 		t.Fatalf("failures=%v replies=%d arms=%d events=%v", s.failures, s.replies, s.arms, s.emitted)
 	}
 	for _, f := range s.failures {

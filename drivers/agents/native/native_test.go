@@ -53,15 +53,14 @@ func (s *testState) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 
 type testSys struct {
 	actorbase.Sys
-	state          *testState
-	self           actor.ActorID
-	replies        map[message.ID]any
-	fails          map[message.ID]string
-	progress       map[message.ID][]any
-	posts          []behavior.RequestSpec
-	events         []behavior.EventSpec
-	controlResults chan behavior.RequestSpec
-	ledger         []logMessage
+	state    *testState
+	self     actor.ActorID
+	replies  map[message.ID]any
+	fails    map[message.ID]string
+	progress map[message.ID][]any
+	posts    []behavior.RequestSpec
+	events   []behavior.EventSpec
+	ledger   []logMessage
 }
 
 type testPending struct{ msg actorbase.Msg }
@@ -76,7 +75,7 @@ func (p testPending) Wait(context.Context, time.Duration) (actorbase.Msg, error)
 func (p testPending) Cancel() error                                              { return nil }
 
 func newTestSys(state *testState) *testSys {
-	return &testSys{controlResults: make(chan behavior.RequestSpec, 16), state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}}
+	return &testSys{state: state, self: "agent:native:1", replies: map[message.ID]any{}, fails: map[message.ID]string{}, progress: map[message.ID][]any{}}
 }
 func (s *testSys) State() actorbase.StateHandle { return s.state }
 func (s *testSys) Self() actor.ActorID          { return s.self }
@@ -95,14 +94,6 @@ func (s *testSys) Progress(msg actorbase.Msg, _ string, v any) (message.ID, erro
 	return "progress", nil
 }
 func (s *testSys) Post(spec behavior.RequestSpec) (message.ID, error) {
-	if spec.Type == controlDoneType && s.controlResults != nil {
-		s.controlResults <- spec
-		return "control-done", nil
-	}
-	if spec.Type == startDoneType {
-		return "start-done", nil
-	}
-
 	s.posts = append(s.posts, spec)
 	return message.ID("post"), nil
 }
@@ -363,21 +354,16 @@ func TestWaitWorkStopsOnlyAfterItsLastCallerLeaves(t *testing.T) {
 	c.handleAsk(sys, testRequest("q1", agentproto.TypeAsk, body))
 	c.handleAsk(sys, testRequest("q2", agentproto.TypeAsk, body))
 	w := c.data.Works[c.data.Order[0]]
-	closeWait := func(id, requestID string) {
-		c.handleWaitClosed(sys, testRequestFrom(id, waitClosedType, "c", sys.self.String(), map[string]any{"work_id": w.ID, "request_id": requestID}))
+	closeWait := func(requestID string) {
+		c.handleWaitClosed(sys, waitClosed{WorkID: w.ID, RequestID: message.ID(requestID)})
 	}
-	closeWait("gone-1", "q1")
+	closeWait("q1")
 	if w.Stage == "stopping" || len(c.wait[w.ID]) != 1 {
 		t.Fatalf("first departing waiter stopped shared work: stage=%s waiters=%d", w.Stage, len(c.wait[w.ID]))
 	}
-	closeWait("gone-2", "q2")
+	closeWait("q2")
 	if w.Stage != "stopping" || len(c.wait[w.ID]) != 0 {
 		t.Fatalf("last departing waiter did not stop foreground work: stage=%s waiters=%d", w.Stage, len(c.wait[w.ID]))
-	}
-	unauthorized := testRequestFrom("forged", waitClosedType, "c", "human:alice:1", map[string]any{"work_id": w.ID, "request_id": "q2"})
-	c.handleWaitClosed(sys, unauthorized)
-	if sys.fails["forged"] != "permission_denied" {
-		t.Fatalf("forged lifecycle report failure=%q", sys.fails["forged"])
 	}
 }
 

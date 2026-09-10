@@ -15,7 +15,16 @@ import (
 )
 
 // describe answers with its own id; the embedded Sys is nil, so supply it.
-func (s *terminalRecorder) Self() actor.ActorID { return "tool:fixture" }
+func (s *terminalRecorder) Self() actor.ActorID   { return "tool:fixture" }
+func (s *terminalRecorder) Life() context.Context { return context.Background() }
+
+type blockingRefreshTransport struct{}
+
+func (blockingRefreshTransport) RoundTrip(ctx context.Context, _ rpcRequest, _ string) (rpcResponse, responseInfo, error) {
+	<-ctx.Done()
+	return rpcResponse{}, responseInfo{}, ctx.Err()
+}
+func (blockingRefreshTransport) Close() error { return nil }
 
 type handlerTransport struct {
 	mu     sync.Mutex
@@ -44,6 +53,21 @@ func (t *handlerTransport) count(method string) int {
 
 func testClient(transport transport) *client {
 	return &client{transport: transport, cache: make(map[string]cachedResult), now: time.Now}
+}
+
+func TestPeriodicRefreshUsesTheConfiguredCallTimeout(t *testing.T) {
+	a := &mcpActor{
+		cfg:    Config{Name: "fixture", CallTimeoutMS: 5},
+		client: testClient(blockingRefreshTransport{}),
+	}
+	started := time.Now()
+	a.refreshWithTimeout(&terminalRecorder{})
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("refresh did not respect its timeout: %v", elapsed)
+	}
+	if !errors.Is(a.currentLastError(), context.DeadlineExceeded) {
+		t.Fatalf("last error=%v, want deadline exceeded", a.currentLastError())
+	}
 }
 
 func TestCacheHintsControlRefetchWithoutLeakingIntoContract(t *testing.T) {

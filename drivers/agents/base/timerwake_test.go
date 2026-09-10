@@ -88,24 +88,14 @@ func TestTimerFireBecomesASelfCommission(t *testing.T) {
 	}
 }
 
-// Fires are routed by WHICH timer rang, not by what it is called: a caller can
-// name any msg_type through system.timer.set, so dispatching by type would let
-// an alarm named agent.hold_expired walk into the loop's private hold branch
-// and be swallowed there instead of waking anyone.
-func TestAnAlarmNamedLikeTheHoldTimerStillWakesTheAgent(t *testing.T) {
+// Hold expiry is private now, so no public event type is reserved for it. A
+// caller may use the old spelling for an ordinary alarm and it still wakes the
+// agent like every other schedule fire.
+func TestAnAlarmNamedLikeTheFormerHoldTimerStillWakesTheAgent(t *testing.T) {
 	l, sys := newWakeLoop(t)
-	l.holdTimer = "hold-99"
-
-	// The loop's own hold timer, recognised by its id.
-	l.handleIntake(fireEvent("timer:hold-99", typeHoldExpired, "agent:test:1", `{"hold_id":"nobody"}`))
-	if len(sys.posts) != 0 {
-		t.Fatal("the loop's own hold timer must not become an alarm commission")
-	}
-
-	// A caller-armed alarm that merely borrows the name.
-	l.handleIntake(fireEvent("timer:user-1", typeHoldExpired, "agent:test:1", `{}`))
+	l.handleIntake(fireEvent("timer:user-1", "agent.hold_expired", "agent:test:1", `{}`))
 	if len(sys.posts) != 1 {
-		t.Fatalf("posts=%d, want the borrowed-name alarm to still wake its owner", len(sys.posts))
+		t.Fatalf("posts=%d, want the alarm to wake its owner", len(sys.posts))
 	}
 }
 

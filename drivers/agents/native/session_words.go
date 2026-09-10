@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
@@ -58,7 +59,7 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 	switch msg.Type {
 	case agentproto.TypeSessionArchive:
 		s.Archived = true
-		err := c.postSessionCommand(sys, msg, s, agentloop.TypeStop, agentloop.StopRequest{SessionID: id, TurnID: s.Execution, AssignmentID: s.Execution, Archive: true, Reason: "archive"})
+		err := c.postSessionCommand(sys, msg.Cause(), msg.Context(), s, agentloop.TypeStop, agentloop.StopRequest{SessionID: id, TurnID: s.Execution, AssignmentID: s.Execution, Archive: true, Reason: "archive"})
 		if err != nil {
 			s.Archived = false
 			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
@@ -70,7 +71,7 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = fail(sys, msg, "busy", "session has active turn")
 			return
 		}
-		err := c.postSessionCommand(sys, msg, s, agentloop.TypeReset, agentloop.ResetRequest{SessionID: id})
+		err := c.postSessionCommand(sys, msg.Cause(), msg.Context(), s, agentloop.TypeReset, agentloop.ResetRequest{SessionID: id})
 		if err != nil {
 			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
@@ -84,7 +85,7 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = fail(sys, msg, "invalid_args", "name required")
 			return
 		}
-		err := c.postSessionCommand(sys, msg, s, agentloop.TypeRename, agentloop.RenameRequest{SessionID: id, Name: req.Name})
+		err := c.postSessionCommand(sys, msg.Cause(), msg.Context(), s, agentloop.TypeRename, agentloop.RenameRequest{SessionID: id, Name: req.Name})
 		if err != nil {
 			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
@@ -104,7 +105,7 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 			_, _ = fail(sys, msg, "invalid_args", "from_session required")
 			return
 		}
-		err := c.postSessionCommand(sys, msg, s, agentloop.TypeSync, agentloop.SyncRequest{SessionID: id, From: agentloop.SyncRange{Session: req.FromSession, After: req.After, Through: req.Through}})
+		err := c.postSessionCommand(sys, msg.Cause(), msg.Context(), s, agentloop.TypeSync, agentloop.SyncRequest{SessionID: id, From: agentloop.SyncRange{Session: req.FromSession, After: req.After, Through: req.Through}})
 		if err != nil {
 			_, _ = fail(sys, msg, "ledger_unavailable", err.Error())
 			return
@@ -113,7 +114,7 @@ func (c *controller) handleSession(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 }
 
-func (c *controller) postSessionCommand(sys actorbase.Sys, msg actorbase.Msg, s *session, typ string, payload any) error {
+func (c *controller) postSessionCommand(sys actorbase.Sys, cause message.Cause, app harness.Context, s *session, typ string, payload any) error {
 	tried := map[string]bool{}
 	for attempt := 0; attempt <= len(c.cfg.Loopers); attempt++ {
 		target := s.Holder
@@ -125,7 +126,7 @@ func (c *controller) postSessionCommand(sys actorbase.Sys, msg actorbase.Msg, s 
 			}
 		}
 		tried[target] = true
-		_, err := sys.Post(behavior.RequestSpec{Cause: msg.Cause(), Type: typ, Audience: message.Audience{actorID(target)}, Payload: mustJSON(payload), Context: msg.Context()})
+		_, err := sys.Post(behavior.RequestSpec{Cause: cause, Type: typ, Audience: message.Audience{actorID(target)}, Payload: mustJSON(payload), Context: app})
 		if err == nil {
 			s.Holder = target
 			return nil

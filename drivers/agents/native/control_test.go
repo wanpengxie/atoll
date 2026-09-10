@@ -16,22 +16,33 @@ func controlFixture(t *testing.T) (*testSys, *controller, *workRecord) {
 	t.Helper()
 	sys := newTestSys(newTestState())
 	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 32, MaxTurns: 4, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxAssignmentsPerLooper: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	attachTestInbox(c)
 	c.handleAsk(sys, testRequest("q", agentproto.TypeAsk, map[string]any{"text": "first", "session_id": "session:v", "delivery": "receipt", "submission_key": "one"}))
 	w := c.data.Works[c.data.Order[0]]
 	w.Stage, w.ExecutionState = "thinking", "confirmed_running"
 	return sys, c, w
 }
-func drainControl(t *testing.T, sys *testSys) {
+func attachTestInbox(c *controller) {
+	c.local = context.Background()
+	c.inbox = make(chan controllerEvent, controllerInboxCapacity)
+}
+func drainControl(t *testing.T, _ *testSys, c *controller) {
 	t.Helper()
-	select {
-	case <-sys.controlResults:
-	case <-time.After(time.Second):
-		t.Fatal("control delivery did not terminate")
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-c.inbox:
+			if event.control != nil {
+				return
+			}
+		case <-deadline:
+			t.Fatal("control delivery did not terminate")
+		}
 	}
 }
 func admitControl(t *testing.T, sys *testSys, c *controller, s *session) agentloop.ControlResult {
 	t.Helper()
-	drainControl(t, sys)
+	drainControl(t, sys, c)
 	if s.Control == nil {
 		t.Fatal("missing pending control")
 	}
@@ -47,7 +58,7 @@ func TestSteerTransfersOwnerOnceAndReportBeforeAck(t *testing.T) {
 	if s.Owner != old.ID || sys.replies["steer"] != nil {
 		t.Fatal("Post was treated as acceptance")
 	}
-	drainControl(t, sys)
+	drainControl(t, sys, c)
 	pc := s.Control
 	d := agentloop.ControlResult{ControlID: pc.ID, Disposition: "accepted", Inputs: pc.Request.Inputs}
 	c.settleControl(sys, s, d, false)
@@ -73,7 +84,7 @@ func TestSteerRejectionRestoresOriginalQueueOrder(t *testing.T) {
 	}
 	original := append([]agentproto.WorkID(nil), s.Buffer...)
 	c.steer(sys, testRequest("all", agentproto.TypeSteer, map[string]any{"session_id": s.ID, "all": true}))
-	drainControl(t, sys)
+	drainControl(t, sys, c)
 	c.settleControl(sys, s, agentloop.ControlResult{ControlID: s.Control.ID, Disposition: "target_gone"}, false)
 	if string(mustJSON(original)) != string(mustJSON(s.Buffer)) {
 		t.Fatal("queue reordered")
@@ -86,7 +97,7 @@ func TestSteerAllOnlyIncludesCallerAndView(t *testing.T) {
 	c.handleAsk(sys, testRequestFrom("b", agentproto.TypeAsk, "c", "human:bob:1", map[string]any{"text": "bob", "session_id": s.ID}))
 	c.handleAsk(sys, testRequest("other", agentproto.TypeAsk, map[string]any{"text": "other", "session_id": "view:other"}))
 	c.steer(sys, testRequest("all", agentproto.TypeSteer, map[string]any{"session_id": s.ID, "all": true}))
-	drainControl(t, sys)
+	drainControl(t, sys, c)
 	if len(s.Control.Targets) != 1 || c.data.Works[string(s.Control.Targets[0])].SourceRequest != "a" || len(s.Buffer) != 1 {
 		t.Fatal("steer swept other caller or view")
 	}
@@ -226,7 +237,7 @@ func TestPendingControlDoesNotBlockAnotherView(t *testing.T) {
 	sys, c, w := controlFixture(t)
 	s := c.sessions[w.SessionID]
 	c.steer(sys, testRequest("steer", agentproto.TypeSteer, map[string]any{"session_id": s.ID, "text": "wait"}))
-	drainControl(t, sys)
+	drainControl(t, sys, c)
 	for _, id := range []string{"b", "c", "d"} {
 		c.handleAsk(sys, testRequest(id, agentproto.TypeAsk, map[string]any{"session_id": "view:" + id, "text": id, "delivery": "receipt", "submission_key": id}))
 	}
@@ -242,10 +253,20 @@ func TestUnknownControlIsNotAutomaticallyRequeued(t *testing.T) {
 	s := c.sessions[w.SessionID]
 	c.handleAsk(sys, testRequest("waiting", agentproto.TypeAsk, map[string]any{"session_id": s.ID, "text": "later"}))
 	c.steer(sys, testRequest("target", agentproto.TypeSteer, map[string]any{"target": "waiting"}))
-	drainControl(t, sys)
+	drainControl(t, sys, c)
 	c.settleControl(sys, s, agentloop.ControlResult{ControlID: s.Control.ID}, true)
 	if len(s.Buffer) != 0 || s.Freeze != "interrupt" || w.Stage != "stopping" || c.requestWork("waiting").ExecutionState != "control_unknown" {
 		t.Fatal("unknown admission was replayed or hidden")
+	}
+}
+
+func TestStaleControlCompletionIsIgnoredPrivately(t *testing.T) {
+	sys, c, w := controlFixture(t)
+	s := c.sessions[w.SessionID]
+	stale := controlDone{Session: s.ID, Execution: "old", ID: "old"}
+	c.controlDone(sys, stale)
+	if len(sys.replies) != 1 || len(sys.fails) != 0 || s.Control != nil {
+		t.Fatalf("stale private completion changed protocol state: replies=%v fails=%v control=%+v", sys.replies, sys.fails, s.Control)
 	}
 }
 

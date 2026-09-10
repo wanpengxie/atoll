@@ -130,8 +130,7 @@ const (
 	// account; dropping somebody else's cannot be, because a bystander is not
 	// an authorized closure author — but the receiver always is, so the honest
 	// shape is to ask the receiver to answer it rather than to reach around it.
-	TypeDismiss     = "agent.dismiss"
-	typeHoldExpired = "agent.hold_expired"
+	TypeDismiss = "agent.dismiss"
 )
 
 // supports gates intake. TypeTimerWake is accepted but deliberately NOT in the

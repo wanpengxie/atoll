@@ -94,6 +94,31 @@ func TestSchemasAreJSONDocuments(t *testing.T) {
 	}
 }
 
+func TestControlOutputAllowsAgentWideInterruptResult(t *testing.T) {
+	var schema struct {
+		AnyOf []struct {
+			Required []string `json:"required"`
+		} `json:"anyOf"`
+		OneOf json.RawMessage `json:"oneOf"`
+	}
+	if err := json.Unmarshal([]byte(ControlOutputSchema), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if len(schema.OneOf) != 0 || len(schema.AnyOf) != 2 {
+		t.Fatalf("control result alternatives are exclusive or missing: %s", ControlOutputSchema)
+	}
+	result := map[string]any{
+		"scope": "agent", "stop_requested": 2, "disposition": "stop_requested",
+	}
+	for index, alternative := range schema.AnyOf {
+		for _, field := range alternative.Required {
+			if _, ok := result[field]; !ok {
+				t.Fatalf("real agent-wide interrupt result misses anyOf[%d] field %q", index, field)
+			}
+		}
+	}
+}
+
 func TestClosedEnums(t *testing.T) {
 	if _, ok := ParseDelivery("later"); ok {
 		t.Fatal("unknown delivery accepted")

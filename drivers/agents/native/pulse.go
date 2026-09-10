@@ -2,17 +2,15 @@ package native
 
 import (
 	"sort"
-	"time"
 
 	agentproto "github.com/wanpengxie/atoll/drivers/agents/workapi"
 	agentloop "github.com/wanpengxie/atoll/drivers/tools/agentlooper/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-const pulseType = "agent.internal.pulse"
-
-func (c *controller) pulse(sys actorbase.Sys, msg actorbase.Msg) error {
+func (c *controller) pulse(sys actorbase.Sys, cause message.Cause, app harness.Context) {
 	now := nowMillis()
 	for _, s := range c.sessions {
 		if s.Freeze == "hold" && now >= s.HoldUntil {
@@ -35,7 +33,7 @@ func (c *controller) pulse(sys actorbase.Sys, msg actorbase.Msg) error {
 		if i < c.cfg.Archive.KeepAlive || !c.idleInThisProcess(s) || c.cfg.Archive.IdleMS == 0 || now-s.LastUsed < c.cfg.Archive.IdleMS {
 			continue
 		}
-		err := c.postSessionCommand(sys, msg, s, agentloop.TypeStop, agentloop.StopRequest{SessionID: s.ID, Archive: true, Reason: "idle"})
+		err := c.postSessionCommand(sys, cause, app, s, agentloop.TypeStop, agentloop.StopRequest{SessionID: s.ID, Archive: true, Reason: "idle"})
 		if err == nil {
 			s.Archived = true
 		}
@@ -51,9 +49,7 @@ func (c *controller) pulse(sys actorbase.Sys, msg actorbase.Msg) error {
 			}
 		}
 	}
-	c.scheduleQueued(sys, msg.Cause(), msg.Context())
-	_, err := sys.After(10*time.Second, pulseType, map[string]any{}, schedule.TimerHomeMemory)
-	return err
+	c.scheduleQueued(sys, cause, app)
 }
 
 // A missing local execution does not prove that a historical holder is idle.

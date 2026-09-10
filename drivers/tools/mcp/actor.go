@@ -17,12 +17,15 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const actorDoc = "External MCP server dynamically adapted as an Atoll tool actor."
-const typeRefresh = "mcp.refresh"
 const refreshInterval = time.Minute
+
+type receiveResult struct {
+	msg actorbase.Msg
+	err error
+}
 
 type snapshot struct {
 	description string
@@ -49,7 +52,26 @@ func Def(cfg Config) actorbase.Def {
 }
 
 func (a *mcpActor) run(sys actorbase.Sys) error {
+	local, cancel := context.WithCancel(sys.Life())
+	defer cancel()
+	received := make(chan receiveResult, 1)
+	go func() {
+		for {
+			msg, err := sys.Recv()
+			select {
+			case received <- receiveResult{msg: msg, err: err}:
+			case <-local.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	client, err := newClient(a.cfg)
+	var refresh <-chan time.Time
+	var refreshTimer *time.Timer
 	if err != nil {
 		a.lastError = err
 	} else {
@@ -58,32 +80,43 @@ func (a *mcpActor) run(sys actorbase.Sys) error {
 			_ = client.Close()
 			a.inflight.Wait()
 		}()
-		a.refresh(sys, sys.Life())
-		_, _ = sys.After(refreshInterval, typeRefresh, struct{}{}, schedule.TimerHomeMemory)
+		a.refreshWithTimeout(sys)
+		refreshTimer = time.NewTimer(refreshInterval)
+		defer refreshTimer.Stop()
+		refresh = refreshTimer.C
 	}
 	for {
-		msg, err := sys.Recv()
-		if err != nil {
-			return err
+		select {
+		case <-local.Done():
+			return nil
+		case <-refresh:
+			a.refreshWithTimeout(sys)
+			refreshTimer.Reset(refreshInterval)
+		case result := <-received:
+			if result.err != nil {
+				return result.err
+			}
+			msg := result.msg
+			if msg.Kind != message.KindRequest {
+				continue
+			}
+			if a.cfg.Transport == transportHTTP {
+				a.inflight.Add(1)
+				go func() {
+					defer a.inflight.Done()
+					a.handle(sys, msg)
+				}()
+				continue
+			}
+			a.handle(sys, msg)
 		}
-		if msg.Kind == message.KindEvent && msg.Type == typeRefresh {
-			a.refresh(sys, sys.Life())
-			_, _ = sys.After(refreshInterval, typeRefresh, struct{}{}, schedule.TimerHomeMemory)
-			continue
-		}
-		if msg.Kind != message.KindRequest {
-			continue
-		}
-		if a.cfg.Transport == transportHTTP {
-			a.inflight.Add(1)
-			go func() {
-				defer a.inflight.Done()
-				a.handle(sys, msg)
-			}()
-			continue
-		}
-		a.handle(sys, msg)
 	}
+}
+
+func (a *mcpActor) refreshWithTimeout(sys actorbase.Sys) {
+	ctx, cancel := context.WithTimeout(sys.Life(), a.callTimeout())
+	defer cancel()
+	a.refresh(sys, ctx)
 }
 
 func (a *mcpActor) handle(sys actorbase.Sys, msg actorbase.Msg) {

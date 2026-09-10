@@ -38,14 +38,18 @@ func TestRestartIgnoresOldWorkAndDoesNotContactLooper(t *testing.T) {
 	addOldSession(base)
 	// A previous binary may have left either valid or corrupt State behind.
 	base.state.values["native-agent.work-projection.v1"] = []byte(`{"version":1,"works":{"old-work":{"work_id":"old-work","state":"open","assignment_id":"old-turn","session_id":"branch","looper":"tool:loop-a:9"}},"order":["old-work"]}`)
-	sys := &noWorkStateSys{&pulseTestSys{testSys: base}}
-	sys.inbox = []actorbase.Msg{
+	recv := make(chan actorbase.Msg, 4)
+	sys := &noWorkStateSys{&pulseTestSys{testSys: base, recv: recv}}
+	for _, msg := range []actorbase.Msg{
 		testRequest("status", agentproto.TypeStatus, map[string]any{"work_id": "old-work"}),
 		testRequest("result", agentproto.TypeResult, map[string]any{"work_id": "old-work"}),
 		testRequest("list", agentproto.TypeSessionList, map[string]any{}),
 		testReport("late-report", "tool:loop-a:9", agentloop.ReportRequest{SessionID: "branch", TurnID: "old-turn", State: "completed"}),
+	} {
+		recv <- msg
 	}
-	if err := run(sys, Config{Loopers: []string{"loop-a"}, Archive: ArchiveConfig{IdleMS: 1}}); !errors.Is(err, io.EOF) {
+	close(recv)
+	if err := runWithTicks(sys, Config{Loopers: []string{"loop-a"}, Archive: ArchiveConfig{IdleMS: 1}}, make(chan time.Time)); !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
 	for _, id := range []message.ID{"status", "result"} {
@@ -53,8 +57,8 @@ func TestRestartIgnoresOldWorkAndDoesNotContactLooper(t *testing.T) {
 			t.Fatalf("%s revived old work: failures=%v replies=%v", id, base.fails, base.replies)
 		}
 	}
-	if base.fails["late-report"] != "stale_assignment" || base.replies["list"] == nil || sys.arms != 3 {
-		t.Fatalf("failures=%v replies=%v timers=%d", base.fails, base.replies, sys.arms)
+	if base.fails["late-report"] != "stale_assignment" || base.replies["list"] == nil {
+		t.Fatalf("failures=%v replies=%v", base.fails, base.replies)
 	}
 	if len(base.posts) != 0 || len(base.events) != 0 {
 		t.Fatalf("restart sent commands or settled old work: posts=%v events=%v", base.posts, base.events)
@@ -126,18 +130,13 @@ func TestRelationRefreshNeverRebuildsOrOverwritesExecution(t *testing.T) {
 	}
 	s = c.sessions["branch"]
 	s.LastUsed = 1
-	pulseSys := &pulseTestSys{testSys: base}
-	if err := c.pulse(pulseSys, pulseEvent(base.Self(), pulseType)); err != nil {
-		t.Fatal(err)
-	}
+	c.pulse(base, message.Root(), harness.Context{})
 	if len(base.posts) != 0 || s.Archived {
 		t.Fatalf("timer stopped historical holder: posts=%v session=%+v", base.posts, s)
 	}
 	// Normal idle archival remains available after this process handles a report.
 	c.data.Works["current"] = &workRecord{ID: "current", SessionID: s.ID, State: agentproto.WorkClosed, BoundaryID: s.LastBoundary}
-	if err := c.pulse(pulseSys, pulseEvent(base.Self(), pulseType)); err != nil {
-		t.Fatal(err)
-	}
+	c.pulse(base, message.Root(), harness.Context{})
 	if len(base.posts) != 1 || base.posts[0].Type != agentloop.TypeStop || !s.Archived {
 		t.Fatalf("normal idle archive stopped working: posts=%v session=%+v", base.posts, s)
 	}
@@ -161,9 +160,11 @@ func (s *failedControlSys) Call(_ message.Cause, app harness.Context, _ actor.Ac
 
 func TestFailedControlDoesNotInspectLooper(t *testing.T) {
 	sys := &failedControlSys{testSys: newTestSys(newTestState()), ctx: context.Background()}
-	deliverControl(sys, "branch", "loop-a", &pendingControl{ID: "control", Execution: "turn", Message: testRequest("steer", agentproto.TypeSteer, map[string]any{})})
-	if !reflect.DeepEqual(sys.calls, []string{agentloop.TypeInput}) || len(sys.controlResults) != 1 {
-		t.Fatalf("failed control triggered recovery: calls=%v completions=%d", sys.calls, len(sys.controlResults))
+	c := &controller{}
+	attachTestInbox(c)
+	c.deliverControl(sys, "branch", "loop-a", &pendingControl{ID: "control", Execution: "turn", Message: testRequest("steer", agentproto.TypeSteer, map[string]any{})})
+	if !reflect.DeepEqual(sys.calls, []string{agentloop.TypeInput}) || len(c.inbox) != 1 {
+		t.Fatalf("failed control triggered recovery: calls=%v completions=%d", sys.calls, len(c.inbox))
 	}
 }
 
@@ -173,8 +174,8 @@ func TestContextRefusalClosesCurrentWorkWithoutRetry(t *testing.T) {
 	c.handleAsk(sys, testRequest("ask", agentproto.TypeAsk, map[string]any{"text": "continue", "delivery": "receipt", "submission_key": "one"}))
 	w := c.requestWork("ask")
 	done := startDone{Session: w.SessionID, Turn: w.AssignmentID, Looper: w.Looper, Error: "session_context_unavailable", Detail: "History exceeds 4096 messages; open a new session."}
-	msg := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "start-refusal", Sender: message.Sender{ID: sys.Self()}, Payload: mustJSON(done)})
-	c.startDone(sys, msg)
+	done.Cause = message.Root()
+	c.startDone(sys, done)
 	c.scheduleQueued(sys, message.Root(), harness.Context{})
 	if w.State != agentproto.WorkClosed || w.Outcome != agentproto.OutcomeFailed || len(sys.posts) != 1 || c.sessions[w.SessionID].Execution != "" {
 		t.Fatalf("context refusal was retried: work=%+v posts=%v", w, sys.posts)
@@ -206,13 +207,14 @@ func TestControllerExitDoesNotCancelRemoteRequests(t *testing.T) {
 		t.Run(word, func(t *testing.T) {
 			pending := &cancelledLifePending{}
 			sys := &failedControlSys{testSys: newTestSys(newTestState()), ctx: ctx, pending: pending}
+			c := &controller{local: ctx, inbox: make(chan controllerEvent, 1)}
 			if word == agentloop.TypeStart {
-				awaitStart(sys, message.Root(), harness.Context{}, "branch", "turn", "loop-a", pending)
+				c.awaitStart(sys, message.Root(), harness.Context{}, "branch", "turn", "loop-a", pending)
 			} else {
-				deliverControl(sys, "branch", "loop-a", &pendingControl{ID: "control", Execution: "turn", Message: testRequest("steer", agentproto.TypeSteer, map[string]any{})})
+				c.deliverControl(sys, "branch", "loop-a", &pendingControl{ID: "control", Execution: "turn", Message: testRequest("steer", agentproto.TypeSteer, map[string]any{})})
 			}
-			if pending.cancelled || len(sys.controlResults) != 0 || len(sys.posts) != 0 {
-				t.Fatalf("Controller exit propagated to another actor: cancelled=%v posts=%v", pending.cancelled, sys.posts)
+			if pending.cancelled || len(c.inbox) != 0 || len(sys.posts) != 0 {
+				t.Fatalf("Controller exit propagated to another actor: cancelled=%v private=%d posts=%v", pending.cancelled, len(c.inbox), sys.posts)
 			}
 		})
 	}

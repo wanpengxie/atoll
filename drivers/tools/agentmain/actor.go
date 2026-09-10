@@ -1,6 +1,7 @@
 package agentmain
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,11 +24,9 @@ import (
 	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
-	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const Class = "agent-main"
-const pulse = "agent.main.internal.pulse"
 
 type Config struct {
 	LLMActor         string `json:"llm_actor,omitempty"`
@@ -76,43 +75,72 @@ func manifest() introspect.Manifest {
 
 func proc(cfg Config) actorbase.Proc {
 	return func(sys actorbase.Sys) error {
-		if err := ensureMain(sys, cfg); err != nil {
-			if !errors.Is(err, errMainContextWrite) {
-				return fmt.Errorf("initialize main %s: %w", cfg.Session, err)
-			}
-			slog.Warn("agent-main context initialization failed", "actor", sys.Self(), "session", cfg.Session, "error", err)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		return runWithTicks(sys, cfg, ticker.C)
+	}
+}
+
+type receiveResult struct {
+	msg actorbase.Msg
+	err error
+}
+
+func receive(sys actorbase.Sys, local context.Context, inbox chan<- receiveResult) {
+	for {
+		msg, err := sys.Recv()
+		select {
+		case inbox <- receiveResult{msg: msg, err: err}:
+		case <-local.Done():
+			return
 		}
-		if _, err := sys.After(10*time.Second, pulse, map[string]any{}, schedule.TimerHomeMemory); err != nil {
-			return err
+		if err != nil {
+			return
 		}
-		for {
-			msg, e := sys.Recv()
-			if e != nil {
-				return e
-			}
-			if msg.Kind == message.KindEvent && msg.Type == pulse && msg.Sender.ID == sys.Self() {
-				if err := autoMerge(sys, msg, cfg); err != nil {
-					slog.Warn("agent-main auto merge failed", "actor", sys.Self(), "session", cfg.Session, "error", err)
-				}
-				if _, err := sys.After(10*time.Second, pulse, map[string]any{}, schedule.TimerHomeMemory); err != nil {
-					return err
-				}
-				continue
-			}
-			if msg.Kind != message.KindRequest {
-				continue
-			}
-			switch msg.Type {
-			case "agent.main.track":
-				track(sys, msg, cfg)
-			case "agent.main.merge":
-				mergeOne(sys, msg, cfg)
-			case "agent.main.merge_all":
-				mergeAll(sys, msg, cfg)
-			default:
-				_, _ = sys.Fail(msg, "type_unsupported", "unknown agent-main word")
-			}
+	}
+}
+
+func runWithTicks(sys actorbase.Sys, cfg Config, ticks <-chan time.Time) error {
+	if err := ensureMain(sys, cfg); err != nil {
+		if !errors.Is(err, errMainContextWrite) {
+			return fmt.Errorf("initialize main %s: %w", cfg.Session, err)
 		}
+		slog.Warn("agent-main context initialization failed", "actor", sys.Self(), "session", cfg.Session, "error", err)
+	}
+	local, cancel := context.WithCancel(sys.Life())
+	defer cancel()
+	inbox := make(chan receiveResult, 64)
+	go receive(sys, local, inbox)
+	for {
+		select {
+		case <-local.Done():
+			return local.Err()
+		case <-ticks:
+			if err := autoMerge(sys, cfg); err != nil {
+				slog.Warn("agent-main auto merge failed", "actor", sys.Self(), "session", cfg.Session, "error", err)
+			}
+		case received := <-inbox:
+			if received.err != nil {
+				return received.err
+			}
+			handleMessage(sys, received.msg, cfg)
+		}
+	}
+}
+
+func handleMessage(sys actorbase.Sys, msg actorbase.Msg, cfg Config) {
+	if msg.Kind != message.KindRequest {
+		return
+	}
+	switch msg.Type {
+	case "agent.main.track":
+		track(sys, msg, cfg)
+	case "agent.main.merge":
+		mergeOne(sys, msg, cfg)
+	case "agent.main.merge_all":
+		mergeAll(sys, msg, cfg)
+	default:
+		_, _ = sys.Fail(msg, "type_unsupported", "unknown agent-main word")
 	}
 }
 
@@ -261,7 +289,7 @@ func mergeAll(sys actorbase.Sys, msg actorbase.Msg, cfg Config) {
 	}
 	_, _ = sys.Reply(msg, map[string]any{"disposition": "merged", "count": n})
 }
-func autoMerge(sys actorbase.Sys, _ actorbase.Msg, cfg Config) error {
+func autoMerge(sys actorbase.Sys, cfg Config) error {
 	branches, archived, err := relations(sys, cfg)
 	if err != nil {
 		return err

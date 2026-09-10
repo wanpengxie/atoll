@@ -3,7 +3,6 @@ package base
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -34,13 +33,6 @@ type v7Terminal struct {
 type v7Progress struct {
 	status string
 	value  any
-}
-
-type v7Timer struct {
-	id      schedule.TimerID
-	d       time.Duration
-	typ     string
-	payload any
 }
 
 type v7Resource struct{}
@@ -81,9 +73,6 @@ type v7Sys struct {
 	mu        sync.Mutex
 	terminals map[string][]v7Terminal
 	progress  map[string][]v7Progress
-	timers    []v7Timer
-	cancelled []schedule.TimerID
-	afterErr  bool
 }
 
 func newV7Sys() *v7Sys {
@@ -109,21 +98,11 @@ func (s *v7Sys) Progress(msg actorbase.Msg, status string, value any) (message.I
 	return "progress", nil
 }
 func (*v7Sys) Emit(behavior.EventSpec) (message.ID, error) { return "event", nil }
-func (s *v7Sys) After(d time.Duration, typ string, payload any, _ schedule.TimerHome) (schedule.TimerID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.afterErr {
-		return "", errors.New("timer unavailable")
-	}
-	id := schedule.TimerID(fmt.Sprintf("timer-%d", len(s.timers)+1))
-	s.timers = append(s.timers, v7Timer{id: id, d: d, typ: typ, payload: payload})
-	return id, nil
+func (*v7Sys) After(time.Duration, string, any, schedule.TimerHome) (schedule.TimerID, error) {
+	panic("private hold expiry must not use the channel scheduler")
 }
-func (s *v7Sys) CancelTimer(id schedule.TimerID) error {
-	s.mu.Lock()
-	s.cancelled = append(s.cancelled, id)
-	s.mu.Unlock()
-	return nil
+func (*v7Sys) CancelTimer(schedule.TimerID) error {
+	panic("private hold expiry must not use the channel scheduler")
 }
 func (*v7Sys) Resource() actorbase.ResourceHandle { return v7Resource{} }
 
@@ -161,6 +140,7 @@ func newV7Loop(t *testing.T, capabilities map[string]bool) (*agentLoop, *v7Sys, 
 	}
 	t.Cleanup(func() {
 		cancel()
+		l.clearHoldTimer()
 		for _, timer := range l.receiptTimers {
 			timer.Stop()
 		}
@@ -310,7 +290,7 @@ func TestAgentControl07LaterHoldResetsHolderAndDeadline(t *testing.T) {
 	if l.heldBy != "h2" || !l.frozenUntil.Equal(wantUntil) {
 		t.Fatalf("replacement hold heldBy=%q until=%v want=%v", l.heldBy, l.frozenUntil, wantUntil)
 	}
-	l.handleHoldExpired(json.RawMessage(`{"hold_id":"h1"}`))
+	l.handleHoldExpired(holdExpiredFact{holdID: "h1", generation: l.holdGeneration})
 	if l.heldBy != "h2" || !l.frozenUntil.Equal(wantUntil) {
 		t.Fatal("late fire changed the newer hold")
 	}
@@ -359,6 +339,23 @@ func TestAgentControl11CancelBufferedRequestDoesNotUnfreeze(t *testing.T) {
 }
 
 func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
+	t.Run("local timer publishes expiry into the private inbox", func(t *testing.T) {
+		l, _, rt := newV7Loop(t, nil)
+		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")), harness.Context{})}
+		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
+		l.freeze("h", time.Millisecond)
+		deadline := time.Now().Add(time.Second)
+		for len(rt.starts) == 0 && time.Now().Before(deadline) {
+			if fact, ok := l.inbox.pop(); ok {
+				l.handleFact(fact)
+				continue
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if len(rt.starts) != 1 || l.heldBy != "" || l.holdTimer != nil {
+			t.Fatalf("starts=%d heldBy=%q timer=%v", len(rt.starts), l.heldBy, l.holdTimer)
+		}
+	})
 	t.Run("clock expiry advances without another message", func(t *testing.T) {
 		l, _, rt := newV7Loop(t, nil)
 		now := time.Unix(100, 0)
@@ -373,36 +370,35 @@ func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
 		}
 	})
 	t.Run("fire mismatch early and expired", func(t *testing.T) {
-		l, sys, rt := newV7Loop(t, nil)
+		l, _, rt := newV7Loop(t, nil)
 		now := time.Unix(100, 0)
 		l.nowFn = func() time.Time { return now }
 		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")), harness.Context{})}
 		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
 		l.freeze("h", time.Second)
-		l.handleHoldExpired(json.RawMessage(`{"hold_id":"old"}`))
+		l.handleHoldExpired(holdExpiredFact{holdID: "old", generation: l.holdGeneration})
 		if l.heldBy != "h" || len(rt.starts) != 0 {
 			t.Fatal("mismatched fire changed hold")
 		}
-		l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
-		if l.heldBy != "h" || len(sys.timers) != 2 || sys.timers[1].d != time.Second {
-			t.Fatalf("early fire heldBy=%q timers=%+v", l.heldBy, sys.timers)
+		l.handleHoldExpired(holdExpiredFact{holdID: "h", generation: l.holdGeneration})
+		if l.heldBy != "h" || l.holdTimer == nil {
+			t.Fatalf("early fire heldBy=%q timer=%v", l.heldBy, l.holdTimer)
 		}
 		now = now.Add(2 * time.Second)
-		l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
+		l.handleHoldExpired(holdExpiredFact{holdID: "h", generation: l.holdGeneration})
 		if l.heldBy != "" || len(rt.starts) != 1 {
 			t.Fatalf("expired fire heldBy=%q starts=%d", l.heldBy, len(rt.starts))
 		}
 	})
-	t.Run("After failure still expires by clock", func(t *testing.T) {
-		l, sys, rt := newV7Loop(t, nil)
+	t.Run("local timer still expires by clock", func(t *testing.T) {
+		l, _, rt := newV7Loop(t, nil)
 		now := time.Unix(100, 0)
 		l.nowFn = func() time.Time { return now }
-		sys.afterErr = true
 		row := &book.Request{ID: "queued", Input: runtimeproto.Input{Text: "queued"}, Location: book.Buffered, Scope: l.vault.Mint(message.Anchored(message.ID("queued"), message.ID("queued")), harness.Context{})}
 		l.state.Requests[row.ID], l.state.Buffer = row, []book.RequestID{row.ID}
 		l.freeze("h", time.Second)
-		if !l.frozen(now) || len(sys.timers) != 0 {
-			t.Fatal("After failure prevented freeze")
+		if !l.frozen(now) || l.holdTimer == nil {
+			t.Fatal("local timer was not armed")
 		}
 		now = now.Add(2 * time.Second)
 		l.startNext()
@@ -410,14 +406,15 @@ func TestAgentControl12ExpiryUsesClockAndAllFireBranches(t *testing.T) {
 			t.Fatalf("frozen=%v starts=%d", l.frozen(now), len(rt.starts))
 		}
 	})
-	t.Run("late fire after CancelTimer is a no-op", func(t *testing.T) {
-		l, sys, rt := newV7Loop(t, nil)
+	t.Run("late local fire after clear is a no-op", func(t *testing.T) {
+		l, _, rt := newV7Loop(t, nil)
 		l.freeze("h", time.Second)
+		generation := l.holdGeneration
 		l.clearFreeze()
-		if len(sys.cancelled) != 1 {
-			t.Fatalf("cancelled=%v", sys.cancelled)
+		if l.holdTimer != nil {
+			t.Fatal("local hold timer was not stopped")
 		}
-		l.handleHoldExpired(json.RawMessage(`{"hold_id":"h"}`))
+		l.handleHoldExpired(holdExpiredFact{holdID: "h", generation: generation})
 		if l.heldBy != "" || !l.frozenUntil.IsZero() || len(rt.starts) != 0 {
 			t.Fatalf("heldBy=%q until=%v starts=%d", l.heldBy, l.frozenUntil, len(rt.starts))
 		}
@@ -1102,7 +1099,7 @@ func TestAgentControl40HoldRestoresInterruptFreeze(t *testing.T) {
 		l.handleIntake(v7Request("stop", TypeInterrupt, "caller", `{}`))
 		l.handleIntake(v7Request("hold", TypeHold, "caller", `{"duration_ms":1000}`))
 		now = now.Add(2 * time.Second)
-		l.handleHoldExpired(json.RawMessage(`{"hold_id":"hold"}`))
+		l.handleHoldExpired(holdExpiredFact{holdID: "hold", generation: l.holdGeneration})
 		if !l.frozen(now) || l.freezeSource != freezeSourceInterrupt || l.heldBy != "stop" || l.restoreInterrupt || len(rt.starts) != 0 {
 			t.Fatalf("frozen=%v source=%v heldBy=%q restore=%v starts=%v", l.frozen(now), l.freezeSource, l.heldBy, l.restoreInterrupt, rt.starts)
 		}

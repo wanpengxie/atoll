@@ -1,7 +1,6 @@
 package native
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 
@@ -80,8 +79,7 @@ func TestUnacceptedReportCannotCloseWorkOrBecomeBoundary(t *testing.T) {
 				// Even when the erroneous report arrives first, the capacity receipt
 				// must still be able to return the work to the queue.
 				c.cfg.Loopers = nil
-				done := actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{ID: "start-done", Kind: message.KindRequest, Type: startDoneType, Sender: message.Sender{ID: sys.Self()}, Payload: mustJSON(startDone{Session: w.SessionID, Turn: w.AssignmentID, Looper: w.Looper, Error: "capacity"})})
-				c.startDone(sys, done)
+				c.startDone(sys, startDone{Session: w.SessionID, Turn: w.AssignmentID, Looper: w.Looper, Error: "capacity", Cause: message.Root()})
 				if w.State != agentproto.WorkOpen || w.Stage != "queued" || w.AssignmentID != "" {
 					t.Fatalf("capacity receipt did not requeue: %+v", w)
 				}
