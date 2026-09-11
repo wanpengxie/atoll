@@ -27,7 +27,7 @@ func (s *rejectedStartSys) Post(behavior.RequestSpec) (message.ID, error) {
 
 func TestCapacityRejectDoesNotEmitTerminalReport(t *testing.T) {
 	sys := &rejectedStartSys{}
-	l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 1}, active: map[string]*assignment{"busy": {}}}
+	l := &looper{cfg: Config{ControllerActor: "controller", MaxAssignments: 1}, active: map[string]*assignment{"busy": {}}}
 	l.start(sys, internalRequest("start", agentloop.TypeStart, agentloop.StartRequest{SessionID: "s", TurnID: "rejected", ControllerActor: "agent:controller:1", Inputs: []agentloop.Input{{ID: "input", Text: "work"}}}))
 	if sys.code != "capacity" || sys.posts != 0 || len(l.active) != 1 {
 		t.Fatalf("code=%s posts=%d active=%d", sys.code, sys.posts, len(l.active))

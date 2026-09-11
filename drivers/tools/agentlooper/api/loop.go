@@ -40,14 +40,6 @@ type Input struct {
 	Origin        *agentproto.Origin `json:"origin,omitempty"`
 }
 
-// ToolBinding is one model-visible name bound to one actor request word.
-// The model chooses only Name; Actor and Word remain fixed for the episode.
-type ToolBinding struct {
-	Name  string `json:"name"`
-	Actor string `json:"actor"`
-	Word  string `json:"word"`
-}
-
 type StartRequest struct {
 	SessionID          string            `json:"session_id,omitempty"`
 	TurnID             string            `json:"turn_id,omitempty"`
@@ -60,15 +52,9 @@ type StartRequest struct {
 	ControllerActor    string            `json:"controller_actor"`
 	Inputs             []Input           `json:"inputs"`
 	Prior              []json.RawMessage `json:"prior,omitempty"`
-	ContextActor       string            `json:"context_actor"`
-	LLMActor           string            `json:"llm_actor"`
-	WorkspaceActor     string            `json:"workspace_actor,omitempty"`
-	HostActor          string            `json:"host_actor,omitempty"`
-	Prompt             string            `json:"prompt,omitempty"`
 	Model              string            `json:"model,omitempty"`
 	Effort             string            `json:"effort,omitempty"`
 	MaxTurns           int               `json:"max_turns,omitempty"`
-	Tools              *[]ToolBinding    `json:"tools,omitempty"`
 	ToolResultMaxLines int               `json:"tool_result_max_lines,omitempty"`
 	ToolResultMaxBytes int               `json:"tool_result_max_bytes,omitempty"`
 	ToolImageMaxBytes  int               `json:"tool_image_max_bytes,omitempty"`
@@ -88,8 +74,6 @@ type startWire struct {
 		Model  string `json:"model,omitempty"`
 		Effort string `json:"effort,omitempty"`
 	} `json:"selection"`
-	Prompt string         `json:"prompt,omitempty"`
-	Tools  *[]ToolBinding `json:"tools,omitempty"`
 	Limits struct {
 		ToolTimeoutMS      int64  `json:"tool_timeout_ms,omitempty"`
 		ExecutionTimeoutMS int64  `json:"execution_timeout_ms,omitempty"`
@@ -106,7 +90,7 @@ type startWire struct {
 
 func (r StartRequest) MarshalJSON() ([]byte, error) {
 	var w startWire
-	w.RootSession, w.SessionID, w.TurnID, w.Open, w.Prompt, w.Tools = r.SessionID, r.SessionID, r.TurnID, r.Open, r.Prompt, r.Tools
+	w.RootSession, w.SessionID, w.TurnID, w.Open = r.SessionID, r.SessionID, r.TurnID, r.Open
 	if w.TurnID == "" {
 		w.TurnID = r.AssignmentID
 	}
@@ -126,7 +110,7 @@ func (r *StartRequest) UnmarshalJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return err
 	}
-	r.SessionID, r.TurnID, r.AssignmentID, r.Open, r.Prompt, r.Tools = w.SessionID, w.TurnID, w.TurnID, w.Open, w.Prompt, w.Tools
+	r.SessionID, r.TurnID, r.AssignmentID, r.Open = w.SessionID, w.TurnID, w.TurnID, w.Open
 	r.Model = w.Selection.Model
 	r.Effort = w.Selection.Effort
 	for i, id := range w.Inputs {

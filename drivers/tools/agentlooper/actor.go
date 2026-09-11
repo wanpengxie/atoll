@@ -21,9 +21,11 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -31,7 +33,9 @@ import (
 
 const Class = "agent-looper"
 const maxResultTextBytes = 64 << 10
-const channelCallWord = "channel.call"
+const workspaceActor = "pi-workspace"
+const hostActor = "host"
+const hostHandleCall = "channel.call"
 
 const (
 	defaultToolResultMaxLines = 2000
@@ -41,26 +45,19 @@ const (
 
 var validToolName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
 
-type resolvedTool struct {
-	Name       string
-	Actor      string
-	Word       string
-	Definition json.RawMessage
-}
-
 type Config struct {
-	ControllerActor string `json:"controller_actor,omitempty"`
-	LLMActor        string `json:"llm_actor,omitempty"`
-	WorkspaceActor  string `json:"workspace_actor,omitempty"`
-	HostActor       string `json:"host_actor,omitempty"`
-	MaxAssignments  int    `json:"max_assignments,omitempty"`
+	ControllerActor string     `json:"controller_actor,omitempty"`
+	LLMActor        string     `json:"llm_actor,omitempty"`
+	HostChannel     channel.ID `json:"host_channel,omitempty"`
+	Prompt          string     `json:"prompt,omitempty"`
+	MaxAssignments  int        `json:"max_assignments,omitempty"`
 }
 
 func defaultConfig() json.RawMessage {
-	return json.RawMessage(`{"controller_actor":"native-agent","llm_actor":"pi-llm","workspace_actor":"pi-workspace","max_assignments":32}`)
+	return json.RawMessage(`{"controller_actor":"native-agent","llm_actor":"pi-llm","max_assignments":32}`)
 }
 func parseConfig(raw json.RawMessage) (Config, error) {
-	cfg := Config{ControllerActor: "native-agent", LLMActor: "pi-llm", WorkspaceActor: "pi-workspace", MaxAssignments: 32}
+	cfg := Config{ControllerActor: "native-agent", LLMActor: "pi-llm", MaxAssignments: 32}
 	if len(raw) > 0 {
 		if err := actorbase.DecodeStrict(raw, &cfg); err != nil {
 			return Config{}, err
@@ -78,14 +75,17 @@ func parseConfig(raw json.RawMessage) (Config, error) {
 	return cfg, nil
 }
 func init() {
-	registry.Register(Class, registry.ClassDecl{Kind: actor.KindTool, Placement: channelspec.PlacementDaemon, Manifest: manifest(), New: construct, DefaultConfig: defaultConfig, ValidateConfig: func(raw json.RawMessage) error { _, err := parseConfig(raw); return err }, ConfigSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"controller_actor":{"type":"string","minLength":1},"llm_actor":{"type":"string","minLength":1},"workspace_actor":{"type":"string"},"host_actor":{"type":"string"},"max_assignments":{"type":"integer","minimum":1,"maximum":10000}}}`)})
+	registry.Register(Class, registry.ClassDecl{Kind: actor.KindTool, Placement: channelspec.PlacementDaemon, Manifest: manifest(), New: construct, DefaultConfig: defaultConfig, ValidateConfig: func(raw json.RawMessage) error { _, err := parseConfig(raw); return err }, ConfigSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"controller_actor":{"type":"string","minLength":1},"llm_actor":{"type":"string","minLength":1},"host_channel":{"type":"string","minLength":1},"prompt":{"type":"string"},"max_assignments":{"type":"integer","minimum":1,"maximum":10000}}}`)})
 }
-func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
+func construct(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
 	cfg, err := parseConfig(spec.Config)
 	if err != nil {
 		return platform.ActorDecl{}, err
 	}
-	return platform.ActorDecl{ID: spec.ID, Kind: actor.KindTool, Factory: platform.ActorFactory{Proc: actorbase.Def{Manifest: manifest(), New: func() (actorbase.Proc, error) { return proc(cfg), nil }}}}, nil
+	if cfg.HostChannel == "" {
+		return platform.ActorDecl{}, errors.New("agent-looper config: host_channel relation binding is required")
+	}
+	return platform.ActorDecl{ID: spec.ID, Kind: actor.KindTool, Factory: platform.ActorFactory{Proc: actorbase.Def{Manifest: manifest(), New: func() (actorbase.Proc, error) { return proc(cfg, deps), nil }}}}, nil
 }
 func manifest() introspect.Manifest {
 	return introspect.Manifest{Class: Class, Interfaces: []string{"actor", "agent-loop"}, Capabilities: map[string]bool{"multi_assignment": true, "independent_assignment": true, "targeted_stop": true}, Words: map[string]introspect.WordSpec{
@@ -114,6 +114,7 @@ type assignment struct {
 	version  message.ID
 	acks     []pendingInputAck
 	archive  bool
+	branch   *branchRuntime
 }
 type pendingInputAck struct {
 	msg      actorbase.Msg
@@ -121,18 +122,25 @@ type pendingInputAck struct {
 }
 type looper struct {
 	cfg           Config
+	modelPrefix   modelPrefix
+	initialEnv    environmentDefaults
 	mu            sync.Mutex
 	active        map[string]*assignment
 	finished      map[string]*assignment
 	finishedOrder []string
+	branches      map[string]*branchRuntime
 	wg            sync.WaitGroup
 }
 
-func proc(cfg Config) actorbase.Proc {
+func proc(cfg Config, deps registry.Deps) actorbase.Proc {
 	return func(sys actorbase.Sys) error {
+		prefix, err := buildModelPrefix(cfg)
+		if err != nil {
+			return err
+		}
 		life, stop := context.WithCancel(sys.Life())
 		sys = looperLifeSys{Sys: sys, life: life}
-		l := &looper{cfg: cfg, active: map[string]*assignment{}}
+		l := &looper{cfg: cfg, modelPrefix: prefix, initialEnv: newEnvironmentDefaults(cfg, deps), active: map[string]*assignment{}, branches: map[string]*branchRuntime{}}
 		defer func() { stop(); l.wg.Wait() }()
 		for {
 			msg, err := sys.Recv()
@@ -418,9 +426,6 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	req.ControllerActor = msg.Sender.ID.String()
-	req.LLMActor = l.cfg.LLMActor
-	req.WorkspaceActor = l.cfg.WorkspaceActor
-	req.HostActor = l.cfg.HostActor
 	if req.TurnID == "" {
 		req.TurnID = req.AssignmentID
 	}
@@ -430,8 +435,8 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 	if req.SessionID == "" {
 		req.SessionID = msg.Context().Session
 	}
-	if req.SessionID == "" || req.TurnID == "" || req.ControllerActor == "" || req.LLMActor == "" || len(req.Inputs) == 0 {
-		_, _ = fail(sys, msg, "invalid_args", "session_id, turn_id, controller_actor, llm_actor, and inputs are required")
+	if req.SessionID == "" || req.TurnID == "" || req.ControllerActor == "" || len(req.Inputs) == 0 {
+		_, _ = fail(sys, msg, "invalid_args", "session_id, turn_id, controller_actor, and inputs are required")
 		return
 	}
 	if msg.Context().Session != req.SessionID {
@@ -520,6 +525,10 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 	if historyErr == nil {
 		historyErr = validateSessionContext(object)
 	}
+	var branch *branchRuntime
+	if historyErr == nil {
+		branch, object, historyErr = l.branchForStart(req, object)
+	}
 	if historyErr != nil {
 		l.mu.Unlock()
 		cancel()
@@ -527,7 +536,7 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	turnCause := msg.Cause()
-	a := &assignment{start: req, cause: turnCause, app: msg.Context(), cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted", history: append([]json.RawMessage(nil), object.Messages...), version: object.Version}
+	a := &assignment{start: req, cause: turnCause, app: msg.Context(), cancel: cancel, inputs: append([]agentloop.Input(nil), req.Inputs...), phase: "accepted", history: append([]json.RawMessage(nil), object.Messages...), version: object.Version, branch: branch}
 	l.active[req.AssignmentID] = a
 	l.mu.Unlock()
 	if !exists {
@@ -567,6 +576,9 @@ func (l *looper) start(sys actorbase.Sys, msg actorbase.Msg) {
 		l.mu.Lock()
 		if l.active[req.AssignmentID] == a {
 			delete(l.active, req.AssignmentID)
+		}
+		if archive {
+			delete(l.branches, a.start.SessionID)
 		}
 		l.mu.Unlock()
 	}()
@@ -642,6 +654,9 @@ func (l *looper) stop(sys actorbase.Sys, msg actorbase.Msg) {
 		l.mu.Unlock()
 		if found == nil {
 			_ = agentbase.DeleteContext(sys, req.SessionID)
+			l.mu.Lock()
+			delete(l.branches, req.SessionID)
+			l.mu.Unlock()
 			_, _ = sys.Reply(msg, map[string]any{"disposition": "archived", "session_id": req.SessionID})
 			return
 		}
@@ -728,6 +743,10 @@ func targetMatches(configured, actual string) bool {
 }
 
 func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
+	if a.branch == nil {
+		l.report(sys, a, "failed", 0, nil, "environment_unavailable", "assignment has no Holder-owned branch runtime", "confirmed")
+		return
+	}
 	a.mu.Lock()
 	inputs := append([]agentloop.Input(nil), a.inputs...)
 	a.phase = "context"
@@ -748,6 +767,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		history = append(history, inputMessage(in))
 		a.version = message.ID(in.ID)
 	}
+	history = a.branch.appendInitialEnvironmentHint(history)
 	if err := validateHistory(history); err != nil {
 		l.report(sys, a, "failed", 0, nil, "context_invalid", err.Error(), "confirmed")
 		return
@@ -760,16 +780,16 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 	if turns <= 0 {
 		turns = 12
 	}
-	tools, err := resolveTools(ctx, sys, a)
-	if err != nil {
-		l.report(sys, a, "failed", through, nil, "tool_discovery_failed", err.Error(), stateForError(err))
-		return
-	}
-	definitions := make([]json.RawMessage, 0, len(tools))
-	targets := make(map[string]resolvedTool, len(tools))
-	for _, tool := range tools {
-		definitions = append(definitions, tool.Definition)
-		targets[tool.Name] = tool
+	prefix := l.modelPrefix
+	targets := prefix.ByName
+	if targets == nil {
+		built, prefixErr := buildModelPrefix(l.cfg)
+		if prefixErr != nil {
+			l.report(sys, a, "failed", through, nil, "tool_discovery_failed", prefixErr.Error(), "confirmed")
+			return
+		}
+		prefix = built
+		targets = prefix.ByName
 	}
 	overflowRetried := false
 	for turn := 0; turn < turns; turn++ {
@@ -832,7 +852,7 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 		if a.start.Effort != "" {
 			options = mustRaw(map[string]any{"thinkingLevel": a.start.Effort})
 		}
-		generatedMsg, err := callMessage(ctx, sys, a.cause, a.app, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: a.start.Prompt, Context: ref, Tools: definitions, Options: options})
+		generatedMsg, err := callMessage(ctx, sys, a.cause, a.app, actor.ActorID(l.cfg.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{ModelRef: parseModel(a.start.Model), SystemPrompt: prefix.SystemPrompt, Context: ref, ToolsJSON: prefix.ToolsJSON, Options: options})
 		if err != nil {
 			state := "confirmed"
 			kind := "llm_failed"
@@ -924,12 +944,51 @@ func (l *looper) drive(ctx context.Context, sys actorbase.Sys, a *assignment) {
 				a.setHistory(history)
 				continue
 			}
+			if tool.Kind == executeEnvironment {
+				raw, isErr := executeEnvironmentTool(tool, json.RawMessage(tc.Arguments), a.branch)
+				history = append(history, toolResult(tc, isErr, string(raw)))
+				a.setHistory(history)
+				continue
+			}
 			toolTimeout := 2 * time.Minute
 			if a.start.ToolTimeoutMS > 0 {
 				toolTimeout = time.Duration(a.start.ToolTimeoutMS) * time.Millisecond
 			}
 			toolCtx, cancelTool := context.WithTimeout(ctx, toolTimeout)
-			toolMsg, callErr := callMessage(toolCtx, sys, generatedMsg.Cause(), generatedMsg.Context(), actor.ActorID(tool.Actor), tool.Word, json.RawMessage(tc.Arguments))
+			if tool.Kind == executeHostMeta {
+				exec, execErr := l.hostMetaExec(sys, actor.ActorID(tool.Actor), a.branch)
+				if execErr != nil || tool.Meta == nil {
+					if execErr == nil {
+						execErr = errors.New("meta tool executor is unavailable")
+					}
+					cancelTool()
+					history = append(history, toolResult(tc, true, execErr.Error()))
+					a.setHistory(history)
+					continue
+				}
+				rv := tool.Meta.Execute(toolCtx, json.RawMessage(tc.Arguments), exec, metatool.RuntimeContext{Trigger: metatool.Trigger{Cause: generatedMsg.Cause(), Context: generatedMsg.Context()}})
+				cancelTool()
+				raw, marshalErr := json.Marshal(rv.Value)
+				if marshalErr != nil {
+					history = append(history, toolResult(tc, true, marshalErr.Error()))
+				} else {
+					history = append(history, toolResult(tc, rv.IsError, string(raw)))
+				}
+				a.setHistory(history)
+				continue
+			}
+			payload := json.RawMessage(tc.Arguments)
+			if tool.Kind == executeWorkspace {
+				if a.branch == nil {
+					cancelTool()
+					history = append(history, toolResult(tc, true, "branch environment is unavailable"))
+					a.setHistory(history)
+					continue
+				}
+				env := a.branch.environmentSnapshot()
+				payload = mustJSON(workspaceproto.ExecuteRequest{Input: payload, Execution: workspaceproto.ExecutionSnapshot{CWD: env.CWD, Env: env.Vars}})
+			}
+			toolMsg, callErr := callMessage(toolCtx, sys, generatedMsg.Cause(), generatedMsg.Context(), actor.ActorID(tool.Actor), tool.Word, payload)
 			cancelTool()
 			if callErr != nil {
 				detail := callErr.Error()
@@ -1294,69 +1353,6 @@ func mustRaw(value any) json.RawMessage {
 	raw, _ := json.Marshal(value)
 	return raw
 }
-func configuredTools(start agentloop.StartRequest) []agentloop.ToolBinding {
-	if start.Tools != nil {
-		return append([]agentloop.ToolBinding(nil), (*start.Tools)...)
-	}
-	var tools []agentloop.ToolBinding
-	if start.WorkspaceActor != "" {
-		for _, item := range []struct{ name, word string }{
-			{"read", workspaceproto.TypeRead}, {"write", workspaceproto.TypeWrite},
-			{"edit", workspaceproto.TypeEdit}, {"bash", workspaceproto.TypeBash},
-		} {
-			tools = append(tools, agentloop.ToolBinding{Name: item.name, Actor: start.WorkspaceActor, Word: item.word})
-		}
-	}
-	if start.HostActor != "" {
-		for _, item := range []struct{ name, word string }{
-			{"channel_call", channelCallWord}, {"channel_post", "channel.post"}, {"channel_emit", "channel.emit"},
-		} {
-			tools = append(tools, agentloop.ToolBinding{Name: item.name, Actor: start.HostActor, Word: item.word})
-		}
-	}
-	return tools
-}
-
-func resolveTools(ctx context.Context, sys actorbase.Sys, a *assignment) ([]resolvedTool, error) {
-	bindings := configuredTools(a.start)
-	seen := make(map[string]struct{}, len(bindings))
-	manifests := make(map[string]introspect.Describe)
-	out := make([]resolvedTool, 0, len(bindings))
-	for _, binding := range bindings {
-		if !validToolName.MatchString(binding.Name) || strings.TrimSpace(binding.Actor) == "" || strings.TrimSpace(binding.Word) == "" {
-			return nil, fmt.Errorf("invalid tool binding %q", binding.Name)
-		}
-		if _, exists := seen[binding.Name]; exists {
-			return nil, fmt.Errorf("duplicate tool name %q", binding.Name)
-		}
-		seen[binding.Name] = struct{}{}
-		describe, ok := manifests[binding.Actor]
-		if !ok {
-			raw, err := call(ctx, sys, a.cause, a.app, actor.ActorID(binding.Actor), introspect.QueryDescribe, introspect.DescribeRequest{})
-			if err != nil {
-				return nil, fmt.Errorf("describe tool actor %q: %w", binding.Actor, err)
-			}
-			if err := json.Unmarshal(raw, &describe); err != nil {
-				return nil, fmt.Errorf("describe tool actor %q returned invalid manifest: %w", binding.Actor, err)
-			}
-			manifests[binding.Actor] = describe
-		}
-		spec, ok := describe.Words[binding.Word]
-		if !ok {
-			return nil, fmt.Errorf("tool actor %q declares no request word %q", binding.Actor, binding.Word)
-		}
-		if err := validInputSchema(spec.InputSchema); err != nil {
-			return nil, fmt.Errorf("tool %q word %q has invalid input schema: %w", binding.Name, binding.Word, err)
-		}
-		definition, err := json.Marshal(map[string]any{"name": binding.Name, "description": spec.Description, "parameters": spec.InputSchema})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, resolvedTool{Name: binding.Name, Actor: binding.Actor, Word: binding.Word, Definition: definition})
-	}
-	return out, nil
-}
-
 func validInputSchema(raw json.RawMessage) error {
 	if len(raw) == 0 || !json.Valid(raw) {
 		return errors.New("schema is missing or invalid JSON")
@@ -1610,7 +1606,7 @@ func (l *looper) compactIfNeeded(ctx context.Context, sys actorbase.Sys, a *assi
 	if model == "" {
 		model = a.start.Model
 	}
-	summaryMsg, err := callMessage(ctx, sys, a.cause, a.app, actor.ActorID(a.start.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{
+	summaryMsg, err := callMessage(ctx, sys, a.cause, a.app, actor.ActorID(l.cfg.LLMActor), llmproto.TypeGenerate, llmproto.GenerateRequest{
 		ModelRef: parseModel(model), Purpose: "compact", Context: ref,
 		Options: func() json.RawMessage {
 			if a.start.Effort == "" {
@@ -1658,7 +1654,12 @@ func modelMessageRole(raw json.RawMessage) string {
 
 func (a *assignment) setHistory(history []json.RawMessage) {
 	a.mu.Lock()
-	a.history = append([]json.RawMessage(nil), history...)
+	a.history = cloneMessages(history)
+	if a.branch != nil {
+		a.branch.mu.Lock()
+		a.branch.Context = agentbase.ContextObject{Messages: cloneMessages(history), Version: a.version}
+		a.branch.mu.Unlock()
+	}
 	a.mu.Unlock()
 }
 func mustJSON(v any) json.RawMessage { raw, _ := json.Marshal(v); return raw }

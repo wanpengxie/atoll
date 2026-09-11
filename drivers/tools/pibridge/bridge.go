@@ -18,14 +18,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-const Version = "pi-0.85.1-atoll-v8"
-const BundleSHA256 = "041367f893bc6a54083c78c090d23f5a78d19fb768fa81870b4ccc5a4dafb3bf"
+const Version = "pi-0.85.1-atoll-v10"
+const BundleSHA256 = "4e71911461dec2ee9c75a676a374e2dfe2e38c8e92de0258c61633a993bbb87c"
 const maxBridgeFrameBytes = 24 << 20
 
 //go:embed bridge.mjs
@@ -319,6 +320,17 @@ func (b *Bridge) write(v any) error {
 }
 
 func (b *Bridge) Call(ctx context.Context, op string, args any, cwd string, progress func(json.RawMessage)) (json.RawMessage, error) {
+	env := make(map[string]string)
+	for _, entry := range selectedEnvironment(RuntimeEnvironment) {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && key != "PWD" {
+			env[key] = value
+		}
+	}
+	return b.CallWithEnvironment(ctx, op, args, cwd, env, progress)
+}
+
+func (b *Bridge) CallWithEnvironment(ctx context.Context, op string, args any, cwd string, env map[string]string, progress func(json.RawMessage)) (json.RawMessage, error) {
 	id := uuid.NewString()
 	c := &call{frames: make(chan frame, 32), done: make(chan struct{})}
 	b.mu.Lock()
@@ -337,7 +349,7 @@ func (b *Bridge) Call(ctx context.Context, op string, args any, cwd string, prog
 		delete(b.pending, id)
 		b.mu.Unlock()
 	}()
-	if err := b.write(map[string]any{"id": id, "kind": "request", "op": op, "args": args, "cwd": cwd}); err != nil {
+	if err := b.write(map[string]any{"id": id, "kind": "request", "op": op, "args": args, "cwd": cwd, "env": env}); err != nil {
 		return nil, err
 	}
 	for {
@@ -386,6 +398,21 @@ func (e *Error) Error() string {
 		return e.Code
 	}
 	return e.Code + ": " + e.Detail
+}
+
+// Alive reports whether the child process is still available for another
+// call. It exposes no branch state; pi-workspace uses it only to validate its
+// disposable process cache before reuse.
+func (b *Bridge) Alive() bool {
+	if b == nil {
+		return false
+	}
+	select {
+	case <-b.done:
+		return false
+	default:
+		return true
+	}
 }
 
 func (b *Bridge) Close() {

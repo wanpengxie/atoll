@@ -6,7 +6,6 @@
     "declarations": [
       {
         "config": {
-          "host_actor": "host",
           "llm_actor": "pi-llm",
           "loopers": [
             "agent-looper"
@@ -19,60 +18,7 @@
           "default_model": "deepseek/deepseek-v4-pro",
           "tool_image_max_bytes": 3145728,
           "tool_result_max_bytes": 51200,
-          "tool_result_max_lines": 2000,
-          "tools": [
-            {
-              "name": "read",
-              "actor": "pi-workspace",
-              "word": "workspace.read"
-            },
-            {
-              "name": "write",
-              "actor": "pi-workspace",
-              "word": "workspace.write"
-            },
-            {
-              "name": "edit",
-              "actor": "pi-workspace",
-              "word": "workspace.edit"
-            },
-            {
-              "name": "bash",
-              "actor": "pi-workspace",
-              "word": "workspace.bash"
-            },
-            {
-              "name": "grep",
-              "actor": "pi-workspace",
-              "word": "workspace.grep"
-            },
-            {
-              "name": "find",
-              "actor": "pi-workspace",
-              "word": "workspace.find"
-            },
-            {
-              "name": "ls",
-              "actor": "pi-workspace",
-              "word": "workspace.ls"
-            },
-            {
-              "name": "channel_call",
-              "actor": "host",
-              "word": "channel.call"
-            },
-            {
-              "name": "channel_post",
-              "actor": "host",
-              "word": "channel.post"
-            },
-            {
-              "name": "channel_emit",
-              "actor": "host",
-              "word": "channel.emit"
-            }
-          ],
-          "workspace_actor": "pi-workspace"
+          "tool_result_max_lines": 2000
         },
         "decl_id": "native-agent"
       },
@@ -80,9 +26,10 @@
         "decl_id": "agent-looper",
         "config": {
           "llm_actor": "pi-llm",
-          "workspace_actor": "pi-workspace",
-          "host_actor": "host",
           "max_assignments": 32
+        },
+        "bindings": {
+          "host_channel": "parent_channel_id"
         }
       },
       {

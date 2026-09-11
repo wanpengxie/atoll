@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
@@ -31,10 +34,19 @@ type historyTestSys struct {
 	code, detail string
 	replies      int
 	readErr      error
+	resourceOnce sync.Once
+	resource     actorbase.ResourceHandle
 }
 
-func (*historyTestSys) Resource() actorbase.ResourceHandle { panic("must not trust context KV") }
-func (*historyTestSys) Self() actor.ActorID                { return "tool:loop:1" }
+func (s *historyTestSys) Resource() actorbase.ResourceHandle {
+	s.resourceOnce.Do(func() {
+		if s.resource == nil {
+			s.resource = &looperTestResource{values: map[resource.ResourceID][]byte{}}
+		}
+	})
+	return s.resource
+}
+func (*historyTestSys) Self() actor.ActorID { return "tool:loop:1" }
 func (s *historyTestSys) Recv() (actorbase.Msg, error) {
 	if len(s.inbox) == 0 {
 		return actorbase.Msg{}, io.EOF
@@ -113,7 +125,7 @@ func TestLooperStartupAndStaleCommandsNeverAttach(t *testing.T) {
 			if word != "" {
 				sys.inbox = []actorbase.Msg{internalRequest("command", word, map[string]any{"session": "s", "assignment_id": "old"})}
 			}
-			if err := proc(Config{ControllerActor: "controller"})(sys); !errors.Is(err, io.EOF) {
+			if err := proc(Config{ControllerActor: "controller", LLMActor: "llm"}, registry.Deps{})(sys); !errors.Is(err, io.EOF) {
 				t.Fatal(err)
 			}
 			if sys.queries != 0 || sys.posts != 0 {
@@ -125,7 +137,7 @@ func TestLooperStartupAndStaleCommandsNeverAttach(t *testing.T) {
 
 func TestUnclosedSessionStartIsRejectedWithNewSessionAdvice(t *testing.T) {
 	sys := &historyTestSys{rows: closedHistory()[:6]}
-	l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{}}
+	l := &looper{cfg: Config{ControllerActor: "controller", MaxAssignments: 2}, active: map[string]*assignment{}}
 	l.start(sys, internalRequest("new-start", agentloop.TypeStart, agentloop.StartRequest{SessionID: "s", TurnID: "new", Inputs: []agentloop.Input{{ID: "new-input", Text: "continue"}}}))
 	if sys.code != sessionContextUnavailable || !strings.Contains(sys.detail, "open a new session") || len(l.active) != 0 || sys.posts != 0 || sys.replies != 0 {
 		t.Fatalf("unclosed session was accepted or repaired: code=%s detail=%s active=%d posts=%d", sys.code, sys.detail, len(l.active), sys.posts)
@@ -134,7 +146,7 @@ func TestUnclosedSessionStartIsRejectedWithNewSessionAdvice(t *testing.T) {
 
 func TestHistoricalTurnIDCannotStartAnotherExecution(t *testing.T) {
 	sys := &historyTestSys{rows: closedHistory()}
-	l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{}}
+	l := &looper{cfg: Config{ControllerActor: "controller", MaxAssignments: 2}, active: map[string]*assignment{}}
 	l.start(sys, internalRequest("retry-old-turn", agentloop.TypeStart, agentloop.StartRequest{SessionID: "s", TurnID: "old", Inputs: []agentloop.Input{{ID: "new-input", Text: "again"}}}))
 	if sys.code != sessionContextUnavailable || !strings.Contains(sys.detail, "turn_id") || len(l.active) != 0 || sys.posts != 0 {
 		t.Fatalf("historical turn ID was reused: code=%s detail=%s", sys.code, sys.detail)
@@ -161,10 +173,47 @@ func TestClosedHistoryIsReadOnceAndMissingInputsAreRejected(t *testing.T) {
 	}
 }
 
+func TestSessionContextUsesOnlyMatchingValidRuntimeCache(t *testing.T) {
+	sys := &historyTestSys{rows: closedHistory()}
+	ledger, opened, err := sessionContext(t.Context(), sys, message.Root(), "s")
+	if err != nil || !opened || len(ledger.Messages) != 2 || ledger.Version == "" {
+		t.Fatalf("ledger context=%+v opened=%v err=%v", ledger, opened, err)
+	}
+	runtimeOnly := mustJSON(map[string]any{"role": "user", "content": environmentHintPrefix + "cwd=/runtime"})
+	cached := cloneContextObject(ledger)
+	cached.Messages = append(cached.Messages, runtimeOnly)
+	if _, err := agentbase.WriteContext(sys, "s", cached); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := sessionContext(t.Context(), sys, message.Root(), "s")
+	if err != nil || len(got.Messages) != 3 || string(got.Messages[2]) != string(runtimeOnly) {
+		t.Fatalf("matching runtime context was not restored: context=%+v err=%v", got, err)
+	}
+
+	stale := cloneContextObject(cached)
+	stale.Version = "stale"
+	if _, err := agentbase.WriteContext(sys, "s", stale); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = sessionContext(t.Context(), sys, message.Root(), "s")
+	if err != nil || len(got.Messages) != len(ledger.Messages) || got.Version != ledger.Version {
+		t.Fatalf("stale runtime context replaced ledger: context=%+v err=%v", got, err)
+	}
+
+	id, _ := agentbase.ContextResource("s")
+	if _, err := sys.Resource().Write(id, []byte(`{"messages":`)); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = sessionContext(t.Context(), sys, message.Root(), "s")
+	if err != nil || len(got.Messages) != len(ledger.Messages) || got.Version != ledger.Version {
+		t.Fatalf("malformed runtime context blocked ledger recovery: context=%+v err=%v", got, err)
+	}
+}
+
 func TestHistoryViewFailureRejectsStart(t *testing.T) {
 	for _, err := range []error{actorcaps.ErrLedgerLimit, context.DeadlineExceeded, errors.New("storage unavailable")} {
 		sys := &historyTestSys{readErr: err}
-		l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{}}
+		l := &looper{cfg: Config{ControllerActor: "controller", MaxAssignments: 2}, active: map[string]*assignment{}}
 		l.start(sys, internalRequest("start", agentloop.TypeStart, agentloop.StartRequest{SessionID: "s", TurnID: "new", Inputs: []agentloop.Input{{ID: "in", Text: "work"}}}))
 		if sys.code != sessionContextUnavailable || sys.replies != 0 || sys.posts != 0 || len(l.active) != 0 {
 			t.Fatalf("read failure accepted: %+v", sys)
@@ -182,7 +231,7 @@ func TestAncestorContextUsesOneViewSnapshot(t *testing.T) {
 
 func TestLocalSessionExclusionDoesNotReadHistory(t *testing.T) {
 	sys := &historyTestSys{}
-	l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{"old": {start: agentloop.StartRequest{SessionID: "s"}}}}
+	l := &looper{cfg: Config{ControllerActor: "controller", MaxAssignments: 2}, active: map[string]*assignment{"old": {start: agentloop.StartRequest{SessionID: "s"}}}}
 	l.start(sys, internalRequest("new-start", agentloop.TypeStart, agentloop.StartRequest{SessionID: "s", TurnID: "new", Inputs: []agentloop.Input{{ID: "input", Text: "work"}}}))
 	if sys.code != "busy" || sys.queries != 0 || len(l.active) != 1 {
 		t.Fatalf("session exclusion failed: code=%s queries=%d active=%d", sys.code, sys.queries, len(l.active))

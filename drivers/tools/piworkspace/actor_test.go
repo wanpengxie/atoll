@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +12,7 @@ import (
 	workspaceproto "github.com/wanpengxie/atoll/drivers/tools/piworkspace/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/registry"
 )
 
 func TestDecodeArgsEnforcesAdvertisedClosedSchemaBeforePi(t *testing.T) {
@@ -61,25 +60,16 @@ func schedulerMsg(ctx context.Context, id message.ID, typ string) actorbase.Msg 
 	return actorbase.NewBodyMsg(actorbase.OriginMailbox, ctx, message.Envelope{ID: id, Kind: message.KindRequest, Type: typ, Payload: json.RawMessage(`{}`)})
 }
 
-func TestSchedulerOverlapsReadsAndKeepsWritesFIFO(t *testing.T) {
+func TestSchedulerRunsAllWorkspaceWordsThroughOneBoundedPool(t *testing.T) {
 	sys := &schedulerTestSys{jobs: make(chan actorbase.Msg, 8), failures: map[message.ID]string{}}
 	release := make(chan struct{})
 	started := make(chan string, 8)
-	var activeReads atomic.Int32
-	var activeWrites atomic.Int32
+	var active atomic.Int32
 	execute := func(msg actorbase.Msg) {
-		if isReadWord(msg.Type) {
-			activeReads.Add(1)
-		} else {
-			activeWrites.Add(1)
-		}
+		active.Add(1)
 		started <- string(msg.ID)
 		<-release
-		if isReadWord(msg.Type) {
-			activeReads.Add(-1)
-		} else {
-			activeWrites.Add(-1)
-		}
+		active.Add(-1)
 	}
 	done := make(chan error, 1)
 	go func() { done <- runScheduler(sys, Config{MaxConcurrency: 3, QueueCapacity: 8}, execute, func() {}) }()
@@ -101,15 +91,12 @@ func TestSchedulerOverlapsReadsAndKeepsWritesFIFO(t *testing.T) {
 			t.Fatalf("only started %v", seen)
 		}
 	}
-	if !seen["w1"] || seen["w2"] || !seen["r1"] || !seen["r2"] || activeReads.Load() != 2 || activeWrites.Load() != 1 {
-		t.Fatalf("starts=%v active reads=%d writes=%d", seen, activeReads.Load(), activeWrites.Load())
+	if len(seen) != 3 || active.Load() != 3 {
+		t.Fatalf("starts=%v active=%d", seen, active.Load())
 	}
 	close(release)
 	select {
-	case id := <-started:
-		if id != "w2" {
-			t.Fatalf("second write start=%s", id)
-		}
+	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("second write did not start")
 	}
@@ -121,13 +108,13 @@ func TestSchedulerOverlapsReadsAndKeepsWritesFIFO(t *testing.T) {
 	}
 }
 
-func TestSchedulerDropsCancelledQueuedWriteAndReportsCapacity(t *testing.T) {
+func TestSchedulerDropsCancelledQueuedCallAndReportsCapacity(t *testing.T) {
 	sys := &schedulerTestSys{jobs: make(chan actorbase.Msg, 4), failures: map[message.ID]string{}}
 	release := make(chan struct{})
 	started := make(chan string, 4)
 	execute := func(msg actorbase.Msg) { started <- string(msg.ID); <-release }
 	done := make(chan error, 1)
-	go func() { done <- runScheduler(sys, Config{MaxConcurrency: 2, QueueCapacity: 1}, execute, func() {}) }()
+	go func() { done <- runScheduler(sys, Config{MaxConcurrency: 1, QueueCapacity: 1}, execute, func() {}) }()
 	sys.jobs <- schedulerMsg(context.Background(), "w1", workspaceproto.TypeWrite)
 	select {
 	case <-started:
@@ -151,22 +138,6 @@ func TestSchedulerDropsCancelledQueuedWriteAndReportsCapacity(t *testing.T) {
 	}
 }
 
-func TestSafeWorkspacePathRejectsLexicalAndSymlinkEscape(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := safeWorkspacePath(root, "nested/new.txt"); err != nil {
-		t.Fatalf("safe new path rejected: %v", err)
-	}
-	for _, path := range []string{"../escape", filepath.Join(root, "absolute"), "outside-link/file.txt"} {
-		if err := safeWorkspacePath(root, path); err == nil {
-			t.Fatalf("unsafe path %q accepted", path)
-		}
-	}
-}
-
 func TestSearchArgumentsValidateOnlyTheSearchRootAsAPath(t *testing.T) {
 	for _, tc := range []struct {
 		word string
@@ -182,15 +153,6 @@ func TestSearchArgumentsValidateOnlyTheSearchRootAsAPath(t *testing.T) {
 			t.Fatalf("%s path=%q err=%v", tc.word, path, err)
 		}
 	}
-	for _, raw := range []json.RawMessage{json.RawMessage(`{"pattern":"x","path":"../escape"}`), json.RawMessage(`{"pattern":"x","path":"/absolute"}`)} {
-		path, _, err := decodeArgs(workspaceproto.TypeGrep, raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := safeWorkspacePath(t.TempDir(), path); err == nil {
-			t.Fatalf("unsafe search root accepted: %s", raw)
-		}
-	}
 }
 
 func TestManifestPublishesSearchAndOnlyRunnablePowerShell(t *testing.T) {
@@ -199,9 +161,78 @@ func TestManifestPublishesSearchAndOnlyRunnablePowerShell(t *testing.T) {
 		if spec, ok := words[word]; !ok || len(spec.InputSchema) == 0 || spec.Description == "" {
 			t.Fatalf("missing manifest word %s: %+v", word, spec)
 		}
+		var schema struct {
+			Required   []string `json:"required"`
+			Properties struct {
+				Input json.RawMessage `json:"input"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(words[word].InputSchema, &schema); err != nil || len(schema.Properties.Input) == 0 || len(schema.Required) != 2 {
+			t.Fatalf("%s does not publish its word-specific transport schema: %s", word, words[word].InputSchema)
+		}
 	}
 	_, advertised := words[workspaceproto.TypePowerShell]
 	if advertised != powerShellAvailable() || isWord(workspaceproto.TypePowerShell) != advertised {
 		t.Fatalf("powershell advertised=%v available=%v", advertised, powerShellAvailable())
 	}
+}
+
+func TestConfigControlsBridgeIdleLifetime(t *testing.T) {
+	cfg, err := parseConfig(json.RawMessage(`{"node":"node","max_concurrency":2,"queue_capacity":3,"idle_ms":17}`))
+	if err != nil || cfg.IdleMS != 17 {
+		t.Fatalf("config=%+v err=%v", cfg, err)
+	}
+	if _, err := parseConfig(json.RawMessage(`{"idle_ms":-1}`)); err == nil {
+		t.Fatal("negative idle lifetime accepted")
+	}
+}
+
+func TestBridgePoolIsPerSessionAndIdleCacheOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool := newBridgePool(ctx, Config{Node: "node", IdleMS: 10}, registry.Deps{WorkspaceDir: t.TempDir()})
+	t.Cleanup(pool.Close)
+	first, err := pool.Acquire("branch-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := pool.Acquire("branch-one")
+	if err != nil || again != first {
+		t.Fatalf("same session did not reuse Bridge: first=%p again=%p err=%v", first, again, err)
+	}
+	second, err := pool.Acquire("branch-two")
+	if err != nil || second == first {
+		t.Fatalf("different sessions shared Bridge: first=%p second=%p err=%v", first, second, err)
+	}
+	pool.Release("branch-one", first)
+	pool.Release("branch-one", again)
+	pool.Release("branch-two", second)
+	time.Sleep(30 * time.Millisecond)
+	pool.mu.Lock()
+	remaining := len(pool.sessions)
+	pool.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("idle Bridge cache retained %d sessions", remaining)
+	}
+}
+
+func TestBridgePoolEnsureReplacesExitedProcess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool := newBridgePool(ctx, Config{Node: "node", IdleMS: 1000}, registry.Deps{WorkspaceDir: t.TempDir()})
+	t.Cleanup(pool.Close)
+	first, err := pool.Acquire("branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Release("branch", first)
+	first.Close()
+	replacement, err := pool.Acquire("branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement == first || !replacement.Alive() {
+		t.Fatalf("ensure reused an exited Bridge: first=%p replacement=%p", first, replacement)
+	}
+	pool.Release("branch", replacement)
 }

@@ -237,15 +237,6 @@
         "schema": {
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
-            "from_session": {
-              "type": "string"
-            },
-            "through": {
-              "type": "string"
-            },
             "session": {
               "type": "string",
               "minLength": 1
@@ -260,15 +251,6 @@
         "schema": {
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
-            "from_session": {
-              "type": "string"
-            },
-            "through": {
-              "type": "string"
-            },
             "session": {
               "type": "string",
               "minLength": 1
@@ -282,21 +264,6 @@
         "description": "Read or change session lifecycle state.",
         "schema": {
           "type": "object",
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "from_session": {
-              "type": "string"
-            },
-            "through": {
-              "type": "string"
-            },
-            "session": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
           "additionalProperties": false
         },
         "target": "native-agent"
@@ -305,15 +272,13 @@
         "description": "Read or change session lifecycle state.",
         "schema": {
           "type": "object",
+          "required": [
+            "name"
+          ],
           "properties": {
             "name": {
-              "type": "string"
-            },
-            "from_session": {
-              "type": "string"
-            },
-            "through": {
-              "type": "string"
+              "type": "string",
+              "pattern": "\\S"
             },
             "session": {
               "type": "string",
@@ -329,15 +294,6 @@
         "schema": {
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
-            "from_session": {
-              "type": "string"
-            },
-            "through": {
-              "type": "string"
-            },
             "session": {
               "type": "string",
               "minLength": 1
@@ -351,11 +307,15 @@
         "description": "Read or change session lifecycle state.",
         "schema": {
           "type": "object",
+          "required": [
+            "from_session"
+          ],
           "properties": {
-            "name": {
-              "type": "string"
-            },
             "from_session": {
+              "type": "string",
+              "minLength": 1
+            },
+            "after": {
               "type": "string"
             },
             "through": {

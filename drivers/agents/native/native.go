@@ -409,28 +409,6 @@ func (c *controller) startDone(sys actorbase.Sys, done startDone) {
 	c.scheduleQueued(sys, done.Cause, done.Context)
 }
 
-func (c *controller) toolBindings() []agentloop.ToolBinding {
-	if c.cfg.ToolsConfigured {
-		bindings := make([]agentloop.ToolBinding, len(c.cfg.Tools))
-		for i, tool := range c.cfg.Tools {
-			bindings[i] = agentloop.ToolBinding{Name: tool.Name, Actor: tool.Actor, Word: tool.Word}
-		}
-		return bindings
-	}
-	var bindings []agentloop.ToolBinding
-	if c.cfg.WorkspaceActor != "" {
-		for _, item := range []struct{ name, word string }{{"read", "workspace.read"}, {"write", "workspace.write"}, {"edit", "workspace.edit"}, {"bash", "workspace.bash"}} {
-			bindings = append(bindings, agentloop.ToolBinding{Name: item.name, Actor: c.cfg.WorkspaceActor, Word: item.word})
-		}
-	}
-	if c.cfg.HostActor != "" {
-		for _, item := range []struct{ name, word string }{{"channel_call", "channel.call"}, {"channel_post", "channel.post"}, {"channel_emit", "channel.emit"}} {
-			bindings = append(bindings, agentloop.ToolBinding{Name: item.name, Actor: c.cfg.HostActor, Word: item.word})
-		}
-	}
-	return bindings
-}
-
 func (c *controller) handleAsk(sys actorbase.Sys, msg actorbase.Msg) {
 	var accepted bool
 	msg, accepted = sessionInput(sys, msg)
@@ -643,7 +621,6 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 			inputs = append(inputs, w.Inputs[i].Input)
 		}
 	}
-	tools := c.toolBindings()
 	selection := c.selected(sys)
 	startCause := w.SourceCause
 	var open *agentloop.OpenRequest
@@ -651,8 +628,8 @@ func (c *controller) dispatch(sys actorbase.Sys, w *workRecord, cause message.Ca
 		open = &agentloop.OpenRequest{Base: s.Base}
 	}
 	request := agentloop.StartRequest{
-		WorkID: w.ID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, SessionID: w.SessionID, Open: open, ToolTimeoutMS: c.cfg.ToolTimeoutMS, ExecutionTimeoutMS: c.cfg.ExecutionTimeoutMS, ControllerActor: string(sys.Self()), Inputs: inputs, Prompt: c.cfg.Prompt, LLMActor: c.cfg.LLMActor,
-		WorkspaceActor: c.cfg.WorkspaceActor, HostActor: c.cfg.HostActor, Model: selection.Model, Effort: selection.Effort, MaxTurns: c.cfg.MaxTurns, Tools: &tools,
+		WorkID: w.ID, AssignmentID: w.AssignmentID, TurnID: w.AssignmentID, SessionID: w.SessionID, Open: open, ToolTimeoutMS: c.cfg.ToolTimeoutMS, ExecutionTimeoutMS: c.cfg.ExecutionTimeoutMS, ControllerActor: string(sys.Self()), Inputs: inputs,
+		Model: selection.Model, Effort: selection.Effort, MaxTurns: c.cfg.MaxTurns,
 		ToolResultMaxLines: c.cfg.ToolResultMaxLines, ToolResultMaxBytes: c.cfg.ToolResultMaxBytes, ToolImageMaxBytes: c.cfg.ToolImageMaxBytes,
 		ContextWindow: c.cfg.Compact.ContextWindow, ReserveTokens: c.cfg.Compact.ReserveTokens, KeepRecentTokens: c.cfg.Compact.KeepRecentTokens, CompactModel: c.cfg.Compact.Model}
 	pending, err := sys.Call(startCause, w.SourceContext, actorID(looper), agentloop.TypeStart, request)

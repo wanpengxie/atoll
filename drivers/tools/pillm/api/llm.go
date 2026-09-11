@@ -24,9 +24,11 @@ type GenerateRequest struct {
 	SystemPrompt string               `json:"system_prompt,omitempty"`
 	Context      agentbase.ContextRef `json:"context"`
 	Messages     []json.RawMessage    `json:"-"` // populated only by old in-process test fixtures
-	Tools        []json.RawMessage    `json:"tools,omitempty"`
-	Options      json.RawMessage      `json:"options,omitempty"`
-	APIKey       string               `json:"api_key,omitempty"`
+	// ToolsJSON is the Looper's once-built, ordered tool array. Keeping it as a
+	// string prevents any intermediate Go map from reserializing prompt data.
+	ToolsJSON string          `json:"tools_json,omitempty"`
+	Options   json.RawMessage `json:"options,omitempty"`
+	APIKey    string          `json:"api_key,omitempty"`
 }
 
 type GenerateResponse struct {

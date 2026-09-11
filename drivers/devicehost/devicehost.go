@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 
 	"github.com/wanpengxie/atoll/drivers/devicehost/internal/storagehost"
@@ -40,6 +41,8 @@ type Config struct {
 // body: compute.Run with per-channel compartments backed by storagehost.
 func Run(ctx context.Context, cfg Config) error {
 	var attachedIdentity atomic.Value
+	var workspaces sync.Map
+	type workspaceBinding struct{ path string }
 	return compute.Run(ctx, compute.Config{
 		ServerWS:   cfg.ServerWS,
 		Credential: cfg.Credential,
@@ -63,12 +66,25 @@ func Run(ctx context.Context, cfg Config) error {
 				return compute.CompartmentResources{}, err
 			}
 			adapter := storageHostAdapter{host: sh}
+			binding := &workspaceBinding{path: workspaceDir}
+			workspaces.Store(channel.ID(chID), binding)
+			closeCompartment := func() error {
+				workspaces.CompareAndDelete(channel.ID(chID), binding)
+				return sh.Close()
+			}
 			return compute.CompartmentResources{
 				Factories: classFactories{
 					chID: chID, wsRoot: workspaceDir, deviceID: identity.id, deviceName: identity.name, deviceLabel: cfg.DeviceLabel,
-					logger: cfg.Logger.With("channel", chID),
+					logger: cfg.Logger.With("channel", chID), workspaceFor: func(id channel.ID) (string, bool) {
+						value, ok := workspaces.Load(id)
+						binding, valid := value.(*workspaceBinding)
+						if !ok || !valid || binding.path == "" {
+							return "", false
+						}
+						return binding.path, true
+					},
 				},
-				LocalFileOpener: adapter, Close: sh.Close,
+				LocalFileOpener: adapter, Close: closeCompartment,
 			}, nil
 		},
 	})
@@ -84,6 +100,7 @@ func Run(ctx context.Context, cfg Config) error {
 type classFactories struct {
 	chID, wsRoot, deviceID, deviceName, deviceLabel string
 	logger                                          *slog.Logger
+	workspaceFor                                    func(channel.ID) (string, bool)
 }
 
 func (f classFactories) BuildClass(
@@ -101,6 +118,7 @@ func (f classFactories) BuildClass(
 		DeviceName:   f.deviceName,
 		DeviceLabel:  f.deviceLabel,
 		Logger:       f.logger,
+		WorkspaceFor: f.workspaceFor,
 	})
 	if err != nil {
 		f.logger.Error("devicehost: build class failed",

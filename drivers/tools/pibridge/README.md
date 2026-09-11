@@ -8,9 +8,9 @@ by `bridge.go`. Actor startup never runs npm and never downloads `latest`.
 - packages: `@earendil-works/pi-ai` and `@earendil-works/pi-agent-core` 0.85.1
 - package lock: the `package-lock.json` at that commit
 - bundler: esbuild 0.28.1
-- output SHA-256: `041367f893bc6a54083c78c090d23f5a78d19fb768fa81870b4ccc5a4dafb3bf`
+- output SHA-256: `4e71911461dec2ee9c75a676a374e2dfe2e38c8e92de0258c61633a993bbb87c`
 - runtime prerequisite: Node.js >= 22.19.0; startup verifies the version
-- Atoll bridge revision: v8 (v7 behavior retained; Pi-native overflow, recoverable-length, retryability, and usage classifiers)
+- Atoll bridge revision: v10 (v9 behavior retained; Windows helper lookup treats environment names case-insensitively)
 - upstream license: MIT; see `PI_LICENSE.txt`
 
 The auditable source boundary is `bridge.ts`. From a clean pinned Pi checkout

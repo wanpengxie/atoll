@@ -23,6 +23,11 @@ import (
 type Deps struct {
 	ChannelID    channel.ID // the channel this cell is scoped to
 	WorkspaceDir string     // workspace root (device / agent situation facts)
+	// WorkspaceFor resolves another active compartment on the same device.
+	// It is an assembly fact, not actor state. Agent Channel loopers use it to
+	// take their initial CWD from the Host Channel instead of the child
+	// Channel's own compartment directory.
+	WorkspaceFor func(channel.ID) (string, bool)
 	// DeviceID is the server-assigned identity of the daemon installation that
 	// hosts this cell. It is routing identity. It never comes from hostname or a
 	// CLI label.

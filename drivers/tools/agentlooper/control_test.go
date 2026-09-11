@@ -79,7 +79,7 @@ func (s *steeringSys) Call(c message.Cause, app harness.Context, target actor.Ac
 func TestSteerDuringModelAndToolWaitStaysInSameExecution(t *testing.T) {
 	for _, trigger := range []string{llmproto.TypeGenerate, workspaceproto.TypeBash} {
 		t.Run(trigger, func(t *testing.T) {
-			a := &assignment{start: agentloop.StartRequest{SessionID: "session:v", WorkID: "w", AssignmentID: "e", ControllerActor: "controller", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "first", Seq: 1, Text: "run"}}}
+			a := &assignment{start: agentloop.StartRequest{SessionID: "session:v", WorkID: "w", AssignmentID: "e", ControllerActor: "controller", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "first", Seq: 1, Text: "run"}}, branch: testBranchRuntime()}
 			first := json.RawMessage(finalAssistant)
 			if trigger == workspaceproto.TypeBash {
 				first = json.RawMessage(`{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"tool","name":"bash","arguments":{"command":"true"}}]}`)

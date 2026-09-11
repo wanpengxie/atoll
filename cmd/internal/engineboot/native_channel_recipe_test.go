@@ -39,11 +39,13 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(want, got) || config.Words[name].Target != "native-agent" {
-			t.Fatalf("stale native schema/target: %s", name)
+			t.Errorf("stale native schema/target: %s\nmanifest=%s\nhandle=%s\ntarget=%s", name, word.InputSchema, config.Words[name].Schema, config.Words[name].Target)
 		}
 	}
 	for _, name := range []string{"agent.main.merge", "agent.main.merge_all", "agent.main.track"} {
-		if config.Words[name].Target != "agent-main" { t.Fatalf("main word %s is not routed to agent-main", name) }
+		if config.Words[name].Target != "agent-main" {
+			t.Fatalf("main word %s is not routed to agent-main", name)
+		}
 	}
 	var template struct {
 		Body struct {
@@ -65,13 +67,23 @@ func TestNativeChannelRecipeUsesExplicitHandleAndCurrentWorkSchemas(t *testing.T
 		t.Fatal("member relation still depends on svc_agent")
 	}
 	found := false
+	foundLooper := false
 	for _, d := range template.Body.Declarations {
 		if d.DeclID == declaration.ID && d.Bindings["host"] != "parent_channel_id" {
 			t.Fatal("parent host binding must be explicit in recipe")
 		}
 		found = found || d.DeclID == declaration.ID
+		if d.DeclID == "agent-looper" {
+			foundLooper = true
+			if d.Bindings["host_channel"] != "parent_channel_id" {
+				t.Fatal("Looper must receive the Host Channel id from the relation binding")
+			}
+		}
 	}
 	if !found {
 		t.Fatal("recipe does not explicitly introduce its handle")
+	}
+	if !foundLooper {
+		t.Fatal("recipe does not declare its branch Holder")
 	}
 }

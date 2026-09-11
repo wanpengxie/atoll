@@ -328,16 +328,24 @@ func materializeRows(ctx context.Context, sys actorbase.Sys, rows []ledgerRow, o
 			}
 			declared := map[string]bool{}
 			toolByName := map[string]resolvedTool{}
-			if t.req.Tools != nil {
-				for _, tool := range *t.req.Tools {
-					declared[tool.Name] = true
-					toolByName[tool.Name] = resolvedTool{Name: tool.Name, Actor: tool.Actor, Word: tool.Word}
+			for _, tc := range calls {
+				if tool, ok := fixedMaterializedTool(tc.Name); ok {
+					declared[tc.Name] = true
+					toolByName[tc.Name] = tool
 				}
 			}
 			sendable := 0
 			for _, tc := range calls {
 				if !declared[tc.Name] || !json.Valid(tc.Arguments) {
 					object.Messages = append(object.Messages, toolResult(tc, true, "Looper: tool was not executed"))
+					continue
+				}
+				if toolByName[tc.Name].Kind == executeEnvironment {
+					object.Messages = append(object.Messages, toolResult(tc, true, "Environment state is runtime-only; call environment_get to read the current value"))
+					continue
+				}
+				if toolByName[tc.Name].Kind == executeHostMeta && !toolByName[tc.Name].LedgerCall {
+					object.Messages = append(object.Messages, toolResult(tc, true, "Host request-account state is runtime-only; inspect the Host again"))
 					continue
 				}
 				if sendable >= len(toolReqs) {
@@ -395,7 +403,21 @@ func sessionContext(ctx context.Context, sys actorbase.Sys, cause message.Cause,
 		return agentbase.ContextObject{Messages: []json.RawMessage{}}, false, nil
 	}
 	object, err := materializeSession(ctx, sys, cause, session, "")
-	return object, true, err
+	if err != nil {
+		return object, true, err
+	}
+	// The ledger is authoritative for the accepted boundary and version. A KV
+	// object with that same version is the Holder's disposable current context;
+	// unlike ledger reconstruction it also retains local tool results and the
+	// runtime-only environment hint.
+	if cached, found, loadErr := agentbase.LoadContext(sys, session); loadErr == nil && found && cached.Version == object.Version {
+		if validateErr := validateSessionContext(cached); validateErr == nil {
+			return cached, true, nil
+		}
+	}
+	// Context KV is a disposable runtime cache. A missing, unreadable, malformed,
+	// stale, or invalid object must never make durable ledger history unusable.
+	return object, true, nil
 }
 
 func readSessionRows(ctx context.Context, sys actorbase.Sys, cause message.Cause, session string) ([]ledgerRow, error) {

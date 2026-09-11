@@ -71,7 +71,7 @@ func (s *piLoopSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, 
 			s.sawImage = strings.Contains(string(encoded), `"type":"image"`) && strings.Contains(string(encoded), `"mimeType":"`+s.expectedMime+`"`)
 			req.Options = json.RawMessage(`{"faux_response":"finished after tool result"}`)
 		}
-		args := map[string]any{"provider": req.Provider, "model": req.Model, "messages": messages, "tools": req.Tools, "options": req.Options, "system_prompt": req.SystemPrompt}
+		args := map[string]any{"provider": req.Provider, "model": req.Model, "messages": messages, "tools": json.RawMessage(req.ToolsJSON), "options": req.Options, "system_prompt": req.SystemPrompt}
 		result, err := s.bridge.Call(ctx, llmproto.TypeGenerate, args, s.cwd, nil)
 		if err != nil {
 			return nil, err
@@ -86,7 +86,12 @@ func (s *piLoopSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, 
 		}})
 		return completedPending(value), nil
 	default:
-		raw, err := s.bridge.Call(ctx, typ, value, s.cwd, nil)
+		var execute workspaceproto.ExecuteRequest
+		rawValue, _ := json.Marshal(value)
+		if err := json.Unmarshal(rawValue, &execute); err != nil {
+			return nil, err
+		}
+		raw, err := s.bridge.CallWithEnvironment(ctx, typ, execute.Input, execute.Execution.CWD, execute.Execution.Env, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -118,9 +123,9 @@ func TestPNGAndJPEGPassThroughWorkspaceLooperAndFauxProvider(t *testing.T) {
 			t.Cleanup(func() { bridge.Close(); cancelLife() })
 			_, _ = sharedLooperResources.Delete("ctx/session:test")
 			sys := &piLoopSys{bridge: bridge, cwd: cwd, toolName: "read", toolArgs: map[string]any{"path": fixture.name}, expectedMime: fixture.mime}
-			bindings := []agentloop.ToolBinding{{Name: "read", Actor: "workspace", Word: workspaceproto.TypeRead}}
-			a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-image", AssignmentID: "a-image", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", Tools: &bindings, Model: "faux/faux-1", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "read image"}}}
-			(&looper{}).drive(context.Background(), sys, a)
+			a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-image", AssignmentID: "a-image", Model: "faux/faux-1", MaxTurns: 4}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "read image"}}, branch: &branchRuntime{Environment: branchEnvironment{CWD: cwd, Vars: map[string]string{}}}}
+			l := &looper{cfg: Config{LLMActor: "llm"}, initialEnv: testEnvironmentDefaults(cwd, map[string]string{})}
+			l.drive(context.Background(), sys, a)
 			if sys.llmCall != 2 || !sys.sawImage || len(sys.posts) != 1 {
 				t.Fatalf("llm=%d saw_image=%v reports=%d", sys.llmCall, sys.sawImage, len(sys.posts))
 			}
@@ -158,7 +163,7 @@ func TestLongCustomResultIsRenderedWithoutSideEffects(t *testing.T) {
 	sys := &bridgeStoreSys{bridge: bridge, cwd: cwd}
 	full := strings.Repeat("多字节-long-line", 100)
 	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": full}}})
-	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "workspace", ToolResultMaxLines: 2000, ToolResultMaxBytes: 256}, cause: message.Root()}
+	a := &assignment{start: agentloop.StartRequest{ToolResultMaxLines: 2000, ToolResultMaxBytes: 256}, cause: message.Root()}
 	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
 	if !strings.Contains(string(result), "Output truncated to configured limit") || strings.Contains(string(result), `"path"`) || sys.calls != 0 {
 		t.Fatalf("result=%s calls=%d", result, sys.calls)
@@ -182,12 +187,12 @@ func TestLooperRunsActualPinnedPiProviderAndWorkspaceTool(t *testing.T) {
 
 	sys := &piLoopSys{bridge: bridge, cwd: cwd}
 	_, _ = sharedLooperResources.Delete("ctx/session:test")
-	l := &looper{cfg: Config{MaxAssignments: 1}, active: map[string]*assignment{}}
+	l := &looper{cfg: Config{LLMActor: "llm", MaxAssignments: 1}, initialEnv: testEnvironmentDefaults(cwd, map[string]string{}), active: map[string]*assignment{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a := &assignment{
-		start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-pi", AssignmentID: "a-pi", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", Model: "faux/faux-1", MaxTurns: 4},
-		cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-pi", Seq: 1, Text: "write result.txt"}},
+		start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-pi", AssignmentID: "a-pi", ControllerActor: "agent:controller:1", Model: "faux/faux-1", MaxTurns: 4},
+		cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-pi", Seq: 1, Text: "write result.txt"}}, branch: &branchRuntime{Environment: branchEnvironment{CWD: cwd, Vars: map[string]string{}}},
 	}
 	l.active["w-pi"] = a
 	l.drive(ctx, sys, a)
@@ -200,7 +205,7 @@ func TestLooperRunsActualPinnedPiProviderAndWorkspaceTool(t *testing.T) {
 		t.Fatalf("llm calls=%d reports=%d", sys.llmCall, len(sys.posts))
 	}
 	var report agentloop.ReportRequest
-	if err := json.Unmarshal(sys.posts[0].Payload, &report); err != nil || report.State != "completed" || !contains(string(mustRaw(testContextMessages("session:test"))), "finished after tool result") || len(testContextMessages("session:test")) != 4 {
+	if err := json.Unmarshal(sys.posts[0].Payload, &report); err != nil || report.State != "completed" || !contains(string(mustRaw(testContextMessages("session:test"))), "finished after tool result") || len(testContextMessages("session:test")) != 5 {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }

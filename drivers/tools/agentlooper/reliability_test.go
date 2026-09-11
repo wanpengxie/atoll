@@ -80,7 +80,7 @@ func runReliability(t *testing.T, s *reliabilitySys, ctx context.Context) agentl
 	t.Helper()
 	_, _ = sharedLooperResources.Delete("ctx/session:test")
 	s.t = t
-	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ControllerActor: "controller", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 5, ToolTimeoutMS: 5}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
+	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ControllerActor: "controller", MaxTurns: 5, ToolTimeoutMS: 5}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}, branch: testBranchRuntime()}
 	l := &looper{active: map[string]*assignment{"a": a}}
 	l.drive(ctx, s, a)
 	var report agentloop.ReportRequest

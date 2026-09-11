@@ -510,9 +510,9 @@ func TestReceiptIsIdempotentWithinControllerProcess(t *testing.T) {
 
 func TestRelatedWorkContinuesExistingView(t *testing.T) {
 	sys := newTestSys(newTestState())
-	c := &controller{cfg: Config{Loopers: []string{"loop-a"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
+	c := &controller{cfg: Config{Loopers: []string{"loop-b"}, ContextActor: "context", LLMActor: "llm", MaxOpenWorks: 8, MaxInputsPerWork: 128, MaxOperationKeys: 256, MaxTurns: 4}, data: newWorkTable(), wait: map[agentproto.WorkID][]actorbase.Msg{}}
 	source := &workRecord{ID: "w-source", SessionID: "view:source", BoundaryID: "boundary-source", Owner: harness.Caller{Channel: "c", Actor: "human:alice:1"}, State: agentproto.WorkClosed, Outcome: agentproto.OutcomeCompleted, CreatedAt: 1, UpdatedAt: 1}
-	c.sessions = map[string]*session{"view:source": {ID: "view:source"}}
+	c.sessions = map[string]*session{"view:source": {ID: "view:source", Holder: "loop-a"}}
 	c.sessionOrder = []string{"view:source"}
 	c.data.Works[string(source.ID)] = source
 	c.data.Order = []string{string(source.ID)}
@@ -531,6 +531,9 @@ func TestRelatedWorkContinuesExistingView(t *testing.T) {
 	branched := c.requestWork("branch")
 	if branched.RelatedWorkID != source.ID || branched.SessionID != "view:branch" {
 		t.Fatalf("branch=%+v", branched)
+	}
+	if got := sys.posts[0].Audience; len(got) != 1 || got[0] != "loop-a" {
+		t.Fatalf("fork did not stay with parent Holder: %v", got)
 	}
 }
 

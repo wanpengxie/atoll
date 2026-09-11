@@ -86,7 +86,7 @@ func construct(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDe
 
 func manifest() introspect.Manifest {
 	return introspect.Manifest{Class: Class, Interfaces: []string{"actor", "llm"}, Capabilities: map[string]bool{"pi_provider": true, "streaming": true, "request_cancel": true}, Words: map[string]introspect.WordSpec{
-		llmproto.TypeGenerate: {Description: "Read one versioned session context object and run one bounded Pi LLM request.", InputSchema: json.RawMessage(`{"type":"object","required":["context"],"properties":{"provider":{"type":"string"},"model":{"type":"string","minLength":1},"purpose":{"type":"string"},"api_key":{"type":"string","minLength":1,"writeOnly":true},"system_prompt":{"type":"string"},"context":{"type":"object","required":["resource","version"],"properties":{"resource":{"type":"string","minLength":1},"version":{"type":"string","minLength":1}},"additionalProperties":false},"tools":{"type":"array"},"options":{"type":"object"}},"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object","required":["provider","model","message","attempts"],"properties":{"provider":{"type":"string"},"model":{"type":"string"},"message":{"type":"object"},"attempts":{"type":"integer","minimum":1},"usage":{"type":"object"},"error_code":{"type":"string"},"retryable":{"type":"boolean"}},"additionalProperties":false}`), ErrorCodes: []string{"invalid_args", "context_missing", "context_invalid", "context_stale", "capacity", "model_not_found", "auth", "permission", "rate_limited", "transient_provider", "transport_error", "unknown_provider_error", "cancelled", "deadline_exceeded", "runtime_unavailable"}},
+		llmproto.TypeGenerate: {Description: "Read one versioned session context object and run one bounded Pi LLM request.", InputSchema: json.RawMessage(`{"type":"object","required":["context"],"properties":{"provider":{"type":"string"},"model":{"type":"string","minLength":1},"purpose":{"type":"string"},"api_key":{"type":"string","minLength":1,"writeOnly":true},"system_prompt":{"type":"string"},"context":{"type":"object","required":["resource","version"],"properties":{"resource":{"type":"string","minLength":1},"version":{"type":"string","minLength":1}},"additionalProperties":false},"tools_json":{"type":"string"},"options":{"type":"object"}},"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object","required":["provider","model","message","attempts"],"properties":{"provider":{"type":"string"},"model":{"type":"string"},"message":{"type":"object"},"attempts":{"type":"integer","minimum":1},"usage":{"type":"object"},"error_code":{"type":"string"},"retryable":{"type":"boolean"}},"additionalProperties":false}`), ErrorCodes: []string{"invalid_args", "context_missing", "context_invalid", "context_stale", "capacity", "model_not_found", "auth", "permission", "rate_limited", "transient_provider", "transport_error", "unknown_provider_error", "cancelled", "deadline_exceeded", "runtime_unavailable"}},
 		llmproto.TypeModels:   {Description: "List the model catalog embedded from the pinned Pi provider package; querying never occupies Agent control state.", InputSchema: json.RawMessage(`{"type":"object","properties":{"provider":{"type":"string"}},"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object","required":["models"],"properties":{"models":{"type":"array"}},"additionalProperties":false}`), ErrorCodes: []string{"invalid_args", "runtime_unavailable"}},
 		llmproto.TypeCount:    {Description: "Count the current version of a session context object.", InputSchema: json.RawMessage(`{"type":"object","required":["context"],"properties":{"context":{"type":"object","required":["resource","version"],"properties":{"resource":{"type":"string","minLength":1},"version":{"type":"string","minLength":1}},"additionalProperties":false}},"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object","required":["context_tokens"],"properties":{"context_tokens":{"type":"integer","minimum":0}},"additionalProperties":false}`), ErrorCodes: []string{"invalid_args", "context_missing", "context_invalid", "context_stale"}},
 	}}
@@ -168,12 +168,17 @@ func handle(sys actorbase.Sys, b *pibridge.Bridge, cfg Config, cwd string, msg a
 			Purpose      string            `json:"purpose,omitempty"`
 			SystemPrompt string            `json:"system_prompt,omitempty"`
 			Messages     []json.RawMessage `json:"messages"`
-			Tools        []json.RawMessage `json:"tools,omitempty"`
+			Tools        json.RawMessage   `json:"tools,omitempty"`
 			Options      json.RawMessage   `json:"options,omitempty"`
 			APIKey       string            `json:"api_key,omitempty"`
 		}
 		if req.Model == "" {
 			_, _ = sys.Fail(msg, "invalid_args", "model is required")
+			return
+		}
+		tools, err := decodeToolsJSON(req.ToolsJSON)
+		if err != nil {
+			_, _ = sys.Fail(msg, "invalid_args", err.Error())
 			return
 		}
 		// A call-specific credential overrides the Provider Actor's default.
@@ -183,7 +188,7 @@ func handle(sys actorbase.Sys, b *pibridge.Bridge, cfg Config, cwd string, msg a
 		if req.APIKey == "" {
 			req.APIKey = cfg.APIKey
 		}
-		op, args = llmproto.TypeGenerate, bridgeGenerate{ModelRef: req.ModelRef, Purpose: req.Purpose, SystemPrompt: req.SystemPrompt, Messages: object.Messages, Tools: req.Tools, Options: req.Options, APIKey: req.APIKey}
+		op, args = llmproto.TypeGenerate, bridgeGenerate{ModelRef: req.ModelRef, Purpose: req.Purpose, SystemPrompt: req.SystemPrompt, Messages: object.Messages, Tools: tools, Options: req.Options, APIKey: req.APIKey}
 		generateProvider, generateModel = req.Provider, req.Model
 	case llmproto.TypeModels:
 		var req llmproto.ModelsRequest
@@ -263,6 +268,27 @@ func handle(sys actorbase.Sys, b *pibridge.Bridge, cfg Config, cwd string, msg a
 		return
 	}
 	_, _ = sys.Reply(msg, json.RawMessage(raw))
+}
+
+func decodeToolsJSON(input string) (json.RawMessage, error) {
+	if input == "" {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(input)
+	if len(trimmed) == 0 || trimmed[0] != '[' || !json.Valid([]byte(trimmed)) {
+		return nil, errors.New("tools_json must encode an array")
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &entries); err != nil {
+		return nil, errors.New("tools_json must encode an array")
+	}
+	for _, entry := range entries {
+		definition := bytes.TrimSpace(entry)
+		if len(definition) == 0 || definition[0] != '{' {
+			return nil, errors.New("tools_json entries must be objects")
+		}
+	}
+	return json.RawMessage(input), nil
 }
 
 func assistantError(raw json.RawMessage) (string, bool) {

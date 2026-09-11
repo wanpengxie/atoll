@@ -175,6 +175,34 @@ func TestEmbeddedPiWorkspaceParitySlice(t *testing.T) {
 	}
 }
 
+func TestEmbeddedPiWorkspaceUsesPerCallCWDAndEnvironment(t *testing.T) {
+	b, _ := startTestBridge(t)
+	cwd := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := b.CallWithEnvironment(ctx, "workspace.bash", map[string]any{
+		"command": `printf '%s|%s|%s' "$BRANCH_VALUE" "$PWD" "${HOME-unset}"`,
+	}, cwd, map[string]string{"BRANCH_VALUE": "branch-specific"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "branch-specific|"+cwd+"|unset") {
+		t.Fatalf("branch execution snapshot was not applied: %s", raw)
+	}
+}
+
+func TestEmbeddedPiSearchDoesNotFallBackToBridgePATH(t *testing.T) {
+	b, _ := startTestBridge(t)
+	cwd := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := b.CallWithEnvironment(ctx, "workspace.grep", map[string]any{"pattern": "anything", "path": "."}, cwd, map[string]string{"PATH": ""}, nil)
+	var bridgeErr *Error
+	if !errors.As(err, &bridgeErr) || bridgeErr.Code != "tool_failed" || !strings.Contains(bridgeErr.Detail, "not available") {
+		t.Fatalf("grep used Bridge PATH instead of branch snapshot: %v", err)
+	}
+}
+
 func TestEmbeddedPiWorkspaceUsesPiNativeArgumentValidation(t *testing.T) {
 	b, cwd := startTestBridge(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

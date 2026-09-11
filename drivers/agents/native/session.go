@@ -112,7 +112,17 @@ func (c *controller) sessionForAsk(sys actorbase.Sys, msg *actorbase.Msg, req ag
 	app := msg.Context()
 	app.Session = id
 	*msg = msg.WithContext(app)
-	s := &session{ID: id, LastUsed: nowMillis(), Base: base, Merge: "auto"}
+	// A fork stays with the parent's current Holder when that runtime still
+	// exists. That lets the sole runtime owner copy the non-replayable branch
+	// environment directly; a stale Holder is still cleared by dispatch's
+	// ordinary retry path.
+	holder := ""
+	if base != nil {
+		if parent := c.sessions[base.Session]; parent != nil {
+			holder = parent.Holder
+		}
+	}
+	s := &session{ID: id, LastUsed: nowMillis(), Holder: holder, Base: base, Merge: "auto"}
 	c.sessions[s.ID] = s
 	c.sessionOrder = append(c.sessionOrder, s.ID)
 	return s, nil

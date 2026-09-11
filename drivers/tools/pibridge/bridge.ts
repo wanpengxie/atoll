@@ -33,19 +33,47 @@ const models = builtinModels();
 const faux = fauxProvider();
 models.setProvider(faux.provider);
 const active = new Map<string, AbortController>();
-const envs = new Map<string, NodeExecutionEnv>();
 const harnessTools = new Map([
   ["read", createReadTool()],
   ["write", createWriteTool()],
   ["edit", createEditTool()],
-  ["bash", createBashTool()],
 ]);
 
-function executableAvailable(name: string): boolean {
+function configuredHarnessTool(name: string, shellEnv: Record<string, string>) {
+  if (name !== "bash") return harnessTools.get(name);
+  return createBashTool({
+    prepare(execution) {
+      // The Looper supplied a complete branch snapshot. Do not merge the
+      // Bridge process environment back in: that would make unset ineffective
+      // and create a second source of branch execution truth.
+      execution.env = { ...shellEnv };
+      execution.inheritEnv = false;
+    },
+  });
+}
+
+function environmentValue(shellEnv: Record<string, string>, name: string): string | undefined {
+  if (process.platform !== "win32") return shellEnv[name];
+  const found = Object.keys(shellEnv).find((key) => key.toUpperCase() === name.toUpperCase());
+  return found === undefined ? undefined : shellEnv[found];
+}
+
+function normalizeEnvironmentNames(shellEnv: Record<string, string>): Record<string, string> {
+  if (process.platform !== "win32") return shellEnv;
+  const seen = new Set<string>();
+  for (const key of Object.keys(shellEnv)) {
+    const folded = key.toUpperCase();
+    if (seen.has(folded)) throw new BridgeValidationError(`duplicate Windows environment name ${key}`);
+    seen.add(folded);
+  }
+  return shellEnv;
+}
+
+function executableAvailable(name: string, shellEnv: Record<string, string> = {}): boolean {
   const extensions = process.platform === "win32"
-    ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
+    ? (environmentValue(shellEnv, "PATHEXT") || ".EXE;.CMD;.BAT;.COM").split(";")
     : [""];
-  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+  for (const dir of (environmentValue(shellEnv, "PATH") || "").split(path.delimiter)) {
     for (const extension of extensions) {
       try {
         accessSync(path.join(dir, name + extension), fsConstants.X_OK);
@@ -56,13 +84,38 @@ function executableAvailable(name: string): boolean {
   return false;
 }
 
-function codingTools(cwd: string) {
+// The pinned coding-agent grep/find implementations resolve helper binaries
+// through process.env and do not accept an env option. A Workspace Bridge
+// belongs to one branch, so serialize its calls and project the Holder's full
+// snapshot into that compatibility seam only for the duration of one call.
+// Restoring it afterwards keeps the Bridge from becoming environment state.
+let workspaceTail: Promise<void> = Promise.resolve();
+async function withWorkspaceEnvironment<T>(shellEnv: Record<string, string>, run: () => Promise<T>): Promise<T> {
+  const previous = workspaceTail;
+  let release!: () => void;
+  workspaceTail = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  const saved = { ...process.env };
+  try {
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    for (const [key, value] of Object.entries(shellEnv)) process.env[key] = value;
+    return await run();
+  } finally {
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    for (const [key, value] of Object.entries(saved)) {
+      if (value !== undefined) process.env[key] = value;
+    }
+    release();
+  }
+}
+
+function codingTools(cwd: string, shellEnv: Record<string, string>) {
   const tools = new Map([
     ["grep", createGrepTool(cwd)],
     ["find", createFindTool(cwd)],
     ["ls", createLsTool(cwd)],
   ]);
-  if (executableAvailable("pwsh") || executableAvailable("powershell")) {
+  if (executableAvailable("pwsh", shellEnv) || executableAvailable("powershell", shellEnv)) {
     tools.set("powershell", createPowerShellTool(cwd));
   }
   return tools;
@@ -222,23 +275,15 @@ async function generate(id: string, args: any, controller: AbortController) {
   send({ id, kind: "result", value: { provider: model.provider, model: model.id, message, usage } });
 }
 
-function executionEnv(cwd: string) {
-  let env = envs.get(cwd);
-  if (!env) {
-    env = new NodeExecutionEnv({ cwd });
-    envs.set(cwd, env);
-  }
-  return env;
-}
-
-async function workspace(id: string, name: string, args: any, cwd: string, controller: AbortController) {
+async function workspace(id: string, name: string, args: any, cwd: string, shellEnv: Record<string, string>, controller: AbortController) {
   if (name === "read") {
     if (args.offset !== undefined && (!Number.isInteger(args.offset) || args.offset < 1)) throw new Error("Validation failed for tool read: offset must be a positive integer");
     if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1)) throw new Error("Validation failed for tool read: limit must be a positive integer");
   }
-  const harnessTool = harnessTools.get(name);
-  let result: unknown;
-  if (harnessTool) {
+  const harnessTool = configuredHarnessTool(name, shellEnv);
+	let result: unknown;
+	if (harnessTool) {
+		const env = new NodeExecutionEnv({ cwd, shellEnv });
     const prepared = harnessTool.prepareArguments ? harnessTool.prepareArguments(args) : args;
     const validated = validateToolArguments(harnessTool, { type: "toolCall", id, name, arguments: prepared });
     const context = withAbortSignal(controller.signal, TODO_CONTEXT);
@@ -249,18 +294,22 @@ async function workspace(id: string, name: string, args: any, cwd: string, contr
       async getMemo(_name: string) { return undefined; },
       async setMemo(_name: string, _value: any) {},
     };
-    result = await harnessTool.execute(
-      id,
-      validated,
-      (update: unknown) => send({ id, kind: "progress", event: update }),
-      { env: executionEnv(cwd) },
-      invocation,
-      context,
-    );
+		try {
+			result = await harnessTool.execute(
+				id,
+				validated,
+				(update: unknown) => send({ id, kind: "progress", event: update }),
+				{ env },
+				invocation,
+				context,
+			);
+		} finally {
+			await env.cleanup(TODO_CONTEXT);
+		}
   } else {
-    if (name === "grep" && !executableAvailable("rg")) throw new Error("ripgrep (rg) is not available");
-    if (name === "find" && !executableAvailable("fd")) throw new Error("fd is not available");
-    const tool = codingTools(cwd).get(name);
+    if (name === "grep" && !executableAvailable("rg", shellEnv)) throw new Error("ripgrep (rg) is not available");
+    if (name === "find" && !executableAvailable("fd", shellEnv)) throw new Error("fd is not available");
+    const tool = codingTools(cwd, shellEnv).get(name);
     if (!tool) throw new Error(`unknown or unavailable Pi workspace tool ${name}`);
     const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
     const validated = validateToolArguments(tool, { type: "toolCall", id, name, arguments: prepared });
@@ -295,7 +344,15 @@ async function handle(frame: any) {
       }));
       send({ id, kind: "result", value: { models: values } });
     } else if (typeof frame.op === "string" && frame.op.startsWith("workspace.")) {
-      await workspace(id, frame.op.slice("workspace.".length), frame.args || {}, frame.cwd || process.cwd(), controller);
+      const shellEnv: Record<string, string> = {};
+      if (frame.env && typeof frame.env === "object" && !Array.isArray(frame.env)) {
+        for (const [key, value] of Object.entries(frame.env)) {
+          if (typeof value !== "string") throw new BridgeValidationError("workspace env values must be strings");
+          shellEnv[key] = value;
+        }
+      }
+      const normalizedEnv = normalizeEnvironmentNames(shellEnv);
+      await withWorkspaceEnvironment(normalizedEnv, () => workspace(id, frame.op.slice("workspace.".length), frame.args || {}, frame.cwd || process.cwd(), normalizedEnv, controller));
     } else throw new Error(`unsupported bridge operation ${frame.op}`);
   } catch (error) {
     failure(id, typeof frame.op === "string" ? frame.op : "", error);
@@ -311,6 +368,6 @@ input.on("line", (line) => {
 });
 input.on("close", () => {
   for (const controller of active.values()) controller.abort();
-  void Promise.all([...envs.values()].map((env) => env.cleanup(TODO_CONTEXT))).finally(() => process.exit(0));
+  process.exit(0);
 });
 send({ kind: "ready", protocol: 1, node: process.version, pi: "0.85.1" });

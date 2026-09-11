@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -78,7 +79,7 @@ func TestInternalCallDrainsProgressBeforeWaitingForTerminal(t *testing.T) {
 }
 
 func TestLooperAcceptsBoundedConcurrentAssignments(t *testing.T) {
-	cfg, err := parseConfig(json.RawMessage(`{"controller_actor":"native-agent","max_assignments":32}`))
+	cfg, err := parseConfig(json.RawMessage(`{"controller_actor":"native-agent","host_channel":"host","max_assignments":32}`))
 	if err != nil || cfg.MaxAssignments != 32 {
 		t.Fatalf("multi-assignment config=%+v err=%v", cfg, err)
 	}
@@ -149,10 +150,11 @@ func internalRequest(id, typ string, body any) actorbase.Msg {
 func TestOneLooperRunsSeveralLoopsAndStopsOnlyTheAddressedOne(t *testing.T) {
 	life, cancelLife := context.WithCancel(context.Background())
 	sys := &multiAssignmentSys{life: life}
-	l := &looper{cfg: Config{ControllerActor: "controller", LLMActor: "llm", MaxAssignments: 2}, active: map[string]*assignment{}}
+	cwd, _ := os.Getwd()
+	l := &looper{cfg: Config{ControllerActor: "controller", MaxAssignments: 2}, initialEnv: testEnvironmentDefaults(cwd, map[string]string{}), active: map[string]*assignment{}}
 	for index, workID := range []agentloop.StartRequest{
-		{Open: &agentloop.OpenRequest{}, SessionID: "session:one", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "one"}}},
-		{Open: &agentloop.OpenRequest{}, SessionID: "session:two", WorkID: "w-2", AssignmentID: "a-2", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", Inputs: []agentloop.Input{{ID: "i-2", Seq: 1, Text: "two"}}},
+		{Open: &agentloop.OpenRequest{}, SessionID: "session:one", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", Inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "one"}}},
+		{Open: &agentloop.OpenRequest{}, SessionID: "session:two", WorkID: "w-2", AssignmentID: "a-2", ControllerActor: "agent:controller:1", Inputs: []agentloop.Input{{ID: "i-2", Seq: 1, Text: "two"}}},
 	} {
 		l.start(sys, internalRequest(fmt.Sprintf("start-%d", index), agentloop.TypeStart, workID))
 	}
@@ -222,142 +224,31 @@ func TestToolResultPreservesExplicitIsErrorAndSpillDetails(t *testing.T) {
 	}
 }
 
-func TestDefaultToolsBindHostAndWorkspaceWithoutAddingSearchTools(t *testing.T) {
-	start := agentloop.StartRequest{WorkspaceActor: "workspace", HostActor: "host"}
-	tools := configuredTools(start)
-	if len(tools) != 7 || tools[0].Actor != "workspace" || tools[0].Word != workspaceproto.TypeRead || tools[4].Actor != "host" || tools[4].Word != channelCallWord {
-		t.Fatalf("default tools=%+v", tools)
+func TestFixedToolPrefixIsCompleteAndByteStable(t *testing.T) {
+	cfg := Config{Prompt: "system"}
+	first, err := buildModelPrefix(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tool := range tools {
-		if tool.Name == "grep" || tool.Name == "find" || tool.Name == "ls" {
-			t.Fatalf("new search tool was silently added to compatibility defaults: %+v", tools)
+	second, err := buildModelPrefix(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ToolsJSON != second.ToolsJSON || first.SystemPrompt != "system" {
+		t.Fatalf("fixed prefix changed: first=%s second=%s", first.ToolsJSON, second.ToolsJSON)
+	}
+	want := []string{"read", "write", "edit", "bash", "grep", "find", "ls", environmentGetName, environmentUpdateName,
+		"list_actors", "system_describe", "system_call", "describe_actor", "describe_type", "call_actor", "await_result", "cancel", "list_pending"}
+	if len(first.Tools) != len(want) {
+		t.Fatalf("tools=%d want=%d", len(first.Tools), len(want))
+	}
+	for i, name := range want {
+		if first.Tools[i].Name != name {
+			t.Fatalf("tool[%d]=%q want %q", i, first.Tools[i].Name, name)
 		}
 	}
-}
-
-type customToolSys struct {
-	looperTestBase
-	llmCalls     int
-	customCalls  int
-	definitions  []json.RawMessage
-	posts        []behavior.RequestSpec
-	toolCallName string
-}
-
-func (s *customToolSys) Call(_ message.Cause, app harness.Context, target actor.ActorID, typ string, value any) (actorbase.Pending, error) {
-	var body any
-	switch typ {
-	case contextproto.TypeBuild:
-		body = contextproto.Artifact{ArtifactID: "ctx", Messages: []json.RawMessage{json.RawMessage(`{"role":"user","content":"run","timestamp":1}`)}}
-	case "actor.describe":
-		if target != "custom" {
-			return nil, fmt.Errorf("unexpected describe target %s", target)
-		}
-		body = map[string]any{"class": "custom", "interfaces": []string{"actor"}, "capabilities": map[string]bool{}, "words": map[string]any{
-			"custom.run": map[string]any{"description": "manifest description", "input_schema": json.RawMessage(`{"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}`)},
-		}}
-	case llmproto.TypeGenerate:
-		s.llmCalls++
-		raw, _ := json.Marshal(value)
-		var req llmproto.GenerateRequest
-		_ = json.Unmarshal(raw, &req)
-		s.definitions = req.Tools
-		if s.llmCalls == 1 {
-			name := s.toolCallName
-			if name == "" {
-				name = "custom"
-			}
-			body = llmproto.GenerateResponse{Message: mustRaw(map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "toolCall", "id": "tc", "name": name, "arguments": map[string]any{"value": "x"}}}, "timestamp": 2})}
-		} else {
-			body = llmproto.GenerateResponse{Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"done"}],"timestamp":3}`)}
-		}
-	case "custom.run":
-		if target != "custom" {
-			return nil, fmt.Errorf("unexpected custom target %s", target)
-		}
-		s.customCalls++
-		body = map[string]any{"content": []map[string]any{{"type": "text", "text": "custom result"}}}
-	default:
-		return nil, fmt.Errorf("unexpected call %s", typ)
-	}
-	raw, _ := json.Marshal(body)
-	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &fields)
-	fields["status"] = json.RawMessage(`"completed"`)
-	payload, _ := json.Marshal(fields)
-	return immediatePending{msg: actorbase.NewBodyMsg(actorbase.OriginMailbox, context.Background(), message.Envelope{Kind: message.KindResponse, Payload: payload})}, nil
-}
-
-func (s *customToolSys) Post(spec behavior.RequestSpec) (message.ID, error) {
-	s.posts = append(s.posts, spec)
-	return "report", nil
-}
-
-func TestManifestDefinedCustomToolRunsWithoutWorkspace(t *testing.T) {
-	sys := &customToolSys{}
-	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
-	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
-	(&looper{}).drive(context.Background(), sys, a)
-	if sys.llmCalls != 2 || sys.customCalls != 1 || len(sys.definitions) != 1 || !strings.Contains(string(sys.definitions[0]), "manifest description") {
-		t.Fatalf("llm=%d custom=%d definitions=%s", sys.llmCalls, sys.customCalls, sys.definitions)
-	}
-}
-
-func TestExplicitEmptyToolListProducesNoDefinitions(t *testing.T) {
-	empty := []agentloop.ToolBinding{}
-	if got := configuredTools(agentloop.StartRequest{WorkspaceActor: "workspace", HostActor: "host", Tools: &empty}); len(got) != 0 {
-		t.Fatalf("explicit empty tools gained defaults: %+v", got)
-	}
-}
-
-func TestUnopenedToolNameNeverReachesTarget(t *testing.T) {
-	sys := &customToolSys{toolCallName: "not_allowed"}
-	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
-	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings, MaxTurns: 3}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
-	(&looper{}).drive(context.Background(), sys, a)
-	if sys.customCalls != 0 || sys.llmCalls != 2 {
-		t.Fatalf("unopened tool calls=%d llm=%d", sys.customCalls, sys.llmCalls)
-	}
-}
-
-func TestInvalidManifestFailsBeforeInference(t *testing.T) {
-	sys := &customToolSys{}
-	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "missing.run"}}
-	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w", AssignmentID: "a", ContextActor: "context", LLMActor: "llm", Tools: &bindings}, cause: message.Root(), inputs: []agentloop.Input{{ID: "i", Seq: 1, Text: "run"}}}
-	(&looper{}).drive(context.Background(), sys, a)
-	if sys.llmCalls != 0 || len(sys.posts) != 1 {
-		t.Fatalf("invalid manifest reached inference: llm=%d posts=%d", sys.llmCalls, len(sys.posts))
-	}
-	var report agentloop.ReportRequest
-	_ = json.Unmarshal(sys.posts[0].Payload, &report)
-	if report.State != "failed" {
-		t.Fatalf("report=%+v", report)
-	}
-}
-
-type refreshManifestSys struct {
-	looperTestBase
-	calls int
-}
-
-func (s *refreshManifestSys) Call(_ message.Cause, app harness.Context, _ actor.ActorID, typ string, _ any) (actorbase.Pending, error) {
-	if typ != "actor.describe" {
-		return nil, fmt.Errorf("unexpected %s", typ)
-	}
-	s.calls++
-	raw, _ := json.Marshal(map[string]any{"class": "custom", "interfaces": []string{"actor"}, "capabilities": map[string]bool{}, "words": map[string]any{"custom.run": map[string]any{"description": fmt.Sprintf("version-%d", s.calls), "input_schema": json.RawMessage(`{"type":"object"}`)}}})
-	return completedPending(raw), nil
-}
-
-func TestEachEpisodeReadsAFreshManifest(t *testing.T) {
-	sys := &refreshManifestSys{}
-	bindings := []agentloop.ToolBinding{{Name: "custom", Actor: "custom", Word: "custom.run"}}
-	for want := 1; want <= 2; want++ {
-		a := &assignment{start: agentloop.StartRequest{Tools: &bindings}, cause: message.Root()}
-		tools, err := resolveTools(context.Background(), sys, a)
-		if err != nil || len(tools) != 1 || !strings.Contains(string(tools[0].Definition), fmt.Sprintf("version-%d", want)) {
-			t.Fatalf("episode %d tools=%+v err=%v", want, tools, err)
-		}
+	if strings.Contains(first.ToolsJSON, "channel_call") {
+		t.Fatalf("host business tools were expanded into prefix: %s", first.ToolsJSON)
 	}
 }
 
@@ -398,7 +289,7 @@ func (s *resultStoreSys) Call(_ message.Cause, app harness.Context, target actor
 func TestLongToolTextIsBoundedDeterministically(t *testing.T) {
 	sys := &resultStoreSys{}
 	full := "αβγ\n" + strings.Repeat("long", 100)
-	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 10, ToolResultMaxBytes: 256, ToolImageMaxBytes: 1024}, cause: message.Root()}
+	a := &assignment{start: agentloop.StartRequest{ToolResultMaxLines: 10, ToolResultMaxBytes: 256, ToolImageMaxBytes: 1024}, cause: message.Root()}
 	raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": full}}, "details": map[string]any{"upstream": true}})
 	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
 	if sys.target != "" || !strings.Contains(string(result), "Output truncated to configured limit") || strings.Contains(string(result), `"path"`) {
@@ -428,7 +319,7 @@ func TestLongToolTextDoesNotDependOnOutputStore(t *testing.T) {
 		sys  *resultStoreSys
 	}{
 		{"no store", &assignment{start: agentloop.StartRequest{ToolResultMaxLines: 10, ToolResultMaxBytes: 10}}, &resultStoreSys{}},
-		{"save failure", &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 10, ToolResultMaxBytes: 10}}, &resultStoreSys{err: errors.New("disk full")}},
+		{"save failure", &assignment{start: agentloop.StartRequest{ToolResultMaxLines: 10, ToolResultMaxBytes: 10}}, &resultStoreSys{err: errors.New("disk full")}},
 	} {
 		result := (&looper{}).toolResult(context.Background(), tc.sys, tc.a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
 		if first == "" {
@@ -443,7 +334,7 @@ func TestLongToolTextDoesNotDependOnOutputStore(t *testing.T) {
 func TestLargeOrdinaryJSONResultUsesTheSameBoundary(t *testing.T) {
 	sys := &resultStoreSys{}
 	raw, _ := json.Marshal(map[string]any{"status": "completed", "value": strings.Repeat("json", 100)})
-	a := &assignment{start: agentloop.StartRequest{WorkspaceActor: "store", ToolResultMaxLines: 20, ToolResultMaxBytes: 256}, cause: message.Root()}
+	a := &assignment{start: agentloop.StartRequest{ToolResultMaxLines: 20, ToolResultMaxBytes: 256}, cause: message.Root()}
 	result := (&looper{}).toolResult(context.Background(), sys, a, toolCall{ID: "tc", Name: "custom"}, resolvedTool{Word: "custom.run"}, raw)
 	if sys.request.Content != "" || !strings.Contains(string(result), "atoll_output") {
 		t.Fatalf("unexpected side effect=%q result=%s", sys.request.Content, result)
@@ -518,7 +409,7 @@ func TestLooperOwnsOneCompleteToolLoopAndReportsProposal(t *testing.T) {
 	l := &looper{cfg: Config{MaxAssignments: 1}, active: map[string]*assignment{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", ContextActor: "context", LLMActor: "llm", WorkspaceActor: "workspace", MaxTurns: 4}, cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "do it"}}}
+	a := &assignment{start: agentloop.StartRequest{SessionID: "session:test", WorkID: "w-1", AssignmentID: "a-1", ControllerActor: "agent:controller:1", MaxTurns: 4}, cause: message.Root(), cancel: cancel, inputs: []agentloop.Input{{ID: "i-1", Seq: 1, Text: "do it"}}, branch: testBranchRuntime()}
 	l.active["a-1"] = a
 	l.drive(ctx, sys, a)
 	if sys.llmCalls != 2 || sys.toolCalls != 1 {
