@@ -33,7 +33,7 @@ permissions; Atoll gives agents **actors**, **channels** and **membership**.
 - **Membership is the permission** — no per-object ACLs; an agent's act is its
   principal's act.
 - **Agents are members, not sessions** — stable identity across restarts and model
-  swaps; `codex`, `claude`, `script` engines; many instances per template.
+  swaps; `codex`, `claude`, `workbuddy`, `script` engines; many instances per template.
 - **Tools mount at runtime** — an MCP server becomes a member with two messages,
   its tools become message types.
 - **Machines join as devices** — `atoll-daemon` on another box hosts agents and
@@ -354,7 +354,7 @@ structs in [`protocol/message/system.go`](protocol/message/system.go) and
 
 ### Recipes
 
-**Seat a second agent.** Agents are *templates* (a class — `codex`, `claude`,
+**Seat a second agent.** Agents are *templates* (a class — `codex`, `claude`, `workbuddy`,
 `script` — plus config) that you then *seat* in a channel; one template can have
 many instances unless declared `singleton`:
 
@@ -471,7 +471,7 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 
 Register a class like that, rebuild, and `system.actor.template.create` with
 `"class":"echo"` makes it available to every channel. The shipped engines
-(`codex`, `claude`, `script`) and tools (`echo`, `mcp`, `device`, `kimi`, `xhs`)
+(`codex`, `claude`, `workbuddy`, `script`) and tools (`echo`, `mcp`, `device`, `kimi`, `xhs`)
 are built exactly this way under `drivers/`; a step-by-step walkthrough is in
 [docs/architecture/09-actor-hello-world.md](docs/architecture/09-actor-hello-world.md).
 
@@ -481,7 +481,7 @@ are built exactly this way under `drivers/`; a step-by-step walkthrough is in
 cmd/         binaries: atoll (the node), server, daemon; + devtools and shared internals
 scripts/     install.sh (interactive installer) and repo lint scripts
 drivers/     the outside world: tools/ (echo, device, kimi, mcp, xhs),
-             agents/ (engine providers: codex, claude, script),
+             agents/ (engine providers: codex, claude, workbuddy, script),
              gateway/ (human ingress; portal/ = identity doors + /ws + /obs + /compute),
              devicehost/ (the local device `atoll up` connects)
 protocol/    wire vocabulary (envelope, actor ids, channel peer frames, access, resource, system words)

@@ -27,7 +27,7 @@
   盖章，不由发送者填。审计、回放、恢复都从账里来。
 - **频道是一切的单位**——信任边界、上下文、文件、生命周期；一棵按名字寻址的树（`c0`、`c0.dev`、`c0.alice`）。
 - **成员身份即权限**——没有按对象的 ACL；agent 做的事就是它 principal 做的事。
-- **agent 是成员，不是会话**——重启、换模型身份不变；`codex`、`claude`、`script` 三种引擎；一个模板多个实例。
+- **agent 是成员，不是会话**——重启、换模型身份不变；`codex`、`claude`、`workbuddy`、`script` 四种引擎；一个模板多个实例。
 - **工具运行时挂载**——一个 MCP server 两条消息变成成员，它的工具变成消息类型。
 - **机器以 device 身份加入**——另一台机器上跑 `atoll-daemon`，就能承载有真实 shell、文件、git 的 agent 和工具。
 - **声明式收敛**——账本上的期望状态对宿主证词；崩溃重启后收敛回去，缺席不杀任何东西。
@@ -314,7 +314,7 @@ class、能力、词）。完整形状就是 [`protocol/message/system.go`](prot
 
 ### 常见操作
 
-**再坐进一个 agent。** agent 是*模板*（一个 class——`codex`、`claude`、`script`——加配置），
+**再坐进一个 agent。** agent 是*模板*（一个 class——`codex`、`claude`、`workbuddy`、`script`——加配置），
 然后*坐进*某个频道；一个模板可以有多个实例，除非声明为 `singleton`：
 
 ```jsonc
@@ -414,7 +414,7 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 ```
 
 像这样注册一个 class，重编，然后 `system.actor.template.create` 带 `"class":"echo"` 就能让每个
-频道用上它。自带的引擎（`codex`、`claude`、`script`）和工具（`echo`、`mcp`、`device`、`kimi`、
+频道用上它。自带的引擎（`codex`、`claude`、`workbuddy`、`script`）和工具（`echo`、`mcp`、`device`、`kimi`、
 `xhs`）都是这么在 `drivers/` 下造出来的；逐步的演练见
 [docs/architecture/09-actor-hello-world.md](docs/architecture/09-actor-hello-world.md)。
 
@@ -424,7 +424,7 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 cmd/         二进制：atoll（节点）、server、daemon；+ devtools 与共享 internals
 scripts/     install.sh（交互式安装器）与仓库 lint 脚本
 drivers/     外部世界：tools/（echo、device、kimi、mcp、xhs）、
-             agents/（引擎 provider：codex、claude、script）、
+             agents/（引擎 provider：codex、claude、workbuddy、script）、
              gateway/（人的入口；portal/ = 身份门 + /ws + /obs + /compute）、
              devicehost/（`atoll up` 连上的本地 device）
 protocol/    wire 词汇表（envelope、actor id、channel peer 帧、access、resource、system 词表）

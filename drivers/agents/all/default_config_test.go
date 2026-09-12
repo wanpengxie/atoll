@@ -17,6 +17,7 @@ func TestOrdinaryAgentBuildInheritsProviderDefaultConfig(t *testing.T) {
 	}{
 		{class: "codex", branches: 15},
 		{class: "claude", branches: 20},
+		{class: "workbuddy", branches: 119},
 	}
 	for _, test := range tests {
 		t.Run(test.class, func(t *testing.T) {

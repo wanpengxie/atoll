@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/agents/provider/claude"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/codex"
 	"github.com/wanpengxie/atoll/drivers/agents/provider/script"
+	"github.com/wanpengxie/atoll/drivers/agents/provider/workbuddy"
 	agentruntime "github.com/wanpengxie/atoll/drivers/agents/runtime"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelspec"
@@ -23,7 +24,23 @@ func init() {
 	full := map[string]bool{driverproto.CapabilitySteer: true, driverproto.CapabilityInterrupt: true, driverproto.CapabilityResume: true}
 	registry.Register(claude.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(claude.Class, full), New: newClaude, DefaultConfig: claude.DefaultConfig, ValidateConfig: claude.ValidateConfig, ConfigSchema: json.RawMessage(claude.ConfigSchema)})
 	registry.Register(codex.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(codex.Class, full), New: newCodex, DefaultConfig: codex.DefaultConfig, ValidateConfig: codex.ValidateConfig, ConfigSchema: json.RawMessage(codex.ConfigSchema)})
+	registry.Register(workbuddy.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(workbuddy.Class, full), New: newWorkBuddy, DefaultConfig: workbuddy.DefaultConfig, ValidateConfig: workbuddy.ValidateConfig, ConfigSchema: json.RawMessage(workbuddy.ConfigSchema)})
 	registry.Register(script.Class, registry.ClassDecl{Kind: actor.KindAgent, Placement: channelspec.PlacementDaemon, Manifest: base.Manifest(script.Class, nil), New: newScript, ValidateConfig: func(raw json.RawMessage) error { _, err := script.ParseConfig(raw); return err }, ConfigSchema: json.RawMessage(script.ConfigSchema)})
+}
+
+func newWorkBuddy(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
+	if spec.ID == "" {
+		return platform.ActorDecl{}, errors.New("workbuddy: explicit instance id required")
+	}
+	if deps.ChannelID == "" {
+		return platform.ActorDecl{}, errors.New("workbuddy: channel required")
+	}
+	cfg, err := workbuddy.ParseConfig(spec.Config, deps.WorkspaceDir, deps.Logger)
+	if err != nil {
+		return platform.ActorDecl{}, fmt.Errorf("workbuddy config: %w", err)
+	}
+	cfg.Situation = situation(spec, deps, workbuddy.Class)
+	return compose(spec, workbuddy.NewProvider(cfg), deps)
 }
 
 func newClaude(spec registry.InstanceSpec, deps registry.Deps) (platform.ActorDecl, error) {
