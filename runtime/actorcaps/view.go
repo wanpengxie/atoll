@@ -24,6 +24,11 @@ type LedgerRead struct {
 }
 
 const MaxLedgerRows = 4096
+
+// MaxLedgerBytes is the aggregate byte budget for a complete snapshot or a
+// cursor page. Complete snapshots fail when they exceed it. Cursor reads still
+// return one visible row when that row alone exceeds the budget so callers can
+// advance and apply their own projection policy.
 const MaxLedgerBytes = 16 << 20
 const MaxVisiblePageRows = 256
 

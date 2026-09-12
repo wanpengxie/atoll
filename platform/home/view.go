@@ -146,8 +146,12 @@ func (v View) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int
 		bytes = next
 		keep++
 	}
+	// A cursor page must always make progress across a visible row. The byte
+	// budget bounds batching, not whether an already-stored fact exists: if the
+	// first row alone exceeds it, return that one row and let the consumer apply
+	// its own projection or rejection policy.
 	if keep == 0 && len(rows) > 0 {
-		return nil, afterSeq, actorcaps.ErrLedgerLimit
+		keep = 1
 	}
 	if keep < len(rows) {
 		rows = rows[:keep]
@@ -177,8 +181,10 @@ func (v View) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit i
 		bytes = next
 		start--
 	}
+	// As above, an oversized row is a one-row page rather than a permanent
+	// backwards-pagination barrier.
 	if start == len(rows) && len(rows) > 0 {
-		return nil, head, hasOlder, actorcaps.ErrLedgerLimit
+		start--
 	}
 	if start > 0 {
 		hasOlder = true

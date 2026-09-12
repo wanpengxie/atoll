@@ -184,6 +184,33 @@ func TestVisibleCursorReadsEnforceRowAndByteBoundsWithoutSkipping(t *testing.T) 
 	}
 }
 
+func TestVisibleCursorReadsAdvancePastSingleOversizedRow(t *testing.T) {
+	oversized := make([]byte, actorcaps.MaxLedgerBytes+1)
+	stub := &cursorLedgerStub{rows: []storespec.StoredRow{
+		{Seq: 1, Envelope: message.Envelope{Payload: oversized}},
+		{Seq: 2, Envelope: message.Envelope{Payload: []byte(`{}`)}},
+	}}
+	view := View{visible: stub}
+
+	rows, scanned, err := view.ReadVisibleAfterSeq(t.Context(), 0, 10)
+	if err != nil || len(rows) != 1 || rows[0].Seq != 1 || scanned != 1 {
+		t.Fatalf("oversized forward row blocked cursor: row_count=%d scanned=%d err=%v", len(rows), scanned, err)
+	}
+	rows, scanned, err = view.ReadVisibleAfterSeq(t.Context(), scanned, 10)
+	if err != nil || len(rows) != 1 || rows[0].Seq != 2 || scanned != 2 {
+		t.Fatalf("forward continuation failed: row_count=%d scanned=%d err=%v", len(rows), scanned, err)
+	}
+
+	rows, _, hasOlder, err := view.ReadVisibleBeforeSeq(t.Context(), 0, 10)
+	if err != nil || len(rows) != 1 || rows[0].Seq != 2 || !hasOlder {
+		t.Fatalf("backward suffix failed: row_count=%d has_older=%v err=%v", len(rows), hasOlder, err)
+	}
+	rows, _, hasOlder, err = view.ReadVisibleBeforeSeq(t.Context(), rows[0].Seq, 10)
+	if err != nil || len(rows) != 1 || rows[0].Seq != 1 || hasOlder {
+		t.Fatalf("oversized backward row blocked cursor: row_count=%d has_older=%v err=%v", len(rows), hasOlder, err)
+	}
+}
+
 func TestVisibleCursorReadsRejectNegativeLimits(t *testing.T) {
 	view := View{visible: &cursorLedgerStub{}}
 	if _, _, err := view.ReadVisibleAfterSeq(t.Context(), 0, -1); err == nil {
