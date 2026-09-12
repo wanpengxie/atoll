@@ -42,7 +42,7 @@ func (w *worker) onFrame(c *connection, typ, subtype string, raw json.RawMessage
 	}
 ```
 
-Claude Code 的 stream-json 里,子 agent 产生的每一帧(assistant / user / tool_use / tool_result)都带 `parent_tool_use_id` 指向父回合里那个 `Agent` 工具调用。驱动在入口处把它们全部 `return`,所以子 agent 的活动既不成 progress 行,也不算 Activity 心跳。这是现象 1。
+Claude Code 的 stream-json 里,子 agent 产生的每一帧(assistant / user / tool_use / tool_result)都带 `parent_tool_use_id` 指向父回合里那个 `Agent` 工具调用。驱动在入口处把它们全部 `return`,所以子 agent 的活动不产生 progress 行。这是现象 1。
 
 ### 3.2 后台任务完成后的输出没有回合可挂
 
@@ -67,7 +67,7 @@ CLI 侧的时序:
 ## 4. 影响
 
 - 凡 claude 用 `Agent` 工具做后台任务(读大量文件、并行调研),owner 看到的是一条"我去派人了"的短回复,随后结果静默蒸发。claude 自己的上下文里结果是在的,它以为已经交付了。
-- 前台 `Agent` 调用(`run_in_background: false`)只有现象 1:结果能回来,但过程是黑的,`ControlFactDeadline`(45s)期间没有 Activity,可能被判成无响应。
+- 前台 `Agent` 调用(`run_in_background: false`)只有现象 1:结果能回来,但过程是黑的。
 - 与 timer wake 那条线对照:闹钟到点时驱动特意 Post 一条自我委托,就是为了让"没有人问却要说话"的输出有回合可挂(`timerwake.go` 的注释写得很清楚)。后台任务完成是同一类事件,目前没有对应的委托。
 
 ## 5. 修复方向

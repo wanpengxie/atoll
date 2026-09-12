@@ -91,7 +91,6 @@ type ControlOutcome struct {
 }
 
 type TurnStarted struct{ Target WorkerTurnTarget }
-type Activity struct{ Target WorkerTurnTarget }
 
 // ProgressNote 是回合内一件"已完成的中间产物"的截断摘要。Kind 是 provider
 // 无关的统一词表（下方常量），各 provider 把自家 wire 的条目映射填充进来；
@@ -160,7 +159,6 @@ type Diagnostic struct {
 }
 
 func (TurnStarted) driverEvent()        {}
-func (Activity) driverEvent()           {}
 func (ProgressNote) driverEvent()       {}
 func (Tool) driverEvent()               {}
 func (TurnEnded) driverEvent()          {}

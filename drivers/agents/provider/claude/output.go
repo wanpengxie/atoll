@@ -168,9 +168,7 @@ func (w *worker) onFrame(c *connection, typ, subtype string, raw json.RawMessage
 			return
 		}
 		if subtype == "thinking_tokens" {
-			if target, ok := w.activeTarget(c); ok {
-				w.publish(driverproto.Activity{Target: target})
-			} else {
+			if _, ok := w.activeTarget(c); !ok {
 				w.unsolicited(typ + "/" + subtype)
 			}
 			return
@@ -186,10 +184,8 @@ func (w *worker) onFrame(c *connection, typ, subtype string, raw json.RawMessage
 		w.debug("noise_frame", typ+"/"+subtype)
 	case "conversation_reset":
 		// `/clear` announces the reset before the following system/init frame.
-		// The init frame owns the actual session id; this frame is only liveness.
-		if target, ok := w.activeTarget(c); ok {
-			w.publish(driverproto.Activity{Target: target})
-		} else {
+		// The init frame owns the actual session id; this frame carries no fact.
+		if _, ok := w.activeTarget(c); !ok {
 			w.unsolicited(typ)
 		}
 	case "assistant":
@@ -220,11 +216,7 @@ func (w *worker) onStatus(c *connection, raw json.RawMessage) {
 	if frame.CompactResult != "" {
 		w.turn.compactResult, w.turn.compactError = frame.CompactResult, frame.CompactError
 	}
-	target := w.target
 	w.mu.Unlock()
-	if target.Valid() {
-		w.publish(driverproto.Activity{Target: target})
-	}
 }
 
 func (w *worker) onCompactBoundary(c *connection, raw json.RawMessage) {
@@ -341,11 +333,10 @@ func (w *worker) onAssistant(c *connection, raw json.RawMessage) {
 		case "tool_use":
 			if strings.HasPrefix(block.Name, toolsurface.ClaudeExposedPrefix) {
 				// Host-served tool: the host callback projects this call
-				// authoritatively; the stream narration is liveness only.
+				// authoritatively, so drop the duplicate stream narration.
 				w.mu.Lock()
 				w.hostToolCalls[block.ID] = struct{}{}
 				w.mu.Unlock()
-				w.publish(driverproto.Activity{Target: target})
 				continue
 			}
 			w.publish(driverproto.Tool{Target: target, CallID: block.ID, Phase: driverproto.ToolStarted, Name: block.Name, Status: driverproto.ToolStatusUnknown, Detail: boundedSummary(block.Input), Input: append(json.RawMessage(nil), block.Input...)})
@@ -355,14 +346,10 @@ func (w *worker) onAssistant(c *connection, raw json.RawMessage) {
 			// 回答是回答，各自完整，恒不为了去重而猜"这块是不是最后一块"。
 			if s := strings.TrimSpace(block.Text); s != "" {
 				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteText, Text: boundedSummary(s)})
-			} else {
-				w.publish(driverproto.Activity{Target: target})
 			}
 		case "thinking":
 			if s := strings.TrimSpace(block.Thinking); s != "" {
 				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking, Text: boundedSummary(s)})
-			} else {
-				w.publish(driverproto.Activity{Target: target})
 			}
 		}
 	}
@@ -382,12 +369,10 @@ func (w *worker) onUser(c *connection, raw json.RawMessage) {
 		w.debug("invalid_frame", "user")
 		return
 	}
-	hadTool := false
 	for _, block := range frame.Message.Content {
 		if block.Type != "tool_result" {
 			continue
 		}
-		hadTool = true
 		w.mu.Lock()
 		_, hostServed := w.hostToolCalls[block.ToolUseID]
 		if hostServed {
@@ -402,9 +387,6 @@ func (w *worker) onUser(c *connection, raw json.RawMessage) {
 			status = driverproto.ToolStatusFailed
 		}
 		w.publish(driverproto.Tool{Target: target, CallID: block.ToolUseID, Phase: driverproto.ToolEnded, Status: status, Detail: boundedSummary(block.Content), Output: append(json.RawMessage(nil), block.Content...)})
-	}
-	if !hadTool {
-		w.publish(driverproto.Activity{Target: target})
 	}
 }
 

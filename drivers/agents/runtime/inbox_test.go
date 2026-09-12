@@ -43,28 +43,6 @@ func TestObservationPressureDropsObservationButPreservesLifecycleFact(t *testing
 	}
 }
 
-func TestInboxCoalescedActivityKeepsAdmissionOrder(t *testing.T) {
-	q := newInbox(Policy{IngressCapacity: 2, CommandCapacity: 1, CallbackCapacity: 1}.normalized())
-	target := driverproto.WorkerTurnTarget{Attempt: 1, Native: "native"}
-	if !q.pushActivity(1, target) || !q.push(classTimer, timerFact{kind: timerWatchdog}) || !q.pushActivity(1, target) {
-		t.Fatal("admission failed")
-	}
-	first, ok := q.pop()
-	if !ok {
-		t.Fatal("missing first fact")
-	}
-	if _, ok := first.value.(driverFact); !ok {
-		t.Fatalf("first=%T want driverFact", first.value)
-	}
-	second, ok := q.pop()
-	if !ok {
-		t.Fatal("missing second fact")
-	}
-	if _, ok := second.value.(timerFact); !ok {
-		t.Fatalf("second=%T want timerFact", second.value)
-	}
-}
-
 func TestInboxCommandCreditRejectsWithoutAdmission(t *testing.T) {
 	q := newInbox(Policy{IngressCapacity: 1, CommandCapacity: 1, CallbackCapacity: 1}.normalized())
 	if !q.push(classCommand, command{kind: commandStart}) {

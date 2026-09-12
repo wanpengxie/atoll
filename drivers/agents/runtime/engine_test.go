@@ -213,11 +213,10 @@ func (w *stageWorker) Start(_ context.Context, r driverproto.StartRequest) {
 	target := driverproto.WorkerTurnTarget{Attempt: r.Attempt, Native: "turn"}
 	w.host.Events().Publish(driverproto.TurnStarted{Target: target})
 	// note 逐条上报不合并；无文本的 note 合法（思考区间没有文本可给），但
-	// 与上一条完全相同的读数没有信息量、恒丢；纯心跳恒不产生 progress。
+	// 与上一条完全相同的读数没有信息量、恒丢。
 	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking})
 	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking})
 	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking, Text: "a"})
-	w.host.Events().Publish(driverproto.Activity{Target: target})
 	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: "", Text: "无 kind 恒不发"})
 	w.host.Events().Publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NotePlan, Text: "b"})
 	w.host.Events().Publish(driverproto.TurnEnded{Target: target, Status: driverproto.TurnOK, FinalText: "done"})
@@ -230,9 +229,9 @@ func (w *stageWorker) Reaped() <-chan struct{} { return w.reaped }
 
 // TestProgressNotesFlowThroughInOrder: intermediate artifacts pass through
 // one-by-one (no coalescing); a repeat of the previous reading and a kindless
-// note are dropped, bare liveness never becomes progress.
+// note are dropped.
 func TestProgressNotesFlowThroughInOrder(t *testing.T) {
-	factory, _, err := Build(&stageProvider{}, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, Watchdog: time.Second})
+	factory, _, err := Build(&stageProvider{}, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +274,7 @@ func TestProgressNotesFlowThroughInOrder(t *testing.T) {
 
 func TestRuntimeFactsDriveTurnAndUUIDv7(t *testing.T) {
 	p := &testProvider{}
-	factory, _, err := Build(p, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, Watchdog: time.Second})
+	factory, _, err := Build(p, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +318,6 @@ func TestResumeInvalidRetriesAtMostOnce(t *testing.T) {
 				OpenFactDeadline:  time.Second,
 				StartFactDeadline: time.Second,
 				ReapedDemand:      time.Second,
-				Watchdog:          time.Second,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -364,7 +362,7 @@ func TestResumeInvalidRetriesAtMostOnce(t *testing.T) {
 }
 
 func TestSequentialCallbacksHaveNoPerTurnSemanticQuota(t *testing.T) {
-	policy := Policy{CallbackCapacity: 1, Watchdog: time.Hour}.normalized()
+	policy := Policy{CallbackCapacity: 1}.normalized()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	target := driverproto.WorkerTurnTarget{Attempt: 1, Native: "turn"}
@@ -500,7 +498,6 @@ func TestUnexpectedReapSettlesPendingControlOnTerminalTurn(t *testing.T) {
 		OpenFactDeadline:    time.Second,
 		StartFactDeadline:   time.Second,
 		ControlFactDeadline: time.Minute,
-		Watchdog:            time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -543,7 +540,6 @@ func newStateEngine(t *testing.T) (*engine, *testWorker, *eventCollector) {
 		StartFactDeadline:   time.Hour,
 		ControlFactDeadline: time.Hour,
 		InterruptEnded:      time.Hour,
-		Watchdog:            time.Hour,
 		ReapedDemand:        time.Hour,
 	}.normalized()
 	provider := &testProvider{neverReap: true}
@@ -839,12 +835,10 @@ func TestToolProcessPayloadSurvivesRuntimeProjection(t *testing.T) {
 	}
 }
 
-func TestStaleTimersCannotSettleCurrentTurnOrControl(t *testing.T) {
+func TestStaleControlTimerCannotSettleCurrentTurnOrControl(t *testing.T) {
 	e, _, events := newStateEngine(t)
 	turn, target := setFixtureTurn(e, false, false)
-	turn.watchdogRevision = 5
 	turn.control = &controlState{op: 12, action: 2, target: target, revision: 7}
-	e.handleTimer(timerFact{kind: timerWatchdog, generation: 1, revision: 4, attempt: 1})
 	e.handleTimer(timerFact{kind: timerControl, generation: 1, revision: 6, action: 2})
 	if got := drainEventKinds(events); len(got) != 0 {
 		t.Fatalf("stale timers emitted events: %v", got)

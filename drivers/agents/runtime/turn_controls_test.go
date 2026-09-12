@@ -73,7 +73,7 @@ func newTurnControlRuntime(t *testing.T, provider *turnControlProvider, options 
 	t.Helper()
 	provider.opens = make(chan driverproto.OpenRequest, 4)
 	provider.starts = make(chan driverproto.StartRequest, 8)
-	factory, _, err := Build(provider, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, ReapedDemand: time.Second, Watchdog: time.Second})
+	factory, _, err := Build(provider, Policy{OpenFactDeadline: time.Second, StartFactDeadline: time.Second, ReapedDemand: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

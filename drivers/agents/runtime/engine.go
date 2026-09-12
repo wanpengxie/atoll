@@ -93,7 +93,6 @@ type turnState struct {
 	starting          bool
 	terminal          bool
 	startRevision     uint64
-	watchdogRevision  uint64
 	interruptRevision uint64
 	life              context.Context
 	cancel            context.CancelFunc
@@ -112,7 +111,6 @@ const (
 	timerStart
 	timerControl
 	timerInterrupt
-	timerWatchdog
 	timerReapedDemand
 )
 
@@ -538,8 +536,6 @@ func (e *engine) handleDriverFact(f driverFact) {
 		e.submissionRejected(x)
 	case driverproto.TurnStarted:
 		e.turnStarted(x)
-	case driverproto.Activity:
-		e.activity(x)
 	case driverproto.ProgressNote:
 		e.note(x)
 	case driverproto.Tool:
@@ -609,9 +605,7 @@ func (e *engine) turnStarted(x driverproto.TurnStarted) {
 	t.starting = false
 	t.target = x.Target
 	t.id = runtimeproto.TurnID(id.String())
-	t.watchdogRevision = e.revision()
 	e.publish(publishTurnStarted{op: t.op, turn: t.id})
-	e.arm(timerWatchdog, e.policy.Watchdog, timerFact{kind: timerWatchdog, generation: e.generation.id, revision: t.watchdogRevision, attempt: t.attempt})
 }
 
 func (e *engine) submissionRejected(x driverproto.SubmissionRejected) {
@@ -639,20 +633,11 @@ func (e *engine) submissionRejected(x driverproto.SubmissionRejected) {
 	}
 }
 
-func (e *engine) activity(x driverproto.Activity) {
-	if !e.currentTarget(x.Target) {
-		e.logContradiction("late Activity", x)
-		return
-	}
-	e.resetWatchdog()
-}
-
 func (e *engine) note(x driverproto.ProgressNote) {
 	if !e.currentTarget(x.Target) {
 		e.logContradiction("late ProgressNote", x)
 		return
 	}
-	e.resetWatchdog()
 	if e.turn == nil || e.turn.terminal || e.turn.id == "" || x.Kind == "" {
 		return
 	}
@@ -681,7 +666,6 @@ func (e *engine) nativeTool(x driverproto.Tool) {
 	if e.turn != nil {
 		for _, row := range e.turn.callbacks {
 			if row.request.callID == x.CallID {
-				e.resetWatchdog()
 				return
 			}
 		}
@@ -697,7 +681,6 @@ func (e *engine) nativeTool(x driverproto.Tool) {
 		status = "failed"
 	}
 	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: x.CallID, Phase: phase, Name: x.Name, Status: status, Detail: x.Detail, Input: x.Input, Output: x.Output}})
-	e.resetWatchdog()
 }
 
 func (e *engine) turnEnded(x driverproto.TurnEnded) {
@@ -805,14 +788,6 @@ func (e *engine) workerEnded(x driverproto.WorkerEnded) {
 func (e *engine) currentTarget(target driverproto.WorkerTurnTarget) bool {
 	return e.turn != nil && !e.turn.starting && !e.turn.terminal && e.turn.target == target
 }
-func (e *engine) resetWatchdog() {
-	if e.turn == nil {
-		return
-	}
-	e.turn.watchdogRevision = e.revision()
-	e.arm(timerWatchdog, e.policy.Watchdog, timerFact{kind: timerWatchdog, generation: e.generation.id, revision: e.turn.watchdogRevision, attempt: e.turn.attempt})
-}
-
 func (e *engine) handleTimer(t timerFact) {
 	if t.generation != e.generation.id {
 		return
@@ -843,11 +818,6 @@ func (e *engine) handleTimer(t timerFact) {
 		if e.turn != nil && !e.turn.terminal && t.attempt == e.turn.attempt && t.revision == e.turn.interruptRevision {
 			e.closeLost(runtimeproto.LostTimeout, "interrupt did not end turn")
 			e.beginRetire("interrupt timeout")
-		}
-	case timerWatchdog:
-		if e.turn != nil && !e.turn.starting && !e.turn.terminal && t.attempt == e.turn.attempt && t.revision == e.turn.watchdogRevision {
-			e.closeLost(runtimeproto.LostTimeout, "provider turn inactivity timeout")
-			e.beginRetire("watchdog")
 		}
 	case timerReapedDemand:
 		if e.generation.phase == generationRetiring && e.pending != nil && t.revision == e.generation.reapRevision {
@@ -1095,7 +1065,6 @@ func (e *engine) handleCallback(r *callbackRequest) {
 		return
 	}
 	e.turn.callbacks[key] = &callbackRow{request: r, running: true}
-	e.resetWatchdog()
 	e.publish(publishTool{turn: e.turn.id, event: runtimeproto.ToolEvent{CallID: r.callID, Phase: "started", Name: callbackName(r), Input: callbackInput(r)}})
 	e.invokeBridge(r, key, e.turn.start, e.turn.acceptedSteer, e.turn.hasAcceptedSteer)
 }
@@ -1109,7 +1078,6 @@ func (e *engine) handleCallbackCompletion(c callbackCompletion) {
 		return
 	}
 	row.running = false
-	e.resetWatchdog()
 	status, detail := "completed", ""
 	if row.request.kind == callbackTool && c.result.tool.IsError {
 		status, detail = "failed", c.result.tool.Text

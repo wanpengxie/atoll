@@ -179,9 +179,6 @@ func TestStartTurnLifecycleFromStartedToResult(t *testing.T) {
 	if len(started) != 1 || started[0].Target.Native != driverproto.WorkerTurnRef(u) {
 		t.Fatalf("started=%#v", started)
 	}
-	if len(eventsAs[driverproto.Activity](h.sink.snapshot())) == 0 {
-		t.Fatal("golden activity was not mapped")
-	}
 }
 
 func TestResumeInvalidBeforeStartedRejectsSubmissionForRetry(t *testing.T) {
@@ -469,7 +466,7 @@ func TestSubagentFramesAndNoiseAreDropped(t *testing.T) {
 	if diagnostic.Code != "noise_frame" {
 		t.Fatalf("diagnostic=%+v", diagnostic)
 	}
-	if len(eventsAs[driverproto.Tool](h.sink.snapshot())) != 0 || len(eventsAs[driverproto.Activity](h.sink.snapshot())) != 0 {
+	if len(eventsAs[driverproto.Tool](h.sink.snapshot())) != 0 {
 		t.Fatalf("events=%#v", h.sink.snapshot())
 	}
 }

@@ -38,12 +38,6 @@ func (s *generationSink) Publish(event driverproto.DriverEvent) bool {
 	}
 	g := s.generation
 	s.mu.Unlock()
-	if a, ok := event.(driverproto.Activity); ok {
-		if s.queue.pushActivity(g, a.Target) {
-			return true
-		}
-		return s.dropObservation("activity")
-	}
 	event = cloneDriverEvent(event)
 	if isObservation(event) {
 		if s.queue.push(classObservation, driverFact{generation: g, event: event}) {

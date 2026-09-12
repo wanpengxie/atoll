@@ -145,7 +145,6 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 					w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteText, Text: boundedNoteText(n.Item.Text)})
 					return
 				}
-				w.publish(driverproto.Activity{Target: target})
 				return
 			}
 			if method == "item/completed" && strings.TrimSpace(n.Item.Text) != "" {
@@ -153,7 +152,6 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				w.final[target.Native] = n.Item.Text
 				w.mu.Unlock()
 			}
-			w.publish(driverproto.Activity{Target: target})
 			return
 		}
 		if n.Item.Type == "reasoning" {
@@ -165,7 +163,6 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NoteThinking})
 				return
 			}
-			w.publish(driverproto.Activity{Target: target})
 			return
 		}
 		if n.Item.Type == "plan" {
@@ -173,19 +170,16 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				w.publish(driverproto.ProgressNote{Target: target, Kind: driverproto.NotePlan, Text: boundedNoteText(n.Item.Text)})
 				return
 			}
-			w.publish(driverproto.Activity{Target: target})
 			return
 		}
 		if n.Item.Type == "userMessage" || n.Item.Type == "contextCompaction" {
-			w.publish(driverproto.Activity{Target: target})
 			return
 		}
 		if n.Item.Type == "dynamicToolCall" {
 			// Dynamic tools are host-served (item/tool/call → host callback), and
 			// the host projects that call authoritatively as tool started/ended.
 			// Re-publishing codex's own narration of the same call would double
-			// every tool event on the ledger — count it as liveness only.
-			w.publish(driverproto.Activity{Target: target})
+			// every tool event on the ledger, so drop the duplicate stream item.
 			return
 		}
 		phase := driverproto.ToolStarted
@@ -213,13 +207,14 @@ func (w *worker) notification(c *connection, method string, params json.RawMessa
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if json.Unmarshal(params, &notice) == nil && notice.ThreadID == thread && driverproto.WorkerTurnRef(notice.TurnID) == target.Native && target.Valid() {
-			w.publish(driverproto.Activity{Target: target})
+		if json.Unmarshal(params, &notice) != nil || notice.ThreadID != thread || driverproto.WorkerTurnRef(notice.TurnID) != target.Native || !target.Valid() {
+			return
 		}
-	default:
-		if isDeltaMethod(method) && target.Valid() {
-			w.publish(driverproto.Activity{Target: target})
+		code := "provider_error"
+		if notice.WillRetry {
+			code = "provider_retry"
 		}
+		w.publish(driverproto.Diagnostic{Level: driverproto.DiagnosticDebug, Code: code, Detail: boundedNoteText(notice.Error.Message)})
 	}
 }
 
@@ -339,4 +334,3 @@ func compactJSON(raw json.RawMessage) string {
 	}
 	return string(raw)
 }
-func isDeltaMethod(method string) bool { return strings.Contains(strings.ToLower(method), "delta") }

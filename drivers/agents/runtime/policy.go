@@ -12,7 +12,6 @@ type Policy struct {
 	StartFactDeadline   time.Duration
 	ControlFactDeadline time.Duration
 	InterruptEnded      time.Duration
-	Watchdog            time.Duration
 	ReapedDemand        time.Duration
 	MethodCall          time.Duration
 	InputMaxItems       int
@@ -24,8 +23,8 @@ func DefaultPolicy() Policy {
 		CommandCapacity: 32, IngressCapacity: 256, CallbackCapacity: 32, EventCapacity: 256,
 		OpenFactDeadline: 45 * time.Second, StartFactDeadline: 45 * time.Second,
 		ControlFactDeadline: 45 * time.Second, InterruptEnded: 45 * time.Second,
-		Watchdog: 10 * time.Minute, ReapedDemand: 30 * time.Second,
-		MethodCall: 30 * time.Second, InputMaxItems: 256, InputMaxBytes: 8 << 20,
+		ReapedDemand: 30 * time.Second,
+		MethodCall:   30 * time.Second, InputMaxItems: 256, InputMaxBytes: 8 << 20,
 	}
 }
 
@@ -54,9 +53,6 @@ func (p Policy) normalized() Policy {
 	}
 	if p.InterruptEnded <= 0 {
 		p.InterruptEnded = d.InterruptEnded
-	}
-	if p.Watchdog <= 0 {
-		p.Watchdog = d.Watchdog
 	}
 	if p.ReapedDemand <= 0 {
 		p.ReapedDemand = d.ReapedDemand
