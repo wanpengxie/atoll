@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
 // defaultEpoch mints the production process-lifetime gateway epoch.
@@ -44,6 +45,17 @@ type subscription struct {
 	cancel    func()
 	lastOK    time.Time
 	paused    bool
+}
+
+func routeLedgerView(route Route) (actorcaps.LedgerView, bool) {
+	if route.Bundle == nil || route.SubjectID == "" {
+		return nil, false
+	}
+	slot, ok := route.Bundle.Gateway().SubjectSlotFor(route.SubjectID)
+	if !ok {
+		return nil, false
+	}
+	return slot.View()
 }
 
 type controlKind uint8
@@ -290,13 +302,13 @@ func (s *Session) PrepareHistoryMetadata(focus channel.ID) []subjectgate.History
 					results <- result{ch: item.ch, entry: entry}
 					continue
 				}
-				active, err := item.sub.route.Bundle.View().IsActive(ctx, item.sub.reader.ActorID)
-				if err != nil || !active {
+				view, ok := routeLedgerView(item.sub.route)
+				if !ok {
 					entry.ErrorCode, entry.ErrorDetail = subjectgate.CodeUnavailable, "channel eligibility unavailable — retry"
 					results <- result{ch: item.ch, entry: entry}
 					continue
 				}
-				rows, head, _, err := item.sub.route.Bundle.View().ReadVisibleBeforeSeq(ctx, 0, 1)
+				rows, head, _, err := view.ReadVisibleBeforeSeq(ctx, 0, 1)
 				if err != nil {
 					entry.ErrorCode, entry.ErrorDetail = subjectgate.CodeUnavailable, "history unavailable — retry"
 					results <- result{ch: item.ch, entry: entry}
@@ -829,9 +841,9 @@ func (s *Session) handleControl(command controlCommand) {
 		// The pump owns subscription/eligibility state, so it snapshots the
 		// authorized route here. The potentially slow historical read runs outside
 		// the pump; live commit notifications and feed batches remain runnable.
-		route, reader := sub.route, sub.reader
+		route := sub.route
 		s.historyWG.Add(1)
-		go func(route Route, reader Reader) {
+		go func(route Route) {
 			defer s.historyWG.Done()
 			defer s.releaseHistory(command.channel, command.ref)
 			if command.start != nil {
@@ -841,8 +853,8 @@ func (s *Session) handleControl(command controlCommand) {
 					return
 				}
 			}
-			s.readHistory(command.readCtx, command, route, reader)
-		}(route, reader)
+			s.readHistory(command.readCtx, command, route)
+		}(route)
 		result.accepted = true
 	case controlHistoryCancel:
 		if command.generation != s.generation {
@@ -879,20 +891,14 @@ func (s *Session) releaseHistory(ch channel.ID, ref string) {
 	}
 }
 
-func (s *Session) readHistory(baseCtx context.Context, command controlCommand, route Route, reader Reader) {
+func (s *Session) readHistory(baseCtx context.Context, command controlCommand, route Route) {
 	started := time.Now()
 	rctx, cancel := context.WithTimeout(baseCtx, s.gw.tRead)
 	defer cancel()
-	if reader.Mode == ReaderMember {
-		active, err := route.Bundle.View().IsActive(rctx, reader.ActorID)
-		if err != nil {
-			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "channel eligibility unavailable — retry"})
-			return
-		}
-		if !active {
-			s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeForbidden, ErrorDetail: "no eligibility for channel"})
-			return
-		}
+	view, ok := routeLedgerView(route)
+	if !ok {
+		s.sendHistoryEnd(command, subjectgate.PageEndPayload{ErrorCode: subjectgate.CodeUnavailable, ErrorDetail: "history unavailable — retry"})
+		return
 	}
 	// Every historical surface uses the same projection. Live feed remains raw,
 	// but attach, upward paging and system.log.recent all hide housekeeping and
@@ -907,7 +913,7 @@ func (s *Session) readHistory(baseCtx context.Context, command controlCommand, r
 		// row/byte reservoir and only needs one semantic root boundary.
 		minimumRoots = 20
 	}
-	window, err := route.Bundle.View().ReadVisibleTurnWindowBeforeSeq(rctx, channelspec.HistoryWindowQuery{
+	window, err := channelspec.ReadHistoryWindow(rctx, view, channelspec.HistoryWindowQuery{
 		BeforeSeq: command.before, TargetRows: command.limit, MinimumCompleteRoots: minimumRoots,
 	})
 	if err != nil {
@@ -1156,13 +1162,11 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
 	at := s.lane.cursor.at(ch)
-	if sub.reader.Mode == ReaderMember {
-		active, err := sub.route.Bundle.View().IsActive(rctx, sub.reader.ActorID)
-		if err != nil || !active {
-			return false, true
-		}
+	view, ok := routeLedgerView(sub.route)
+	if !ok {
+		return false, true
 	}
-	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, at, feedBatch)
+	rows, scanned, err := view.ReadVisibleAfterSeq(rctx, at, feedBatch)
 	if err != nil || (len(rows) == 0 && scanned == at) {
 		return false, true
 	}

@@ -20,11 +20,61 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
-	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
+
+type transformedViewHitch struct {
+	base      channelhost.GatewayHitch
+	transform func(actorcaps.LedgerView) actorcaps.LedgerView
+}
+
+func (h transformedViewHitch) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool) {
+	baseSlot, ok := h.base.SubjectSlotFor(id)
+	if !ok {
+		return nil, false
+	}
+	baseView, ok := baseSlot.View()
+	if !ok {
+		return nil, false
+	}
+	shadow := subjectgate.NewRegistry().EnsureSlot(id)
+	_, token, _ := shadow.AttachInterpreter()
+	shadow.BindView(token, h.transform(baseView))
+	return shadow, true
+}
+
+func (h transformedViewHitch) Subscribe() (<-chan struct{}, func()) { return h.base.Subscribe() }
+
+type fixedSlotBundle struct {
+	channelhost.Bundle
+	slot *subjectgate.Slot
+}
+
+func (b fixedSlotBundle) Gateway() channelhost.GatewayHitch {
+	return fixedSlotHitch{base: b.Bundle.Gateway(), slot: b.slot}
+}
+
+type fixedSlotHitch struct {
+	base channelhost.GatewayHitch
+	slot *subjectgate.Slot
+}
+
+func (h fixedSlotHitch) SubjectSlotFor(actor.ActorID) (*subjectgate.Slot, bool) {
+	return h.slot, h.slot != nil
+}
+func (h fixedSlotHitch) Subscribe() (<-chan struct{}, func()) { return h.base.Subscribe() }
+
+type failingAfterView struct {
+	actorcaps.LedgerView
+	err error
+}
+
+func (v failingAfterView) ReadVisibleAfterSeq(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
+	return nil, 0, v.err
+}
 
 type blockingHistoryBundle struct {
 	channelhost.Bundle
@@ -32,12 +82,14 @@ type blockingHistoryBundle struct {
 	release chan struct{}
 }
 
-func (b blockingHistoryBundle) View() channelhost.View {
-	return blockingHistoryView{View: b.Bundle.View(), started: b.started, release: b.release}
+func (b blockingHistoryBundle) Gateway() channelhost.GatewayHitch {
+	return transformedViewHitch{base: b.Bundle.Gateway(), transform: func(view actorcaps.LedgerView) actorcaps.LedgerView {
+		return blockingHistoryView{LedgerView: view, started: b.started, release: b.release}
+	}}
 }
 
 type blockingHistoryView struct {
-	channelhost.View
+	actorcaps.LedgerView
 	started chan struct{}
 	release chan struct{}
 }
@@ -49,20 +101,22 @@ type attachSeamBundle struct {
 	release    chan struct{}
 }
 
-func (b attachSeamBundle) View() channelhost.View {
-	return attachSeamView{View: b.Bundle.View(), beforeRead: b.beforeRead, reached: b.reached, release: b.release}
+func (b attachSeamBundle) Gateway() channelhost.GatewayHitch {
+	return transformedViewHitch{base: b.Bundle.Gateway(), transform: func(view actorcaps.LedgerView) actorcaps.LedgerView {
+		return attachSeamView{LedgerView: view, beforeRead: b.beforeRead, reached: b.reached, release: b.release}
+	}}
 }
 
 type attachSeamView struct {
-	channelhost.View
+	actorcaps.LedgerView
 	beforeRead bool
 	reached    chan struct{}
 	release    chan struct{}
 }
 
-func (v attachSeamView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+func (v attachSeamView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]actorcaps.LedgerRow, int64, bool, error) {
 	if beforeSeq != 0 || limit != 1 {
-		return v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+		return v.LedgerView.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
 	}
 	wait := func() error {
 		select {
@@ -82,7 +136,7 @@ func (v attachSeamView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int6
 			return nil, 0, false, err
 		}
 	}
-	rows, head, older, err := v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+	rows, head, older, err := v.LedgerView.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
 	if err == nil && !v.beforeRead {
 		if waitErr := wait(); waitErr != nil {
 			return nil, 0, false, waitErr
@@ -97,43 +151,44 @@ type failingHistoryBundle struct {
 	pageErr   error
 }
 
-func (b failingHistoryBundle) View() channelhost.View {
-	return failingHistoryView{View: b.Bundle.View(), windowErr: b.windowErr, pageErr: b.pageErr}
+func (b failingHistoryBundle) Gateway() channelhost.GatewayHitch {
+	return transformedViewHitch{base: b.Bundle.Gateway(), transform: func(view actorcaps.LedgerView) actorcaps.LedgerView {
+		return failingHistoryView{LedgerView: view, windowErr: b.windowErr, pageErr: b.pageErr}
+	}}
 }
 
 type failingHistoryView struct {
-	channelhost.View
+	actorcaps.LedgerView
 	windowErr error
 	pageErr   error
 }
 
-func (v failingHistoryView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
-	if beforeSeq == 0 && limit == 1 && v.windowErr != nil {
+func (v failingHistoryView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]actorcaps.LedgerRow, int64, bool, error) {
+	if limit == 1 && v.windowErr != nil {
 		return nil, 0, false, v.windowErr
 	}
-	return v.View.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
+	if limit != 1 && v.pageErr != nil {
+		return nil, 0, false, v.pageErr
+	}
+	if limit != 1 && v.windowErr != nil {
+		return nil, 0, false, v.windowErr
+	}
+	return v.LedgerView.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
 }
 
-func (v failingHistoryView) ReadVisibleTurnWindowBeforeSeq(ctx context.Context, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
-	if query.MinimumCompleteRoots == 1 && v.pageErr != nil {
-		return channelspec.HistoryWindow{}, v.pageErr
+func (v blockingHistoryView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]actorcaps.LedgerRow, int64, bool, error) {
+	if limit == 1 {
+		return v.LedgerView.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
 	}
-	if v.windowErr != nil {
-		return channelspec.HistoryWindow{}, v.windowErr
-	}
-	return v.View.ReadVisibleTurnWindowBeforeSeq(ctx, query)
-}
-
-func (v blockingHistoryView) ReadVisibleTurnWindowBeforeSeq(ctx context.Context, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
 	select {
 	case v.started <- struct{}{}:
 	default:
 	}
 	select {
 	case <-v.release:
-		return v.View.ReadVisibleTurnWindowBeforeSeq(ctx, query)
+		return v.LedgerView.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
 	case <-ctx.Done():
-		return channelspec.HistoryWindow{}, ctx.Err()
+		return nil, 0, false, ctx.Err()
 	}
 }
 
@@ -164,6 +219,66 @@ func TestAttachCarriesMetadataAndAnchorsLiveAtSnapshotHead(t *testing.T) {
 	}
 	s.LaunchFeed()
 	s.Close()
+}
+
+func TestPumpRetriesFromSameCursorAfterCellViewReplacement(t *testing.T) {
+	clk := newClock()
+	g := newTestGateway(t, Config{Resolver: newResolver()}, settings{clock: clk})
+	h, id := openHome(t, "view-replacement", "view-replacement-user")
+	admitRows(t, h, 1)
+	baseSlot, ok := h.Gateway().SubjectSlotFor(id)
+	if !ok {
+		t.Fatal("base subject slot unavailable")
+	}
+	baseView, ok := baseSlot.View()
+	if !ok {
+		t.Fatal("base view unavailable")
+	}
+
+	shadow := subjectgate.NewRegistry().EnsureSlot(id)
+	_, oldToken, oldRelease := shadow.AttachInterpreter()
+	shadow.BindView(oldToken, failingAfterView{LedgerView: baseView, err: errors.New("old run stale")})
+	route := Route{Channel: "view-replacement", SubjectID: id, Bundle: fixedSlotBundle{Bundle: h, slot: shadow}}
+	sub := &subscription{route: route, reader: Reader{ActorID: id, Mode: ReaderMember}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	session := &Session{
+		gw: g, ctx: ctx, lane: newLane(newCursor(nil)), generation: 1,
+		subs: map[channel.ID]*subscription{"view-replacement": sub},
+	}
+
+	if full, alive := session.pumpChannel("view-replacement", sub); full || !alive {
+		t.Fatalf("failed old view pump = full:%v alive:%v", full, alive)
+	}
+	if got := session.lane.cursor.at("view-replacement"); got != 0 {
+		t.Fatalf("failed read advanced cursor to %d", got)
+	}
+	if session.subs["view-replacement"] != sub {
+		t.Fatal("failed read removed subscription")
+	}
+
+	_, newToken, newRelease := shadow.AttachInterpreter()
+	shadow.BindView(newToken, baseView)
+	oldRelease()
+	if shadow.BindView(oldToken, nil) {
+		t.Fatal("old cell release cleared replacement view")
+	}
+	if full, alive := session.pumpChannel("view-replacement", sub); full || !alive {
+		t.Fatalf("replacement view pump = full:%v alive:%v", full, alive)
+	}
+	readThrough := session.lane.cursor.at("view-replacement")
+	if readThrough == 0 {
+		t.Fatal("replacement view did not resume from the retained cursor")
+	}
+	queued := len(session.lane.live)
+	if _, alive := session.pumpChannel("view-replacement", sub); !alive {
+		t.Fatal("steady replacement pump closed session")
+	}
+	if got := session.lane.cursor.at("view-replacement"); got != readThrough || len(session.lane.live) != queued {
+		t.Fatalf("steady pump duplicated rows: cursor %d→%d queue %d→%d", readThrough, got, queued, len(session.lane.live))
+	}
+	shadow.BindView(newToken, nil)
+	newRelease()
 }
 
 func TestAttachMetadataAndLiveSubscriptionHaveNoCommitSeam(t *testing.T) {
@@ -612,10 +727,18 @@ func TestPumpFairness(t *testing.T) {
 
 func sourceSeqs(t *testing.T, h *testChannel) []int64 {
 	t.Helper()
+	slot, ok := h.Gateway().SubjectSlotFor(h.memberID)
+	if !ok {
+		t.Fatal("source subject slot unavailable")
+	}
+	view, ok := slot.View()
+	if !ok {
+		t.Fatal("source ledger view unavailable")
+	}
 	var seqs []int64
 	after := int64(0)
 	for {
-		rows, scanned, err := h.View().ReadVisibleAfterSeq(context.Background(), after, feedBatch)
+		rows, scanned, err := view.ReadVisibleAfterSeq(context.Background(), after, feedBatch)
 		if err != nil {
 			t.Fatalf("ReadAfterSeq(%d): %v", after, err)
 		}

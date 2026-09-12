@@ -16,7 +16,16 @@ func TestRegistrarTransactionCreatesOneChannelAndPostsOneMaterializationIntent(t
 	child := createdChannelID(t, callMember(t, channelspec.C0ChannelID, core, channelspec.RootPrincipalID, registrar, string(lagoon.WordChannelCreate), map[string]any{
 		"name": "transaction-child", "initial_actor_ids": []any{currentMemberID(t, core, channelspec.RootPrincipalID)},
 	}))
-	rows, _, err := core.View().ReadVisibleAfterSeq(context.Background(), 0, 512)
+	root := currentMemberID(t, core, channelspec.RootPrincipalID)
+	slot, ok := core.Gateway().SubjectSlotFor(root)
+	if !ok {
+		t.Fatal("root subject slot unavailable")
+	}
+	view, ok := slot.View()
+	if !ok {
+		t.Fatal("root ledger view unavailable")
+	}
+	rows, _, err := view.ReadVisibleAfterSeq(context.Background(), 0, 512)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -101,11 +101,24 @@ func failedMainQuery(mode string) (actorcaps.LedgerSnapshot, error) {
 	}
 }
 func mainQueryRows(items ...row) actorcaps.LedgerSnapshot {
+	return sessionQueryRows("main", items...)
+}
+
+func sessionQueryRows(session string, items ...row) actorcaps.LedgerSnapshot {
 	var out actorcaps.LedgerSnapshot
 	for _, r := range items {
-		raw := mainTestBody(map[string]any{"_context": map[string]any{}, "body": r.Body})
+		raw := mainTestBody(map[string]any{"_context": map[string]any{"session": session}, "body": r.Body})
 		out.Rows = append(out.Rows, actorcaps.LedgerRow{Seq: r.Seq, Envelope: message.Envelope{ID: r.ID, ParentID: r.Parent, Kind: r.Kind, Type: r.Type, Sender: message.Sender{ID: r.Sender}, Audience: r.To, Payload: raw}})
 		out.HeadSeq = max(out.HeadSeq, r.Seq)
+	}
+	return out
+}
+
+func joinQueryRows(snapshots ...actorcaps.LedgerSnapshot) actorcaps.LedgerSnapshot {
+	var out actorcaps.LedgerSnapshot
+	for _, snapshot := range snapshots {
+		out.Rows = append(out.Rows, snapshot.Rows...)
+		out.HeadSeq = max(out.HeadSeq, snapshot.HeadSeq)
 	}
 	return out
 }
@@ -167,8 +180,8 @@ func TestMergeMainReadFailurePreventsAllWrites(t *testing.T) {
 	for _, mode := range []string{"storage", "deadline", "limit"} {
 		t.Run(mode, func(t *testing.T) {
 			s := &mainFailureSys{}
-			s.query = func(req actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
-				if req.Session == "branch" {
+			s.query = func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+				if s.scans == 1 {
 					return actorcaps.LedgerSnapshot{}, nil
 				}
 				return failedMainQuery(mode)
@@ -210,19 +223,18 @@ func TestMergeFailureDoesNotStopActorOrTimer(t *testing.T) {
 
 func TestMergeAllReportsBranchFailure(t *testing.T) {
 	s := &mainFailureSys{}
-	s.query = func(req actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
-		switch req.Session {
-		case "main":
-			return mainQueryRows(row{Seq: 1, ID: "track", Type: "session.track", Body: mainTestBody(map[string]any{"from_session": "branch", "merge": "manual"})}), nil
-		case "branch":
-			return actorcaps.LedgerSnapshot{}, errMainRead
-		default:
-			return mainQueryRows(
-				row{Seq: 2, ID: "start", Kind: message.KindRequest, Type: "loop.start", Sender: "agent:controller:1", To: message.Audience{"tool:loop:1"}, Body: mainTestBody(map[string]any{"session_id": "branch"})},
-				row{Seq: 3, ID: "ack", Parent: "start", Kind: message.KindResponse, Body: mainTestBody(map[string]any{"disposition": "accepted"})},
-				row{Seq: 4, ID: "stop", Kind: message.KindRequest, Type: "loop.stop", Sender: "agent:controller:1", To: message.Audience{"tool:loop:1"}, Body: mainTestBody(map[string]any{"session_id": "branch", "archive": true})},
+	s.query = func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		if s.scans <= 2 {
+			return joinQueryRows(
+				mainQueryRows(row{Seq: 1, ID: "track", Type: "session.track", Body: mainTestBody(map[string]any{"from_session": "branch", "merge": "manual"})}),
+				sessionQueryRows("branch",
+					row{Seq: 2, ID: "start", Kind: message.KindRequest, Type: "loop.start", Sender: "agent:controller:1", To: message.Audience{"tool:loop:1"}, Body: mainTestBody(map[string]any{"session_id": "branch"})},
+					row{Seq: 3, ID: "ack", Parent: "start", Kind: message.KindResponse, Body: mainTestBody(map[string]any{"disposition": "accepted"})},
+					row{Seq: 4, ID: "stop", Kind: message.KindRequest, Type: "loop.stop", Sender: "agent:controller:1", To: message.Audience{"tool:loop:1"}, Body: mainTestBody(map[string]any{"session_id": "branch", "archive": true})},
+				),
 			), nil
 		}
+		return actorcaps.LedgerSnapshot{}, errMainRead
 	}
 	mergeAll(s, actorbase.Msg{}, Config{Session: "main"})
 	if len(s.failures) != 1 || s.failures[0]["from_session"] != "branch" || s.failures[0]["count"] != 0 || s.replies != 0 || len(s.emitted) != 0 {

@@ -30,6 +30,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -433,18 +434,27 @@ func (p *Portal) callViaLobby(ctx context.Context, word lagoon.Word, in any) (la
 	if _, err := slot.Deliver(ctx, frame); err != nil {
 		return lagoon.Reply{}, err
 	}
-	reader := gateway.Reader{ActorID: guest, Mode: gateway.ReaderMember}
 	var cursor int64
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		active, err := bundle.View().IsActive(ctx, reader.ActorID)
-		if err != nil || !active {
-			return lagoon.Reply{}, errors.New("guest cell unavailable")
+		view, available := slot.View()
+		if !available {
+			select {
+			case <-ctx.Done():
+				return lagoon.Reply{}, errors.New("guest cell unavailable")
+			case <-ticker.C:
+				continue
+			}
 		}
-		rows, next, err := bundle.View().ReadVisibleAfterSeq(ctx, cursor, 256)
+		rows, next, err := view.ReadVisibleAfterSeq(ctx, cursor, actorcaps.MaxVisiblePageRows)
 		if err != nil {
-			return lagoon.Reply{}, err
+			select {
+			case <-ctx.Done():
+				return lagoon.Reply{}, errors.New("guest cell unavailable")
+			case <-ticker.C:
+				continue
+			}
 		}
 		cursor = next
 		for _, row := range rows {

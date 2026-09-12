@@ -16,7 +16,6 @@ import (
 	llmproto "github.com/wanpengxie/atoll/drivers/tools/pillm/api"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -73,18 +72,9 @@ func (s *historyTestSys) Call(_ message.Cause, app harness.Context, target actor
 
 type looperTestView struct {
 	actorcaps.LedgerView
-	read  func(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error)
-	build func(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error)
+	read func(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error)
 }
 
-// Tests compose the real platform projection with a controlled ledger reader.
-// The Looper receives only the LedgerView interface, just as in production.
-func (v looperTestView) BuildSession(ctx context.Context, snapshot actorcaps.LedgerSnapshot, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
-	if v.build != nil {
-		return v.build(ctx, snapshot, session, upto)
-	}
-	return (home.View{}).BuildSession(ctx, snapshot, session, upto)
-}
 func (v looperTestView) Read(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
 	return v.read(ctx, q)
 }
@@ -304,29 +294,10 @@ func TestInputBatchSharesSnapshotButNextBatchSeesNewRows(t *testing.T) {
 	}
 }
 
-type projectionTestSys struct {
-	*historyTestSys
-	view actorcaps.LedgerView
-}
-
-func (s projectionTestSys) View() actorcaps.LedgerView { return s.view }
-
-func TestMaterializeDelegatesSessionExpansionToView(t *testing.T) {
+func TestMaterializeExpandsSessionFromOneSnapshot(t *testing.T) {
 	sys := &historyTestSys{rows: closedHistory()}
-	denied := errors.New("platform session projection rejected")
-	calls := 0
-	view := looperTestView{
-		read: sys.View().Read,
-		build: func(ctx context.Context, snapshot actorcaps.LedgerSnapshot, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
-			calls++
-			if len(snapshot.Rows) != len(sys.rows) || session != "s" || upto != "report" {
-				t.Fatalf("wrong projection input: rows=%d session=%s upto=%s", len(snapshot.Rows), session, upto)
-			}
-			return nil, denied
-		},
-	}
-	_, err := materializeSession(t.Context(), projectionTestSys{sys, view}, message.Root(), "s", "report")
-	if !errors.Is(err, denied) || calls != 1 || sys.queries != 1 {
-		t.Fatalf("View bypassed or re-read: err=%v build=%d reads=%d", err, calls, sys.queries)
+	_, err := materializeSession(t.Context(), sys, message.Root(), "s", "report")
+	if err != nil || sys.queries != 1 {
+		t.Fatalf("materialize err=%v reads=%d", err, sys.queries)
 	}
 }

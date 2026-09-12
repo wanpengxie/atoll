@@ -147,7 +147,16 @@ func callMember(t *testing.T, ch channel.ID, bundle channelhost.Bundle, principa
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		rows, next, err := bundle.View().ReadVisibleAfterSeq(ctx, cursor, 256)
+		view, available := slot.View()
+		if !available {
+			select {
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			case <-ticker.C:
+				continue
+			}
+		}
+		rows, next, err := view.ReadVisibleAfterSeq(ctx, cursor, 256)
 		if err != nil {
 			t.Fatal(err)
 		}

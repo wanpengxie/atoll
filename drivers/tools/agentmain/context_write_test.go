@@ -49,22 +49,19 @@ func TestMainContextWritesRetryThenDelete(t *testing.T) {
 func committedMainSys() *mainFailureSys {
 	s := &mainFailureSys{}
 	s.res.outcome = accessdoor.Outcome{Found: true, Value: []byte(`{"messages":[{"role":"assistant","content":"A"}],"version":"old"}`)}
-	s.query = func(q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
-		if q.Session == "main" {
-			return mainQueryRows(
+	s.query = func(actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+		return joinQueryRows(
+			mainQueryRows(
 				row{Seq: 1, ID: "opened", Type: "session.opened", Body: mainTestBody(map[string]any{})},
 				row{Seq: 2, ID: "merge-A", Type: "session.merge", Body: mainTestBody(map[string]any{"decision": "merged", "summary": map[string]any{"role": "assistant", "content": "A"}})},
 				row{Seq: 6, ID: "merge-B", Type: "session.merge", Body: mainTestBody(map[string]any{"decision": "merged", "refs": []string{"report"}, "summary": map[string]any{"role": "assistant", "content": "B"}})},
-			), nil
-		}
-		if q.Session == "branch" {
-			return mainQueryRows(
+			),
+			sessionQueryRows("branch",
 				row{Seq: 3, ID: "start", Kind: message.KindRequest, Type: "loop.start", Sender: "agent:controller:1", To: message.Audience{"tool:loop:1"}, Body: mainTestBody(map[string]any{"session_id": "branch", "turn_id": "turn"})},
 				row{Seq: 4, ID: "ack", Parent: "start", Kind: message.KindResponse, Type: "loop.start", Body: mainTestBody(map[string]any{"disposition": "accepted"})},
 				row{Seq: 5, ID: "report", Kind: message.KindRequest, Type: "loop.report", Sender: "tool:loop:1", Body: mainTestBody(map[string]any{"turn_id": "turn", "state": "completed"})},
-			), nil
-		}
-		return actorcaps.LedgerSnapshot{}, nil
+			),
+		), nil
 	}
 	return s
 }

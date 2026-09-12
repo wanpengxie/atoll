@@ -72,7 +72,7 @@ func materializeSession(ctx context.Context, sys actorbase.Sys, cause message.Ca
 		return agentbase.ContextObject{}, err
 	}
 	budget := ctx.Value(historyBudgetKey{}).(*historyBudget)
-	expanded, err := sys.View().BuildSession(ctx, *budget.snapshot, session, upto)
+	expanded, err := agentbase.BuildSessionPrefix(ctx, *budget.snapshot, session, upto)
 	if err != nil {
 		return agentbase.ContextObject{}, err
 	}

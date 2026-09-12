@@ -195,7 +195,16 @@ func controlledCallerLedger(
 	}
 	var cursor int64
 	for {
-		rows, next, err := bundle.View().ReadVisibleAfterSeq(ctx, cursor, 256)
+		view, available := slot.View()
+		if !available {
+			select {
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			case <-time.After(20 * time.Millisecond):
+				continue
+			}
+		}
+		rows, next, err := view.ReadVisibleAfterSeq(ctx, cursor, 256)
 		if err != nil {
 			t.Fatal(err)
 		}

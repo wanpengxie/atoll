@@ -19,9 +19,6 @@ type LedgerRow struct {
 // LedgerRead limits one complete snapshot read. Zero limits use the hard
 // defaults; callers can only lower them.
 type LedgerRead struct {
-	// Session is retained only for the migration to consumer-owned projection.
-	// It is removed with the driver step.
-	Session  string
 	MaxRows  int
 	MaxBytes int
 }
@@ -38,15 +35,11 @@ type LedgerSnapshot struct {
 }
 
 // LedgerView is the read-only channel-ledger capability supplied to an actor.
-// It exposes storage-neutral snapshots and visible cursor pages only; session
-// and turn projection are consumer policy layered above this capability.
+// It exposes storage-neutral snapshots and visible cursor pages only; domain
+// projections are consumer policy layered above this capability.
 type LedgerView interface {
 	// Read returns a complete prefix at one head, or an error with no partial rows.
 	Read(context.Context, LedgerRead) (LedgerSnapshot, error)
 	ReadVisibleAfterSeq(context.Context, int64, int) ([]LedgerRow, int64, error)
 	ReadVisibleBeforeSeq(context.Context, int64, int) ([]LedgerRow, int64, bool, error)
-	// Transitional methods removed once session projection moves to agentbase.
-	Session(context.Context, string, message.ID) ([]LedgerRow, error)
-	BuildSession(context.Context, LedgerSnapshot, string, message.ID) ([]LedgerRow, error)
-	Tail(context.Context, int64, int) ([]LedgerRow, int64, error)
 }

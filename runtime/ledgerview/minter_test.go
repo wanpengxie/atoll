@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
@@ -35,21 +34,6 @@ func (v *recordingView) ReadVisibleAfterSeq(context.Context, int64, int) ([]acto
 func (v *recordingView) ReadVisibleBeforeSeq(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, bool, error) {
 	v.reads++
 	return nil, 6, true, nil
-}
-
-func (v *recordingView) Session(context.Context, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	v.reads++
-	return nil, nil
-}
-
-func (v *recordingView) BuildSession(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	v.reads++
-	return nil, nil
-}
-
-func (v *recordingView) Tail(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
-	v.reads++
-	return nil, 0, nil
 }
 
 func TestBoundViewChecksAuthorityOnEveryOperation(t *testing.T) {

@@ -13,13 +13,46 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/drivers/gateway"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/dataplane"
 	"github.com/wanpengxie/atoll/platform/lagoon"
 	"github.com/wanpengxie/atoll/platform/obs"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+type lobbyViewStub struct {
+	channelhost.View
+	guest actor.ActorID
+}
+
+func (v lobbyViewStub) ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error) {
+	return v.guest, true, nil
+}
+
+type lobbyGatewayStub struct {
+	slot *subjectgate.Slot
+}
+
+func (g lobbyGatewayStub) SubjectSlotFor(actor.ActorID) (*subjectgate.Slot, bool) {
+	return g.slot, g.slot != nil
+}
+
+func (lobbyGatewayStub) Subscribe() (<-chan struct{}, func()) {
+	return make(chan struct{}), func() {}
+}
+
+type lobbyBundleStub struct {
+	channelhost.Bundle
+	view    channelhost.View
+	gateway channelhost.GatewayHitch
+}
+
+func (lobbyBundleStub) Generation() uint64                  { return 1 }
+func (b lobbyBundleStub) Gateway() channelhost.GatewayHitch { return b.gateway }
+func (b lobbyBundleStub) View() channelhost.View            { return b.view }
 
 type filePlaneStub struct {
 	channelID channel.ID
@@ -91,6 +124,33 @@ func TestRegisterRejectsMissingFieldsAndTrailingJSON(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("body=%q status=%d response=%s", body, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestCallViaLobbyReportsUnavailableWhenGuestViewIsMissing(t *testing.T) {
+	guest := actor.ActorID("human:guest:1")
+	registry := subjectgate.NewRegistry()
+	slot := registry.EnsureSlot(guest)
+	jobs, _, release := slot.AttachInterpreter()
+	defer release()
+	go func() {
+		job := <-jobs
+		receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, job.Frame.Ref, subjectgate.SubmitReceipt{MessageID: "request"})
+		job.Reply(subjectgate.FrameResult{Frame: receipt})
+	}()
+	bundle := lobbyBundleStub{
+		view:    lobbyViewStub{guest: guest},
+		gateway: lobbyGatewayStub{slot: slot},
+	}
+	p := New(Config{
+		ContractVersion: "test",
+		Lobby:           func(context.Context) (channelhost.Bundle, error) { return bundle, nil },
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	_, err := p.callViaLobby(ctx, lagoon.Word("test"), map[string]any{})
+	if err == nil || err.Error() != "guest cell unavailable" {
+		t.Fatalf("callViaLobby error = %v, want guest cell unavailable", err)
 	}
 }
 

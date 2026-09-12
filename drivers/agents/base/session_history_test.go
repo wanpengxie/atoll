@@ -1,4 +1,4 @@
-package home
+package base
 
 import (
 	"encoding/json"
@@ -16,7 +16,7 @@ func sessionRow(seq int64, id, session, word, body string) actorcaps.LedgerRow {
 }
 
 func TestSessionBuildExpandsNestedBasesAtTheirOwnBoundaries(t *testing.T) {
-	s := actorcaps.LedgerSnapshot{HeadSeq: 7, Rows: []actorcaps.LedgerRow{
+	snapshot := actorcaps.LedgerSnapshot{HeadSeq: 7, Rows: []actorcaps.LedgerRow{
 		sessionRow(1, "main-open", "main", "session.opened", `{}`),
 		sessionRow(2, "main-merge", "main", "session.merge", `{}`),
 		sessionRow(3, "a-open", "a", "session.opened", `{"base":{"session":"main","at":"main-merge"}}`),
@@ -25,21 +25,20 @@ func TestSessionBuildExpandsNestedBasesAtTheirOwnBoundaries(t *testing.T) {
 		sessionRow(6, "main-late", "main", "session.merge", `{}`),
 		sessionRow(7, "a-late", "a", "loop.report", `{}`),
 	}}
-	rows, err := (View{}).BuildSession(t.Context(), s, "b", "b-open")
+	rows, err := BuildSessionPrefix(t.Context(), snapshot, "b", "b-open")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var ids []message.ID
-	for _, r := range rows {
-		ids = append(ids, r.Envelope.ID)
+	for _, row := range rows {
+		ids = append(ids, row.Envelope.ID)
 	}
 	if !reflect.DeepEqual(ids, []message.ID{"main-open", "main-merge", "a-open", "a-report", "b-open"}) {
 		t.Fatalf("wrong prefix: %v", ids)
 	}
-	// Later messages cannot change a fixed checkout, even on the target session.
-	s.HeadSeq = 8
-	s.Rows = append(s.Rows, sessionRow(8, "b-late", "b", "session.reset", `{}`))
-	again, err := (View{}).BuildSession(t.Context(), s, "b", "b-open")
+	snapshot.HeadSeq = 8
+	snapshot.Rows = append(snapshot.Rows, sessionRow(8, "b-late", "b", "session.reset", `{}`))
+	again, err := BuildSessionPrefix(t.Context(), snapshot, "b", "b-open")
 	if err != nil || !reflect.DeepEqual(rows, again) {
 		t.Fatalf("fixed checkout changed: %v %v", again, err)
 	}
@@ -54,12 +53,12 @@ func TestSessionBuildRejectsInvalidEdges(t *testing.T) {
 		{"empty", `{"session":""}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := actorcaps.LedgerSnapshot{HeadSeq: 3, Rows: []actorcaps.LedgerRow{
+			snapshot := actorcaps.LedgerSnapshot{HeadSeq: 3, Rows: []actorcaps.LedgerRow{
 				sessionRow(1, "main-open", "main", "session.opened", `{}`),
 				sessionRow(2, "branch-open", "branch", "session.opened", `{"base":`+tc.base+`}`),
 				sessionRow(3, "late", "main", "session.merge", `{}`),
 			}}
-			if rows, err := (View{}).BuildSession(t.Context(), s, "branch", ""); err == nil || rows != nil {
+			if rows, err := BuildSessionPrefix(t.Context(), snapshot, "branch", ""); err == nil || rows != nil {
 				t.Fatalf("invalid edge accepted: rows=%v err=%v", rows, err)
 			}
 		})
@@ -67,13 +66,24 @@ func TestSessionBuildRejectsInvalidEdges(t *testing.T) {
 }
 
 func TestUnpinnedBaseStopsBeforeOpening(t *testing.T) {
-	s := actorcaps.LedgerSnapshot{HeadSeq: 3, Rows: []actorcaps.LedgerRow{
+	snapshot := actorcaps.LedgerSnapshot{HeadSeq: 3, Rows: []actorcaps.LedgerRow{
 		sessionRow(1, "main-open", "main", "session.opened", `{}`),
 		sessionRow(2, "branch-open", "branch", "session.opened", `{"base":{"session":"main"}}`),
 		sessionRow(3, "late", "main", "session.merge", `{}`),
 	}}
-	rows, err := (View{}).BuildSession(t.Context(), s, "branch", "")
+	rows, err := BuildSessionPrefix(t.Context(), snapshot, "branch", "")
 	if err != nil || len(rows) != 2 || rows[0].Envelope.ID != "main-open" {
 		t.Fatalf("inherited future: rows=%v err=%v", rows, err)
+	}
+}
+
+func TestFilterSession(t *testing.T) {
+	snapshot := actorcaps.LedgerSnapshot{Rows: []actorcaps.LedgerRow{
+		sessionRow(1, "one", "a", "x", `{}`),
+		sessionRow(2, "two", "b", "x", `{}`),
+	}}
+	rows := FilterSession(snapshot, "b")
+	if len(rows) != 1 || rows[0].Envelope.ID != "two" {
+		t.Fatalf("filtered rows = %+v", rows)
 	}
 }

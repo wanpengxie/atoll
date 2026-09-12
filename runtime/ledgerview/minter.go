@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 )
@@ -67,27 +66,6 @@ func (v boundView) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, li
 	return v.inner.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
 }
 
-func (v boundView) Session(ctx context.Context, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
-	if err := v.admit(); err != nil {
-		return nil, err
-	}
-	return v.inner.Session(ctx, session, upto)
-}
-
-func (v boundView) BuildSession(ctx context.Context, snapshot actorcaps.LedgerSnapshot, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
-	if err := v.admit(); err != nil {
-		return nil, err
-	}
-	return v.inner.BuildSession(ctx, snapshot, session, upto)
-}
-
-func (v boundView) Tail(ctx context.Context, afterSeq int64, limit int) ([]actorcaps.LedgerRow, int64, error) {
-	if err := v.admit(); err != nil {
-		return nil, afterSeq, err
-	}
-	return v.inner.Tail(ctx, afterSeq, limit)
-}
-
 type rejectedView struct {
 	err error
 }
@@ -102,18 +80,6 @@ func (v rejectedView) ReadVisibleAfterSeq(context.Context, int64, int) ([]actorc
 
 func (v rejectedView) ReadVisibleBeforeSeq(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, bool, error) {
 	return nil, 0, false, v.err
-}
-
-func (v rejectedView) Session(context.Context, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	return nil, v.err
-}
-
-func (v rejectedView) BuildSession(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	return nil, v.err
-}
-
-func (v rejectedView) Tail(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
-	return nil, 0, v.err
 }
 
 var _ actorcaps.LedgerView = boundView{}

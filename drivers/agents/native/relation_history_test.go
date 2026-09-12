@@ -19,7 +19,7 @@ func TestRelationHistoryUsesBoundedViewAndPreservesProjectionOnFailure(t *testin
 		calls := 0
 		sys := relationViewSys{testSys: newTestSys(newTestState()), view: nativeTestView{read: func(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
 			calls++
-			if q.MaxRows != 1000 || q.MaxBytes != 4<<20 || q.Session != "" {
+			if q.MaxRows != 1000 || q.MaxBytes != 4<<20 {
 				t.Fatalf("unbounded request: %+v", q)
 			}
 			if _, ok := ctx.Deadline(); !ok {

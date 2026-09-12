@@ -43,16 +43,6 @@ func (s *historyQueryStub) ReadVisibleBeforeSeq(_ context.Context, beforeSeq int
 	return page, head, start > 0, nil
 }
 
-func (s *historyQueryStub) Session(context.Context, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	return nil, nil
-}
-func (s *historyQueryStub) BuildSession(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	return nil, nil
-}
-func (s *historyQueryStub) Tail(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
-	return nil, 0, nil
-}
-
 func historyRow(seq int64, id string, kind message.Kind, parent, correlation string, terminal bool) actorcaps.LedgerRow {
 	return actorcaps.LedgerRow{
 		Seq: seq,

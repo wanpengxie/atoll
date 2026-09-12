@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
@@ -22,15 +21,6 @@ func (*slotViewStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]actorca
 }
 func (*slotViewStub) ReadVisibleBeforeSeq(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, bool, error) {
 	return nil, 0, false, nil
-}
-func (*slotViewStub) Session(context.Context, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	return nil, nil
-}
-func (*slotViewStub) BuildSession(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error) {
-	return nil, nil
-}
-func (*slotViewStub) Tail(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
-	return nil, 0, nil
 }
 
 // TestPublishLevelMintsMonotonicEdgeSeq pins the连接模型勘误期 form: edgeSeq is

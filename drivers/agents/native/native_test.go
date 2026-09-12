@@ -137,12 +137,9 @@ func (s *testSys) View() actorcaps.LedgerView {
 		}
 		out := actorcaps.LedgerSnapshot{HeadSeq: int64(len(s.ledger))}
 		for _, r := range s.ledger {
-			app, _, err := harness.UnwrapPayload(json.RawMessage(r.PayloadText))
+			_, _, err := harness.UnwrapPayload(json.RawMessage(r.PayloadText))
 			if err != nil {
 				return actorcaps.LedgerSnapshot{}, err
-			}
-			if q.Session != "" && q.Session != app.Session {
-				continue
 			}
 			out.Rows = append(out.Rows, actorcaps.LedgerRow{Seq: r.Seq, IsTerminal: r.Terminal, Envelope: message.Envelope{ID: r.ID, Sender: r.Sender, Audience: r.Audience, Kind: r.Kind, Type: r.MessageType, ParentID: r.ParentID, TSReceived: r.TSReceived, Payload: json.RawMessage(r.PayloadText)}})
 		}

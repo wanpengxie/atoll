@@ -1197,11 +1197,11 @@ func (c *controller) sessionResult(sys actorbase.Sys, session, turn string, upto
 }
 
 func nativeSessionRows(sys actorbase.Sys, session string) ([]logMessage, int64, error) {
-	snapshot, err := sys.View().Read(sys.Life(), actorcaps.LedgerRead{Session: session})
+	snapshot, err := sys.View().Read(sys.Life(), actorcaps.LedgerRead{})
 	if err != nil {
 		return nil, 0, err
 	}
-	return nativeLedgerRows(snapshot.Rows), snapshot.HeadSeq, nil
+	return nativeLedgerRows(agentbase.FilterSession(snapshot, session)), snapshot.HeadSeq, nil
 }
 
 func nativeRowBody(_ actorbase.Sys, row logMessage, _ int64) json.RawMessage {

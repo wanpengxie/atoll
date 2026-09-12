@@ -320,12 +320,12 @@ func rows(sys actorbase.Sys, session string) ([]row, error) {
 }
 
 func queryRows(sys actorbase.Sys, session string) ([]row, error) {
-	snapshot, err := sys.View().Read(sys.Life(), actorcaps.LedgerRead{Session: session})
+	snapshot, err := sys.View().Read(sys.Life(), actorcaps.LedgerRead{})
 	if err != nil {
 		return nil, err
 	}
 	var out []row
-	for _, r := range snapshot.Rows {
+	for _, r := range agentbase.FilterSession(snapshot, session) {
 		m := r.Envelope
 		_, body, err := harness.UnwrapPayload(m.Payload)
 		if err != nil {

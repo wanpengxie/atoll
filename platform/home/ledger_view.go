@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Read owns pagination and its hard budget. Filtering never hides storage work.
@@ -57,15 +56,6 @@ func (v View) Read(ctx context.Context, q actorcaps.LedgerRead) (actorcaps.Ledge
 			bytes += len(row.Envelope.Payload)
 			if bytes > maxBytes {
 				return actorcaps.LedgerSnapshot{}, actorcaps.ErrLedgerLimit
-			}
-			if q.Session != "" {
-				app, _, err := harness.UnwrapPayload(row.Envelope.Payload)
-				if err != nil {
-					return actorcaps.LedgerSnapshot{}, fmt.Errorf("invalid ledger row %s: %w", row.Envelope.ID, err)
-				}
-				if app.Session != q.Session {
-					continue
-				}
 			}
 			out.Rows = append(out.Rows, actorcaps.LedgerRow{Envelope: row.Envelope, Seq: row.Seq, IsTerminal: row.IsTerminal})
 		}

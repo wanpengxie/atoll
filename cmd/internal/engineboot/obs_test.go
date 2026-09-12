@@ -20,7 +20,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	classregistry "github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type censusPanicHost struct {
@@ -59,16 +58,7 @@ func (obsViewStub) HumanRoster(context.Context) ([]channelspec.HumanRosterEntry,
 func (obsViewStub) ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error) {
 	return "", false, nil
 }
-func (obsViewStub) OwnerPrincipal(context.Context) (string, bool, error) { return "", false, nil }
-func (obsViewStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, error) {
-	return nil, 0, nil
-}
-func (obsViewStub) ReadVisibleBeforeSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, bool, error) {
-	return nil, 0, false, nil
-}
-func (obsViewStub) ReadVisibleTurnWindowBeforeSeq(context.Context, channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
-	return channelspec.HistoryWindow{}, nil
-}
+func (obsViewStub) OwnerPrincipal(context.Context) (string, bool, error)  { return "", false, nil }
 func (obsViewStub) IsActive(context.Context, actor.ActorID) (bool, error) { return true, nil }
 func (obsViewStub) ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error) {
 	return channelspec.ActorFacts{}, false, nil
