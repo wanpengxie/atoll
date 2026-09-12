@@ -18,6 +18,41 @@ type boundedLedgerStub struct {
 	page               func(context.Context, int64, int) ([]storespec.StoredRow, int64, bool, error)
 }
 
+type cursorLedgerStub struct {
+	storespec.VisibleMessageQuery
+	rows      []storespec.StoredRow
+	lastLimit int
+}
+
+func (s *cursorLedgerStub) ReadVisibleAfterSeq(_ context.Context, after int64, limit int) ([]storespec.StoredRow, int64, error) {
+	s.lastLimit = limit
+	start := 0
+	for start < len(s.rows) && s.rows[start].Seq <= after {
+		start++
+	}
+	end := min(len(s.rows), start+limit)
+	rows := append([]storespec.StoredRow(nil), s.rows[start:end]...)
+	scanned := after
+	if len(rows) > 0 {
+		scanned = rows[len(rows)-1].Seq
+	}
+	return rows, scanned, nil
+}
+
+func (s *cursorLedgerStub) ReadVisibleBeforeSeq(_ context.Context, before int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+	s.lastLimit = limit
+	end := len(s.rows)
+	for end > 0 && before > 0 && s.rows[end-1].Seq >= before {
+		end--
+	}
+	start := max(0, end-limit)
+	head := int64(0)
+	if len(s.rows) > 0 {
+		head = s.rows[len(s.rows)-1].Seq
+	}
+	return append([]storespec.StoredRow(nil), s.rows[start:end]...), head, start > 0, nil
+}
+
 func (s *boundedLedgerStub) ReadVisibleBeforeSeq(ctx context.Context, before int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
 	s.calls++
 	if s.page != nil {
@@ -115,5 +150,46 @@ func TestLedgerLimitsCannotBeRaisedAndCancelledReadsDoNotQuery(t *testing.T) {
 	_, err = (View{visible: s}).Read(ctx, actorcaps.LedgerRead{})
 	if !errors.Is(err, context.Canceled) || s.calls != 0 {
 		t.Fatalf("expired read queried storage: calls=%d err=%v", s.calls, err)
+	}
+}
+
+func TestVisibleCursorReadsEnforceRowAndByteBoundsWithoutSkipping(t *testing.T) {
+	rows := make([]storespec.StoredRow, 300)
+	for i := range rows {
+		rows[i] = storespec.StoredRow{Seq: int64(i + 1), Envelope: message.Envelope{Payload: []byte(`{}`)}}
+	}
+	stub := &cursorLedgerStub{rows: rows}
+	got, scanned, err := (View{visible: stub}).ReadVisibleAfterSeq(t.Context(), 0, 10_000)
+	if err != nil || len(got) != actorcaps.MaxVisiblePageRows || stub.lastLimit != actorcaps.MaxVisiblePageRows || scanned != actorcaps.MaxVisiblePageRows {
+		t.Fatalf("row bound: rows=%d underlying_limit=%d scanned=%d err=%v", len(got), stub.lastLimit, scanned, err)
+	}
+
+	half := actorcaps.MaxLedgerBytes / 2
+	stub = &cursorLedgerStub{rows: []storespec.StoredRow{
+		{Seq: 1, Envelope: message.Envelope{Payload: make([]byte, half)}},
+		{Seq: 2, Envelope: message.Envelope{Payload: make([]byte, half)}},
+		{Seq: 3, Envelope: message.Envelope{Payload: []byte(`x`)}},
+	}}
+	got, scanned, err = (View{visible: stub}).ReadVisibleAfterSeq(t.Context(), 0, 10)
+	if err != nil || len(got) != 2 || scanned != 2 {
+		t.Fatalf("after byte bound: rows=%d scanned=%d err=%v", len(got), scanned, err)
+	}
+	next, nextScanned, err := (View{visible: stub}).ReadVisibleAfterSeq(t.Context(), scanned, 10)
+	if err != nil || len(next) != 1 || next[0].Seq != 3 || nextScanned != 3 {
+		t.Fatalf("after continuation: rows=%v scanned=%d err=%v", next, nextScanned, err)
+	}
+	before, _, older, err := (View{visible: stub}).ReadVisibleBeforeSeq(t.Context(), 0, 10)
+	if err != nil || len(before) != 2 || before[0].Seq != 2 || before[1].Seq != 3 || !older {
+		t.Fatalf("before byte bound: rows=%v older=%v err=%v", before, older, err)
+	}
+}
+
+func TestVisibleCursorReadsRejectNegativeLimits(t *testing.T) {
+	view := View{visible: &cursorLedgerStub{}}
+	if _, _, err := view.ReadVisibleAfterSeq(t.Context(), 0, -1); err == nil {
+		t.Fatal("negative after limit accepted")
+	}
+	if _, _, _, err := view.ReadVisibleBeforeSeq(t.Context(), 0, -1); err == nil {
+		t.Fatal("negative before limit accepted")
 	}
 }

@@ -3,6 +3,7 @@ package home
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -107,30 +107,6 @@ func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
 	return stat.StartedAt, true
 }
 
-func (v View) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
-	return v.visible.ReadVisibleAfterSeq(ctx, afterSeq, limit)
-}
-
-func (v View) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
-	return v.visible.ReadVisibleBeforeSeq(ctx, beforeSeq, limit)
-}
-
-// Session returns one deterministic, ancestor-expanded session ledger prefix.
-// It interprets only the session tag and session.opened base edge; content
-// semantics stay in the agent materializer.
-func (v View) Session(ctx context.Context, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
-	snapshot, err := v.Read(ctx, actorcaps.LedgerRead{})
-	if err != nil {
-		return nil, err
-	}
-	return v.BuildSession(ctx, snapshot, session, upto)
-}
-
-func (v View) Tail(ctx context.Context, afterSeq int64, limit int) ([]actorcaps.LedgerRow, int64, error) {
-	rows, head, err := v.ReadVisibleAfterSeq(ctx, afterSeq, limit)
-	return actorLedgerRows(rows), head, err
-}
-
 func actorLedgerRows(rows []storespec.StoredRow) []actorcaps.LedgerRow {
 	out := make([]actorcaps.LedgerRow, len(rows))
 	for i, row := range rows {
@@ -139,172 +115,76 @@ func actorLedgerRows(rows []storespec.StoredRow) []actorcaps.LedgerRow {
 	return out
 }
 
-// ReadVisibleTurnWindowBeforeSeq reads backwards until a root-turn-safe
-// boundary is available, then projects away historical intermediate progress.
-// Live feed remains the full visible ledger; this method is history-only.
-func (v View) ReadVisibleTurnWindowBeforeSeq(ctx context.Context, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
-	return readVisibleTurnWindow(ctx, v.visible, query)
+func visiblePageLimit(limit int) (int, error) {
+	if limit < 0 {
+		return 0, fmt.Errorf("negative ledger read limit")
+	}
+	if limit == 0 || limit > actorcaps.MaxVisiblePageRows {
+		return actorcaps.MaxVisiblePageRows, nil
+	}
+	return limit, nil
 }
 
-const historyScanBatch = 256
-
-func readVisibleTurnWindow(ctx context.Context, visible storespec.VisibleMessageQuery, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
-	target := query.TargetRows
-	if target <= 0 {
-		target = 200
+func (v View) ReadVisibleAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]actorcaps.LedgerRow, int64, error) {
+	bounded, err := visiblePageLimit(limit)
+	if err != nil {
+		return nil, afterSeq, err
 	}
-	minimumRoots := query.MinimumCompleteRoots
-	if minimumRoots <= 0 {
-		minimumRoots = 20
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, scanned, err := v.visible.ReadVisibleAfterSeq(ctx, afterSeq, bounded)
+	if err != nil {
+		return nil, afterSeq, err
 	}
-	before := query.BeforeSeq
-	var accumulated []storespec.StoredRow
-	var head int64
-	for {
-		page, snapshotHead, hasOlder, err := visible.ReadVisibleBeforeSeq(ctx, before, historyScanBatch)
-		if err != nil {
-			return channelspec.HistoryWindow{}, err
-		}
-		if head == 0 {
-			head = snapshotHead
-		}
-		if len(page) > 0 {
-			accumulated = append(page, accumulated...)
-			before = page[0].Seq
-		}
-		boundary, ready := historyBoundary(accumulated, target, minimumRoots, !hasOlder)
-		if ready {
-			return projectHistoryWindow(accumulated, boundary, head, hasOlder || boundary > 0), nil
-		}
-		if !hasOlder || len(page) == 0 {
-			return projectHistoryWindow(accumulated, 0, head, false), nil
-		}
-	}
-}
-
-func historyBoundary(rows []storespec.StoredRow, target, minimumRoots int, atBeginning bool) (int, bool) {
-	if len(rows) == 0 {
-		return 0, atBeginning
-	}
-	if len(rows) < target && !atBeginning {
-		return 0, false
-	}
-	rootIndexes := make([]int, 0)
-	completeRootIndexes := make([]int, 0)
-	terminalParents := make(map[message.ID]bool)
-	for _, row := range rows {
-		if row.IsTerminal {
-			terminalParents[row.Envelope.ParentID] = true
-		}
-	}
-	for index, row := range rows {
-		envelope := row.Envelope
-		if envelope.Kind != message.KindRequest || envelope.ParentID != "" {
-			continue
-		}
-		// A capability probe or a log poll is a root request too, but it is not
-		// a turn anyone reads back to. Counting it lets a quiet channel's tail
-		// fill the "twenty complete turns" quota with zero conversation.
-		if channelspec.HousekeepingWord(envelope.Type) {
-			continue
-		}
-		rootIndexes = append(rootIndexes, index)
-		if terminalParents[envelope.ID] {
-			completeRootIndexes = append(completeRootIndexes, index)
-		}
-	}
-	if len(rootIndexes) == 0 {
-		hasTurnRows := false
-		for _, row := range rows {
-			if row.Envelope.Kind == message.KindRequest || row.Envelope.Kind == message.KindResponse {
-				hasTurnRows = true
-				break
-			}
-		}
-		if !hasTurnRows && len(rows) >= target {
-			return len(rows) - target, true
-		}
-		if !atBeginning {
-			return 0, false
-		}
-		return 0, true
-	}
-	cutoff := len(rows) - target
-	if cutoff < 0 {
-		cutoff = 0
-	}
-	boundary := -1
-	for _, index := range rootIndexes {
-		if index > cutoff {
+	bytes := 0
+	keep := 0
+	for keep < len(rows) {
+		next := bytes + len(rows[keep].Envelope.Payload)
+		if next > actorcaps.MaxLedgerBytes {
 			break
 		}
-		boundary = index
+		bytes = next
+		keep++
 	}
-	if boundary < 0 {
-		if !atBeginning {
-			return 0, false
-		}
-		boundary = 0
+	if keep == 0 && len(rows) > 0 {
+		return nil, afterSeq, actorcaps.ErrLedgerLimit
 	}
-	if len(completeRootIndexes) < minimumRoots {
-		if !atBeginning {
-			return 0, false
-		}
-		return 0, true
+	if keep < len(rows) {
+		rows = rows[:keep]
+		scanned = rows[len(rows)-1].Seq
 	}
-	minimumBoundary := completeRootIndexes[len(completeRootIndexes)-minimumRoots]
-	if minimumBoundary < boundary {
-		boundary = minimumBoundary
-	}
-	return boundary, true
+	return actorLedgerRows(rows), scanned, nil
 }
 
-func projectHistoryWindow(raw []storespec.StoredRow, boundary int, head int64, hasOlder bool) channelspec.HistoryWindow {
-	if boundary < 0 || boundary > len(raw) {
-		boundary = 0
+func (v View) ReadVisibleBeforeSeq(ctx context.Context, beforeSeq int64, limit int) ([]actorcaps.LedgerRow, int64, bool, error) {
+	bounded, err := visiblePageLimit(limit)
+	if err != nil {
+		return nil, beforeSeq, false, err
 	}
-	rows := raw[boundary:]
-	housekeeping := make(map[message.ID]bool)
-	for _, row := range rows {
-		if row.Envelope.Kind == message.KindRequest && channelspec.HousekeepingWord(row.Envelope.Type) {
-			housekeeping[row.Envelope.ID] = true
-		}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, head, hasOlder, err := v.visible.ReadVisibleBeforeSeq(ctx, beforeSeq, bounded)
+	if err != nil {
+		return nil, head, false, err
 	}
-	terminalParents := make(map[message.ID]bool)
-	latestProvisional := make(map[message.ID]int64)
-	for _, row := range rows {
-		if row.Envelope.Kind != message.KindResponse || row.Envelope.ParentID == "" {
-			continue
+	bytes := 0
+	start := len(rows)
+	for start > 0 {
+		next := bytes + len(rows[start-1].Envelope.Payload)
+		if next > actorcaps.MaxLedgerBytes {
+			break
 		}
-		if row.IsTerminal {
-			terminalParents[row.Envelope.ParentID] = true
-		} else if row.Seq > latestProvisional[row.Envelope.ParentID] {
-			latestProvisional[row.Envelope.ParentID] = row.Seq
-		}
+		bytes = next
+		start--
 	}
-	projected := make([]channelspec.VisibleMessageRow, 0, len(rows))
-	for _, row := range rows {
-		// Housekeeping never rides a history window: the timeline hides it
-		// anyway, and each describe carries a whole word table.
-		if housekeeping[row.Envelope.ID] || housekeeping[row.Envelope.ParentID] {
-			continue
-		}
-		include := row.Envelope.Kind != message.KindResponse || row.IsTerminal
-		if row.Envelope.Kind == message.KindResponse && !row.IsTerminal && !terminalParents[row.Envelope.ParentID] {
-			include = latestProvisional[row.Envelope.ParentID] == row.Seq
-		}
-		if include {
-			projected = append(projected, channelspec.VisibleMessageRow{Seq: row.Seq, Envelope: row.Envelope})
-		}
+	if start == len(rows) && len(rows) > 0 {
+		return nil, head, hasOlder, actorcaps.ErrLedgerLimit
 	}
-	window := channelspec.HistoryWindow{Rows: projected, HeadSeq: head, HasOlder: hasOlder}
-	if len(rows) > 0 {
-		window.OldestSeq = rows[0].Seq
+	if start > 0 {
+		hasOlder = true
+		rows = rows[start:]
 	}
-	if len(projected) > 0 {
-		window.NewestSeq = projected[len(projected)-1].Seq
-	}
-	return window
+	return actorLedgerRows(rows), head, hasOlder, nil
 }
 
 // IsActive is the narrow membership question used by boundary readers before

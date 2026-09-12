@@ -217,7 +217,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			return h.controller.IdentityAuthorityFor(id)
 		},
 	}
-	viewMinter, err := ledgerview.New(actorLedgerView{View: h.View()})
+	viewMinter, err := ledgerview.New(h.View())
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct ledger view minter: %w", err)
 	}
@@ -345,7 +345,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			// skipped, provisional collapsed. TargetRows=1 leaves the boundary to
 			// the turn count alone.
 			RecentTurns: func(ctx context.Context, turns int) (channelspec.HistoryWindow, error) {
-				return readVisibleTurnWindow(ctx, h.visible, channelspec.HistoryWindowQuery{TargetRows: 1, MinimumCompleteRoots: turns})
+				return channelspec.ReadHistoryWindow(ctx, systemCaps.View, channelspec.HistoryWindowQuery{TargetRows: 1, MinimumCompleteRoots: turns})
 			},
 			QueryLog: func(ctx context.Context, query channelspec.LogQueryRequest) (channelspec.LogQueryResponse, error) {
 				return queryLog(ctx, logReader, query)

@@ -96,6 +96,7 @@ func (h *Home) runHumanCell(id actor.ActorID, principal string, sys actorbase.Sy
 		}
 		token := humancell.WirePresenceSelfReport(sys, slot)
 		frames, incarnation, release := slot.AttachInterpreter()
+		slot.BindView(incarnation, sys.View())
 		h.logger.Debug("platform.subjectgate.interpreter_attached", "channel", string(h.channelID),
 			"actor", string(id), "incarnation", incarnation, "reason", "cell activate")
 		wg.Add(1)
@@ -110,6 +111,7 @@ func (h *Home) runHumanCell(id actor.ActorID, principal string, sys actorbase.Sy
 				}
 				h.logger.Debug("platform.subjectgate.interpreter_released", "channel", string(h.channelID),
 					"actor", string(id), "incarnation", incarnation, "reason", reason)
+				slot.BindView(incarnation, nil)
 				release()
 			}()
 			defer slot.RemoveObserver(token)

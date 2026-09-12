@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
 // Level is a layer-3 presence value the gateway writes into a slot as its own
@@ -85,6 +86,10 @@ type Slot struct {
 	live        bool
 	dead        chan struct{}
 	incarnation uint64
+	view        actorcaps.LedgerView
+	// viewIncarnation makes binding and clearing use the same generation gate
+	// as interpreter attachment. A late release can only clear its own view.
+	viewIncarnation uint64
 }
 
 // Job is one upstream frame handed to the interpreter goroutine. The interpreter
@@ -266,6 +271,35 @@ func (s *Slot) AttachInterpreter() (<-chan Job, uint64, func()) {
 		})
 	}
 	return frames, token, release
+}
+
+// BindView installs the current interpreter incarnation's already-authorized
+// ledger view. A nil view clears only that same incarnation's binding.
+func (s *Slot) BindView(token uint64, view actorcaps.LedgerView) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if view == nil {
+		if s.viewIncarnation != token {
+			return false
+		}
+		s.view = nil
+		s.viewIncarnation = 0
+		return true
+	}
+	if token != s.incarnation || !s.live {
+		return false
+	}
+	s.view = view
+	s.viewIncarnation = token
+	return true
+}
+
+// View returns the current cell incarnation's ledger capability. The handle
+// itself performs the live run admission check on every operation.
+func (s *Slot) View() (actorcaps.LedgerView, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.view, s.view != nil
 }
 
 // Deliver hands one upstream frame to the attached interpreter and blocks for

@@ -7,19 +7,23 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/channelspec"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
 type historyQueryStub struct {
-	rows  []storespec.StoredRow
+	rows  []actorcaps.LedgerRow
 	calls int
 }
 
-func (s *historyQueryStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, error) {
+func (s *historyQueryStub) Read(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+	return actorcaps.LedgerSnapshot{Rows: s.rows}, nil
+}
+
+func (s *historyQueryStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
 	return nil, 0, nil
 }
 
-func (s *historyQueryStub) ReadVisibleBeforeSeq(_ context.Context, beforeSeq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
+func (s *historyQueryStub) ReadVisibleBeforeSeq(_ context.Context, beforeSeq int64, limit int) ([]actorcaps.LedgerRow, int64, bool, error) {
 	s.calls++
 	end := len(s.rows)
 	if beforeSeq > 0 {
@@ -31,7 +35,7 @@ func (s *historyQueryStub) ReadVisibleBeforeSeq(_ context.Context, beforeSeq int
 	if start < 0 {
 		start = 0
 	}
-	page := append([]storespec.StoredRow(nil), s.rows[start:end]...)
+	page := append([]actorcaps.LedgerRow(nil), s.rows[start:end]...)
 	head := int64(0)
 	if len(s.rows) > 0 {
 		head = s.rows[len(s.rows)-1].Seq
@@ -39,8 +43,18 @@ func (s *historyQueryStub) ReadVisibleBeforeSeq(_ context.Context, beforeSeq int
 	return page, head, start > 0, nil
 }
 
-func historyRow(seq int64, id string, kind message.Kind, parent, correlation string, terminal bool) storespec.StoredRow {
-	return storespec.StoredRow{
+func (s *historyQueryStub) Session(context.Context, string, message.ID) ([]actorcaps.LedgerRow, error) {
+	return nil, nil
+}
+func (s *historyQueryStub) BuildSession(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error) {
+	return nil, nil
+}
+func (s *historyQueryStub) Tail(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
+	return nil, 0, nil
+}
+
+func historyRow(seq int64, id string, kind message.Kind, parent, correlation string, terminal bool) actorcaps.LedgerRow {
+	return actorcaps.LedgerRow{
 		Seq: seq,
 		Envelope: message.Envelope{
 			ID:            message.ID(id),
@@ -53,7 +67,7 @@ func historyRow(seq int64, id string, kind message.Kind, parent, correlation str
 	}
 }
 
-func appendCompletedRoot(rows []storespec.StoredRow, seq *int64, name string, progress int, withChild bool) []storespec.StoredRow {
+func appendCompletedRoot(rows []actorcaps.LedgerRow, seq *int64, name string, progress int, withChild bool) []actorcaps.LedgerRow {
 	root := name + "-root"
 	rows = append(rows, historyRow(*seq, root, message.KindRequest, "", root, false))
 	*seq++
@@ -75,14 +89,14 @@ func appendCompletedRoot(rows []storespec.StoredRow, seq *int64, name string, pr
 
 func TestHistoryWindowScansToThreeCompleteRootTurnsAndProjectsProgress(t *testing.T) {
 	seq := int64(1)
-	var rows []storespec.StoredRow
+	var rows []actorcaps.LedgerRow
 	rows = appendCompletedRoot(rows, &seq, "one", 4, false)
 	rows = appendCompletedRoot(rows, &seq, "two", 4, true)
 	rows = appendCompletedRoot(rows, &seq, "three", 4, false)
 	rows = appendCompletedRoot(rows, &seq, "four", 300, false)
 	query := &historyQueryStub{rows: rows}
 
-	window, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{
+	window, err := channelspec.ReadHistoryWindow(context.Background(), query, channelspec.HistoryWindowQuery{
 		TargetRows:           200,
 		MinimumCompleteRoots: 3,
 	})
@@ -126,7 +140,7 @@ func TestHistoryWindowScansToThreeCompleteRootTurnsAndProjectsProgress(t *testin
 
 func TestHistoryWindowKeepsLatestProgressOnlyForOpenRequest(t *testing.T) {
 	seq := int64(1)
-	var rows []storespec.StoredRow
+	var rows []actorcaps.LedgerRow
 	rows = appendCompletedRoot(rows, &seq, "one", 2, false)
 	rows = appendCompletedRoot(rows, &seq, "two", 2, false)
 	rows = appendCompletedRoot(rows, &seq, "three", 2, false)
@@ -139,7 +153,7 @@ func TestHistoryWindowKeepsLatestProgressOnlyForOpenRequest(t *testing.T) {
 	)
 	query := &historyQueryStub{rows: rows}
 
-	window, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{
+	window, err := channelspec.ReadHistoryWindow(context.Background(), query, channelspec.HistoryWindowQuery{
 		TargetRows:           2,
 		MinimumCompleteRoots: 3,
 	})
@@ -159,11 +173,11 @@ func TestHistoryWindowKeepsLatestProgressOnlyForOpenRequest(t *testing.T) {
 
 func TestHistoryWindowDefaultsToTwentyCompleteRootTurns(t *testing.T) {
 	seq := int64(1)
-	var rows []storespec.StoredRow
+	var rows []actorcaps.LedgerRow
 	for index := 1; index <= 25; index++ {
 		rows = appendCompletedRoot(rows, &seq, fmt.Sprintf("turn-%d", index), 0, false)
 	}
-	window, err := readVisibleTurnWindow(context.Background(), &historyQueryStub{rows: rows}, channelspec.HistoryWindowQuery{TargetRows: 2})
+	window, err := channelspec.ReadHistoryWindow(context.Background(), &historyQueryStub{rows: rows}, channelspec.HistoryWindowQuery{TargetRows: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,20 +194,20 @@ func TestHistoryWindowDefaultsToTwentyCompleteRootTurns(t *testing.T) {
 
 func TestHistoryWindowPaginationUsesExclusiveRootBoundary(t *testing.T) {
 	seq := int64(1)
-	var rows []storespec.StoredRow
+	var rows []actorcaps.LedgerRow
 	for index := 1; index <= 7; index++ {
 		rows = appendCompletedRoot(rows, &seq, fmt.Sprintf("turn-%d", index), 2, false)
 	}
 	query := &historyQueryStub{rows: rows}
 
-	newer, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{
+	newer, err := channelspec.ReadHistoryWindow(context.Background(), query, channelspec.HistoryWindowQuery{
 		TargetRows:           6,
 		MinimumCompleteRoots: 3,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	older, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{
+	older, err := channelspec.ReadHistoryWindow(context.Background(), query, channelspec.HistoryWindowQuery{
 		BeforeSeq:            newer.OldestSeq,
 		TargetRows:           6,
 		MinimumCompleteRoots: 3,
@@ -207,7 +221,7 @@ func TestHistoryWindowPaginationUsesExclusiveRootBoundary(t *testing.T) {
 	if older.NewestSeq >= newer.OldestSeq {
 		t.Fatalf("pages overlap: older newest=%d, newer oldest=%d", older.NewestSeq, newer.OldestSeq)
 	}
-	oldest, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{
+	oldest, err := channelspec.ReadHistoryWindow(context.Background(), query, channelspec.HistoryWindowQuery{
 		BeforeSeq:            older.OldestSeq,
 		TargetRows:           6,
 		MinimumCompleteRoots: 3,
@@ -224,11 +238,11 @@ func TestHistoryWindowPaginationUsesExclusiveRootBoundary(t *testing.T) {
 }
 
 func TestHistoryWindowBoundsStandaloneEvents(t *testing.T) {
-	rows := make([]storespec.StoredRow, 12)
+	rows := make([]actorcaps.LedgerRow, 12)
 	for index := range rows {
 		rows[index] = historyRow(int64(index+1), fmt.Sprintf("event-%d", index+1), message.KindEvent, "", "", false)
 	}
-	window, err := readVisibleTurnWindow(context.Background(), &historyQueryStub{rows: rows}, channelspec.HistoryWindowQuery{TargetRows: 3})
+	window, err := channelspec.ReadHistoryWindow(context.Background(), &historyQueryStub{rows: rows}, channelspec.HistoryWindowQuery{TargetRows: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +251,7 @@ func TestHistoryWindowBoundsStandaloneEvents(t *testing.T) {
 	}
 }
 
-func housekeepingRow(seq int64, id, word string, kind message.Kind, parent string, terminal bool) storespec.StoredRow {
+func housekeepingRow(seq int64, id, word string, kind message.Kind, parent string, terminal bool) actorcaps.LedgerRow {
 	row := historyRow(seq, id, kind, parent, id, terminal)
 	row.Envelope.Type = word
 	return row
@@ -248,7 +262,7 @@ func housekeepingRow(seq int64, id, word string, kind message.Kind, parent strin
 // them reports "twenty complete turns" over a window holding no conversation.
 func TestHistoryWindowIgnoresHousekeepingRootsAndDropsThem(t *testing.T) {
 	seq := int64(1)
-	var rows []storespec.StoredRow
+	var rows []actorcaps.LedgerRow
 	rows = appendCompletedRoot(rows, &seq, "talk-one", 2, false)
 	rows = appendCompletedRoot(rows, &seq, "talk-two", 2, false)
 	for index := 0; index < 30; index++ {
@@ -264,7 +278,7 @@ func TestHistoryWindowIgnoresHousekeepingRootsAndDropsThem(t *testing.T) {
 		seq++
 	}
 	query := &historyQueryStub{rows: rows}
-	window, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{TargetRows: 60, MinimumCompleteRoots: 2})
+	window, err := channelspec.ReadHistoryWindow(context.Background(), query, channelspec.HistoryWindowQuery{TargetRows: 60, MinimumCompleteRoots: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +306,7 @@ func TestHistoryWindowIgnoresHousekeepingRootsAndDropsThem(t *testing.T) {
 // newest rows are all probes still answers with real conversation.
 func TestRecentTurnsWindowIsGovernedByTurnCountAlone(t *testing.T) {
 	seq := int64(1)
-	var rows []storespec.StoredRow
+	var rows []actorcaps.LedgerRow
 	for _, name := range []string{"a", "b", "c", "d"} {
 		rows = appendCompletedRoot(rows, &seq, name, 3, false)
 	}
@@ -304,7 +318,7 @@ func TestRecentTurnsWindowIsGovernedByTurnCountAlone(t *testing.T) {
 		seq++
 	}
 	query := &historyQueryStub{rows: rows}
-	window, err := readVisibleTurnWindow(context.Background(), query, channelspec.HistoryWindowQuery{TargetRows: 1, MinimumCompleteRoots: 2})
+	window, err := channelspec.ReadHistoryWindow(context.Background(), query, channelspec.HistoryWindowQuery{TargetRows: 1, MinimumCompleteRoots: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

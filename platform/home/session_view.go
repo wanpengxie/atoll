@@ -17,6 +17,21 @@ func (v View) BuildSession(ctx context.Context, snapshot actorcaps.LedgerSnapsho
 	return buildSessionPrefix(ctx, snapshot, session, upto, snapshot.HeadSeq, map[string]bool{})
 }
 
+// Session is retained during the migration of session projection to the agent
+// driver. It disappears with this file.
+func (v View) Session(ctx context.Context, session string, upto message.ID) ([]actorcaps.LedgerRow, error) {
+	snapshot, err := v.Read(ctx, actorcaps.LedgerRead{})
+	if err != nil {
+		return nil, err
+	}
+	return v.BuildSession(ctx, snapshot, session, upto)
+}
+
+// Tail is retained only until every consumer uses the visible cursor method.
+func (v View) Tail(ctx context.Context, afterSeq int64, limit int) ([]actorcaps.LedgerRow, int64, error) {
+	return v.ReadVisibleAfterSeq(ctx, afterSeq, limit)
+}
+
 func buildSessionPrefix(ctx context.Context, s actorcaps.LedgerSnapshot, session string, upto message.ID, ceiling int64, seen map[string]bool) ([]actorcaps.LedgerRow, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

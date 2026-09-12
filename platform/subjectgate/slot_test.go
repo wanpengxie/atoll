@@ -5,9 +5,33 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorcaps"
 )
 
 const testID = "human:alice"
+
+type slotViewStub struct{ name string }
+
+func (*slotViewStub) Read(context.Context, actorcaps.LedgerRead) (actorcaps.LedgerSnapshot, error) {
+	return actorcaps.LedgerSnapshot{}, nil
+}
+func (*slotViewStub) ReadVisibleAfterSeq(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
+	return nil, 0, nil
+}
+func (*slotViewStub) ReadVisibleBeforeSeq(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, bool, error) {
+	return nil, 0, false, nil
+}
+func (*slotViewStub) Session(context.Context, string, message.ID) ([]actorcaps.LedgerRow, error) {
+	return nil, nil
+}
+func (*slotViewStub) BuildSession(context.Context, actorcaps.LedgerSnapshot, string, message.ID) ([]actorcaps.LedgerRow, error) {
+	return nil, nil
+}
+func (*slotViewStub) Tail(context.Context, int64, int) ([]actorcaps.LedgerRow, int64, error) {
+	return nil, 0, nil
+}
 
 // TestPublishLevelMintsMonotonicEdgeSeq pins the连接模型勘误期 form: edgeSeq is
 // slot-minted (not client-supplied), so every same-or-greater-epoch publish
@@ -264,6 +288,37 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 	relB()
 	if _, err := s.Deliver(context.Background(), f); err != ErrNoOccupant {
 		t.Fatalf("Deliver after current release want ErrNoOccupant, got %v", err)
+	}
+}
+
+func TestViewBindingIncarnationGate(t *testing.T) {
+	s := newSlot()
+	_, tokA, relA := s.AttachInterpreter()
+	viewA := &slotViewStub{name: "a"}
+	if !s.BindView(tokA, viewA) {
+		t.Fatal("current incarnation A could not bind view")
+	}
+
+	_, tokB, relB := s.AttachInterpreter()
+	viewB := &slotViewStub{name: "b"}
+	if !s.BindView(tokB, viewB) {
+		t.Fatal("current incarnation B could not bind view")
+	}
+	relA()
+	if s.BindView(tokA, nil) {
+		t.Fatal("stale incarnation A cleared successor view")
+	}
+	got, ok := s.View()
+	if !ok || got != viewB {
+		t.Fatalf("view after stale release = %#v, %v; want B", got, ok)
+	}
+
+	if !s.BindView(tokB, nil) {
+		t.Fatal("current incarnation B could not clear view")
+	}
+	relB()
+	if _, ok := s.View(); ok {
+		t.Fatal("view remained after current incarnation release")
 	}
 }
 
