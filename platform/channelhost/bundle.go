@@ -7,8 +7,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/actorcaps"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type Bundle interface {
@@ -29,9 +27,6 @@ type View interface {
 	HumanRoster(context.Context) ([]channelspec.HumanRosterEntry, error)
 	ResolvePrincipal(context.Context, string) (actor.ActorID, bool, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
-	ReadVisibleAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, error)
-	ReadVisibleBeforeSeq(context.Context, int64, int) ([]storespec.StoredRow, int64, bool, error)
-	ReadVisibleTurnWindowBeforeSeq(context.Context, channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error)
 	IsActive(context.Context, actor.ActorID) (bool, error)
 	ActorFacts(context.Context, actor.ActorID) (channelspec.ActorFacts, bool, error)
 	IsBound(context.Context, string) (bool, error)
@@ -71,25 +66,6 @@ func (a viewAdapter) ResolvePrincipal(ctx context.Context, principal string) (ac
 }
 func (a viewAdapter) OwnerPrincipal(ctx context.Context) (string, bool, error) {
 	return a.home.View().OwnerPrincipal(ctx)
-}
-func (a viewAdapter) ReadVisibleAfterSeq(ctx context.Context, seq int64, limit int) ([]storespec.StoredRow, int64, error) {
-	rows, scanned, err := a.home.View().ReadVisibleAfterSeq(ctx, seq, limit)
-	return storedRows(rows), scanned, err
-}
-func (a viewAdapter) ReadVisibleBeforeSeq(ctx context.Context, seq int64, limit int) ([]storespec.StoredRow, int64, bool, error) {
-	rows, head, older, err := a.home.View().ReadVisibleBeforeSeq(ctx, seq, limit)
-	return storedRows(rows), head, older, err
-}
-func (a viewAdapter) ReadVisibleTurnWindowBeforeSeq(ctx context.Context, query channelspec.HistoryWindowQuery) (channelspec.HistoryWindow, error) {
-	return channelspec.ReadHistoryWindow(ctx, a.home.View(), query)
-}
-
-func storedRows(rows []actorcaps.LedgerRow) []storespec.StoredRow {
-	out := make([]storespec.StoredRow, len(rows))
-	for i, row := range rows {
-		out[i] = storespec.StoredRow{Envelope: row.Envelope, Seq: row.Seq, IsTerminal: row.IsTerminal}
-	}
-	return out
 }
 func (a viewAdapter) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
 	return a.home.View().IsActive(ctx, id)
