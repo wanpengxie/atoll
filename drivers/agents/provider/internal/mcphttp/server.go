@@ -73,6 +73,20 @@ func (s *Server) Config() json.RawMessage {
 	return raw
 }
 
+// ACPConfig returns the same authenticated endpoint in ACP's session/new
+// wire shape. ACP represents headers as name/value records (rather than the
+// map used by Claude's --mcp-config), and carries servers as an array.
+func (s *Server) ACPConfig() []map[string]any {
+	return []map[string]any{{
+		"type": "http",
+		"name": toolsurface.ClaudeServer,
+		"url":  "http://" + s.listener.Addr().String() + "/mcp",
+		"headers": []map[string]string{{
+			"name": "Authorization", "value": "Bearer " + s.token,
+		}},
+	}}
+}
+
 func (s *Server) serve(snapshot Snapshot, w http.ResponseWriter, r *http.Request) {
 	if !s.validOrigin(r.Header.Get("Origin")) {
 		http.Error(w, "forbidden origin", http.StatusForbidden)
@@ -94,7 +108,7 @@ func (s *Server) serve(snapshot Snapshot, w http.ResponseWriter, r *http.Request
 		return
 	}
 	method := methodOf(raw)
-	s.logger.Debug("claude.mcp_http", "method", method, "protocol_version", r.Header.Get("MCP-Protocol-Version"))
+	s.logger.Debug("agent.mcp_http", "method", method, "protocol_version", r.Header.Get("MCP-Protocol-Version"))
 	if method != "notifications/cancelled" {
 		select {
 		case s.slots <- struct{}{}:

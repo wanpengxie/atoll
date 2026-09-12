@@ -82,6 +82,28 @@ func TestGenerationScopedHTTPMCPAuthCatalogAndRetirement(t *testing.T) {
 	}
 }
 
+func TestACPConfigUsesACPHeaderRecords(t *testing.T) {
+	life, retire := context.WithCancel(context.Background())
+	defer retire()
+	surface, err := toolsurface.Assemble(nil, toolsurface.Claude, driverproto.Situation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := Start(life, surface, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	cfg := server.ACPConfig()
+	if len(cfg) != 1 || cfg[0]["type"] != "http" || cfg[0]["name"] != toolsurface.ClaudeServer {
+		t.Fatalf("config=%+v", cfg)
+	}
+	headers, ok := cfg[0]["headers"].([]map[string]string)
+	if !ok || len(headers) != 1 || headers[0]["name"] != "Authorization" || !strings.HasPrefix(headers[0]["value"], "Bearer ") {
+		t.Fatalf("headers=%+v", cfg[0]["headers"])
+	}
+}
+
 func TestCallbackSaturationRejectsOneCallWithoutRetiringGeneration(t *testing.T) {
 	life, retire := context.WithCancel(context.Background())
 	defer retire()
