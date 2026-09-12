@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorcaps"
 	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/ledgerview"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -24,21 +25,17 @@ type Minter struct {
 	pen      harness.Minter
 	access   accessdoor.AccessMinter
 	schedule schedule.Minter
-	view     actorcaps.LedgerView
+	view     ledgerview.Minter
 }
 
 func New(
 	pen harness.Minter,
 	access accessdoor.AccessMinter,
 	scheduler schedule.Minter,
-	views ...actorcaps.LedgerView,
+	view ledgerview.Minter,
 ) (*Minter, error) {
-	if pen == nil || access == nil || scheduler == nil {
+	if pen == nil || access == nil || scheduler == nil || view == nil {
 		return nil, ErrInvalidInput
-	}
-	var view actorcaps.LedgerView
-	if len(views) > 0 {
-		view = views[0]
 	}
 	return &Minter{pen: pen, access: access, schedule: scheduler, view: view}, nil
 }
@@ -55,6 +52,6 @@ func (m *Minter) Mint(context.Context) (actorcaps.Caps, error) {
 		State:     nil,
 		Schedule:  m.schedule.MintAuthority(authority),
 		Lifecycle: nil,
-		View:      m.view,
+		View:      m.view.MintAuthority(authority),
 	}, nil
 }

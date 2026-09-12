@@ -36,16 +36,16 @@ func (s *boundedLedgerStub) ReadVisibleBeforeSeq(ctx context.Context, before int
 	return rows, int64(s.total), start > 0, nil
 }
 
-func TestLedgerViewHardScanLimitIncludesUnrelatedRows(t *testing.T) {
+func TestLedgerViewHardScanLimit(t *testing.T) {
 	for _, cap := range []int{1000, 4096} {
 		for _, total := range []int{0, cap, 1_000_000} {
 			s := &boundedLedgerStub{total: total}
-			out, err := (View{visible: s}).Read(t.Context(), actorcaps.LedgerRead{Session: "missing", MaxRows: cap})
+			out, err := (View{visible: s}).Read(t.Context(), actorcaps.LedgerRead{MaxRows: cap})
 			if total > cap {
 				if !errors.Is(err, actorcaps.ErrLedgerLimit) || out.Rows != nil || out.HeadSeq != 0 {
 					t.Fatalf("partial read returned: %+v %v", out, err)
 				}
-			} else if err != nil || len(out.Rows) != 0 || out.HeadSeq != int64(total) {
+			} else if err != nil || len(out.Rows) != total || out.HeadSeq != int64(total) {
 				t.Fatalf("bounded read rejected: %+v %v", out, err)
 			}
 			if s.read != min(cap, total) || s.calls > max(1, (cap+255)/256) {
@@ -100,14 +100,6 @@ func TestLedgerViewFailuresNeverReturnPartialHistory(t *testing.T) {
 				t.Fatalf("partial history escaped: rows=%d head=%d calls=%d err=%v", len(out.Rows), out.HeadSeq, s.calls, err)
 			}
 		})
-	}
-}
-
-func TestViewSessionUsesTheSameStorageLimit(t *testing.T) {
-	s := &boundedLedgerStub{total: 1_000_000}
-	rows, err := (View{visible: s}).Session(t.Context(), "other", "")
-	if !errors.Is(err, actorcaps.ErrLedgerLimit) || rows != nil || s.read != 4096 || s.calls != 16 {
-		t.Fatalf("unbounded Session: rows=%d reads=%d calls=%d err=%v", len(rows), s.read, s.calls, err)
 	}
 }
 

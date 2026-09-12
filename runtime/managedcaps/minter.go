@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/ledgerview"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -30,7 +31,7 @@ type Minter struct {
 	state     accessdoor.StateHandleResolver
 	schedule  schedule.Minter
 	lifecycle LifecycleOperations
-	view      actorcaps.LedgerView
+	view      ledgerview.Minter
 }
 
 func New(
@@ -39,15 +40,11 @@ func New(
 	state accessdoor.StateHandleResolver,
 	scheduleMinter schedule.Minter,
 	lifecycle LifecycleOperations,
-	views ...actorcaps.LedgerView,
+	view ledgerview.Minter,
 ) (*Minter, error) {
 	if pen == nil || access == nil || state == nil ||
-		scheduleMinter == nil || lifecycle == nil {
+		scheduleMinter == nil || lifecycle == nil || view == nil {
 		return nil, ErrInvalidInput
-	}
-	var view actorcaps.LedgerView
-	if len(views) > 0 {
-		view = views[0]
 	}
 	return &Minter{
 		pen:       pen,
@@ -81,7 +78,7 @@ func (m *Minter) Mint(
 			id:         prepared.ActorID(),
 			attempt:    prepared.AttemptKey(),
 		},
-		View: m.view,
+		View: m.view.MintAuthority(prepared.Run()),
 	}, nil
 }
 

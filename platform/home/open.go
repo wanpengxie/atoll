@@ -25,6 +25,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/ledgerview"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
 	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
@@ -216,6 +217,10 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			return h.controller.IdentityAuthorityFor(id)
 		},
 	}
+	viewMinter, err := ledgerview.New(actorLedgerView{View: h.View()})
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct ledger view minter: %w", err)
+	}
 
 	h.managedCaps, err = managedcaps.New(
 		h.minter,
@@ -223,7 +228,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		h.stateHandles,
 		schedMinter,
 		h.actors,
-		h.View(),
+		viewMinter,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct managed caps minter: %w", err)
@@ -236,7 +241,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		h.minter,
 		access,
 		schedMinter,
-		h.View(),
+		viewMinter,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct system caps minter: %w", err)
