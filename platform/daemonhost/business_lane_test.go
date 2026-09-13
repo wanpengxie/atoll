@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -418,11 +419,17 @@ func TestCarrierKindChildClosesTheWholeCarrier(t *testing.T) {
 func TestCarrierAcceptWriteFailureWithdrawsLedgerAndJoinsSupervisor(t *testing.T) {
 	previous := sendCarrierAccept
 	attempted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
 	sendCarrierAccept = func(*link.ServerCarrier, link.SpineFrame) error {
 		close(attempted)
+		<-release
 		return errors.New("injected accept write failure")
 	}
-	t.Cleanup(func() { sendCarrierAccept = previous })
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		sendCarrierAccept = previous
+	})
 
 	host := New(Config{ScanInterval: time.Hour})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -441,6 +448,10 @@ func TestCarrierAcceptWriteFailureWithdrawsLedgerAndJoinsSupervisor(t *testing.T
 	case <-time.After(time.Second):
 		t.Fatal("carrier accept write was never attempted")
 	}
+	// Dial only establishes the carrier stream; the server's accept fact is a
+	// later write. Release that write failure after Dial has returned so this
+	// test measures supervisor cleanup, not scheduler-dependent handshake order.
+	releaseOnce.Do(func() { close(release) })
 	waitFor(t, func() bool { return !host.DaemonOnline("daemon-a") })
 
 	closed := make(chan struct{})

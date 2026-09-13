@@ -556,71 +556,38 @@ func TestReplayIsBounded(t *testing.T) {
 }
 
 // 快照与订阅必须在同一把锁内产生。分两次拿的话，两次之间到达的字节既不在快照里
-// 也不在订阅里——凭空丢一段，而且恒难复现。这条在设备持续输出时反复 attach，
-// 用字节的连号来验"无丢无重"。
+// 也不在订阅里——凭空丢一段，而且恒难复现。这条让每一个标记与 attach 竞争：它
+// 必须出现在 replay 或 live 其中一边。每轮只有一个标记在途，恒不把 viewer 允许
+// 丢弃的过载流量混进接缝原子性测试。
 func TestReplayAndLiveStreamDoNotLoseBytesAtTheSeam(t *testing.T) {
 	m, dev, _ := newTestManager(t, time.Hour)
 	s, err := m.Open(context.Background(), "s1", "c0", "human:root", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const total = 400
-	writing := make(chan struct{})
-	go func() {
-		defer close(writing)
-		for i := 0; i < total; i++ {
-			dev.push(link.PTYFrameData, []byte(fmt.Sprintf("<%d>", i)))
-		}
-	}()
-
-	seen := ""
-	_, att, err := m.Attach("s1", "c0", "human:root")
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen += string(att.Replay)
-	deadline := time.After(10 * time.Second)
-	for {
-		done := false
-		select {
-		case b, ok := <-att.Bytes:
-			if !ok {
-				done = true
-				break
-			}
-			seen += string(b)
-		case <-time.After(120 * time.Millisecond):
-			done = true
-		case <-deadline:
-			t.Fatal("timeout")
-		}
-		if !done {
-			continue
-		}
-		if strings.Contains(seen, fmt.Sprintf("<%d>", total-1)) {
-			break
-		}
-		// 中途重新 attach：接缝正是在这里发生的。
+	for i := 0; i < 400; i++ {
 		m.Detach(s)
-		_, att, err = m.Attach("s1", "c0", "human:root")
+		marker := []byte(fmt.Sprintf("<seam-%d>", i))
+		pushed := make(chan struct{})
+		go func() {
+			dev.push(link.PTYFrameData, marker)
+			close(pushed)
+		}()
+		_, att, err := m.Attach("s1", "c0", "human:root")
 		if err != nil {
 			t.Fatal(err)
 		}
-		seen += string(att.Replay)
-	}
-	<-writing
-	// 每个标记恒该出现，且恒该按序。回放会与之前看过的内容重叠——那是允许的
-	// （RIS 之后重画同一屏），这里验的是**恒不缺号**。
-	last := -1
-	for i := 0; i < total; i++ {
-		idx := strings.LastIndex(seen, fmt.Sprintf("<%d>", i))
-		if idx < 0 {
-			t.Fatalf("接缝处丢了第 %d 个标记", i)
+		if !bytes.Contains(att.Replay, marker) {
+			select {
+			case live, ok := <-att.Bytes:
+				if !ok || !bytes.Contains(live, marker) {
+					t.Fatalf("接缝处丢了第 %d 个标记: %q", i, live)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("接缝处没有交付第 %d 个标记", i)
+			}
 		}
-		if idx < last {
-			t.Fatalf("第 %d 个标记乱序", i)
-		}
-		last = idx
+		<-pushed
 	}
 }
 
